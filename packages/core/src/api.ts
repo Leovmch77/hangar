@@ -1779,6 +1779,26 @@ export async function interrupt(name: string, clear = false): Promise<void> {
   });
 }
 
+// Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
+// Demora o que a resposta demorar (ate 120s no backend) — quem chama mostra espera.
+export interface PerguntaLateral {
+  question: string;
+  answer: string;
+  fonte: 'buffer' | 'pane';
+  ts: number;
+}
+
+export async function perguntaLateral(name: string, question: string): Promise<PerguntaLateral> {
+  return apiFetch<PerguntaLateral>(`/api/sessions/${encodeURIComponent(name)}/btw`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function historicoLateral(name: string): Promise<PerguntaLateral[]> {
+  return apiFetch<PerguntaLateral[]>(`/api/sessions/${encodeURIComponent(name)}/btw`);
+}
+
 // Espelho do pane (overlays so-TUI): le o pane cru e manda teclas de navegacao (allowlist no backend).
 export type NavKey =
   | 'Up' | 'Down' | 'Left' | 'Right'

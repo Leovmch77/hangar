@@ -21,6 +21,7 @@
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
   import CodexLimitsSheet from '../components/CodexLimitsSheet.svelte';
   import ForwardSheet from '../components/ForwardSheet.svelte';
+  import BtwSheet from '../components/BtwSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
@@ -391,6 +392,8 @@
   let switcherOpen = $state(false);
   let createOpen = $state(false);
   let usageOpen = $state(false);
+  let btwOpen = $state(false);
+  let btwPergunta = $state('');
   let gitOpen = $state(false);
   let gitInitialTab = $state<GitTabId>('changes');
 
@@ -712,9 +715,9 @@
   }
 
   const anyOverlayOpen = () =>
-    switcherOpen || createOpen || usageOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
+    switcherOpen || createOpen || usageOpen || btwOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
   function closeOverlays() {
-    switcherOpen = createOpen = usageOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
+    switcherOpen = createOpen = usageOpen = btwOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
     if (mirrorOpen) closeMirror();
     xtermOpen = false;
     askOpen = false;
@@ -2134,6 +2137,7 @@
   });
 
   async function handleSend(text: string, steer = false, onlyThisSession = false) {
+    if (abrirBtwSe(text)) return;
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
     // começa — sessão ocupada num turno longo deixava a msg invisível por minutos, e a corrida de
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
@@ -2261,7 +2265,18 @@
 
   // Slash commands gerais do Claude Code (ex: /clear, /compact) -> sessao viva. Modelo e
   // esforco NAO passam por aqui: vao pelos popovers de modelo/esforco -> endpoint /model-effort.
+  // `/btw` não é mensagem nem entra na fila: abre a folha de pergunta lateral, que dirige o
+  // overlay da TUI. Só Claude tem o comando; nos outros providers segue como texto.
+  function abrirBtwSe(text: string): boolean {
+    const btw = /^\/btw(?:\s+([\s\S]*))?$/i.exec(text.trim());
+    if (!btw || (sessionProvider ?? 'claude') !== 'claude') return false;
+    btwPergunta = (btw[1] ?? '').trim();
+    btwOpen = true;
+    return true;
+  }
+
   async function handleCommand(cmd: string) {
+    if (abrirBtwSe(cmd)) return;
     try {
       await sendInput(sessionName, cmd);
     } catch (err) {
@@ -2752,6 +2767,7 @@
   {/if}
 
   <UsageSheet open={usageOpen} {status} onClose={() => (usageOpen = false)} />
+  <BtwSheet open={btwOpen} {sessionName} pergunta={btwPergunta} onClose={() => (btwOpen = false)} />
 
   <Git open={gitOpen} {sessionName} {desktop} {filesInContext} initialTab={gitInitialTab} onClose={() => { gitOpen = false; gitInitialTab = 'changes'; }}
        {events} {histGap} cwd={planSession?.cwd ?? null} />

@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  migracao_sidecars, pensamento_pt, procinfo, tmux)
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
@@ -1532,6 +1532,10 @@ class BroadcastBody(_StrictBody):
 
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
+
+
+class BtwBody(_StrictBody):
+    question: str = Field(min_length=1, max_length=4000)
 
 
 class KeyBody(_StrictBody):
@@ -3984,6 +3988,32 @@ async def interrupt(name: str, clear: bool = False):
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
     return {"ok": True}
+
+
+def _exige_claude_de_terminal(name: str) -> None:
+    # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
+    provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
+    if provider != "claude":
+        raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
+
+
+@app.post("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def pergunta_lateral(name: str, body: BtwBody):
+    if not await _send_thread(_session_exists, name):
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    await _send_thread(_exige_claude_de_terminal, name)
+    _recusa_se_painel_aberto(name)
+    try:
+        item = await asyncio.to_thread(btw.perguntar, name, body.question)
+    except btw.BtwError as e:
+        raise HTTPException(e.status, detail=erro(e.code, e.detail))
+    await asyncio.to_thread(btw.registrar, name, item)
+    return item
+
+
+@app.get("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def historico_lateral(name: str):
+    return await asyncio.to_thread(btw.historico, name)
 
 
 def _normalize_rate_window(window: dict | None) -> dict | None:

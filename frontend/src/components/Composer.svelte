@@ -1084,6 +1084,13 @@
       submit();
       return;
     }
+    // Esc com a sessão trabalhando = o Esc do terminal: interrompe o turno. Parada, deixa
+    // passar pro resto da tela (overlays, visor).
+    if (e.key === 'Escape' && isWorking) {
+      e.preventDefault();
+      onInterrupt();
+      return;
+    }
     // Shift+Tab no campo = a tecla do terminal do Claude. Só com o foco aqui, pra não roubar a
     // navegação por teclado do resto da tela.
     if (e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (isClaude || isCodex)) {
