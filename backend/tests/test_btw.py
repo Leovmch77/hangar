@@ -25,7 +25,28 @@ class TmuxFalso:
     def capture_pane(self, name, lines=200):
         return self.telas.pop(0) if len(self.telas) > 1 else self.telas[0]
 
+    # O composer como a TUI o mostraria: o que foi digitado, sem espaco, ate o Enter. `perde_barra`
+    # = quantas digitacoes chegam SEM a `/` inicial (o que o Windows fez em 13/09/2026).
+    perde_barra = 0
+    digitado = ""
+
+    def composer(self, name):
+        return self.digitado
+
+    def esvaziar(self, name):
+        self.teclas.append("C-u")
+        self.digitado = ""
+        return True
+
     def send_keys(self, name, keys, literal=False):
+        if literal:
+            texto = keys
+            if texto.startswith("/") and self.perde_barra > 0:
+                self.perde_barra -= 1
+                texto = texto[1:]
+            self.digitado = "".join(texto.split())
+        elif keys == "Enter":
+            self.digitado = ""
         self.teclas.append(keys)
         if keys == "c" and self.buffer_apos_c:
             self.buffers.append("buffer7")
@@ -49,8 +70,8 @@ def falso(monkeypatch):
         monkeypatch.setattr(btw.tmux, "capture_pane", f.capture_pane)
         monkeypatch.setattr(btw.tmux, "send_keys", f.send_keys)
         monkeypatch.setattr(btw.tmux, "_run", f._run)
-        monkeypatch.setattr(btw, "_esvaziar_composer_claude", lambda name: True)
-        monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: "")
+        monkeypatch.setattr(btw, "_esvaziar_composer_claude", f.esvaziar)
+        monkeypatch.setattr(btw, "_texto_composer_claude", f.composer)
         monkeypatch.setattr(btw.time, "sleep", lambda s: None)
         return f
     return montar
@@ -67,7 +88,7 @@ def test_le_a_resposta_do_buffer_e_fecha_o_overlay(falso):
     assert r["answer"] == "1. Apple\n2. Banana"
     assert r["fonte"] == "buffer"
     assert r["question"] == "list fruits"
-    assert f.teclas == ["/btw list fruits", "Enter", "c", "Escape"]
+    assert f.teclas == ["C-u", "/btw list fruits", "Enter", "c", "Escape"]
     assert f.apagados == ["buffer7"]
 
 
@@ -105,7 +126,7 @@ def test_composer_com_texto_parado_nao_digita(falso, monkeypatch):
     with pytest.raises(btw.BtwError) as e:
         btw.perguntar("s", "q")
     assert e.value.code == "erro_btw_composer_ocupado"
-    assert f.teclas == []
+    assert f.teclas == ["C-u"]              # tentou esvaziar; nada digitado, nenhum Enter
 
 
 def test_overlay_fechado_por_fora_aborta_sem_escape(falso):
@@ -126,3 +147,27 @@ def test_historico_guarda_so_os_ultimos(tmp_path, monkeypatch):
         btw.registrar("s", {"question": str(i), "answer": "a", "ts": i})
     assert [it["question"] for it in btw.historico("s")] == ["2", "3", "4"]
     assert len(btw._arquivo("s").read_text().splitlines()) == 3
+
+
+def test_barra_perdida_redigita_sem_mandar_a_pergunta_pra_conversa(falso):
+    # No Windows a `/` inicial sumiu e o Enter submeteu "btw <pergunta>" como MENSAGEM normal: a
+    # pergunta caiu na conversa principal e o overlay nunca abriu (13/09/2026).
+    f = falso([
+        _tela("    /btw q", "      4", RODAPE_PRONTO),
+        _tela("    /btw q", "      4", RODAPE_COPIADO),
+    ], buffer_apos_c=False)
+    f.perde_barra = 1
+    r = btw.perguntar("s", "q")
+    assert r["answer"] == "4"
+    primeiro_enter = f.teclas.index("Enter")
+    assert f.teclas[:primeiro_enter] == ["C-u", "/btw q", "C-u", "/btw q"]
+
+
+def test_barra_perdida_de_novo_para_sem_enter(falso):
+    f = falso([_tela("❯ ")])
+    f.perde_barra = 5
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_barra_perdida"
+    assert "Enter" not in f.teclas
+    assert f.digitado == ""                 # nada ficou parado no composer

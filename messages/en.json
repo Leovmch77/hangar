@@ -2141,6 +2141,7 @@
   "erro_btw_composer_ocupado": "there is text sitting in the session's terminal; send or clear it first",
   "erro_btw_fechado": "/btw was closed in the terminal before the answer could be read",
   "erro_btw_nao_digitou": "could not type /btw into the session's terminal",
+  "erro_btw_barra_perdida": "the terminal dropped the / of /btw; nothing was sent to the conversation, try again",
   "erro_limits_so_codex": "limits only exists for Codex sessions",
   "erro_models_so_codex": "models only exists for Codex sessions",
   "erro_model_so_codex": "model only exists for Codex sessions",

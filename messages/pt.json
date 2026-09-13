@@ -2141,6 +2141,7 @@
   "erro_btw_composer_ocupado": "há texto parado no terminal da sessão; envie ou apague antes",
   "erro_btw_fechado": "o /btw foi fechado no terminal antes de eu ler a resposta",
   "erro_btw_nao_digitou": "não consegui digitar o /btw no terminal da sessão",
+  "erro_btw_barra_perdida": "o terminal perdeu a / do /btw; nada foi enviado pra conversa, tente de novo",
   "erro_limits_so_codex": "limits só existe pra sessões Codex",
   "erro_models_so_codex": "models só existe pra sessões Codex",
   "erro_model_so_codex": "model só existe pra sessões Codex",

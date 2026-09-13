@@ -84,9 +84,21 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
         if _texto_composer_claude(name):
             raise BtwError(409, "erro_btw_composer_ocupado",
                            "há texto parado no terminal da sessão; envie ou apague antes")
-        if not tmux.send_keys(name, "/btw " + pergunta, literal=True):
-            raise BtwError(502, "erro_btw_nao_digitou", "não consegui digitar o /btw no terminal da sessão")
-        time.sleep(_SETTLE)
+        # Confere o composer ANTES do Enter: no Windows a `/` inicial sumiu e o Enter submeteu
+        # "btw <pergunta>" como mensagem da conversa (o overlay nunca abriu). Uma segunda tentativa;
+        # errado de novo, apaga e para sem Enter. Vazio ou ilegível seguem, como antes.
+        for tentativa in range(2):
+            if not tmux.send_keys(name, "/btw " + pergunta, literal=True):
+                raise BtwError(502, "erro_btw_nao_digitou", "não consegui digitar o /btw no terminal da sessão")
+            time.sleep(_SETTLE)
+            digitado = _texto_composer_claude(name)
+            if not digitado or digitado.startswith("/btw"):
+                break
+            _log.warning("btw de %r: o composer recebeu sem a barra (%d/2); apagando", name, tentativa + 1)
+            _esvaziar_composer_claude(name)
+        else:
+            raise BtwError(502, "erro_btw_barra_perdida",
+                           "o terminal perdeu a / do /btw; nada foi enviado pra conversa")
         tmux.send_keys(name, "Enter")
 
         inicio = time.monotonic()
