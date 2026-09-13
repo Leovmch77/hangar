@@ -5,6 +5,7 @@
  * SSE segue full-replace a cada ~150ms).
  *
  * Regras, na ordem em que importam:
+ *  - O primeiro retrato aparece inteiro; só acréscimos recebidos ao vivo ganham animação.
  *  - Só anima quando o texto novo ESTENDE o que já está na tela (é o caminho do sidecar, que
  *    acumula deltas). Troca de conteúdo (pane oscilando, mensagem nova) vira snap imediato —
  *    "digitar de novo" um texto que a pessoa já leu é pior que o pulo que se quer esconder.
@@ -28,6 +29,7 @@ export class Typewriter {
   #tPrev = 0;
   #prazo = 0;   // instante em que o backlog atual precisa estar todo na tela
   #snap: boolean;
+  #iniciado = false;
 
   constructor(snap?: boolean) {
     // matchMedia lido UMA vez: quem troca a preferência no meio de uma prévia viva é caso raro
@@ -42,7 +44,7 @@ export class Typewriter {
   }
 
   /** Novo texto completo (full-replace, como chega do SSE). */
-  set(texto: string) {
+  set(texto: string, streaming = true) {
     // untrack no corpo INTEIRO: set() roda dentro de um $effect e escreve alvo/mostrado — mas
     // tambem LE os dois (this.texto, o Math.min, o if). Sem untrack o efeito chamador vira
     // dependente do que a propria animacao muta, e passa a rodar de novo a cada chunk (medido
@@ -50,7 +52,9 @@ export class Typewriter {
     untrack(() => {
       const estende = texto.startsWith(this.texto);
       this.alvo = texto;
-      if (this.#snap || !estende) {
+      if (!this.#iniciado || !streaming || this.#snap || !estende) {
+        this.#iniciado = true;
+        this.parar();
         this.mostrado = texto.length;
         return;
       }

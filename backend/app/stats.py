@@ -2,8 +2,8 @@
 
 Lê o MESMO arquivo que o transcript da sessão já usa (jsonl do Claude, wire.jsonl do
 Kimi, session.jsonl do Pi), mas incrementalmente e por conta própria: guarda o offset
-de bytes e a cada `collect()` folda só as linhas novas. Nenhum estado de módulo — o
-acumulador vive dentro do `merged_events` de uma conexão e morre com ela.
+de bytes e a cada `collect()` folda só as linhas novas. Conexões compartilham o
+acumulador; os últimos usados ficam em memória para uma reabertura barata.
 
 Todos os números de tempo/velocidade são APROXIMADOS (atribuição de gaps entre
 timestamps de linhas); o front prefixa "~" neles. O Codex entra pelo mesmo caminho:
@@ -352,10 +352,10 @@ class Accumulator:
     """Fold incremental sobre o arquivo da sessão. `collect()` é SÍNCRONO e faz IO —
     o chamador roda em asyncio.to_thread (regra do incidente do git status no tick)."""
 
-    # Um acumulador por (provider, caminho), com contagem de quem o segura. Cada SSE criava o seu
-    # e relia o transcript inteiro (109-204ms num de 21 MiB) a cada reconexao ou 2o aparelho;
-    # compartilhado, a 2a conexao entra no fold ja feito. Sai do dicionario quando o ultimo solta.
+    # Um acumulador por (provider, caminho), reaproveitado ao reabrir sem manter um watcher.
     _compartilhados: dict[tuple[str, str], "Accumulator"] = {}
+    _inativos: dict[tuple[str, str], None] = {}
+    _INATIVOS_MAX = 16
     _trava_compartilhados = threading.Lock()
 
     def __init__(self, provider: str, path: str) -> None:
@@ -363,6 +363,8 @@ class Accumulator:
         self._fold: _Fold = _FOLDS[provider]()
         self._provider = provider
         self._offset = 0
+        self._identidade: tuple[int, int] | None = None
+        self._mtime_ns: int | None = None
         self._resto = b""            # linha parcial no fim do arquivo (escrita em andamento)
         self._invalid_lines = 0
         self._trava = threading.Lock()   # collect() roda em thread, e ha uma por conexao
@@ -380,6 +382,7 @@ class Accumulator:
             return None
         chave = (provider, str(Path(path)))   # a mesma forma que `soltar` usa
         with cls._trava_compartilhados:
+            cls._inativos.pop(chave, None)
             acc = cls._compartilhados.get(chave)
             if acc is None:
                 acc = cls._compartilhados[chave] = cls(provider, path)
@@ -391,7 +394,12 @@ class Accumulator:
             self._donos -= 1
             chave = (self._provider, str(self._path))
             if self._donos <= 0 and self._compartilhados.get(chave) is self:
-                del self._compartilhados[chave]
+                self._inativos.pop(chave, None)
+                self._inativos[chave] = None
+                while len(self._inativos) > self._INATIVOS_MAX:
+                    antiga = next(iter(self._inativos))
+                    del self._inativos[antiga]
+                    del self._compartilhados[antiga]
 
     def collect(self) -> dict | None:
         with self._trava:
@@ -417,17 +425,24 @@ class Accumulator:
 
     def _collect(self) -> dict | None:
         try:
-            size = self._path.stat().st_size
+            stat = self._path.stat()
         except FileNotFoundError:
             # Transitório (arquivo ainda não existe / rotação). Outro OSError — permissão,
             # disco — PROPAGA: o stats_pump loga e desliga a faixa, em vez de congelá-la
             # calada nos últimos números válidos pra sempre.
             return self._fold.snapshot()
-        if size < self._offset:      # truncou/regravou -> refolda do zero
+        size = stat.st_size
+        identidade = (stat.st_dev, stat.st_ino)
+        if (self._identidade is not None and identidade != self._identidade
+                or size < self._offset
+                or size == self._offset and self._mtime_ns is not None
+                and stat.st_mtime_ns != self._mtime_ns):
             self._fold = _FOLDS[self._provider]()
             self._offset = 0
             self._resto = b""
             self._invalid_lines = 0
+        self._identidade = identidade
+        self._mtime_ns = stat.st_mtime_ns
         if size > self._offset:
             restantes = size - self._offset
             with self._path.open("rb") as f:

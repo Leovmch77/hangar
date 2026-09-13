@@ -347,6 +347,84 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     return out
 
 
+class _CodexCommitted:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.offset = 0
+        self.signature = None
+        self.anchor = b""
+        self.lines: set[str] = set()
+
+    def read(self, path: str) -> set[str] | None:
+        from app.adapters.codex.rollout import parse_rollout_obj
+
+        with self.lock:
+            try:
+                with open(path, "rb") as fh:
+                    stat = os.fstat(fh.fileno())
+                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                    fh.seek(max(0, self.offset - len(self.anchor)))
+                    unchanged = fh.read(len(self.anchor)) == self.anchor
+                    if self.signature and (signature[:2] != self.signature[:2]
+                            or stat.st_size < self.signature[2]
+                            or stat.st_size == self.signature[2] and signature != self.signature
+                            or not unchanged):
+                        self.offset = 0
+                        self.lines.clear()
+                    fh.seek(self.offset)
+                    while fh.tell() < stat.st_size:
+                        start = fh.tell()
+                        raw = fh.readline(stat.st_size - start)
+                        if not raw.endswith(b"\n"):
+                            break  # Linha incompleta não comprova entrega nem avança o índice.
+                        self.offset = fh.tell()
+                        try:
+                            obj = json.loads(raw.decode("utf-8", "replace"))
+                        except ValueError:
+                            continue
+                        for event in parse_rollout_obj(obj):
+                            if event.kind == "user_msg" and event.text:
+                                self.lines.update(_chaves_de_commit(event.text))
+                    current = os.stat(path)
+                    if ((current.st_dev, current.st_ino) != signature[:2]
+                            or current.st_size < stat.st_size
+                            or current.st_size == stat.st_size and current.st_mtime_ns != stat.st_mtime_ns):
+                        raise OSError("transcript mudou durante a confirmação")
+                    fh.seek(max(0, self.offset - 256))
+                    self.anchor = fh.read(min(self.offset, 256))
+                    self.signature = signature
+                    return self.lines.copy()
+            except OSError as exc:
+                self.offset = 0
+                self.signature = None
+                self.anchor = b""
+                self.lines.clear()
+                _log.warning("nao deu pra ler o transcript %s pra confirmar entregas: %s", path, exc)
+                return None
+
+
+_codex_committed: dict[str, _CodexCommitted] = {}
+_codex_committed_lock = threading.Lock()
+_CODEX_COMMITTED_MAX = 8
+_CODEX_COMMITTED_CHARS = 1_000_000
+
+
+def _committed_codex_lines(jsonl: str) -> set[str] | None:
+    path = str(Path(jsonl))
+    with _codex_committed_lock:
+        index = _codex_committed.pop(path, None) or _CodexCommitted()
+        _codex_committed[path] = index
+        while len(_codex_committed) > _CODEX_COMMITTED_MAX:
+            del _codex_committed[next(iter(_codex_committed))]
+    lines = index.read(path)
+    # Índice grande continua correto, mas não fica retido entre chamadas.
+    if lines is None or sum(map(len, lines)) > _CODEX_COMMITTED_CHARS:
+        with _codex_committed_lock:
+            if _codex_committed.get(path) is index:
+                del _codex_committed[path]
+    return lines
+
+
 def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | None:
     """Textos que ATERRISSARAM no transcript (inteiros + por linha), pra confirmar entregas.
 
@@ -369,6 +447,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     redigitava o mesmo prompt (double-send medido: pi-e2e.jsonl com attempts: 2). Pi nao tem fila
     interna com `queue-operation`, entao o parser proprio ja basta. Kimi: mesmo motivo, shape
     `context.append_message` — o parser do adapter e usado do mesmo jeito."""
+    if provider == "codex":
+        return _committed_codex_lines(jsonl)
     out: set[str] = set()
 
     def add(t: str) -> None:
@@ -392,16 +472,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     # Import local pelo mesmo motivo do merged_history: app.adapters importa app.pqueue no boot.
     pi_parse = None
     kimi_parse = None
-    codex_parse = None
     if provider in ("pi", "omp"):
         from app.adapters.pi.transcript import parse_obj as pi_parse
-    elif provider == "codex":
-        # Codex: o texto do usuario vive em `response_item`/`message` com role "user", e o parser
-        # ainda tira o contexto que o CLI injeta com esse mesmo role (environment_context,
-        # AGENTS.md). Sem este ramo o oraculo devolve set() vazio -> "nada chegou" -> o reconcile
-        # re-enfileira e o drain REDIGITA a mensagem do usuario, o incidente ja visto no Pi e no
-        # Kimi, aqui com o agravante de o texto ja ter sido entregue pelo `turn/start`.
-        from app.adapters.codex.rollout import parse_rollout_obj as codex_parse
     elif provider == "kimi":
         # Kimi: sem o parser proprio, NENHUMA linha do wire casa o shape do Claude (o role mora em
         # `context.append_message`) -> oraculo vazio -> reconcile lia TODA entrega como engolida e
@@ -415,7 +487,7 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                parse = pi_parse or kimi_parse or codex_parse
+                parse = pi_parse or kimi_parse
                 if parse is not None:
                     for ev in parse(obj):
                         if ev.kind == "user_msg" and ev.text:

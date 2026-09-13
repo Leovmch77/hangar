@@ -19,13 +19,14 @@
     ts?: number | null;
     sessionName?: string;
     preview?: boolean;
+    streaming?: boolean;
     md?: boolean;        // previa cujo texto e markdown CRU (veio do agente, nao raspado da tela)
     full?: boolean;      // previa INCREMENTAL (so cresce no fim: deltas, ou a costura do pane do
                          // Kimi) -> texto plano SEM o teto de 10 linhas do ramo raspado comum
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade/slide
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
   }
-  let { text, ts, sessionName = '', preview = false, md = false, full = false, animate = true, onForward = null }: Props = $props();
+  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, animate = true, onForward = null }: Props = $props();
 
   // Previa em texto PLANO era consequencia da FONTE, nao escolha: raspada do pane, ela ja vinha
   // pintada pela TUI e renderizar de novo estragaria. Quando o proprio agente publica o texto
@@ -75,7 +76,7 @@
   // Gate pelo preview: bolha de HISTORICO (preview=false) nunca le tw.texto, e alimentar a
   // maquina mesmo assim acordava um rAF por bolha — ate 120 de uma vez ao abrir conversa longa
   // (achado da review).
-  $effect(() => { if (preview) tw.set(textoPreviaBruto); else tw.parar(); });
+  $effect(() => { if (preview) tw.set(textoPreviaBruto, streaming); else tw.parar(); });
   $effect(() => () => tw.parar());
   const textoPrevia = $derived(preview ? tw.texto : textoPreviaBruto);
 

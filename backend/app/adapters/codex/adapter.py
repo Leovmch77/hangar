@@ -35,6 +35,7 @@ from app.adapters.codex.rollout import parse_rollout_line
 from app import codex_contas
 from app import tmux
 from app.pqueue import PromptQueue
+from app.send_executor import send_thread
 from app.state import StateEvent
 from app.transcript import ChatEvent, TranscriptTailer
 
@@ -673,7 +674,7 @@ class CodexAdapter:
             # sem controle vivo e sessao MORTA pra quem abriu o chat (o _state_stream emite `dead`,
             # que tem tela propria) e segue ociosa na lista — a lista nao tem coluna de morto, entao
             # some-la faria o card desaparecer enquanto a pessoa usa a TUI.
-            if await asyncio.to_thread(tmux.has_session, name):
+            if await send_thread(tmux.has_session, name):
                 _log.info("codex: sessao %s sem controle vivo, mas o pane existe — nao recriado",
                           name)
                 return None
@@ -1216,13 +1217,13 @@ class CodexAdapter:
 
         IMPORTANT 2: PromptQueue.load/claim_undelivered/set_delivered fazem I/O de arquivo SINCRONO
         com lock -- chamados direto numa corrotina bloqueariam o event loop (que serve o SSE de
-        outras sessoes). Mesmo padrao do ClaudeAdapter (ver adapters/claude.py): to_thread."""
+        outras sessoes). O pool de envio evita disputar com funcionalidades secundárias."""
         q = PromptQueue(name)
-        if not any(e.get("delivered") is False for e in await asyncio.to_thread(q.load)):
+        if not any(e.get("delivered") is False for e in await send_thread(q.load)):
             return 0
         sent = 0
         while True:
-            claimed = await asyncio.to_thread(q.claim_undelivered, limit=1)
+            claimed = await send_thread(q.claim_undelivered, limit=1)
             if not claimed:
                 return sent
             entry = claimed[0]
@@ -1235,14 +1236,14 @@ class CodexAdapter:
                 # entrada fica delivered=True pra sempre (nunca reenviada, bolha "queued-" eterna).
                 # Mesmo tratamento do branch "deferred" abaixo.
                 try:
-                    await asyncio.to_thread(q.set_delivered, entry["id"], False)
+                    await send_thread(q.set_delivered, entry["id"], False)
                 except OSError:
                     pass
                 return sent
             if result != "sent":
                 # turno em curso / sessao indisponivel: reverte (nada foi enviado) e espera o proximo idle.
                 try:
-                    await asyncio.to_thread(q.set_delivered, entry["id"], False)
+                    await send_thread(q.set_delivered, entry["id"], False)
                 except OSError:
                     pass
                 return sent
@@ -1418,17 +1419,17 @@ class CodexAdapter:
             raise RuntimeError("Não há turno em andamento para orientar")
         q = PromptQueue(name)
         sent: list[str] = []
-        while claimed := await asyncio.to_thread(q.claim_undelivered, limit=1, entry_id=entry_id):
+        while claimed := await send_thread(q.claim_undelivered, limit=1, entry_id=entry_id):
             entry = claimed[0]
             try:
                 await self.steer(name, entry["text"], turn_id=turn_id)
             except BaseException:
-                await asyncio.to_thread(q.set_delivered, entry["id"], False)
+                await send_thread(q.set_delivered, entry["id"], False)
                 raise
             sent.append(entry["id"])
             # Fora do rollback: uma falha de gravação não desfaz o RPC já aceito.
             try:
-                await asyncio.to_thread(q.set_delivered, entry["id"], True, steered=True)
+                await send_thread(q.set_delivered, entry["id"], True, steered=True)
             except OSError:
                 _log.exception("orientacao aceita, mas recibo indisponivel name=%s entry=%s", name, entry["id"])
                 return sent

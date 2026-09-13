@@ -1,6 +1,5 @@
 import anyio.to_thread
 import asyncio
-import contextvars
 import json
 import logging
 import mimetypes
@@ -14,7 +13,6 @@ import threading
 import time
 import urllib.request
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -29,6 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, diag, harness_api,
                  migracao_sidecars, pensamento_pt, procinfo, tmux)
 from app.auth import require_auth, require_loopback
+from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import list_commands
@@ -2675,20 +2674,6 @@ async def events(name: str, request: Request):
         merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset))
 
 
-# Pool DEDICADO ao caminho de ENVIO (nucleo sagrado). Separado do executor default do asyncio, que a
-# decoracao da lista (git_summary/capture_pane via asyncio.to_thread) pode ocupar em rajada -> sem isto,
-# um burst de decoracao lenta atrasaria o POST /input. Poucos workers bastam (single-user; envios a uma
-# mesma sessao ja serializam no _send_lock do terminal_input).
-_send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-send")
-
-
-def _send_thread(fn, *args):
-    """Roda `fn(*args)` no pool DEDICADO de envio (nao no executor default, saturavel pela decoracao)."""
-    # run_in_executor não leva sozinho o id do pedido até os eventos de envio.
-    return asyncio.get_running_loop().run_in_executor(
-        _send_executor, contextvars.copy_context().run, fn, *args)
-
-
 def _erro_texto(e) -> str:
     """Texto de um erro de envio: string crua (endpoint antigo) ou o `msg` do envelope {code, params, msg}.
 
@@ -2914,11 +2899,11 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
-    source = await asyncio.to_thread(codex_sessions.load, name)
+    source = await _send_thread(codex_sessions.load, name)
     async with get_adapter("codex").delivery_lock(name):
-        current = await asyncio.to_thread(codex_sessions.load, name)
+        current = await _send_thread(codex_sessions.load, name)
         changed = source is not None and (current or {}).get("thread_id") != source.get("thread_id")
-        if changed or not await asyncio.to_thread(_session_exists, name):
+        if changed or not await _send_thread(_session_exists, name):
             return {"ok": False, "error": erro("erro_sessao_inexistente", "sessao nao encontrada")}
         return await _send_one_codex_locked(name, text, track_entry=track_entry)
 
@@ -2932,7 +2917,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
     broadcast: devolve ok/error por sessao).
 
     IMPORTANT 2: PromptQueue.append/set_delivered fazem I/O de arquivo sincrono com lock -- chamados
-    direto aqui (corrotina) bloqueariam o event loop. Mesmo padrao de to_thread do drain do Codex."""
+    direto aqui (corrotina) bloqueariam o event loop. O pool de envio evita disputar com funcionalidades secundárias."""
     adapter = get_adapter("codex")
     try:
         deliverable = await adapter.deliverable(name)
@@ -2944,7 +2929,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         deliverable = False
     # Enfileira sempre como pendente; so marca entregue apos a TUI REALMENTE receber o prompt.
     try:
-        entry = await asyncio.to_thread(PromptQueue(name).append, text, delivered=False)
+        entry = await _send_thread(PromptQueue(name).append, text, delivered=False)
     except OSError as e:
         # Mesma regra do _send_one: sidecar nao gravou + NAO entregavel = a msg nao esta em lugar
         # NENHUM, e responder "ok, na fila" era a mentira que o eeba30a tirou do caminho Claude.
@@ -2973,7 +2958,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         if entry is not None:
             # turno iniciou -> marca entregue pra o drain-on-complete nao reenviar a mesma entrada.
             try:
-                await asyncio.to_thread(PromptQueue(name).set_delivered, entry["id"], True)
+                await _send_thread(PromptQueue(name).set_delivered, entry["id"], True)
             except OSError:
                 pass
     elif entry is None:

@@ -148,6 +148,8 @@
   // amarrados a ela. E o `finally` do loadHistory PRECISA soltar exatamente a mesma chave.
   const sessaoDoPortao = sessionName;
   segurarAquecimento(sessaoDoPortao);
+  const aquecimento = new AbortController();
+  onDestroy(() => aquecimento.abort());
 
   let events = $state<ChatEvent[]>([]);
   const retiredQueuedIds = new Set<string>();
@@ -459,8 +461,9 @@
   let runRunning = $state(false);
   // Só acende o indicador do botão Rodar — nada na tela depende dele pra abrir. Espera a conversa.
   onMount(() => {
-    void aoAquecer(sessionName).then(() =>
-      getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted
+        && getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
   });
   let previewOpen = $state(false);
   let activityOpen = $state(false);
@@ -578,9 +581,10 @@
     planError = false;
     // Painel docado no desktop: este GET (105 KB de markdown) saía junto do histórico. Espera a
     // conversa pintar, como os outros aquecimentos.
-    aoAquecer(sessionName).then(() => getPlan(sessionName))
+    aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted ? getPlan(sessionName) : null)
       .then((d) => {
-        if (planKey !== key) return;   // chegou tarde: já tem fetch mais novo no ar, descarta
+        if (aquecimento.signal.aborted || planKey !== key) return;
         planDetail = d;
         planDetailKey = key;
         planLoading = false;
@@ -608,7 +612,9 @@
   // ladrão da abertura — a conversa esperava a política que ninguém tinha pedido ainda.
   $effect(() => {
     const sn = sessionName;
-    void aoAquecer(sn).then(() => prefetchOrq(sn));
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado !== false && !aquecimento.signal.aborted) prefetchOrq(sn);
+    });
   });
   // Membro do grupo aberto no modal (null = fechado). É string, não lista, de propósito: um modal
   // por vez mantém o teto em 2 SSE (este chat + o do par) e o navegador corta em ~6 por host.
@@ -1259,20 +1265,26 @@
 
   // Quando perguntar: enquanto TRABALHA (é quando nasce subagente) e uma vez ao parar, pra pegar o
   // último que terminou junto com o turno. Sessão parada não fica batendo no backend.
+  let subagentesEmVoo: ReturnType<typeof getSubagents> | null = null;
   $effect(() => {
     const trabalhando = currentState === 'working';
     let vivo = true;
     async function contar() {
       try {
-        const lista = await getSubagents(sessionName);
+        const lista = await (subagentesEmVoo ??= getSubagents(sessionName)
+          .finally(() => { subagentesEmVoo = null; }));
         if (vivo) subagentesNoDisco = lista.length;
       } catch { /* offline / sessão sem transcript -> mantém o que tinha */ }
     }
     // A 1ª contagem espera a conversa pintar (ver lib/aquecimento): ela só acende o ponto do botão
     // de Atividade. Depois que o histórico chega a espera já está resolvida e o ciclo de 5s corre
     // no ritmo de sempre.
-    void aoAquecer(sessionName).then(() => { if (vivo) void contar(); });
-    const id = trabalhando ? setInterval(contar, 5000) : undefined;
+    let id: ReturnType<typeof setInterval> | undefined;
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) => {
+      if (!vivo || liberado === false) return;
+      void contar();
+      if (trabalhando) id = setInterval(contar, 5000);
+    });
     return () => { vivo = false; if (id !== undefined) clearInterval(id); };
   });
 
@@ -1282,6 +1294,7 @@
   // poll (kick) que, se estiver rodando, liga o loop de 4s até terminar. Antes: qualquer workflow
   // no histórico (mesmo finalizado há dias) pollava a cada 4s pra sempre.
   let workflowRunning = $state(false);
+  let workflowsEmVoo: ReturnType<typeof getWorkflows> | null = null;
   const wfCount = $derived(activity.agents.filter((a) => a.kind === 'workflow').length);
   const activityRunning = $derived(workflowRunning || activity.runningAgents > 0);
   $effect(() => {
@@ -1290,7 +1303,8 @@
     let alive = true;
     async function poll() {
       try {
-        const ws = await getWorkflows(sessionName);
+        const ws = await (workflowsEmVoo ??= getWorkflows(sessionName)
+          .finally(() => { workflowsEmVoo = null; }));
         if (alive) workflowRunning = ws.some((w) => w.running);
       } catch { /* offline / sem run -> ignora */ }
     }
