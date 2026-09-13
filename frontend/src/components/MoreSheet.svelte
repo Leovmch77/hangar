@@ -16,12 +16,17 @@
     /** Passagem de bastão. Mora AQUI porque no celular a lista de sessões não tem menu por sessão
      *  (as ações dela são swipe no SessionCard) — o "⋯" do chat aberto é a única entrada. */
     onBastao: () => void;
+    /** Troca terminal ⇄ sem terminal (só Claude): rótulo é o destino, bloqueado fora de ociosa. */
+    onTrocarModo?: () => void;
+    modoDestinoTerminal?: boolean;
+    modoBloqueado?: boolean;
     activityRunning?: boolean;
     activityBadge?: number;
   }
   let {
     open, onClose, onRun, runRunning = false,
     onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao,
+    onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
   }: Props = $props();
 
   function pick(fn: () => void) {
@@ -91,6 +96,22 @@
       </span>
       <span class="chev" aria-hidden="true">›</span>
     </button>
+
+    {#if onTrocarModo}
+      <button class="item" onclick={() => pick(onTrocarModo)} disabled={modoBloqueado}>
+        <span class="ico" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 8h13l-3-3" /><path d="M20 16H7l3 3" />
+          </svg>
+        </span>
+        <span class="txt">
+          <span class="label">{modoDestinoTerminal ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}</span>
+          <span class="sub">{modoBloqueado ? m.modo_so_ociosa()
+            : modoDestinoTerminal ? m.modo_abrir_no_terminal_detalhe() : m.modo_continuar_sem_terminal_detalhe()}</span>
+        </span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+    {/if}
   </div>
 </BottomSheet>
 

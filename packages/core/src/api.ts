@@ -2337,6 +2337,14 @@ export function getPermissionModes(name: string, sondar = false): Promise<{ curr
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-modes${qs}`);
 }
 
+/** Troca a sessão Claude entre terminal e sem terminal, na mesma conversa. Só ociosa (409 com o motivo). */
+export function setModoExecucao(name: string, terminal: boolean): Promise<{ ok: boolean; terminal: boolean }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/modo-execucao`, {
+    method: 'POST',
+    body: JSON.stringify({ terminal }),
+  });
+}
+
 export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-mode`, {

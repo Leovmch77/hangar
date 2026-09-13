@@ -714,6 +714,10 @@ class StateMonitor:
                 # None = tmux nao respondeu: nao e morte (o watcher do Codex ja matou app-servers
                 # vivos lendo timeout como sessao sumida); espera o proximo tick.
                 existe = await asyncio.to_thread(tmux.sessao_existe, self.name)
+                from app.adapters.claude_headless.sessions import em_troca
+                if existe is False and em_troca(self.name):
+                    await asyncio.sleep(self.poll)
+                    continue
                 if existe is False:
                     yield StateEvent(session=self.name, state="dead")
                     return

@@ -130,6 +130,19 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
     return cwd.replace("\\", "/") if windows else cwd
 
 
+def _env_subagente(modelo: str | None) -> dict:
+    return {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": modelo}} if modelo else {}
+
+
+def _esperar_saida(pids: list[int], teto_s: float = 5.0) -> None:
+    fim = time.monotonic() + teto_s
+    while any(procinfo.pid_vivo(p) for p in pids):
+        if time.monotonic() >= fim:
+            _log.warning("troca de modo: processo(s) %s seguem vivos apos %.0fs", pids, teto_s)
+            return
+        time.sleep(0.1)
+
+
 def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
     """Marca `hasTrustDialogAccepted=True` pra `cwd` no .claude.json que a sessão nova vai LER —
     quem responde qual é o arquivo é `tmux.claude_json_de`, o mesmo lugar que decide se o pane
@@ -1911,6 +1924,106 @@ class SessionRegistry:
         diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
                            headless=True, engine=engine)
+
+    # ── Troca terminal ⇄ sem terminal (mesma conversa) ──────────────────────────────────────
+    # É troca, não cópia: o antigo morre antes do novo nascer, e fila, `then` e pareamento ficam
+    # (são da sessão, não do transporte). Quem garante que a sessão está ociosa é a API.
+
+    def para_terminal(self, name: str) -> SessionInfo:
+        """Sessão sem terminal vira pane tmux com `claude --resume`. Falhando o pane, o sidecar
+        volta e quem chama religa o processo — a sessão nunca fica sem nenhum dos dois."""
+        from app.adapters import get_adapter, CLAUDE_HEADLESS
+        meta = headless_sessions.load(name)
+        if meta is None:
+            raise ValueError("sessao sem terminal nao encontrada")
+        hl = get_adapter(CLAUDE_HEADLESS)
+        jsonl = hl.transcript_path_de(meta)
+        # Comando inteiro ANTES de matar: validação que estoura depois deixaria a sessão sem nada.
+        cmd = self._comando_terminal(meta, resume=Path(jsonl).exists())
+        headless_sessions.marcar_troca(name)
+        headless_sessions.delete(name)
+        hl.close_sync(name, meta)
+        cano_pid = (meta.get("cano") or {}).get("pid")
+        _esperar_saida([int(cano_pid)] if cano_pid else [])
+        self._forget(name)
+        if not tmux.new_session(name, meta["cwd"], cmd, meta.get("config_dir"), provider="claude",
+                                **_env_subagente(meta.get("subagent_model"))):
+            headless_sessions.restaurar(meta)
+            raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
+        self._jsonl_cache[name] = jsonl
+        return SessionInfo(name=name, cwd=meta["cwd"], jsonl=jsonl, tracked=True,
+                           provider="claude", engine=meta.get("engine"))
+
+    @staticmethod
+    def _comando_terminal(meta: dict, *, resume: bool) -> str:
+        sid = meta["session_id"]
+        uuid.UUID(sid)
+        # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
+        cmd = tmux.join_cmd(["claude", "--resume" if resume else "--session-id", sid]
+                            + model_args.args_de("claude", meta.get("model"), meta.get("effort"),
+                                                 meta.get("permission_mode")))
+        if meta.get("engine"):
+            from app import engines
+            if meta["engine"] not in engines.listar():
+                raise ValueError(f"motor '{meta['engine']}' nao existe")
+            _exigir_cp_engine()
+            pre = ["hangar-engine", "--exec", meta["engine"]]
+            if meta.get("model"):
+                pre += ["--model", meta["model"]]
+                if meta.get("context_window"):
+                    pre += ["--context", str(meta["context_window"])]
+            cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
+        return cmd
+
+    def para_headless(self, name: str, permission_mode: str | None) -> dict:
+        """Pane tmux vira sessão sem terminal. Devolve o sidecar gravado; subir o processo é da
+        API (async). `permission_mode` é o que o rodapé mostra agora (lido por quem chama)."""
+        if codex_sessions.exists(name) or headless_sessions.exists(name):
+            raise ValueError("so sessao Claude no terminal pode ficar sem terminal")
+        pane = self._pane_of(name)
+        if pane is None:
+            raise ValueError("sessao nao encontrada")
+        self._refuse_non_claude_resume(pane)
+        cwd, pid = pane["cwd"], pane.get("pid")
+        jsonl, tracked = self.resolve_tracked(name, cwd)
+        if not jsonl or not tracked:
+            raise ValueError("sessao sem id: nao sei qual conversa continuar")
+        sid = Path(jsonl).stem
+        uuid.UUID(sid)
+        # Tudo lido do processo vivo ANTES do kill: o /proc (ou o psutil) some com ele.
+        cdir = _config_dir_of(pid) if pid else None
+        motor = _engine_of(pid) if pid else None
+        modelo, esforco = procinfo._model_of(pid) if pid else (None, None)
+        janela = procinfo._env_var_of(pid, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if pid else None
+        # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
+        subagente = procinfo._env_var_of(pid, "CLAUDE_CODE_SUBAGENT_MODEL") if pid and not motor else None
+        if motor:
+            from app import engines
+            if motor not in engines.listar():
+                # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
+                motor = modelo = esforco = janela = None
+        model_args.validar("claude", modelo, esforco, permission_mode)
+        filhos = _descendant_pids(pid) if pid else []
+        headless_sessions.marcar_troca(name)
+        if not tmux.kill_session(name):
+            raise KillFailed(name)
+        # Dois `claude` no mesmo .jsonl é conversa corrompida: o do pane sai antes do novo subir.
+        _esperar_saida(filhos)
+        self._forget(name)
+        try:
+            meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
+                                          engine=motor, model=modelo, effort=esforco,
+                                          context_window=int(janela) if janela and janela.isdigit() else None,
+                                          permission_mode=permission_mode, subagent_model=subagente)
+        except OSError:
+            meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
+                    "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}
+            if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
+                                    meta["config_dir"], provider="claude", **_env_subagente(subagente)):
+                _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
+            raise
+        self._jsonl_cache[name] = jsonl
+        return meta
 
     def rename(self, old: str, new: str) -> None:
         if headless_sessions.exists(old):

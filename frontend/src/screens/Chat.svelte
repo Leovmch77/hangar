@@ -46,6 +46,7 @@
     getHistoryDesde,
     sendInput,
     setPermissionMode,
+    setModoExecucao,
     steerSession,
     broadcast,
     selectOption,
@@ -855,8 +856,24 @@
   const sessionProvider = $derived(allSessions.find((s) => s.name === sessionName)?.provider);
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
-  const sessionHeadless = $derived(stateEvent?.headless === true
-    || allSessions.find((s) => s.name === sessionName)?.headless === true);
+  // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
+  const sessionHeadless = $derived(stateEvent ? stateEvent.headless === true
+    : allSessions.find((s) => s.name === sessionName)?.headless === true);
+  // Troca terminal ⇄ sem terminal: só Claude e só parada (o backend confere de novo e dá 409).
+  const modoTrocavel = $derived(sessionProvider === 'claude');
+  let trocandoModo = $state(false);
+  async function trocarModo() {
+    if (trocandoModo || currentState !== 'idle') return;
+    trocandoModo = true;
+    try {
+      await setModoExecucao(sessionName, sessionHeadless);
+      await loadSessionsForNav();
+    } catch (err) {
+      mostrarAviso(err);
+    } finally {
+      trocandoModo = false;
+    }
+  }
   // Motor da sessão (null = conta Anthropic) — o Composer usa no placeholder ("Mensagem para …").
   const sessionEngine = $derived(allSessions.find((s) => s.name === sessionName)?.engine ?? null);
   // Transcript desta sessão: a chave da cauda em cache (ver queries.ts). Nulo enquanto a lista não
@@ -882,6 +899,7 @@
   const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
   const currentState = $derived<State>(codexPreThread
     ? codexEntrada?.state ?? 'idle' : stateEvent?.state ?? 'idle');
+  const modoLivre = $derived(currentState === 'idle');
   let claudePlanDiscovery = $state<ClaudePlanDiscovery | null>(null);
   let claudePlanDiscoveryLoading = $state(false);
   let claudePlanDiscoveryError = $state('');
@@ -1278,12 +1296,18 @@
         keywords: ['navegador', 'browser', 'localhost', 'site'],
         group: m.lista_ferramentas(),
       },
+      modo: {
+        detail: !modoLivre ? m.modo_so_ociosa()
+          : sessionHeadless ? m.modo_abrir_no_terminal_detalhe() : m.modo_continuar_sem_terminal_detalhe(),
+        keywords: ['terminal', 'headless', 'tui', m.modo_continuar_sem_terminal()],
+        group: m.lista_ferramentas(),
+      },
     };
     return {
       id,
       title,
       ...metadata[id],
-      disabled: id === 'terminal' && currentState === 'dead',
+      disabled: (id === 'terminal' && currentState === 'dead') || (id === 'modo' && (!modoLivre || trocandoModo)),
       run,
     };
   }
@@ -1297,6 +1321,7 @@
       action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
       action('run', m.chat_executar_workflow(), () => (runOpen = true)),
       ...(sessionHeadless ? [] : [action('terminal', m.ctx_terminal(), abrirTerminalReal)]),
+      ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
       action('navegador', m.ctx_navegador(), alternarNavegador),
     ]);
     // Ao trocar a key servidor-aware ou desmontar este Chat, nenhum callback pode sobreviver.
@@ -1820,14 +1845,6 @@
         // `pendingPiQuestion`, que fecha pelo tool_result) e o estado do pane dela nao segue essa
         // regra -> so o caso do Claude, que abre pelo evento SSE.
         if (askOpen && !askPiId && askPayload?.provider !== 'codex' && stateEvent?.state !== 'awaiting_input') askOpen = false;
-        // Problema publicado pelo backend (processo caiu, turno com erro, sem resposta): uma vez
-        // por código, no aviso que já existe — senão a sessão só "volta a ociosa" sem explicar.
-        const prob = stateEvent?.problema ?? null;
-        if (prob !== problemaAvisado) {
-          problemaAvisado = prob;
-          const texto = textoProblema(prob);
-          if (texto) mostrarAviso(stateEvent?.problema_detalhe ? `${texto} — ${stateEvent.problema_detalhe.split('\n')[0].slice(0, 160)}` : texto);
-        }
       } catch (err) {
         quadroFalhou('state');
         // Mesmo motivo do handler de `preview` logo abaixo: engolir aqui congela a prévia na tela
@@ -2388,7 +2405,20 @@
   // por aqui"). Some sozinho depois de 8s, ou no toque — não é estado, é aviso.
   let avisoErr = $state('');
   let avisoErrTimer: ReturnType<typeof setTimeout> | undefined;
-  let problemaAvisado: string | null = null;   // último código de problema já mostrado
+  // Problema publicado pelo backend (processo caiu, turno com erro, sem resposta): linha discreta
+  // acima do composer enquanto durar. Dispensar vale só pra este problema; outro volta a aparecer.
+  let problemaDispensado = $state<string | null>(null);
+  $effect(() => {
+    if (!stateEvent?.problema) problemaDispensado = null;   // ocorrência nova aparece de novo
+  });
+  const problemaChave = $derived(stateEvent?.problema ? `${stateEvent.problema}\n${stateEvent.problema_detalhe ?? ''}` : null);
+  const faixaProblema = $derived.by(() => {
+    if (!problemaChave || problemaChave === problemaDispensado) return null;
+    const texto = textoProblema(stateEvent?.problema ?? null);
+    if (!texto) return null;
+    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0].slice(0, 80);
+    return detalhe ? `${texto} — ${detalhe}` : texto;
+  });
 
   function mostrarAviso(err: unknown) {
     clearTimeout(avisoErrTimer);
@@ -2550,6 +2580,9 @@
       {sessionName}
       {events} {histGap} cwd={planSession?.cwd ?? null}
       onOpenTerminal={sessionHeadless ? undefined : abrirTerminalReal}
+      onTrocarModo={modoTrocavel ? trocarModo : undefined}
+      modoDestinoTerminal={sessionHeadless}
+      modoBloqueado={!modoLivre || trocandoModo}
       onOpenNavegador={alternarNavegador}
       terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen}
       onOpenRun={() => (runOpen = true)}
@@ -2773,6 +2806,13 @@
           <button type="button" class="sse-retry" onclick={connectSSE}>{m.chat_sse_tentar()}</button>
         </div>
       {/if}
+      {#if faixaProblema}
+        <div class="faixa-problema" role="status">
+          <span class="faixa-problema-texto" title={faixaProblema}>{faixaProblema}</span>
+          <button type="button" class="faixa-problema-fechar" aria-label={m.chat_problema_dispensar()}
+                  onclick={() => (problemaDispensado = problemaChave)}>×</button>
+        </div>
+      {/if}
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->
@@ -2877,6 +2917,9 @@
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
              onBastao={passarBastaoDaqui}
+             onTrocarModo={modoTrocavel ? trocarModo : undefined}
+             modoDestinoTerminal={sessionHeadless}
+             modoBloqueado={!modoLivre || trocandoModo}
              {activityRunning} {activityBadge} />
   <AttachmentsSheet open={anexosOpen} {sessionName} onClose={() => (anexosOpen = false)}
                     onUsarNoDitado={usarAnexoNoDitado} />
@@ -3392,6 +3435,27 @@
     padding: var(--space-2) var(--space-4);
     font-size: var(--text-sm);
     color: var(--text-muted);
+  }
+  .faixa-problema {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 var(--space-3) var(--space-1);
+    padding: 2px var(--space-2) 2px var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface-inset);
+    border-radius: var(--radius-md);
+  }
+  .faixa-problema-texto { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .faixa-problema-fechar {
+    background: transparent;
+    border: 0;
+    color: var(--text-muted);
+    font-size: var(--text-base);
+    line-height: 1;
+    padding: 0 var(--space-1);
+    cursor: pointer;
   }
   .sse-retry {
     background: var(--surface-raised);

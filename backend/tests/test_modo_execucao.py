@@ -1,0 +1,171 @@
+"""Troca terminal ⇄ sem terminal na mesma conversa: ordem (antigo morre antes do novo), o que
+passa de um lado pro outro, a volta quando o novo não nasce, e o 409 com a sessão ocupada."""
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.adapters.claude_headless import sessions as S
+from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
+from app.config import settings
+
+SID = "11111111-1111-1111-1111-111111111111"
+
+
+@pytest.fixture
+def reg(tmp_path, monkeypatch):
+    from app import pqueue, registry as R
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
+    monkeypatch.setattr(S, "_trocando", {})
+    monkeypatch.setattr(R.procinfo, "pid_vivo", lambda pid: False)
+    monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
+    return R.SessionRegistry(str(tmp_path / "projects"))
+
+
+def test_sem_terminal_vira_pane_com_resume_e_as_escolhas(reg, tmp_path, monkeypatch):
+    from app import registry as R
+    from app.pqueue import PromptQueue
+    meta = S.save("hl", str(tmp_path), SID, model="haiku", effort="low", permission_mode="acceptEdits",
+                  subagent_model="sonnet")
+    jsonl = ClaudeHeadlessAdapter().transcript_path_de(meta)
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    from pathlib import Path
+    Path(jsonl).parent.mkdir(parents=True, exist_ok=True)
+    Path(jsonl).write_text("{}\n")
+    PromptQueue("hl").append_saida_local("nota que fica")
+    ordem = []
+    fake_hl = MagicMock()
+    fake_hl.transcript_path_de.side_effect = ClaudeHeadlessAdapter().transcript_path_de
+    fake_hl.close_sync.side_effect = lambda n, m: ordem.append(("fechou", S.exists(n)))
+    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
+
+    def nova(name, cwd, cmd, cfg=None, provider="claude", env=None):
+        ordem.append(("pane", cmd))
+        ordem.append(("env", env))
+        return True
+    monkeypatch.setattr(R.tmux, "new_session", nova)
+    info = reg.para_terminal("hl")
+    assert ordem[0] == ("fechou", False)            # sidecar some antes de matar o processo
+    cmd = ordem[1][1]
+    assert f"--resume {SID}" in cmd and "--model haiku" in cmd and "--effort low" in cmd
+    assert "--permission-mode acceptEdits" in cmd
+    assert ordem[2] == ("env", {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
+    assert not S.exists("hl") and not info.headless and info.jsonl == jsonl
+    assert S.em_troca("hl")
+    assert any(e.get("text") == "nota que fica" for e in PromptQueue("hl").load())
+
+
+def test_pane_que_nao_nasce_devolve_o_sidecar(reg, tmp_path, monkeypatch):
+    from app import registry as R
+    S.save("hl", str(tmp_path), SID, model="haiku")
+    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: MagicMock(
+        transcript_path_de=lambda m: str(tmp_path / "nao-existe.jsonl")))
+    monkeypatch.setattr(R.tmux, "new_session", lambda *a, **k: False)
+    with pytest.raises(ValueError):
+        reg.para_terminal("hl")
+    assert S.load("hl")["session_id"] == SID and S.load("hl")["cano"] is None
+
+
+def _pane(reg, tmp_path, monkeypatch, *, mata=True):
+    from app import registry as R
+    jsonl = str(tmp_path / "projects" / "x" / f"{SID}.jsonl")
+    monkeypatch.setattr(reg, "_pane_of", lambda n: {"name": n, "cwd": str(tmp_path), "pid": 999})
+    monkeypatch.setattr(R.SessionRegistry, "_refuse_non_claude_resume", staticmethod(lambda p: None))
+    monkeypatch.setattr(reg, "resolve_tracked", lambda n, c: (jsonl, True))
+    monkeypatch.setattr(R, "_config_dir_of", lambda pid: tmp_path / ".claude-b")
+    monkeypatch.setattr(R, "_engine_of", lambda pid: None)
+    monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: ("sonnet", "high"))
+    monkeypatch.setattr(R.procinfo, "_env_var_of",
+                        lambda pid, n: "haiku" if n == "CLAUDE_CODE_SUBAGENT_MODEL" else None)
+    monkeypatch.setattr(R, "_descendant_pids", lambda pid: [999, 1000])
+    mortos = []
+
+    def kill(n):
+        mortos.append((n, S.exists(n)))
+        return mata
+    monkeypatch.setattr(R.tmux, "kill_session", kill)
+    return mortos
+
+
+def test_pane_vira_sem_terminal_com_sid_vivo_conta_e_modo(reg, tmp_path, monkeypatch):
+    mortos = _pane(reg, tmp_path, monkeypatch)
+    meta = reg.para_headless("t1", "plan")
+    assert mortos == [("t1", False)]                 # pane morre antes do sidecar existir
+    assert meta["session_id"] == SID and S.load("t1")["session_id"] == SID
+    assert meta["config_dir"] == str(tmp_path / ".claude-b")
+    assert (meta["model"], meta["effort"], meta["permission_mode"]) == ("sonnet", "high", "plan")
+    assert meta["subagent_model"] == "haiku"
+
+
+def test_pane_que_nao_morre_nao_vira_sem_terminal(reg, tmp_path, monkeypatch):
+    from app.registry import KillFailed
+    _pane(reg, tmp_path, monkeypatch, mata=False)
+    with pytest.raises(KillFailed):
+        reg.para_headless("t1", "manual")
+    assert not S.exists("t1")
+
+
+def test_monitor_sem_terminal_nao_diz_dead_durante_a_troca(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
+    monkeypatch.setattr(S, "_trocando", {})
+    S.marcar_troca("hl")
+    ad = ClaudeHeadlessAdapter()
+
+    async def fluxo():
+        gen = ad.state_monitor("hl", lambda: None)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(gen.__anext__(), 1.5)
+        S._trocando.clear()
+        gen = ad.state_monitor("hl", lambda: None)
+        assert (await gen.__anext__()).state == "dead"
+    asyncio.run(fluxo())
+
+
+@pytest.fixture
+def cliente(monkeypatch):
+    import app.api as api_mod
+    settings.auth_token = "secret"
+    monkeypatch.setattr(api_mod, "_session_exists", lambda name: True)
+    return TestClient(api_mod.app)
+
+
+_H = {"Authorization": "Bearer secret"}
+
+
+def test_troca_com_turno_em_voo_da_409_e_nao_mexe(cliente, monkeypatch):
+    from app.models import SessionInfo
+    import app.api as api_mod
+    info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
+    hl = ClaudeHeadlessAdapter()
+    sess = MagicMock(vivo=True, iniciando=False, pending={}, question=None, in_progress=True)
+    hl._sessions["hl"] = sess
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch.object(api_mod.registry, "para_terminal") as troca:
+        r = cliente.post("/api/sessions/hl/modo-execucao", headers=_H, json={"terminal": True})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_sessao_trabalhando"
+    troca.assert_not_called()
+
+
+def test_troca_para_sem_terminal_sobe_o_processo_e_volta_se_nao_subir(cliente, monkeypatch, tmp_path):
+    from app.models import SessionInfo
+    import app.api as api_mod
+    monkeypatch.setattr("app.pqueue.settings.projects_dir", tmp_path)
+    info = SessionInfo(name="t1", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", state="idle")
+    hl = ClaudeHeadlessAdapter()
+    hl.ensure_running = AsyncMock(side_effect=RuntimeError("binário não encontrado: claude"))
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=False), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch.object(api_mod.registry, "list_with_state", AsyncMock(return_value=[info])), \
+         patch.object(api_mod.perm_mode, "ler_modo", return_value="manual"), \
+         patch.object(api_mod.registry, "para_headless", return_value={}) as ida, \
+         patch.object(api_mod.registry, "para_terminal") as volta:
+        r = cliente.post("/api/sessions/t1/modo-execucao", headers=_H, json={"terminal": False})
+    ida.assert_called_once_with("t1", "manual")
+    hl.ensure_running.assert_awaited_once_with("t1", esperar_pronta=False)
+    volta.assert_called_once_with("t1")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_troca_modo"

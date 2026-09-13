@@ -53,6 +53,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     // opcionais: sem handler, sem botao (mesma regra da NavBar).
     onOpenTerminal?: () => void;
     terminalAlert?: boolean;
+    // Troca terminal ⇄ sem terminal (só Claude). O rótulo é o destino; bloqueado fora de ociosa.
+    onTrocarModo?: () => void;
+    modoDestinoTerminal?: boolean;
+    modoBloqueado?: boolean;
     // Navegador embutido: o botão na fileira de ações ATIVA a aba (criando o navegador da sessão
     // se não tem). A aba Navegador na tab bar só EXISTE quando a sessão tem navegador aberto.
     onOpenNavegador?: () => void;
@@ -101,6 +105,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     events = null, histGap = '', cwd = null,
     serverLabel = '', provider = 'claude', sessionName = '', serverId = '',
     onOpenTerminal = undefined, terminalAlert = false,
+    onTrocarModo = undefined, modoDestinoTerminal = false, modoBloqueado = false,
     onOpenNavegador = undefined,
     onOpenRun = undefined, runRunning = false,
     onOpenAttachments = undefined,
@@ -114,7 +119,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     toggleExterno = false,
   }: Props = $props();
 
-  const hasActions = $derived(onOpenTerminal || onOpenNavegador || onOpenRun || onOpenAttachments || onOpenActivity);
+  const hasActions = $derived(onOpenTerminal || onTrocarModo || onOpenNavegador || onOpenRun || onOpenAttachments || onOpenActivity);
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
@@ -280,6 +285,17 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             <line x1="12.5" y1="15" x2="17" y2="15"/>
           </svg>
           <span>{m.ctx_terminal()}</span>
+        </button>
+      {/if}
+      {#if onTrocarModo}
+        {@const rotulo = modoDestinoTerminal ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
+        <button class="ctx-action" onclick={onTrocarModo} disabled={modoBloqueado} aria-label={rotulo}
+                title={modoBloqueado ? m.modo_so_ociosa() : modoDestinoTerminal ? m.modo_abrir_no_terminal_detalhe() : m.modo_continuar_sem_terminal_detalhe()}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 8h13l-3-3"/>
+            <path d="M20 16H7l3 3"/>
+          </svg>
+          <span>{rotulo}</span>
         </button>
       {/if}
       {#if onOpenNavegador}
@@ -695,6 +711,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     transition: background 160ms var(--ease-out), color 160ms var(--ease-out);
   }
   .ctx-action:hover { background: var(--surface-raised); color: var(--text-primary); }
+  .ctx-action:disabled { opacity: 0.45; cursor: default; background: transparent; }
   .ctx-action:active { background: var(--bg-hover); }
   .ctx-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .ctx-action svg { flex-shrink: 0; width: 18px; height: 18px; }

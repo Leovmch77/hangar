@@ -1372,6 +1372,9 @@ class ClaudeHeadlessAdapter:
     async def _state_stream(self, name: str) -> AsyncIterator[StateEvent]:
         while True:
             if not hl_sessions.exists(name):
+                if hl_sessions.em_troca(name):
+                    await asyncio.sleep(1.0)
+                    continue
                 yield StateEvent(session=name, state="dead", headless=True)
                 return
             sess = self._sessions.get(name)
@@ -1396,8 +1399,7 @@ class ClaudeHeadlessAdapter:
                         # reemitir, o problema só apareceria numa conexão nova.
                         break
                     if not hl_sessions.exists(name):
-                        yield StateEvent(session=name, state="dead", headless=True)
-                        return
+                        break   # o laço de fora decide: encerrada, ou só trocando de modo
                 if sess is None or not sess.vivo:
                     continue
             last = -1

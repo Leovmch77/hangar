@@ -10,6 +10,7 @@ Local: ~/.hangar/claude-headless/<nome>.json, um arquivo por sessão, keyed pelo
 import json
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -55,6 +56,25 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
     }
     _write(name, meta)
     return meta
+
+
+def restaurar(meta: dict) -> None:
+    """Regrava um sidecar apagado (troca de modo que falhou), sem o cano que já morreu."""
+    _write(meta["name"], {**meta, "cano": None})
+
+
+# Troca terminal ⇄ sem terminal: por alguns segundos nenhum dos dois lados existe, e os monitores
+# de estado diriam `dead` — o chat mostraria "sessão encerrada" até o SSE trocar de adapter.
+_TROCA_S = 15.0
+_trocando: dict[str, float] = {}
+
+
+def marcar_troca(name: str) -> None:
+    _trocando[name] = time.monotonic() + _TROCA_S
+
+
+def em_troca(name: str) -> bool:
+    return _trocando.get(name, 0.0) > time.monotonic()
 
 
 def update(name: str, **campos) -> dict | None:

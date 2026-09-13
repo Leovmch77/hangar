@@ -2033,6 +2033,86 @@ async def kill_session(name: str):
     return {"ok": True, "warning": warn}
 
 
+class ModoExecucaoBody(_StrictBody):
+    terminal: bool = Field(strict=True)
+
+
+_OCUPADA = {
+    "erro_sessao_iniciando": "a sessão ainda está iniciando — espere ela ficar pronta",
+    "erro_sessao_esperando_resposta": "há uma permissão ou pergunta esperando resposta",
+    "erro_sessao_trabalhando": "a sessão está trabalhando — espere ela terminar",
+    "erro_fila_pendente": "há mensagens na fila esperando entrega",
+}
+
+
+async def _motivo_ocupada(name: str, headless: bool) -> str | None:
+    """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
+    if headless:
+        sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
+        if sess is not None and sess.vivo:
+            if sess.iniciando:
+                return "erro_sessao_iniciando"
+            if sess.pending or sess.question:
+                return "erro_sessao_esperando_resposta"
+            if sess.in_progress:
+                return "erro_sessao_trabalhando"
+    else:
+        info = next((i for i in await registry.list_with_state() if i.name == name), None)
+        if info is not None and info.state == "awaiting_input":
+            return "erro_sessao_esperando_resposta"
+        if info is not None and info.state != "idle":
+            return "erro_sessao_trabalhando"
+    fila = await asyncio.to_thread(PromptQueue(name).load)
+    if any(e.get("delivered") is False for e in fila):
+        return "erro_fila_pendente"
+    return None
+
+
+@app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth)])
+async def modo_execucao(name: str, body: ModoExecucaoBody):
+    """Troca uma sessão Claude entre terminal (pane tmux) e sem terminal, na mesma conversa.
+    Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider != "claude":
+        raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
+    headless = _headless(name)
+    if headless != body.terminal:
+        return {"ok": True, "terminal": body.terminal}
+    hl = get_adapter(CLAUDE_HEADLESS)
+    # A trava de entrega do headless: nenhum drain sobe processo no meio da troca.
+    async with hl.delivery_lock(name):
+        motivo = await _motivo_ocupada(name, headless)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        if headless:
+            try:
+                await asyncio.to_thread(registry.para_terminal, name)
+            except ValueError as e:
+                if headless_sessions.exists(name):
+                    hl.acordar(name)   # sidecar restaurado: religa o processo que a troca matou
+                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
+        else:
+            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
+            try:
+                await asyncio.to_thread(registry.para_headless, name, modo)
+            except KillFailed as e:
+                raise HTTPException(500, str(e))
+            except (ValueError, OSError) as e:
+                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
+            try:
+                await hl.ensure_running(name, esperar_pronta=False)
+            except Exception as e:
+                _log.warning("troca para sem terminal: processo nao subiu name=%s; voltando ao terminal", name, exc_info=True)
+                try:
+                    await asyncio.to_thread(registry.para_terminal, name)
+                except Exception:
+                    _log.exception("troca para sem terminal: volta ao terminal falhou name=%s", name)
+                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
+    return {"ok": True, "terminal": body.terminal}
+
+
 class RenameBody(_StrictBody):
     new: str
 
