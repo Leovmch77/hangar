@@ -719,14 +719,6 @@
         <div class="hs-integracao">
           <div class="hs-item hs-integracao-cab">
             <span class="hs-item-txt"><b>{m.harness_codex_integracao()}</b></span>
-            {#if contasCodex.length}
-              <select class="hs-conta" aria-label={m.codex_ui_account()} value={contaCodex}
-                onchange={trocarConta} disabled={integracaoOcupada}>
-                {#each contasCodex as conta (conta.id)}
-                  <option value={conta.id}>{conta.name}{conta.is_default ? ` · ${m.criar_padrao()}` : ''}</option>
-                {/each}
-              </select>
-            {/if}
             <button type="button" class="hs-btn" onclick={reconciliarIntegracao}
               disabled={integracaoOcupada}
               >{integracaoOcupada ? m.harness_codex_executando() : m.harness_codex_reconciliar()}</button>
@@ -735,6 +727,22 @@
             <summary><span class="cfg-vered">{m.harness_codex_reconciliar_vered()}</span> <span class="cfg-pq">{m.config_motores_por_que()}<span class="cfg-chev" aria-hidden="true">▾</span></span></summary>
             <p class="cfg-motivo">{m.harness_codex_reconciliar_porque()}</p>
           </details>
+          <!-- O seletor existe sempre: com só a conta padrão ele fica apagado com o motivo, como o
+               seletor de máquina no topo do modal — sumir esconderia que dá pra ter mais de uma. -->
+          <label class="hs-item hs-automatica" for="codex-conta">
+            <span class="hs-item-txt">
+              <b>{m.codex_ui_account()}</b>
+              <span class="hs-ajuda" id="codex-conta-ajuda">{contasCodex.length > 1 ? m.harness_codex_conta_ajuda() : m.harness_codex_conta_so_padrao()}</span>
+            </span>
+            <select class="hs-conta" id="codex-conta" aria-describedby="codex-conta-ajuda" value={contaCodex}
+              onchange={trocarConta} disabled={integracaoOcupada || contasCodex.length <= 1}>
+              {#each contasCodex as conta (conta.id)}
+                <option value={conta.id}>{conta.name}{conta.is_default ? ` · ${m.criar_padrao()}` : ''}</option>
+              {:else}
+                <option value="default">{m.criar_padrao()}</option>
+              {/each}
+            </select>
+          </label>
           {#if integracao}
             <label class="hs-item hs-automatica" for="codex-automatica">
               <span class="hs-item-txt">
@@ -748,17 +756,21 @@
                 checked={integracao.automatica}
                 disabled={trocandoAutomatica} onchange={trocarAutomatica} />
             </label>
-            <label class="hs-item hs-automatica">
+            <label class="hs-item hs-automatica" for="codex-memoria">
               <span class="hs-item-txt">
                 <b>{m.harness_codex_memoria()}</b>
-                <span class="hs-ajuda">{m.harness_codex_memoria_ajuda()}</span>
+                <span class="hs-ajuda" id="codex-memoria-ajuda">{m.harness_codex_memoria_ajuda()}</span>
               </span>
-              <input type="checkbox" class="switch" checked={integracao.memoria}
+              <input type="checkbox" class="switch" id="codex-memoria"
+                aria-label={m.harness_codex_memoria()} aria-describedby="codex-memoria-ajuda"
+                checked={integracao.memoria}
                 disabled={trocandoMemoria} onchange={trocarMemoria} />
             </label>
-            {#if integracao.memoria}
-              <p class="hs-aviso" role="status">{m.harness_codex_memoria_prazo()}</p>
-            {/if}
+            <!-- O prazo é lido ANTES de ligar: quem liga e acha que já vale é o defeito que ele evita. -->
+            <details class="cfg-porque hs-porque">
+              <summary><span class="cfg-vered">{m.harness_codex_memoria_vered()}</span> <span class="cfg-pq">{m.config_motores_por_que()}<span class="cfg-chev" aria-hidden="true">▾</span></span></summary>
+              <p class="cfg-motivo">{m.harness_codex_memoria_prazo()}</p>
+            </details>
             {#if contaCodex === 'default'}
               <p class="hs-aviso" role="status">
                 {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}

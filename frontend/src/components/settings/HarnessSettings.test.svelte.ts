@@ -12,6 +12,7 @@ const ROTA = '/api/harness/codex/integracao';
 const ROTA_INST = '/api/harness/instalar';
 const ROTA_CONFIG = '/api/config';
 const ROTA_CODEX = '/api/harness/codex/opcoes';
+const ROTA_CONTAS = '/api/codex-contas';
 // A tela também consulta a instalação na montagem (é de lá que sai a lista de quem dá pra instalar
 // por botão). Sem uma resposta com a forma certa, o `fetch` genérico abaixo devolveria a lista de
 // harnesses no lugar dela.
@@ -93,6 +94,8 @@ beforeEach(() => {
     if (String(url).endsWith(ROTA_INST)) return resposta(ociosa);
     if (String(url).endsWith(ROTA_CONFIG)) return lerConfig(init);
     if (String(url).endsWith(ROTA_CODEX)) return lerOpcoesCodex(init);
+    // Sem esta rota a lista de harnesses viraria a lista de contas do Codex, calada.
+    if (String(url).endsWith(ROTA_CONTAS)) return resposta([]);
     return resposta(harnesses);
   });
 });
@@ -600,7 +603,7 @@ describe('opções dentro do card', () => {
     expect(automatica().disabled).toBe(true);
   });
 
-  it('o interruptor de memória grava codex_memory_import e o prazo só aparece com ele ligado', async () => {
+  it('o interruptor de memória grava codex_memory_import e o prazo é lido antes, no "por quê?"', async () => {
     let memoria = false;
     ler = async () => resposta(estado({ memoria }));
     vi.mocked(fetch).mockImplementation(async (url, init) => {
@@ -612,15 +615,28 @@ describe('opções dentro do card', () => {
       return String(url).endsWith(ROTA) ? ler(String(url), init) : resposta(harnesses);
     });
     const { el } = await montar();
-    // O aviso do prazo é a razão de a opção existir: sem ele a pessoa liga e acha que já vale.
-    expect(el.textContent).not.toContain(m.harness_codex_memoria_prazo());
-    const caixa = el.querySelectorAll<HTMLInputElement>('input.switch')[1]!;
+    // O prazo é a razão de a opção existir, e mora no "por quê?" ao lado do interruptor: quem lê
+    // antes de ligar não liga achando que já vale. Recolhido de nascença, como as outras linhas.
+    const pq = [...el.querySelectorAll<HTMLDetailsElement>('details.cfg-porque')]
+      .find((d) => d.textContent?.includes(m.harness_codex_memoria_vered()))!;
+    expect(pq).toBeDefined();
+    expect(pq.open).toBe(false);
+    expect(pq.textContent).toContain(m.harness_codex_memoria_prazo());
+    const caixa = el.querySelector<HTMLInputElement>('#codex-memoria')!;
     expect(caixa.checked).toBe(false);
     caixa.click(); await estabilizar();
     const gravacao = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/config'));
     expect(JSON.parse(String(gravacao?.[1]?.body))).toEqual({ codex_memory_import: true });
     expect(caixa.checked).toBe(true);
-    expect(el.textContent).toContain(m.harness_codex_memoria_prazo());
+  });
+
+  it('o seletor de conta do Codex nunca some: com só a padrão fica apagado, com o motivo', async () => {
+    const { el } = await montar();
+    const sel = el.querySelector<HTMLSelectElement>('#codex-conta')!;
+    expect(sel).not.toBeNull();
+    expect(sel.disabled).toBe(true);
+    expect(el.textContent).toContain(m.harness_codex_conta_so_padrao());
+    expect(el.textContent).toContain(m.codex_ui_account());
   });
 });
 

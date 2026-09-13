@@ -41,6 +41,7 @@
     { tela: 'aparencia', rotulo: m.config_aparencia_contraste, descricao: m.config_aparencia_contraste_desc },
     { tela: 'aparencia', rotulo: m.config_fundo_transparencia, descricao: m.config_fundo_transparencia_desc },
     { tela: 'aparencia', rotulo: m.config_fundo_solidez, descricao: m.config_fundo_solidez_desc },
+    { tela: 'aparencia', rotulo: m.config_aparencia_paleta, descricao: m.config_aparencia_paleta_desc },
     { tela: 'aparencia', rotulo: m.config_aparencia_destaque, descricao: m.config_aparencia_destaque_desc },
     { tela: 'aparencia', rotulo: m.config_aparencia_tinta, descricao: m.config_aparencia_tinta_desc },
     { tela: 'aparencia', rotulo: m.config_aparencia_forca, descricao: m.config_aparencia_forca_leitura_desc },
@@ -66,6 +67,7 @@
     { tela: 'maquinas', rotulo: m.config_term_origins, descricao: m.config_term_origins_ajuda },
     { tela: 'maquinas', rotulo: m.config_servidores_sair_titulo, descricao: m.maquinas_intro },
     { tela: 'maquinas', rotulo: m.maquinas_reconectar },
+    { tela: 'maquinas', rotulo: m.maquinas_buscar_tailscale, descricao: m.maquinas_buscar_ajuda },
 
     { tela: 'contas', rotulo: m.contas_atualizar, descricao: m.contas_legenda },
     { tela: 'contas', rotulo: m.contas_secao_claude, descricao: m.contas_secao_claude_leg },
@@ -78,6 +80,8 @@
     { tela: 'harnesses', rotulo: m.harness_codex_integracao, descricao: m.harness_legenda },
     { tela: 'harnesses', rotulo: m.harness_codex_automatica, descricao: m.harness_codex_automatica_ajuda },
     { tela: 'harnesses', rotulo: m.harness_codex_reconciliar, descricao: m.harness_codex_reconciliar_porque },
+    { tela: 'harnesses', rotulo: m.harness_codex_memoria, descricao: m.harness_codex_memoria_ajuda },
+    { tela: 'harnesses', rotulo: m.codex_ui_account, descricao: m.harness_codex_conta_ajuda },
     { tela: 'harnesses', rotulo: m.codex_contexto_titulo, descricao: m.codex_contexto_ajuda },
     { tela: 'harnesses', rotulo: m.codex_voice_config_title, descricao: m.codex_voice_config_help },
 

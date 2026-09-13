@@ -524,10 +524,14 @@
   onTestarDeNovo={testarDeNovo}
   onRemover={(l) => (removerLinha = l)}
   onAdicionar={() => { addEndereco = ''; showAdd = true; }} />
+<!-- O botão existe sempre: sem máquina escolhida ele fica apagado com o motivo, como o seletor
+     do topo — sumir esconderia que a busca existe. Só lê a rede; não cadastra nada sozinho. -->
+<button class="ss-btn mq-buscar" onclick={buscarNoTailscale} disabled={descobrindo || !resolvedServer}
+  aria-describedby="mq-buscar-ajuda">
+  {descobrindo ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
+</button>
+<p class="ss-legenda" id="mq-buscar-ajuda">{resolvedServer ? m.maquinas_buscar_ajuda() : m.maquinas_buscar_sem_maquina()}</p>
 {#if resolvedServer}
-  <button class="ss-btn mq-buscar" onclick={buscarNoTailscale} disabled={descobrindo}>
-    {descobrindo ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
-  </button>
   {#if descobertasErro}<p class="id-erro" role="status">{descobertasErro}</p>{/if}
   {#if descobertas !== null && !descobrindo}
     {#if novasDescobertas.length === 0}
@@ -541,7 +545,7 @@
               <span class="mq-achada-nome">{d.nome}</span>
               <span class="mq-achada-url">{d.base_url}</span>
             </span>
-            <button class="ss-btn" onclick={() => { addEndereco = d.base_url; showAdd = true; }}>+ {m.sessao_adicionar_servidor()}</button>
+            <button class="ss-btn" onclick={() => { addEndereco = d.base_url; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
           </li>
         {/each}
       </ul>

@@ -264,7 +264,7 @@ describe('HarnessSettings — conta da integração Codex', () => {
     const t = await montar([
       { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
     ], estado());
-    const seletorConta = `[aria-label="${m.codex_ui_account()}"]`;
+    const seletorConta = '#codex-conta';
     await vi.waitFor(() => expect(
       t.el.querySelector<HTMLSelectElement>(seletorConta),
     ).not.toBeNull());
