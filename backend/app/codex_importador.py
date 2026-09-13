@@ -313,6 +313,8 @@ class CodexNativo:
             self._proc = None
             if self._work_dir is not None:
                 self._work_dir.cleanup()
+                if Path(self._work_dir.name).exists():
+                    _log.warning("Pasta temporária do Codex não pôde ser removida: %s", self._work_dir.name)
                 self._work_dir = None
 
     def _diagnostico_cli(self, args: list[str], codigo: int | None,
