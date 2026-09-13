@@ -88,9 +88,7 @@ class Cano:
             self.saiu = rc
             self.aberto = False
             self._log(f"claude saiu rc={rc}")
-            self._mandar(json.dumps({"type": "cano_saiu", "rc": rc, "stderr_tail": list(self.stderr_tail)}))
-            if self.cliente is not None:
-                self.saiu_entregue.set()
+            self._mandar_saida()
 
     def _ler_stderr(self) -> None:
         assert self.proc and self.proc.stderr
@@ -152,6 +150,22 @@ class Cano:
             if not self.saida_cheia:
                 self.saida_cheia = True
                 self._log("fila de saída cheia: cliente não lê; descartando")
+
+    def _mandar_saida(self) -> None:
+        # Sob self.trava. Última mensagem: vai SÍNCRONA (com teto), não pela fila — o processo sai
+        # logo depois e a thread de envio morreria com a linha dentro. Sem cliente, fica pro
+        # snapshot de quem chegar.
+        con = self.cliente
+        if con is None:
+            return
+        linha = json.dumps({"type": "cano_saiu", "rc": self.saiu, "stderr_tail": list(self.stderr_tail)})
+        try:
+            con.settimeout(5)
+            con.sendall((linha + "\n").encode("utf-8"))
+        except OSError:
+            self._fechar_cliente()
+            return
+        self.saiu_entregue.set()
 
     def _enviar(self) -> None:
         while True:
@@ -218,9 +232,7 @@ class Cano:
                 if self.saiu is not None:
                     # Já saiu: entrega o evento de saída como se estivesse acontecendo agora, e
                     # aí pode morrer — quem chegou levou o rc e o stderr.
-                    self._mandar(json.dumps({"type": "cano_saiu", "rc": self.saiu,
-                                             "stderr_tail": list(self.stderr_tail)}))
-                    self.saiu_entregue.set()
+                    self._mandar_saida()
             self._log("cliente conectado")
             self._ler_cliente(con, arq)
             self._log("cliente saiu")

@@ -461,6 +461,46 @@ def test_permissao_decidida_por_hook_e_negacao_automatica_viram_nota(adapter, tm
     q.clear()
 
 
+def test_esforco_vai_como_comando_local_e_espera_o_turno(adapter):
+    # Medido: `/effort high` pelo stdin responde "Set effort level to high" sem API. Ociosa:
+    # sai na hora; com turno em voo: guarda e sai no `result`, antes de drenar a fila.
+    sess = adapter._sessions["s1"]
+
+    def confirmacao(nivel: str) -> dict:
+        return {"type": "assistant", "local_command_source": "<local-command-stdout>x</local-command-stdout>",
+                "message": {"model": "<synthetic>", "content": [{"type": "text", "text": f"Set effort level to {nivel} (this session only): …"}]}}
+
+    async def fluxo():
+        assert await adapter.set_model("s1", None, "high") is True
+        assert adapter.escritos[-1]["message"]["content"][0]["text"] == "/effort high"
+        assert sess.effort != "high"          # só quando a CLI confirmar
+        await adapter._on_event(sess, confirmacao("high"))
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "local_command": "effort", "usage": {}})
+        assert sess.state == "idle" and sess.effort == "high" and S.load("s1")["effort"] == "high"
+        # Em voo: não escreve agora; no result do turno, sai antes de drenar.
+        sess.in_progress = True
+        n = len(adapter.escritos)
+        assert await adapter.set_model("s1", None, "low") is False
+        assert len(adapter.escritos) == n and sess.effort_pendente == "low"
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {}})
+        assert adapter.escritos[-1]["message"]["content"][0]["text"] == "/effort low"
+        assert sess.effort_pendente is None and sess.in_progress
+        # Pedido mais novo enquanto o /effort low ainda espera resposta: sai no result dele.
+        assert await adapter.set_model("s1", None, "max") is False
+        await adapter._on_event(sess, confirmacao("low"))
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "local_command": "effort", "usage": {}})
+        assert adapter.escritos[-1]["message"]["content"][0]["text"] == "/effort max"
+        # Recusa da CLI: valor não muda e vira problema visível.
+        await adapter._on_event(sess, {"type": "assistant", "local_command_source": "<local-command-stdout>x</local-command-stdout>",
+                                       "message": {"content": [{"type": "text", "text": "Usage: /effort <low|medium|high|xhigh|max|auto>"}]}})
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "local_command": "effort", "usage": {}})
+        await sess.drenador
+        assert sess.state == "idle" and sess.effort == "low"
+        assert adapter.problema_de("s1")[0] == "headless_turno_erro" and "max" in adapter.problema_de("s1")[1]
+    _run(fluxo())
+    assert S.load("s1")["effort"] == "low"
+
+
 def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setenv("TMUX", "/tmp/x")

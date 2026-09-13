@@ -131,6 +131,8 @@ class _Sessao:
         self.janelas_ts = 0.0
         self.drenador: asyncio.Task | None = None   # referência viva do drain de fim de turno
         self.tarefas: dict[str, dict] = {}          # subagentes em voo: task_id -> {tipo, passo}
+        self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
+        self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
 
     @property
     def sid(self) -> str:
@@ -363,9 +365,10 @@ class ClaudeHeadlessAdapter:
         return sess.permission_mode
 
     async def set_model(self, name: str, model: str | None, effort: str | None) -> bool:
-        """Troca modelo em voo (`set_model`). Esforço não tem controle em voo na CLI: fica no
-        sidecar e, com a sessão ociosa, o processo é reaberto com `--resume` e a flag nova.
-        Devolve se o esforço já vale (False = só no próximo processo, porque havia turno em voo)."""
+        """Troca modelo em voo (`set_model`). Esforço vai como o comando local `/effort <x>` pelo
+        stdin — medido: a CLI responde "Set effort level to <x> (this session only)" sem chamar a
+        API, igual à TUI. Com turno em voo fica guardado e sai no `result`.
+        Devolve se o esforço já vale (False = vai valer no fim do turno)."""
         sess = await self.ensure_running(name)
         if sess is None:
             raise ValueError("sessão indisponível")
@@ -373,19 +376,42 @@ class ClaudeHeadlessAdapter:
             await self._ctrl(sess, "set_model", model=model)
             sess.model = model
         esforco_ja_vale = True
-        reabrir = bool(effort) and effort != sess.effort
-        if reabrir:
-            sess.effort = effort
-        # Sidecar ANTES de reabrir: o processo novo nasce do que está gravado.
-        hl_sessions.update(name, model=sess.model, effort=sess.effort)
-        if reabrir:
+        if effort and effort != sess.effort:
+            # `sess.effort` só muda quando a CLI confirmar (ver `_confirmar_effort`).
             if await self.deliverable(name):
-                await self._reabrir(sess)
+                await self._comando_local(sess, f"/effort {effort}")
             else:
+                sess.effort_pendente = effort
                 esforco_ja_vale = False
-        sess = self._sessions.get(name, sess)
+        hl_sessions.update(name, model=sess.model)
         await self._notify(sess)
         return esforco_ja_vale
+
+    def _confirmar_effort(self, sess: _Sessao, texto: str) -> None:
+        """Resposta do `/effort`: "Set effort level to X" confirma; qualquer outra coisa (Usage…)
+        é recusa — o valor não muda e o problema aparece, em vez de um status line mentindo."""
+        pedido, sess.effort_aguardando = sess.effort_aguardando, None
+        if pedido is None:
+            return
+        if texto.startswith("Set effort level to"):
+            sess.effort = pedido
+            hl_sessions.update(sess.name, effort=pedido)
+        else:
+            self._registrar_problema(sess, "headless_turno_erro", f"esforço {pedido!r} não aceito: {texto[:200]}")
+
+    async def _comando_local(self, sess: _Sessao, texto: str) -> None:
+        """Comando local da CLI (`/effort`, `/compact`…) direto no stdin, fora da fila: a
+        resposta volta como `assistant` + `result` sem chamada à API, e vira nota no chat.
+        Sob a trava de entrega, como todo escritor do stdin."""
+        async with self.delivery_lock(sess.name):
+            if texto.startswith("/effort "):
+                sess.effort_aguardando = texto.split(" ", 1)[1].strip()
+            await self._write(sess, {
+                "type": "user", "session_id": "", "parent_tool_use_id": None,
+                "message": {"role": "user", "content": [{"type": "text", "text": texto}]},
+            })
+            sess.in_progress = True
+            sess.state = "working"
 
     async def list_models(self, name: str) -> list[dict]:
         sess = await self.ensure_running(name)
@@ -788,6 +814,8 @@ class ClaudeHeadlessAdapter:
                 # durável como bolha do assistente (histórico, reload e SSE já sabem lê-la).
                 texto = "\n".join(b.get("text", "") for b in blocos
                                   if isinstance(b, dict) and b.get("type") == "text").strip()
+                if sess.effort_aguardando is not None:
+                    self._confirmar_effort(sess, texto)
                 if texto:
                     await self._nota_local(sess, texto)
                 return
@@ -849,7 +877,9 @@ class ClaudeHeadlessAdapter:
                 # viva; o app precisa dizer o que fazer, não só "deu erro".
                 codigo = "headless_sem_login" if "not logged in" in detalhe.lower() else "headless_turno_erro"
                 self._registrar_problema(sess, codigo, f"{sub}: {detalhe[:300]}")
-            elif sub == "success":
+            elif sub == "success" and not ev.get("local_command"):
+                # Comando local "dando certo" não diz nada da saúde da sessão (e apagaria o
+                # problema que a própria resposta dele acabou de registrar, ex.: /effort recusado).
                 self._limpar_problema(sess)
             negadas = [d for d in (ev.get("permission_denials") or []) if isinstance(d, dict)]
             if negadas:
@@ -864,6 +894,14 @@ class ClaudeHeadlessAdapter:
             await self._notify(sess)
             if time.time() - sess.janelas_ts > 300:
                 self._agendar_cota(sess)
+            if sess.effort_pendente:
+                # Esforço pedido no meio do turno: agora, antes da fila, pra o próximo prompt já
+                # sair no nível novo. O `result` desse comando volta aqui com `effort_pendente`
+                # já vazio (ou com um pedido mais novo, que sai na sequência).
+                pendente, sess.effort_pendente = sess.effort_pendente, None
+                await self._comando_local(sess, f"/effort {pendente}")
+                await self._notify(sess)
+                return
             # Fim de turno é o momento certo de entregar o que ficou na fila. O hook Stop também
             # dispara o drain server-side, mas pode correr ANTES deste `result` chegar — aí o
             # adapter ainda se acha em turno e devolve "deferred".

@@ -6511,7 +6511,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
 
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
-        # nada a repor no settings.json. O esforço reabre o processo quando a sessão está ociosa.
+        # nada a repor no settings.json. O esforço vai como `/effort <x>` pelo stdin.
         try:
             esforco_ja_vale = await get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort)
         except Exception as e:
@@ -6519,7 +6519,7 @@ async def engine_model_set(name: str, body: EngineModelBody):
             raise HTTPException(409, detail=erro("erro_headless_modelo", f"troca de modelo falhou: {e}", erro=str(e)))
         res = {"ok": True, "model": body.model}
         if body.effort and not esforco_ja_vale:
-            res["effort_error"] = "esforço vale no próximo processo (turno em andamento)"
+            res["effort_error"] = "esforço entra no fim do turno em andamento"
         return res
 
     cfg_dir = _session_config_dir(name)  # mesma leitura de /proc que resolve o config dir das outras rotas
