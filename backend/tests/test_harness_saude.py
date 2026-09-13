@@ -214,6 +214,7 @@ def test_wrapper_windows_le_o_perfil_que_o_instalador_escreve(tmp_path, monkeypa
 def test_conserto_wrapper_no_windows_usa_o_script_do_perfil(monkeypatch):
     # Sem isto o wrapper faltando no Windows nao tinha botao: o unico conserto era o bash.
     monkeypatch.setattr(h, "_E_WINDOWS", True)
+    monkeypatch.setattr(h.shutil, "which", lambda cli: "/resolved/powershell.exe" if cli == "powershell.exe" else None)
     chamado = {}
 
     def _run(argv, **kw):
@@ -222,6 +223,7 @@ def test_conserto_wrapper_no_windows_usa_o_script_do_perfil(monkeypatch):
 
     monkeypatch.setattr(h.subprocess, "run", _run)
     h.consertar("wrapper")
+    assert chamado["argv"][0] == "/resolved/powershell.exe"
     assert chamado["argv"][-2:] == [str(h._REPO / "scripts" / "setup-windows-wrappers.ps1"), "-Apply"]
 
 
@@ -259,6 +261,7 @@ def test_tmux_windows_sem_bloco_segue_a_precedencia_do_psmux(tmp_path, monkeypat
 
 def test_conserto_tmux_no_windows_usa_o_script_do_psmux(monkeypatch):
     monkeypatch.setattr(h, "_E_WINDOWS", True)
+    monkeypatch.setattr(h.shutil, "which", lambda cli: "/resolved/powershell.exe" if cli == "powershell.exe" else None)
     chamado = {}
 
     def _run(argv, **kw):
@@ -267,6 +270,7 @@ def test_conserto_tmux_no_windows_usa_o_script_do_psmux(monkeypatch):
 
     monkeypatch.setattr(h.subprocess, "run", _run)
     h.consertar("tmux")
+    assert chamado["argv"][0] == "/resolved/powershell.exe"
     assert chamado["argv"][-3:] == [str(h._REPO / "scripts" / "setup-windows-tmux.ps1"), "-Apply", "-SkipInstall"]
 
 
