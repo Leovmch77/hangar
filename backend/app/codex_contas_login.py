@@ -141,7 +141,7 @@ class CodexContasLogin:
             if kind == "login" and (self._live(account) or any(item.live for item in current)):
                 raise accounts.AccountError(409, "codex_account_in_use", {"account_id": account.id})
             active = next((item for item in current if not item.live
-                           and not (kind == "creation" and item.kind == "prepare")), None)
+                           and {kind, item.kind} != {"creation", "prepare"}), None)
             if active is not None:
                 code = {
                     "login": "codex_account_login_in_progress",

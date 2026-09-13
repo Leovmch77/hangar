@@ -650,7 +650,9 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   pane e navega, enquanto `hangar-codex-tui` inicia/acompanha o preparo no terminal e só depois
   sobe o app-server e a TUI. O GET final do preparo grava a confiança da pasta no backend, depois
   que as escritas da sincronização terminaram. Preparo já em curso é compartilhado por todos os
-  launchers daquela conta; falha fica visível no pane, e não num callback descartado do backend.
+  launchers daquela conta nos dois sentidos da corrida criação↔preparo. O teto é 180s, acima dos
+  103s medidos para plugins; falha de chamada ou estouro fica visível no pane e impede a TUI de ler config
+  possivelmente antiga, em vez de seguir por um callback descartado do backend.
   A conferência nativa dos plugins pode ser reutilizada por até 5min, com hashes de origem e
   destino e versão do CLI iguais. Falha, confiança pendente, relógio regressivo ou pedido manual
   forçado exigem nova conferência; avisos de credenciais excluídas continuam visíveis e não

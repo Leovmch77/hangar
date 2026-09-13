@@ -163,6 +163,18 @@ def test_conta_ja_preparada_ainda_confirma_trust_da_pasta(monkeypatch):
     assert chamadas == ["POST", "GET"]
 
 
+def test_preparo_da_conta_tem_prazo_total(monkeypatch):
+    lancador = runpy.run_path(str(_LANCADOR))
+    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend",
+                        lambda *_: {"status": "running", "etapa": "plugins", "issues": []})
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    relogio = iter([0.0, 181.0])
+    monkeypatch.setattr(time, "monotonic", lambda: next(relogio))
+
+    with pytest.raises(TimeoutError, match="180s"):
+        lancador["_preparar_conta_codex"]("work", "/repo", prazo=180)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
 def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     cwd = tmp_path / "proj"

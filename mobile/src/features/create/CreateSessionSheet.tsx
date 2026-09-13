@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { createSession, createSessionForServer, getArchivePorCwd, getCodexAccountsForServer,
-  getCodexPreparationForServer, getEngines, getSessions, listClaudeConfigs, listarCotasResumo,
-  modelOptions, modelOptionsForServer, prepareCodexAccountForServer, resumeArchivedConversation,
-  codexAccountMessage, codexPreparationMessage } from '@hangar/core';
+  getEngines, getSessions, listClaudeConfigs, listarCotasResumo, modelOptions,
+  modelOptionsForServer, resumeArchivedConversation } from '@hangar/core';
 import { basename, providerName, cotaDaConta, cotaParada, resumoCota } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
@@ -32,12 +31,6 @@ function uniqueName(base: string, taken: Set<string>): string {
 
 function valorModelo(mm: ModelOption): string {
   return mm.provider ? `${mm.provider}/${mm.id}` : mm.id;
-}
-
-function showSyncWarning(sync: CodexAccount['sync']) {
-  if (sync.status !== 'ready') {
-    Alert.alert(sync.issues.map(codexAccountMessage).join('\n') || m.codex_ui_prepare_error());
-  }
 }
 
 // pequeno wrapper pra MenuView — renderiza botão com valor atual e abre menu nativo
@@ -94,7 +87,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [codexProgress, setCodexProgress] = useState('');
   const codexGeneration = useRef(0);
   const codexController = useRef<AbortController | null>(null);
-  const operationController = useRef<AbortController | null>(null);
   const mounted = useRef(true);
   const [retomaveis, setRetomaveis] = useState<ArchiveEntry[]>([]);
   const [retomavel, setRetomavel] = useState('');
@@ -134,7 +126,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     archiveGeneration.current++;
     codexController.current?.abort();
     archiveController.current?.abort();
-    operationController.current?.abort();
     };
   }, []);
 
@@ -292,23 +283,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     }
   };
 
-  async function prepareCodex(target: NonNullable<typeof active>, account: string, generation: number) {
-    const controller = new AbortController();
-    operationController.current?.abort();
-    operationController.current = controller;
-    setCodexProgress(codexPreparationMessage());
-    let sync = await prepareCodexAccountForServer(target, account);
-    if (!mounted.current || generation !== codexGeneration.current || controller.signal.aborted) return null;
-    while (sync.status === 'running') {
-      setCodexProgress(codexPreparationMessage(sync.etapa));
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (!mounted.current || generation !== codexGeneration.current || controller.signal.aborted) return null;
-      sync = await getCodexPreparationForServer(target, account, controller.signal);
-      if (!mounted.current || generation !== codexGeneration.current || controller.signal.aborted) return null;
-    }
-    return mounted.current && generation === codexGeneration.current && !controller.signal.aborted ? sync : null;
-  }
-
   const handleResume = async () => {
     const entry = retomaveis.find((candidate) => candidate.session_id === retomavel);
     if (!entry || !active || retomando) return;
@@ -318,10 +292,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     setRetomando(true);
     setError('');
     try {
-      const sync = await prepareCodex(target, entry.codex_account ?? codexAccount, codexGeneration.current);
-      if (!sync || !mounted.current || generation !== archiveGeneration.current || codexGenerationAtStart !== codexGeneration.current) return;
-      showSyncWarning(sync);
-      setCodexAccounts((items) => items.map((item) => item.id === (entry.codex_account ?? codexAccount) ? { ...item, sync } : item));
       setCodexProgress(m.codex_ui_abrindo_sessao());
       const session = await resumeArchivedConversation(entry.project, entry.session_id, null, null,
         'codex', entry.codex_account ?? codexAccount, target);
@@ -475,7 +445,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                   onChange={(value) => {
                     codexGeneration.current++;
                     archiveGeneration.current++;
-                    operationController.current?.abort();
                     setLoading(false);
                     setRetomando(false);
                     setRetomavel('');

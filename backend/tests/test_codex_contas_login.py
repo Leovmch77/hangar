@@ -577,6 +577,25 @@ async def test_preparacao_em_curso_nao_impede_criar_outro_terminal(contas, servi
     await asyncio.gather(*service._preparations.values())
 
 
+async def test_terminal_nascendo_nao_impede_o_lancador_de_preparar(contas, service, monkeypatch):
+    _, work = contas
+    gate = asyncio.Event()
+
+    async def blocked_prepare(account):
+        await gate.wait()
+        return {"status": "ready", "trust_pending": False, "issues": []}
+
+    monkeypatch.setattr("app.codex_contas_login.codex_contas_sync.prepare_account", blocked_prepare)
+    lease = service.reserve_creation(work)
+
+    status = await service.prepare(work)
+
+    assert status["status"] == "running"
+    lease.release()
+    gate.set()
+    await asyncio.gather(*service._preparations.values())
+
+
 async def test_payload_publico_preserva_home_credencial_e_status(contas, service):
     default, _ = contas
 

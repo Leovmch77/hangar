@@ -32,6 +32,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 # Quanto a abertura espera o backend reconciliar; estourou, a sessão abre e ele termina sozinho.
 _PRAZO_INTEGRACAO = 20.0
+_PRAZO_CONTA = 180.0
 
 
 def _api_backend(method: str, path: str) -> dict:
@@ -82,15 +83,18 @@ def _integracao_codex(prazo: float = _PRAZO_INTEGRACAO) -> dict:
     return resultado
 
 
-def _preparar_conta_codex(account_id: str, cwd: str) -> dict:
+def _preparar_conta_codex(account_id: str, cwd: str, prazo: float = _PRAZO_CONTA) -> dict:
     """Espera o preparo da conta no pane; o modal ja foi liberado."""
     path = (f"/api/codex-contas/{urllib.parse.quote(account_id, safe='')}/prepare"
             f"?cwd={urllib.parse.quote(cwd, safe='')}")
     resultado = _api_backend("POST", path)
     if resultado.get("status") != "running":
         return _api_backend("GET", path)
+    limite = time.monotonic() + prazo
     ultima = ""
     while resultado.get("status") == "running":
+        if time.monotonic() >= limite:
+            raise TimeoutError(f"preparo da conta não terminou em {prazo:.0f}s")
         etapa = str(resultado.get("etapa") or "")
         if etapa and etapa != ultima:
             print(f"hangar-codex-tui: sincronizando conta Codex: {etapa}", file=sys.stderr)
@@ -335,8 +339,9 @@ def main() -> int:
                 print(f"hangar-codex-tui: {_texto(issue) or issue.get('code', 'aviso da sincronização')}",
                       file=sys.stderr)
         except Exception as exc:                          # noqa: BLE001
-            print(f"hangar-codex-tui: sincronização da conta falhou ({exc}); a sessão abre assim mesmo",
+            print(f"hangar-codex-tui: sincronização da conta falhou ({exc}); Codex não foi aberto",
                   file=sys.stderr)
+            return 1
 
     # O cwd novo ainda pode não estar no config do Codex. O alias precisa existir antes do app-server.
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
