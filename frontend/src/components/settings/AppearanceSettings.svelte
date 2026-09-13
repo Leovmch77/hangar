@@ -181,18 +181,29 @@
       {#if podeAoVivo}
         <!-- Desktop: a previa embutida e uma amostra; isto revela a conversa DE VERDADE atras,
              encolhendo o painel numa caixinha no canto. -->
-        <button class="ap-padrao" onclick={onVerAoVivo}>{m.config_aparencia_ver_ao_vivo()}</button>
+        <button class="ap-padrao" onclick={onVerAoVivo} title={m.config_aparencia_ver_ao_vivo_desc()}
+          >{m.config_aparencia_ver_ao_vivo()}</button>
       {/if}
-      <button class="ap-padrao" onclick={voltarAoPadrao} disabled={!temAjuste}>
+      <button class="ap-padrao" onclick={voltarAoPadrao} disabled={!temAjuste}
+              title={m.config_aparencia_voltar_padrao_desc()}>
         {m.config_aparencia_voltar_padrao()}
       </button>
     </div>
   </div>
+  <!-- Fora do bloco grudado no topo, de propósito: ele é de vidro, e tudo que rola por baixo dele
+       aparece através. A legenda entra na parte que rola, logo abaixo dos botões que explica.
+       Na caixinha do "ao vivo" o painel é do tamanho de um cartão: lá só o `title` dos botões. -->
+  {#if !semPrevia}
+    <div class="ap-acoes-leg">
+      {#if podeAoVivo}<p>{m.config_aparencia_ver_ao_vivo_desc()}</p>{/if}
+      <p>{m.config_aparencia_voltar_padrao_desc()}</p>
+    </div>
+  {/if}
 
   <div class="ap-row">
     <div class="ap-label">
       <strong>{m.config_tema_curto()}</strong>
-      <span>{m.config_aparencia_tema_desc()}</span>
+      <span>{m.config_aparencia_tema_desc_web()}</span>
     </div>
     <ThemeToggle onEscolha={(p) => (tema = p)} />
   </div>
@@ -214,22 +225,24 @@
        um picker aqui escreveria por cima dela (gate invertido ao da "Cor do texto" abaixo). O
        `{#key}` remonta no "Voltar ao padrão", que limpa as cores gravadas — senão os swatches
        continuariam marcados numa cor que já não está aplicada. -->
-  {#if tema !== 'desktop'}
-    <div class="ap-row ap-row--stack">
-      <div class="ap-label">
-        <strong>{m.config_aparencia_cor_tema()}</strong>
-        <span>{m.config_aparencia_cor_tema_desc()}</span>
-      </div>
-      {#key resetSeq}<CorTemaSettings onMudanca={() => (temCor = temCorTema())} />{/key}
+  <div class="ap-row ap-row--stack">
+    <div class="ap-label">
+      <strong>{m.config_aparencia_cor_tema()}</strong>
+      <span>{m.config_aparencia_cor_tema_desc()}</span>
     </div>
-  {/if}
+    {#if tema !== 'desktop'}
+      {#key resetSeq}<CorTemaSettings onMudanca={() => (temCor = temCorTema())} />{/key}
+    {:else}
+      <p class="hint">{m.config_aparencia_motivo_cor_tema()}</p>
+    {/if}
+  </div>
 
-  {#if tema === 'desktop'}
-    <div class="ap-row">
-      <div class="ap-label">
-        <strong>{m.config_aparencia_cor_texto()}</strong>
-        <span>{m.config_aparencia_cor_texto_desc()}</span>
-      </div>
+  <div class="ap-row">
+    <div class="ap-label">
+      <strong>{m.config_aparencia_cor_texto()}</strong>
+      <span>{m.config_aparencia_cor_texto_desc()}</span>
+    </div>
+    {#if tema === 'desktop'}
       <SegmentedPicker
         value={textoDesktop ? 'desktop' : 'app'}
         options={[
@@ -249,8 +262,10 @@
           });
         }}
       />
-    </div>
-  {/if}
+    {:else}
+      <p class="hint">{m.config_aparencia_motivo_cor_texto()}</p>
+    {/if}
+  </div>
 
   <div class="ap-row ap-row--stack">
     <div class="ap-label">
@@ -266,20 +281,22 @@
        app) e uma cópia do papel de parede dentro da página. A cópia é o que devolve vidro e cor às
        caixas — `backdrop-filter` só borra o que a própria página pintou, e atrás de transparência
        não há pixel nenhum (ver GLASS_KEY em lib/background.ts). -->
-  {#if fundo === 'desktop'}
-    <div class="ap-row">
-      <div class="ap-label">
-        <strong>{m.config_aparencia_papel_parede()}</strong>
-        <span>{m.config_aparencia_papel_parede_desc()}</span>
-      </div>
+  <div class="ap-row">
+    <div class="ap-label">
+      <strong>{m.config_aparencia_papel_parede()}</strong>
+      <span>{m.config_aparencia_papel_parede_desc()}</span>
+    </div>
+    {#if fundo === 'desktop'}
       <SegmentedPicker
         value={vidroDesktop ? 'vidro' : 'janela'}
         options={opcoesVidroDesktop}
         ariaLabel={m.config_aparencia_papel_parede()}
         onPick={(v) => { vidroDesktop = v === 'vidro'; setDesktopGlass(vidroDesktop); }}
       />
-    </div>
-  {/if}
+    {:else}
+      <p class="hint">{m.config_aparencia_motivo_fundo_so_desktop()}</p>
+    {/if}
+  </div>
 
   <!-- Só faz sentido com foto de fundo — sem imagem não há o que embaçar. Aparecer aqui ensina que
        a opção existe, e desligada NÃO muda nada no resto da tela: o scrim, a leitura e a solidez
@@ -382,25 +399,33 @@
       <SegmentedPicker value={leitura} options={opcoesLeitura} ariaLabel={m.config_aparencia_leitura()}
                        onPick={(v) => { leitura = v; setReadMode(v); }} />
     </div>
-    {#if leitura !== 'glass'}
-      <!-- Mesma lógica do slider do fundo: 100 tapa a foto atrás da conversa, 0 deixa ela passar
-           inteira. "Sólida" no talo virava um bloco escuro — o ponto certo é olhando. -->
-      <label class="ap-slider">
-        <span>{leitura === 'solid' ? m.config_aparencia_solidez_folha() : m.config_aparencia_forca()}</span>
-        <input type="range" min="0" max="100" step="1" value={solidez}
-               oninput={(e) => { solidez = +(e.currentTarget as HTMLInputElement).value; setReadAlpha(solidez); }} />
-        <em>{solidez}</em>
-      </label>
-    {/if}
-    {#if leitura === 'text' || leitura === 'auto'}
-      <!-- Contraste do texto: os tokens do app são propositalmente mais escuros que branco (conforto
-           em sessão longa); sobre foto isso não vale, e aqui você escolhe quanto do branco volta. -->
-      <label class="ap-slider">
-        <span>{m.config_aparencia_contraste()}</span>
-        <input type="range" min="0" max="100" step="1" value={contraste}
-               oninput={(e) => { contraste = +(e.currentTarget as HTMLInputElement).value; setTextBoost(contraste); }} />
-        <em>{contraste}</em>
-      </label>
+    <!-- Mesma lógica do slider do fundo: 100 tapa a foto atrás da conversa, 0 deixa ela passar
+         inteira. "Sólida" no talo virava um bloco escuro — o ponto certo é olhando.
+         Em Leitura = Nenhum não há reforço a dosar: o slider fica apagado com o motivo, não some. -->
+    <label class="ap-slider" class:ap-slider--off={leitura === 'glass'}>
+      <span>{leitura === 'solid' ? m.config_aparencia_solidez_folha() : m.config_aparencia_forca()}</span>
+      <input type="range" min="0" max="100" step="1" value={solidez}
+             disabled={leitura === 'glass'}
+             aria-describedby={leitura === 'glass' ? 'ap-motivo-forca' : undefined}
+             oninput={(e) => { solidez = +(e.currentTarget as HTMLInputElement).value; setReadAlpha(solidez); }} />
+      <em>{solidez}</em>
+    </label>
+    {#if leitura === 'glass'}<p class="hint" id="ap-motivo-forca">{m.config_aparencia_motivo_leitura()}</p>
+    {:else}<p class="hint">{m.config_aparencia_forca_leitura_desc()}</p>{/if}
+    <!-- Contraste do texto: os tokens do app são propositalmente mais escuros que branco (conforto
+         em sessão longa); sobre foto isso não vale, e aqui você escolhe quanto do branco volta. -->
+    <label class="ap-slider" class:ap-slider--off={leitura !== 'text' && leitura !== 'auto'}>
+      <span>{m.config_aparencia_contraste()}</span>
+      <input type="range" min="0" max="100" step="1" value={contraste}
+             disabled={leitura !== 'text' && leitura !== 'auto'}
+             aria-describedby={leitura !== 'text' && leitura !== 'auto' ? 'ap-motivo-contraste' : undefined}
+             oninput={(e) => { contraste = +(e.currentTarget as HTMLInputElement).value; setTextBoost(contraste); }} />
+      <em>{contraste}</em>
+    </label>
+    {#if leitura !== 'text' && leitura !== 'auto'}
+      <p class="hint" id="ap-motivo-contraste">{m.config_aparencia_motivo_contraste()}</p>
+    {:else}
+      <p class="hint">{m.config_aparencia_contraste_desc()}</p>
     {/if}
   </div>
 
@@ -488,6 +513,8 @@
   }
   .ap-amostra--solta { position: static; background: none; padding-bottom: var(--space-3); }
   .ap-acoes { display: flex; gap: var(--space-2); }
+  .ap-acoes-leg { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-1); }
+  .ap-acoes-leg p { margin: 0; color: var(--text-muted); font-size: var(--text-xs); line-height: 1.4; }
   .ap-padrao {
     flex: 1;
     width: 100%;
@@ -529,4 +556,7 @@
   .ap-slider span { color: var(--text-muted); font-size: var(--text-xs); white-space: nowrap; }
   .ap-slider input { flex: 1; min-width: 120px; accent-color: var(--accent); }
   .ap-slider em { color: var(--text-muted); font-size: var(--text-xs); font-style: normal; min-width: 2ch; text-align: right; }
+  /* Controle que nao se aplica agora: apagado, com o motivo escrito embaixo — nunca escondido. */
+  .ap-slider--off { opacity: 0.45; }
+  .ap-slider input:disabled { cursor: default; }
 </style>

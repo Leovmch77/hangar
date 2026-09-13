@@ -3,6 +3,7 @@
   import type { Server } from '../../lib/auth';
   import { getSyncSetup, activateSync, disableSync } from '../../lib/sync';
   import ConfirmSheet from '../ConfirmSheet.svelte';
+  import EscopoChip from './EscopoChip.svelte';
   import { copyText } from '../../lib/clipboard';
   import * as m from '../../paraglide/messages';
 
@@ -97,6 +98,7 @@
 </script>
 
 <div class="sync-settings">
+  <p class="sync-titulo">{m.sync_config_titulo()} <EscopoChip escopo="servidor" /></p>
   <p>{m.sync_config_ganho()}</p>
   <p>{m.sync_config_principal({ servidor: server.label })}</p>
   <p class="context">{sameOrigin ? m.sync_config_neste_endereco() : m.sync_config_outro_endereco()}</p>
@@ -152,6 +154,13 @@
 <style>
   .sync-settings { display: flex; flex-direction: column; gap: var(--space-4); container-type: inline-size; }
   p { margin: 0; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
+  /* Mesma receita de rótulo de seção do modal (o CSS dele não atravessa pra cá) + a etiqueta de
+     escopo ao lado, como nos cards de Harnesses e Contas. */
+  .sync-titulo {
+    display: flex; align-items: center; gap: var(--space-2); margin: 0 0 calc(var(--space-2) * -1);
+    color: var(--text-muted); font-size: var(--label-size); font-weight: var(--label-weight);
+    text-transform: uppercase; letter-spacing: var(--label-tracking);
+  }
   .context { color: var(--text-muted); }
   .error { color: var(--error); }
   .status { color: var(--text-primary); font-weight: 600; }

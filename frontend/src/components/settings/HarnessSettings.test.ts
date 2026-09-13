@@ -26,10 +26,14 @@ vi.mock('../../lib/credenciais', () => ({
   estadoContaCodex: vi.fn(async () => ({ status: 'ready', trust_pending: false, issues: [] })),
   instalacaoEstado: vi.fn(),
   instalarHarness: vi.fn(),
+  codexOpcoes: vi.fn(() => new Promise(() => {})),
 }));
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
   patchConfig: vi.fn(), patchConfigForServer: vi.fn(),
+  // Este arquivo cobre o botão "Instalar": a leitura de configuração do card do Claude não pode
+  // sair pra rede aqui, nem resolver e repintar no meio de um caso.
+  getConfig: vi.fn(() => new Promise(() => {})), getConfigForServer: vi.fn(() => new Promise(() => {})),
 }));
 
 const c = vi.mocked(cred);
@@ -55,7 +59,16 @@ async function montar(cards: Harness[], inst: Instalacao) {
   c.instalacaoEstado.mockResolvedValue(inst);
   const el = document.createElement('div');
   document.body.appendChild(el);
-  const comp = mount(HarnessSettings, { target: el, props: { apiTarget: null } });
+  // A configuração vem do modal (store), não de um GET desta tela — aqui ela nem importa: o caso é
+  // o card do CLI ausente.
+  const store = {
+    get campos() { return {}; }, get leitura() { return {}; },
+    get carregando() { return false; }, get salvando() { return false; },
+    get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
+    valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+    carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
+  } as never;
+  const comp = mount(HarnessSettings, { target: el, props: { apiTarget: null, store } });
   montados.push(comp);
   await tick(); await Promise.resolve(); await Promise.resolve(); await tick();
   return { el, comp: comp as never };
@@ -251,7 +264,7 @@ describe('HarnessSettings — conta da integração Codex', () => {
     const t = await montar([
       { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
     ], estado());
-    const seletorConta = `[aria-label="${m.codex_ui_account()}"]`;
+    const seletorConta = '#codex-conta';
     await vi.waitFor(() => expect(
       t.el.querySelector<HTMLSelectElement>(seletorConta),
     ).not.toBeNull());

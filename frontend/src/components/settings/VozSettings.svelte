@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
   import LinhaConfig from './LinhaConfig.svelte';
+  import EscopoChip from './EscopoChip.svelte';
   import Select from '../Select.svelte';
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import { lerMaosLivres, setMaosLivres } from '../../lib/maosLivres';
@@ -60,11 +61,17 @@
   // colapsado, e isso deixaria a tela "dizendo" o endpoint do LLM mesmo com o acordeão fechado.
   let avancadoAberto = $state(false);
   let avancadoDecidido = $state(false);
-  const CAMPOS_LLM = [
+  // Tipado à mão porque só uma das linhas tem veredito: sem a anotação, o TypeScript infere a
+  // união dos objetos e ler `c.veredito` nas outras vira erro.
+  const CAMPOS_LLM: {
+    chave: string; tipo: 'texto' | 'segredo' | 'escolha'; rotulo: string; ajuda: string;
+    opcoes?: { value: string; label: string }[]; veredito?: string; motivo?: string;
+  }[] = [
     { chave: 'llm_base_url', tipo: 'texto' as const, rotulo: m.config_server_endpoint_llm(), ajuda: m.config_server_endpoint_llm_ajuda() },
     { chave: 'llm_api_key', tipo: 'segredo' as const, rotulo: m.config_server_chave_llm(), ajuda: m.config_server_chave_llm_ajuda() },
     { chave: 'llm_model', tipo: 'texto' as const, rotulo: m.config_server_modelo_llm(), ajuda: m.config_server_modelo_llm_ajuda() },
     { chave: 'llm_reasoning_effort', tipo: 'escolha' as const, rotulo: m.config_server_raciocinio_llm(), ajuda: m.config_server_raciocinio_llm_ajuda(),
+      veredito: m.config_motores_recomendado_none(), motivo: m.config_server_raciocinio_llm_porque(),
       opcoes: [{ value: '', label: m.config_server_raciocinio_padrao() },
                { value: 'none', label: 'none' }, { value: 'low', label: 'low' },
                { value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
@@ -176,7 +183,6 @@
 <div class="voz" class:com-rodape={rodapeVisivel}>
   <header class="cfg-head">
     <h2>{m.voz_titulo()}</h2>
-    <p class="sub">{m.config_server_valem()}</p>
   </header>
 
   {#if store.carregando}
@@ -201,7 +207,7 @@
 
       <div class="estilo">
         <div class="txt">
-          <span class="rot">{m.voz_estilo()}</span>
+          <span class="rot">{m.voz_estilo()} <EscopoChip escopo="servidor" /></span>
           <span class="ajuda">{m.voz_estilo_ajuda()}</span>
         </div>
         <SegmentedPicker value={ditadoEstilo.valor} options={OPCOES_ESTILO}
@@ -233,7 +239,7 @@
         {#if avancadoAberto}
           <div class="detalhes-corpo">
             {#each CAMPOS_LLM as c (c.chave)}
-              <LinhaConfig campo={c} {store} />
+              <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} />
             {/each}
           </div>
         {/if}
@@ -252,6 +258,11 @@
             <p class="aviso erro">{vozErro}</p>
             <button class="btn" onclick={carregarVozes} disabled={carregandoVozes}>{m.config_server_tentar_de_novo()}</button>
           {:else if vozes.length}
+            <!-- Rótulo VISÍVEL, não só `ariaLabel`: sem ele a etiqueta de escopo ficaria solta ao
+                 lado de um select sem nome, e a regra "sem etiqueta = neste aparelho" leria errado
+                 num controle que grava no servidor. Mesmo par dos sliders logo abaixo (span com o
+                 rótulo, `aria-label` próprio no controle). -->
+            <span class="rot rot-voz">{m.config_server_voz()} <EscopoChip escopo="servidor" /></span>
             <Select
               class="campo-select"
               ariaLabel={m.config_server_voz()}
@@ -260,6 +271,7 @@
                        ...vozes.map((v) => ({ value: v.id, label: v.nome }))]}
               onchange={(v) => store.setRascunho('elevenlabs_voice_id', v)}
             />
+            <span class="ajuda">{m.config_server_voz_ajuda()}</span>
           {:else}
             <button class="btn" onclick={carregarVozes} disabled={carregandoVozes}>
               {carregandoVozes ? m.comum_carregando() : m.config_server_carregar_vozes()}
@@ -271,9 +283,13 @@
               {@const valor = ajusteValor(a)}
               <div class="ajuste">
                 <div class="ajuste-cabeca">
-                  <span class="ajuste-rot">{a.rotulo} <em>{valor}</em></span>
+                  <span class="ajuste-rot">{a.rotulo} <em>{valor}</em> <EscopoChip escopo="servidor" /></span>
                   {#if valor !== a.padrao}
-                    <button class="ajuste-reset" onclick={() => ajusteResetar(a)}>{m.config_server_voltar_padrao()}</button>
+                    <!-- São quatro botões iguais na tela, um por ajuste: sem o rótulo do ajuste no
+                         nome acessível, o leitor de tela lê "voltar ao padrão" quatro vezes. -->
+                    <button class="ajuste-reset" onclick={() => ajusteResetar(a)}
+                            aria-label={`${a.rotulo} — ${m.config_server_voltar_padrao()}`}
+                      >{m.config_server_voltar_padrao()}</button>
                   {/if}
                 </div>
                 <span class="ajuda">{a.ajuda}</span>
@@ -307,7 +323,8 @@
         </div>
       {/if}
       <LinhaConfig campo={CAMPO_MAX_CHARS} {store} />
-      <LinhaConfig campo={CAMPO_CMD_LOCAL} {store} />
+      <LinhaConfig campo={CAMPO_CMD_LOCAL} {store}
+        veredito={m.config_server_comando_voz_vered()} motivo={m.config_server_comando_voz_porque()} />
     </section>
   {/if}
 
@@ -334,7 +351,6 @@
 
   /* Mesmo par h2+sub das telas irmãs (ServerSettings.svelte) — a Voz também é config de servidor. */
   .cfg-head h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
-  .cfg-head .sub { margin: 2px 0 0; font-size: var(--text-xs); color: var(--text-muted); }
 
   /* O título da etapa tem que pesar MAIS que o rótulo do campo — com os dois em `sm`/600 a
      hierarquia se invertia e a tela virava uma lista sem começo. */
@@ -362,6 +378,9 @@
   .detalhes-corpo { margin-top: var(--space-2); }
 
   .tts-extra { container-type: inline-size; margin-top: var(--space-2); }
+  /* O rótulo do seletor de voz é a única coisa acima do select: vira bloco pra o select não subir
+     pra linha dele. */
+  .rot-voz { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: 4px; }
   .tts-extra :global(.campo-select) { width: 100%; font-family: var(--font-ui); font-size: var(--text-sm); }
   @container (min-width: 360px) { .tts-extra :global(.campo-select) { width: auto; min-width: 220px; } }
 

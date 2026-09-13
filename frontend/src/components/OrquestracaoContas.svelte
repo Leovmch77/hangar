@@ -5,6 +5,7 @@
   // Configurações → Orquestração mostra a mesma tela sem precisar de grupo.
   import * as m from '../paraglide/messages';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
+  import EscopoChip from './settings/EscopoChip.svelte';
   import { providerName } from '@hangar/core';
   import { getOrqPolitica, putOrqConta } from '@hangar/core';
   import { iniciais, politicaDe, type ContaInventario, type ModeloInventario, type OrqPolitica, type Papel, type Provider } from '@hangar/core';
@@ -121,7 +122,9 @@
 </script>
 
 {#snippet listaContas()}
-  <p class="oc-intro">{m.orqcfg_contas_intro()}</p>
+  <!-- A política é um arquivo DA MÁQUINA (~/.hangar/orquestracao-contas.md): a etiqueta diz isso
+       uma vez, no topo, em vez de repetir por conta. -->
+  <p class="oc-intro"><EscopoChip escopo="servidor" /> {m.orqcfg_contas_intro()}</p>
   {#if conflito}
     <p class="oc-erro" role="alert">{m.orqcfg_arquivo_mudou()} <button type="button" class="oc-link" onclick={recarregar}>{m.orqcfg_recarregar()}</button></p>
   {/if}
@@ -188,6 +191,10 @@
         <button type="button" class="oc-link" onclick={() => (marcados = [])}>{m.orqcfg_limpar()}</button>
       </span>
     </div>
+    <details class="cfg-porque oc-porque">
+      <summary><span class="cfg-vered">{m.orqcfg_modelos_liberados_vered()}</span> <span class="cfg-pq">{m.config_motores_por_que()}<span class="cfg-chev" aria-hidden="true">▾</span></span></summary>
+      <p class="cfg-motivo">{m.orqcfg_modelos_liberados_porque()}</p>
+    </details>
     {#if lista.length > 6}
       <input class="field-input oc-filtro" type="search" bind:value={filtro} placeholder={m.orqcfg_filtrar_modelos()} aria-label={m.orqcfg_filtrar_modelos()} />
     {/if}
@@ -285,6 +292,9 @@
   .oc-link { color: var(--accent); font-size: 12px; background: none; padding: 0; }
   .oc-link:disabled { opacity: .5; }
   .oc-filtro { margin-bottom: 6px; }
+  /* `.cfg-porque` é global (app.css). Sem margem negativa no topo: o contorno de foco do summary
+     sai 2px pra fora e encostaria no rótulo de cima. */
+  .oc-porque { margin: 0 0 var(--space-2); }
   .oc-modelos { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); max-height: 320px; overflow-y: auto; }
   .oc-mrow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
   .oc-mrow:last-child { border-bottom: 0; }

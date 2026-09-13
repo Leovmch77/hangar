@@ -13,6 +13,7 @@
   import SyncSettings from './SyncSettings.svelte';
   import ServidorSeletor from './ServidorSeletor.svelte';
   import ConfigIcone from './ConfigIcone.svelte';
+  import BuscaConfig, { TITULO_TELA } from './BuscaConfig.svelte';
   import { criarConfigServidor } from '../../lib/serverConfig.svelte';
   import { TELAS_DE_SERVIDOR, type TelaConfig } from '../../lib/configRoute';
   import { fly, fade } from 'svelte/transition';
@@ -58,11 +59,12 @@
   // (App.svelte, alvoConfig), então null aqui é só "alvo que não resolveu" — e nesse caso nem
   // tela de servidor abre (telaEfetiva cai na Aparencia).
   const servidorAtualId = $derived(resolvedServer?.id ?? '');
-  // Com UM servidor não há escolha a fazer — o rótulo estático de sempre fica. Sem onPickServer
-  // (quem monta sem a porta) também não faz sentido oferecer troca. E sem resolvedServer (um
-  // ?srv= que não resolveu) o select abriria em BRANCO — nenhuma option casa com '' —, então a
-  // condição exige o alvo resolvido (a tela em si já caiu na Aparencia nesse caso).
-  const mostrarSeletor = $derived(servidores.length > 1 && !!onPickServer && !!resolvedServer);
+  // O seletor EXISTE sempre que dá pra trocar. Com uma máquina só ele fica apagado com o motivo à
+  // vista (o próprio ServidorSeletor cuida disso) — antes ele sumia, e sumir escondia que a escolha
+  // existe. Os dois gates que ficam são de "dá pra trocar", não de contagem: sem onPickServer (quem
+  // monta sem a porta) não há para onde trocar, e sem resolvedServer (um ?srv= que não resolveu) o
+  // select abriria em BRANCO — nenhuma option casa com ''.
+  const mostrarSeletor = $derived(!!onPickServer && !!resolvedServer);
   function trocarServidor(id: string) { onPickServer?.(id); }
 
   // Na tela Máquinas o store fica EM SILENCIO (zero GET /api/config) e a operacao pendente é
@@ -87,22 +89,12 @@
     else if (veioDeMaquinas) store.carregar();
   });
 
-  const TITULO: Record<TelaConfig, string> = {
-    root: m.config_modal_titulo(),
-    geral: m.config_geral_titulo(),
-    aparencia: m.config_modal_aparencia(),
-    voz: m.voz_titulo(),
-    sobre: m.config_modal_sobre(),
-    diario: m.config_diag_titulo(),
-    maquinas: m.maquinas_titulo(),
-    contas: m.contas_modelos_titulo(),
-    notificacoes: m.config_modal_notificacoes(),
-    anexos: m.config_modal_anexos_curto(),
-    avancado: m.config_modal_avancado(),
-    orquestracao: m.config_modal_orquestracao(),
-    harnesses: m.harness_titulo(),
-    sincronizacao: m.sync_config_titulo(),
-  };
+  // Uma fonte só: a busca precisa do mesmo título por tela pra escrever "Tela › Controle", e dois
+  // mapas iguais em arquivos diferentes divergiriam na primeira tela renomeada.
+  const TITULO = ((t) => {
+    for (const [tela, titulo] of Object.entries(TITULO_TELA)) t[tela as TelaConfig] = titulo();
+    return t;
+  })({} as Record<TelaConfig, string>);
 
   // Valores de rotulo vindo de funcao (m.*) dependem do locale: o `as const` nao pode mais
   // existir (valor de funcao nao e literal), mas o `satisfies` fica — e ele que checa a forma.
@@ -147,7 +139,15 @@
   // Trocar de rota destroi a linha que tinha o foco e o activeElement cai no <body>: leitor de tela
   // fica mudo e o Tab recomeca do zero. Mover o foco pro titulo (que muda a cada tela) anuncia a
   // troca e da um ponto de partida.
-  $effect(() => { tela; tituloEl?.focus(); });
+  // No desktop não há <h2>: o título só existe como ariaLabel da folha. Sem um alvo aqui, escolher
+  // um resultado da busca destruía o botão focado e o foco caía no <body>.
+  let conteudoEl = $state<HTMLElement | null>(null);
+  // Quem move o foco pela BUSCA é a ação, não a troca de rota: escolher um resultado apaga a lista
+  // (e com ela o botão focado) mesmo quando o resultado é da tela já aberta, e aí o $effect abaixo
+  // não roda. A navegação pela lateral, o voltar e a rota continuam cobertos pelo $effect.
+  function focarTela() { (tituloEl ?? conteudoEl)?.focus(); }
+  function irPelaBusca(t: TelaConfig) { onIrPara(t); focarTela(); }
+  $effect(() => { tela; focarTela(); });
 
   let isDesktop = $state(false);
   $effect(() => {
@@ -269,12 +269,15 @@
            quem navega por teclado chegar nele antes de percorrer a navegacao e o conteudo inteiros. -->
       <button class="st-fechar" bind:this={fecharEl} onclick={onFechar} aria-label={m.sessao_fechar()}>✕</button>
       <aside class="st-nav">
+        <!-- No desktop a raiz nunca renderiza (cai na Aparência), então o campo mora aqui: é o
+             único lugar que existe nas duas colunas o tempo todo. -->
+        <BuscaConfig onIrPara={irPelaBusca} {semServidor} compacta />
         {#each SECOES as secao (secao)}
           {#if secao === 'servidor' && mostrarSeletor}
             <!-- O rótulo do grupo vira o TROCADOR de alvo: "Servidor" + select com a máquina
                  sendo configurada. Antes dizia "Servidor · X" e trocar exigia ir à tela
                  Servidores e voltar (pedido recorrente do usuário). -->
-            <div class="st-secao st-secao-sel">
+            <div class="st-secao st-secao-sel" class:so-uma={servidores.length <= 1}>
               <span>{m.lista_agrupar_servidor()}</span>
               <ServidorSeletor {servidores} atualId={servidorAtualId} onTrocar={trocarServidor} />
             </div>
@@ -291,7 +294,7 @@
           {/each}
         {/each}
       </aside>
-      <section class="st-conteudo">
+      <section class="st-conteudo" tabindex="-1" bind:this={conteudoEl}>
         <!-- #key por tela: a troca remonta o conteúdo, e o wrapper novo entra voando (a saída do
              antigo é instantânea de propósito — transição de saída aqui brigaria com a nova). -->
         {#key telaAtual}<div in:animarTela={{ x: 18 }}>{@render corpo()}</div>{/key}
@@ -304,18 +307,20 @@
       <!-- tabindex=-1: alvo do foco na troca de tela, sem entrar na ordem do Tab. -->
       <h2 class="st-titulo" bind:this={tituloEl} tabindex="-1">{TITULO[tela]}</h2>
       <span class="st-icone st-vazio" aria-hidden="true"></span>
-      {#if TELAS_DE_SERVIDOR.includes(telaAtual) && nomeAlvo}
+      {#if TELAS_DE_SERVIDOR.includes(telaAtual) && (mostrarSeletor || nomeAlvo)}
         <!-- Sem isto nao da pra saber em que maquina se esta mexendo: o app roda no front de um
-             servidor e a lista e agregada, entao a config aberta pode ser de outra maquina. Com
-             mais de um servidor o texto vira o TROCADOR (select) — dizer sem deixar trocar foi o
-             pedido recorrente do usuário. -->
-        <p class="st-sub">
+             servidor e a lista e agregada, entao a config aberta pode ser de outra maquina. O
+             texto vira o TROCADOR (select) — dizer sem deixar trocar foi o pedido recorrente do
+             usuário; com uma máquina só ele aparece apagado, com o motivo. -->
+        <!-- `div`, não `p`: agora ele carrega um controle de formulário (o select) e um texto de
+             motivo, não uma frase. O CSS casa pela classe. -->
+        <div class="st-sub">
           {#if mostrarSeletor}
             <ServidorSeletor {servidores} atualId={servidorAtualId} onTrocar={trocarServidor} />
-          {:else}
+          {:else if nomeAlvo}
             {m.config_modal_em({ nome: nomeAlvo })}
           {/if}
-        </p>
+        </div>
       {/if}
     </header>
     {#key telaAtual}<div in:animarTela={{ x: telaAtual === 'root' ? -18 : 18 }}>{@render corpo()}</div>{/key}
@@ -324,10 +329,25 @@
 {/if}
 
 {#snippet corpo()}
+  <!-- A regra do escopo dita UMA vez, nas duas larguras: etiqueta ao lado do rótulo diz onde grava;
+       sem etiqueta, grava neste aparelho. Sem esta linha a ausência de etiqueta não significa nada,
+       e etiquetar toda linha do modal seria ruído.
+       UMA frase por tela, nunca duas coladas: as telas são de TRÊS tipos, e duas legendas globais
+       davam conta de dois. Máquinas é o terceiro — uma linha por máquina com uma caixa do navegador
+       e uma do servidor —, e ali a frase "sem etiqueta vale só neste aparelho", sozinha, prometia
+       aparelho para o que apaga o peer no servidor. -->
+  {#if telaAtual === 'maquinas'}
+    <p class="st-sem-etiqueta">{m.config_escopo_mista({ etiqueta: m.config_escopo_servidor() })}</p>
+  {:else if TELAS_DE_SERVIDOR.includes(telaAtual)}
+    <p class="st-valem">{m.config_server_valem({ etiqueta: m.config_escopo_servidor() })}</p>
+  {:else}
+    <p class="st-sem-etiqueta">{m.config_escopo_sem_etiqueta()}</p>
+  {/if}
   {#if telaAtual === 'root'}
+    <BuscaConfig onIrPara={irPelaBusca} {semServidor} />
     {#each SECOES as secao (secao)}
       {#if secao === 'servidor' && mostrarSeletor}
-        <div class="st-secao st-secao-sel">
+        <div class="st-secao st-secao-sel" class:so-uma={servidores.length <= 1}>
           <span>{m.lista_agrupar_servidor()}</span>
           <ServidorSeletor {servidores} atualId={servidorAtualId} onTrocar={trocarServidor} />
         </div>
@@ -366,7 +386,10 @@
       <p>{m.config_modal_escolha_servidor()}</p>
     {/if}
   {:else if telaAtual === 'harnesses'}
-    <HarnessSettings apiTarget={alvo} />
+    <!-- A configuração vai JÁ CARREGADA: o store desta folha é quem lê o `/api/config`, e a tela de
+         Harnesses lia o dela por fora (3 leituras por abertura, contra 1). Gravar continua sendo
+         chamada direta dela. -->
+    <HarnessSettings apiTarget={alvo} {store} />
   {:else if telaAtual === 'voz'}
     <VozSettings {store} />
   {:else}
@@ -384,7 +407,13 @@
     font-size: var(--text-base); font-weight: 600; color: var(--text-primary);
   }
   .st-sub { grid-column: 2; margin: 0; text-align: center; font-size: var(--text-xs); color: var(--text-muted); }
+  .st-valem { margin: 0 0 var(--space-3); font-size: var(--text-xs); color: var(--text-muted); }
+  .st-sem-etiqueta { margin: 0 0 var(--space-2); font-size: var(--text-xs); color: var(--text-muted); }
+  /* No sub-cabeçalho do celular tudo é centralizado; o seletor ocupa a linha inteira por causa do
+     motivo do apagado, então sem isto o select ficava encostado à esquerda dele. */
+  .st-sub :global(.srv-wrap) { justify-content: center; }
   .st-titulo:focus { outline: none; }   /* alvo programatico: o anel aqui so confundiria */
+  .st-conteudo:focus { outline: none; } /* idem: alvo de foco do desktop, nao um controle */
   .st-icone {
     width: 32px; height: 32px; border-radius: var(--radius-full);
     border: 1px solid var(--border-subtle); background: var(--surface-raised);
@@ -401,7 +430,15 @@
   }
   /* Versão com o seletor de alvo: o rótulo "Servidor" e o select na mesma linha. O select fica
      minúsculo de propósito — o nome da máquina é dado, não título de seção. */
-  .st-secao-sel { display: flex; align-items: center; gap: var(--space-2); }
+  /* `baseline`, não `center`: com o motivo do apagado o bloco do seletor tem duas linhas, e
+     centralizar deixava o rótulo "SERVIDOR" boiando no meio delas. A baseline o prende à linha do
+     select, valendo igual com uma ou duas linhas.
+     O `nowrap` é o estado normal (podendo trocar): na coluna de 228px da navegação, deixar quebrar
+     joga o select pra linha de baixo esticado na largura toda — o desenho é rótulo e select LADO A
+     LADO, com o select do tamanho do nome. Só o apagado quebra, porque ali a segunda linha é o
+     motivo. */
+  .st-secao-sel { display: flex; align-items: baseline; flex-wrap: nowrap; gap: var(--space-2); }
+  .st-secao-sel.so-uma { flex-wrap: wrap; }
   /* Cartao arredondado com as linhas dentro, no formato do iOS. `--surface-card` entra no veu do
      papel de parede junto com o resto (CLAUDE.md, "Transparencia"). */
   .st-cartao {
