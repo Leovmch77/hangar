@@ -616,13 +616,15 @@ def test_buracos_calados_viram_nota_no_chat(adapter, tmp_path, monkeypatch):
     async def fluxo():
         await adapter._on_event(sess, {"type": "control_request", "request_id": "c-1",
                                        "request": {"subtype": "hook_callback", "callback_id": "x"}})
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "c-2",
+                                       "request": {"subtype": "hook_callback", "callback_id": "y"}})   # repetido
         await adapter._on_event(sess, {"type": "novo_tipo", "x": 1})
         await adapter._on_event(sess, {"type": "novo_tipo", "x": 2})   # repetido: sem 2ª nota
         await adapter._on_event(sess, {"type": "keep_alive"})          # conhecido: nada
     _run(fluxo())
-    # A CLI destrava com resposta vazia, e a pessoa vê o que foi respondido sem ela.
-    assert adapter.escritos == [{"type": "control_response",
-                                 "response": {"subtype": "success", "request_id": "c-1", "response": {}}}]
+    # A CLI destrava com resposta vazia toda vez; a pessoa vê uma nota por subtype.
+    assert [e["response"]["request_id"] for e in adapter.escritos] == ["c-1", "c-2"]
+    assert all(e["response"]["response"] == {} for e in adapter.escritos)
     textos = [r["text"] for r in q.load()]
     assert textos == ["⚙️ A CLI pediu `hook_callback`; respondi vazio",
                       "⚙️ Evento desconhecido da CLI: novo_tipo"]

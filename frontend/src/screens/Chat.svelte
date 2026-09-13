@@ -923,7 +923,13 @@
   async function implementHeadlessPlan(plan: string) {
     if (currentState !== 'idle' || plan !== headlessPlan) throw new Error(m.chat_plan_indisponivel());
     await setPermissionMode(sessionName, stateEvent?.claude_previous_non_plan || 'acceptEdits');
-    await handleSend(m.chat_plan_pedido(), false, true);
+    try {
+      await handleSend(m.chat_plan_pedido(), false, true);
+    } catch (err) {
+      // Pedido não saiu: a sessão não pode ficar fora do modo plan sem ter implementado nada.
+      await setPermissionMode(sessionName, 'plan').catch(() => {});
+      throw err;
+    }
   }
   const planAnchorId = $derived.by(() => {
     if (sessionProvider === 'codex') return codexPlanEvent?.id ?? null;

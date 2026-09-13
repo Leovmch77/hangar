@@ -1020,7 +1020,9 @@ class ClaudeHeadlessAdapter:
             # Subtype que não tratamos: responder vazio destrava a CLI (mesma escolha do MonoCode),
             # mas a pessoa precisa saber que algo foi pedido e decidido sem ela.
             await self._responder(sess, rid, {})
-            await self._nota_local(sess, f"⚙️ A CLI pediu `{sub}`; respondi vazio")
+            if sub not in sess.tipos_desconhecidos:
+                sess.tipos_desconhecidos.add(str(sub))
+                await self._nota_local(sess, f"⚙️ A CLI pediu `{sub}`; respondi vazio")
             return
         if req.get("tool_name") == "AskUserQuestion":
             perguntas = (req.get("input") or {}).get("questions") or []
