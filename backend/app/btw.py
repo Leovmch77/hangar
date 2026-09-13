@@ -48,6 +48,15 @@ def _rodape(name: str) -> str:
     return _pane_tail(tmux.capture_pane(name, lines=60), _RODAPE_LINHAS)
 
 
+def _limpar_composer_as_cegas(name: str) -> None:
+    """Às cegas: com a tela desalinhada a leitura não vê o resto, e o próximo envio normal sairia
+    grudado nele. C-u num composer vazio não faz nada."""
+    for _ in range(3):
+        if not tmux.send_keys(name, "C-u"):
+            _log.warning("btw de %r: o C-u da limpeza não chegou ao terminal; pode ter sobrado texto "
+                         "no composer", name)
+
+
 def _buffers() -> list[str]:
     cp = tmux._run(["tmux", "list-buffers", "-F", "#{buffer_name}"])
     return [b for b in (cp.stdout or "").split("\n") if b]
@@ -81,7 +90,11 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
         # Overlay de uma pergunta anterior ainda fechando: digitar agora perdia a `/` e a TUI
         # desenhava o texto em cima da régua (medido ao vivo, pergunta logo depois de outra).
         fim_espera = time.monotonic() + _PRAZO_ABRIR
-        while _ABERTO in _rodape(name) and time.monotonic() < fim_espera:
+        while _ABERTO in _rodape(name):
+            if time.monotonic() >= fim_espera:
+                # Preso aberto (um /btw feito à mão no terminal): digitar agora cairia dentro dele.
+                raise BtwError(409, "erro_btw_overlay_aberto",
+                               "há um /btw aberto no terminal da sessão; feche antes de perguntar")
             time.sleep(_POLL)
         _esvaziar_composer_claude(name)
         # Texto que sobrou no composer viraria "<rascunho>/btw …" submetido como MENSAGEM real
@@ -97,15 +110,21 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
                 raise BtwError(502, "erro_btw_nao_digitou", "não consegui digitar o /btw no terminal da sessão")
             time.sleep(_SETTLE)
             digitado = _texto_composer_claude(name)
-            if not digitado or digitado.startswith("/btw"):
+            if digitado is None:
+                # Ilegível não confirma nada: com Enter às cegas a pergunta podia cair na conversa.
+                time.sleep(_SETTLE)
+                digitado = _texto_composer_claude(name)
+                if digitado is None:
+                    _log.warning("btw de %r: composer ilegível depois de digitar; parado sem Enter", name)
+                    _limpar_composer_as_cegas(name)
+                    raise BtwError(502, "erro_btw_composer_ilegivel",
+                                   "não consegui conferir o /btw digitado; nada foi enviado pra conversa")
+            if digitado == "" or digitado.startswith("/btw"):
                 break
             _log.warning("btw de %r: o composer recebeu sem a barra (%d/2); apagando", name, tentativa + 1)
             _esvaziar_composer_claude(name)
         else:
-            # Às cegas: com a tela desalinhada a leitura não vê o resto, e o próximo envio normal
-            # sairia grudado nele. C-u num composer vazio não faz nada.
-            for _ in range(3):
-                tmux.send_keys(name, "C-u")
+            _limpar_composer_as_cegas(name)
             raise BtwError(502, "erro_btw_barra_perdida",
                            "o terminal perdeu a / do /btw; nada foi enviado pra conversa")
         tmux.send_keys(name, "Enter")

@@ -192,3 +192,38 @@ def test_espera_o_overlay_anterior_fechar_antes_de_digitar(falso):
     ], buffer_apos_c=False)
     btw.perguntar("s", "q")
     assert "Esc to close" not in f.tela_ao_digitar
+
+
+def test_overlay_que_nao_fecha_para_sem_digitar(falso, monkeypatch):
+    # Overlay preso aberto (um /btw feito à mão no terminal): digitar agora cairia DENTRO dele.
+    f = falso([_tela("    /btw alheia", "      x", RODAPE_PRONTO)])
+    relogio = iter(range(0, 100))
+    monkeypatch.setattr(btw.time, "monotonic", lambda: next(relogio))
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_overlay_aberto"
+    assert f.teclas == []
+
+
+def test_composer_ilegivel_depois_de_digitar_para_sem_enter(falso, monkeypatch):
+    # Ilegível NÃO é "confirmado": com Enter às cegas a pergunta podia cair na conversa (revisão
+    # de falhas silenciosas, 13/09/2026).
+    f = falso([_tela("❯ ")])
+    leituras = iter(["", None, None])
+    monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: next(leituras))
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_composer_ilegivel"
+    assert "Enter" not in f.teclas
+    assert f.teclas[-3:] == ["C-u", "C-u", "C-u"]
+
+
+def test_composer_ilegivel_uma_vez_relê_e_segue(falso, monkeypatch):
+    f = falso([
+        _tela("❯ "),
+        _tela("    /btw q", "      4", RODAPE_PRONTO),
+        _tela("    /btw q", "      4", RODAPE_COPIADO),
+    ], buffer_apos_c=False)
+    leituras = iter(["", None, "/btwq"])
+    monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: next(leituras))
+    assert btw.perguntar("s", "q")["answer"] == "4"

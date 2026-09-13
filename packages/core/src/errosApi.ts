@@ -292,6 +292,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_btw_fechado: () => m.erro_btw_fechado(),
   erro_btw_nao_digitou: () => m.erro_btw_nao_digitou(),
   erro_btw_barra_perdida: () => m.erro_btw_barra_perdida(),
+  erro_btw_overlay_aberto: () => m.erro_btw_overlay_aberto(),
+  erro_btw_composer_ilegivel: () => m.erro_btw_composer_ilegivel(),
   erro_terminal_invalido: (p) => m.erro_terminal_invalido({ nome: String(p.nome) }),
   erro_terminal_ausente: () => m.erro_terminal_ausente(),
   erro_terminal_abertura_falhou: (p) => m.erro_terminal_abertura_falhou({ erro: String(p.erro) }),
