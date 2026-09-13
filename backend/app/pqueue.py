@@ -195,6 +195,11 @@ def _da_sessao_atual(entry: dict, min_ts: float, ts: float | None = None) -> boo
     return quando >= min_ts - folga
 
 
+# Nota local gravada até isto antes de o stream abrir ainda sai por ele: cobre a que nasce entre o
+# /history do front e a conexão do SSE.
+_FOLGA_SAIDA_LOCAL_S = 30.0
+
+
 def _saida_local(entry: dict) -> bool:
     # Entrada que NAO e prompt: texto que o agente respondeu fora do transcript (comando local
     # da sessao sem terminal). Nasce entregue e confirmada — drain e reconcile nunca a tocam — e
@@ -887,6 +892,8 @@ class PromptQueue:
         # ao inicio da sessao atual (ex: pre-/clear) — espelha a poda do merged_history no live SSE.
         # Entrega e desistência mudam depois do primeiro evento. O front substitui pelo mesmo id.
         seen: dict[str, tuple[bool | None, bool | None, bool]] = {}
+        inicio = time.time()
+        primeira = [True]
 
         def emit_new() -> list[ChatEvent]:
             evs = []
@@ -905,6 +912,11 @@ class PromptQueue:
                 if eid in seen and seen[eid] == signature:
                     continue
                 seen[eid] = signature
+                if (primeira[0] and _saida_local(entry)
+                        and float(entry.get("ts") or 0) < inicio - _FOLGA_SAIDA_LOCAL_S):
+                    # Nota local antiga já está no /history, no lugar do relógio dela. Emitida aqui,
+                    # o front a anexava no FIM da conversa a cada vez que o chat abria.
+                    continue
                 if min_ts and not _da_sessao_atual(entry, min_ts):
                     continue
                 evs.append(event)
@@ -914,6 +926,7 @@ class PromptQueue:
         # sao sequenciais (uma await por vez), entao o set `seen` que ela muta nao corre risco de corrida.
         for ev in await asyncio.to_thread(emit_new):
             yield ev
+        primeira[0] = False
         # yield_on_timeout: cobre entrada gravada entre o emit_new acima e o watcher armar (senao so
         # apareceria no proximo write da fila). O dir e COMPARTILHADO por todas as sessoes -> filtra:
         # so recarrega quando o toque e no NOSSO arquivo (ou no timeout do heartbeat).

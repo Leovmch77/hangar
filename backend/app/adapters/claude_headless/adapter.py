@@ -1288,7 +1288,7 @@ class ClaudeHeadlessAdapter:
             state, label = "working", "Iniciando sessão…"
         if state == "working" and (contas := sess.rotulo_turno()):
             label = f"{label or 'Trabalhando…'} {contas}"
-        return StateEvent(session=sess.name, state=state, label=label,
+        return StateEvent(session=sess.name, state=state, label=label, headless=True,
                           question=question, options=options,
                           status_line=self.status_line(sess),
                           claude_permission_mode=sess.permission_mode,
@@ -1338,7 +1338,7 @@ class ClaudeHeadlessAdapter:
                 # subir outro. Não sobe aqui — abrir o chat não deve custar um processo.
                 meta = hl_sessions.load(name) or {}
                 prob = self._problemas.get(name)
-                yield StateEvent(session=name, state="idle",
+                yield StateEvent(session=name, state="idle", headless=True,
                                  claude_permission_mode=meta.get("permission_mode"),
                                  claude_previous_non_plan=meta.get("previous_non_plan"),
                                  status_line=(f"🤖 {_rotulo_modelo(meta['model'])}" if meta.get("model") else None),

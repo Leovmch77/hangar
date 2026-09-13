@@ -250,6 +250,10 @@ class StateEvent(BaseModel):
     # sessão voltava a "ociosa" como se nada tivesse acontecido.
     problema: Optional[str] = None
     problema_detalhe: Optional[str] = None
+    # Claude sem terminal. Vai no stream da própria sessão porque a lista que o chat do celular
+    # consulta é a do servidor ATIVO: sessão de outro servidor (ou lista que ainda não chegou)
+    # não diria que não há terminal, e o botão dele aparecia.
+    headless: bool = False
 
 
 class PreviewEvent(BaseModel):

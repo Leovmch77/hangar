@@ -184,6 +184,27 @@ def test_merged_history_e_follow_mostram_saida_local_como_assistente(tmp_path):
     assert ev_local.kind == "assistant_msg" and not ev_local.queued_confirmed
 
 
+def test_follow_nao_reemite_nota_local_antiga_ao_abrir_o_chat(tmp_path, monkeypatch):
+    # Nota antiga já vem no /history no lugar do relógio dela; emitida pelo stream ao conectar, o
+    # front a anexava no FIM da conversa toda vez que o chat abria. A nova, depois de abrir, sai.
+    import json
+    q = PromptQueue("notas")
+    velha = q.append_saida_local("Set effort level to high")
+    q.path.write_text(json.dumps({**velha, "ts": velha["ts"] - 3600}) + "\n", encoding="utf-8")
+    recente = q.append_saida_local("recente (entre o /history e o SSE)")
+
+    async def changes(*args, **kwargs):
+        q.append_saida_local("## Context")
+        yield set()
+
+    monkeypatch.setattr(pqueue, "awatch", changes)
+
+    async def collect():
+        return [e.text async for e in q.follow(emit_confirmed=True)]
+    textos = asyncio.run(collect())
+    assert textos == [recente["text"], "## Context"]
+
+
 def test_merged_history_ignores_delivered_flag(tmp_path):
     # delivered NAO afeta exibicao: entrada entregue mas ainda nao gravada no transcript continua
     # aparecendo como bubble queued- (o dedup por texto so a remove quando o user_msg real cai).

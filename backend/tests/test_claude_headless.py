@@ -139,7 +139,7 @@ def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, mo
     async def fluxo():
         gen = ad.state_monitor("s1", lambda: None)
         ev = await gen.__anext__()
-        assert ev.state == "idle" and ev.problema is None
+        assert ev.state == "idle" and ev.problema is None and ev.headless
         ad.acordar("s1")
         await asyncio.gather(*ad._tarefas)
         ev = await asyncio.wait_for(gen.__anext__(), 3)
@@ -171,7 +171,7 @@ def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapt
         tarefa = asyncio.create_task(adapter._esperar_initialize(sess))
         await asyncio.sleep(0)
         ev = adapter._evento(sess)
-        assert ev.state == "working" and ev.label.startswith("Iniciando sessão… (")
+        assert ev.state == "working" and ev.label.startswith("Iniciando sessão… (") and ev.headless
         assert await adapter.deliverable("s1") is False       # prompt vai pra fila, não pro stdin
         await asyncio.sleep(0.05)
         assert sess.problema == "headless_sem_resposta"        # passou do aviso: fica à vista

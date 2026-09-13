@@ -852,7 +852,9 @@
   // "codex" alem disso esconde controles Claude-only.
   const sessionProvider = $derived(allSessions.find((s) => s.name === sessionName)?.provider);
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
-  const sessionHeadless = $derived(allSessions.find((s) => s.name === sessionName)?.headless === true);
+  // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
+  const sessionHeadless = $derived(stateEvent?.headless === true
+    || allSessions.find((s) => s.name === sessionName)?.headless === true);
   // Motor da sessão (null = conta Anthropic) — o Composer usa no placeholder ("Mensagem para …").
   const sessionEngine = $derived(allSessions.find((s) => s.name === sessionName)?.engine ?? null);
   // Transcript desta sessão: a chave da cauda em cache (ver queries.ts). Nulo enquanto a lista não
