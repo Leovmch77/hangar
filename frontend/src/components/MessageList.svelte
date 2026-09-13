@@ -56,6 +56,7 @@
     preview?: string;
     previewMd?: boolean;   // o texto da previa e markdown cru -> a bolha renderiza
     previewFull?: boolean; // a previa e incremental (so cresce no fim) -> bolha sem o teto de 10 linhas
+    previewVivo?: boolean; // deltas do proprio modelo, no ritmo real -> sem maquina de escrever
     onSelectOption: (i: number) => void;
     /** Múltipla escolha: envia o que já foi marcado. Ausente = sem botão de enviar. */
     onSubmitSelected?: () => void;
@@ -91,7 +92,7 @@
   }
 
   let {
-    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, onSelectOption, onSubmitSelected, onCancel,
+    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, onSelectOption, onSubmitSelected, onCancel,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0
@@ -548,7 +549,7 @@
     {/if}
 
     {#if preview}
-      <AssistantBubble text={codex ? planDisplayText(preview) : preview} ts={undefined} {sessionName} preview md={previewMd} full={previewFull}
+      <AssistantBubble text={codex ? planDisplayText(preview) : preview} ts={undefined} {sessionName} preview md={previewMd} full={previewFull} vivo={previewVivo}
                        streaming={stateEvent?.state === 'working'} />
     {/if}
 

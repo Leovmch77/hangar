@@ -396,6 +396,8 @@
   // Previa INCREMENTAL (so cresce no fim): sidecar/deltas, ou a costura do pane do Kimi
   // (_costurar no backend). Libera a bolha sem o teto de 10 linhas do texto raspado.
   let previewFull = $state(false);
+  // Prévia dos deltas do próprio modelo (sem terminal, Codex): já chega no ritmo real, sem digitação.
+  let previewVivo = $state(false);
   // Carencia entre o fim do turno e a bolha real: o Stop (hook) chega ANTES do tail do .jsonl
   // entregar o assistant_msg, entao apagar a previa na hora abria um buraco de ~1-2s no meio da
   // leitura e a bolha voltava re-animando. Sair de working AGENDA o drop; quem apaga de verdade
@@ -1880,7 +1882,7 @@
     es.addEventListener('preview', (e) => {
       noteAlive();
       try {
-        const ev = JSON.parse(e.data) as { text?: string; md?: boolean; full?: boolean };
+        const ev = JSON.parse(e.data) as { text?: string; md?: boolean; full?: boolean; vivo?: boolean };
         const t = ev.text ?? '';
         // Guard de monotonicidade: frame TRANSITORIO do pane (mid-redraw) as vezes chega como
         // PREFIXO do texto ja mostrado -> ignorar, senao o texto recua e re-cresce (stuttering).
@@ -1910,6 +1912,7 @@
         previewText = t;
         previewMd = !!ev.md;
         previewFull = !!ev.full;
+        previewVivo = !!ev.vivo;
       } catch (err) {
         quadroFalhou('preview');
         // Engolir aqui congela a previa (texto E flag) no ultimo frame bom, sem rastro nenhum. O
@@ -2695,6 +2698,7 @@
       preview={previewText}
       previewMd={previewMd}
       previewFull={previewFull}
+      previewVivo={previewVivo}
       onSelectOption={handleSelect}
       onSubmitSelected={handleSubmitSelected}
       onCancel={handleInterrupt}

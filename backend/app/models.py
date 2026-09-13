@@ -271,6 +271,10 @@ class PreviewEvent(BaseModel):
     # teto de 10 linhas porque troca inteira e instavel; a costurada nao troca, entao o front mostra
     # sem teto, igual ao ramo md. Fontes md=True sao incrementais por construcao (full sempre True).
     full: bool = False
+    # `vivo`: o texto chega pelos deltas do próprio modelo (Claude sem terminal, Codex), já no ritmo
+    # real. O front mostra como veio: a máquina de escrever existe pra fonte que chega em blocos
+    # (pane, hook), e por cima de stream de verdade só atrasa — e redigitava o que já tinha sido lido.
+    vivo: bool = False
 
 
 class CommandInfo(BaseModel):

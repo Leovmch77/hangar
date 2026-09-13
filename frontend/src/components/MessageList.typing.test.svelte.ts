@@ -65,3 +65,28 @@ it('preserva o texto ao voltar, anima só o streaming novo e conclui inteiro ao 
     vi.unstubAllGlobals();
   }
 });
+
+it('prévia vivo (deltas do modelo) aparece como chega, sem máquina de escrever', async () => {
+  vi.stubGlobal('requestAnimationFrame', () => 1);
+  vi.stubGlobal('cancelAnimationFrame', () => {});
+  const target = document.createElement('div');
+  document.body.appendChild(target);
+  const props = $state({
+    events: [] as ChatEvent[], pending: [], sessionName: 's', dockH: 0,
+    stateEvent: { session: 's', state: 'working' } as StateEvent,
+    preview: 'Começo.', previewMd: true, previewVivo: true,
+    onSelectOption: () => {}, onCancel: () => {},
+  });
+  const comp = mount(MessageList, { target, props });
+  const texto = () => target.querySelector('.assistant-msg .prose')?.textContent?.trim();
+  try {
+    await tick();
+    props.preview += ' Delta novo chegando do stream.'.repeat(10);
+    await tick();
+    expect(texto()).toBe(props.preview);   // sem frame nenhum rodado: nada ficou pra trás
+  } finally {
+    await unmount(comp);
+    target.remove();
+    vi.unstubAllGlobals();
+  }
+});

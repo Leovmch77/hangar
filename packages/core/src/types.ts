@@ -193,7 +193,7 @@ export interface StateEvent {
 
 // Evento SSE `preview` (app/preview.py): texto em voo, full-replace. md = veio do sidecar do
 // agente (markdown cru); full = bloco inteiro (não raspagem parcial do pane).
-export interface PreviewEvent { text?: string; md?: boolean; full?: boolean }
+export interface PreviewEvent { text?: string; md?: boolean; full?: boolean; vivo?: boolean }
 
 // Faixa de estatísticas da sessão (evento SSE `stats`, app/stats.py). Todos os campos
 // além de turns/steps/in_tok/out_tok são opcionais — o front só desenha o que veio.

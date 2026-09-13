@@ -942,7 +942,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 yield {"event": "preview",
                        "data": PreviewEvent(session=name, text=preview_slot["text"],
                                             md=bool(preview_slot["md"]),
-                                            full=bool(preview_slot["full"])).model_dump_json()}
+                                            full=bool(preview_slot["full"]),
+                                            vivo=isinstance(broker, PushPreviewSource)).model_dump_json()}
                 continue
             if event == "state":
                 # Rastreia transicoes do awaiting_input pra resetar o guard de emissao unica.
