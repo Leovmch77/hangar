@@ -276,7 +276,7 @@
         } catch (error) {
           if (isSyncUnauthorized(error)) clearKey();
           else {
-            console.error('sync: não foi possível restaurar o cofre', error);
+            console.error('sync vault restore failed', error);
             syncBootError = true;
           }
         }

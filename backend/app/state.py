@@ -140,11 +140,15 @@ _LOGIN_RE = re.compile(
     r"/oauth/authorize|Paste code here|Select login method|Choose the text style",
     re.I,
 )
+_CLAUDE_COMPOSER_RE = re.compile(r"⏵⏵|⏸")
 
 
 def is_login(pane_text: str) -> bool:
     """Sessao parada na tela de welcome/login do Claude Code (sem .jsonl ainda)."""
-    return bool(_LOGIN_RE.search(pane_text))
+    # O texto da conversa pode citar a mesma URL OAuth. Com o composer normal vivo, a sessão já
+    # está logada; os glifos de modo ficam no rodapé e não aparecem na tela de onboarding.
+    return bool(_LOGIN_RE.search(pane_text)) and not _CLAUDE_COMPOSER_RE.search(
+        _rodape(pane_text.splitlines(), 12))
 
 
 # Banner de limite de uso (feature #8), calibrado contra o Claude Code real (fixture

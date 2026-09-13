@@ -701,11 +701,14 @@ def consertar(id_: str) -> str:
     if id_ in ("tmux", "wrapper") and _E_WINDOWS:
         # No Windows cada um tem o seu script (os mesmos que o install.ps1 usa): o do psmux respeita
         # a precedência de config, o do wrapper grava o bloco no perfil do PowerShell.
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise ValueError("powershell.exe não encontrado")
         script, extra, feito = (
             ("setup-windows-tmux.ps1", ["-SkipInstall"], "config do psmux reaplicada — vale nas sessões novas")
             if id_ == "tmux" else
             ("setup-windows-wrappers.ps1", [], "bloco dos wrappers no perfil do PowerShell — vale em terminal novo"))
-        r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        r = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                             str(_REPO / "scripts" / script), "-Apply", *extra],
                            capture_output=True, text=True, timeout=TIMEOUT_INSTALADOR,
                            encoding="utf-8", errors="replace", cwd=str(_REPO))
