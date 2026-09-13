@@ -27,6 +27,8 @@ it('lê o padrão e confirma a gravação antes de liberar a criação', async (
     expect(toggle.getAttribute('aria-checked')).toBe('true');
     await act(async () => toggle.click());
     expect(toggle.disabled).toBe(true);
+    // Muda na hora: preso ao valor confirmado, o toque parecia nao ter pegado (13/09/2026).
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
     expect(busy).toHaveBeenLastCalledWith(true);
     expect(fetchMock).toHaveBeenLastCalledWith('http://a.local/api/harness/codex/opcoes', expect.objectContaining({
       method: 'POST', body: JSON.stringify({ contexto_estendido: false }),

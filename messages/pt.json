@@ -106,6 +106,7 @@
   "chat_plan_erro": "Não foi possível ler o plano. Tente novamente.",
   "chat_plan_indisponivel": "Aguarde o turno terminar e confira o plano antes de implementar.",
   "chat_plan_pedido": "Implemente o plano proposto.",
+  "codex_contexto_salvando": "Salvando…",
   "codex_contexto_titulo": "Contexto estendido (até 1M)",
   "codex_contexto_ajuda": "Solicitar até 1 milhão de tokens. O Codex aplica o limite suportado por cada modelo, incluindo Astra e Sol.",
   "codex_contexto_novas": "Vale para novas sessões no Hangar e no terminal. Ativar define contexto de 1M e compactação em 900 mil tokens; desativar restaura a configuração anterior ao contexto estendido.",

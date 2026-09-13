@@ -106,6 +106,7 @@
   "chat_plan_erro": "Could not read the plan. Try again.",
   "chat_plan_indisponivel": "Wait for the turn to finish and review the plan before implementing.",
   "chat_plan_pedido": "Implement the proposed plan.",
+  "codex_contexto_salvando": "Saving…",
   "codex_contexto_titulo": "Extended context (up to 1M)",
   "codex_contexto_ajuda": "Request up to 1 million tokens. Codex applies each model's supported limit, including Astra and Sol.",
   "codex_contexto_novas": "Applies to new sessions in Hangar and the terminal. Enabling sets context to 1M and compaction to 900K tokens; disabling restores the configuration from before extended context.",
