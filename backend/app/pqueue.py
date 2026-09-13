@@ -274,6 +274,10 @@ def _strip_attach(text: str) -> str:
 # Prefixo que o Claude Code PREPENDA ao prompt quando o texto referencia imagem anexada
 # ("[Image #1]<texto>"; multiplas imagens empilham). A fila guarda o texto SEM ele.
 _IMG_PREFIX = re.compile(r"^(?:\[Image #\d+\])+\s*")
+# Mensagem SO de imagem: o Claude Code grava o caminho como "[Image: source: <path>]" em vez do
+# "📎 imagem: <path>" que o app digitou (2.1.270). Sem traduzir de volta, a entrega nunca casava e
+# o print era redigitado.
+_IMG_SOURCE = re.compile(r"\[Image: source: ([^\]]+)\]")
 
 
 def _chaves_de_commit(text: str) -> set[str]:
@@ -290,7 +294,8 @@ def _chaves_de_commit(text: str) -> set[str]:
     out: set[str] = set()
     t = text.strip()
     base = _IMG_PREFIX.sub("", t)
-    for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+    fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+    for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
         variant = variant.strip()
         if not variant:
             continue
@@ -339,7 +344,8 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     out: set[str] = set()
     for t in pendente:
         base = _IMG_PREFIX.sub("", t)
-        for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+        fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+        for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
             variant = variant.strip()
             if variant:
                 out.add(variant)
@@ -461,7 +467,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
         # mid-turn nunca confirmava e era redigitada ate max_attempts (a entrega tripla de
         # 2026-07-17).
         base = _IMG_PREFIX.sub("", t)
-        for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+        fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+        for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
             variant = variant.strip()
             if not variant:
                 continue
