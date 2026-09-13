@@ -1,14 +1,25 @@
 import json
+import logging
+import os
 import re
+import shutil
+import signal
+import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
+from app import atomico
 from app.models import CommandInfo
 
-# Built-ins comuns do Claude Code. destructive marca os que apagam o contexto ou encerram a
-# sessao (a UI pede confirmacao antes de enviar). Descricoes curtas em pt-BR, sem em-dash.
+_log = logging.getLogger("hangar.commands")
+
+# Fallback quando a CLI ainda nao foi sondada (ou a sonda falhou) e fonte de descricao em pt-BR e
+# da marca destructive (a UI pede confirmacao antes de enviar). A lista de NOMES vem da CLI.
 BUILTINS: list[dict] = [
     {"name": "clear", "description": "Limpa o histórico da conversa", "destructive": True},
     {"name": "compact", "description": "Resume e compacta o contexto", "destructive": True},
@@ -31,6 +42,16 @@ BUILTINS: list[dict] = [
     {"name": "config", "description": "Abre as configurações"},
     {"name": "doctor", "description": "Verifica a saúde da instalação"},
     {"name": "quit", "description": "Encerra a sessão", "destructive": True},
+    # A CLI em `-p` não informa os comandos que só a TUI tem: estes a sonda nunca traz.
+    {"name": "login", "description": "Entra com a conta Anthropic"},
+    {"name": "permissions", "description": "Gerencia as regras de permissão"},
+    {"name": "hooks", "description": "Gerencia os hooks"},
+    {"name": "plugin", "description": "Gerencia plugins e marketplaces"},
+    {"name": "skills", "description": "Lista as skills disponíveis"},
+    {"name": "theme", "description": "Troca o tema do terminal"},
+    {"name": "statusline", "description": "Configura a linha de status"},
+    {"name": "add-dir", "description": "Adiciona um diretório de trabalho", "argumentHint": "<caminho>"},
+    {"name": "review", "description": "Revisa um pull request"},
 ]
 
 # Captura so o bloco YAML entre os '---' do topo do markdown (tolera BOM e CRLF).
@@ -172,23 +193,183 @@ def _scan_plugins(plugins_dir: Path) -> list[dict]:
     return out
 
 
-def list_commands(cwd: Optional[str]) -> list[CommandInfo]:
-    """Built-ins + comandos/skills do projeto (cwd) + skills globais (~/.claude/skills)
-    + skills/comandos de plugins instalados (~/.claude/plugins, namespaced '<plugin>:<nome>').
+_SONDA_TETO_S = 120.0
+_SONDA_RETRY_S = 600.0
+_sonda_trava = threading.Lock()
+_sonda_em_voo: set[str] = set()
+_sonda_falhou_em: dict[str, float] = {}
 
-    Tolerante a diretorios ausentes: cada scan so roda se o diretorio existir. Dedupe por
-    nome preservando a ordem de prioridade (built-in > projeto > global > plugin)."""
+
+def _cache_path() -> Path:
+    return Path.home() / ".hangar" / "claude-slash-commands.json"
+
+
+def _chave_cli(config_dir: Optional[str]) -> Optional[str]:
+    # Binario resolvido + mtime/tamanho = versao instalada, sem pagar um `claude --version` por chamada.
+    exe = shutil.which("claude")
+    if not exe:
+        return None
+    try:
+        real = Path(exe).resolve()
+        st = real.stat()
+    except OSError:
+        return None
+    return f"{real}|{st.st_mtime_ns}|{st.st_size}|{config_dir or ''}"
+
+
+def _ler_cache() -> dict:
+    try:
+        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _gravar_cache(chave: str, comandos: list[dict]) -> None:
+    path = _cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {k: v for k, v in _ler_cache().items() if not k.endswith("|" + chave.rsplit("|", 1)[1])}
+    data[chave] = {"comandos": comandos, "em": time.time()}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    atomico.substituir(tmp, path)
+
+
+def _matar_arvore(proc: subprocess.Popen) -> None:
+    # Hooks de SessionStart sao filhos do claude: matar so o pai deixa eles rodando.
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def sondar_cli(config_dir: Optional[str]) -> list[dict]:
+    """Lista de comandos da propria CLI via `control_request initialize`: a resposta traz nome,
+    descricao e argumentHint, e nao gasta turno (o `system/init` so sai depois de um prompt).
+    Levanta RuntimeError quando nao consegue."""
+    exe = shutil.which("claude")
+    if not exe:
+        raise RuntimeError("binario claude nao encontrado")
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE", "CP_SESSION_NAME", "CP_SESSION_KEY")}
+    # Exportar CLAUDE_CONFIG_DIR=~/.claude nao e o mesmo que nao exportar (ver tmux._config_dir_padrao).
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    extra: dict = {"creationflags": 0x08000000} if os.name == "nt" else {"start_new_session": True}
+    with tempfile.TemporaryDirectory(prefix="hangar-slash-", ignore_cleanup_errors=True) as cwd:
+        proc = subprocess.Popen(
+            [exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+             "--setting-sources", "user"],
+            cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **extra)
+        carrasco = threading.Timer(_SONDA_TETO_S, _matar_arvore, (proc,))
+        carrasco.start()
+        try:
+            assert proc.stdin and proc.stdout
+            proc.stdin.write((json.dumps({"type": "control_request", "request_id": "hangar_slash",
+                                          "request": {"subtype": "initialize"}}) + "\n").encode())
+            proc.stdin.flush()
+            for bruto in proc.stdout:
+                try:
+                    ev = json.loads(bruto)
+                except ValueError:
+                    continue
+                r = ev.get("response") if isinstance(ev, dict) and ev.get("type") == "control_response" else None
+                if not isinstance(r, dict) or r.get("request_id") != "hangar_slash":
+                    continue
+                if r.get("subtype") == "error":
+                    raise RuntimeError(f"initialize recusado: {str(r.get('error'))[:200]}")
+                comandos = (r.get("response") or {}).get("commands")
+                if not isinstance(comandos, list) or not comandos:
+                    raise RuntimeError("initialize sem lista de comandos")
+                return [c for c in comandos if isinstance(c, dict) and isinstance(c.get("name"), str)]
+            raise RuntimeError(f"claude saiu sem responder ao initialize (rc={proc.poll()})")
+        finally:
+            carrasco.cancel()
+            _matar_arvore(proc)
+
+
+def _sondar_em_fundo(chave: str, config_dir: Optional[str]) -> None:
+    try:
+        inicio = time.monotonic()
+        comandos = sondar_cli(config_dir)
+        _gravar_cache(chave, comandos)
+        _log.info("commands: CLI sondada (%d comandos, %.1fs) config_dir=%s", len(comandos),
+                  time.monotonic() - inicio, config_dir or "~/.claude")
+    except Exception as e:  # noqa: BLE001 — thread de fundo: erro escapando sumiria sem log
+        _sonda_falhou_em[chave] = time.monotonic()
+        _log.warning("commands: sonda da CLI falhou (lista fixa no lugar) config_dir=%s: %s",
+                     config_dir or "~/.claude", e)
+    finally:
+        with _sonda_trava:
+            _sonda_em_voo.discard(chave)
+
+
+def comandos_da_cli(config_dir: Optional[str]) -> Optional[list[dict]]:
+    """Lista cacheada por (binario, config_dir). Sem cache: dispara UMA sonda em fundo (custa ~20s
+    de subida da CLI) e devolve None, pro chamador servir a lista fixa enquanto isso."""
+    chave = _chave_cli(config_dir)
+    if chave is None:
+        _log.warning("commands: binario claude nao encontrado; lista fixa no lugar")
+        return None
+    hit = _ler_cache().get(chave)
+    if isinstance(hit, dict) and isinstance(hit.get("comandos"), list):
+        return hit["comandos"]
+    with _sonda_trava:
+        falhou = _sonda_falhou_em.get(chave)
+        if chave in _sonda_em_voo or (falhou and time.monotonic() - falhou < _SONDA_RETRY_S):
+            return None
+        _sonda_em_voo.add(chave)
+    threading.Thread(target=_sondar_em_fundo, args=(chave, config_dir), daemon=True,
+                     name="hangar-slash-sonda").start()
+    return None
+
+
+def list_commands(cwd: Optional[str], cli: Optional[list[dict]] = None,
+                  excluir: frozenset[str] = frozenset(), com_tui: bool = True) -> list[CommandInfo]:
+    """Nomes da CLI (`cli`, quando ja se sabe) ou, sem ela, built-ins fixos + scans. Descricao e
+    argumentHint vem primeiro dos arquivos locais (frontmatter, pt-BR dos built-ins), depois da CLI;
+    nome sem descricao entra mesmo assim. Comandos do projeto (cwd) sempre entram: a sonda roda
+    fora de qualquer projeto. `com_tui` soma os built-ins fixos que a CLI nao informa (sessao com
+    terminal); `excluir` tira nomes que nao tem como rodar nesta sessao."""
     raw: list[dict] = [{**b, "source": "builtin"} for b in BUILTINS]
-
+    projeto: list[dict] = []
     if cwd:
         base = Path(cwd)
-        raw += _scan_project_commands(base / ".claude" / "commands")
-        raw += _scan_skills(base / ".claude" / "skills")
+        projeto = _scan_project_commands(base / ".claude" / "commands") + _scan_skills(base / ".claude" / "skills")
+        raw += projeto
 
+    raw += _scan_project_commands(Path.home() / ".claude" / "commands")
     raw += _scan_skills(Path.home() / ".claude" / "skills")
     raw += _scan_plugins(Path.home() / ".claude" / "plugins")
 
-    seen: set[str] = set()
+    if cli is not None:
+        local: dict[str, dict] = {}
+        for item in raw:
+            local.setdefault(item["name"], item)
+        da_cli = []
+        for c in cli:
+            nome = c["name"]
+            base_item = local.get(nome, {})
+            da_cli.append({
+                "name": nome,
+                "description": base_item.get("description") or _clean(c.get("description")),
+                "argumentHint": base_item.get("argumentHint") or _clean(c.get("argumentHint")),
+                "source": base_item.get("source") or ("plugin" if ":" in nome else "builtin"),
+                "destructive": base_item.get("destructive", False),
+            })
+        raw = da_cli + ([{**b, "source": "builtin"} for b in BUILTINS] if com_tui else []) + projeto
+
+    seen: set[str] = set(excluir)
     out: list[CommandInfo] = []
     for item in raw:
         name = item["name"]

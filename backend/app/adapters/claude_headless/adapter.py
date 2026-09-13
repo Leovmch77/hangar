@@ -148,6 +148,9 @@ class _Sessao:
         self.tokens_msg_chars = 0     # caracteres da mensagem em voo, até o real chegar
         self.pensando_desde: float | None = None
         self.pensou_s = 0.0
+        # Lista do `/` vinda da própria CLI: nomes+descrição do initialize; os só-de-TUI do init.
+        self.comandos: list[dict] | None = None
+        self.comandos_terminal: frozenset[str] = frozenset()
 
     def iniciar_turno(self) -> None:
         self.turno_inicio = time.monotonic()
@@ -703,7 +706,9 @@ class ClaudeHeadlessAdapter:
                 _log.warning("claude headless: initialize sem resposta em %.0fs name=%s", _AVISO_INIT_S, sess.name)
                 self._registrar_problema(sess, "headless_sem_resposta", "\n".join(sess.stderr_tail) or None)
                 await self._notify(sess)
-            await pedido
+            resposta = await pedido
+            if isinstance(resposta, dict) and isinstance(resposta.get("commands"), list):
+                sess.comandos = [c for c in resposta["commands"] if isinstance(c, dict) and isinstance(c.get("name"), str)]
         except asyncio.TimeoutError:
             _log.warning("claude headless: initialize desistiu em %.0fs name=%s", _TETO_INIT_S, sess.name)
         except RuntimeError as e:
@@ -1048,6 +1053,8 @@ class ClaudeHeadlessAdapter:
                 sess.model = ev["model"]
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
+            if isinstance(ev.get("terminal_slash_commands"), list):
+                sess.comandos_terminal = frozenset(str(c) for c in ev["terminal_slash_commands"])
             sess.initialized.set()
         elif sub == "status":
             if ev.get("permissionMode"):
@@ -1289,6 +1296,14 @@ class ClaudeHeadlessAdapter:
                           limited=sess.limited, limit_reset=sess.limit_reset,
                           codex_question=sess.question,
                           problema=sess.problema, problema_detalhe=sess.problema_detalhe)
+
+    def comandos(self, name: str) -> tuple[list[dict] | None, frozenset[str]]:
+        """Lista do `/` que a CLI desta sessão informou (None = ainda não subiu) e os nomes que só
+        rodam na TUI."""
+        sess = self._sessions.get(name)
+        if sess is None:
+            return None, frozenset()
+        return sess.comandos, sess.comandos_terminal
 
     def problema_de(self, name: str) -> tuple[str, str | None] | None:
         sess = self._sessions.get(name)

@@ -168,7 +168,8 @@ def test_commands_route(monkeypatch, tmp_path):
     from app.api import app
     client = TestClient(app)
     with patch("app.api.registry.list",
-               return_value=[SessionInfo(name="cc", cwd=str(tmp_path))]):
+               return_value=[SessionInfo(name="cc", cwd=str(tmp_path))]), \
+            patch("app.api.comandos_da_cli", return_value=None):
         r = client.get("/api/sessions/cc/commands", headers={"Authorization": "Bearer secret"})
     assert r.status_code == 200
     data = r.json()
