@@ -110,6 +110,36 @@ def test_rotulo_do_spinner_conta_tempo_tokens_e_pensamento_como_a_tui(adapter, m
     _run(fluxo())
 
 
+def test_rotulo_da_tool_mostra_o_alvo_enquanto_o_input_escreve(adapter):
+    sess = adapter._sessions["s1"]
+
+    def stream(ev):
+        return adapter._on_event(sess, {"type": "stream_event", "event": ev})
+
+    def pedaco(txt):
+        return stream({"type": "content_block_delta", "index": 1,
+                       "delta": {"type": "input_json_delta", "partial_json": txt}})
+
+    async def fluxo():
+        await stream({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "name": "Bash"}})
+        assert sess.label == "Bash…"
+        await pedaco('{"comm')
+        assert sess.label == "Bash…"
+        await pedaco('and": "uv run py')
+        assert sess.label == "Bash: uv run py"   # string ainda sem aspa final
+        await pedaco('test -k \\"x\\"\\nsegunda linha", "description": "roda"}')
+        assert sess.label == 'Bash: uv run pytest -k "x"'
+        await stream({"type": "content_block_stop", "index": 1})
+        assert sess.label == 'Bash: uv run pytest -k "x"' and sess.tool_json == ""
+        # A mensagem inteira chega depois e mantém o alvo (antes voltava a "Bash…").
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "C:\\repo\\backend\\adapter.py"}}]}})
+        assert sess.label == "Edit: adapter.py"
+    _run(fluxo())
+    assert A._rotulo_tool("Bash", {"command": "x" * 200}) == "Bash: " + "x" * 80 + "…"
+    assert A._rotulo_tool("Grep", A._input_parcial('{"pattern": "def ')) == "Grep: def"
+
+
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
     # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
     ad = ClaudeHeadlessAdapter()

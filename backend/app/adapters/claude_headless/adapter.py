@@ -154,6 +154,9 @@ class _Sessao:
         self.tokens_msg_chars = 0     # caracteres da mensagem em voo, até o real chegar
         self.pensando_desde: float | None = None
         self.pensou_s = 0.0
+        # Input da tool em voo (partial_json acumulado): o rótulo mostra o alvo antes dela rodar.
+        self.tool_nome: str | None = None
+        self.tool_json = ""
         # Lista do `/` vinda da própria CLI: nomes+descrição do initialize; os só-de-TUI do init.
         self.comandos: list[dict] | None = None
         self.comandos_terminal: frozenset[str] = frozenset()
@@ -987,9 +990,9 @@ class ClaudeHeadlessAdapter:
                     await self._nota_local(sess, texto)
                 return
             _aplicar_uso_da_chamada(sess, (ev.get("message") or {}).get("usage"))
-            tools = [b.get("name") for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
+            tools = [b for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:
-                sess.label = f"{tools[-1]}…"
+                sess.label = _rotulo_tool(tools[-1].get("name"), tools[-1].get("input"))
             if any(isinstance(b, dict) and b.get("type") == "text" for b in blocos):
                 # O bloco fechou: o .jsonl já tem a mensagem, a prévia sai de cena.
                 sess.previa = ""
@@ -1154,7 +1157,8 @@ class ClaudeHeadlessAdapter:
                 sess.previa = ""
                 sess.label = None
             elif bloco.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
-                sess.label = f"{bloco.get('name') or 'tool'}…"
+                sess.tool_nome, sess.tool_json = bloco.get("name"), ""
+                sess.label = _rotulo_tool(sess.tool_nome, None)
             elif bloco.get("type") == "thinking":
                 sess.label = "Pensando…"
                 sess.pensando_desde = time.monotonic()
@@ -1168,7 +1172,14 @@ class ClaudeHeadlessAdapter:
             if d.get("type") == "text_delta" and d.get("text"):
                 sess.previa += d["text"]
                 await PushPreviewSource.get(sess.name).push(sess.previa)
+            elif d.get("type") == "input_json_delta" and sess.tool_nome is not None:
+                sess.tool_json += d.get("partial_json") or ""
+                rotulo = _rotulo_tool(sess.tool_nome, _input_parcial(sess.tool_json))
+                if rotulo != sess.label:
+                    sess.label = rotulo
+                    await self._notify(sess)
         elif tipo == "content_block_stop":
+            sess.tool_nome, sess.tool_json = None, ""
             if sess.pensando_desde is not None:
                 sess.pensou_s += time.monotonic() - sess.pensando_desde
                 sess.pensando_desde = None
@@ -1539,6 +1550,41 @@ def _alvo_da_permissao(req: dict) -> tuple[str, str]:
     if len(detalhe) > 200:
         detalhe = detalhe[:200] + "…"
     return str(tool), detalhe
+
+
+_CAMPOS_ALVO = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "description", "prompt")
+_CAMPO_PARCIAL = re.compile(r'"(' + "|".join(_CAMPOS_ALVO) + r')"\s*:\s*"((?:[^"\\]|\\.)*)')
+
+
+def _input_parcial(bruto: str) -> dict:
+    """Input de tool ainda sendo escrito: JSON inteiro se já fechou, senão os campos-alvo cujo
+    valor string já começou (mesmo sem a aspa final)."""
+    try:
+        obj = json.loads(bruto)
+        return obj if isinstance(obj, dict) else {}
+    except ValueError:
+        pass
+    achados: dict = {}
+    for campo, valor in _CAMPO_PARCIAL.findall(bruto):
+        try:
+            achados.setdefault(campo, json.loads(f'"{valor}"'))
+        except ValueError:
+            achados.setdefault(campo, valor)
+    return achados
+
+
+def _rotulo_tool(nome: str | None, inp) -> str:
+    nome = nome or "tool"
+    inp = inp if isinstance(inp, dict) else {}
+    campo = next((c for c in _CAMPOS_ALVO if isinstance(inp.get(c), str) and inp[c].strip()), None)
+    if campo is None:
+        return f"{nome}…"
+    alvo = inp[campo].strip().splitlines()[0]
+    if campo in ("file_path", "notebook_path"):
+        alvo = re.split(r"[\\/]", alvo.rstrip("\\/"))[-1] or alvo
+    if len(alvo) > 80:
+        alvo = alvo[:80] + "…"
+    return f"{nome}: {alvo}"
 
 
 def _modo_do_app(modo: str) -> str:
