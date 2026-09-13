@@ -46,6 +46,9 @@ def _home(monkeypatch, alvo):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(codex_appserver.Path, "home", staticmethod(lambda: alvo))
     monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", alvo / ".codex")
+    # A conta padrão só aparece com o Codex instalado ou `~/.codex` existente; estes testes são
+    # sobre credencial, não sobre instalação — e a máquina do CI não tem o binário.
+    monkeypatch.setattr(codex_contas.shutil, "which", lambda nome: "/usr/bin/codex")
 
 
 def _auth(home, tokens=True):
@@ -269,6 +272,7 @@ def test_fontes_codex_sao_separadas_mesmo_sem_auth(monkeypatch, tmp_path):
     monkeypatch.setattr(__import__("pathlib").Path, "home",
                         classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    monkeypatch.setattr(codex_contas.shutil, "which", lambda nome: "/usr/bin/codex")
     monkeypatch.setattr(cotas, "_codex_auth_cache",
                         lambda home: {"method": "none", "status": "disconnected"})
     work = codex_contas.create_account("work")
