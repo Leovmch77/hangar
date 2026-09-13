@@ -767,6 +767,18 @@ def test_confirm_nao_redigita_com_estado_desconhecido(tmp_path, monkeypatch):
     assert "confirmed" not in row              # senao a msg do usuario sumiria da tela
 
 
+def test_confirm_nunca_redigita_sessao_sem_terminal(tmp_path, monkeypatch):
+    # Sem terminal, a escrita no stdin é a entrega; o .jsonl só ganha a linha depois dos hooks de
+    # UserPromptSubmit. Ocioso + ausente do transcript redigitava: cada recado chegava 2x.
+    import time as _t
+    import app.api as api
+    monkeypatch.setattr(api, "_headless", lambda name: True)
+    chamou, row = _cenario_engolida(tmp_path, monkeypatch, ("idle", _t.time()))
+    assert chamou == []
+    assert row["delivered"] is True and not row.get("attempts")
+    assert "desistiu" not in row and "confirmed" not in row   # segue esperando a prova
+
+
 def test_confirm_ainda_redigita_com_estado_conhecido_ocioso(tmp_path, monkeypatch):
     # O contrario, pra a correcao acima nao matar a feature: estado PROVADAMENTE ocioso e
     # texto ausente do transcript continua sendo re-enfileirado (envio engolido pela TUI).

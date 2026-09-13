@@ -1120,7 +1120,10 @@ def _confirm_and_drain(name: str) -> None:
             _log.warning("confirmacao adiada name=%s: transcript ilegivel agora (nada foi "
                          "reenfileirado nem dado por perdido)", name)
             return
-        if m and m[0] == "working":
+        # Sem terminal não há tecla engolida: a escrita no stdin de um processo vivo é a entrega. O
+        # .jsonl só ganha a linha depois dos hooks de UserPromptSubmit (medido: >8s com plugins), e
+        # "ausente do transcript" virava redigitação — cada recado chegava duas vezes ao agente.
+        if (m and m[0] == "working") or _headless(name):
             # Turno vivo: REDIGITAR e DESISTIR no meio do turno sao perigosos (o texto pode ainda
             # estar na fila interna da TUI — desistiu viraria aviso falso de "nao chegou" sobre
             # msg que chega depois). CONFIRMAR nao: o transcript e a fonte de verdade, e texto
