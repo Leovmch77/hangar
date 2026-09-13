@@ -122,7 +122,7 @@ async def listar_endpoint(request: Request, forcar: bool = False) -> list[Creden
         return {"id": account.id, "auth": auth or {"method": "unknown", "status": "unavailable"},
                 "sync": sync}
 
-    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_accounts())) if service else []
+    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_visible_accounts())) if service else []
     return await asyncio.to_thread(listar, forcar, codex_snapshots=snapshots)
 
 
@@ -165,7 +165,7 @@ def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) ->
         ))
 
     snapshots = {a["id"]: a for a in codex_snapshots}
-    for account in codex_contas.list_accounts():
+    for account in codex_contas.list_visible_accounts():
         cid = f"codex:{account.home.expanduser().resolve(strict=False)}"
         auth = snapshots.get(account.id, {}).get("auth", {})
         status = auth.get("status", "unavailable")

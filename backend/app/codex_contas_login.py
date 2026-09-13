@@ -608,7 +608,7 @@ class CodexContasLogin:
 
     async def accounts_snapshot(self) -> list[dict]:
         result = []
-        for account in accounts.list_accounts():
+        for account in accounts.list_visible_accounts():
             sync = self.preparation_status(account)
             result.append(await self.account_snapshot(
                 account, read_auth=sync.get("status") != "running", sync=sync))

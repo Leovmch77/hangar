@@ -666,7 +666,7 @@ def _fontes() -> list[_Fonte]:
     # Codex: uma linha por raiz registrada. A conta continua visível sem `auth.json`: ausência de
     # credencial é estado da conta, não prova de que ela deixou de existir.
     try:
-        contas_codex = codex_contas.list_accounts()
+        contas_codex = codex_contas.list_visible_accounts()
     except OSError:
         _log.warning("cota: nao consegui listar contas Codex", exc_info=True)
         contas_codex = []
