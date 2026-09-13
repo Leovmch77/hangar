@@ -2134,6 +2134,7 @@
   "erro_sessao_nao_pareada": "sessão não está pareada",
   "erro_terminal_aberto": "Terminal aberto nesta sessão. Feche o painel pra responder por aqui.",
   "erro_btw_so_claude": "pergunta lateral só existe em sessão Claude",
+  "erro_btw_sem_terminal": "pergunta lateral precisa do terminal; esta sessão não tem",
   "erro_btw_vazia": "pergunta vazia",
   "erro_btw_nao_abriu": "o /btw não abriu no terminal da sessão",
   "erro_btw_sem_resposta": "o /btw não respondeu a tempo",

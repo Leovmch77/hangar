@@ -2134,6 +2134,7 @@
   "erro_sessao_nao_pareada": "session is not paired",
   "erro_terminal_aberto": "Terminal open in this session. Close the panel to reply here.",
   "erro_btw_so_claude": "side questions only exist in Claude sessions",
+  "erro_btw_sem_terminal": "side questions need a terminal; this session has none",
   "erro_btw_vazia": "empty question",
   "erro_btw_nao_abriu": "/btw did not open in the session's terminal",
   "erro_btw_sem_resposta": "/btw did not answer in time",

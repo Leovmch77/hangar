@@ -284,6 +284,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),
   erro_btw_so_claude: () => m.erro_btw_so_claude(),
+  erro_btw_sem_terminal: () => m.erro_btw_sem_terminal(),
   erro_btw_vazia: () => m.erro_btw_vazia(),
   erro_btw_nao_abriu: () => m.erro_btw_nao_abriu(),
   erro_btw_sem_resposta: () => m.erro_btw_sem_resposta(),

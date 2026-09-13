@@ -243,3 +243,15 @@ def test_composer_ilegivel_uma_vez_relê_e_segue(falso, monkeypatch):
     leituras = iter(["", None, "/btwq"])
     monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: next(leituras))
     assert btw.perguntar("s", "q")["answer"] == "4"
+
+
+def test_sessao_sem_terminal_recusa_antes_de_tocar_no_tmux(monkeypatch):
+    # A CLI sem terminal responde "/btw isn't available in this environment": não há pane pra dirigir.
+    from fastapi import HTTPException
+
+    from app import api
+    monkeypatch.setattr(api, "_headless", lambda name: True)
+    monkeypatch.setattr(api, "_pane_info", lambda name: pytest.fail("não devia olhar o pane"))
+    with pytest.raises(HTTPException) as e:
+        api._exige_claude_de_terminal("s1")
+    assert e.value.status_code == 400 and e.value.detail["code"] == "erro_btw_sem_terminal"

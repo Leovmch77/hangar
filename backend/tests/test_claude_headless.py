@@ -12,6 +12,8 @@ from app.adapters.claude_headless import sessions as S
 from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _Sessao
 from app.adapters.preview_push import PushPreviewSource
 
+_ESFORCO_PADRAO_REAL = A._esforco_padrao
+
 
 class _Proc:
     returncode = None
@@ -27,6 +29,8 @@ def sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
     monkeypatch.setattr(PushPreviewSource, "_sources", {})
     monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
+    # Sem config_dir o esforço padrão viria do ~/.claude/settings.json de quem roda os testes.
+    monkeypatch.setattr(A, "_esforco_padrao", lambda config_dir: None)
     return S.save("s1", str(tmp_path), "11111111-1111-1111-1111-111111111111", model="haiku", permission_mode="manual")
 
 
@@ -59,16 +63,184 @@ def test_prompt_vai_pro_stdin_e_turno_fecha_no_result(adapter):
         await adapter._on_event(sess, {"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "text"}}})
         await adapter._on_event(sess, {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}}})
         assert PushPreviewSource.get("s1").text == "ok"
-        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}})
+        await adapter._on_event(sess, {"type": "assistant", "message": {
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 2, "cache_read_input_tokens": 39000, "output_tokens": 4}}})
         assert PushPreviewSource.get("s1").text == ""
         await adapter._on_event(sess, {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.04,
                                        "usage": {"input_tokens": 2, "cache_read_input_tokens": 39000, "output_tokens": 4},
                                        "modelUsage": {"claude-haiku-4-5": {"contextWindow": 200000}}})
         assert sess.state == "idle" and await adapter.deliverable("s1")
-        assert adapter.status_line(sess) == "🤖 haiku │ 💬 39k/4 39k/200k │ 💵 $0.04"
+        assert adapter.status_line(sess) == "🤖 Haiku │ 💬 39k/4 39k/200k │ 💵 $0.04"
     _run(fluxo())
     msg = adapter.escritos[0]
     assert msg["type"] == "user" and msg["message"]["content"] == [{"type": "text", "text": "oi"}]
+
+
+def test_rotulo_do_spinner_conta_tempo_tokens_e_pensamento_como_a_tui(adapter, monkeypatch):
+    relogio = [1000.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
+    sess = adapter._sessions["s1"]
+
+    def stream(ev):
+        return adapter._on_event(sess, {"type": "stream_event", "event": ev})
+
+    async def fluxo():
+        assert await adapter.send_prompt("s1", "oi") == "sent"
+        assert adapter._evento(sess).label == "Trabalhando… (0s)"
+        # 1ª chamada: pensa 2s, escreve, fecha com o output_tokens real.
+        await stream({"type": "message_start", "message": {"usage": {"output_tokens": 1}}})
+        await stream({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}})
+        relogio[0] += 2.5
+        assert adapter._evento(sess).label == "Pensando… (2s · thought for 2s)"
+        await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "x" * 400}})
+        await stream({"type": "content_block_stop", "index": 0})
+        await stream({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "name": "Bash"}})
+        assert adapter._evento(sess).label == "Bash… (2s · ↓ 100 tokens · thought for 2s)"   # estimativa
+        await stream({"type": "message_delta", "usage": {"output_tokens": 334}})
+        assert adapter._evento(sess).label == "Bash… (2s · ↓ 334 tokens · thought for 2s)"   # real
+        # 2ª chamada soma, e o tempo passa de um minuto.
+        relogio[0] += 80
+        await stream({"type": "message_start", "message": {"usage": {"output_tokens": 1}}})
+        await stream({"type": "message_delta", "usage": {"output_tokens": 900}})
+        assert adapter._evento(sess).label == "Bash… (1m 22s · ↓ 1.2k tokens · thought for 2s)"
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {}})
+        assert sess.turno_inicio is None and adapter._evento(sess).label is None
+        await sess.drenador
+    _run(fluxo())
+
+
+def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
+    # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
+    ad = ClaudeHeadlessAdapter()
+    chamadas = []
+
+    async def ensure_falso(name, **kw):
+        chamadas.append(kw)
+        return None
+    monkeypatch.setattr(ad, "ensure_running", ensure_falso)
+
+    async def fluxo():
+        assert await ad.deliverable("s1") is False
+        ad.acordar("s1")
+        await asyncio.sleep(0)
+        await asyncio.gather(*ad._tarefas)
+    _run(fluxo())
+    assert chamadas == [{"esperar_pronta": False}]
+
+
+def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapter, monkeypatch):
+    sess = adapter._sessions["s1"]
+    monkeypatch.setattr(A, "_AVISO_INIT_S", 0.01)
+    liberar = asyncio.Event
+    drenou = []
+
+    async def fluxo():
+        solta = liberar()
+
+        async def ctrl_lento(s, subtype, **kw):
+            await solta.wait()
+            return {}
+        monkeypatch.setattr(adapter, "_ctrl", ctrl_lento)
+        monkeypatch.setattr(adapter, "_agendar_cota", lambda s: None)
+
+        async def drenar(s):
+            drenou.append(s.name)
+        monkeypatch.setattr(adapter, "_drenar_fim_de_turno", drenar)
+        sess.iniciando = True
+        sess.iniciar_turno()
+        tarefa = asyncio.create_task(adapter._esperar_initialize(sess))
+        await asyncio.sleep(0)
+        ev = adapter._evento(sess)
+        assert ev.state == "working" and ev.label.startswith("Iniciando sessão… (")
+        assert await adapter.deliverable("s1") is False       # prompt vai pra fila, não pro stdin
+        await asyncio.sleep(0.05)
+        assert sess.problema == "headless_sem_resposta"        # passou do aviso: fica à vista
+        solta.set()
+        await tarefa
+        assert not sess.iniciando and sess.initialized.is_set() and sess.problema is None
+        assert adapter._evento(sess).state == "idle" and drenou == ["s1"]
+    _run(fluxo())
+
+
+def test_contexto_vem_da_ultima_chamada_nao_da_soma_do_turno(adapter):
+    # Turno com 3 chamadas de ~70k: o `usage` do result soma as três (210k) e pintava o anel cheio.
+    sess = adapter._sessions["s1"]
+    sess.model = "claude-opus-5[1m]"
+
+    async def fluxo():
+        for cache in (69000, 70000, 71000):
+            await adapter._on_event(sess, {"type": "assistant", "message": {
+                "content": [{"type": "tool_use", "name": "Bash"}],
+                "usage": {"input_tokens": 2, "cache_read_input_tokens": cache, "output_tokens": 100}}})
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "total_cost_usd": 0.5,
+                                       "usage": {"input_tokens": 6, "cache_read_input_tokens": 210000, "output_tokens": 300},
+                                       "modelUsage": {"claude-opus-5[1m]": {"contextWindow": 1000000}}})
+        # Interrupt: uso zerado não apaga o contexto que valia.
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [], "usage": {"input_tokens": 0}}})
+    _run(fluxo())
+    assert adapter.status_line(sess) == "🤖 Opus5·1M │ 💬 71k/100 71k/1M │ 💵 $0.50"
+
+
+def test_contexto_apos_religar_le_a_ultima_chamada_do_transcript(adapter):
+    sess = adapter._sessions["s1"]
+    caminho = adapter.transcript_path_de(sess.meta)
+    A.Path(caminho).parent.mkdir(parents=True, exist_ok=True)
+    linhas = [
+        {"type": "assistant", "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 50000}}},
+        {"type": "assistant", "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 80000}}},
+        {"type": "assistant", "isSidechain": True, "message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 3000}}},
+        {"type": "user", "message": {"content": "ok"}},
+    ]
+    A.Path(caminho).write_text("\n".join(json.dumps(x) for x in linhas) + "\n", encoding="utf-8")
+    result = json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 1.0,
+                         "usage": {"input_tokens": 9, "cache_read_input_tokens": 900000},
+                         "modelUsage": {"claude-haiku-4-5": {"contextWindow": 200000}}})
+    _run(adapter._aplicar_snapshot(sess, {"ultimo_result": result}))
+    assert sess.usage["cache_read_input_tokens"] == 80000
+
+
+def test_aviso_de_cota_nao_e_limite(adapter):
+    sess = adapter._sessions["s1"]
+
+    async def fluxo(status):
+        await adapter._on_event(sess, {"type": "rate_limit_event", "rate_limit_info": {
+            "status": status, "resetsAt": 1789362000, "rateLimitType": "seven_day"}})
+    _run(fluxo("allowed_warning"))
+    assert not sess.limited and sess.limit_reset is None
+    _run(fluxo("rejected"))
+    assert sess.limited and sess.limit_reset
+    _run(fluxo("allowed"))
+    assert not sess.limited and sess.limit_reset is None
+
+
+@pytest.mark.parametrize("modelo, rotulo", [
+    ("claude-opus-5[1m]", "Opus5·1M"),
+    ("claude-opus-5", "Opus5"),
+    ("claude-sonnet-5", "Sonnet 5"),
+    ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+    ("claude-fable-5-1", "Fable 5.1"),
+    ("opus", "Opus"),
+    ("kimi-k3", "kimi-k3"),
+])
+def test_rotulo_do_modelo_na_grafia_da_statusline(modelo, rotulo):
+    assert A._rotulo_modelo(modelo) == rotulo
+
+
+def test_esforco_cai_no_padrao_da_conta(adapter, tmp_path, monkeypatch):
+    monkeypatch.setattr(A, "_esforco_padrao", _ESFORCO_PADRAO_REAL)   # tira o stub da fixture
+    monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)
+    (tmp_path / "conta").mkdir()
+    (tmp_path / "conta" / "settings.json").write_text('{"effortLevel": "high"}', encoding="utf-8")
+    assert A._esforco_padrao(str(tmp_path / "conta")) == "high"
+    assert A._esforco_padrao(str(tmp_path / "sem-conta")) is None
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+    assert A._esforco_padrao(str(tmp_path / "conta")) == "max"
+    sess = adapter._sessions["s1"]
+    sess.meta = {**sess.meta, "config_dir": str(tmp_path / "conta")}
+    assert adapter.status_line(sess) == "🤖 Haiku (max)"
+    sess.effort = "low"   # escolhido na sessão vence o padrão
+    assert adapter.status_line(sess) == "🤖 Haiku (low)"
 
 
 def test_permissao_vira_awaiting_e_opcao_responde(adapter):
@@ -485,8 +657,7 @@ def test_permissao_decidida_por_hook_e_negacao_automatica_viram_nota(adapter, tm
     _run(fluxo())
     notas = [r["text"] for r in q.load() if r.get("papel") == "assistant"]
     assert notas == ["⚙️ Permitir Bash? ls — decidido por hook, sem você",
-                     "⚙️ Pergunta cancelada antes da resposta: Qual banco?",
-                     "⛔ Negado sem perguntar (1): Edit /x.py"]
+                     "⚙️ Pergunta cancelada antes da resposta: Qual banco?"]
     q.clear()
 
 

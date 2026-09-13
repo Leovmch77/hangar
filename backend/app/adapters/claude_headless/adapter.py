@@ -53,7 +53,11 @@ _SANITIZE_RE = re.compile(r"[^A-Za-z0-9]")
 # (é Claude para o front, comandos, estatísticas e cotas); só o transporte é outro.
 CHAVE = "claude-headless"
 
-_TETO_INIT_S = 25.0        # os hooks de SessionStart rodam antes do initialize responder
+# Os hooks de SessionStart rodam antes do initialize responder, e com muitos plugins passam de 20s.
+# Até o aviso a sessão só aparece "Iniciando…"; depois dele o problema fica à vista, mas a espera
+# segue até o teto — resposta tardia limpa o problema.
+_AVISO_INIT_S = 60.0
+_TETO_INIT_S = 180.0
 _TETO_CTRL_S = 15.0
 _TETO_CANO_S = 10.0        # do spawn do cano até ele escutar
 _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
@@ -136,6 +140,41 @@ class _Sessao:
         self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
         self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
         self.tipos_desconhecidos: set[str] = set()  # eventos do stdout já avisados (uma nota por tipo)
+        self.iniciando = False     # processo novo esperando o `initialize` (hooks de SessionStart)
+        # Contadores do turno em voo, pro rótulo "(7s · ↓ 334 tokens · thought for 2s)" da TUI.
+        self.turno_inicio: float | None = None
+        self.tokens_fechados = 0      # output_tokens das mensagens já fechadas do turno
+        self.tokens_msg: int | None = None   # output_tokens real da mensagem em voo (message_delta)
+        self.tokens_msg_chars = 0     # caracteres da mensagem em voo, até o real chegar
+        self.pensando_desde: float | None = None
+        self.pensou_s = 0.0
+
+    def iniciar_turno(self) -> None:
+        self.turno_inicio = time.monotonic()
+        self.tokens_fechados = self.tokens_msg_chars = 0
+        self.tokens_msg = self.pensando_desde = None
+        self.pensou_s = 0.0
+
+    def fechar_mensagem(self) -> None:
+        self.tokens_fechados += self._tokens_da_mensagem()
+        self.tokens_msg, self.tokens_msg_chars = None, 0
+
+    def _tokens_da_mensagem(self) -> int:
+        return self.tokens_msg if self.tokens_msg is not None else self.tokens_msg_chars // 4
+
+    def rotulo_turno(self) -> str | None:
+        if self.turno_inicio is None:
+            return None
+        agora = time.monotonic()
+        seg = int(agora - self.turno_inicio)
+        partes = [f"{seg // 60}m {seg % 60}s" if seg >= 60 else f"{seg}s"]
+        tokens = self.tokens_fechados + self._tokens_da_mensagem()
+        if tokens:
+            partes.append(f"↓ {tokens / 1000:.1f}k tokens" if tokens >= 1000 else f"↓ {tokens} tokens")
+        pensou = self.pensou_s + (agora - self.pensando_desde if self.pensando_desde is not None else 0)
+        if pensou >= 1:
+            partes.append(f"thought for {int(pensou)}s")
+        return f"({' · '.join(partes)})"
 
     @property
     def sid(self) -> str:
@@ -183,13 +222,33 @@ class ClaudeHeadlessAdapter:
         return self._delivery_locks.setdefault(name, asyncio.Lock())
 
     async def deliverable(self, name: str) -> bool:
+        # Parada ou subindo: o prompt vai pra fila e a resposta HTTP sai na hora. Quem sobe é o
+        # `acordar`, e quem entrega é o fim do `initialize` — nunca o POST esperando os hooks.
         sess = self._sessions.get(name)
         if sess is None:
-            return hl_sessions.exists(name)
-        return not (sess.in_progress or sess.pending or sess.question)
+            return False
+        return not (sess.iniciando or sess.in_progress or sess.pending or sess.question)
+
+    def acordar(self, name: str) -> None:
+        """Sobe (ou religa) a sessão em segundo plano e entrega a fila quando ela estiver pronta."""
+        sess = self._sessions.get(name)
+        if sess is not None and sess.vivo:
+            return
+        t = asyncio.get_running_loop().create_task(self._acordar(name))
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
+
+    async def _acordar(self, name: str) -> None:
+        try:
+            sess = await self.ensure_running(name, esperar_pronta=False)
+        except Exception:
+            return   # ensure_running já registrou o problema que a tela mostra
+        if sess is not None and not sess.iniciando:
+            # Religou num cano vivo (sem initialize a esperar): ninguém mais drenaria a fila.
+            await self._drenar_fim_de_turno(sess)
 
     async def send_prompt(self, name: str, text: str) -> str:
-        sess = await self.ensure_running(name)
+        sess = await self.ensure_running(name, esperar_pronta=False)
         if sess is None or not await self.deliverable(name):
             return "deferred"
         try:
@@ -200,6 +259,7 @@ class ClaudeHeadlessAdapter:
         sess.in_progress = True
         sess.state = "working"
         sess.label = None
+        sess.iniciar_turno()
         await self._notify(sess)
         return "sent"
 
@@ -448,7 +508,15 @@ class ClaudeHeadlessAdapter:
     # de um restart — o processo, o turno em voo e a permissão pendente sobrevivem. Ver o
     # snapshot em cano.py e a decisão em docs/decisoes/harnesses.md.
 
-    async def ensure_running(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
+    async def ensure_running(self, name: str, *, so_reconectar: bool = False,
+                             esperar_pronta: bool = True) -> _Sessao | None:
+        sess = await self._ligar(name, so_reconectar=so_reconectar)
+        if sess is not None and esperar_pronta and sess.iniciando:
+            # Controles (set_model, modo, lista de modelos) só valem depois do `initialize`.
+            await asyncio.wait_for(sess.initialized.wait(), _TETO_INIT_S + 5)
+        return sess
+
+    async def _ligar(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
@@ -619,17 +687,39 @@ class ClaudeHeadlessAdapter:
         for linha in snap.get("stderr_tail") or []:
             sess.stderr_tail.append(linha)
         _log.info("claude headless: subiu name=%s cano=%s claude=%s resume=%s", sess.name, proc.pid, sess.proc.pid, resume)
+        sess.iniciando = True
+        sess.iniciar_turno()      # relógio do "Iniciando sessão… (Ns)"
+        t = asyncio.create_task(self._esperar_initialize(sess))
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
+
+    async def _esperar_initialize(self, sess: _Sessao) -> None:
+        pedido = asyncio.ensure_future(self._ctrl(sess, "initialize"))
         try:
-            await asyncio.wait_for(self._ctrl(sess, "initialize"), _TETO_INIT_S)
+            feito, _ = await asyncio.wait({pedido}, timeout=_AVISO_INIT_S)
+            if not feito:
+                # Normalmente é a CLI parada numa pergunta que só o terminal responderia (confiança
+                # na pasta, login). A espera continua: hook lento responde e limpa o problema.
+                _log.warning("claude headless: initialize sem resposta em %.0fs name=%s", _AVISO_INIT_S, sess.name)
+                self._registrar_problema(sess, "headless_sem_resposta", "\n".join(sess.stderr_tail) or None)
+                await self._notify(sess)
+            await pedido
         except asyncio.TimeoutError:
-            # Normalmente é a CLI parada numa pergunta que só o terminal responderia (confiança
-            # na pasta, login). Segue vivo, mas o problema fica à vista.
-            _log.warning("claude headless: initialize sem resposta em %.0fs name=%s", _TETO_INIT_S, sess.name)
-            self._registrar_problema(sess, "headless_sem_resposta", "\n".join(sess.stderr_tail) or None)
+            _log.warning("claude headless: initialize desistiu em %.0fs name=%s", _TETO_INIT_S, sess.name)
+        except Exception:
+            _log.warning("claude headless: initialize falhou name=%s", sess.name, exc_info=True)
         else:
-            self._limpar_problema(sess)
-        sess.initialized.set()
+            if sess.problema == "headless_sem_resposta":
+                self._limpar_problema(sess)
+        finally:
+            sess.iniciando = False
+            if not sess.in_progress:
+                sess.turno_inicio = None
+            sess.initialized.set()
+        await self._notify(sess)
         self._agendar_cota(sess)
+        # O que chegou enquanto subia está na fila: sai agora, na ordem.
+        await self._drenar_fim_de_turno(sess)
 
     async def _conectar(self, cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
         """Abre a conexão com o cano e lê o snapshot. None = não há cano escutando ali (morto, ou
@@ -684,6 +774,13 @@ class ClaudeHeadlessAdapter:
                 self._aplicar_uso(sess, ev)
             else:
                 await self._on_event(sess, ev)
+        if sess.usage is None:
+            # O snapshot só guarda o `result`, que não diz o contexto: a última chamada está no .jsonl.
+            try:
+                uso = await asyncio.to_thread(_uso_da_ultima_chamada, self.transcript_path_de(sess.meta))
+            except (KeyError, TypeError):
+                uso = None
+            _aplicar_uso_da_chamada(sess, uso)
         sess.initialized.set()
         if snap.get("aberto"):
             sess.in_progress = True
@@ -745,7 +842,7 @@ class ClaudeHeadlessAdapter:
                 _esquecer_cano(sess.name, ((sess.meta or {}).get("cano") or {}).get("pid"))
             # A CLI apanha o SIGTERM e sai com 143 (128+15), não com -15 — só o nosso encerramento
             # marca `encerrando`; qualquer outra saída não-zero é queda (-1 = o cano sumiu).
-            caiu = not sess.encerrando and not sess.desligando and rc not in (0, None, -signal.SIGTERM, -signal.SIGKILL)
+            caiu = not sess.encerrando and not sess.desligando and rc not in (0, None, -signal.SIGTERM, -getattr(signal, "SIGKILL", signal.SIGTERM))
             if caiu:
                 self._registrar_problema(sess, "headless_processo_caiu",
                                          f"rc={rc}\n" + "\n".join(sess.stderr_tail))
@@ -829,6 +926,7 @@ class ClaudeHeadlessAdapter:
                 if texto:
                     await self._nota_local(sess, texto)
                 return
+            _aplicar_uso_da_chamada(sess, (ev.get("message") or {}).get("usage"))
             tools = [b.get("name") for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:
                 sess.label = f"{tools[-1]}…"
@@ -865,6 +963,7 @@ class ClaudeHeadlessAdapter:
             return
         if t == "result":
             sess.in_progress = False
+            sess.turno_inicio = None
             sess.pending.clear()
             sess.question = None
             sess.label = None
@@ -891,13 +990,8 @@ class ClaudeHeadlessAdapter:
                 # Comando local "dando certo" não diz nada da saúde da sessão (e apagaria o
                 # problema que a própria resposta dele acabou de registrar, ex.: /effort recusado).
                 self._limpar_problema(sess)
-            negadas = [d for d in (ev.get("permission_denials") or []) if isinstance(d, dict)]
-            if negadas:
-                # Negadas pelo modo/regra sem perguntar (dontAsk, deny rule): no terminal fica a
-                # linha vermelha; aqui o turno só "terminava" sem dizer o que faltou.
-                itens = "; ".join(" ".join(_alvo_da_permissao({"tool_name": d.get("tool_name"), "input": d.get("tool_input")})).strip()
-                                  for d in negadas[:5])
-                await self._nota_local(sess, f"⛔ Negado sem perguntar ({len(negadas)}): {itens}")
+            # `permission_denials` (hook, regra deny, dontAsk) NÃO vira nota: cada negação já está no
+            # .jsonl como tool_result com o motivo, e o card da ferramenta mostra igual ao terminal.
             self._aplicar_uso(sess, ev)
             self._recalcular_estado(sess)
             await PushPreviewSource.get(sess.name).push("")
@@ -921,7 +1015,9 @@ class ClaudeHeadlessAdapter:
             return
         if t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
-            sess.limited = info.get("status") not in (None, "allowed")
+            # Só `rejected` é bloqueio. `allowed_warning` é a janela passando de um patamar com
+            # a cota ainda livre — pintá-lo como limite mostrava "volta HH:MM" sem limite nenhum.
+            sess.limited = info.get("status") == "rejected"
             sess.limit_reset = _hora_local(info.get("resetsAt")) if sess.limited else None
             await self._notify(sess)
             return
@@ -999,13 +1095,29 @@ class ClaudeHeadlessAdapter:
                 sess.label = f"{bloco.get('name') or 'tool'}…"
             elif bloco.get("type") == "thinking":
                 sess.label = "Pensando…"
+                sess.pensando_desde = time.monotonic()
             await self._notify(sess)
         elif tipo == "content_block_delta":
             d = e.get("delta") or {}
+            pedaco = d.get("text") or d.get("thinking") or d.get("partial_json") or ""
+            # Estimativa enquanto a mensagem escreve (o `output_tokens` real só chega no fim dela);
+            # o tique de 1s do stream leva o número pra tela, sem notificar a cada delta.
+            sess.tokens_msg_chars += len(pedaco)
             if d.get("type") == "text_delta" and d.get("text"):
                 sess.previa += d["text"]
                 await PushPreviewSource.get(sess.name).push(sess.previa)
+        elif tipo == "content_block_stop":
+            if sess.pensando_desde is not None:
+                sess.pensou_s += time.monotonic() - sess.pensando_desde
+                sess.pensando_desde = None
+        elif tipo == "message_delta":
+            real = (e.get("usage") or {}).get("output_tokens")
+            if isinstance(real, int):
+                sess.tokens_msg = real
         elif tipo == "message_start":
+            sess.fechar_mensagem()
+            if sess.turno_inicio is None:
+                sess.iniciar_turno()
             if not sess.in_progress:
                 # Turno iniciado por outro caminho (steer, hook): o estado acompanha o stream.
                 sess.in_progress = True
@@ -1034,18 +1146,15 @@ class ClaudeHeadlessAdapter:
 
     @staticmethod
     def _aplicar_uso(sess: _Sessao, ev: dict) -> None:
-        """Custo, uso e janela de contexto de um `result` — também do que veio no snapshot."""
+        """Custo e janela de contexto de um `result` — também do que veio no snapshot. O `usage`
+        dele é a SOMA das chamadas do turno (cada uma relê o cache inteiro), não o contexto: o
+        contexto sai da última chamada (`_aplicar_uso_da_chamada`)."""
         if isinstance(ev.get("total_cost_usd"), (int, float)):
             sess.cost = float(ev["total_cost_usd"])
-        u = ev.get("usage")
-        # Turno interrompido vem com uso zerado: o contexto anterior continua valendo.
-        if isinstance(u, dict) and any(u.get(k) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
-            sess.usage = u
-            mu = ev.get("modelUsage") or {}
-            for m, dados in mu.items():
-                if isinstance(dados, dict) and dados.get("contextWindow"):
-                    sess.model = sess.model or m
-                    sess.context_window = int(dados["contextWindow"])
+        for m, dados in (ev.get("modelUsage") or {}).items():
+            if isinstance(dados, dict) and dados.get("contextWindow"):
+                sess.model = sess.model or m
+                sess.context_window = int(dados["contextWindow"])
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
         antes = sess.state
@@ -1099,9 +1208,10 @@ class ClaudeHeadlessAdapter:
     def status_line(self, sess: _Sessao) -> str | None:
         parts: list[str] = []
         if sess.model:
-            seg = f"🤖 {sess.model}"
-            if sess.effort:
-                seg += f" ({sess.effort})"
+            seg = f"🤖 {_rotulo_modelo(sess.model)}"
+            esforco = sess.effort or _esforco_padrao(sess.meta.get("config_dir"))
+            if esforco:
+                seg += f" ({esforco})"
             parts.append(seg)
         u = sess.usage or {}
         usado = (u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0)
@@ -1157,7 +1267,13 @@ class ClaudeHeadlessAdapter:
             req = next(iter(sess.pending.values()))
             question = self._permissao_texto(req)
             options = list(OPCOES_PERMISSAO) + ([OPCAO_SEMPRE] if _sugestoes_de(req) else [])
-        return StateEvent(session=sess.name, state=sess.state, label=sess.label,
+        label, state = sess.label, sess.state
+        if sess.iniciando and state == "idle":
+            # Sem terminal, este é o único sinal de que o prompt foi aceito e a sessão está subindo.
+            state, label = "working", "Iniciando sessão…"
+        if state == "working" and (contas := sess.rotulo_turno()):
+            label = f"{label or 'Trabalhando…'} {contas}"
+        return StateEvent(session=sess.name, state=state, label=label,
                           question=question, options=options,
                           status_line=self.status_line(sess),
                           claude_permission_mode=sess.permission_mode,
@@ -1202,7 +1318,7 @@ class ClaudeHeadlessAdapter:
                 yield StateEvent(session=name, state="idle",
                                  claude_permission_mode=meta.get("permission_mode"),
                                  claude_previous_non_plan=meta.get("previous_non_plan"),
-                                 status_line=(f"🤖 {meta['model']}" if meta.get("model") else None),
+                                 status_line=(f"🤖 {_rotulo_modelo(meta['model'])}" if meta.get("model") else None),
                                  problema=prob[0] if prob else None,
                                  problema_detalhe=prob[1] if prob else None)
                 while True:
@@ -1216,7 +1332,13 @@ class ClaudeHeadlessAdapter:
             last = -1
             while True:
                 async with sess.cond:
-                    await sess.cond.wait_for(lambda: sess.version != last)
+                    # Turno em voo: tique de 1s, senão o relógio e os tokens do rótulo ficam parados
+                    # entre dois eventos (uma tool longa não emite nada).
+                    try:
+                        await asyncio.wait_for(sess.cond.wait_for(lambda: sess.version != last),
+                                               1.0 if sess.turno_inicio is not None else None)
+                    except TimeoutError:
+                        pass
                     last = sess.version
                     ev = self._evento(sess)
                 if ev.state == "dead":
@@ -1342,6 +1464,72 @@ def _dir_marcadores(meta: dict) -> Path:
 def _sugestoes_de(req: dict) -> list[dict]:
     s = req.get("permission_suggestions")
     return [x for x in s if isinstance(x, dict)] if isinstance(s, list) else []
+
+
+def _aplicar_uso_da_chamada(sess: _Sessao, u) -> None:
+    """Contexto = o que UMA chamada mandou pro modelo. Uso zerado (interrupt, comando local) não
+    apaga o contexto anterior."""
+    if isinstance(u, dict) and any(u.get(k) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
+        sess.usage = u
+
+
+_TAIL_TRANSCRIPT = 512 << 10
+
+
+def _uso_da_ultima_chamada(path: str) -> dict | None:
+    """`usage` da última mensagem do assistente no .jsonl (fora de subagente), ou None."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - _TAIL_TRANSCRIPT))
+            linhas = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for linha in reversed(linhas):
+        if '"assistant"' not in linha:
+            continue
+        try:
+            o = json.loads(linha)
+        except ValueError:
+            continue   # a primeira linha do corte, ou uma escrita em andamento
+        if o.get("type") != "assistant" or o.get("isSidechain"):
+            continue
+        u = (o.get("message") or {}).get("usage")
+        if isinstance(u, dict) and any(u.get(k) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
+            return u
+    return None
+
+
+_FAMILIAS = ("opus", "sonnet", "haiku", "fable")
+
+
+def _rotulo_modelo(modelo: str) -> str:
+    """`claude-opus-5[1m]` -> `Opus5·1M`, a mesma grafia da statusline das sessões no tmux (que
+    parte do display_name). Id que não é de família conhecida (motor, alias) passa como veio."""
+    base = modelo.strip()
+    um = base.lower().endswith("[1m]")
+    if um:
+        base = base[:-4]
+    partes = base.lower().removeprefix("claude-").split("-")
+    if not partes or partes[0] not in _FAMILIAS:
+        return modelo
+    versao = ".".join(p for p in partes[1:] if p.isdigit() and len(p) < 8)   # 8 dígitos = data
+    familia = partes[0].capitalize()
+    rotulo = (f"{familia}{versao}" if familia == "Opus" else f"{familia} {versao}").strip()
+    return rotulo + ("·1M" if um else "")
+
+
+def _esforco_padrao(config_dir: str | None) -> str | None:
+    """Esforço que a CLI usa quando a sessão não escolheu nenhum: env, depois o settings da conta."""
+    env = os.environ.get("CLAUDE_CODE_EFFORT_LEVEL")
+    if env:
+        return env
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    try:
+        nivel = json.loads((base / "settings.json").read_text(encoding="utf-8")).get("effortLevel")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return nivel if isinstance(nivel, str) and nivel else None
 
 
 def _hora_local(epoch) -> str | None:

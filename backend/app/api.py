@@ -2978,10 +2978,15 @@ async def _enviar(name: str, text: str) -> dict:
 
 async def _send_one_headless(name: str, text: str, *, track_entry: bool = False) -> dict:
     """Mesmo caminho de fila do Codex (adapter em vez de tty), com o adapter do Claude sem terminal."""
-    async with get_adapter(CLAUDE_HEADLESS).delivery_lock(name):
+    adapter = get_adapter(CLAUDE_HEADLESS)
+    async with adapter.delivery_lock(name):
         if not await asyncio.to_thread(_session_exists, name):
             return {"ok": False, "error": erro("erro_sessao_inexistente", "sessao nao encontrada")}
-        return await _send_one_codex_locked(name, text, track_entry=track_entry, chave=CLAUDE_HEADLESS)
+        res = await _send_one_codex_locked(name, text, track_entry=track_entry, chave=CLAUDE_HEADLESS)
+    if res.get("ok") and not res.get("delivered"):
+        # Parada: o prompt já está na fila e a resposta sai agora; a sessão sobe e entrega depois.
+        adapter.acordar(name)
+    return res
 
 
 async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = False,
@@ -4099,6 +4104,9 @@ async def interrupt(name: str, clear: bool = False):
 
 def _exige_claude_de_terminal(name: str) -> None:
     # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
+    # Claude sem terminal também não — a CLI responde "/btw isn't available in this environment".
+    if _headless(name):
+        raise HTTPException(400, detail=erro("erro_btw_sem_terminal", "pergunta lateral precisa do terminal; esta sessão não tem"))
     provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
     if provider != "claude":
         raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
