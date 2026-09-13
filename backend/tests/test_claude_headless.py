@@ -20,6 +20,10 @@ class _Proc:
 
 @pytest.fixture
 def sidecar(tmp_path, monkeypatch):
+    from app import pqueue
+    # Toda nota local vai pra PromptQueue("s1"): sem isto os testes do /effort escreviam na fila
+    # REAL de uma sessão "s1", e o test_sse (mesmo nome) lia essas bolhas antes do `reset`.
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
     monkeypatch.setattr(PushPreviewSource, "_sources", {})
     monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
