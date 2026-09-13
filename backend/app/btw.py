@@ -78,6 +78,11 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
     if not pergunta:
         raise BtwError(400, "erro_btw_vazia", "pergunta vazia")
     with _send_lock(name):
+        # Overlay de uma pergunta anterior ainda fechando: digitar agora perdia a `/` e a TUI
+        # desenhava o texto em cima da régua (medido ao vivo, pergunta logo depois de outra).
+        fim_espera = time.monotonic() + _PRAZO_ABRIR
+        while _ABERTO in _rodape(name) and time.monotonic() < fim_espera:
+            time.sleep(_POLL)
         _esvaziar_composer_claude(name)
         # Texto que sobrou no composer viraria "<rascunho>/btw …" submetido como MENSAGEM real
         # pelo Enter abaixo. Ilegível (None) segue, como o envio normal.
@@ -97,6 +102,10 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
             _log.warning("btw de %r: o composer recebeu sem a barra (%d/2); apagando", name, tentativa + 1)
             _esvaziar_composer_claude(name)
         else:
+            # Às cegas: com a tela desalinhada a leitura não vê o resto, e o próximo envio normal
+            # sairia grudado nele. C-u num composer vazio não faz nada.
+            for _ in range(3):
+                tmux.send_keys(name, "C-u")
             raise BtwError(502, "erro_btw_barra_perdida",
                            "o terminal perdeu a / do /btw; nada foi enviado pra conversa")
         tmux.send_keys(name, "Enter")

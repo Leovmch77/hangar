@@ -40,6 +40,7 @@ class TmuxFalso:
 
     def send_keys(self, name, keys, literal=False):
         if literal:
+            self.tela_ao_digitar = self.telas[0]
             texto = keys
             if texto.startswith("/") and self.perde_barra > 0:
                 self.perde_barra -= 1
@@ -94,6 +95,7 @@ def test_le_a_resposta_do_buffer_e_fecha_o_overlay(falso):
 
 def test_sem_buffer_cai_no_pane(falso):
     f = falso([
+        _tela("❯ "),
         _tela("    /btw q", "      4", RODAPE_PRONTO),
         _tela("    /btw q", "      4", RODAPE_COPIADO),
     ], buffer_apos_c=False)
@@ -131,6 +133,7 @@ def test_composer_com_texto_parado_nao_digita(falso, monkeypatch):
 
 def test_overlay_fechado_por_fora_aborta_sem_escape(falso):
     f = falso([
+        _tela("❯ "),
         _tela("    /btw q", "      · Answering…", RODAPE_ANDANDO),
         _tela("❯ "),
     ])
@@ -153,6 +156,7 @@ def test_barra_perdida_redigita_sem_mandar_a_pergunta_pra_conversa(falso):
     # No Windows a `/` inicial sumiu e o Enter submeteu "btw <pergunta>" como MENSAGEM normal: a
     # pergunta caiu na conversa principal e o overlay nunca abriu (13/09/2026).
     f = falso([
+        _tela("❯ "),
         _tela("    /btw q", "      4", RODAPE_PRONTO),
         _tela("    /btw q", "      4", RODAPE_COPIADO),
     ], buffer_apos_c=False)
@@ -171,3 +175,20 @@ def test_barra_perdida_de_novo_para_sem_enter(falso):
     assert e.value.code == "erro_btw_barra_perdida"
     assert "Enter" not in f.teclas
     assert f.digitado == ""                 # nada ficou parado no composer
+    # Limpeza AS CEGAS no fim: com a tela desalinhada a leitura nao ve o resto, e o proximo
+    # envio normal sairia grudado nele (medido ao vivo em 13/09/2026).
+    assert f.teclas[-3:] == ["C-u", "C-u", "C-u"]
+
+
+def test_espera_o_overlay_anterior_fechar_antes_de_digitar(falso):
+    # Pergunta logo depois de outra: com o overlay ainda fechando, a `/` se perdia e o texto era
+    # desenhado em cima da regua.
+    f = falso([
+        _tela("    /btw antiga", "      x", RODAPE_PRONTO),     # overlay anterior ainda na tela
+        _tela("❯ "),                                        # fechou: a espera para aqui
+        _tela("❯ "),                                        # a tela no instante de digitar
+        _tela("    /btw q", "      4", RODAPE_PRONTO),
+        _tela("    /btw q", "      4", RODAPE_COPIADO),
+    ], buffer_apos_c=False)
+    btw.perguntar("s", "q")
+    assert "Esc to close" not in f.tela_ao_digitar
