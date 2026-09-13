@@ -41,6 +41,7 @@ from app.adapters.codex.adapter import _fmt_tok, _format_reset
 from app.adapters.preview_push import PushPreviewSource
 from app.config import settings
 from app.pqueue import PromptQueue
+from app.procinfo import pid_vivo
 from app.state import StateEvent
 from app.transcript import ChatEvent, TranscriptTailer
 
@@ -72,6 +73,10 @@ OPCOES_PERMISSAO = ["Permitir", "Negar"]
 # 3ª opção só quando a CLI mandou `permission_suggestions` (a regra que a TUI ofereceria como
 # "sempre permitir"); a resposta leva as regras em `updatedPermissions` e a CLI grava no settings.
 OPCAO_SEMPRE = "Sempre permitir"
+
+
+class _CanoOcupado(RuntimeError):
+    """Cano vivo que não respondeu: há outro cliente nele. Não se mata nem se substitui."""
 
 
 class _Ligacao:
@@ -199,6 +204,7 @@ class ClaudeHeadlessAdapter:
         self._problemas: dict[str, tuple[str, str | None]] = {}
         self._spawn_locks: dict[str, asyncio.Lock] = {}
         self._tarefas: set[asyncio.Task] = set()
+        self._religadas: dict[str, float] = {}
 
     # ── contrato Adapter ────────────────────────────────────────────────────────────────────
 
@@ -542,8 +548,11 @@ class ClaudeHeadlessAdapter:
                 _log.exception("claude headless: não subiu name=%s", name)
                 if self._sessions.get(name) is sess:
                     self._sessions.pop(name, None)
-                self._matar(sess)
-                self._problemas[name] = ("headless_nao_subiu", str(e)[:300])
+                if not isinstance(e, _CanoOcupado):
+                    # Ocupado é passageiro (a religada resolve): gravar o problema o deixaria na
+                    # lista depois de a sessão voltar.
+                    self._matar(sess)
+                    self._problemas[name] = ("headless_nao_subiu", str(e)[:300])
                 raise
             return sess
 
@@ -560,6 +569,24 @@ class ClaudeHeadlessAdapter:
             except Exception:
                 _log.warning("claude headless: reconexão falhou name=%s", meta["name"], exc_info=True)
         return n
+
+    def _agendar_religar(self, name: str) -> None:
+        # ponytail: uma religada por nome a cada 10s; dois backends vivos no mesmo HOME ficariam
+        # tomando a conexão um do outro — o teto só impede que isso vire laço apertado.
+        agora = time.monotonic()
+        if agora - self._religadas.get(name, 0.0) < 10:
+            return
+        self._religadas[name] = agora
+
+        async def _religar() -> None:
+            await asyncio.sleep(1.0)
+            try:
+                await self.ensure_running(name, so_reconectar=True)
+            except Exception:
+                _log.warning("claude headless: religar falhou name=%s", name, exc_info=True)
+        t = asyncio.get_running_loop().create_task(_religar())
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
 
     def desligar_todas(self) -> None:
         """Backend saindo: fecha as conexões e deixa os canos vivos pro próximo backend."""
@@ -614,10 +641,10 @@ class ClaudeHeadlessAdapter:
                     await self._reabrir(sess)
                 self._agendar_cota(sess)
                 return True
-            # Sem snapshot: cano morto, ou vivo e mudo. Mata antes de subir outro — dois canos
-            # com o mesmo --resume escreveriam no mesmo .jsonl, e o antigo ficaria invisível.
-            if cano.get("pid") is not None:
-                _matar_grupo(int(cano["pid"]), sess.name)
+            # Sem snapshot com o cano vivo: outro cliente está preso nele (cano antigo atende em
+            # série). Matar derrubaria um claude saudável; subir outro poria dois no mesmo .jsonl.
+            if cano.get("pid") is not None and pid_vivo(int(cano["pid"])):
+                raise _CanoOcupado("o processo da sessão está ocupado por outra conexão; tente de novo")
             _esquecer_cano(sess.name, cano.get("pid"))
             meta = sess.meta = hl_sessions.load(sess.name) or {**meta, "cano": None}
         if so_reconectar:
@@ -850,8 +877,18 @@ class ClaudeHeadlessAdapter:
                 sess.proc.stdin.close()
             except Exception:
                 pass
+            cano_pid = ((sess.meta or {}).get("cano") or {}).get("pid")
+            perdeu_conexao = (rc == -1 and not sess.encerrando and cano_pid is not None
+                              and pid_vivo(int(cano_pid)))
             if sess.desligando:
                 _log.info("claude headless: desligou name=%s (cano segue vivo)", sess.name)
+            elif perdeu_conexao:
+                # Outro cliente tomou a conexão (o cano troca de cliente); o claude segue vivo lá.
+                # Esquecer o cano aqui deixava-o órfão e o próximo prompt subia um segundo claude.
+                _log.warning("claude headless: conexão com o cano perdida, cano vivo name=%s pid=%s; religando",
+                             sess.name, cano_pid)
+                rc = None
+                self._agendar_religar(sess.name)
             else:
                 _log.info("claude headless: processo saiu name=%s rc=%s", sess.name, rc)
                 # Processo foi embora: o próximo prompt sobe outro cano, não tenta este.

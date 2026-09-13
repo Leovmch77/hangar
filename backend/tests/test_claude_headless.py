@@ -465,6 +465,39 @@ def test_processo_caindo_registra_problema_com_stderr(adapter, sidecar):
     _run(fluxo())
 
 
+def test_conexao_tomada_com_cano_vivo_religa_sem_esquecer_nem_acusar_queda(adapter, sidecar, monkeypatch):
+    sess = adapter._sessions["s1"]
+    cano = {"pid": 777, "escuta": "tcp:127.0.0.1:1", "token": "t"}
+    sess.meta = S.update("s1", cano=cano)
+    monkeypatch.setattr(A, "pid_vivo", lambda pid: pid == 777)
+    religar = []
+    monkeypatch.setattr(adapter, "_agendar_religar", religar.append)
+
+    async def fluxo():
+        sess.proc = _ligacao_com([])          # EOF sem `cano_saiu`: outro cliente tomou a conexão
+        await adapter._ler(sess)
+    _run(fluxo())
+    assert religar == ["s1"]
+    assert S.load("s1")["cano"] == cano
+    assert adapter.problema_de("s1") is None
+
+
+def test_cano_mudo_e_vivo_nao_e_morto(sidecar, monkeypatch):
+    ad = ClaudeHeadlessAdapter()
+    S.update("s1", cano={"pid": 777, "escuta": "tcp:127.0.0.1:1", "token": "t"})
+    monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
+
+    async def sem_snapshot(cano, **kw):
+        return None
+    monkeypatch.setattr(ad, "_conectar", sem_snapshot)
+    monkeypatch.setattr(A, "_matar_grupo", lambda pid, name: pytest.fail("matou cano vivo"))
+    monkeypatch.setattr(ad, "_subir_cano", lambda sess: pytest.fail("subiu segundo claude"))
+    with pytest.raises(RuntimeError):
+        _run(ad.ensure_running("s1", esperar_pronta=False))
+    assert S.load("s1")["cano"]["pid"] == 777
+    assert ad.problema_de("s1") is None      # passageiro: não fica na lista
+
+
 def test_ensure_running_nao_sobe_dois_processos(sidecar, monkeypatch):
     ad = ClaudeHeadlessAdapter()
     subidas = []

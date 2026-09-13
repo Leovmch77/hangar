@@ -1133,6 +1133,21 @@ Armadilhas que custaram tempo:
   com turno ou permissão em aberto continua falando com o velho. O que nada resolve é atualização
   da CLI do Claude ou do próprio cano com sessão trabalhando — o processo tem que morrer; o portão
   é reabrir só ocioso.
+- **Cliente novo substitui o ligado, em thread própria** (medido no Windows, 13/09/2026). O
+  `servir` atendia em série: o segundo cliente conectava no TCP mas só recebia snapshot quando o
+  primeiro saía, e `_conectar` desiste em 5s e `_spawn` dá `taskkill /T /F` no cano "mudo". Quem
+  conectou foi a suíte do backend: os testes com `with TestClient(app)` rodam o lifespan, e o
+  `reconectar_todas` leu os sidecars REAIS de `~/.hangar/claude-headless`. No log do backend,
+  `hangar-2` 17:36:32, `hangar-3` 17:36:37, `hangar-5` 17:36:42 — 5s entre cada, na ordem dos
+  arquivos, todos com `WinError 64`; o claude dessas sessões (pid 1012 na `hangar-5`) sumiu, e
+  a `hangar-5` era a sessão que rodava a suíte, que morreu junto. O cano dela tinha sobrevivido ao
+  restart do backend minutos antes (`cliente saiu 17:28:51`, `cliente conectado 17:28:58`), e o
+  kill da sessão de teste pegou só a árvore dela. Os testes de cano pulavam no Windows (só socket
+  unix); o de troca de cliente roda em TCP. Duas correções: `conftest` aponta `sessions._dir` pra
+  pasta temporária na sessão inteira, e o cano atende cada cliente numa thread. Quem troca só
+  derruba o socket antigo (`shutdown` acorda o leitor no Linux, fechar o descritor acorda no
+  Windows); o `makefile` é fechado pela thread que lê dele — fechá-lo de fora, no Windows, espera
+  o `readline` em curso segurando a trava que o leitor precisa.
 
 ## Voz Codex no web
 

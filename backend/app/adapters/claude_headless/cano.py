@@ -182,8 +182,10 @@ class Cano:
                         self._fechar_cliente()
 
     def _fechar_cliente(self) -> None:
+        # Só derruba o socket: o makefile é fechado pela thread que lê dele. Fechá-lo daqui espera
+        # o readline em curso (no Windows) com a trava na mão, e a thread leitora precisa dela.
         if self.cliente is not None:
-            _fechar(self.cliente, self.cliente_arq)
+            _derrubar(self.cliente)
             self.cliente = self.cliente_arq = None
 
     def snapshot(self) -> str:
@@ -197,45 +199,53 @@ class Cano:
         })
 
     def servir(self, srv: socket.socket) -> None:
+        # Uma thread por cliente: atendendo em série, quem chega só recebe o snapshot quando o
+        # ligado sai — e o backend que não recebe snapshot a tempo mata o cano como mudo.
         while True:
             try:
                 con, _ = srv.accept()
             except OSError:
                 return
-            arq = con.makefile("rb")
-            if self.token:
-                # Primeira linha do cliente é o token (TCP em loopback: qualquer processo local
-                # alcança a porta; o token é o que faz o cano ser só do backend).
-                try:
-                    if arq.readline().decode("utf-8", "replace").strip() != self.token:
-                        _fechar(con, arq)
-                        continue
-                except OSError:
+            threading.Thread(target=self._atender, args=(con,), daemon=True).start()
+
+    def _atender(self, con: socket.socket) -> None:
+        arq = con.makefile("rb")
+        if self.token:
+            # Primeira linha do cliente é o token (TCP em loopback: qualquer processo local
+            # alcança a porta; o token é o que faz o cano ser só do backend).
+            try:
+                con.settimeout(10)
+                if arq.readline().decode("utf-8", "replace").strip() != self.token:
                     _fechar(con, arq)
-                    continue
-            with self.trava:
-                self._fechar_cliente()      # um cliente por vez: o novo backend substitui o antigo
-                # Linhas que sobraram pro cliente antigo já estão refletidas no snapshot; mandar
-                # de novo duplicaria eventos no backend novo.
-                while not self.saida.empty():
-                    try:
-                        self.saida.get_nowait()
-                    except queue.Empty:
-                        break
-                self.saida_cheia = False
-                self.cliente, self.cliente_arq = con, arq
+                    return
+                con.settimeout(None)
+            except OSError:
+                _fechar(con, arq)
+                return
+        with self.trava:
+            self._fechar_cliente()      # um cliente por vez: o novo backend substitui o antigo
+            # Linhas que sobraram pro cliente antigo já estão refletidas no snapshot; mandar
+            # de novo duplicaria eventos no backend novo.
+            while not self.saida.empty():
                 try:
-                    con.sendall((self.snapshot() + "\n").encode("utf-8"))
-                except OSError:
-                    self._fechar_cliente()
-                    continue
-                if self.saiu is not None:
-                    # Já saiu: entrega o evento de saída como se estivesse acontecendo agora, e
-                    # aí pode morrer — quem chegou levou o rc e o stderr.
-                    self._mandar_saida()
-            self._log("cliente conectado")
-            self._ler_cliente(con, arq)
-            self._log("cliente saiu")
+                    self.saida.get_nowait()
+                except queue.Empty:
+                    break
+            self.saida_cheia = False
+            self.cliente, self.cliente_arq = con, arq
+            try:
+                con.sendall((self.snapshot() + "\n").encode("utf-8"))
+            except OSError:
+                self._fechar_cliente()
+                arq.close()
+                return
+            if self.saiu is not None:
+                # Já saiu: entrega o evento de saída como se estivesse acontecendo agora, e
+                # aí pode morrer — quem chegou levou o rc e o stderr.
+                self._mandar_saida()
+        self._log("cliente conectado")
+        self._ler_cliente(con, arq)
+        self._log("cliente saiu")
 
     def _ler_cliente(self, con: socket.socket, arq) -> None:
         try:
@@ -257,6 +267,7 @@ class Cano:
             with self.trava:
                 if self.cliente is con:
                     self._fechar_cliente()
+            _fechar(con, arq)
 
     def escutar(self) -> socket.socket:
         # ANTES de subir o claude: escuta que falha (path unix > 107 bytes, porta ocupada) tem
@@ -288,6 +299,24 @@ class Cano:
                 os.unlink(self.escuta[5:])
             except OSError:
                 pass
+
+
+def _derrubar(con: socket.socket) -> None:
+    # shutdown acorda o leitor no Linux; fechar o descritor de verdade acorda no Windows. O
+    # detach evita que o close do makefile, depois, feche um descritor já reaproveitado.
+    try:
+        con.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        fd = con.detach()
+    except OSError:
+        return
+    if fd != -1:
+        try:
+            socket.close(fd)
+        except OSError:
+            pass
 
 
 def _fechar(con: socket.socket, arq) -> None:

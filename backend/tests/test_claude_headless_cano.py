@@ -169,6 +169,44 @@ def test_token_errado_e_recusado(tmp_path):
         p.wait()
 
 
+def test_cliente_novo_substitui_o_ligado_em_tcp(tmp_path):
+    # Roda também no Windows (TCP + token). Com o accept em série, o segundo cliente não recebia
+    # snapshot enquanto o primeiro seguia ligado — e quem conecta sem snapshot mata o cano.
+    falso = tmp_path / "claude_falso.py"
+    falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
+    porta, token = _porta_livre(), uuid.uuid4().hex
+    p = subprocess.Popen([sys.executable, str(CANO), "--escuta", f"tcp:127.0.0.1:{porta}", "--token", token,
+                          "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        a = _conectar_tcp(porta)
+        a.sendall((token + "\n").encode())
+        arq_a = a.makefile("rb")
+        assert json.loads(arq_a.readline())["type"] == "cano_snapshot"
+        b = _conectar_tcp(porta)
+        b.settimeout(3)
+        b.sendall((token + "\n").encode())
+        arq_b = b.makefile("rb")
+        assert json.loads(arq_b.readline())["type"] == "cano_snapshot"
+        try:
+            assert arq_a.readline() == b""        # o antigo foi desligado
+        except OSError:
+            pass
+        b.sendall((json.dumps({"type": "control_request", "request_id": "r1",
+                               "request": {"subtype": "initialize"}}) + "\n").encode())
+        assert json.loads(arq_b.readline())["type"] == "system"   # o novo fala com o claude
+        assert p.poll() is None
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_suite_nunca_le_os_sidecars_reais():
+    from app.adapters.claude_headless import sessions
+    real = Path.home() / ".hangar" / "claude-headless"
+    assert sessions._dir() != real and real not in sessions._dir().parents
+
+
 def _porta_livre() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

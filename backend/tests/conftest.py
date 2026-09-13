@@ -70,6 +70,22 @@ def _sem_integracao_codex_real():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _sem_sessoes_sem_terminal_reais(tmp_path_factory):
+    # O lifespan (`with TestClient(app)`) religa todo cano listado nos sidecars. Lendo os REAIS,
+    # a suíte virava um segundo cliente dos canos das sessões vivas desta máquina e o backend de
+    # verdade perdia a conexão. Session-scoped: os testes que trocam `_dir` pelo monkeypatch
+    # voltam pra este diretório, nunca pro real.
+    from app.adapters.claude_headless import sessions
+    original = sessions._dir
+    pasta = tmp_path_factory.mktemp("claude-headless")
+    sessions._dir = lambda: pasta
+    try:
+        yield
+    finally:
+        sessions._dir = original
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sem_git_dir_no_ambiente_de_teste():
     # git_ops._run passa os.environ inteiro pro subprocess: dentro de um hook (pre-push, p.ex.) o
     # processo herda GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE do git que roda o hook, e qualquer teste
