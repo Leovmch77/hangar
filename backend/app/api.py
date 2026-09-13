@@ -102,7 +102,7 @@ from app.hook_state import hook_state
 from app import push
 from app import stall_watch
 from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
-from app.sync import sync_router
+from app.sync import sync_admin_router, sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
 from app import plano_claude
@@ -561,8 +561,8 @@ app.add_middleware(
 )
 # JSON e assets grandes cruzam LAN/VPN; o Starlette exclui `text/event-stream`, sem segurar o SSE.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
-if settings.sync:
-    app.include_router(sync_router)
+app.include_router(sync_admin_router)
+app.include_router(sync_router)
 app.include_router(deploy_router)
 # Roteadores por assunto (Task 1 do plano descoberta-e-configuracao): cada Task do lote escreve
 # só no módulo dela. Última edição de api.py deste plano.

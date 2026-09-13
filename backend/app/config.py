@@ -227,7 +227,7 @@ class Settings(BaseSettings):
         # Vazio no .env preserva o padrão, como em front_port; números inválidos continuam recusados.
         return 300 if isinstance(v, str) and not v.strip() else v
 
-    # Cloud sync hub (opt-in). CP_SYNC=1 turns THIS backend into the sync hub: it mounts /api/sync/*.
+    # Sync opt-in: CP_SYNC=1 ou ativação persistida pela tela, sem reiniciar o backend.
     # Stores only salt + auth verifier + ciphertext (zero-knowledge; tokens are encrypted client-side).
     sync: bool = False
     sync_bootstrap: str = ""        # CP_SYNC_BOOTSTRAP: one-time secret to gate first registration

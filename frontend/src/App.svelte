@@ -1,7 +1,8 @@
 <script lang="ts">
   import { isAuthenticated, setServers, listServers, mergeServers, onServersChanged, clearCredentials, selectServer, getActiveId, serverIdentidade, type Server } from './lib/auth';
   import { logoutLocal } from './lib/logout';
-  import { getVault, decryptList, encryptList, putVault, logout as syncLogout, syncStatus, stashKey, loadKey, clearKey } from './lib/sync';
+  import { getVault, decryptList, encryptList, putVault, logout as syncLogout, syncStatus, cachedSyncStatus, stashKey, loadKey, clearKey } from './lib/sync';
+  import * as m from './paraglide/messages';
   import { vaultPush } from './lib/vaultPush.svelte';
   import { ttsPlayer } from './lib/ttsPlayer.svelte';
   import { ttsSelection } from './lib/ttsSelection.svelte';
@@ -94,8 +95,9 @@
   // syncReady: ha encKey (login fresco OU restaurado do sessionStorage). Com sync ligado, o app so
   // entra com syncReady -> senao forca o login do hub, mesmo havendo servers em cache (senao os
   // pushes pro hub ficariam mudos por falta de chave).
-  let syncEnabled = $state<boolean | null>(null);
+  let syncEnabled = $state<boolean | null>(cachedSyncStatus()?.enabled ?? null);
   let syncReady = $state(false);
+  let syncBootError = $state(false);
 
   // Duas variaveis, uma variavel so tentando significar duas coisas foi o bug da rodada anterior:
   // --cp-tts-bar-h e SO a barra do player (ttsPlayer.barH, MEDIDA pela propria TtsBar via
@@ -258,10 +260,11 @@
 
   // Boot: sonda o hub. Se ligado, tenta restaurar a sessao do sessionStorage (encKey sobrevive ao
   // reload) sem repedir senha; senao cai no login do hub. Sem sync, segue a regra de localStorage.
-  $effect(() => {
-    (async () => {
+  async function restoreSync() {
+      syncBootError = false;
       const s = await syncStatus();
-      if (!s?.enabled) { syncEnabled = false; return; }
+      if (!s) { syncBootError = true; return; }
+      if (!s.enabled) { syncEnabled = false; return; }
       syncEnabled = true;
       const key = await loadKey();
       if (key) {
@@ -271,8 +274,8 @@
           clearKey();                         // sessao morta (cookie expirado) -> cai no login do hub
         }
       }
-    })();
-  });
+  }
+  $effect(() => { void restoreSync(); });
 
   // Listen for hash changes
   $effect(() => {
@@ -368,6 +371,18 @@
   let vaultRev = 0;
   let unsubSync: (() => void) | null = null;
 
+  $effect(() => {
+    const disabled = () => {
+      encKey = null;
+      unsubSync?.();
+      unsubSync = null;
+      syncReady = false;
+      syncEnabled = false;
+    };
+    window.addEventListener('hangar-sync-disabled', disabled);
+    return () => window.removeEventListener('hangar-sync-disabled', disabled);
+  });
+
   // Login fresco no hub (vindo da tela de login): persiste a chave na aba e estabelece a sessao.
   async function onSyncLogin(key: CryptoKey) {
     await stashKey(key);
@@ -462,7 +477,10 @@
 
 <div class="app-root">
   {#if route.name === 'loading'}
-    <div class="boot" aria-busy="true"></div>
+    <div class="boot" aria-busy={!syncBootError}>
+      <p role="status">{syncBootError ? m.sync_boot_error() : m.sync_boot_loading()}</p>
+      {#if syncBootError}<button class="btn" onclick={restoreSync}>{m.sync_retry()}</button>{/if}
+    </div>
   {:else if route.name === 'login'}
     <Login {onLogin} onSyncLogin={onSyncLogin} />
   {:else if route.name === 'costs'}
@@ -556,5 +574,16 @@
     height: 100%;
     display: flex;
     flex-direction: column;
+  }
+  .boot {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-4);
+    padding: var(--space-6);
+    color: var(--text-primary);
+    text-align: center;
   }
 </style>

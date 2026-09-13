@@ -2040,6 +2040,31 @@ export function openEventStream(name: string, lastEventId?: string | null, req =
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
+export interface SyncSetup {
+  enabled: boolean;
+  registered: boolean;
+  user: string | null;
+}
+
+export interface SyncSetupBody {
+  user: string;
+  salt: string;
+  auth_hash: string;
+  enc_blob: { iv: string; data: string };
+}
+
+export function getSyncSetupForServer(server: Server, signal?: AbortSignal): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { signal: comTeto(signal, 8000) });
+}
+
+export function setupSyncForServer(server: Server, body?: SyncSetupBody): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { method: 'POST', body: JSON.stringify(body ?? {}) });
+}
+
+export function disableSyncForServer(server: Server): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup/disable', { method: 'POST' });
+}
+
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource
 // não manda header e cross-origin não leva cookie); withCredentials same-origin. Por-servidor:
 // cada um tem o seu, falha isolada.

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
 import { overwriteGetLocale as overwriteFront } from '../paraglide/runtime';
-import { configureLocale } from '@hangar/core';
+import { configureLocale, configureApi } from '@hangar/core';
 function overwriteGetLocale(fn: () => 'en' | 'pt') {
   overwriteFront(fn);
   configureLocale({ getLocale: fn });
@@ -19,7 +19,15 @@ const store = new Map<string, string>();
 (globalThis as any).document = { cookie: '' };
 (globalThis as any).window = { location: { origin: 'https://app.test' } };
 
-const { deriveKeys, encryptList, decryptList, register } = await import('./sync');
+const { deriveKeys, encryptList, decryptList, register, syncStatus, cachedSyncStatus, activateSync, disableSync, loadKey } = await import('./sync');
+
+beforeEach(() => {
+  store.clear();
+  configureApi({ getBaseUrl: () => 'https://app.test', getToken: () => 'token',
+    origin: 'https://app.test', onUnauthorized: () => {},
+    createEventSource: () => { throw new Error('SSE inesperado'); } });
+});
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 // Node 20+ exposes WebCrypto at globalThis.crypto; ensure it for the module under test.
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
@@ -74,4 +82,68 @@ describe('register (erro da API de sync)', () => {
     );
     await expect(register('u', 'p', 'b')).rejects.toThrow('register failed');
   });
+});
+
+it('lembra acesso direto por origem e preserva o modo conhecido quando a rede falha', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 404 }));
+  expect(cachedSyncStatus()).toBeNull();
+  await expect(syncStatus()).resolves.toEqual({ enabled: false, registered: false });
+  expect(cachedSyncStatus()?.enabled).toBe(false);
+  fetchMock.mockRejectedValue(new TypeError('offline'));
+  await expect(syncStatus()).resolves.toEqual({ enabled: false, registered: false });
+  store.clear();
+  await expect(syncStatus()).resolves.toBeNull();
+  expect(cachedSyncStatus()).toBeNull();
+});
+
+it('consulta pendurada termina no prazo e não é gravada como modo direto', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  });
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+    init!.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+  }));
+  const first = syncStatus();
+  const second = syncStatus();
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(8000);
+  await expect(first).resolves.toBeNull();
+  await expect(second).resolves.toBeNull();
+  expect(cachedSyncStatus()).toBeNull();
+});
+
+it('cria conta com lista cifrada, autentica na mesma origem e desativa sem apagar a chave', async () => {
+  const servers = [{ id: 'a', label: 'PC', baseUrl: 'https://app.test', token: 'segredo-do-pc' }];
+  store.set('cp_servers', JSON.stringify(servers));
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => new Response(JSON.stringify({
+    enabled: !String(url).endsWith('/disable'), registered: true, user: 'jefferson',
+  })));
+  await activateSync(servers[0], { user: 'jefferson', password: 'senha-comprida' });
+  const body = JSON.parse(fetchMock.mock.calls[0][1]!.body as string);
+  expect(JSON.stringify(body)).not.toContain('senha-comprida');
+  expect(JSON.stringify(body)).not.toContain('segredo-do-pc');
+  const key = await loadKey();
+  expect(await decryptList(key!, body.enc_blob)).toEqual(servers);
+  expect(fetchMock.mock.calls[1][0]).toBe('/api/sync/login');
+  expect(cachedSyncStatus()?.enabled).toBe(true);
+  const notify = vi.fn();
+  window.dispatchEvent = notify;
+  await disableSync(servers[0]);
+  expect(notify.mock.calls[0][0].type).toBe('hangar-sync-disabled');
+  expect(cachedSyncStatus()?.enabled).toBe(false);
+  expect(await loadKey()).not.toBeNull();
+  expect(JSON.parse(store.get('cp_servers')!)).toEqual(servers);
+});
+
+it('configurar outra máquina não troca o login nem o modo de abertura deste endereço', async () => {
+  const server = { id: 'b', label: 'Outro PC', baseUrl: 'https://other.test', token: 'token-b' };
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ enabled: true, registered: true, user: 'u' })));
+  await activateSync(server, { user: 'u', password: 'senha-comprida' });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][0]).toBe('https://other.test/api/sync/setup');
+  expect(cachedSyncStatus()).toBeNull();
+  expect(await loadKey()).toBeNull();
 });
