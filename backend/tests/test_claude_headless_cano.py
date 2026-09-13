@@ -201,6 +201,16 @@ def test_cliente_novo_substitui_o_ligado_em_tcp(tmp_path):
         p.wait()
 
 
+def test_stderr_na_codepage_do_windows_nao_vira_caractere_quebrado():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cano_mod", CANO)
+    cano_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cano_mod)
+    assert cano_mod._texto_do_stderr("não existe".encode("utf-8")) == "não existe"
+    cp = cano_mod._texto_do_stderr("não existe".encode("cp1252"))
+    assert "�" not in cp and cp.startswith("n") and cp.endswith("o existe")
+
+
 def test_suite_nunca_le_os_sidecars_reais():
     from app.adapters.claude_headless import sessions
     real = Path.home() / ".hangar" / "claude-headless"

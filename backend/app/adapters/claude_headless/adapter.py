@@ -695,8 +695,12 @@ class ClaudeHeadlessAdapter:
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
         if meta.get("subagent_model"):
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = meta["subagent_model"]
-        if shutil.which(argv[0]) is None:
+        exe = shutil.which(argv[0])
+        if exe is None:
             raise RuntimeError(f"binário não encontrado: {argv[0]}")
+        # Caminho resolvido: no Windows o `hangar-engine` é `.CMD`, e o CreateProcess do cano não
+        # acha o nome sem extensão (WinError 2) — sessão com motor não subia.
+        argv = [exe, *argv[1:]]
         escuta, token = _escuta_nova(meta["key"])
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
         cmd = [sys.executable, str(_CANO_PY), "--escuta", escuta, "--log", str(log), "--cwd", meta["cwd"]]

@@ -93,7 +93,7 @@ class Cano:
     def _ler_stderr(self) -> None:
         assert self.proc and self.proc.stderr
         for bruto in self.proc.stderr:
-            linha = bruto.decode("utf-8", "replace").rstrip("\r\n")
+            linha = _texto_do_stderr(bruto).rstrip("\r\n")
             if not linha:
                 continue
             with self.trava:
@@ -299,6 +299,16 @@ class Cano:
                 os.unlink(self.escuta[5:])
             except OSError:
                 pass
+
+
+def _texto_do_stderr(bruto: bytes) -> str:
+    # O claude escreve UTF-8; scripts do Windows no meio (hangar-engine.CMD, cmd) escrevem na
+    # codepage local, e decodificar como UTF-8 punha U+FFFD no aviso de problema.
+    try:
+        return bruto.decode("utf-8")
+    except UnicodeDecodeError:
+        import locale
+        return bruto.decode(locale.getpreferredencoding(False) or "cp1252", "replace")
 
 
 def _derrubar(con: socket.socket) -> None:

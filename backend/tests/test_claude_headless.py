@@ -890,7 +890,7 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     # onde ele escuta, pra o próximo backend religar.
     argv = list(visto["argv"])
     ultimo = len(argv) - 1 - argv[::-1].index("--")   # o escopo do systemd também tem um `--`
-    assert argv[ultimo + 1] == "claude" and str(A._CANO_PY) in argv
+    assert argv[ultimo + 1] == "/usr/bin/claude" and str(A._CANO_PY) in argv   # caminho resolvido
     assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
 
