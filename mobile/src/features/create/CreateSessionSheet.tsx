@@ -350,10 +350,6 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     try {
       if (provider === 'codex') {
         if (!target || !account) return;
-        const sync = await prepareCodex(target, account, generation);
-        if (!sync || !mounted.current || generation !== codexGeneration.current) return;
-        showSyncWarning(sync);
-        setCodexAccounts((items) => items.map((item) => item.id === account ? { ...item, sync } : item));
         setCodexProgress(m.codex_ui_abrindo_sessao());
         const s = await createSessionForServer(target, {
           name: name.trim(), cwd: picked, provider: 'codex', model: modelo || null,

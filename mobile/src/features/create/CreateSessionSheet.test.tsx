@@ -120,29 +120,35 @@ describe('CreateSessionSheet Codex', () => {
     const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'));
     expect(create).toBeTruthy();
     await act(async () => create!.click());
-    expect(calls.prepare).toHaveBeenCalledWith(server, 'work');
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex', codex_account: 'work' }));
     root.unmount();
   });
 
-  it.each(['create', 'resume'] as const)('mostra etapas do preparo e abertura durante %s', async (operation) => {
+  it('abre a sessão sem esperar a sincronização da conta na tela', async () => {
+    calls.prepare.mockReturnValue(new Promise(() => {}));
+    const { container, root } = await renderSheet();
+    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
+    await act(async () => create.click());
+    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+    root.unmount();
+  });
+
+  it('mostra etapas do preparo e abertura durante a retomada', async () => {
     vi.useFakeTimers();
-    calls.archives.mockResolvedValue(operation === 'resume' ? [archived] : []);
+    calls.archives.mockResolvedValue([archived]);
     calls.prepare.mockResolvedValue({ status: 'running', etapa: 'principal' });
     calls.preparation
       .mockResolvedValueOnce({ status: 'running', etapa: 'plugins' })
       .mockResolvedValueOnce({ status: 'ready', issues: [], trust_pending: false });
     const pending = deferred<{ name: string; state: 'idle' }>();
-    calls[operation].mockReturnValue(pending.promise);
+    calls.resume.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
-    if (operation === 'resume') {
-      await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
-    }
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === (operation === 'create' ? 'sessao_nova' : 'criar_retomar_acao'))!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
     expect(container.textContent).toContain(codexPreparationMessage('principal'));
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(container.textContent).toContain(codexPreparationMessage('plugins'));
-    expect(calls[operation]).not.toHaveBeenCalled();
+    expect(calls.resume).not.toHaveBeenCalled();
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(container.textContent).toContain('codex_ui_abrindo_sessao');
     await act(async () => pending.resolve({ name: 'nova', state: 'idle' }));
@@ -152,11 +158,13 @@ describe('CreateSessionSheet Codex', () => {
 
   it.each(['provider', 'unmount'])('descarta atualização do polling após %s', async (change) => {
     vi.useFakeTimers();
+    calls.archives.mockResolvedValue([archived]);
     calls.prepare.mockResolvedValue({ status: 'running', etapa: 'principal' });
     const pending = deferred<{ status: 'running'; etapa: string }>();
     calls.preparation.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'sessao_nova')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     if (change === 'provider') {
       await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Claude')!.click());
@@ -167,18 +175,19 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(container.textContent).not.toContain(codexPreparationMessage('plugins'));
     expect(calls.preparation).toHaveBeenCalledTimes(1);
-    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.resume).not.toHaveBeenCalled();
     expect(calls.replace).not.toHaveBeenCalled();
     if (change === 'provider') root.unmount();
   });
 
-  it.each(['partial', 'error'])('abre a conta escolhida mesmo com sincronização %s', async (status) => {
+  it.each(['partial', 'error'])('retoma a conta escolhida mesmo com sincronização %s', async (status) => {
+    calls.archives.mockResolvedValue([archived]);
     calls.prepare.mockResolvedValue({ status, trust_pending: false, issues: [] });
     const { container, root } = await renderSheet();
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
-    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ codex_account: 'work' }));
-    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
+    expect(calls.resume).toHaveBeenCalledWith('-repo', 'sid-1', null, null, 'codex', 'work', server);
+    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/retomada');
     expect(calls.alert).toHaveBeenCalledWith('codex_ui_prepare_error');
     root.unmount();
   });
@@ -225,18 +234,6 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.resume).toHaveBeenCalledWith('-repo', 'sid-1', null, null, 'codex', 'work', server);
     expect(calls.create).not.toHaveBeenCalled();
     root.unmount();
-  });
-
-  it('não cria nem navega se desmontar enquanto prepara uma sessão', async () => {
-    const pending = deferred<{ status: 'ready'; issues: never[]; trust_pending: false }>();
-    calls.prepare.mockReturnValue(pending.promise);
-    const { container, root } = await renderSheet();
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
-    root.unmount();
-    await act(async () => pending.resolve({ status: 'ready', issues: [], trust_pending: false }));
-    expect(calls.create).not.toHaveBeenCalled();
-    expect(calls.replace).not.toHaveBeenCalled();
   });
 
   it('não navega se desmontar depois que o create fica pendente', async () => {

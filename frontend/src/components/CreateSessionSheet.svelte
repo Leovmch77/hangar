@@ -5,8 +5,8 @@
   import FolderScanner from './FolderScanner.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
-  import { getCodexAccountsForServer, prepareCodexAccountForServer, getCodexPreparationForServer,
-    createSessionForServer, codexAccountMessage, codexPreparationMessage, type CodexAccount } from '@hangar/core';
+  import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage,
+    type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
@@ -791,18 +791,6 @@
       else localStorage.removeItem(chaveMemoria() + ':effort');
       if (body.provider === 'codex') {
         if (!server || !account) return;
-        codexProgress = m.codex_ui_preparing();
-        let sync = await prepareCodexAccountForServer(server, account);
-        if (g !== codexGeneration || !open || codexAccount !== account) return;
-        while (sync.status === 'running') {
-          codexProgress = codexPreparationMessage(sync.etapa);
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          if (g !== codexGeneration || !open || codexAccount !== account) return;
-          sync = await getCodexPreparationForServer(server, account, codexController.signal);
-          if (g !== codexGeneration || !open || codexAccount !== account) return;
-        }
-        if (g !== codexGeneration || !open || codexAccount !== account) return;
-        codexAccounts = codexAccounts.map((item) => item.id === account ? { ...item, sync } : item);
         codexProgress = m.codex_ui_abrindo_sessao();
         if (!baton) {
           const result = await createSessionForServer(server, body);

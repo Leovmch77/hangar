@@ -860,23 +860,14 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
-  it('mostra cada etapa do preparo e a abertura depois de concluir', async () => {
-    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({
-      status: 'running', etapa: 'configuracoes', trust_pending: false, issues: [],
-    });
-    vi.mocked(api.getCodexPreparationForServer)
-      .mockResolvedValueOnce({ status: 'running', etapa: 'plugins', trust_pending: false, issues: [] })
-      .mockResolvedValueOnce({ status: 'ready', trust_pending: false, issues: [] });
+  it('mostra a abertura enquanto o terminal está sendo criado', async () => {
     let finish!: (value: api.SessionInfo) => void;
     vi.mocked(api.createSessionForServer).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const { comp } = await abrirNoCodex();
     try {
       (document.querySelector('.primary-btn') as HTMLElement).click();
       await flush();
-      expect(document.body.textContent).toContain(m.codex_etapa_configuracoes());
-      await vi.waitFor(() => expect(document.body.textContent).toContain(m.codex_etapa_plugins()), { timeout: 2000 });
-      await vi.waitFor(() => expect(document.body.textContent).toContain(m.codex_ui_abrindo_sessao()), { timeout: 2000 });
-      expect(document.body.textContent).not.toContain(m.codex_etapa_plugins());
+      expect(document.body.textContent).toContain(m.codex_ui_abrindo_sessao());
       finish({ name: 'x', state: 'idle' });
       await flush();
     } finally {
@@ -884,25 +875,21 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     }
   });
 
-  it('trocar provider durante preparo libera criação e descarta preparo antigo', async () => {
+  it('abre a sessão sem esperar a sincronização da conta no modal', async () => {
+    let finish!: (value: api.CodexAccount['sync']) => void;
+    vi.mocked(api.prepareCodexAccountForServer).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
     const { comp } = await abrirNoCodex();
-    let resolve!: (value: api.CodexAccount['sync']) => void;
-    vi.mocked(api.prepareCodexAccountForServer).mockReturnValueOnce(new Promise((r) => resolve = r));
+    location.hash = '#/original';
     try {
-      (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
-      [...document.querySelectorAll<HTMLButtonElement>('.provider-tile')].find((b) => b.textContent?.trim().endsWith('Claude'))!.click();
+      (document.querySelector('.primary-btn') as HTMLElement).click();
       await flush();
-      expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(false);
-      let resolveNew!: () => void;
-      onCreate.mockReturnValueOnce(new Promise<void>((r) => resolveNew = r));
-      (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
-      resolve({ status: 'ready', trust_pending: false, issues: [] }); await flush();
-      expect(api.createSessionForServer).not.toHaveBeenCalled();
-      expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(true);
-      expect(onCreate).toHaveBeenCalledOnce();
-      expect(onCreate.mock.calls[0]).toEqual(expect.arrayContaining(['claude']));
-      resolveNew(); await flush();
-    } finally { await unmount(comp); }
+      expect(location.hash).toBe('#/chat/B/x');
+    } finally {
+      finish({ status: 'ready', trust_pending: false, issues: [] });
+      await flush();
+      await unmount(comp);
+      location.hash = '';
+    }
   });
 
   it.each([false, true])('bastão Codex captura B e descarta resposta após reabertura=%s', async (reopen) => {
@@ -978,7 +965,6 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     // (nome, cwd, configDir, provider, engine, model, effort, permissao)
-    expect(api.prepareCodexAccountForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), 'default');
     expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), {
       name: 'x', cwd: '/tmp/x', provider: 'codex', codex_account: 'default', model: 'gpt-5.6-sol', effort: 'xhigh',
     });
@@ -987,25 +973,17 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
-  it.each(['partial', 'error'] as const)('preparo %s não impede abrir com a conta escolhida', async (status) => {
+  it('fechar durante a criação não navega quando a resposta chega', async () => {
     const { comp } = await abrirNoCodex();
-    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({ status, trust_pending: false, issues: [] });
-    (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
-    expect(api.createSessionForServer).toHaveBeenCalledOnce();
-    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
-      expect.objectContaining({ codex_account: 'default' }));
-    unmount(comp);
-  });
-
-  it('fechar durante preparação não cria quando a resposta chega', async () => {
-    const { comp } = await abrirNoCodex();
-    let resolve!: (value: api.CodexAccount['sync']) => void;
-    vi.mocked(api.prepareCodexAccountForServer).mockReturnValueOnce(new Promise((r) => resolve = r));
+    let resolve!: (value: api.SessionInfo) => void;
+    vi.mocked(api.createSessionForServer).mockReturnValueOnce(new Promise((r) => resolve = r));
+    location.hash = '#/original';
     (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
     (document.querySelector('[data-testid="sheet-toggle"]') as HTMLElement).click(); await flush();
-    resolve({ status: 'ready', trust_pending: false, issues: [] }); await flush();
-    expect(api.createSessionForServer).not.toHaveBeenCalled();
+    resolve({ name: 'x', state: 'idle' }); await flush();
+    expect(location.hash).toBe('#/original');
     unmount(comp);
+    location.hash = '';
   });
 
   it('trocar conta limpa modelo/esforço e consulta catálogo com a identidade nova', async () => {
