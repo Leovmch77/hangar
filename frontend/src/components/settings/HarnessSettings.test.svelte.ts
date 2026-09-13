@@ -630,6 +630,24 @@ describe('opções dentro do card', () => {
     expect(caixa.checked).toBe(true);
   });
 
+  it('a lista de contas falhando vira o erro na linha do seletor, nunca "só a padrão" como fato', async () => {
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith(ROTA_CONTAS)) return new Response('quebrou', { status: 500 });
+      if (String(url).endsWith(ROTA)) return ler(String(url), init);
+      if (String(url).endsWith(ROTA_INST)) return resposta(ociosa);
+      if (String(url).endsWith(ROTA_CONFIG)) return lerConfig(init);
+      if (String(url).endsWith(ROTA_CODEX)) return lerOpcoesCodex(init);
+      return resposta(harnesses);
+    });
+    const { el } = await montar();
+    // O poll da integração continua respondendo bem e não pode apagar o erro da lista.
+    await estabilizar();
+    expect(el.textContent).not.toContain(m.harness_codex_conta_so_padrao());
+    const ajuda = el.querySelector('#codex-conta-ajuda')!;
+    expect(ajuda.getAttribute('role')).toBe('alert');
+    expect(ajuda.textContent).toBe(m.harness_codex_conta_erro({ erro: ajuda.textContent!.match(/: (.*)\. /)?.[1] ?? '' }));
+  });
+
   it('o seletor de conta do Codex nunca some: com só a padrão fica apagado, com o motivo', async () => {
     const { el } = await montar();
     const sel = el.querySelector<HTMLSelectElement>('#codex-conta')!;

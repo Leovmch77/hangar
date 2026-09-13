@@ -52,6 +52,7 @@
   let trocandoOpcoesCodex = $state(false);
   let integracao = $state<IntegracaoCodex | null>(null);
   let contasCodex = $state<CodexAccount[]>([]);
+  let erroContas = $state('');
   let contaCodex = $state('default');
   let syncConta = $state<CodexAccount['sync'] | null>(null);
   let contaSelecionada = $derived(contasCodex.find((conta) => conta.id === contaCodex) ?? null);
@@ -202,6 +203,7 @@
     try {
       const contas = await listarContasCodex(ctx.alvo, ctx.controle.signal);
       if (ctx.controle.signal.aborted) return;
+      erroContas = '';
       contasCodex = contas;
       const lembrada = localStorage.getItem(`cp_harness_codex_account:${ctx.alvo?.id ?? 'active'}`);
       if (lembrada && contas.some((conta) => conta.id === lembrada)) contaCodex = lembrada;
@@ -209,7 +211,9 @@
       syncConta = contas.find((conta) => conta.id === contaCodex)?.sync ?? null;
       if (contaCodex !== 'default' && syncConta?.status === 'running') void consultarConta(ctx);
     } catch (e) {
-      if (!ctx.controle.signal.aborted) erroIntegracao = e instanceof Error ? e.message : String(e);
+      // Erro PRÓPRIO: `erroIntegracao` é zerado por todo poll da integração, e a falha da lista
+      // sumia em 1,5s — deixando o seletor apagado dizendo "só a conta padrão" como se fosse fato.
+      if (!ctx.controle.signal.aborted) erroContas = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -443,7 +447,7 @@
     lista = []; feito = ''; consertando = null;
     camposGravados = null; erroConfig = ''; trocandoStatusline = false;
     opcoesDoCodex = null; erroOpcoesCodex = ''; trocandoOpcoesCodex = false;
-    integracao = null; contasCodex = []; contaCodex = 'default'; syncConta = null;
+    integracao = null; contasCodex = []; erroContas = ''; contaCodex = 'default'; syncConta = null;
     erroIntegracao = ''; reconciliando = false;
     inst = null; erroInst = ''; confirmar = null;
     void carregar();
@@ -732,7 +736,11 @@
           <label class="hs-item hs-automatica" for="codex-conta">
             <span class="hs-item-txt">
               <b>{m.codex_ui_account()}</b>
-              <span class="hs-ajuda" id="codex-conta-ajuda">{contasCodex.length > 1 ? m.harness_codex_conta_ajuda() : m.harness_codex_conta_so_padrao()}</span>
+              {#if erroContas}
+                <span class="hs-ajuda erro" id="codex-conta-ajuda" role="alert">{m.harness_codex_conta_erro({ erro: erroContas })}</span>
+              {:else}
+                <span class="hs-ajuda" id="codex-conta-ajuda">{contasCodex.length > 1 ? m.harness_codex_conta_ajuda() : m.harness_codex_conta_so_padrao()}</span>
+              {/if}
             </span>
             <select class="hs-conta" id="codex-conta" aria-describedby="codex-conta-ajuda" value={contaCodex}
               onchange={trocarConta} disabled={integracaoOcupada || contasCodex.length <= 1}>
@@ -916,6 +924,7 @@
   .hs-beta { display: inline-block; margin-left: var(--space-1); padding: 1px 6px; border-radius: var(--radius-full);
              background: var(--accent-dim); color: var(--accent); font-size: 10px; font-style: normal; text-transform: uppercase; }
   .hs-ajuda { display: block; font-size: var(--text-xs); color: var(--text-muted); }
+  .hs-ajuda.erro { color: var(--error); }
   /* `.cfg-porque` é global (app.css). O recuo alinha o motivo com o texto da linha, e não com a
      marca ✓/✕ dela (16px da marca + o gap da faixa). */
   .hs-porque { margin-left: calc(16px + var(--space-2)); }
