@@ -350,10 +350,39 @@
   // Snapshot do mount de proposito: o App remonta o Chat por {#key sessionName} a cada troca.
   // svelte-ignore state_referenced_locally
   const draftKey = `cp-draft:${sessionName}`;
-  let composerText = $state(localStorage.getItem(draftKey) ?? '');
+  // O rascunho guarda o TRANSCRIPT de quem o escreveu: a chave é o nome, e nome se repete. Uma
+  // sessão morta e recriada com o mesmo nome (a época de recriação só vive com o app aberto) abria
+  // com o texto da anterior. Valor antigo, só texto, vale como "transcript desconhecido".
+  function lerRascunho(): { text: string; jsonl: string | null } {
+    let cru: string | null = null;
+    try { cru = localStorage.getItem(draftKey); } catch { return { text: '', jsonl: null }; }
+    if (!cru) return { text: '', jsonl: null };
+    try {
+      const d = JSON.parse(cru);
+      if (d && typeof d === 'object' && typeof d.text === 'string') {
+        return { text: d.text, jsonl: typeof d.jsonl === 'string' ? d.jsonl : null };
+      }
+    } catch { /* texto cru de versão anterior */ }
+    return { text: cru, jsonl: null };
+  }
+  const rascunhoSalvo = lerRascunho();
+  // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
+  let rascunhoConferido = $state(rascunhoSalvo.jsonl === null);
+  let composerText = $state(rascunhoSalvo.jsonl === null ? rascunhoSalvo.text : '');
   $effect(() => {
-    if (composerText) localStorage.setItem(draftKey, composerText);
-    else localStorage.removeItem(draftKey);
+    if (rascunhoConferido || !sessionJsonl) return;
+    rascunhoConferido = true;
+    if (sessionJsonl === rascunhoSalvo.jsonl) { if (!composerText) composerText = rascunhoSalvo.text; }
+    else try { localStorage.removeItem(draftKey); } catch { /* sem storage */ }
+  });
+  $effect(() => {
+    const texto = composerText;
+    const jsonl = sessionJsonl;
+    if (!rascunhoConferido) return;      // antes de conferir, apagar aqui perderia o rascunho certo
+    try {
+      if (texto) localStorage.setItem(draftKey, JSON.stringify({ text: texto, jsonl }));
+      else localStorage.removeItem(draftKey);
+    } catch { /* sem storage: o rascunho vive só na memória */ }
   });
   // Preview AO VIVO do bloco de assistente em voo (lido do pane via SSE 'preview'). Texto-completo,
   // full-replace; some quando o assistant_msg canonico (do .jsonl) cobre o texto — sair de working
