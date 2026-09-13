@@ -12,10 +12,13 @@ O que estes testes protegem, e que nao da pra ver lendo o codigo:
 """
 import json
 import os
+import runpy
 import signal
 import subprocess
 import sys
 import time
+import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -32,7 +35,12 @@ import json, os, sys, time
 
 args = sys.argv[1:]
 if args[:1] == ["app-server"]:
+    if os.environ.get("FAKE_SERVER_OUT"):
+        with open(os.environ["FAKE_SERVER_OUT"], "w") as fh:
+            json.dump(args, fh)
     if os.environ.get("FAKE_SERVIDOR_MORRE"):
+        if os.environ.get("FAKE_ERRO_PRIVADO"):
+            print(os.environ["FAKE_ERRO_PRIVADO"], file=sys.stderr)
         print("error: unexpected argument '--listen' found", file=sys.stderr)
         sys.exit(3)
     from websockets.sync.server import serve
@@ -91,6 +99,10 @@ def _ambiente(tmp_path, cwd):
     env.update({
         "PATH": f"{binario}{os.pathsep}{env['PATH']}",
         "HOME": str(tmp_path / "home"),        # o sidecar mora em ~/.hangar/codex-sessions
+        "USERPROFILE": str(tmp_path / "home"),
+        "LOCALAPPDATA": str(tmp_path / "local"),
+        "CODEX_HOME": str(tmp_path / "home" / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "home" / ".claude"),
         "FAKE_ROLLOUT": str(tmp_path / "rollout.jsonl"),
         "FAKE_CWD": str(cwd),
         "FAKE_TUI_OUT": str(tmp_path / "tui-argv.txt"),
@@ -264,10 +276,49 @@ def test_app_server_que_morre_na_largada_diz_o_motivo(tmp_path):
     env = _ambiente(tmp_path, cwd)
     env["FAKE_SERVIDOR_MORRE"] = "1"
     env["FAKE_TUI_SLEEP"] = "0.2"
+    env["FAKE_ERRO_PRIVADO"] = "x" * 3000 + "token=SEGREDO-DO-CLI"
     r = subprocess.run([sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd)],
                        env=env, capture_output=True, text=True, timeout=60)
     assert "codigo 3" in r.stderr
     assert "unexpected argument '--listen'" in r.stderr
+    logs = (Path(env["LOCALAPPDATA"]) / "hangar" / "logs" if os.name == "nt"
+            else Path(env["HOME"]) / ".hangar" / "logs")
+    privados = list((logs / "privado").glob("codex-app-server-*.log"))
+    assert len(privados) == 1
+    assert privados[0].stat().st_size <= 2000
+    assert "SEGREDO-DO-CLI" in privados[0].read_text()
+    if os.name == "posix":
+        assert privados[0].stat().st_mode & 0o777 == 0o600
+    diario = "".join(p.read_text() for p in (logs / "diario").glob("uso-*.jsonl"))
+    eventos = [json.loads(linha) for linha in diario.splitlines()]
+    evento = next(e for e in eventos if e["evento"] == "codex.app_server.falhou")
+    assert (evento["sessao"], evento["provider"], evento["codigo"], evento["retorno"]) == (
+        "sess", "codex", "processo_encerrou", 3)
+    assert "SEGREDO-DO-CLI" not in diario
+    assert "unexpected argument" not in diario
+    assert "ws://" not in diario
+
+
+def test_timeout_guarda_so_ultima_cauda_privada(tmp_path, monkeypatch):
+    from app import diag, log_paths
+    monkeypatch.setattr(log_paths, "base", lambda: tmp_path / "logs")
+    monkeypatch.setenv("CP_SESSION_NAME", "sess-timeout")
+    lancador = runpy.run_path(str(_LANCADOR))
+    servidor = SimpleNamespace(poll=lambda: None)
+    with tempfile.TemporaryFile() as erros:
+        erros.write(b"token=SEGREDO-ANTIGO")
+        assert not lancador["_esperar_porta"]("ws://127.0.0.1:1", servidor, erros, 0)
+        erros.write(b"x" * 3000 + b"token=SEGREDO-NOVO")
+        assert not lancador["_esperar_porta"]("ws://127.0.0.1:1", servidor, erros, 0)
+    privados = list((log_paths.base() / "privado").glob("codex-app-server-*.log"))
+    assert len(privados) == 1
+    cauda = privados[0].read_bytes()
+    assert len(cauda) == lancador["_ERRO_MAX"]
+    assert b"SEGREDO-NOVO" in cauda and b"SEGREDO-ANTIGO" not in cauda
+    diario = diag.caminho_do_dia().read_text()
+    eventos = [json.loads(linha) for linha in diario.splitlines()]
+    assert all(e["codigo"] == "timeout" for e in eventos)
+    assert "SEGREDO" not in diag.ler_tudo()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
@@ -278,20 +329,26 @@ def test_lancador_retoma_a_conversa_pedida(tmp_path):
     cwd.mkdir()
     env = _ambiente(tmp_path, cwd)
     env["FAKE_TUI_SLEEP"] = "0.3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
     proc = subprocess.Popen(
         [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
          "--resume", "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     proc.wait(timeout=30)
+    assert proc.returncode == 0
     argv = (tmp_path / "tui-argv.txt").read_text().split("\n")
     assert argv[0] == "resume"
     assert argv[-1] == "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
     assert "-C" not in argv
-    # A politica de sandbox/aprovacao vale na conversa retomada tambem: sem ela a TUI pode parar
-    # num pedido de aprovacao que ninguem responde, e o app fica olhando uma sessao muda.
-    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    # O resume remoto recusa overrides na TUI; as politicas pertencem ao app-server.
+    assert "--remote" in argv
+    assert "--sandbox" not in argv
+    assert "--ask-for-approval" not in argv
+    server_argv = json.loads((tmp_path / "server-argv.json").read_text())
+    configs = [server_argv[i + 1] for i, arg in enumerate(server_argv[:-1]) if arg == "-c"]
+    assert 'sandbox_mode="danger-full-access"' in configs
+    assert 'approval_policy="never"' in configs
 
 
 @pytest.mark.parametrize("resume", [False, True])

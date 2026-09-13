@@ -94,6 +94,36 @@ def test_linha_parcial_fica_pro_proximo_collect(tmp_path):
     assert acc.collect()["steps"] == 2
 
 
+def test_collect_processa_linhas_sem_leitura_integral(tmp_path, monkeypatch):
+    p = tmp_path / "s.jsonl"
+    _w(p, [_claude_user("2026-08-17T12:00:00Z"),
+           _claude_assistant("2026-08-17T12:00:02Z", "m1")])
+    original = Path.open
+
+    class _SomenteLinhas:
+        def __init__(self, arquivo):
+            self._arquivo = arquivo
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._arquivo.__exit__(*args)
+
+        def __getattr__(self, nome):
+            return getattr(self._arquivo, nome)
+
+        def read(self, *_args, **_kwargs):
+            raise AssertionError("collect nao deve carregar o trecho inteiro")
+
+    def abrir(self, *args, **kwargs):
+        arquivo = original(self, *args, **kwargs)
+        return _SomenteLinhas(arquivo) if self == p else arquivo
+
+    monkeypatch.setattr(Path, "open", abrir)
+    assert Accumulator("claude", str(p)).collect()["steps"] == 1
+
+
 # -- Kimi ---------------------------------------------------------------------
 
 def test_kimi_usage_llm_e_tool(tmp_path):
@@ -357,7 +387,11 @@ def test_compartilhado_nao_rele_o_transcript_para_a_segunda_conexao(tmp_path, mo
     assert c is a                                              # b ainda segura
     b.soltar()
     c.soltar()
-    assert Accumulator.compartilhado("claude", str(p)) is not a  # ultimo soltou -> instancia nova
+    d = Accumulator.compartilhado("claude", str(p))
+    assert d is a
+    assert d.collect()["steps"] == 1
+    assert len(aberturas) == 1, "reabrir também deve aproveitar o fold anterior"
+    d.soltar()
 
 
 def test_soltar_acha_a_entrada_mesmo_com_caminho_nao_canonico(tmp_path):
@@ -369,8 +403,44 @@ def test_soltar_acha_a_entrada_mesmo_com_caminho_nao_canonico(tmp_path):
     torto = f"{tmp_path}/./s.jsonl"
     a = Accumulator.compartilhado("claude", torto)
     a.soltar()
-    assert Accumulator._compartilhados == {} or all(
-        v is not a for v in Accumulator._compartilhados.values())
+    assert a._donos == 0
+    assert ("claude", str(p)) in Accumulator._inativos
+    b = Accumulator.compartilhado("claude", str(p))
+    assert b is a
+    assert ("claude", str(p)) not in Accumulator._inativos
+    b.soltar()
+
+
+def test_retencao_limitada_preserva_ativos(tmp_path, monkeypatch):
+    monkeypatch.setattr(Accumulator, "_compartilhados", {})
+    monkeypatch.setattr(Accumulator, "_inativos", {})
+    monkeypatch.setattr(Accumulator, "_INATIVOS_MAX", 2)
+    ativo = Accumulator.compartilhado("claude", str(tmp_path / "ativo"))
+    antigos = [Accumulator.compartilhado("claude", str(tmp_path / str(i))) for i in range(3)]
+    for acc in antigos:
+        acc.soltar()
+    assert list(Accumulator._compartilhados.values()) == [ativo, *antigos[1:]]
+    assert len(Accumulator._inativos) == 2
+
+
+def test_reabrir_processa_append_e_substituicao(tmp_path):
+    p = tmp_path / "s.jsonl"
+    _w(p, [_claude_assistant("2026-08-17T12:00:02Z", "m1")])
+    acc = Accumulator.compartilhado("claude", str(p))
+    assert acc.collect()["steps"] == 1
+    acc.soltar()
+    _w(p, [_claude_assistant("2026-08-17T12:00:05Z", "m2")])
+    novo = Accumulator.compartilhado("claude", str(p))
+    assert novo is acc
+    assert novo.collect()["steps"] == 2
+    novo.soltar()
+    substituto = tmp_path / "novo.jsonl"
+    _w(substituto, [_claude_assistant("2026-08-17T12:00:05Z", f"replacement-{i}")
+                   for i in range(3)])
+    substituto.replace(p)
+    reaberto = Accumulator.compartilhado("claude", str(p))
+    assert reaberto.collect()["steps"] == 3
+    reaberto.soltar()
 
 
 def test_compartilhado_por_provider_e_caminho(tmp_path):

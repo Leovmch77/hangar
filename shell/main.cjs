@@ -182,6 +182,7 @@ async function criarJanela() {
 
   const win = new BrowserWindow({
     ...geo,
+    icon: path.join(__dirname, 'build', 'icon.png'),
     transparent: fundo.transparente,
     // Fallback opaco: onde a transparência não vale, a janela precisa de cor própria, senão
     // aparece preta. O front também não recebe a marca de fundo nesse caso (ver abaixo).
@@ -418,6 +419,47 @@ function avisarOculto(chave, view, oculto) {
   else aplicar();
 }
 
+// View escondido não pode ficar com o teclado: o Chromium foca o WebContents que acabou de nascer
+// ou de carregar, a janela segue ativa pro compositor e todo atalho do front morre em silêncio.
+// `!view.webContents` é estado válido: um Target.closeTarget por fora deixa o view no Map sem ele.
+const viewVivo = (win, view) => !win.isDestroyed() && view.webContents && !view.webContents.isDestroyed();
+
+function anexarNaJanela(win, view) {
+  if (!viewVivo(win, view)) return;
+  if (!win.contentView.children.includes(view)) win.contentView.addChildView(view);
+}
+
+const algumViewVisivel = (win) => {
+  const m = navegadores.get(win);
+  if (!m) return false;
+  for (const v of m.values()) if (viewVivo(win, v) && v.getVisible()) return true;
+  return false;
+};
+
+// Uma pendência por janela: o `did-finish-load` de um view dirigido por CDP repete a cada
+// navegação, e um `once` por load empilharia listeners e chamadas redundantes de foco.
+const focoPendente = new WeakSet();
+
+function devolverFoco(win, view) {
+  if (!viewVivo(win, view) || view.getVisible()) return;
+  // Com a janela em segundo plano, `focus()` vira pedido de ativação (xdg-activation) e um
+  // compositor com focus_on_activate traz o app pra frente — devolver o teclado não pode roubar a
+  // tela de quem está noutro aplicativo. Espera a volta do usuário; focar já focado não ativa nada.
+  if (!win.isFocused()) {
+    if (focoPendente.has(win)) return;
+    focoPendente.add(win);
+    win.once('focus', () => {
+      focoPendente.delete(win);
+      // Enquanto o usuário esteve fora ele pode ter aberto o painel: o teclado é de quem está na
+      // tela, e arrancá-lo do navegador visível seria o mesmo roubo, ao contrário.
+      if (win.isDestroyed() || algumViewVisivel(win)) return;
+      win.webContents.focus();
+    });
+    return;
+  }
+  win.webContents.focus();
+}
+
 function fecharNavegador(win, chave) {
   const m = navegadores.get(win);
   const view = m && m.get(chave);
@@ -558,11 +600,23 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
       if (/^https?:/i.test(alvo)) shell.openExternal(alvo);
       return { action: 'deny' };
     });
-    win.contentView.addChildView(view);
+    const wc = view.webContents;
+    // Escondido, o view carrega SOLTO e só entra na janela com a página pronta: é o primeiro load
+    // de um view anexado que leva o teclado (anexar depois não leva). Solto ele não tem quadro,
+    // por isso a anexação vem antes da emulação que o `avisarOculto` liga no mesmo evento.
+    if (oculto) {
+      // Load que falha também anexa: solto pra sempre, o view não teria print nem viewport e o
+      // agente que o dirige não receberia erro nenhum — só um `shot` que nunca responde.
+      const anexar = () => { wc.removeListener('did-finish-load', anexar); wc.removeListener('did-fail-load', falhou); anexarNaJanela(win, view); };
+      const falhou = (_e, codigo, descricao) => { console.error(`[nav] ${chave}: load escondido falhou (${codigo} ${descricao})`); anexar(); };
+      wc.once('did-finish-load', anexar);
+      wc.once('did-fail-load', falhou);
+    } else {
+      anexarNaJanela(win, view);
+    }
     views.set(chave, view);
     // Estado de navegação pro painel (barra de carregamento, ✕/↻, voltar/avançar, endereço que
     // acompanha os cliques). O view não tem DOM no cockpit — sem isto a página carrega em silêncio.
-    const wc = view.webContents;
     const publicar = () => {
       if (win.isDestroyed() || wc.isDestroyed()) return;
       win.webContents.send('hangar:nav-estado', {
@@ -571,6 +625,7 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
       });
     };
     for (const ev of ['did-start-loading', 'did-stop-loading', 'did-navigate', 'did-navigate-in-page']) wc.on(ev, publicar);
+    wc.on('did-finish-load', () => devolverFoco(win, view));
     // Preenchimento de login com as senhas salvas do Chrome do usuário, ao terminar de carregar
     // uma página cujo domínio tem senha salva. Uma vez por URL (o `dom-ready` repete em SPA).
     let ultimoPreenchido = '';
@@ -627,10 +682,12 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
     // Escondido, a página fica em 0x0 e sem quadro: quem devolve viewport de desktop e print é a
     // emulação de tamanho, e ela SÓ pode entrar com a página carregada (antes disso, SIGSEGV).
     avisarOculto(chave, view, true);
+    devolverFoco(win, view);
     // `oculto: true` na resposta é a prova de que este shell entendeu o pedido: um shell antigo
     // ignora o campo, cria o view visível com bounds zero e devolve só {ok} — o front não confirma.
     return { ok: true, oculto: true };
   }
+  anexarNaJanela(win, view);
   view.setVisible(true);
   view.setBounds(normalizaBounds(bounds));
   avisarOculto(chave, view, false);
@@ -638,12 +695,14 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
 });
 
 ipcMain.on('hangar:nav-hide', (ev, { chave } = {}) => {
+  const win = BrowserWindow.fromWebContents(ev.sender);
   const view = viewDe(ev, chave);
   if (!view) return;
   view.setVisible(false);
   // Sair da tela é o mesmo estado do view que nasceu escondido: sem a emulação, o agente que
   // continuar dirigindo esta sessão passa a ler uma página de 0x0.
   avisarOculto(chave, view, true);
+  devolverFoco(win, view);
 });
 
 ipcMain.on('hangar:nav-bounds', (ev, { chave, bounds } = {}) => {

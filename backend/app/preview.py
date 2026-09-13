@@ -6,6 +6,7 @@ import time
 from typing import AsyncIterator, Callable, Optional
 
 from app import tmux
+from app.hook_state import hook_state
 from app.state import _RULE_RE, _is_boundary, _live_spinner
 # _dirs: MESMO cache de diretorios de config que a statusline usa, e pelo mesmo motivo (roda por
 # sessao, a cada poll). Reusado em vez de copiado — sao os mesmos diretorios e a mesma chave (o stem
@@ -22,6 +23,10 @@ _log = logging.getLogger("hangar.preview")
 _ASSISTANT_GLYPH = "●"
 _USER_PROMPT_RE = re.compile(r"^\s*❯")
 _BANNER_RE = re.compile(r"^[\s▐▛█▝▜▀]*Claude Code v\d")
+# Aviso de plugin ("● ecc: hooks.json: unknown keys …"), com o ● da prosa. Os cortes por posição
+# não bastam: o Claude Code o reimprime no MEIO da conversa, depois do último ❯ (pane real de
+# 11/09, sessão em grupo do orquestrar), e ali ele é o último ● e vira prévia. Por conteúdo, então.
+_PLUGIN_WARNING_RE = re.compile(r"^[a-z][\w.-]*: hooks\.json: [a-z]")
 
 
 def _norm(s: str) -> str:
@@ -331,6 +336,11 @@ def extract_assistant_text(pane: str, provider: str = "claude") -> str:
     for i, ln in enumerate(lines[inicio:fim], inicio):  # sem régua, fim == len(lines)
         s = ln.lstrip()
         corpo = s[1:].lstrip()
+        if s[:1] == _ASSISTANT_GLYPH and _PLUGIN_WARNING_RE.match(corpo):
+            # O aviso ZERA a eleição, não é só pulado: pular faria a varredura cair num ● anterior,
+            # prosa já commitada, que voltaria como se estivesse em voo.
+            start = -1
+            continue
         if (s[:1] == _ASSISTANT_GLYPH and not _TOOL_BLOCK_RE.match(corpo)
                 and not _MCP_CALL_RE.match(corpo)
                 and not _AGENT_FINISHED_RE.match(corpo)
@@ -409,6 +419,16 @@ def read_sidecar(stem: Optional[str]) -> Optional[str]:
         if not isinstance(text, str):
             continue
         if isinstance(ts, (int, float)) and time.time() - ts > _PREVIEW_MAX_AGE:
+            estado = hook_state.get_state(stem)
+            if (text and estado is not None and estado[0] == "working"
+                    and time.time() - estado[1] <= _PREVIEW_MAX_AGE):
+                # Turno longo só de ferramentas não publica texto novo e não é publicador morto:
+                # cair no pane aqui mostrava como mensagem a linha que a TUI desenha ao lado do spinner.
+                # O marcador também tem que ser recente: cada ferramenta o renova, e um agente que
+                # morreu no meio do turno o deixa preso em "working" para sempre.
+                _log.debug("preview: sidecar velho mantido, sessao trabalhando path=%s idade=%.0fs",
+                           f, time.time() - ts)
+                return text
             if text:
                 # Este e o descarte que importa operacionalmente: "a extensao morreu no meio do
                 # turno". Sem o log, quem for entender por que a previa ficou parada ate cair no

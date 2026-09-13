@@ -144,6 +144,16 @@ def list_accounts() -> list[Account]:
     return result + sorted(managed, key=lambda account: account.id)
 
 
+def list_visible_accounts() -> list[Account]:
+    """Contas que as TELAS mostram. A padrao sai quando nao ha Codex instalado nem `~/.codex`:
+    ali ela e so um nome, e o cartao mandava "entrar" numa conta que nunca existiu. Resolver id
+    continua com `list_accounts`, que a mantem sempre."""
+    contas = list_accounts()
+    if shutil.which("codex") is None and not default_home().exists():
+        contas = [a for a in contas if not a.is_default]
+    return contas
+
+
 def resolve_account(account_id: str = "default") -> Account:
     account_id = _validate_name(account_id, allow_default=True)
     if account_id == "default":
@@ -184,6 +194,8 @@ def create_account(name: str) -> Account:
             json.dumps({"version": _MARKER_VERSION, "id": name}) + "\n",
             encoding="utf-8",
         )
+        # Sem isto o login gravaria a credencial no keyring do sistema, fora da pasta da conta.
+        (target / "config.toml").write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
     except Exception as error:
         _cleanup_new_directory(target)
         raise AccountError(500, "codex_account_marker_failed", {"account_id": name}) from error

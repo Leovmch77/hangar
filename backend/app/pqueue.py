@@ -274,6 +274,10 @@ def _strip_attach(text: str) -> str:
 # Prefixo que o Claude Code PREPENDA ao prompt quando o texto referencia imagem anexada
 # ("[Image #1]<texto>"; multiplas imagens empilham). A fila guarda o texto SEM ele.
 _IMG_PREFIX = re.compile(r"^(?:\[Image #\d+\])+\s*")
+# Mensagem SO de imagem: o Claude Code grava o caminho como "[Image: source: <path>]" em vez do
+# "📎 imagem: <path>" que o app digitou (2.1.270). Sem traduzir de volta, a entrega nunca casava e
+# o print era redigitado.
+_IMG_SOURCE = re.compile(r"\[Image: source: ([^\]]+)\]")
 
 
 def _chaves_de_commit(text: str) -> set[str]:
@@ -290,7 +294,8 @@ def _chaves_de_commit(text: str) -> set[str]:
     out: set[str] = set()
     t = text.strip()
     base = _IMG_PREFIX.sub("", t)
-    for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+    fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+    for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
         variant = variant.strip()
         if not variant:
             continue
@@ -314,7 +319,7 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     """
     if provider != "claude":
         return set()
-    pendente: dict[str, int] = {}
+    pendente: list[str] = []
     try:
         with open(jsonl, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -322,26 +327,108 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if obj.get("type") != "queue-operation" or not isinstance(obj.get("content"), str):
+                if obj.get("type") != "queue-operation":
+                    continue
+                if not isinstance(obj.get("content"), str):
+                    # Sem texto, sai a primeira entrada, inclusive quando há pedidos repetidos.
+                    if obj.get("operation") == "dequeue" and pendente:
+                        pendente.pop(0)
                     continue
                 c = obj["content"].strip()
                 if obj.get("operation") == "enqueue":
-                    pendente[c] = pendente.get(c, 0) + 1
+                    pendente.append(c)
                 elif c in pendente:
-                    pendente[c] -= 1
-                    if pendente[c] <= 0:
-                        del pendente[c]
+                    pendente.remove(c)
     except OSError:
         return set()
     out: set[str] = set()
     for t in pendente:
         base = _IMG_PREFIX.sub("", t)
-        for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+        fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+        for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
             variant = variant.strip()
             if variant:
                 out.add(variant)
                 out.update(ln.strip() for ln in variant.split("\n"))
     return out
+
+
+class _CodexCommitted:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.offset = 0
+        self.signature = None
+        self.anchor = b""
+        self.lines: set[str] = set()
+
+    def read(self, path: str) -> set[str] | None:
+        from app.adapters.codex.rollout import parse_rollout_obj
+
+        with self.lock:
+            try:
+                with open(path, "rb") as fh:
+                    stat = os.fstat(fh.fileno())
+                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                    fh.seek(max(0, self.offset - len(self.anchor)))
+                    unchanged = fh.read(len(self.anchor)) == self.anchor
+                    if self.signature and (signature[:2] != self.signature[:2]
+                            or stat.st_size < self.signature[2]
+                            or stat.st_size == self.signature[2] and signature != self.signature
+                            or not unchanged):
+                        self.offset = 0
+                        self.lines.clear()
+                    fh.seek(self.offset)
+                    while fh.tell() < stat.st_size:
+                        start = fh.tell()
+                        raw = fh.readline(stat.st_size - start)
+                        if not raw.endswith(b"\n"):
+                            break  # Linha incompleta não comprova entrega nem avança o índice.
+                        self.offset = fh.tell()
+                        try:
+                            obj = json.loads(raw.decode("utf-8", "replace"))
+                        except ValueError:
+                            continue
+                        for event in parse_rollout_obj(obj):
+                            if event.kind == "user_msg" and event.text:
+                                self.lines.update(_chaves_de_commit(event.text))
+                    current = os.stat(path)
+                    if ((current.st_dev, current.st_ino) != signature[:2]
+                            or current.st_size < stat.st_size
+                            or current.st_size == stat.st_size and current.st_mtime_ns != stat.st_mtime_ns):
+                        raise OSError("transcript mudou durante a confirmação")
+                    fh.seek(max(0, self.offset - 256))
+                    self.anchor = fh.read(min(self.offset, 256))
+                    self.signature = signature
+                    return self.lines.copy()
+            except OSError as exc:
+                self.offset = 0
+                self.signature = None
+                self.anchor = b""
+                self.lines.clear()
+                _log.warning("nao deu pra ler o transcript %s pra confirmar entregas: %s", path, exc)
+                return None
+
+
+_codex_committed: dict[str, _CodexCommitted] = {}
+_codex_committed_lock = threading.Lock()
+_CODEX_COMMITTED_MAX = 8
+_CODEX_COMMITTED_CHARS = 1_000_000
+
+
+def _committed_codex_lines(jsonl: str) -> set[str] | None:
+    path = str(Path(jsonl))
+    with _codex_committed_lock:
+        index = _codex_committed.pop(path, None) or _CodexCommitted()
+        _codex_committed[path] = index
+        while len(_codex_committed) > _CODEX_COMMITTED_MAX:
+            del _codex_committed[next(iter(_codex_committed))]
+    lines = index.read(path)
+    # Índice grande continua correto, mas não fica retido entre chamadas.
+    if lines is None or sum(map(len, lines)) > _CODEX_COMMITTED_CHARS:
+        with _codex_committed_lock:
+            if _codex_committed.get(path) is index:
+                del _codex_committed[path]
+    return lines
 
 
 def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | None:
@@ -366,6 +453,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     redigitava o mesmo prompt (double-send medido: pi-e2e.jsonl com attempts: 2). Pi nao tem fila
     interna com `queue-operation`, entao o parser proprio ja basta. Kimi: mesmo motivo, shape
     `context.append_message` — o parser do adapter e usado do mesmo jeito."""
+    if provider == "codex":
+        return _committed_codex_lines(jsonl)
     out: set[str] = set()
 
     def add(t: str) -> None:
@@ -378,7 +467,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
         # mid-turn nunca confirmava e era redigitada ate max_attempts (a entrega tripla de
         # 2026-07-17).
         base = _IMG_PREFIX.sub("", t)
-        for variant in (t, base, _strip_attach(t), _strip_attach(base)):
+        fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
+        for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
             variant = variant.strip()
             if not variant:
                 continue
@@ -389,16 +479,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     # Import local pelo mesmo motivo do merged_history: app.adapters importa app.pqueue no boot.
     pi_parse = None
     kimi_parse = None
-    codex_parse = None
     if provider in ("pi", "omp"):
         from app.adapters.pi.transcript import parse_obj as pi_parse
-    elif provider == "codex":
-        # Codex: o texto do usuario vive em `response_item`/`message` com role "user", e o parser
-        # ainda tira o contexto que o CLI injeta com esse mesmo role (environment_context,
-        # AGENTS.md). Sem este ramo o oraculo devolve set() vazio -> "nada chegou" -> o reconcile
-        # re-enfileira e o drain REDIGITA a mensagem do usuario, o incidente ja visto no Pi e no
-        # Kimi, aqui com o agravante de o texto ja ter sido entregue pelo `turn/start`.
-        from app.adapters.codex.rollout import parse_rollout_obj as codex_parse
     elif provider == "kimi":
         # Kimi: sem o parser proprio, NENHUMA linha do wire casa o shape do Claude (o role mora em
         # `context.append_message`) -> oraculo vazio -> reconcile lia TODA entrega como engolida e
@@ -412,7 +494,7 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                parse = pi_parse or kimi_parse or codex_parse
+                parse = pi_parse or kimi_parse
                 if parse is not None:
                     for ev in parse(obj):
                         if ev.kind == "user_msg" and ev.text:
@@ -508,7 +590,8 @@ class PromptQueue:
             self._write_atomic(rows)
         return entry
 
-    def claim_undelivered(self, min_ts: float = 0.0, limit: int | None = None) -> list[dict]:
+    def claim_undelivered(self, min_ts: float = 0.0, limit: int | None = None,
+                          *, entry_id: str | None = None) -> list[dict]:
         """Reivindica (atomicamente) entradas ainda nao entregues: vira delivered=True e devolve as
         reivindicadas. Sob _append_lock -> com N drains concorrentes so UM pega cada entrada (os
         outros pegam []) = single-flight, sem double-send. `is False` ESTRITO: legada (sem a chave) ou
@@ -517,6 +600,8 @@ class PromptQueue:
             rows = self.load()
             claimed = []
             for r in rows:
+                if entry_id is not None and str(r.get("id")) != entry_id:
+                    continue
                 if r.get("delivered") is False and _da_sessao_atual(r, min_ts):
                     r["delivered"] = True
                     claimed.append(dict(r))
@@ -526,7 +611,7 @@ class PromptQueue:
                 self._write_atomic(rows)
             return claimed
 
-    def set_delivered(self, entry_id: str, value: bool) -> None:
+    def set_delivered(self, entry_id: str, value: bool, *, steered: bool = False) -> None:
         """Marca UMA entrada (por id) como delivered=value e reescreve atomico. Usado pra reverter um
         claim quando o envio nao chegou a tocar a TUI (provadamente pre-envio)."""
         with _append_lock:
@@ -534,6 +619,10 @@ class PromptQueue:
             for r in rows:
                 if str(r.get("id")) == entry_id:
                     r["delivered"] = value
+                    if value and steered:
+                        r["steered"] = True
+                    elif not value:
+                        r.pop("steered", None)
                     break
             else:
                 return
@@ -692,7 +781,8 @@ class PromptQueue:
                 if not text_raw or cons:
                     disponiveis -= cons            # as linhas casadas confirmam UMA entrada so
                     r["confirmed"] = True
-                elif confirm_only:
+                elif confirm_only or r.get("steered") is True:
+                    # RPC confirmado não é uma tecla possivelmente engolida: não redigitar.
                     # Meio do turno sem prova: nao decide. Entrada segue entregue/nao-confirmada e
                     # o caller reagenda — quando a sessao ficar ociosa, o caminho normal desiste ou
                     # re-enfileira com tentativa contada.

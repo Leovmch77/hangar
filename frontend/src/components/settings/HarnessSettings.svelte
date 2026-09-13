@@ -6,13 +6,15 @@
   // no meio do trabalho.
   import {
     listarHarnesses, consertarHarness, codexIntegracaoEstado, codexIntegracaoReconciliar,
+    listarContasCodex, prepararContaCodex, estadoContaCodex, codexAccountMessage,
     instalacaoEstado, instalarHarness, codexOpcoes,
-    type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex, type Instalacao,
+    type CodexAccount, type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex, type Instalacao,
     type CodexOpcoes,
   } from '../../lib/credenciais';
   import { patchConfig, patchConfigForServer, type CampoConfig } from '@hangar/core';
   import * as m from '../../paraglide/messages';
   import { getLocale } from '../../paraglide/runtime';
+  import { onDestroy } from 'svelte';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import EscopoChip from './EscopoChip.svelte';
@@ -49,9 +51,19 @@
   let erroOpcoesCodex = $state('');
   let trocandoOpcoesCodex = $state(false);
   let integracao = $state<IntegracaoCodex | null>(null);
+  let contasCodex = $state<CodexAccount[]>([]);
+  let contaCodex = $state('default');
+  let syncConta = $state<CodexAccount['sync'] | null>(null);
+  let contaSelecionada = $derived(contasCodex.find((conta) => conta.id === contaCodex) ?? null);
   let erroIntegracao = $state('');
   let reconciliando = $state(false);
-  let integracaoOcupada = $derived(reconciliando || (integracao?.estado === 'executando' && !erroIntegracao));
+  // O `!erroIntegracao` é o que destrava o botão quando a conexão cai NO MEIO do polling: ali o
+  // último estado lido continua sendo `executando`, mas ninguém mais vai perguntar (o catch não
+  // reagenda), então o card ficava preso em "Executando…" com o botão desabilitado para sempre.
+  // Erro significa que não se sabe mais se está rodando — e quem não sabe tem que poder tentar.
+  // Apertar o botão limpa o erro na entrada de `consultarIntegracao`, então o ciclo se rearma.
+  let integracaoOcupada = $derived(reconciliando || (!erroIntegracao && (contaCodex === 'default'
+    ? integracao?.estado === 'executando' : syncConta?.status === 'running')));
   interface ConsultaIntegracao {
     alvo: Server | null;
     controle: AbortController;
@@ -61,6 +73,8 @@
     reqInst: number;
     reqConfig: number;
     reqCodex: number;
+    timerConta?: ReturnType<typeof setTimeout>;
+    reqConta: number;
   }
   let consulta: ConsultaIntegracao | null = null;
 
@@ -154,9 +168,63 @@
     }
   }
 
+  function guardarSyncConta(id: string, sync: CodexAccount['sync']) {
+    syncConta = sync;
+    contasCodex = contasCodex.map((conta) => conta.id === id ? { ...conta, sync } : conta);
+  }
+
+  async function consultarConta(ctx: ConsultaIntegracao, reconciliar = false) {
+    if (ctx.timerConta) clearTimeout(ctx.timerConta);
+    const id = contaCodex;
+    if (id === 'default') return;
+    const requisicao = ++ctx.reqConta;
+    if (reconciliar) reconciliando = true;
+    erroIntegracao = '';
+    try {
+      const sync = await (reconciliar
+        ? prepararContaCodex(ctx.alvo, id, true, ctx.controle.signal)
+        : estadoContaCodex(ctx.alvo, id, ctx.controle.signal));
+      if (ctx.controle.signal.aborted || requisicao !== ctx.reqConta || contaCodex !== id) return;
+      guardarSyncConta(id, sync);
+      if (sync.status === 'running') {
+        ctx.timerConta = setTimeout(() => { void consultarConta(ctx); }, 1500);
+      }
+    } catch (e) {
+      if (!ctx.controle.signal.aborted && requisicao === ctx.reqConta && contaCodex === id) {
+        erroIntegracao = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      if (!ctx.controle.signal.aborted && requisicao === ctx.reqConta) reconciliando = false;
+    }
+  }
+
+  async function carregarContas(ctx: ConsultaIntegracao) {
+    try {
+      const contas = await listarContasCodex(ctx.alvo, ctx.controle.signal);
+      if (ctx.controle.signal.aborted) return;
+      contasCodex = contas;
+      const lembrada = localStorage.getItem(`cp_harness_codex_account:${ctx.alvo?.id ?? 'active'}`);
+      if (lembrada && contas.some((conta) => conta.id === lembrada)) contaCodex = lembrada;
+      else if (!contas.some((conta) => conta.id === contaCodex)) contaCodex = 'default';
+      syncConta = contas.find((conta) => conta.id === contaCodex)?.sync ?? null;
+      if (contaCodex !== 'default' && syncConta?.status === 'running') void consultarConta(ctx);
+    } catch (e) {
+      if (!ctx.controle.signal.aborted) erroIntegracao = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  function trocarConta(ev: Event) {
+    contaCodex = (ev.currentTarget as HTMLSelectElement).value;
+    localStorage.setItem(`cp_harness_codex_account:${consulta?.alvo?.id ?? 'active'}`, contaCodex);
+    erroIntegracao = '';
+    syncConta = contasCodex.find((conta) => conta.id === contaCodex)?.sync ?? null;
+    if (consulta && contaCodex !== 'default') void consultarConta(consulta);
+  }
+
   function reconciliarIntegracao() {
     if (consulta && !integracaoOcupada) {
-      void consultarIntegracao(consulta, true);
+      if (contaCodex === 'default') void consultarIntegracao(consulta, true);
+      else void consultarConta(consulta, true);
     }
   }
 
@@ -216,6 +284,7 @@
   }
 
   let trocandoAutomatica = $state(false);
+  let trocandoMemoria = $state(false);
   // O interruptor nunca muda sozinho: `checked` é o dado do servidor; o onchange repõe o dado,
   // grava, e a releitura é quem muda a tela (regra das Máquinas, CLAUDE.md).
   async function trocarAutomatica(ev: Event) {
@@ -239,6 +308,25 @@
     }
   }
 
+  async function trocarMemoria(ev: Event) {
+    const alvo = ev.currentTarget as HTMLInputElement;
+    const querido = alvo.checked;
+    alvo.checked = !querido;
+    const ctx = consulta;
+    if (!ctx || trocandoMemoria) return;
+    trocandoMemoria = true;
+    erroIntegracao = '';
+    try {
+      await (ctx.alvo ? patchConfigForServer(ctx.alvo, { codex_memory_import: querido })
+                      : patchConfig({ codex_memory_import: querido }));
+      if (consulta === ctx) await consultarIntegracao(ctx);
+    } catch (e) {
+      if (consulta === ctx) erroIntegracao = e instanceof Error ? e.message : String(e);
+    } finally {
+      trocandoMemoria = false;
+    }
+  }
+
   function atualizar() {
     void carregar();
     // O ↻ é a saída de uma leitura que falhou — inclusive a da CONFIGURAÇÃO, que agora vem do modal:
@@ -248,6 +336,10 @@
     void store.carregar();
     // As opções do Codex saem pelo `carregar()` acima, nos dois ramos dele.
     if (consulta && !reconciliando) void consultarIntegracao(consulta);
+    if (consulta) {
+      void carregarContas(consulta);
+      if (contaCodex !== 'default') void consultarConta(consulta);
+    }
     // Sem guard de "instalando": `consultarInstalacao` já limpa o timer e incrementa a geração no
     // topo, então reentrar é seguro — e o guard trancava justamente a saída manual de uma tela
     // presa em "rodando".
@@ -267,6 +359,11 @@
     ocioso: m.harness_codex_ocioso, executando: m.harness_codex_executando,
     ok: m.harness_codex_ok, parcial: m.harness_codex_parcial,
     erro: m.harness_codex_erro, indisponivel: m.harness_codex_indisponivel,
+  };
+
+  const ESTADOS_CONTA: Record<CodexAccount['sync']['status'], () => string> = {
+    idle: m.harness_codex_ocioso, running: m.harness_codex_executando,
+    ready: m.harness_codex_ok, partial: m.harness_codex_parcial, error: m.harness_codex_erro,
   };
 
   function dataIntegracao(valor: string | null): string {
@@ -300,32 +397,58 @@
     finally { if (g === ger) carregando = false; }
   }
 
-  async function consertar(id: string) {
+  // Etapas concluídas + a fração da etapa atual que o sub-andamento (item i de N) mede. Sem sub, a
+  // etapa em curso conta zero: a barra nunca promete um avanço que o servidor não informou.
+  function pctIntegracao(p: NonNullable<IntegracaoCodex['progresso']>): number {
+    const dentro = p.sub && p.sub.total > 0 ? (p.sub.atual - 1) / p.sub.total : 0;
+    return Math.round(Math.min(1, Math.max(0, (p.passo - 1 + dentro) / p.total)) * 100);
+  }
+
+  // Andamento e desfecho moram JUNTO do item: o botão virava "…" e o resultado ia pro rodapé da
+  // página, longe de quem clicou. Tempo decorrido, não estimativa: um conserto é um comando só, e
+  // "quanto falta" seria inventado.
+  let consertoDe = $state<{ cli: string; item: string } | null>(null);
+  let resultado = $state<{ cli: string; item: string; ok: boolean; texto: string } | null>(null);
+  let decorrido = $state(0);
+  let relogio: ReturnType<typeof setInterval> | undefined;
+  onDestroy(() => clearInterval(relogio));
+
+  async function consertar(id: string, cli: string, item: string) {
     if (consertando) return;
     const alvo = apiTarget;
     const g = ++ger;
-    consertando = id; erro = ''; feito = '';
+    consertando = id; consertoDe = { cli, item }; resultado = null; erro = ''; feito = '';
+    const inicio = Date.now();
+    decorrido = 0;
+    clearInterval(relogio);
+    relogio = setInterval(() => { decorrido = Math.floor((Date.now() - inicio) / 1000); }, 1000);
     try {
       const r = await consertarHarness(alvo, id);
       if (g !== ger) return;
       lista = r.harnesses;
-      feito = r.feito;
-    } catch (e) { if (g === ger) erro = e instanceof Error ? e.message : String(e); }
-    finally { if (g === ger) consertando = null; }
+      resultado = { cli, item, ok: true, texto: r.feito };
+    } catch (e) {
+      if (g === ger) resultado = { cli, item, ok: false, texto: e instanceof Error ? e.message : String(e) };
+    } finally {
+      if (g === ger) { consertando = null; consertoDe = null; clearInterval(relogio); }
+    }
   }
 
   $effect(() => {
     const ctx: ConsultaIntegracao = {
       alvo: apiTarget, controle: new AbortController(), requisicao: 0, reqInst: 0, reqConfig: 0, reqCodex: 0,
+      reqConta: 0,
     };
     consulta = ctx;
     lista = []; feito = ''; consertando = null;
     camposGravados = null; erroConfig = ''; trocandoStatusline = false;
     opcoesDoCodex = null; erroOpcoesCodex = ''; trocandoOpcoesCodex = false;
-    integracao = null; erroIntegracao = ''; reconciliando = false;
+    integracao = null; contasCodex = []; contaCodex = 'default'; syncConta = null;
+    erroIntegracao = ''; reconciliando = false;
     inst = null; erroInst = ''; confirmar = null;
     void carregar();
     void consultarIntegracao(ctx);
+    void carregarContas(ctx);
     // Também na montagem: é desta resposta que sai a lista de quem dá pra instalar por botão nesta
     // máquina, e sem ela nenhum card ausente saberia o que oferecer.
     void consultarInstalacao(ctx);
@@ -337,6 +460,7 @@
       ++ctx.reqCodex;
       ctx.controle.abort();
       if (ctx.timer) clearTimeout(ctx.timer);
+      if (ctx.timerConta) clearTimeout(ctx.timerConta);
       if (ctx.timerInst) clearTimeout(ctx.timerInst);
       consulta = null;
     };
@@ -479,7 +603,7 @@
             >{i.info ? '·' : i.ok === true ? '✓' : i.ok === false ? '✕' : '?'}</span>
           <span class="hs-item-txt"><b>{rotulo(i)}</b> {texto(i)}</span>
           {#if i.conserto}
-            <button type="button" class="hs-btn" onclick={() => consertar(i.conserto!)}
+            <button type="button" class="hs-btn" onclick={() => consertar(i.conserto!, h.id, i.id)}
               disabled={consertando !== null}
               >{consertando === i.conserto ? '…'
                 : i.conserto.startsWith('sync:') ? m.harness_sincronizar()
@@ -495,7 +619,21 @@
             <p class="cfg-motivo">{pq.motivo()}</p>
           </details>
         {/if}
+        {#if consertoDe?.cli === h.id && consertoDe.item === i.id}
+          <div class="hs-conserto" role="status">
+            <span>{m.harness_consertando({ item: rotulo(i), s: decorrido })}</span>
+            <span class="hs-barra" aria-hidden="true"><span></span></span>
+          </div>
+        {:else if resultado?.cli === h.id && resultado.item === i.id}
+          <p class="hs-conserto" class:erro={!resultado.ok} role={resultado.ok ? 'status' : 'alert'}
+            >{resultado.texto}</p>
+        {/if}
       {/each}
+      <!-- Item que sumiu depois do conserto (ele deixou de se aplicar): o desfecho fica no card. -->
+      {#if resultado?.cli === h.id && !h.itens.some((i) => i.id === resultado?.item)}
+        <p class="hs-conserto" class:erro={!resultado.ok} role={resultado.ok ? 'status' : 'alert'}
+          >{resultado.texto}</p>
+      {/if}
       {#if h.id === 'claude'}
         {#if campos?.claude_statusline_update}
           <label class="hs-item hs-opcao">
@@ -551,6 +689,10 @@
           <p class="hs-aviso" role="status">
             {#if instalando}
               {m.harness_inst_andamento({ passo: inst.passo, total: inst.total, etapa: etapaInst(inst.etapa) })}
+              <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                aria-valuenow={pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}
+                aria-label={m.harness_inst_progresso()}
+                ><span style="width: {pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}%"></span></span>
             {:else if inst.ok}
               {m.harness_inst_pronto()}
             {:else}
@@ -577,6 +719,14 @@
         <div class="hs-integracao">
           <div class="hs-item hs-integracao-cab">
             <span class="hs-item-txt"><b>{m.harness_codex_integracao()}</b></span>
+            {#if contasCodex.length}
+              <select class="hs-conta" aria-label={m.codex_ui_account()} value={contaCodex}
+                onchange={trocarConta} disabled={integracaoOcupada}>
+                {#each contasCodex as conta (conta.id)}
+                  <option value={conta.id}>{conta.name}{conta.is_default ? ` · ${m.criar_padrao()}` : ''}</option>
+                {/each}
+              </select>
+            {/if}
             <button type="button" class="hs-btn" onclick={reconciliarIntegracao}
               disabled={integracaoOcupada}
               >{integracaoOcupada ? m.harness_codex_executando() : m.harness_codex_reconciliar()}</button>
@@ -598,30 +748,62 @@
                 checked={integracao.automatica}
                 disabled={trocandoAutomatica} onchange={trocarAutomatica} />
             </label>
-            <p class="hs-aviso" role="status">
-              {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
-              {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
-            </p>
-            <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
-            {#if integracao.proxima_atualizacao}
-              <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
+            <label class="hs-item hs-automatica">
+              <span class="hs-item-txt">
+                <b>{m.harness_codex_memoria()}</b>
+                <span class="hs-ajuda">{m.harness_codex_memoria_ajuda()}</span>
+              </span>
+              <input type="checkbox" class="switch" checked={integracao.memoria}
+                disabled={trocandoMemoria} onchange={trocarMemoria} />
+            </label>
+            {#if integracao.memoria}
+              <p class="hs-aviso" role="status">{m.harness_codex_memoria_prazo()}</p>
             {/if}
-            <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
-            {#if integracao.skills}
-              <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
+            {#if contaCodex === 'default'}
+              <p class="hs-aviso" role="status">
+                {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
+                {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
+              </p>
+              {#if integracao.estado === 'executando' && integracao.progresso}
+                {@const p = integracao.progresso}
+                <div class="hs-progresso">
+                  <span>{m.harness_codex_progresso({ passo: p.passo, total: p.total })}{#if p.sub}
+                    · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}</span>
+                  <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                    aria-valuenow={pctIntegracao(p)} aria-label={m.harness_codex_integracao()}
+                    ><span style="width: {pctIntegracao(p)}%"></span></span>
+                </div>
+              {/if}
+              <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
+              {#if integracao.proxima_atualizacao}
+                <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
+              {/if}
+              <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
+              {#if integracao.skills}
+                <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
+              {/if}
+              {#if integracao.plugins.length}
+                <ul class="hs-plugins">
+                  {#each integracao.plugins as plugin}
+                    <li><b>{plugin.id}</b> · {plugin.versao} · {plugin.origem}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if integracao.confianca_pendente}
+                <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
+              {/if}
+              {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
+              {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
+            {:else if contaSelecionada && syncConta}
+              {#if contaSelecionada.auth.email}<p class="hs-aviso">{contaSelecionada.auth.email}</p>{/if}
+              <p class="hs-aviso" role="status">{ESTADOS_CONTA[syncConta.status]?.() ?? syncConta.status}</p>
+              {#if syncConta.trust_pending}
+                <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
+              {/if}
+              {#each syncConta.issues as issue (`${issue.code}:${JSON.stringify(issue.params)}`)}
+                <p class="hs-aviso" class:erro={syncConta.status === 'error'}>{codexAccountMessage(issue)}</p>
+              {/each}
             {/if}
-            {#if integracao.plugins.length}
-              <ul class="hs-plugins">
-                {#each integracao.plugins as plugin}
-                  <li><b>{plugin.id}</b> · {plugin.versao} · {plugin.origem}</li>
-                {/each}
-              </ul>
-            {/if}
-            {#if integracao.confianca_pendente}
-              <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
-            {/if}
-            {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
-            {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
           {/if}
           {#if opcoesDoCodex}
             {@const dado = opcoesDoCodex}
@@ -735,6 +917,23 @@
   }
   .hs-aviso { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-aviso.erro { color: var(--error); }
+  .hs-conserto { margin: var(--space-1) 0 0; padding-left: 22px; font-size: var(--text-xs);
+                 color: var(--text-secondary); overflow-wrap: anywhere; }
+  .hs-conserto.erro { color: var(--error); }
+  /* Barra indeterminada: sem porcentagem porque não há medida do quanto falta. A animação é num
+     span HTML (compõe na GPU; em svg repintaria a página a cada quadro). */
+  .hs-barra { display: block; position: relative; height: 3px; margin-top: var(--space-1);
+              border-radius: 2px; overflow: hidden; background: var(--border-subtle); }
+  .hs-barra span { position: absolute; inset: 0; width: 35%; border-radius: 2px;
+                   background: var(--accent); animation: hs-barra 1.2s ease-in-out infinite; }
+  @keyframes hs-barra { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  /* Determinada: a largura é a medida que o servidor informou, sem animação de vai-e-vem. */
+  .hs-progresso { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
+  .hs-barra.det span { animation: none; transition: width .4s ease; }
+    @media (prefers-reduced-motion: reduce) {
+      .hs-barra span { animation: none; width: 100%; opacity: .5; }
+      .hs-barra.det span { transition: none; }
+    }
   .hs-link { color: var(--accent); overflow-wrap: anywhere; }
   /* `--surface-raised`, e não `--bg-elevated` cru: o card já é `--surface-inset` e as duas
      superfícies precisam acompanhar o véu do papel de parede juntas (regra do CLAUDE.md). */
@@ -755,6 +954,9 @@
                  white-space: pre-wrap; overflow-wrap: anywhere; }
   .hs-integracao { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); padding-top: var(--space-1); }
   .hs-integracao-cab { flex-wrap: wrap; }
+  .hs-conta { max-width: 240px; min-height: 30px; padding: 0 var(--space-2);
+              border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+              background: var(--surface-raised); color: var(--text-primary); font-size: var(--text-xs); }
   .hs-integracao .hs-aviso, .hs-plugins { overflow-wrap: anywhere; }
   .hs-plugins { margin: var(--space-1) 0 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--text-secondary); }
 </style>

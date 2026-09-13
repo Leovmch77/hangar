@@ -12,8 +12,14 @@ import { chamadasFocus } from './ComposerStub.svelte';
 import { filesStores } from '../lib/filesStore.svelte';
 import { ctxPanel } from '../lib/ctxPanel.svelte';
 import { overwriteGetLocale } from '../paraglide/runtime';
+import * as m from '../paraglide/messages';
 import GitTabs from '../components/git/GitTabs.svelte';
 import { createGitStore } from '../lib/gitStore.svelte';
+import { renderMarkdown } from '../lib/markdown';
+import type { AggSession, SessionInfo } from '@hangar/core';
+import * as diag from '../lib/diag';
+import { getBaseUrl } from '../lib/auth';
+vi.mock('../lib/diag', () => ({ registrar: vi.fn(), novoReq: () => 'stream-teste' }));
 
 // Stub de componente Svelte 5: createRawSnippet é o padrão do DesktopShell.test.ts — uma classe
 // com $destroy (padrão Svelte 4) quebra no mount do Svelte 5 com "cannot be invoked without new".
@@ -59,6 +65,7 @@ const sseCtl = vi.hoisted(() => {
     },
   };
 });
+const sessionsStoreCtl = vi.hoisted(() => ({ rows: [] as unknown[], byServer: [] as unknown[] }));
 
 // API: só o que o mount do Chat toca precisa responder; o resto nunca chega a ser chamado
 // com os filhos stubados.
@@ -82,6 +89,8 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   })),
   readFile: vi.fn(async () => ({ path: 'a.txt', text: 'A', size: 1, truncated: false })),
   searchFiles: vi.fn(async () => ({ hits: [], truncated: false, mode: 'names' })),
+  resolverCitados: vi.fn(async () => ({ ok: { '/repo/a.txt': { relativo: 'a.txt', real: '/repo/a.txt' } }, faltam: [] })),
+  fileUrl: vi.fn((name: string, path: string) => `/api/sessions/${name}/file?path=${encodeURIComponent(path)}`),
   pathDiff: vi.fn(async () => ({
     path: 'a.txt', diff: '', truncated: false,
     escopo_pedido: 'branch', escopo_usado: 'branch', base: null, motivo: null,
@@ -110,6 +119,14 @@ vi.mock('@hangar/core', async (importOriginal) => ({
 vi.mock('../lib/auth', () => ({
   listServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   getActiveId: vi.fn(() => 'srv-test'),
+  getBaseUrl: vi.fn(() => 'http://x'),
+}));
+vi.mock('../lib/sessionsStore.svelte', () => ({
+  sessionsStore: {
+    sessionsForServer(id: string) { return (sessionsStoreCtl.rows as AggSession[]).filter(s => s.serverId === id); },
+    get rows() { return sessionsStoreCtl.rows; },
+    get byServer() { return sessionsStoreCtl.byServer; },
+  },
 }));
 vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading: false } }));
 vi.mock('../lib/ouvir', () => ({ ouvirTexto: vi.fn() }));
@@ -137,9 +154,13 @@ function montar(desktop = true) {
 }
 
 beforeEach(() => {
+  vi.mocked(getBaseUrl).mockReturnValue('http://x');
+  vi.mocked(diag.registrar).mockClear();
   overwriteGetLocale(() => 'pt');
   ctxPanel.recolhido = false;   // vive no módulo e persiste entre testes
   ctxPanel.aba = 'contexto';
+  sessionsStoreCtl.rows = [];
+  sessionsStoreCtl.byServer = [];
   document.body.innerHTML = '';
   // o registry do FilesStore vive no modulo e persiste entre testes: zera a selecao da chave
   // usada (o GitTabs e o Chat compartilham serverId::sessionName nos testes integrados)
@@ -148,13 +169,61 @@ beforeEach(() => {
   filesStores.release('srv-test::sess');
 });
 
+it('eventos do stream mantêm servidor de origem após trocar o ativo', async () => {
+  const t = montar();
+  try {
+    await tick();
+    const api = await import('@hangar/core');
+    expect(vi.mocked(api.openEventStream).mock.calls.at(-1)?.[2]).toBe('stream-teste');
+    vi.mocked(getBaseUrl).mockReturnValue('http://outro');
+    sseCtl.handlers.get('preview')?.({ data: 'conteudo privado token' } as MessageEvent);
+    sseCtl.handlers.get('ping')?.({ data: '{}' } as MessageEvent);
+    expect(diag.registrar).toHaveBeenCalledWith(expect.objectContaining({
+      evento: 'sse.quadro_falhou', codigo: 'preview', req: 'stream-teste',
+    }), 'http://x');
+    expect(vi.mocked(diag.registrar).mock.calls.every(([, destino]) => destino === 'http://x')).toBe(true);
+    expect(JSON.stringify(vi.mocked(diag.registrar).mock.calls.map(([e]) => e))).not.toContain('conteudo privado');
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('abre o SSE sem esperar a primeira carga do histórico', async () => {
+  const api = await import('@hangar/core');
+  let concluirHistorico!: () => void;
+  vi.mocked(api.openEventStream).mockClear();
+  vi.mocked(api.getHistoryDesde).mockReturnValueOnce(new Promise((resolve) => {
+    concluirHistorico = () => resolve({ eventos: [], etag: null });
+  }));
+  const t = montar();
+  try {
+    await tick();
+    expect(api.openEventStream).toHaveBeenCalledOnce();
+    sseCtl.handlers.get('message')?.({ data: JSON.stringify({
+      id: 'ao-vivo', kind: 'assistant_msg', text: 'evento ao vivo', ts: '2026-09-11T12:00:00Z',
+    }) } as MessageEvent);
+    await tick();
+    expect(t.el.querySelector('.chat-skeleton')).toBeNull();
+    concluirHistorico();
+    await tick();
+    expect(t.el.querySelector('.chat-skeleton')).toBeNull();
+  } finally {
+    await unmount(t.comp);
+    vi.mocked(api.getHistoryDesde).mockResolvedValue({ eventos: [], etag: null });
+  }
+});
+
 it.each([true, false])('mostra a preparação do Codex sem conversa antiga (desktop=%s)', async (desktop) => {
   const api = await import('@hangar/core');
-  vi.mocked(api.getSessions).mockResolvedValue([{
+  const sessao = {
     name: 'sess', provider: 'codex', tracked: false, jsonl: null, state: 'working',
     label: 'integração Codex: conferindo plugins',
     startup_steps: ['preparando as instruções do Codex', 'integração Codex: conferindo plugins'],
-  }]);
+  } satisfies SessionInfo;
+  if (desktop) sessionsStoreCtl.rows = [{
+    ...sessao, serverId: 'srv-test', serverLabel: 'T', serverColor: '#fff',
+  } satisfies AggSession];
+  else vi.mocked(api.getSessions).mockResolvedValue([sessao]);
   vi.mocked(api.getHistoryDesde).mockRejectedValue(Object.assign(new Error('404'), { status: 404 }));
   const t = montar(desktop);
   try {
@@ -168,6 +237,46 @@ it.each([true, false])('mostra a preparação do Codex sem conversa antiga (desk
     await unmount(t.comp);
     vi.mocked(api.getSessions).mockResolvedValue([]);
     vi.mocked(api.getHistoryDesde).mockResolvedValue({ eventos: [], etag: null });
+  }
+});
+
+it('recupera a abertura recusada quando a primeira lista já traz o Codex pronto', async () => {
+  const api = await import('@hangar/core');
+  let publicar!: (rows: SessionInfo[]) => void;
+  vi.mocked(api.getSessions).mockReturnValueOnce(new Promise(resolve => { publicar = resolve; }));
+  vi.mocked(api.getHistoryDesde).mockRejectedValueOnce(Object.assign(new Error('sessão não encontrada'), { status: 404 }));
+  vi.mocked(api.getHistoryDesde).mockClear();
+  vi.mocked(api.openEventStream).mockClear();
+  const t = montar(false);
+  try {
+    await vi.waitFor(() => expect(t.el.textContent).toContain('sessão não encontrada'));
+    const stream = vi.mocked(api.openEventStream).mock.results[0].value;
+    Object.defineProperty(stream, 'readyState', { value: 2 });
+    stream.onerror(new Event('error'));
+    await tick();
+    publicar([{ name: 'sess', provider: 'codex', tracked: true, jsonl: '/codex/nova.jsonl', state: 'idle' }]);
+    await vi.waitFor(() => expect(api.getHistoryDesde).toHaveBeenCalledTimes(2));
+    expect(api.openEventStream).toHaveBeenCalledTimes(2);
+    expect(t.el.textContent).not.toContain('sessão não encontrada');
+    expect(t.el.textContent).not.toContain(m.chat_sse_recusado());
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('desktop reutiliza o stream da lista sem polling REST', async () => {
+  vi.useFakeTimers();
+  const api = await import('@hangar/core');
+  vi.mocked(api.getSessions).mockClear();
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test' }];
+  const t = montar(true);
+  try {
+    await tick();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(api.getSessions).not.toHaveBeenCalled();
+  } finally {
+    await unmount(t.comp);
+    vi.useRealTimers();
   }
 });
 
@@ -199,6 +308,123 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
     mq = stubMatchMedia();
     mq.set('(min-width: 768px)', true);
     mq.set('(min-width: 1280px)', true);   // o visor so existe em desktop largo (B5)
+  });
+
+  it.each(['txt', 'sh'])('clique no arquivo .%s abre o visor sem criar sessão', async (ext) => {
+    const api = await import('@hangar/core');
+    const path = `/repo/a.${ext}`;
+    vi.mocked(api.resolverCitados).mockResolvedValueOnce({ ok: { [path]: { relativo: `a.${ext}`, real: path } }, faltam: [] });
+    vi.mocked(api.createSession).mockClear();
+    const t = montar();
+    await tick();
+    const texto = document.createElement('div');
+    texto.innerHTML = renderMarkdown(`Veja [a.${ext}:2](${path}:2) aqui.`, { fileLinks: true });
+    t.el.querySelector('.chat-underlay')!.append(texto);
+    texto.querySelector('button')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.arq-visor .visor')).not.toBeNull());
+    expect(api.resolverCitados).toHaveBeenCalledWith('sess', [path]);
+    expect(api.readFile).toHaveBeenCalledWith('sess', `a.${ext}`);
+    expect(api.createSession).not.toHaveBeenCalled();
+    const store = filesStores.retain('srv-test::sess', 'sess');
+    expect(store.linha).toBe(2);
+    filesStores.release('srv-test::sess');
+    await unmount(t.comp);
+  });
+
+  it('aba inicial Arquivos abre o mesmo visor no web estreito', async () => {
+    const store = filesStores.retain('srv-test::sess', 'sess');
+    await store.abrir('a.txt', 2);
+    const target = document.createElement('div');
+    document.body.append(target);
+    const git = createGitStore('sess');
+    git.error = 'fatal: not a git repository';
+    const comp = mount(GitTabs, { target, props: {
+      git, desktop: false, filesInContext: false, initialTab: 'files', onClose: vi.fn(),
+    } });
+    await vi.waitFor(() => expect(target.querySelector('.gt-body .visor')).not.toBeNull());
+    expect(target.querySelector('[role=tab][aria-selected=true]')?.textContent).toMatch(/Files|Arquivos/);
+    await unmount(comp);
+    filesStores.release('srv-test::sess');
+  });
+
+  it('nome de script fora do repo abre pelo caminho citado no resultado da ferramenta', async () => {
+    const api = await import('@hangar/core');
+    const nome = 'ecc-review-reminder.sh';
+    const path = `/home/user/.codex/hooks/${nome}`;
+    vi.mocked(api.getHistoryDesde).mockResolvedValueOnce({ eventos: [
+      { kind: 'tool_result', id: 'arquivo-externo', result: `Encontrado: ${path}` },
+    ], etag: null });
+    vi.mocked(api.resolverCitados)
+      .mockResolvedValueOnce({ ok: {}, faltam: [nome] })
+      .mockResolvedValueOnce({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+    const store = filesStores.retain('srv-test::sess', 'sess');
+    const abrir = vi.spyOn(store, 'abrirExterno').mockResolvedValue(true);
+    const t = montar();
+    try {
+      await tick();
+      await tick();
+      const texto = document.createElement('div');
+      texto.innerHTML = renderMarkdown(`Veja \`${nome}:12\`.`, { fileLinks: true });
+      t.el.querySelector('.chat-underlay')!.append(texto);
+      texto.querySelector('button')!.click();
+      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith(path, expect.any(String), 12));
+      expect(api.resolverCitados).toHaveBeenLastCalledWith('sess', [path]);
+    } finally {
+      abrir.mockRestore();
+      await unmount(t.comp);
+      filesStores.release('srv-test::sess');
+    }
+  });
+
+  it('nome repetido abre o primeiro caminho citado em vez de virar erro de sessão', async () => {
+    const api = await import('@hangar/core');
+    const nome = 'guard.sh';
+    vi.mocked(api.getHistoryDesde).mockResolvedValueOnce({ eventos: [
+      { kind: 'tool_result', id: 'homonimos', result: '/home/a/guard.sh\n/home/b/guard.sh' },
+    ], etag: null });
+    vi.mocked(api.resolverCitados)
+      .mockResolvedValueOnce({ ok: {}, faltam: [nome] })
+      .mockResolvedValueOnce({ ok: {
+        '/home/a/guard.sh': { relativo: null, real: '/home/a/guard.sh' },
+        '/home/b/guard.sh': { relativo: null, real: '/home/b/guard.sh' },
+      }, faltam: [] });
+    const store = filesStores.retain('srv-test::sess', 'sess');
+    const abrir = vi.spyOn(store, 'abrirExterno').mockResolvedValue(true);
+    const t = montar();
+    try {
+      await tick();
+      await tick();
+      const texto = document.createElement('div');
+      texto.innerHTML = renderMarkdown(`Veja \`${nome}\`.`, { fileLinks: true });
+      t.el.querySelector('.chat-underlay')!.append(texto);
+      texto.querySelector('button')!.click();
+      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith('/home/a/guard.sh', expect.any(String), null));
+      expect(t.el.querySelector('.chat-error')).toBeNull();
+    } finally {
+      abrir.mockRestore();
+      await unmount(t.comp);
+      filesStores.release('srv-test::sess');
+    }
+  });
+
+  it('arquivo inexistente não substitui a conversa por erro de sessão', async () => {
+    const api = await import('@hangar/core');
+    vi.mocked(api.resolverCitados).mockResolvedValueOnce({ ok: {}, faltam: ['ausente.ts'] });
+    const t = montar();
+    try {
+      await tick();
+      const texto = document.createElement('div');
+      texto.innerHTML = renderMarkdown('Veja `ausente.ts`.', { fileLinks: true });
+      t.el.querySelector('.chat-underlay')!.append(texto);
+      texto.querySelector('button')!.click();
+      const store = filesStores.retain('srv-test::sess', 'sess');
+      await vi.waitFor(() => expect(store.erro).toBe(m.erro_arq_inexistente()));
+      filesStores.release('srv-test::sess');
+      expect(t.el.querySelector('.chat-error')).toBeNull();
+      expect(t.el.querySelector('.chat-underlay')).not.toBeNull();
+    } finally {
+      await unmount(t.comp);
+    }
   });
 
   it('underlay da conversa fica inert com o visor aberto e volta sem ele', async () => {
@@ -398,4 +624,100 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
     unmount(gComp as never);
     unmount(t.comp);
   });
+});
+
+// --- SSE fechado nao e sempre recusa (medido 12/09/2026) ---
+// Atras do `tailscale serve`, backend reiniciando responde 502 em ~24ms: o EventSource vai pra
+// CLOSED igual a um 404 e a faixa "o servidor recusou" ficava parada sobre uma sessao viva. Antes de
+// desistir o Chat pergunta a lista: sem backend e soluco (tenta de novo); sessao fora da lista e
+// recusa de verdade.
+async function fecharStream(api: typeof import('@hangar/core'), indice = 0) {
+  const stream = vi.mocked(api.openEventStream).mock.results[indice].value;
+  Object.defineProperty(stream, 'readyState', { value: 2 });
+  stream.onerror(new Event('error'));
+}
+
+it('SSE fechado com o backend fora do ar tenta de novo, sem faixa de recusa', async () => {
+  vi.useFakeTimers();
+  const api = await import('@hangar/core');
+  vi.mocked(api.openEventStream).mockClear();
+  vi.mocked(api.getSessions).mockRejectedValue(Object.assign(new Error('Bad Gateway'), { status: 502 }));
+  const t = montar(false);
+  try {
+    await vi.advanceTimersByTimeAsync(10);
+    await fecharStream(api);
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(t.el.textContent).not.toContain(m.chat_sse_recusado());
+    expect(api.openEventStream).toHaveBeenCalledTimes(2);
+  } finally {
+    await unmount(t.comp);
+    vi.mocked(api.getSessions).mockResolvedValue([]);
+    vi.useRealTimers();
+  }
+});
+
+it('SSE fechado com a sessao fora da lista mostra a faixa e para', async () => {
+  vi.useFakeTimers();
+  const api = await import('@hangar/core');
+  vi.mocked(api.openEventStream).mockClear();
+  vi.mocked(api.getSessions).mockResolvedValue([]);
+  const t = montar(false);
+  try {
+    await vi.advanceTimersByTimeAsync(10);
+    await fecharStream(api);
+    await vi.advanceTimersByTimeAsync(3_500);
+    expect(t.el.textContent).toContain(m.chat_sse_recusado());
+    expect(api.openEventStream).toHaveBeenCalledTimes(1);
+  } finally {
+    await unmount(t.comp);
+    vi.useRealTimers();
+  }
+});
+
+it('SSE que fecha seguido com a sessao viva desiste no terceiro', async () => {
+  // O laco de 2h14 que a faixa existe pra cortar: /events recusando com a sessao na lista.
+  vi.useFakeTimers();
+  const api = await import('@hangar/core');
+  vi.mocked(api.openEventStream).mockClear();
+  vi.mocked(api.getSessions).mockResolvedValue([{ name: 'sess', state: 'idle' }] as never);
+  const t = montar(false);
+  try {
+    await vi.advanceTimersByTimeAsync(10);
+    for (let i = 0; i < 3; i++) {
+      await fecharStream(api, i);
+      await vi.advanceTimersByTimeAsync(7_000);   // backoff de 3s e 6s, antes do watchdog de 25s
+    }
+    expect(t.el.textContent).toContain(m.chat_sse_recusado());
+    expect(api.openEventStream).toHaveBeenCalledTimes(3);
+  } finally {
+    await unmount(t.comp);
+    vi.mocked(api.getSessions).mockResolvedValue([]);
+    vi.useRealTimers();
+  }
+});
+
+// --- rascunho não atravessa pra sessão NOVA com o mesmo nome (medido 13/09/2026) ---
+// A chave era só o nome: um envio que falhou voltou pro composer da sessão `hangar`, ela morreu, e
+// a sessão Codex criada no dia seguinte com o mesmo nome abriu com o texto da morta no campo.
+it('rascunho de OUTRO transcript com o mesmo nome é descartado', async () => {
+  localStorage.setItem('cp-draft:sess', JSON.stringify({ text: 'da sessão morta', jsonl: '/velha.jsonl' }));
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', jsonl: '/nova.jsonl' }];
+  const t = montar(true);
+  try {
+    await vi.waitFor(() => expect(localStorage.getItem('cp-draft:sess')).toBeNull());
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
+it('rascunho do MESMO transcript é restaurado', async () => {
+  localStorage.setItem('cp-draft:sess', JSON.stringify({ text: 'meu rascunho', jsonl: '/mesma.jsonl' }));
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', jsonl: '/mesma.jsonl' }];
+  const t = montar(true);
+  try {
+    await tick(); await tick();
+    expect(JSON.parse(localStorage.getItem('cp-draft:sess')!).text).toBe('meu rascunho');
+  } finally {
+    await unmount(t.comp);
+  }
 });

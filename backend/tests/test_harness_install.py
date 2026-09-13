@@ -1,5 +1,6 @@
 """Instalar um harness pelo botão (app/harness_install.py)."""
 import asyncio
+import json
 import subprocess
 
 import pytest
@@ -23,6 +24,8 @@ def inst(monkeypatch):
     # dependeria de a máquina de quem roda ter os wrappers instalados. Quem exercita esse ramo
     # sobrescreve com o valor que quer.
     monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": True, "params": {}})
+    # Fluxo POSIX por padrao: o teste que exercita o Windows liga isto na mao.
+    monkeypatch.setattr(hi.harness_saude, "_E_WINDOWS", False)
     return i
 
 
@@ -35,6 +38,20 @@ def test_comando_que_falha_para_ali_e_guarda_a_saida(inst, monkeypatch):
     assert e["fase"] == "pronto" and e["ok"] is False
     assert e["etapa"] == "comando" and "saiu com 1" in e["erro"]
     assert "npm ERR! 404 Not Found" in e["log"]
+
+
+def test_instalacao_em_background_registra_desfecho_sem_saida_bruta(inst, monkeypatch, tmp_path):
+    from app import diag
+    monkeypatch.setattr(diag, "_base", lambda: tmp_path)
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, **kw: (
+        kw["log"]("segredo-token") or subprocess.CompletedProcess(argv, 9, "", "")))
+    assert _rodar(inst, "codex")["ok"] is False
+    raw = diag.caminho_do_dia().read_text()
+    events = [json.loads(line) for line in raw.splitlines()]
+    result = next(e for e in events if e["evento"] == "harness.instalacao")
+    assert result["codigo"] == "falhou" and result["etapa"] == "comando"
+    assert result["provider"] == "codex" and result["operacao"]
+    assert "segredo-token" not in raw
 
 
 def test_rc_zero_nao_prova_instalacao(inst, monkeypatch):
@@ -98,6 +115,8 @@ def test_sem_bash_o_wrapper_e_anotado_e_a_instalacao_segue(inst, monkeypatch):
         raise ValueError("sem bash nesta máquina")
 
     monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.harness_saude, "_E_WINDOWS", False)
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": False, "params": {}})
     monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
                         subprocess.CompletedProcess(argv, 0, "", ""))
     monkeypatch.setattr(hi.harness_saude, "diagnosticar",
@@ -166,6 +185,8 @@ def test_sem_bash_o_pulo_do_wrapper_vira_aviso_no_estado(inst, monkeypatch):
         raise ValueError("sem bash nesta máquina")
 
     monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.harness_saude, "_E_WINDOWS", False)
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": False, "params": {}})
     monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
                         subprocess.CompletedProcess(argv, 0, "", ""))
     monkeypatch.setattr(hi.harness_saude, "diagnosticar",
@@ -173,6 +194,47 @@ def test_sem_bash_o_pulo_do_wrapper_vira_aviso_no_estado(inst, monkeypatch):
     e = _rodar(inst, "codex")
     assert e["ok"] is True
     assert any("wrapper foi pulada" in a for a in e["avisos"])
+
+
+def test_windows_com_wrapper_faltando_grava_o_perfil(inst, monkeypatch):
+    # No Windows a etapa nao pula mais: roda o mesmo conserto do botao (bloco no perfil).
+    estado = {"ok": False}
+    monkeypatch.setattr(hi.harness_saude, "_E_WINDOWS", True)
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador",
+                        lambda: (_ for _ in ()).throw(ValueError("sem bash nesta máquina")))
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": estado["ok"], "params": {}})
+
+    def _consertar(id_):
+        assert id_ == "wrapper"
+        estado["ok"] = True
+        return "bloco gravado"
+
+    monkeypatch.setattr(hi.harness_saude, "consertar", _consertar)
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar",
+                        lambda: [{"id": "codex", "instalado": True, "itens": []}])
+    e = _rodar(inst, "codex")
+    assert e["ok"] is True and estado["ok"] is True
+    assert not e["avisos"]
+
+
+def test_sem_bash_com_o_wrapper_ja_no_perfil_nao_avisa(inst, monkeypatch):
+    # Windows: o bloco do install.ps1 no perfil do PowerShell ja carrega o `codex.ps1`. Avisar
+    # "wrapper pulado" ali mandava consertar o que estava certo (12/09/2026).
+    def _sem_bash():
+        raise ValueError("sem bash nesta máquina")
+
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.harness_saude, "_E_WINDOWS", True)
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar",
+                        lambda: [{"id": "codex", "instalado": True, "itens": []}])
+    e = _rodar(inst, "codex")
+    assert e["ok"] is True
+    assert not e["avisos"]
+    assert not any("wrapper pulado" in l for l in e["log"])
 
 
 def test_instalador_que_sai_zero_sem_ligar_o_wrapper_e_falha(inst, monkeypatch):

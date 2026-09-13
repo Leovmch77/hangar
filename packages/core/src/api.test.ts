@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { configureDiag, _resetDiagForTests } from './diag';
+afterEach(_resetDiagForTests);
 import { overwriteGetLocale as overwriteFront } from './paraglide/runtime';
 import { configureLocale } from './i18n';
 function overwriteGetLocale(fn: () => 'en' | 'pt') {
@@ -9,8 +11,25 @@ import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
-import { passarBastao } from './api';
+import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
+it('configura sincronização no servidor escolhido sem trocar nem apagar o servidor ativo', async () => {
+  const b = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}'));
+  await getSyncSetupForServer(b);
+  await setupSyncForServer(b);
+  await disableSyncForServer(b);
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+    'https://b.test/api/sync/setup', 'https://b.test/api/sync/setup', 'https://b.test/api/sync/setup/disable',
+  ]);
+  for (const [, init] of fetchMock.mock.calls) {
+    expect(init?.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer token-b' }));
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  }
+  fetchMock.mockResolvedValue(new Response('{}', { status: 401 }));
+  await expect(disableSyncForServer(b)).rejects.toThrow();
+  expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+});
 it('bastão captura servidor B e preserva a chamada antiga em A', async () => {
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 200 }));
   const b = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
@@ -64,6 +83,20 @@ describe('rotaGenerica — o que pode ir pro diário de uso', () => {
 });
 
 describe('explicit server settings API', () => {
+  it('correlaciona o servidor explícito sem registrar corpo, credencial ou URL', async () => {
+    const registrar = vi.fn();
+    configureDiag({ registrar, novoReq: () => 'req-teste' });
+    const b = { ...server, baseUrl: 'https://b.test', token: 'segredo-b' };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      detail: { code: 'erro_teste', message: 'segredo https://privado.test/?token=secreto' },
+    }), { status: 409 }));
+    await expect(patchConfigForServer(b, { automations: false })).rejects.toThrow();
+    expect(fetchMock.mock.calls[0][1]?.headers).toEqual(expect.objectContaining({ 'X-Hangar-Req': 'req-teste' }));
+    expect(registrar).toHaveBeenCalledWith(expect.objectContaining({ req: 'req-teste', codigo: '409',
+      detalhe: expect.stringContaining('POST /api/config') }), 'https://b.test');
+    const eventos = JSON.stringify(registrar.mock.calls.map(([ev]) => ev));
+    expect(eventos).not.toMatch(/segredo|privado|secreto|https:/);
+  });
   it('usa base e token explícitos sem depender do servidor ativo', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ campos: {}, somente_leitura: {} }), { status: 200 }),

@@ -27,9 +27,8 @@ if [ ! -d "$skill" ]; then
 fi
 
 cd "$skill" || exit 1
-# Os 16: o roteador, as 8 paginas de papel e as 7 fichas de modelo. Varrer so as 9 de doutrina
-# deixaria passar 5 ocorrencias de "Step" que vivem em references/modelos/.
-arquivos=(SKILL.md references/*.md references/modelos/*.md)
+# O roteador e as paginas de papel. As fichas de modelo moram em ~/.hangar/orq/modelos/, fora da skill.
+arquivos=(SKILL.md references/*.md)
 
 falhou=0
 
@@ -71,6 +70,51 @@ proibido() {
     echo "    $linha"
   done < <(grep -rn -- "$pat" "${arquivos[@]}" 2>/dev/null)
 }
+
+# obrigatorio <arquivo> <padrao-grep-F> <explicacao> — regra que nao pode sumir da pagina.
+obrigatorio() {
+  local f="$1" pat="$2" msg="$3"
+  if ! grep -qF -- "$pat" "$f"; then
+    echo
+    echo "✗ $msg"
+    echo "    $f: falta \`$pat\`"
+    falhou=1
+  fi
+}
+
+# 0. A skill nao nomeia metodo: quem planeja e executa vem do contrato (Method:/Executes with:).
+#    Nome de skill de planejamento no texto vira padrao implicito e prende a skill a um metodo.
+proibido 'superpowers\|mattpocock\|/implement\|to-tickets\|to-spec\|/grill\|writing-plans\|executing-plans' \
+  'A skill nao nomeia metodo de planejamento/execucao — isso vem do contrato, o usuario nomeia.'
+
+# 0b. A linha `Executes with:` existe onde o contrato e o kick-off sao definidos.
+for f in SKILL.md references/planejamento.md references/arbitro-lancamento.md references/executor.md; do
+  obrigatorio "$f" 'Executes with:' \
+    'A linha `Executes with:` (metade executora do metodo) tem de aparecer no contrato e no kick-off.'
+done
+
+# 0c. A rota (audit | full) e decidida na fase 1, vive no contrato e so escala.
+for f in SKILL.md references/planejamento.md references/arbitro-lancamento.md; do
+  obrigatorio "$f" 'Route:' 'A linha `Route:` tem de aparecer no contrato, no kick-off e no lancamento.'
+done
+obrigatorio SKILL.md 'never downgrades' 'A rota so escala (audit -> full); rebaixar nao existe.'
+obrigatorio references/planejamento.md 'no answer → `full`' 'Sem resposta do usuario a rota e `full`.'
+obrigatorio references/revisao-final.md 'audit' 'Na rota audit a revisao final e a UNICA revisao — a pagina tem de dizer o que muda.'
+
+# 0d. Motor por risco: a coluna `vez` aceita `low`/`high` e a Task carrega `Risk:`.
+for f in references/planejamento.md references/arbitro-lancamento.md; do
+  obrigatorio "$f" 'Risk:' 'A linha `Risk:` por Task (seletor de linha por risco) tem de estar no plano e no lancamento.'
+done
+obrigatorio references/arbitro.md 'upward only' 'Escalada de risco e so pra cima; o arbitro nao rebaixa.'
+
+# 0e. `Decided alone:` — relato do executor, julgado pelo revisor, varrido pela retrospectiva.
+for f in references/executor.md references/revisor.md references/retrospectiva.md; do
+  obrigatorio "$f" 'Decided alone:' 'A linha `Decided alone:` liga executor -> revisor -> retrospectiva; sumiu de uma ponta, a cadeia quebra.'
+done
+
+# 0f. Data literal nao entra no texto da skill: a medicao mora no commit e no registro do trabalho.
+proibido '20[0-9][0-9]-[01][0-9]-[0-3][0-9]\|[0-3][0-9]/[01][0-9]/20[0-9][0-9]' \
+  'Skill nao carrega data literal — a evidencia datada vai pra mensagem de commit ou pro registro.'
 
 # 3. "Step" (maiusculo) nao enuncia mecanica em lugar nenhum — a camada de baixo se chama "step".
 proibido 'Step' \

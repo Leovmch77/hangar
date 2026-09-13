@@ -3,6 +3,7 @@
 import * as m from '../paraglide/messages';
   import HangarMark from './icons/HangarMark.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
+  import IconFolder from './icons/IconFolder.svelte';
   import { createSession, gitAction, checkoutBranch, getHistoryTailForServer } from '@hangar/core';
   import { getActiveId, serverColor, withServer } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
@@ -41,7 +42,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   // Linha secundária da sidebar: só o sinal acionável. O detalhe longo do spinner (modelo,
   // tokens, tempo) continua no tooltip, mas não vira texto permanente na lista.
   function sidebarStatus(s: AggSession): string | null {
-    if (s.state === 'awaiting_input') return s.question ?? null;
+    if (s.state === 'awaiting_input' || (s.pending_questions ?? 0) > 0) return s.question ?? null;
     if (s.state !== 'working') return null;
     const label = (s.label ?? '').trim();
     if (!label) return null;
@@ -216,7 +217,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     abrirSessaoDoSheet(name);
     // Aviso da reconciliação da conta (plugin ligado sem instalação etc): antes só ia pro log do
     // backend e a sessão abria "normal" sem o plugin. Texto vem pronto do backend.
-    if (info?.avisos?.length) flash(m.sessao_flash_avisos_conta({ n: info.avisos.join(' · ') }));
+    // Não é erro: a conta foi sincronizada com o principal. Vai pra linha discreta, não pro toast.
+    if (info?.avisos?.length) notar(m.sessao_flash_avisos_conta({ n: info.avisos.join(' · ') }));
     // SSE stream emitirá a sessão nova automaticamente
   }
   // TODA saída do CreateSessionSheet passa por aqui — o create normal, o "continuar conversa" e a
@@ -336,9 +338,16 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
 
   // ── Menu de contexto (botao direito) na linha da sessao — so desktop ──────────
-  let menu = $state<{ x: number; y: number; name: string; serverId: string; cwd: string; thenTarget: string | null } | null>(null);
+  let menu = $state<{ x: number; y: number; name: string; serverId: string; cwd: string; branch: string | null; thenTarget: string | null } | null>(null);
   let menuOrigem: HTMLElement | null = null;
   let menuMsg = $state('');   // banner efemero pro resultado do git pull / erro do editor
+  let nota = $state('');      // aviso informativo, sem cara de erro: uma linha sutil no rodapé
+  let notaTimer: ReturnType<typeof setTimeout> | undefined;
+  function notar(msg: string) {
+    nota = msg;
+    clearTimeout(notaTimer);
+    notaTimer = setTimeout(() => { nota = ''; }, 10000);
+  }
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Recolhida, a <aside> inteira sai do DOM (gate no template) — trilho de iniciais e hover
@@ -354,7 +363,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     clearTimeout(pressTimer);   // cancela o long-press (senao dispararia rename junto)
     hpLeave();   // botao direito nao move o mouse: fecha a espiada pra nao ficar atras do menu
     menuOrigem = (e.currentTarget as HTMLElement | null)?.closest('.sess-row')?.querySelector('.sess-main') as HTMLElement | null;
-    menu = { x: e.clientX, y: e.clientY, name: s.name, serverId, cwd: s.cwd ?? '', thenTarget: s.then_target ?? null };
+    menu = { x: e.clientX, y: e.clientY, name: s.name, serverId, cwd: s.cwd ?? '', branch: s.branch ?? null, thenTarget: s.then_target ?? null };
     // O SessionContextMenu carrega o estado de silenciar/branches/encadeamento na propria montagem.
   }
   function closeMenu() { menu = null; menuOrigem?.focus(); menuOrigem = null; }
@@ -694,6 +703,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         {@const contaChip = chipDaConta(s.conta)}
         {@const srvLabel = servers.find((sv) => sv.id === s.serverId)?.label ?? s.serverId}
         {@const estadoTxt = s.stalled ? m.sessao_pode_travada() : rotuloEstado(s.state)}
+        {@const pendingQuestions = s.pending_questions ?? 0}
+        {@const questionLabel = pendingQuestions > 0 ? `${m.ask_perguntas()}: ${pendingQuestions}` : ''}
         <!-- role=presentation: a row e so o wrapper flex — a semantica toda vive no .sess-main
              (button) e nos botoes irmaos. O hover aqui e decoracao redundante (a resposta ja esta no
              chat), entao nao pede equivalente de teclado. -->
@@ -717,9 +728,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               class:untracked={s.tracked === false}
               class:untracked-open={s.tracked === false && (s.provider === 'kimi' || s.provider === 'codex')}
               aria-pressed={model.selectMode ? model.selected.has(selKey) : undefined}
-              aria-label={!expanded ? `${s.name} · ${srvLabel} · ${estadoTxt}` : undefined}
+              aria-label={!expanded ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}` : undefined}
               title={!expanded
-                ? `${s.name} · ${srvLabel} · ${estadoTxt}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
+                ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
                 : (s.tracked === false ? untrackedReason(s.provider) : m.sessao_toque_renomear())}
               onpointerdown={() => { if (!model.selectMode && !sidebarPin.collapsed) pressStart(rowKey); }}
               onpointerup={pressEnd}
@@ -755,6 +766,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                   {/if}
                   {@const [l1, l2] = railLabel(s.name, item.label)}
                   <span class="rail-lbl" class:aguardando={s.state === 'awaiting_input' && !s.stalled}><b>{l1}</b><i>{l2}</i></span>
+                  {#if pendingQuestions > 0}
+                    <span class="sess-badge pending-questions rail-questions" title={questionLabel}>? {pendingQuestions}</span>
+                  {/if}
                 {:else if s.state === 'working' && !s.limited}
                   <span class="row-mark" style="color: {stateColors[s.state]};"><HangarWorking size={18} /></span>
                 {:else}
@@ -781,14 +795,17 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               <span class="row-info">
                   <span class="name-row">
                     <span class="sess-name">{s.name}</span>
+                    {#if pendingQuestions > 0}
+                      <span class="sess-badge pending-questions" title={questionLabel} aria-label={questionLabel}>? {pendingQuestions}</span>
+                    {/if}
                     {#if s.tracked === false}<span class="sess-badge" title={untrackedReason(s.provider)}>{m.sessao_sem_id()}</span>{/if}
                   </span>
                   {#if sub}
                     <span
                       class="status-sub"
-                      class:asking={s.state === 'awaiting_input'}
-                      class:working={s.state === 'working'}
-                      title={s.state === 'awaiting_input' ? s.question : s.label}
+                      class:asking={s.state === 'awaiting_input' || pendingQuestions > 0}
+                      class:working={s.state === 'working' && pendingQuestions === 0}
+                      title={s.state === 'awaiting_input' || pendingQuestions > 0 ? s.question : s.label}
                     >{sub}</span>
                   {/if}
                   <!-- ⧉ = worktree ligada. Fora do bloco da branch de propósito: worktree com HEAD
@@ -797,29 +814,44 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                   {#if s.worktree}
                     <span class="wt" title={m.sessao_worktree()}>worktree</span>
                   {/if}
-                  {#if showCwd && s.cwd}
-                    {@const cp = cwdParts(s.cwd)}
-                    <span class="cwd" title={showBranch(s.branch) ? `${s.cwd} · branch ${s.branch}` : s.cwd}>
-                      <span class="cwd-prefix">{cp.prefix}</span><span class="cwd-base">{cp.base}</span>
-                      {#if showBranch(s.branch)}<span class="branch-inline">⎇ {s.branch}</span>{/if}
+                  <!-- Pasta, branch e "+128 −24" numa linha só: com o caminho reduzido à última
+                       pasta sobra largura, e os três dizem a mesma coisa (onde e como está o repo).
+                       Em coluna eram três linhas de meta por sessão. -->
+                  {#if (showCwd && s.cwd) || showBranch(s.branch) || s.git_added || s.git_removed}
+                    <span class="cwd-line">
+                      {#if showCwd && s.cwd}
+                        {@const cp = cwdParts(s.cwd)}
+                        <!-- Ícone no lugar do caminho ATÉ a última pasta: o prefixo comia a largura e
+                             truncava justo o nome que identifica o projeto ("/home/jef…/Área de traba…/
+                             Assinado…"). O caminho inteiro segue no title. Custo assumido: dois
+                             checkouts do mesmo repo em pastas diferentes leem igual na lista. -->
+                        <span class="cwd" title={showBranch(s.branch) ? `${s.cwd} · branch ${s.branch}` : s.cwd}>
+                          <!-- O caminho inteiro também no sr-only: o `title` de um span não é lido de
+                               forma confiável, e sem isto quem usa leitor de tela ficaria só com a
+                               última pasta — que é o que a TELA mostra, não o que identifica. -->
+                          <span class="sr-only">{s.cwd}</span>
+                          <span class="cwd-icone" aria-hidden="true"><IconFolder size={11} /></span><span class="cwd-base" aria-hidden="true">{cp.base}</span>
+                          {#if showBranch(s.branch)}<span class="branch-inline">⎇ {s.branch}</span>{/if}
+                        </span>
+                      {:else if showBranch(s.branch)}
+                        <span class="branch" title={m.sessao_branch_git_atual()}>⎇ {s.branch}</span>
+                      {/if}
+                      {#if s.git_added || s.git_removed}
+                        <span class="diff-stats" aria-hidden="true">{#if s.git_added}<span class="diff-add">+{s.git_added}</span>{/if}{#if s.git_removed}<span class="diff-del">−{s.git_removed}</span>{/if}</span>
+                      {/if}
                     </span>
-                  {:else if showBranch(s.branch)}
-                    <span class="branch" title={m.sessao_branch_git_atual()}>⎇ {s.branch}</span>
-                  {/if}
-                  <!-- "+128 −24" do working tree, colado à branch/cwd (paridade com o SessionCard
-                       mobile; referência: cards do super.engineering). -->
-                  {#if s.git_added || s.git_removed}
-                    <span class="diff-stats" aria-hidden="true">{#if s.git_added}<span class="diff-add">+{s.git_added}</span>{/if}{#if s.git_removed}<span class="diff-del">−{s.git_removed}</span>{/if}</span>
                   {/if}
                   {#if model.showProviderTags || provTag || s.then_target || s.pair_peers?.length || s.loop_status || s.engine || s.plan_name || contaChip}
                     <!-- Chips informativos (⏳/🔗/🤝/↻/⚙) na COLUNA DE TEXTO, nao ao lado do state-chip:
                          inline eles cobriam o cwd em sidebar estreita (mesmo fix do SessionCard mobile). -->
                     <span class="badges-line">
                       {#if model.showProviderTags}
-                        <!-- Glifo pra TODOS quando a lista mistura providers (pedido do usuário);
-                             o TEXTO continua só nas não-Claude — o default se reconhece pela marca.
+                        <!-- Glifo pra TODOS quando a lista mistura providers (pedido do usuário), e
+                             SÓ o glifo: cada provider tem marca própria (o ⬡ da OpenAI, o Ω do omp),
+                             então o nome escrito ao lado repetia o desenho e roubava a largura do
+                             chip da conta. O nome continua no title e no leitor de tela.
                              provider ausente = Claude (o campo só viaja quando não é Claude). -->
-                        <span class="prov-chip" class:prov-chip--so-icone={!provTag} title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;</span><ProviderGlyph provider={s.provider} size={12} />{#if provTag}{provTag}{/if}</span>
+                        <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={s.provider} size={12} /></span>
                       {/if}
                       {#if s.then_target}
                         <span class="chain-chip" title={m.sessao_chain_envia({ n: s.then_target })}>🔗&nbsp;{s.then_target}</span>
@@ -848,7 +880,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       {/if}
                       {#if contaChip}
                         <!-- Conta Anthropic da sessão (paridade com o SessionCard do celular). -->
-                        <span class="conta-chip" style="color: {contaChip.cor}; border-color: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
+                        <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
                       {/if}
                     </span>
                   {/if}
@@ -944,6 +976,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
 
   <!-- Rodapé (estilo Claude): botão da conta (avatar -> menu de conta) + CTA "Nova sessão". Tudo que
        era config/conta (servidores, notificações, horas silenciosas, reconectar, sair) vive no menu. -->
+  {#if expanded && nota}
+    <p class="side-nota" title={nota}>{nota}</p>
+  {/if}
   <div class="side-foot" class:rail={!expanded}>
     <!-- A engrenagem e o kebab MUDARAM pra barra do topo (10/08/2026, decisão do usuário):
          a barra é permanente, então os comandos do app moram nela, num lugar só. O ponto do
@@ -1040,7 +1075,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      guarda posicao/alvo em `menu` e decide o que dirty->confirm / checkout / GitSheet fazem. -->
 {#if menu}
   {@const m = menu}
-  <SessionContextMenu x={m.x} y={m.y} name={m.name} serverId={m.serverId} cwd={m.cwd} thenTarget={m.thenTarget}
+  <SessionContextMenu x={m.x} y={m.y} name={m.name} serverId={m.serverId} cwd={m.cwd} branch={m.branch} thenTarget={m.thenTarget}
     chainCandidates={chainCandidates(m.serverId, m.name)}
     onClose={closeMenu}
     onRename={menuRename} onDelete={menuDelete} onGit={menuGit} onBastao={menuBastao}
@@ -1411,6 +1446,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .fold-label { display: none; }
   .row-mark { display: inline-flex; }
   .side-mark { display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
+  /* Colada na borda e recolhida, a marca do trilho fica logo abaixo da marca da barra de abas
+     (SessionTabs), na mesma coluna: duas iguais empilhadas. Em caixa solta a margem separa. */
+  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark { display: none; }
   .side-brand { flex: 1; min-width: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Toggle do modo de seleção: mesma caixa de 36px dos outros controles do header. */
   .select-toggle-btn {
@@ -1623,8 +1661,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   .status-sub.asking { color: var(--warning); font-weight: 600; }
   .status-sub.working { color: var(--text-secondary); font-style: italic; }
+  /* Pasta + branch + diff numa linha. O `.cwd` cede a largura (shrink) e o diff nunca encolhe:
+     o número é curto e é o que some primeiro se ele puder encolher. */
+  .cwd-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
   .cwd { display: flex; min-width: 0; font-family: var(--font-mono); font-size: 10px; }
-  .cwd-prefix { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+  .cwd-icone { flex: 0 0 auto; display: flex; align-items: center; margin-right: 3px; color: var(--text-muted); }
   .cwd-base {
     /* encolhe COM ellipsis (era 0 0 auto e vazava por baixo dos chips em sidebar estreita) */
     flex: 0 1 auto; min-width: 3ch; overflow: hidden; text-overflow: ellipsis;
@@ -1671,13 +1712,21 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     outline: 1px solid var(--warning); outline-offset: -1px;
   }
   /* Rate-limit radar (feature #8): chip proprio, mesma familia visual do stalled (âmbar, calmo). */
-  /* Conta Anthropic da sessão: contorno na cor da conta, fundo transparente (rótulo de identidade,
-     como o prov-chip). */
+  /* Conta da sessão (Anthropic ou Codex): chip neutro com um ponto na cor da conta. O contorno e o
+     texto na cor cheia pintavam a pílula inteira — identidade competindo com estado numa lista que
+     já tem pílula de estado, chip de plano e diff coloridos. O ponto de 5px distingue as contas de
+     relance sem virar mais uma cor gritando na linha. */
   .conta-chip {
     flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-    font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
-    padding: 0 6px; border: 1px solid; border-radius: var(--radius-full); white-space: nowrap;
-    background: transparent;
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: var(--fw-medium); letter-spacing: 0.02em;
+    padding: 1px 6px; border-radius: var(--radius-full); white-space: nowrap;
+    background: var(--fill-subtle); color: var(--text-secondary);
+  }
+  .conta-chip::before {
+    content: ''; flex: 0 0 auto;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--conta-cor, currentColor);
   }
   /* Feature #12: indicador do vinculo 'then' — mesmo formato do limited-chip, cor neutra (accent). */
   .chain-chip {
@@ -1787,6 +1836,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     flex-shrink: 0; font-size: 10px; padding: 1px 5px; border-radius: var(--radius-sm);
     background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--warning); white-space: nowrap;
   }
+  .rail-questions { position: absolute; right: -4px; top: -4px; padding: 0 2px; }
   .sess-edit {
     flex: 1; min-width: 0; height: 38px; padding: 0 var(--space-2);
     background: var(--surface-inset); border: 1px solid var(--accent); border-radius: var(--radius-md);
@@ -1861,6 +1911,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .broadcast-send:disabled { background: var(--bg-hover); color: var(--text-muted); }
 
   /* ── Rodapé: engrenagem (Configurações) + CTA "Nova sessão" ── */
+  .side-nota {
+    margin: 0; padding: var(--space-1) var(--space-2) 0;
+    font-size: 11px; line-height: 1.3; color: var(--text-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .side-foot {
     display: flex; align-items: center; gap: var(--space-2);
     border-top: 1px solid var(--border-subtle); padding-top: var(--space-2); margin-top: var(--space-1);

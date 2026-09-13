@@ -12,6 +12,7 @@ from app.models import CommandInfo
 BUILTINS: list[dict] = [
     {"name": "clear", "description": "Limpa o histórico da conversa", "destructive": True},
     {"name": "compact", "description": "Resume e compacta o contexto", "destructive": True},
+    {"name": "btw", "description": "Pergunta lateral, sem interromper a conversa", "argumentHint": "[pergunta]"},
     {"name": "context", "description": "Mostra o uso do contexto"},
     {"name": "model", "description": "Troca o modelo do Claude"},
     {"name": "effort", "description": "Ajusta o esforço de raciocínio"},

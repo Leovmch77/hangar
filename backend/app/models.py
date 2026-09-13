@@ -114,6 +114,7 @@ class SessionInfo(BaseModel):
     label: Optional[str] = None          # working: texto do spinner ("Elucidating…")
     startup_steps: list[str] = Field(default_factory=list)
     question: Optional[str] = None       # awaiting_input: a pergunta
+    pending_questions: int = 0
     options: Optional[list[str]] = None  # awaiting_input: rótulos das opções
     # True quando "working" ha mais de CP_STALL_SECONDS sem avancar (last_activity parado) — feature #7:
     # loop infinito de ferramenta / subprocesso esperando stdin nunca vira awaiting/finished/dead sozinho.
@@ -217,6 +218,7 @@ class StateEvent(BaseModel):
     state: State
     codex_mode: Optional[Literal["default", "plan"]] = None
     codex_question: dict | None = None
+    codex_buffering: bool = False
     claude_permission_mode: Optional[str] = None
     claude_previous_non_plan: Optional[str] = None
     label: Optional[str] = None         # working: live status text, e.g. "Elucidating…"

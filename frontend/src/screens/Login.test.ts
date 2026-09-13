@@ -22,6 +22,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   getSessions: vi.fn(async () => [])
 }));
 vi.mock('../lib/sync', () => ({
+  cachedSyncStatus: vi.fn(() => null),
   syncStatus: vi.fn(async () => ({ enabled: false })),
   register: vi.fn(),
   login: vi.fn(),
@@ -38,6 +39,17 @@ function montar() {
   const comp = mount(Login, { target: el, props: { onLogin: vi.fn() } });
   return { el, comp: comp as never };
 }
+
+it('abandona o formulário sincronizado quando o servidor foi desativado após o cache', async () => {
+  vi.mocked(sync.cachedSyncStatus).mockReturnValueOnce({ enabled: true, registered: true })
+    .mockReturnValueOnce({ enabled: true, registered: true });
+  const t = montar();
+  await tick(); await tick();
+  expect(t.el.querySelector('#base-url')).not.toBeNull();
+  expect(t.el.querySelector('#sync-user')).toBeNull();
+  await unmount(t.comp);
+  t.el.remove();
+});
 
 async function preencher(t: { el: HTMLElement }, base: string, token: string) {
   const set = (sel: string, v: string) => {

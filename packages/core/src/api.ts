@@ -1,6 +1,6 @@
 import { apiEnv, type EventSourceLike } from './apiEnv';
 import type { Server } from './servers';
-import type { CodexAccount, CodexLoginAttempt, Credencial } from './credenciais';
+import type { CodexAccount, CodexIntegracaoEstado, CodexLoginAttempt, Credencial } from './credenciais';
 import * as m from './paraglide/messages';
 import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
@@ -201,7 +201,7 @@ async function ensureOk(res: Response): Promise<void> {
 //    `/api/claude-configs/<nome>` é o rótulo da conta. O diário promete, no topo do lib/diag.ts,
 //    não guardar caminho de arquivo do projeto — e sem `archive` nesta lista ele guardava, em toda
 //    retomada de conversa arquivada (é POST, então entra mesmo dando certo).
-const SEGMENTOS_OPACOS = /\/(sessions|servers|agents|archive|claude-configs|projects)\/[^/]+/g;
+const SEGMENTOS_OPACOS = /\/(sessions|servers|agents|archive|claude-configs|projects|codex-contas|conta-estado)\/[^/]+/g;
 
 export function rotaGenerica(path: string): string {
   return path.split('?')[0].replace(SEGMENTOS_OPACOS, '/$1/*');
@@ -217,8 +217,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // quem precisa do STATUS ou de um header — hoje o histórico condicional (304 + ETag), que não tem
 // corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
-async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> {
-  const base = apiEnv().getBaseUrl();
+async function apiFetchRes(path: string, init?: RequestInit, server?: Server): Promise<Response> {
+  const base = server?.baseUrl ?? apiEnv().getBaseUrl();
   const url = `${base}${path}`;
   const t0 = Date.now();
   // Id do pedido: vai no cabeçalho e na linha do diário dos DOIS lados, pra quem analisa seguir a
@@ -231,7 +231,7 @@ async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> 
       headers: {
         'Content-Type': 'application/json',
         'X-Hangar-Req': req,
-        ...authHeaders(),
+        ...(server ? { Authorization: `Bearer ${server.token}` } : authHeaders()),
         ...(init?.headers ?? {}),
       },
     });
@@ -250,17 +250,18 @@ async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> 
     if (!isAbortError(e)) {
       const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
       const poll = rota.startsWith('GET ');
-      if (!poll || !_semRede.has(rota)) {
-        registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota });
+      if (!poll || !_semRede.has(`${base}|${rota}`)) {
+        registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota,
+          codigo: e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'rede' }, base);
       }
-      if (poll) _semRede.add(rota);
+      if (poll) _semRede.add(`${base}|${rota}`);
     }
     throw e;
   }
   {
     const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
-    if (_semRede.delete(rota)) {
-      registrarDiag({ evento: 'api.voltou', nivel: 'ok', ms: Date.now() - t0, req, detalhe: rota });
+    if (_semRede.delete(`${base}|${rota}`)) {
+      registrarDiag({ evento: 'api.voltou', nivel: 'ok', ms: Date.now() - t0, req, detalhe: rota }, base);
     }
   }
   // O que entra no diário, e por quê:
@@ -274,21 +275,12 @@ async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> 
   // 304 não é falha: é a resposta certa pra "o que eu tenho ainda vale". Sem esta exceção, toda
   // entrada em sessão sem novidade viraria uma linha de aviso no diário.
   if (acao || (!res.ok && res.status !== 304)) {
-    // Falhou: junta o MOTIVO que o backend mandou no corpo. Só o status ("#409") diz que recusou e
-    // não por quê, e o `detail` do backend é exatamente a explicação ("o terminal está aberto",
-    // "sessão não encontrada — opção NÃO enviada"). Lido de um `clone()` porque o corpo só pode ser
-    // consumido uma vez e quem precisa dele de verdade é o `ensureOk` logo abaixo, que monta a
-    // mensagem da tela — tirar isso dele quebraria todo tratamento de erro do app.
-    //
-    // try/catch em volta do CLONE, não só do `errorDetail`: `res.clone()` lança de forma SÍNCRONA
-    // quando o corpo já foi lido, e como ele é avaliado como argumento, um `.catch()` na chamada
-    // nunca chegaria a ser anexado — a exceção subiria e derrubaria o pedido de verdade (enviar
-    // mensagem, responder opção) por causa do código que só descreve o que aconteceu. O diário
-    // nunca pode derrubar o que ele registra.
+    // Código estável explica a recusa sem copiar texto livre do servidor; o clone preserva a resposta da tela.
     let motivo = '';
     if (!res.ok) {
       try {
-        motivo = await errorDetail(res.clone());
+        const { code } = await lerErro(res.clone());
+        motivo = code && /^[a-z][a-z0-9_]{0,79}$/.test(code) ? code : '';
       } catch {
         motivo = '';
       }
@@ -300,7 +292,7 @@ async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> 
       ms: Date.now() - t0,
       req,
       detalhe: [`${metodo} ${rotaGenerica(path)}`, motivo].filter(Boolean).join(' — '),
-    });
+    }, base);
   }
   return res;
 }
@@ -311,7 +303,7 @@ async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> 
 async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${s.baseUrl}${path}`, {
+    res = await apiFetchRes(path, {
       // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
       // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
       // getSessions ja registrava isso pro poll). Sem prazo, abrir Configuracoes de um servidor
@@ -319,12 +311,7 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit)
       // Antes do spread do `init`: quem precisar de outro prazo (ou de nenhum) passa o proprio sinal.
       signal: AbortSignal.timeout(8000),
       ...init,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${s.token}`,
-        ...(init?.headers ?? {}),
-      },
-    });
+    }, s);
   } catch (e) {
     // "signal timed out" (o texto que o navegador poe no TimeoutError) nao diz nada pra quem le a
     // tela. Abort pedido POR QUEM CHAMOU continua passando cru — quem cancela sabe que cancelou.
@@ -348,10 +335,9 @@ export function getSessions(): Promise<SessionInfo[]> {
 // um servidor lento/offline não segura os demais. Timeout de 4s: servidor morto falha rápido (< o
 // intervalo de poll de 5s) em vez de pendurar no timeout default do browser.
 export async function fetchSessionsForServer(s: Server): Promise<SessionInfo[]> {
-  const res = await fetch(`${s.baseUrl}/api/sessions`, {
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+  const res = await apiFetchRes('/api/sessions', {
     signal: AbortSignal.timeout(4000),
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<SessionInfo[]>;
 }
@@ -359,11 +345,10 @@ export async function fetchSessionsForServer(s: Server): Promise<SessionInfo[]> 
 // O shell criou o view do navegador embutido da sessão: o marcador 'nav' daquele servidor sai, e
 // nenhuma outra conexão (celular, outra janela) o recebe de novo.
 export async function confirmarNavForServer(s: Server, name: string): Promise<void> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/nav`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/nav`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${s.token}` },
     signal: AbortSignal.timeout(4000),
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}`);
 }
 
@@ -383,10 +368,9 @@ export async function confirmarNavForServer(s: Server, name: string): Promise<vo
 // não paga este tempo: conexão recusada volta em milissegundos. Quem espera são os lentos de
 // verdade, e é exatamente por eles que este número existe.
 export async function fetchCostsForServer(s: Server, period: string): Promise<Partial<CostReport>> {
-  const res = await fetch(`${s.baseUrl}/api/costs?period=${encodeURIComponent(period)}`, {
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
+  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}`, {
     signal: AbortSignal.timeout(20000),
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<Partial<CostReport>>;
 }
@@ -407,9 +391,9 @@ export function getOrqDetalheForServer(s: Server, id: string): Promise<OrqExecuc
 // limit dispara o tail-read no backend (parseia só o fim do jsonl). Timeout de 8s mantido: disco
 // frio + arquivo grande ainda pode passar dos 4s dos fan-outs acima.
 export async function getHistoryTailForServer(s: Server, name: string, limit: number): Promise<ChatEvent[]> {
-  const res = await fetch(
-    `${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/history?limit=${limit}`,
-    { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` }, signal: AbortSignal.timeout(8000) },
+  const res = await apiFetchRes(
+    `/api/sessions/${encodeURIComponent(name)}/history?limit=${limit}`,
+    { signal: AbortSignal.timeout(8000) }, s,
   );
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<ChatEvent[]>;
@@ -447,10 +431,9 @@ export async function getHistoryTailCached(
 // board/canvas (mesmos endpoints/headers dos uploadFile/transcribeFile do servidor ativo; aqui
 // baseUrl+token vêm do Server dono do card, que pode não ser o ativo).
 export async function uploadFileForServer(s: Server, name: string, file: File): Promise<{ path: string }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/upload`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/upload`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${s.token}`,
       'Content-Type': file.type || 'application/octet-stream',
       'X-Filename': encodeURIComponent(file.name || 'arquivo'),
     },
@@ -458,7 +441,7 @@ export async function uploadFileForServer(s: Server, name: string, file: File): 
     // Sem teto, uma foto grande num link ruim (tablet em relay) deixava o composer preso em
     // "enviando…" pra sempre. 3min cobre upload legítimo lento; estourou -> erro visível + retry.
     signal: AbortSignal.timeout(180_000),
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
   return res.json() as Promise<{ path: string }>;
 }
@@ -485,16 +468,15 @@ export async function transcribeFileForServer(
   opts?: OpcoesTranscribe,
 ): Promise<{ path: string; text: string; raw?: string; aviso?: string | null }> {
   const qs = queryTranscribe(opts);
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/transcribe${qs}`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/transcribe${qs}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${s.token}`,
       'Content-Type': file.type || 'application/octet-stream',
       'X-Filename': encodeURIComponent(file.name || 'audio.webm'),
     },
     body: file,
     signal: AbortSignal.timeout(300_000),   // mesmo teto do transcribeFile (ver o comentário lá)
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
   return res.json() as Promise<{ path: string; text: string; raw?: string; aviso?: string | null }>;
 }
@@ -504,11 +486,10 @@ export async function transcribeFileForServer(
 // feedback de entrega do Chat). SEM timeout de propósito (igual ao sendInput por-servidor-ativo):
 // abortar um POST já em voo não desfaz o envio, e reportaria "não entregue" pra recado entregue.
 export async function sendInputForServer(s: Server, name: string, text: string): Promise<void> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/input`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/input`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ text }),
-  });
+  }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 
@@ -516,11 +497,10 @@ export async function sendInputForServer(s: Server, name: string, text: string):
 // selectOption por-servidor-ativo (api.ts): option é 1-BASED (1 = primeira opção) — o backend
 // valida ge=1 e traduz pra (option-1)×Down + Enter no tmux.
 export async function selectOptionForServer(s: Server, name: string, option: number): Promise<void> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/select`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ option }),
-  });
+  }, s);
   // Mesmo tratamento do sendInputForServer: o erro do picker tambem e renderizado no card.
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
@@ -740,8 +720,9 @@ export function deleteCodexAccountForServer(server: Server, id: string): Promise
 function codexAccountPath(id: string, action: string): string {
   return `/api/codex-contas/${encodeURIComponent(id)}/${action}`;
 }
-export function prepareCodexAccountForServer(server: Server, id: string): Promise<CodexAccount['sync']> {
-  return apiFetchForServer(server, codexAccountPath(id, 'prepare'), { method: 'POST' });
+export function prepareCodexAccountForServer(server: Server, id: string, force = false): Promise<CodexAccount['sync']> {
+  const query = force ? '?forcar=true' : '';
+  return apiFetchForServer(server, `${codexAccountPath(id, 'prepare')}${query}`, { method: 'POST' });
 }
 export function getCodexPreparationForServer(server: Server, id: string, signal?: AbortSignal): Promise<CodexAccount['sync']> {
   return apiFetchForServer(server, codexAccountPath(id, 'prepare'), { signal: comTeto(signal, 8000) });
@@ -754,6 +735,16 @@ export function getCodexAccountLoginForServer(server: Server, id: string, signal
 }
 export function cancelCodexAccountLoginForServer(server: Server, id: string, attemptId: string): Promise<CodexLoginAttempt> {
   return apiFetchForServer(server, `${codexAccountPath(id, 'login')}?attempt_id=${encodeURIComponent(attemptId)}`, { method: 'DELETE' });
+}
+export function getRootsForServer(server: Server, signal?: AbortSignal): Promise<FsRoot[]> {
+  return apiFetchForServer(server, '/api/fs/roots', { signal: comTeto(signal, 8000) });
+}
+// Importação Claude → Codex da conta padrão (a mesma do "Reconciliar agora" em Harnesses).
+export function getCodexIntegrationForServer(server: Server, signal?: AbortSignal): Promise<CodexIntegracaoEstado> {
+  return apiFetchForServer(server, '/api/harness/codex/integracao', { signal: comTeto(signal, 8000) });
+}
+export function startCodexIntegrationForServer(server: Server): Promise<CodexIntegracaoEstado> {
+  return apiFetchForServer(server, '/api/harness/codex/integracao', { method: 'POST' });
 }
 
 // Cria a pasta da conta Claude no servidor. NÃO loga — o OAuth é interativo e roda dentro da
@@ -1471,7 +1462,7 @@ export function uploadFile(
   const t0 = Date.now();
   const anotar = (nivel: 'ok' | 'aviso' | 'erro', codigo: string, motivo = '') =>
     registrarDiag({ evento: 'acao', nivel, codigo, ms: Date.now() - t0, req,
-                    detalhe: [rota, motivo].filter(Boolean).join(' — ') });
+                    detalhe: [rota, motivo].filter(Boolean).join(' — ') }, base);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${base}/api/sessions/${encodeURIComponent(name)}/upload`);
@@ -1505,7 +1496,7 @@ export function uploadFile(
             msg = mensagemDeErro(j.detail.code, j.detail.params ?? {}) ?? j.detail.msg ?? j.detail.code;
           }
         } catch { /* corpo não-JSON: fica o texto cru */ }
-        anotar(xhr.status >= 500 ? 'erro' : 'aviso', String(xhr.status), msg);
+        anotar(xhr.status >= 500 ? 'erro' : 'aviso', String(xhr.status));
         reject(Object.assign(new Error(msg), { status: xhr.status }));
         return;
       }
@@ -1520,7 +1511,7 @@ export function uploadFile(
     };
     xhr.onerror = () => {
       // Sem status: nunca houve resposta. É o mesmo caso do `api.sem_rede` do apiFetchRes.
-      registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota });
+      registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota }, base);
       reject(new Error(m.composer_falha_envio()));
     };
     xhr.ontimeout = () => {
@@ -1810,6 +1801,27 @@ export async function interrupt(name: string, clear = false): Promise<void> {
   });
 }
 
+// Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
+// Demora o que a resposta demorar (ate 120s no backend) — quem chama mostra espera.
+export interface PerguntaLateral {
+  question: string;
+  answer: string;
+  fonte: 'buffer' | 'pane';   // 'pane' = lida da tela, pode estar cortada
+  ts: number;
+  salvo?: boolean;            // false = respondeu, mas o histórico não foi gravado
+}
+
+export async function perguntaLateral(name: string, question: string): Promise<PerguntaLateral> {
+  return apiFetch<PerguntaLateral>(`/api/sessions/${encodeURIComponent(name)}/btw`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function historicoLateral(name: string): Promise<PerguntaLateral[]> {
+  return apiFetch<PerguntaLateral[]>(`/api/sessions/${encodeURIComponent(name)}/btw`);
+}
+
 // Espelho do pane (overlays so-TUI): le o pane cru e manda teclas de navegacao (allowlist no backend).
 export type NavKey =
   | 'Up' | 'Down' | 'Left' | 'Right'
@@ -2032,7 +2044,7 @@ export async function narrarSelecao(
 // cria um novo (para o auto-retry nativo não virar uma 2ª máquina de retry em paralelo), e o
 // watchdog de 25s faz o mesmo. Objeto novo nasce sem memória de id, então sem este param a retomada
 // exata jamais dispararia no uso real, e toda queda voltaria a custar o backfill cego de 200 linhas.
-export function openEventStream(name: string, lastEventId?: string | null): EventSourceLike {
+export function openEventStream(name: string, lastEventId?: string | null, req = novoReq()): EventSourceLike {
   const base = apiEnv().getBaseUrl();
   const token = apiEnv().getToken();
   const path = `/api/sessions/${encodeURIComponent(name)}/events`;
@@ -2043,21 +2055,49 @@ export function openEventStream(name: string, lastEventId?: string | null): Even
   const params = new URLSearchParams();
   if (!isSameOrigin) params.set('token', token ?? '');
   if (lastEventId) params.set('last_event_id', lastEventId);
+  if (req) params.set('diag_req', req);
   const qs = params.toString();
   const url = `${base}${path}${qs ? `?${qs}` : ''}`;
 
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
+export interface SyncSetup {
+  enabled: boolean;
+  registered: boolean;
+  user: string | null;
+}
+
+export interface SyncSetupBody {
+  user: string;
+  salt: string;
+  auth_hash: string;
+  enc_blob: { iv: string; data: string };
+}
+
+export function getSyncSetupForServer(server: Server, signal?: AbortSignal): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { signal: comTeto(signal, 8000) });
+}
+
+export function setupSyncForServer(server: Server, body?: SyncSetupBody): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { method: 'POST', body: JSON.stringify(body ?? {}) });
+}
+
+export function disableSyncForServer(server: Server): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup/disable', { method: 'POST' });
+}
+
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource
 // não manda header e cross-origin não leva cookie); withCredentials same-origin. Por-servidor:
 // cada um tem o seu, falha isolada.
-export function openSessionsStream(s: Server): EventSourceLike {
+export function openSessionsStream(s: Server, req = novoReq()): EventSourceLike {
   const o = apiEnv().origin;
   const isSameOrigin = !!o && (!s.baseUrl || s.baseUrl === o);
-  const url = isSameOrigin
-    ? `${s.baseUrl}/api/sessions/events`
-    : `${s.baseUrl}/api/sessions/events?token=${encodeURIComponent(s.token)}`;
+  const params = new URLSearchParams();
+  if (!isSameOrigin) params.set('token', s.token);
+  if (req) params.set('diag_req', req);
+  const qs = params.toString();
+  const url = `${s.baseUrl}/api/sessions/events${qs ? `?${qs}` : ''}`;
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
@@ -2065,13 +2105,15 @@ export function openSessionsStream(s: Server): EventSourceLike {
 // ativo) — usado pela grade de comparação (feature #11), que pode misturar sessões de servidores
 // diferentes no mesmo relance. Mesma convenção de openSessionsStream (?token cross-origin,
 // withCredentials same-origin).
-export function openEventStreamForServer(s: Server, name: string): EventSourceLike {
+export function openEventStreamForServer(s: Server, name: string, req = novoReq()): EventSourceLike {
   const path = `/api/sessions/${encodeURIComponent(name)}/events`;
   const o = apiEnv().origin;
   const isSameOrigin = !!o && (!s.baseUrl || s.baseUrl === o);
-  const url = isSameOrigin
-    ? `${s.baseUrl}${path}`
-    : `${s.baseUrl}${path}?token=${encodeURIComponent(s.token)}`;
+  const params = new URLSearchParams();
+  if (!isSameOrigin) params.set('token', s.token);
+  if (req) params.set('diag_req', req);
+  const qs = params.toString();
+  const url = `${s.baseUrl}${path}${qs ? `?${qs}` : ''}`;
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
@@ -2173,6 +2215,12 @@ export function getCodexModels(name: string): Promise<CodexModelsResponse> {
 export function setCodexMode(name: string, mode: 'default' | 'plan'): Promise<CodexModelsResponse['current']> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex/mode`, {
     method: 'POST', body: JSON.stringify({ mode }),
+  });
+}
+
+export function implementCodexPlan(name: string): Promise<void> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex/plan/implement`, {
+    method: 'POST',
   });
 }
 

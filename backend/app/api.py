@@ -13,8 +13,7 @@ import threading
 import time
 import urllib.request
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -22,11 +21,13 @@ from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSock
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  migracao_sidecars, pensamento_pt, procinfo, tmux)
 from app.auth import require_auth, require_loopback
+from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import list_commands
@@ -63,7 +64,7 @@ from app.terminal_input import TerminalInput, drain
 from app.adapters import get_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.sse import merged_events, nav_confirmar, nav_pendente
-from app.state import corrige_ocioso_kimi
+from app.state import corrige_ocioso_kimi, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
 from app.transcribe import transcribe, TranscribeError
@@ -101,7 +102,7 @@ from app.hook_state import hook_state
 from app import push
 from app import stall_watch
 from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
-from app.sync import sync_router
+from app.sync import sync_admin_router, sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
 from app import plano_claude
@@ -183,22 +184,17 @@ def _resolve_codex_account(account_id: str | None):
         raise HTTPException(exc.status, detail=erro(exc.code, "conta Codex inválida", **exc.params)) from None
 
 
-def _codex_prepare_or_fail(account, service) -> None:
+def _codex_require_idle_preparation(account, service) -> None:
     if account.is_default:
         return
     if service is None:
         raise HTTPException(503, detail=erro("codex_account_service_unavailable",
                                              "serviço de contas Codex indisponível"))
     status = service.preparation_status(account)
-    if status.get("status") == "running":
-        raise HTTPException(409, detail=erro("codex_account_preparing",
-                                             "a preparação da conta Codex está em andamento",
-                                             account_id=account.id))
     if status.get("status") != "ready":
-        raise HTTPException(409, detail=erro("codex_account_prepare_failed",
-                                             "a conta Codex tem pendências de preparação",
-                                             account_id=account.id,
-                                             issues=status.get("issues", [])))
+        _log.warning("conta Codex %s com sincronização %s; pendências: %s",
+                     account.id, status.get("status"),
+                     [issue.get("code") for issue in status.get("issues", [])])
 
 
 def _codex_account_in_use(account) -> bool:
@@ -220,6 +216,29 @@ def _codex_account_in_use(account) -> bool:
             if owner is not None and owner.id == account.id:
                 return True
     return False
+
+
+def _start_codex_preparation(account, service) -> None:
+    if account is None or account.is_default or service is None:
+        return
+    task = asyncio.create_task(service.prepare(account), name=f"codex-prepare-{account.id}")
+    tasks = getattr(app.state, "codex_creation_tasks", None)
+    if tasks is None:
+        tasks = set()
+        app.state.codex_creation_tasks = tasks
+    tasks.add(task)
+
+    def finished(done: asyncio.Task) -> None:
+        tasks.discard(done)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            _log.warning("sincronização automática da conta Codex %s falhou", account.id,
+                         exc_info=True)
+
+    task.add_done_callback(finished)
 
 
 class _BodyTooLarge(Exception):
@@ -276,6 +295,9 @@ class _BodySizeLimitMiddleware:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from app import diag_logging
+    diag_logging.instalar()
+    diag.registrar("backend.inicio", **diag.recursos())
     # Uma vez na subida, nunca por request. O Starlette roda cada rota `def` (sao 65 aqui) num
     # anyio.to_thread, cujo limiter default e de 40 tokens — e cada conexao de chat ainda segura
     # DOIS deles PERMANENTEMENTE, num awatch parado (transcript.py:408 e pqueue.py:366). Com ~20
@@ -384,11 +406,17 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
-    codex_contas_login = CodexContasLogin(account_in_use=_codex_account_in_use)
+    codex_warm_task = asyncio.create_task(get_adapter("codex").watch_sessions())
+    from app.codex_integracao import SERVICO as integracao_codex
+    codex_contas_login = CodexContasLogin(
+        account_in_use=_codex_account_in_use,
+        atualizar_principal=integracao_codex.atualizar_e_aguardar,
+    )
     app.state.codex_contas_login = codex_contas_login
     cotas.registrar_codex_auth_cache(codex_contas_login.cached_auth)
+    # Referência guardada: task sem dono pode ser coletada no meio.
+    app.state.codex_auth_aquecer = asyncio.create_task(codex_contas_login.aquecer())
     app.state.codex_creation_tasks = set()
-    from app.codex_integracao import SERVICO as integracao_codex
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
         enabled=settings.omp_plugin_sync_enabled,
@@ -400,6 +428,10 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        diag.registrar("backend.encerrando")
+        codex_warm_task.cancel()
+        app.state.codex_auth_aquecer.cancel()
+        await asyncio.gather(codex_warm_task, app.state.codex_auth_aquecer, return_exceptions=True)
         creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
         for creation_task in creation_tasks:
             creation_task.cancel()
@@ -472,17 +504,40 @@ async def _mux_indisponivel(request: Request, exc: tmux.MuxIndisponivel):
 
 @app.middleware("http")
 async def _correlaciona_diag(request: Request, call_next):
-    """Põe o `X-Hangar-Req` do front no contexto, pra o diário poder LIGAR as duas pontas.
+    """Põe o id do front no contexto, pra o diário poder LIGAR as duas pontas.
 
     Sem isto, a linha da tela ("POST /select devolveu 409") e a do servidor ("o cursor do picker não
     convergiu") ficam soltas no arquivo, e amarrar uma na outra depende de comparar horário — que
     empata assim que há duas telas abertas. Com o id, quem analisa segue a cadeia inteira de um
     toque só.
     """
-    token = diag.req_atual.set(request.headers.get("x-hangar-req", "")[:32])
+    req = request.headers.get("x-hangar-req", "")[:32]
+    path = request.url.path.removeprefix(request.scope.get("root_path", ""))
+    if not req and re.fullmatch(r"/api/sessions/(?:[^/]+/)?events", path):
+        # EventSource nativo não permite acrescentar o header de correlação.
+        candidate = request.query_params.get("diag_req", "")
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", candidate):
+            req = candidate
+    token = diag.req_atual.set(req)
+    started = time.monotonic()
+    response = None
+    failure = ""
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        failure = type(exc).__name__
+        raise
     finally:
+        elapsed = int((time.monotonic() - started) * 1000)
+        status = response.status_code if response is not None else 500
+        # O template da rota não contém query, caminho de arquivo nem corpo do pedido.
+        route = getattr(request.scope.get("route"), "path", "(rota desconhecida)")
+        if (response is not None or failure) and not request.url.path.startswith("/api/diag") and (
+                failure or status >= 400 or elapsed >= 1000 or request.method in ("POST", "PUT", "PATCH", "DELETE")):
+            diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
+                           detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
+                           etapa="cabecalhos", sessao=request.path_params.get("name"), erro_tipo=failure)
         diag.req_atual.reset(token)
 
 
@@ -504,8 +559,10 @@ app.add_middleware(
     # If-None-Match e cairia calado no download inteiro, em toda entrada.
     expose_headers=["ETag"],
 )
-if settings.sync:
-    app.include_router(sync_router)
+# JSON e assets grandes cruzam LAN/VPN; o Starlette exclui `text/event-stream`, sem segurar o SSE.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+app.include_router(sync_admin_router)
+app.include_router(sync_router)
 app.include_router(deploy_router)
 # Roteadores por assunto (Task 1 do plano descoberta-e-configuracao): cada Task do lote escreve
 # só no módulo dela. Última edição de api.py deste plano.
@@ -1467,11 +1524,7 @@ def push_quiet_hours(body: PushQuietHoursBody):
 
 class InputBody(_StrictBody):
     text: str
-    # ACEITO E IGNORADO. Existiu por ~40min em 14/08/2026 (o steer ia junto do envio; virou uma tecla
-    # avulsa, POST /steer). O corpo e estrito, entao tirar o campo fez a PAGINA ABERTA — que e um PWA
-    # com service worker e pode ficar versoes atras — receber 422 em TODO envio: "Extra inputs are
-    # not permitted". Cliente velho nao pode quebrar por causa de campo que o servidor deixou de
-    # usar; fica aqui como tolerancia, sem efeito nenhum.
+    # Recados 1:1 pedem orientação imediata; envios comuns conservam a fila normal.
     steer: bool = False
 
 
@@ -1482,6 +1535,10 @@ class BroadcastBody(_StrictBody):
 
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
+
+
+class BtwBody(_StrictBody):
+    question: str = Field(min_length=1, max_length=4000)
 
 
 class KeyBody(_StrictBody):
@@ -1731,7 +1788,7 @@ async def create_session(body: CreateBody):
             except ValueError as exc:
                 raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
         if body.codex_account is not None:
-            _codex_prepare_or_fail(codex_account_obj, codex_service)
+            _codex_require_idle_preparation(codex_account_obj, codex_service)
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -1810,11 +1867,16 @@ async def create_session(body: CreateBody):
     async def _create_registry(kwargs: dict):
         """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
         nonlocal codex_lease
+        def create():
+            info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
+            # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
+            with _list_lock:
+                _list_snap["snap"] = None
+            return info
+
         if codex_lease is None:
-            return await asyncio.to_thread(registry.create, body.name, body.cwd,
-                                           body.config_dir, **kwargs)
-        worker = asyncio.create_task(asyncio.to_thread(
-            registry.create, body.name, body.cwd, body.config_dir, **kwargs))
+            return await asyncio.to_thread(create)
+        worker = asyncio.create_task(asyncio.to_thread(create))
         try:
             info = await asyncio.shield(worker)
         except asyncio.CancelledError:
@@ -1826,6 +1888,7 @@ async def create_session(body: CreateBody):
                 raise
             _hold_codex_lease(info.name, codex_lease)
             codex_lease = None
+            _start_codex_preparation(codex_account_obj, codex_service)
             raise
         except BaseException:
             codex_lease.release()
@@ -1833,6 +1896,7 @@ async def create_session(body: CreateBody):
             raise
         _hold_codex_lease(info.name, codex_lease)
         codex_lease = None
+        _start_codex_preparation(codex_account_obj, codex_service)
         return info
 
     # Reconciliar e criar a sessão sob a MESMA trava (ciclo_conta), só no caminho que consome o
@@ -1933,7 +1997,21 @@ class RenameBody(_StrictBody):
 
 
 @app.post("/api/sessions/{name}/rename", dependencies=[Depends(require_auth)])
-def rename_session(name: str, body: RenameBody):
+async def rename_session(name: str, body: RenameBody):
+    # Claim, envio e compensação precisam terminar antes de mover a fila e cancelar a bomba.
+    async with AsyncExitStack() as stack:
+        adapter = get_adapter("codex")
+        for key in sorted({name, sanitize_session_name(body.new)}):
+            await stack.enter_async_context(adapter.delivery_lock(key))
+        task = asyncio.create_task(asyncio.to_thread(_rename_session, name, body))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+
+def _rename_session(name: str, body: RenameBody):
     from app import tmux
     # tmux nao aceita espaco/./: no nome -> sanitiza. O transcript NAO depende do nome (resolve por
     # /proc), entao renomear nao quebra o historico. Migra so o sidecar da fila (keyed por nome).
@@ -2603,18 +2681,6 @@ async def events(name: str, request: Request):
         merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset))
 
 
-# Pool DEDICADO ao caminho de ENVIO (nucleo sagrado). Separado do executor default do asyncio, que a
-# decoracao da lista (git_summary/capture_pane via asyncio.to_thread) pode ocupar em rajada -> sem isto,
-# um burst de decoracao lenta atrasaria o POST /input. Poucos workers bastam (single-user; envios a uma
-# mesma sessao ja serializam no _send_lock do terminal_input).
-_send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-send")
-
-
-def _send_thread(fn, *args):
-    """Roda `fn(*args)` no pool DEDICADO de envio (nao no executor default, saturavel pela decoracao)."""
-    return asyncio.get_running_loop().run_in_executor(_send_executor, fn, *args)
-
-
 def _erro_texto(e) -> str:
     """Texto de um erro de envio: string crua (endpoint antigo) ou o `msg` do envelope {code, params, msg}.
 
@@ -2625,7 +2691,7 @@ def _erro_texto(e) -> str:
     return e if isinstance(e, str) else (e.get("msg") if isinstance(e, dict) else str(e))
 
 
-def _send_one(name: str, text: str) -> dict:
+def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     """Sequencia UNICA de envio de prompt: send_prompt + registro na fila duravel + confirmacao/drain.
     Usada pelo /input (uma sessao) e pelo /broadcast (loop por N sessoes) — o broadcast NAO reimplementa
     entrega, so repete esta mesma sequencia por nome. Nunca levanta (devolve ok/error) pra o broadcast
@@ -2779,7 +2845,7 @@ def _send_one(name: str, text: str) -> dict:
         # entrada fica pendente pro drain entregar quando o overlay fechar. Falha ao gravar a fila nao
         # quebra o envio.
         try:
-            PromptQueue(name).append(text, delivered=(result == "sent"), ts=t0)
+            entry = PromptQueue(name).append(text, delivered=(result == "sent"), ts=t0)
         except OSError as e:
             if result != "sent":
                 # NAO digitado na TUI (overlay/picker aberto) + sidecar nao gravou = a msg nao esta em
@@ -2802,7 +2868,8 @@ def _send_one(name: str, text: str) -> dict:
             # entrada (e sem SSE aberto nao havia gatilho nenhum). O drain re-checa deliverable.
             threading.Thread(target=_drain_session, args=(name,), daemon=True).start()
     # delivered: digitou AGORA na TUI ("sent"); False = ficou na fila durável (sessão ocupada/overlay).
-    return {"ok": True, "error": None, "delivered": result == "sent"}
+    return {"ok": True, "error": None, "delivered": result == "sent",
+            **({"entry_id": entry["id"]} if track_entry and entry is not None else {})}
 
 
 def _provider_of(name: str) -> str:
@@ -2838,7 +2905,17 @@ def _pane_info(name: str) -> tuple[str, str | None]:
     return agentpane.pane_info(name)
 
 
-async def _send_one_codex(name: str, text: str) -> dict:
+async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
+    source = await _send_thread(codex_sessions.load, name)
+    async with get_adapter("codex").delivery_lock(name):
+        current = await _send_thread(codex_sessions.load, name)
+        changed = source is not None and (current or {}).get("thread_id") != source.get("thread_id")
+        if changed or not await _send_thread(_session_exists, name):
+            return {"ok": False, "error": erro("erro_sessao_inexistente", "sessao nao encontrada")}
+        return await _send_one_codex_locked(name, text, track_entry=track_entry)
+
+
+async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = False) -> dict:
     """Envio de prompt pra sessao Codex pela TUI no tmux. Registra na fila duravel
     (aparece como user_msg em ordem e persiste no reload; o
     merge dedup-a contra o rollout do Codex) e entrega pela TUI no tmux SE a sessao esta idle;
@@ -2847,7 +2924,7 @@ async def _send_one_codex(name: str, text: str) -> dict:
     broadcast: devolve ok/error por sessao).
 
     IMPORTANT 2: PromptQueue.append/set_delivered fazem I/O de arquivo sincrono com lock -- chamados
-    direto aqui (corrotina) bloqueariam o event loop. Mesmo padrao de to_thread do drain do Codex."""
+    direto aqui (corrotina) bloqueariam o event loop. O pool de envio evita disputar com funcionalidades secundárias."""
     adapter = get_adapter("codex")
     try:
         deliverable = await adapter.deliverable(name)
@@ -2859,7 +2936,7 @@ async def _send_one_codex(name: str, text: str) -> dict:
         deliverable = False
     # Enfileira sempre como pendente; so marca entregue apos a TUI REALMENTE receber o prompt.
     try:
-        entry = await asyncio.to_thread(PromptQueue(name).append, text, delivered=False)
+        entry = await _send_thread(PromptQueue(name).append, text, delivered=False)
     except OSError as e:
         # Mesma regra do _send_one: sidecar nao gravou + NAO entregavel = a msg nao esta em lugar
         # NENHUM, e responder "ok, na fila" era a mentira que o eeba30a tirou do caminho Claude.
@@ -2876,7 +2953,8 @@ async def _send_one_codex(name: str, text: str) -> dict:
         entry = None
     if not deliverable:
         # turno em andamento -> fica pendente na fila; o drain-on-complete entrega no proximo idle.
-        return {"ok": True, "error": None, "delivered": False}
+        return {"ok": True, "error": None, "delivered": False,
+                **({"entry_id": entry["id"]} if track_entry else {})}
     try:
         result = await adapter.send_prompt(name, text)
     except Exception as e:
@@ -2887,7 +2965,7 @@ async def _send_one_codex(name: str, text: str) -> dict:
         if entry is not None:
             # turno iniciou -> marca entregue pra o drain-on-complete nao reenviar a mesma entrada.
             try:
-                await asyncio.to_thread(PromptQueue(name).set_delivered, entry["id"], True)
+                await _send_thread(PromptQueue(name).set_delivered, entry["id"], True)
             except OSError:
                 pass
     elif entry is None:
@@ -2900,7 +2978,8 @@ async def _send_one_codex(name: str, text: str) -> dict:
         return {"ok": False, "error": erro("erro_fila_nao_entregue",
                                                    "fila indisponivel e o turno nao aceitou o prompt: nao foi entregue")}
     # "deferred" COM entrada na fila: fica pendente (delivered ja e False) -> drain-on-complete entrega.
-    return {"ok": True, "error": None, "delivered": result == "sent"}
+    return {"ok": True, "error": None, "delivered": result == "sent",
+            **({"entry_id": entry["id"]} if track_entry and entry is not None else {})}
 
 
 def _session_exists(name: str) -> bool:
@@ -2921,14 +3000,44 @@ async def input_prompt(name: str, body: InputBody):
     # o POST /input. Ver _send_thread.
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, detail=erro("erro_sessao_recado_nao_enfileirado", "sessão não encontrada — recado NÃO enfileirado"))
-    if _provider_of(name) == "codex":
-        res = await _send_one_codex(name, body.text)
+    provider = _provider_of(name)
+    tracking = {"track_entry": True} if body.steer else {}
+    if provider == "codex":
+        res = await _send_one_codex(name, body.text, **tracking)
     else:
-        res = await _send_thread(_send_one, name, body.text)
+        res = await _send_thread(_send_one, name, body.text, True) if body.steer else await _send_thread(_send_one, name, body.text)
     if not res["ok"]:
         raise HTTPException(400, res["error"])
-    # delivered: True = digitou agora na TUI; False = na fila durável (entrega no próximo idle).
-    return {"ok": True, "delivered": res.get("delivered", False)}
+    steered = False
+    entry_id = res.get("entry_id")
+    if body.steer and entry_id:
+        try:
+            if provider == "codex" and not res.get("delivered"):
+                # steer_queue disputa a mesma trava do envio; só pode rodar depois dele.
+                sent = await get_adapter("codex").steer_queue(name, entry_id=entry_id)
+                steered = entry_id in sent
+            elif provider != "codex":
+                provider, _ = await _send_thread(_pane_info, name)
+                q = PromptQueue(name)
+                if provider == "kimi" and await _send_thread(q.entry_delivered, entry_id):
+                    if await _send_thread(terminal_input.steer_now, name) is True:
+                        steered = True
+                        await _send_thread(q.confirm_delivered)
+        except Exception:
+            # O recado já existe na fila. Falha de orientação nunca faz outro append/envio.
+            _log.exception("falha apos persistir recado name=%s entry=%s steered=%s", name, entry_id, steered)
+        if provider == "codex":
+            # Outra promoção ou o drain pode ter concluído a entrega enquanto esperávamos.
+            try:
+                rows = await _send_thread(PromptQueue(name).load)
+                receipt = next((row for row in rows if row.get("id") == entry_id), None)
+                if receipt is not None:
+                    steered = steered or receipt.get("steered") is True
+                    res["delivered"] = res.get("delivered", False) or receipt.get("delivered") is True
+            except OSError:
+                _log.exception("recibo ilegivel apos orientacao name=%s entry=%s steered=%s", name, entry_id, steered)
+    # A orientação confirmada também conta como entrega, sem redigitar o recado na TUI.
+    return {"ok": True, "delivered": res.get("delivered", False) or steered, "steered": steered}
 
 
 @app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth)])
@@ -3873,13 +3982,48 @@ def select_submit(name: str):
 async def interrupt(name: str, clear: bool = False):
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
-        await get_adapter("codex").interrupt(name)
+        if not await get_adapter("codex").interrupt(name):
+            raise HTTPException(409, detail=erro(
+                "erro_codex_controle", "Não há turno Codex ativo para interromper."))
         return {"ok": True}
     # clear=True: alem de interromper, limpa o input (2o Esc). So o front com msg pendente passa isso —
     # garante input nao-vazio, evitando que o Esc-Esc abra o menu de rewind num input ja vazio.
     # terminal.interrupt e SYNC (tmux) -> threadpool pra nao bloquear o event loop (handler async agora).
     await asyncio.to_thread(terminal.interrupt, name, clear=clear)
     return {"ok": True}
+
+
+def _exige_claude_de_terminal(name: str) -> None:
+    # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
+    provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
+    if provider != "claude":
+        raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
+
+
+@app.post("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def pergunta_lateral(name: str, body: BtwBody):
+    if not await _send_thread(_session_exists, name):
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    await _send_thread(_exige_claude_de_terminal, name)
+    _recusa_se_painel_aberto(name)
+    try:
+        item = await asyncio.to_thread(btw.perguntar, name, body.question)
+    except btw.BtwError as e:
+        raise HTTPException(e.status, detail=erro(e.code, e.detail))
+    # A TUI já respondeu e gastou a chamada: falha ao guardar o histórico não pode virar 500 e
+    # levar o cliente a perguntar de novo. Vai marcada, não escondida.
+    try:
+        await asyncio.to_thread(btw.registrar, name, item)
+        item["salvo"] = True
+    except OSError:
+        _log.exception("btw de %s: resposta entregue, historico nao gravado", name)
+        item["salvo"] = False
+    return item
+
+
+@app.get("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def historico_lateral(name: str):
+    return await asyncio.to_thread(btw.historico, name)
 
 
 def _normalize_rate_window(window: dict | None) -> dict | None:
@@ -4014,6 +4158,49 @@ async def set_codex_mode(name: str, body: CodexModeBody):
         return await get_adapter("codex").set_mode(name, body.mode)
     except RuntimeError:
         raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+
+
+def _menu_de_implementar_plano(pane: str) -> bool:
+    menu = menu_codex(pane)
+    return bool(menu and menu[0] == "Implement this plan?"
+                and menu[1][0].startswith("Yes, implement this plan"))
+
+
+@app.post("/api/sessions/{name}/codex/plan/implement", dependencies=[Depends(require_auth)])
+def implementar_plano_codex(name: str):
+    if not _session_exists(name):
+        raise HTTPException(404, detail=erro(
+            "erro_sessao_opcao_nao_enviada", "sessão não encontrada — plano NÃO iniciado"))
+    if _provider_of(name) != "codex":
+        raise HTTPException(400, detail=erro(
+            "erro_model_so_codex", "esta ação só existe para sessões Codex"))
+
+    fim = time.monotonic() + 2.0
+    while True:
+        pane = tmux.capture_pane(name)
+        if _menu_de_implementar_plano(pane):
+            break
+        if menu_codex(pane) is not None or time.monotonic() >= fim:
+            raise HTTPException(409, detail=erro(
+                "erro_codex_controle", "O seletor de implementação não está aberto na sessão."))
+        time.sleep(0.05)
+
+    try:
+        terminal.select(name, 1, require_cursor=True)
+    except terminal_input.DriveError as exc:
+        diag.registrar("plano_codex.nao_convergiu", "erro", sessao=name, detalhe=str(exc))
+        raise HTTPException(409, detail=erro(
+            "erro_opcao_nao_convergiu", "não consegui iniciar o plano pelo terminal",
+            detalhe=str(exc))) from None
+
+    fim = time.monotonic() + 2.0
+    while time.monotonic() < fim:
+        pane = tmux.capture_pane(name)
+        if pane and not _menu_de_implementar_plano(pane):
+            return {"ok": True}
+        time.sleep(0.05)
+    raise HTTPException(409, detail=erro(
+        "erro_codex_controle", "O Codex não fechou o seletor de implementação."))
 
 
 @app.get("/api/sessions/{name}/pane", dependencies=[Depends(require_auth)])
@@ -5111,7 +5298,29 @@ def files_resolver(name: str, body: ResolverBody):
     """Visão "citados": confere de uma vez quais caminhos citados existem (e resolve os relativos
     a outra pasta pelo sufixo). Quem não existe não entra na lista."""
     try:
-        return filesearch.resolver(_session_cwd(name), body.caminhos)
+        info = _cached_info_sync(name)
+        if info is None or not info.cwd:
+            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
+        from app.transcript import citation_cwds
+        cited = citation_cwds(info.jsonl, body.caminhos) if info.jsonl else {}
+        found: dict[str, dict] = {}
+        for path in body.caminhos:
+            bases = list(dict.fromkeys([*(cited.get(path) or []), info.cwd]))
+            for suffix in (False, True):
+                for base in bases:
+                    result = filesearch.resolver(base, [path], suffix=suffix)
+                    target = result["ok"].get(path)
+                    if target is None:
+                        continue
+                    if os.path.realpath(base) != os.path.realpath(info.cwd):
+                        # O FilesStore lê relativos pelo cwd de nascimento. Outro cwd usa /file.
+                        target["relativo"] = None
+                    found[path] = target
+                    break
+                if path in found:
+                    break
+        return {"ok": {path: found[path] for path in body.caminhos if path in found},
+                "faltam": [path for path in body.caminhos if path not in found]}
     except SearchError as e:
         raise _erro_arq(e)
 
@@ -5519,8 +5728,9 @@ def serve_file(name: str, path: str, request: Request):
     info = _cached_info_sync(name)
     if info is None or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.transcript import path_in_transcript
-    if not path_in_transcript(info.jsonl, path):
+    from app.transcript import citation_cwds
+    cited = citation_cwds(info.jsonl, [path])
+    if path not in cited:
         raise HTTPException(403, detail=erro("erro_arquivo_nao_citado", "file not referenced in this conversation"))
     expanded = os.path.expanduser(path)
     if os.path.isabs(expanded):
@@ -5528,10 +5738,20 @@ def serve_file(name: str, path: str, request: Request):
     else:
         if not info.cwd:
             raise HTTPException(409, detail=erro("erro_cwd_indisponivel", "cwd da sessao indisponivel"))
-        base = os.path.realpath(info.cwd)
-        real = os.path.realpath(os.path.join(base, expanded))
-        if real != base and not real.startswith(base + os.sep):
+        if ".." in path.replace("\\", "/").split("/"):
             raise HTTPException(403, detail=erro("erro_caminho_fora_cwd", "path escapes session cwd"))
+        bases = list(dict.fromkeys([*cited[path], info.cwd]))
+        real = ""
+        for raw_base in bases:
+            base = os.path.realpath(raw_base)
+            candidate = os.path.realpath(os.path.join(base, expanded))
+            if candidate != base and not candidate.startswith(base + os.sep):
+                continue
+            if os.path.isfile(candidate):
+                real = candidate
+                break
+        if not real:
+            raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
     if not os.path.isfile(real):
         raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
     media = mimetypes.guess_type(real)[0] or "application/octet-stream"
@@ -6098,7 +6318,7 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         return {"kind": "kimi", "reduced": False, "models": cat["models"], "default": cat["default"]}
     if provider == "codex":
         account = _resolve_codex_account(codex_account or None)
-        _codex_prepare_or_fail(account, _codex_service())
+        _codex_require_idle_preparation(account, _codex_service())
         # Nem config no disco (o ~/.codex/config.toml guarda o modelo escolhido, nunca a lista) nem
         # `codex --list-models`: a fonte e o `model/list` de um app-server efemero em stdio, a MESMA
         # que a folha da sessao viva usa. Ver app/codex_models.py.
@@ -6622,6 +6842,8 @@ class _UIStatic(StaticFiles):
         resp = super().file_response(full_path, *args, **kwargs)
         if str(full_path).endswith(".html"):
             resp.headers["cache-control"] = "no-cache"
+        elif Path(full_path).parent.name == "assets":
+            resp.headers["cache-control"] = "public, max-age=31536000, immutable"
         return resp
 
 

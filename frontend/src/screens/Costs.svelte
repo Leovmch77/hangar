@@ -338,10 +338,20 @@
   // subagente, não só "exclui ou não": "só subagente" filtra pra SÓ linha de Task (`filtrar` em
   // cubo.ts), e "sessões e subagentes" ali afirmaria conversa que não está na conta. Sem
   // detalhamento (servidor antigo) não existe o filtro, e a soma é sempre mistura.
-  const sess = (n: number) => {
+  // Com o filtro em "tudo" os dois lados saem SEPARADOS (`N sessões · M subagentes`) em vez da
+  // soma de antes: um Task dispara dezenas de linhas de subagente, e somadas à conversa a
+  // palavra "sessões" contava um número que ninguém abriu.
+  const sess = (b: { sessions: number; subagentes?: number }) => {
+    const n = b.sessions;
     const um = n === 1;
     if (temCombos && filtroAtivo.subagente === false) return `${n} ${um ? m.sessao_singular() : m.lista_sessoes_plural()}`;
     if (temCombos && filtroAtivo.subagente === true) return `${n} ${um ? m.custos_subagente() : m.custos_subagentes()}`;
+    const sub = b.subagentes ?? 0;
+    if (temCombos && sub > 0) {
+      const conversa = n - sub;
+      return `${conversa} ${conversa === 1 ? m.sessao_singular() : m.lista_sessoes_plural()}`
+        + ` · ${sub} ${sub === 1 ? m.custos_subagente() : m.custos_subagentes()}`;
+    }
     return `${n} ${um ? m.custos_sessao_ou_subagente() : m.custos_sessoes_e_subagentes()}`;
   };
 
@@ -837,7 +847,7 @@
              ele afirmaria "não custou nada". -->
         <dd class="hero" class:tracinho={semTarifa || recorteVazio}>{mFoco(foco.cost)}</dd>
         <div class="foot">
-          {m2Foco(foco.cost)} · {sess(foco.sessions)} · {m2Foco(foco.cost / diasDoPeriodo)}{m.custos_por_dia()}
+          {m2Foco(foco.cost)} · {sess(foco)} · {m2Foco(foco.cost / diasDoPeriodo)}{m.custos_por_dia()}
         </div>
         {#if semTarifa}<div class="foot">{m.custos_sem_tarifa_volume()}</div>
         {:else if tudoGratis}<div class="foot">{m.custos_modelo_gratis_nada()}</div>
@@ -943,7 +953,7 @@
       <p class="caption">
         {#if diaSobHover !== null && grafico.barras[diaSobHover]}
           {@const b = grafico.barras[diaSobHover]}
-          <b>{rotuloDia(b.dia.key)}</b> · {dailyMetric === 'tokens' ? tok(b.total) : m2(b.total)} · {sess(b.dia.bucket.sessions)}
+          <b>{rotuloDia(b.dia.key)}</b> · {dailyMetric === 'tokens' ? tok(b.total) : m2(b.total)} · {sess(b.dia.bucket)}
           {#each b.segs as s}<span class="cap-seg"><i class="swatch" style="background: var({s.slot})"></i>{s.label} {dailyMetric === 'tokens' ? tok(s.cost) : m2(s.cost)}</span>{/each}
         {:else}
           {m.custos_hover_detalhe()}
@@ -1140,7 +1150,11 @@
         <table class="data">
           <thead>
             <tr>
-              <th>{m.custos_dim_modelo()}</th><th class="n">in</th><th class="n">out</th><th class="n">cache R</th>
+              <!-- `entrada` soma os três tipos de entrada porque provedor sem cache escrito conta
+                   o trecho novo de cada turno como entrada crua: comparar só o `in` dos dois
+                   lados lê como se o GPT consumisse mais que o Claude. -->
+              <th>{m.custos_dim_modelo()}</th><th class="n" title={m.custos_col_entrada_ajuda()}>{m.custos_col_entrada()}</th>
+              <th class="n">out</th><th class="n">cache R</th>
               <th class="n">{m.custos_tarifa_in_out()}</th><th class="n">{m.custos_origem()}</th><th class="n">{m.custos_col_pct_conta()}</th>
               <th class="n">{m.custos_custo()}</th><th></th>
             </tr>
@@ -1162,7 +1176,13 @@
                 onclick={() => alternar('model', b.key)}>
                 <td>{b.key}{#if !comPreco}<span class="tag">{isFree(b.key) ? m.custos_gratis() : m.custos_sem_tarifa()}</span>{:else if parcial}<span
                   class="tag" title={m.custos_servidor_malha()}>{m.custos_preco_parcial()}</span>{/if}</td>
-                <td class="n">{tok(b.input)}</td>
+                <!-- Marca curta, não chip: o rótulo por extenso em toda linha empurrava a coluna
+                     de custo pra fora em 1280px, e no celular o `title` do chip nunca abre. A
+                     nota abaixo da tabela é o que explica, e ela é legível sem hover. -->
+                <td class="n">{tok(b.input + b.cache_write + b.cache_read)}<span class="dim">/{tok(b.input)}</span
+                  >{#if b.cache_write === 0 && b.cache_read > 0}<span class="marca"
+                    title={m.custos_sem_cache_escrito_ajuda()}
+                    aria-label={m.custos_sem_cache_escrito_ajuda()}>*</span>{/if}</td>
                 <td class="n">{tok(b.output)}</td>
                 <td class="n">{tok(b.cache_read)}</td>
                 <td class="n dim">{t ? `${dec(t.input, 2)}/${dec(t.output, 2)}` : '—'}</td>
@@ -1183,6 +1203,9 @@
           </tbody>
         </table>
       </div>
+      {#if modelos.some((b) => b.cache_write === 0 && b.cache_read > 0)}
+        <p class="hint nota">{m.custos_sem_cache_escrito_ajuda()}</p>
+      {/if}
     </div>
 
     <div class="card">
@@ -1237,7 +1260,7 @@
               </div>
               <div class="cmpvalor">{valorFmt(b)}</div>
               <div class="foot">{metrica === 'custo' ? tok(brutos(b)) : (custoDesconhecido(b) ? '—' : m2(b.cost))}</div>
-              <div class="foot">{sess(b.sessions)}</div>
+              <div class="foot">{sess(b)}</div>
               <div class="foot">{(metrica === 'custo' && custoDesconhecido(b)) ? '—' : m.custos_do_comparado({ pct: pct(valorDe(b, metrica), totalComparado) })}</div>
               <div class="foot">{(metrica === 'custo' && custoDesconhecido(b)) ? '—' : rotuloMetrica(valorDe(b, metrica) / diasDoPeriodo)}{m.custos_por_dia()}</div>
             </div>
@@ -1600,6 +1623,8 @@
   table.data th.n, table.data td.n { text-align: right; font-variant-numeric: tabular-nums; }
   table.data td.c { font-weight: 650; color: var(--accent); text-align: right; font-variant-numeric: tabular-nums; }
   table.data td.c .tracinho { color: var(--text-muted); font-weight: 400; }
+  table.data td.n .marca { color: var(--text-muted); margin-left: 2px; }
+  .card > .hint.nota { margin: var(--space-2) 0 0; }
   table.data tr.click { cursor: pointer; }
   table.data tr.click:hover td { background: var(--bg-hover); }
   table.data tr[aria-selected='true'] td { background: var(--accent-dim); }

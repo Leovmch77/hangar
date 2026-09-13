@@ -25,3 +25,13 @@ def test_login_panes_detected():
 def test_normal_panes_not_login():
     for pane in NON_LOGIN_PANES:
         assert not is_login(pane), pane
+
+
+def test_oauth_url_na_conversa_com_composer_vivo_nao_e_login():
+    pane = """● A resposta contém https://exemplo.test/oauth/authorize?id=abc
+
+❯
+────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on · shift+tab to cycle
+"""
+    assert not is_login(pane)

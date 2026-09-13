@@ -19,6 +19,159 @@ def _home(tmp_path):
     return tmp_path
 
 
+def test_memoria_leva_um_transcrito_por_projeto(tmp_path):
+    from app.codex_integracao import copiar_memorias
+    origem = tmp_path / "projects"
+    projeto = origem / "-home-alguem-repo"
+    (projeto / "memory").mkdir(parents=True)
+    (projeto / "memory" / "MEMORY.md").write_text("indice")
+    # O menor de todos não tem conversa: o detector ignoraria o projeto, então ele não serve.
+    (projeto / "so-metadado.jsonl").write_text('{"type":"mode"}\n')
+    (projeto / "menor.jsonl").write_text('{"type":"user"}\n' + "x" * 200)
+    (projeto / "grande.jsonl").write_text('{"type":"user"}\n' + "x" * 5000)
+    (origem / "-sem-memoria").mkdir()
+    (origem / "-sem-memoria" / "sessao.jsonl").write_text('{"type":"user"}\n')
+
+    # Memória cuja conversa o Claude já apagou: o Codex não reconheceria o projeto. Fica de fora
+    # calada — é regra dele, acontece o tempo todo, e não há o que a pessoa faça a respeito.
+    (origem / "-orfao" / "memory").mkdir(parents=True)
+    (origem / "-orfao" / "memory" / "nota.md").write_text("sem transcrito")
+    (origem / "-vazio" / "memory").mkdir(parents=True)
+
+    destino = tmp_path / "stage"
+    erros = copiar_memorias(origem, destino)
+
+    assert (destino / "-home-alguem-repo" / "menor.jsonl").exists()
+    assert not (destino / "-home-alguem-repo" / "grande.jsonl").exists()
+    assert not (destino / "-home-alguem-repo" / "so-metadado.jsonl").exists()
+    assert (destino / "-home-alguem-repo" / "memory" / "MEMORY.md").read_text() == "indice"
+    assert not (destino / "-sem-memoria").exists()
+    assert erros == [], "só erro de leitura vira aviso"
+    assert not (destino / "-orfao").exists()
+
+
+async def test_memoria_copiada_que_o_codex_nao_reconhece_vira_aviso(tmp_path, monkeypatch):
+    """Copiar não é ser reconhecido. O detector exige uma conversa ao lado da memória e não diz o
+    quanto — sem esta conferência, a memória some da importação sem nenhum sinal."""
+    from unittest.mock import AsyncMock
+    from app import codex_integracao
+    from app.codex_importador import CodexNativoErro
+    home = _home(tmp_path)
+    (home / ".claude/settings.json").write_text('{"enabledPlugins": {}, "hooks": {}, "env": {}}')
+    for nome in ("-visto", "-ignorado"):
+        (home / f".claude/projects/{nome}/memory").mkdir(parents=True)
+        (home / f".claude/projects/{nome}/memory/MEMORY.md").write_text("indice")
+        (home / f".claude/projects/{nome}/sessao.jsonl").write_text('{"type":"user"}\n')
+    monkeypatch.setattr(codex_integracao, "memoria_ligada", lambda: True)
+
+    class Importer:
+        def __init__(self, stage, cx, binario, **kwargs):
+            self.stage, self.cx = stage, cx
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def detectar(self):
+            # O Codex enxergou só um dos dois projetos copiados.
+            return [{"itemType": "MEMORY", "details": {"memory": ["-visto"]}}]
+        async def importar(self, itens):
+            (self.cx / "hooks.json").write_text('{"hooks": {}}')
+            return {"itemTypeResults": []}
+        async def historicos_importacao(self):
+            raise CodexNativoErro("sem histórico")
+
+    service = IntegracaoCodex(home, home / ".codex", nativo=Importer)
+    service._estado = codex_integracao._snapshot()
+    service.raiz.mkdir(parents=True)
+    monkeypatch.setattr(service, "_config", AsyncMock())
+
+    await service._fragmentos(Importer(None, None, None), {}, {})
+
+    avisos = " ".join(service._estado["avisos"])
+    assert "-ignorado" in avisos and "-visto" not in avisos
+
+
+async def test_memoria_recusada_nao_derruba_o_resto_da_integracao(tmp_path, monkeypatch):
+    """A memória vai numa chamada à parte justamente para isso: o Codex recusando uma memória não
+    pode custar hooks, skills e MCP, que não dependem dela."""
+    from unittest.mock import AsyncMock
+    from app import codex_integracao
+    from app.codex_importador import CodexNativoErro
+    home = _home(tmp_path)
+    (home / ".claude/settings.json").write_text('{"enabledPlugins": {}, "hooks": {}, "env": {}}')
+    projeto = home / ".claude/projects/-um-repo"
+    (projeto / "memory").mkdir(parents=True)
+    (projeto / "memory/MEMORY.md").write_text("indice")
+    (projeto / "sessao.jsonl").write_text('{"type":"user"}\n')
+    monkeypatch.setattr(codex_integracao, "memoria_ligada", lambda: True)
+
+    lotes = []
+
+    class Importer:
+        def __init__(self, stage, cx, binario, **kwargs):
+            self.stage, self.cx = stage, cx
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def detectar(self):
+            return [{"itemType": "HOOKS", "details": {}}, {"itemType": "MEMORY", "details": {}}]
+        async def importar(self, itens):
+            lotes.append(sorted({i["itemType"] for i in itens}))
+            if any(i["itemType"] == "MEMORY" for i in itens):
+                raise CodexNativoErro("o Codex recusou a memória")
+            (self.cx / "hooks.json").write_text('{"hooks": {}}')
+            return {"itemTypeResults": []}
+        async def historicos_importacao(self):
+            raise CodexNativoErro("sem histórico")
+
+    service = IntegracaoCodex(home, home / ".codex", nativo=Importer)
+    service._estado = codex_integracao._snapshot()
+    service.raiz.mkdir(parents=True)
+    monkeypatch.setattr(service, "_config", AsyncMock())
+
+    await service._fragmentos(Importer(None, None, None), {}, {})
+
+    assert lotes == [["HOOKS"], ["MEMORY"]], "a memória tem que ir num lote separado"
+    assert any("memória" in a.lower() or "memoria" in a.lower() for a in service._estado["avisos"])
+    service._config.assert_awaited()  # o resto da integração seguiu
+
+
+def test_transcrito_ilegivel_vira_aviso_e_nao_sumico(tmp_path, monkeypatch):
+    """Não dar para ler é falha, não é o caso normal da memória órfã: os dois acabam fora da
+    importação, mas só um deles a pessoa pode resolver, e por isso só um vira aviso."""
+    from app import codex_integracao
+    origem = tmp_path / "projects"
+    (origem / "-repo" / "memory").mkdir(parents=True)
+    (origem / "-repo" / "memory" / "MEMORY.md").write_text("indice")
+    (origem / "-repo" / "sessao.jsonl").write_text('{"type":"user"}\n')
+
+    def abrir(self, *a, **kw):
+        raise PermissionError("sem acesso")
+
+    monkeypatch.setattr(codex_integracao.Path, "open", abrir)
+    assert codex_integracao.copiar_memorias(origem, tmp_path / "stage") == ["-repo"]
+
+
+def test_memoria_ilegivel_nao_derruba_os_outros_projetos(tmp_path, monkeypatch):
+    from app import codex_integracao
+    origem = tmp_path / "projects"
+    for nome in ("-a-quebrado", "-b-bom"):
+        (origem / nome / "memory").mkdir(parents=True)
+        (origem / nome / "memory" / "MEMORY.md").write_text(nome)
+        (origem / nome / "sessao.jsonl").write_text('{"type":"user"}\n')
+
+    original = codex_integracao.shutil.copytree
+
+    def copytree(src, dst, **kwargs):
+        if "-a-quebrado" in str(src):
+            raise PermissionError("sem acesso")
+        return original(src, dst, **kwargs)
+
+    monkeypatch.setattr(codex_integracao.shutil, "copytree", copytree)
+    erros = codex_integracao.copiar_memorias(origem, tmp_path / "stage")
+
+    # Memória é opt-in aditivo: um projeto ilegível não pode derrubar a reconciliação inteira.
+    assert erros == ["-a-quebrado"]
+    assert (tmp_path / "stage" / "-b-bom" / "memory" / "MEMORY.md").read_text() == "-b-bom"
+
+
 def test_status_nao_cria_arquivos_nem_roda_binario(tmp_path):
     service = IntegracaoCodex(tmp_path, tmp_path / ".codex", binario="nao-existe")
     assert service.status()["estado"] == "ocioso"
@@ -41,6 +194,56 @@ async def test_iniciar_coalesce_e_nao_espera_execucao(tmp_path, monkeypatch):
     assert chamadas == [("manual", True)]
     await service.fechar()
     assert service._task.cancelled()
+
+
+async def test_atualizar_e_aguardar_compartilha_a_reconciliacao(tmp_path, monkeypatch):
+    service = IntegracaoCodex(tmp_path, tmp_path / ".codex")
+    iniciou = asyncio.Event()
+    liberar = asyncio.Event()
+    chamadas = []
+
+    async def rodada(motivo, forcar):
+        chamadas.append((motivo, forcar))
+        iniciou.set()
+        await liberar.wait()
+        service._estado = {**service.status(), "estado": "ok"}
+        return service.status()
+
+    monkeypatch.setattr(service, "reconciliar", rodada)
+    primeira = asyncio.create_task(service.atualizar_e_aguardar(forcar=True))
+    await iniciou.wait()
+    segunda = asyncio.create_task(service.atualizar_e_aguardar(forcar=True))
+    await asyncio.sleep(0)
+    assert not primeira.done() and not segunda.done()
+    liberar.set()
+
+    assert (await primeira)["estado"] == "ok"
+    assert (await segunda)["estado"] == "ok"
+    assert chamadas == [("manual", True)]
+
+
+async def test_pedido_manual_durante_rodada_automatica_forca_segunda_rodada(tmp_path, monkeypatch):
+    service = IntegracaoCodex(tmp_path, tmp_path / ".codex")
+    iniciou = asyncio.Event()
+    liberar = asyncio.Event()
+    chamadas = []
+
+    async def rodada(motivo, forcar):
+        chamadas.append((motivo, forcar))
+        if not forcar:
+            iniciou.set()
+            await liberar.wait()
+        service._estado = {**service.status(), "estado": "ok"}
+        return service.status()
+
+    monkeypatch.setattr(service, "reconciliar", rodada)
+    await service.iniciar("sessao", False)
+    await iniciou.wait()
+    manual = asyncio.create_task(service.atualizar_e_aguardar(forcar=True))
+    liberar.set()
+
+    assert (await manual)["estado"] == "ok"
+    assert chamadas == [("sessao", False), ("manual", True)]
 
 
 async def test_settings_invalidos_nao_desabilitam_plugin(tmp_path):
@@ -275,6 +478,64 @@ async def test_falha_marketplace_permanece_visivel_ate_nova_tentativa(tmp_path, 
     assert chamadas == ['mercado']
 
 
+@pytest.mark.parametrize("cenario, inventarios, deteccoes, instalacoes", [
+    ("estavel", 1, 0, 0),
+    ("ausente", 2, 1, 0),
+    ("atualizacao", 2, 0, 1),
+    ("versao_externa", 1, 0, 1),
+])
+async def test_plugins_consultam_nativo_so_quando_necessario(
+        tmp_path, monkeypatch, cenario, inventarios, deteccoes, instalacoes):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    home = _home(tmp_path)
+    plugin = home / '.codex/plugins/cache/mercado/plugin/1'
+    plugin.mkdir(parents=True)
+    (home / '.claude/settings.json').write_text('{"enabledPlugins":{"plugin@mercado":true}}')
+    (home / '.claude/plugins').mkdir()
+    (home / '.claude/plugins/known_marketplaces.json').write_text(json.dumps({
+        'mercado': {'source': {'source': 'github', 'repo': 'exemplo/mercado'}},
+    }))
+    (home / '.codex/config.toml').write_text(
+        '[marketplaces.mercado]\nsource_type="git"\nsource="https://github.com/exemplo/mercado.git"\n')
+    service = IntegracaoCodex(home, home / '.codex')
+    service._estado = {**service.status(), 'estado': 'executando'}
+    registro = {'marketplaces_em': time.time(), 'plugins': {'plugin@mercado': {
+        'path': str(plugin), 'versao': '1', 'origem': 'mercado', 'id_codex': 'plugin@mercado',
+    }}}
+    atual = [{'pluginId': 'plugin@mercado', 'version': '2' if cenario == 'versao_externa' else '1'}]
+    native = SimpleNamespace(
+        detectar=AsyncMock(return_value=[{'itemType': 'PLUGINS', 'details': {'plugins': [
+            {'marketplaceName': 'mercado', 'pluginNames': ['plugin']},
+        ]}}]),
+        plugins_instalados=AsyncMock(return_value=atual),
+        importar=AsyncMock(return_value={'itemTypeResults': []}),
+        atualizar_marketplace=AsyncMock(return_value={}),
+        instalar_plugin=AsyncMock(return_value={'installedPath': str(plugin), 'version': atual[0]['version']}),
+    )
+    if cenario == 'ausente':
+        native.plugins_instalados.side_effect = [[], atual, atual]
+    monkeypatch.setattr(service, '_habilitar_plugins', AsyncMock())
+    monkeypatch.setattr(service, '_hooks_plugin', lambda path: None)
+    monkeypatch.setattr(service, '_checkpoint', lambda state: None)
+    subprogresso = []
+    monkeypatch.setattr(service, '_sub', lambda atual, total: subprogresso.append((atual, total)))
+
+    await service._plugins(native, {'plugin@mercado'}, registro, cenario == 'atualizacao')
+
+    assert service._estado['erros'] == []
+    assert native.plugins_instalados.await_count == inventarios
+    assert native.detectar.await_count == deteccoes
+    assert native.importar.await_count == (cenario == 'ausente')
+    assert native.atualizar_marketplace.await_count == (cenario == 'atualizacao')
+    assert native.instalar_plugin.await_count == instalacoes
+    assert registro['plugins']['plugin@mercado']['versao'] == atual[0]['version']
+    service._habilitar_plugins.assert_awaited_once_with(native, {'plugin@mercado': True})
+    if cenario == 'atualizacao':
+        assert subprogresso == [(1, 2), (2, 2)]
+
+
 def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     home = _home(tmp_path)
     source = home / '.claude/CLAUDE.md'
@@ -289,3 +550,45 @@ def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     assert target.is_symlink()
     assert (home / '.codex/AGENTS.override.md').read_text() == source.read_text()
     assert source.read_text() == 'Texto global que deve permanecer somente na fonte'
+
+
+async def test_rodada_informa_etapa_x_de_n_e_limpa_no_fim(tmp_path, monkeypatch):
+    # O card so dizia o nome da etapa: sem "quanto falta", uma rodada longa parecia travada
+    # (pedido de 13/09/2026). As etapas sao fixas, entao "etapa X de N" e medida, nao estimativa.
+    home = _home(tmp_path)
+    # `_home` grava sem encoding: no Windows sai cp1252 e a integracao le UTF-8.
+    (home / ".claude/CLAUDE.md").write_text("Instruções globais\n", encoding="utf-8")
+    class Native:
+        def __init__(self, *args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+
+    service = IntegracaoCodex(home, home / ".codex", nativo=Native)
+    async def async_noop(*args, **kwargs): pass
+    def noop(*args, **kwargs): pass
+    for nome in ("_config", "_plugins", "_fragmentos", "_conferir_confianca"):
+        monkeypatch.setattr(service, nome, async_noop)
+    for nome in ("_instrucoes", "_migrar_ponte_antiga", "_hooks", "_hooks_arquivos", "_skills", "_checkpoint"):
+        monkeypatch.setattr(service, nome, noop)
+    vistos = {}
+
+    def espiar(nome):
+        original = getattr(service, nome)
+        if asyncio.iscoroutinefunction(original):
+            async def envolto(*a, **k):
+                vistos[nome] = service.status()["progresso"]
+                return await original(*a, **k)
+        else:
+            def envolto(*a, **k):
+                vistos[nome] = service.status()["progresso"]
+                return original(*a, **k)
+        setattr(service, nome, envolto)
+
+    for nome in ("_instrucoes", "_fragmentos", "_skills"):
+        espiar(nome)
+    final = await service.reconciliar()
+    assert final["estado"] == "ok", final
+    assert vistos["_instrucoes"]["passo"] == 2 and vistos["_instrucoes"]["total"] == 5
+    assert vistos["_fragmentos"]["passo"] == 4
+    assert vistos["_skills"]["passo"] == 5
+    assert final["progresso"] is None

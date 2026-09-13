@@ -61,6 +61,8 @@ class Credencial(BaseModel):
     tipo: Tipo
     auth_method: Literal["oauth", "api_key", "none", "unknown"] = "unknown"
     codex_account: str | None = None
+    # Herança da conta padrão numa conta Codex adicional: `idle` = nunca herdou (o card oferece).
+    codex_sync: Literal["idle", "running", "ready", "partial", "error"] | None = None
     nome: str                     # o que a tela mostra: apelido, se houver
     nome_natural: str             # o que o disco diz (pasta / nome do motor)
     apelido: str | None = None    # só quando a pessoa deu um; a tela usa pra saber se pode limpar
@@ -110,15 +112,17 @@ async def listar_endpoint(request: Request, forcar: bool = False) -> list[Creden
     service = getattr(request.app.state, "codex_contas_login", None)
     async def snapshot(account):
         auth = service.cached_auth(account)
-        if service.preparation_status(account).get("status") != "running":
+        sync = service.preparation_status(account).get("status")
+        if sync != "running":
             try:
                 async with asyncio.timeout(3):
                     auth = await service.read_auth(account, refresh=forcar)
             except TimeoutError:
                 _log.warning("leitura de autenticação Codex excedeu o prazo: %s", account.id)
-        return {"id": account.id, "auth": auth or {"method": "unknown", "status": "unavailable"}}
+        return {"id": account.id, "auth": auth or {"method": "unknown", "status": "unavailable"},
+                "sync": sync}
 
-    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_accounts())) if service else []
+    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_visible_accounts())) if service else []
     return await asyncio.to_thread(listar, forcar, codex_snapshots=snapshots)
 
 
@@ -161,7 +165,7 @@ def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) ->
         ))
 
     snapshots = {a["id"]: a for a in codex_snapshots}
-    for account in codex_contas.list_accounts():
+    for account in codex_contas.list_visible_accounts():
         cid = f"codex:{account.home.expanduser().resolve(strict=False)}"
         auth = snapshots.get(account.id, {}).get("auth", {})
         status = auth.get("status", "unavailable")
@@ -169,10 +173,12 @@ def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) ->
             id=cid, tipo="codex", nome=nomes.get(cid) or account.id,
             nome_natural=account.id, apelido=nomes.get(cid),
             codex_account=account.id, path=str(account.home), ativa=account.is_default,
+            codex_sync=None if account.is_default else snapshots.get(account.id, {}).get("sync"),
             auth_method=auth.get("method", "unknown"), usos=["codex_cli"], cota=cota.get(cid),
             login=EstadoLogin(estado="indisponivel" if status == "unavailable" else "ok",
                              loggedIn=None if status == "unavailable" else status == "connected",
-                             email=auth.get("email"), plano=auth.get("plan")),
+                             email=auth.get("email"), plano=auth.get("plan"),
+                             motivo="cli-ausente" if auth.get("reason") == "cli_missing" else None),
         ))
 
     # Cota sem cadastro continua visível, mas não comprova autenticação do Codex.

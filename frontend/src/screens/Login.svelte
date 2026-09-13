@@ -3,7 +3,7 @@
   import { addServerWithRollback, getBaseUrl, validarPareamento } from '../lib/auth';
   import { getSessions } from '@hangar/core';
   import { focusFirstInvalid } from '../lib/focusCycle';
-  import { syncStatus, register as syncRegister, login as syncLogin } from '../lib/sync';
+  import { syncStatus, cachedSyncStatus, register as syncRegister, login as syncLogin } from '../lib/sync';
   import QrScanner from '../components/QrScanner.svelte';
   import HangarIntro from '../components/icons/HangarIntro.svelte';
   import * as m from '../paraglide/messages';
@@ -37,7 +37,7 @@
   $effect(() => { if (erroValidacao) focusFirstInvalid(loginFormEl); });
 
   // Cloud-sync: quando o hub tem CP_SYNC=1, troca o form URL+token por user/senha. null = desabilitado.
-  let syncMode = $state<null | { registered: boolean }>(null);
+  let syncMode = $state<null | { registered: boolean }>(cachedSyncStatus()?.enabled ? cachedSyncStatus() : null);
   let user = $state('');
   let password = $state('');
   let bootstrap = $state('');
@@ -136,6 +136,7 @@
       syncMode = { registered: s.registered };
       return;
     }
+    syncMode = null;
     // Deep-link de pareamento (?token=…): valida a URL COMPLETA antes de extrair QUALQUER coisa.
     // URLSearchParams.get descarta duplicatas e api vazia silenciosamente — o validator precisa
     // ver a URL inteira (round 5): token/api duplicados ou api vazia são rejeitados sem alterar

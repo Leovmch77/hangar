@@ -16,10 +16,12 @@ from app.config import _backend_config_base, settings
 # valor do env quando não.
 #
 # O que NÃO entra aqui, de propósito: porta, IP de bind, token de auth, chaves VAPID e segredos de
-# sync/deploy. São coisas que ou exigem reiniciar o processo, ou dariam ao celular o poder de mudar
+# sync/deploy. A ativação do sync é editável, os segredos continuam no env. Os demais ou exigem
+# reiniciar o processo, ou dariam ao celular o poder de mudar
 # a própria fechadura. Essas continuam só no env — a tela mostra o valor em leitura e diz qual
 # variável mexer.
 EDITAVEIS: dict[str, type] = {
+    "sync": bool,                 # ativa esta máquina como principal sem reiniciar
     "groq_api_key": str,          # transcrição de áudio e de vídeo
     "upload_retention_days": int,  # dias que um anexo sobrevive
     "notify_finished": bool,
@@ -29,6 +31,8 @@ EDITAVEIS: dict[str, type] = {
     "automations": bool,           # kill-switch das automações desatendidas
     "codex_sync": bool,            # reconciliação automática do Codex (por cima do automations)
     "codex_voice_beta": bool,      # conversa realtime do Codex (experimental, opt-in)
+    "codex_memory_import": bool,   # leva as memórias do Claude pro Codex (opt-in: é o único
+                                   # item da reconciliação que gasta cota, na consolidação)
     "claude_statusline_update": bool,  # permite ao instalador atualizar a barra do Claude Code
     "editor": str,
     "elevenlabs_api_key": str,     # sintese de voz (ouvir a selecao)

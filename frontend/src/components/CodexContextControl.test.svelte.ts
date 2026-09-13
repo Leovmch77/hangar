@@ -2,6 +2,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 import Control from './CodexContextControl.svelte';
+import * as m from '../paraglide/messages';
 
 const server = { id: 'a', label: 'A', baseUrl: 'http://a.local', token: 'teste' };
 const response = (enabled: boolean) => new Response(JSON.stringify({ contexto_estendido: enabled }));
@@ -16,7 +17,9 @@ async function open() {
 }
 afterEach(async () => { await unmount(component); vi.restoreAllMocks(); document.body.innerHTML = ''; });
 
-it('lê o padrão, salva ao tocar e só libera criação depois da confirmação', async () => {
+it('lê o padrão, muda NA HORA ao tocar e só libera criação depois da confirmação', async () => {
+  // O switch desfazia a marca e esperava o servidor: parecia que o clique não tinha pegado
+  // (relato de 13/09/2026). Agora mostra o valor escolhido e diz que está salvando.
   let finish: (r: Response) => void = () => {};
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => init?.method === 'POST'
     ? new Promise<Response>(resolve => { finish = resolve; }) : response(true));
@@ -25,7 +28,8 @@ it('lê o padrão, salva ao tocar e só libera criação depois da confirmação
   toggle().click(); await flush();
   expect(props.busy).toBe(true);
   expect(toggle().disabled).toBe(true);
-  expect(toggle().checked).toBe(true);
+  expect(toggle().checked).toBe(false);
+  expect(document.querySelector('[role="status"]')?.textContent).toContain(m.codex_contexto_salvando());
   expect(fetch).toHaveBeenLastCalledWith('http://a.local/api/harness/codex/opcoes', expect.objectContaining({
     method: 'POST', body: JSON.stringify({ contexto_estendido: false }),
   }));

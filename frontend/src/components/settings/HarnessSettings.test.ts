@@ -14,6 +14,16 @@ vi.mock('../../lib/credenciais', () => ({
   consertarHarness: vi.fn(),
   codexIntegracaoEstado: vi.fn(() => new Promise(() => {})),
   codexIntegracaoReconciliar: vi.fn(() => new Promise(() => {})),
+  listarContasCodex: vi.fn(async () => [
+    { id: 'default', name: 'default', is_default: true, home: '/default', credential_id: 'codex:/default',
+      auth: { method: 'oauth', status: 'connected', email: 'principal@x', plan: 'pro' },
+      sync: { status: 'ready', trust_pending: false, issues: [] } },
+    { id: 'work', name: 'work', is_default: false, home: '/work', credential_id: 'codex:/work',
+      auth: { method: 'oauth', status: 'connected', email: 'work@x', plan: 'plus' },
+      sync: { status: 'ready', trust_pending: false, issues: [] } },
+  ]),
+  prepararContaCodex: vi.fn(async () => ({ status: 'ready', trust_pending: false, issues: [] })),
+  estadoContaCodex: vi.fn(async () => ({ status: 'ready', trust_pending: false, issues: [] })),
   instalacaoEstado: vi.fn(),
   instalarHarness: vi.fn(),
   codexOpcoes: vi.fn(() => new Promise(() => {})),
@@ -68,18 +78,20 @@ function botoes(el: HTMLElement): (string | undefined)[] {
   return [...el.querySelectorAll('button')].map((b) => b.textContent?.trim());
 }
 
-beforeEach(() => { vi.clearAllMocks(); montados = []; document.body.innerHTML = ''; });
+beforeEach(() => { vi.clearAllMocks(); montados = []; document.body.innerHTML = ''; localStorage.clear(); });
 afterEach(async () => { for (const comp of montados) await unmount(comp); document.body.innerHTML = ''; });
 
 describe('HarnessSettings — instalar um CLI que falta', () => {
   it('card ausente com comando oferece o botão; instalado não oferece nada', async () => {
     const t = await montar([CARD_AUSENTE], estado());
     expect(botoes(t.el)).toContain(m.harness_inst_botao());
-    unmount(t.comp);
+    await unmount(t.comp);
+    montados = montados.filter((comp) => comp !== t.comp);
 
     const u = await montar([CARD_PRESENTE], estado());
     expect(botoes(u.el)).not.toContain(m.harness_inst_botao());
-    unmount(u.comp);
+    await unmount(u.comp);
+    montados = montados.filter((comp) => comp !== u.comp);
   });
 
   it('sem comando pra este sistema, mostra o link do fornecedor e nenhum botão', async () => {
@@ -126,6 +138,9 @@ describe('HarnessSettings — instalar um CLI que falta', () => {
     expect(t.el.textContent).toContain(
       m.harness_inst_andamento({ passo: 1, total: 4, etapa: m.harness_inst_etapa_comando() }));
     expect(t.el.querySelector('.hs-inst-log')!.textContent).toContain('baixando kimi 0.38.0');
+    // Barra igual à da integração: etapas concluídas sobre o total (1ª etapa em curso = 0%).
+    expect(t.el.querySelector('.hs-inst [role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('0');
+    expect(t.el.querySelector('.hs-inst [role="progressbar"]')?.getAttribute('aria-label')).toBe(m.harness_inst_progresso());
     unmount(t.comp);
   });
 
@@ -237,5 +252,116 @@ describe('HarnessSettings — instalar um CLI que falta', () => {
     }, { timeout: 4000 });
     expect(c.listarHarnesses.mock.calls.length).toBeGreaterThan(1);
     unmount(t.comp);
+  });
+});
+
+describe('HarnessSettings — conta da integração Codex', () => {
+  it('seleciona uma conta adicional e reconcilia a cadeia dela', async () => {
+    c.codexIntegracaoEstado.mockResolvedValue({
+      estado: 'ok', etapa: null, ultima_execucao: null, proxima_atualizacao: null,
+      plugins: [], avisos: [], erros: [], confianca_pendente: false, automatica: true, memoria: false,
+    });
+    const t = await montar([
+      { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
+    ], estado());
+    const seletorConta = `[aria-label="${m.codex_ui_account()}"]`;
+    await vi.waitFor(() => expect(
+      t.el.querySelector<HTMLSelectElement>(seletorConta),
+    ).not.toBeNull());
+    const seletor = t.el.querySelector<HTMLSelectElement>(seletorConta)!;
+    seletor.value = 'work';
+    seletor.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick();
+    const botao = [...t.el.querySelectorAll('button')]
+      .find((item) => item.textContent?.includes(m.harness_codex_reconciliar()))!;
+    botao.click();
+    await tick(); await Promise.resolve(); await tick();
+
+    expect(c.prepararContaCodex).toHaveBeenCalledWith(null, 'work', true, expect.anything());
+    expect(t.el.textContent).toContain('work@x');
+    await unmount(t.comp);
+    montados = montados.filter((comp) => comp !== t.comp);
+
+    const u = await montar([
+      { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
+    ], estado());
+    await vi.waitFor(() => expect(
+      u.el.querySelector<HTMLSelectElement>(seletorConta)?.value,
+    ).toBe('work'));
+    expect(u.el.textContent).toContain('work@x');
+    await unmount(u.comp);
+    montados = montados.filter((comp) => comp !== u.comp);
+  });
+
+  it('retoma o polling da conta lembrada que ainda está sincronizando', async () => {
+    localStorage.setItem('cp_harness_codex_account:active', 'work');
+    c.codexIntegracaoEstado.mockResolvedValueOnce({
+      estado: 'ok', etapa: null, ultima_execucao: null, proxima_atualizacao: null,
+      plugins: [], avisos: [], erros: [], confianca_pendente: false, automatica: true, memoria: false,
+    });
+    c.listarContasCodex.mockResolvedValueOnce([
+      { id: 'default', name: 'default', is_default: true, home: '/default', credential_id: 'codex:/default',
+        auth: { method: 'oauth', status: 'connected', email: 'principal@x', plan: 'pro' },
+        sync: { status: 'ready', trust_pending: false, issues: [] } },
+      { id: 'work', name: 'work', is_default: false, home: '/work', credential_id: 'codex:/work',
+        auth: { method: 'oauth', status: 'connected', email: 'work@x', plan: 'plus' },
+        sync: { status: 'running', trust_pending: false, issues: [] } },
+    ]);
+    c.estadoContaCodex.mockResolvedValueOnce({ status: 'ready', trust_pending: false, issues: [] });
+    const t = await montar([
+      { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
+    ], estado());
+
+    await vi.waitFor(() => expect(c.estadoContaCodex).toHaveBeenCalledWith(
+      null, 'work', expect.anything(),
+    ));
+    await vi.waitFor(() => expect(t.el.textContent).toContain('work@x'));
+    await unmount(t.comp);
+    montados = montados.filter((comp) => comp !== t.comp);
+  });
+});
+
+describe('HarnessSettings — consertar mostra o andamento no próprio item', () => {
+  // O botão virava "…" e o resultado ia pro rodapé da página inteira: quem clicou em Consertar no
+  // tmux não sabia se estava rodando, e o erro aparecia longe do item (pedido de 13/09/2026).
+  const CARD_TMUX: Harness = {
+    id: 'tmux', nome: 'tmux', instalado: true, versao: 'tmux 3.3.8',
+    itens: [
+      { id: 'bloco', ok: false, codigo: 'tmux_bloco_ausente', conserto: 'tmux', params: {} },
+      { id: 'mouse', ok: true, codigo: 'tmux_mouse_on', conserto: null, params: {}, info: true },
+    ],
+  } as Harness;
+  const itemBloco = (el: HTMLElement) => el.querySelectorAll<HTMLElement>('.hs-item')[0];
+
+  it('rodando: diz o que está consertando, há quanto tempo, com barra de andamento', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      c.consertarHarness.mockReturnValue(new Promise(() => {}));
+      const t = await montar([CARD_TMUX], estado());
+      itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+      await tick();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await tick();
+      const andamento = t.el.querySelector<HTMLElement>('.hs-conserto[role="status"]')!;
+      expect(andamento).not.toBeNull();
+      expect(andamento.textContent).toContain(m.harness_consertando({ item: m.harness_item_tmux_bloco(), s: 3 }));
+      expect(andamento.querySelector('.hs-barra')).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('terminou: o resultado aparece junto do item, não no rodapé', async () => {
+    c.consertarHarness.mockResolvedValue({ feito: 'config do psmux reaplicada', harnesses: [CARD_TMUX] });
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-conserto')?.textContent).toContain('config do psmux reaplicada'));
+    expect(t.el.querySelector('.hs-card .hs-conserto')).not.toBeNull();
+  });
+
+  it('falhou: o erro aparece junto do item que falhou', async () => {
+    c.consertarHarness.mockRejectedValue(new Error('setup-windows-tmux.ps1 saiu com 1'));
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-card .hs-conserto[role="alert"]')?.textContent)
+      .toContain('saiu com 1'));
   });
 });

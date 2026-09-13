@@ -47,10 +47,70 @@ def sincronizacao_ligada() -> bool:
     return bool(runtime_config.get("codex_sync")) and automations_enabled()
 
 
+def memoria_ligada() -> bool:
+    """Memórias do Claude no Codex. Fica de fora por padrão porque é o único item importado que
+    gasta cota: o Codex consolida os arquivos num índice por um modelo, na abertura de sessão."""
+    from app import runtime_config
+    return bool(runtime_config.get("codex_memory_import"))
+
+
+def _tem_conversa(transcrito: Path) -> bool:
+    """Sessão que abriu e nunca conversou não serve de prova de projeto para o Codex: o arquivo
+    existe e só tem metadados (`mode`, `attachment`, `system`), e o detector a ignora.
+
+    Erro de leitura sobe: quem chama distingue "não serve" de "não deu para ler", e só o segundo
+    merece aviso. Tratar os dois como `False` aqui esconderia a falha dentro do caso normal."""
+    with transcrito.open(encoding="utf-8", errors="replace") as arquivo:
+        return any('"type":"user"' in linha or '"type": "user"' in linha for linha in arquivo)
+
+
+def copiar_memorias(origem: Path, destino: Path) -> list[str]:
+    """Memórias do Claude para o stage da importação; devolve os projetos que deram ERRO de leitura.
+
+    A pasta `memory/` sozinha NÃO é detectada: o Codex só trata como projeto o diretório que tem
+    transcrito ao lado dela. Por isso vai junto o MENOR `.jsonl` de cada um — todos custariam a
+    ordem de gigabytes por reconciliação, e o segundo em diante não muda a detecção.
+
+    Memória sem transcrito ao lado fica de fora em silêncio: o Claude Code apaga conversa antiga e
+    preserva a memória dela, então isso é comum, é regra do Codex, e não há o que a pessoa faça.
+    Já um erro de leitura é falha de verdade — vira aviso, sem derrubar os outros projetos nem o
+    resto da reconciliação, que não depende de memória."""
+    erros = []
+    if not origem.is_dir():
+        return erros
+    for memoria in sorted(origem.glob("*/memory")):
+        if not memoria.is_dir():
+            continue
+        projeto = destino / memoria.parent.name
+        try:
+            if not any(memoria.glob("*.md")):
+                continue
+            transcrito = next((f for f in sorted(memoria.parent.glob("*.jsonl"),
+                                                 key=lambda f: f.stat().st_size)
+                               if _tem_conversa(f)), None)
+            if transcrito is None:
+                continue
+            shutil.copytree(memoria, projeto / "memory",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+            shutil.copy2(transcrito, projeto / transcrito.name)
+        except OSError:
+            # A causa real (disco cheio, E/S) não cabe no aviso da tela, mas some sem o log.
+            _log.warning("memória de %s não pôde ser lida", memoria.parent.name, exc_info=True)
+            shutil.rmtree(projeto, ignore_errors=True)
+            erros.append(memoria.parent.name)
+    return erros
+
+
 def _e_hook_do_app(command: object) -> bool:
     """Hook do próprio Hangar (backend/hooks/): cada harness recebe o seu pelo instalador dele
     (codex_hook_installer aqui), então ele não atravessa pelo importador do Codex."""
-    return isinstance(command, str) and "backend/hooks/" in command.replace("\\", "/")
+    if not isinstance(command, str):
+        return False
+    normalizado = command.replace("\\", "/")
+    # O guard fica sob ~/.claude/hooks para caber na allowlist do Pi, mas continua sendo hook do
+    # Hangar. No Codex ele recebe uma entrada própria, com a sintaxe do shell daquele harness.
+    return ("backend/hooks/" in normalizado
+            or bool(re.search(r"(?:^|/)guard_tmux\.py(?:[\"'\s;]|$)", normalizado)))
 
 
 def sem_hooks_do_app(hooks: dict) -> dict:
@@ -81,7 +141,12 @@ def _iso(tempo: float | None) -> str | None:
 def _snapshot() -> dict:
     return {"estado": "ocioso", "etapa": "", "ultima_execucao": None,
             "proxima_atualizacao": None, "plugins": [], "erros": [], "avisos": [],
-            "confianca_pendente": False}
+            "confianca_pendente": False, "progresso": None}
+
+
+# Etapas de uma rodada, na ordem: o card mostra "etapa X de N" e a barra. Fixas, entao a conta e
+# medida, nao estimativa.
+_TOTAL_ETAPAS = 5
 
 
 def _toml(path: Path) -> dict:
@@ -150,6 +215,7 @@ class IntegracaoCodex:
         self._home, self._codex_home = home, codex_home
         self.nativo, self.binario = nativo, binario
         self._task: asyncio.Task | None = None
+        self._task_forcada = False
         self._estado: dict | None = None
         self._plugins_confirmados: set[str] = set()
 
@@ -205,7 +271,25 @@ class IntegracaoCodex:
     async def iniciar(self, motivo: str = "manual", forcar: bool = True) -> dict:
         if self._task is None or self._task.done():
             self._estado = {**self.status(), "estado": "executando", "etapa": msg("etapa_aguardando")}
+            self._task_forcada = forcar
             self._task = asyncio.create_task(self.reconciliar(motivo, forcar))
+        return self.status()
+
+    async def atualizar_e_aguardar(self, forcar: bool = False) -> dict:
+        """Atualiza a conta principal e compartilha a rodada que já estiver em andamento."""
+        anterior = self._task if self._task is not None and not self._task.done() else None
+        anterior_forcada = self._task_forcada
+        if forcar:
+            await self.iniciar("manual", True)
+        else:
+            await self.sessao()
+        task = self._task
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+        if forcar and anterior is task and not anterior_forcada:
+            await self.iniciar("manual", True)
+            if self._task is not None:
+                await asyncio.shield(self._task)
         return self.status()
 
     async def fechar(self) -> None:
@@ -238,6 +322,16 @@ class IntegracaoCodex:
     def _etapa(self, texto: str) -> None:
         self._estado["etapa"] = texto
 
+    def _passo(self, passo: int, texto: str) -> None:
+        self._estado["etapa"] = texto
+        self._estado["progresso"] = {"passo": passo, "total": _TOTAL_ETAPAS, "sub": None}
+
+    def _sub(self, atual: int, total: int) -> None:
+        """Andamento DENTRO da etapa (plugin i de N): sem ele a etapa de importar, a mais longa,
+        ficava parada no mesmo ponto da barra."""
+        if self._estado.get("progresso"):
+            self._estado["progresso"]["sub"] = {"atual": atual, "total": total}
+
     def _erro(self, texto: str) -> None:
         self._estado["erros"].append(texto)
         _log.warning("%s", texto)
@@ -251,13 +345,14 @@ class IntegracaoCodex:
     async def reconciliar(self, motivo: str = "manual", forcar: bool = False) -> dict:
         anterior = self.status()
         self._estado = {**_snapshot(), "estado": "executando", "etapa": msg("etapa_inventariando"),
+                        "progresso": {"passo": 1, "total": _TOTAL_ETAPAS, "sub": None},
                         "plugins": anterior["plugins"], "ultima_execucao": anterior["ultima_execucao"],
                         "confianca_pendente": anterior["confianca_pendente"]}
         if not (self.home / ".claude" / "settings.json").is_file():
-            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_claude"))
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_claude"), progresso=None)
             return self.status()
         if self.nativo is CodexNativo and not shutil.which(self.binario):
-            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_codex"))
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_codex"), progresso=None)
             return self.status()
         registro = {}
         self._plugins_confirmados = set()
@@ -274,21 +369,21 @@ class IntegracaoCodex:
             self.codex_home.mkdir(parents=True, exist_ok=True)
             settings = json_obj(self.home / ".claude" / "settings.json")
             desejados = _plugins_desejados(settings)
-            self._etapa(msg("etapa_instrucoes"))
+            self._passo(2, msg("etapa_instrucoes"))
             await self._mutacao(self._instrucoes)
             await self._mutacao(self._migrar_ponte_antiga)
             await self._mutacao(self._hooks, {}, registro)
             async with self.nativo(self.home, self.codex_home, self.binario) as codex:
                 await self._config(codex, {}, {})
-                self._etapa(msg("etapa_importando"))
+                self._passo(3, msg("etapa_importando"))
                 await self._plugins(codex, desejados, registro, forcar)
-                self._etapa(msg("etapa_fragmentos"))
+                self._passo(4, msg("etapa_fragmentos"))
                 await self._fragmentos(codex, settings, registro)
                 # DEPOIS da importação: é ela que reescreve os comandos pra `<codex>/hooks/` e
                 # decide o que copiar. Antes dela não há o que materializar.
                 await self._mutacao(self._hooks_arquivos)
                 self._checkpoint(registro)
-                self._etapa(msg("etapa_skills"))
+                self._passo(5, msg("etapa_skills"))
                 await self._mutacao(self._skills, registro)
                 self._checkpoint(registro)
                 await self._conferir_confianca(codex)
@@ -308,6 +403,7 @@ class IntegracaoCodex:
             self._estado["estado"] = "erro"
             _log.exception("Falha inesperada da integração")
         finally:
+            self._estado["progresso"] = None
             if carregado:
                 self._estado["ultima_execucao"] = _iso(time.time())
                 if self._estado["estado"] != "ocioso":
@@ -415,7 +511,7 @@ class IntegracaoCodex:
         await editar_config(self.codex_home / "config.toml", self.backups, self.raiz,
                             self.nativo, preparar, binario=self.binario)
 
-    async def _config(self, codex, mcp: dict, agentes: dict, *, hooks: bool = False,
+    async def _config(self, codex, mcp: dict, agentes: dict, *, hooks: bool = False, memoria: bool = False,
                       registro: dict | None = None, historico: dict | None = None,
                       env: dict | None = None) -> None:
         from app.codex_fragmentos import mesclar_config
@@ -435,6 +531,11 @@ class IntegracaoCodex:
                 edits.append({"keyPath": "project_doc_fallback_filenames", "value": nomes, "mergeStrategy": "replace"})
             if hooks and atual.get("features", {}).get("hooks") is not True:
                 edits.append({"keyPath": "features.hooks", "value": True, "mergeStrategy": "replace"})
+            # Sem esta flag o detect nem oferece o item MEMORY; desligar a opção não a remove,
+            # porque o que já está importado continua servindo à memória já consolidada.
+            if memoria and atual.get("features", {}).get("external_agent_memory_import") is not True:
+                edits.append({"keyPath": "features.external_agent_memory_import", "value": True,
+                              "mergeStrategy": "replace"})
             manifestos, avisos = {}, []
             if registro is not None:
                 for secao, valores in (("mcp_servers", mcp), ("agents", agentes)):
@@ -523,14 +624,15 @@ class IntegracaoCodex:
         # Elas seguem pela atualização abaixo, sem recadastrar a origem do marketplace.
         # Recorta a seleção nativa pela identidade completa, inclusive em marketplaces homônimos.
         itens = []
-        for item in await codex.detectar():
+        faltantes = candidatos - ja_instalados
+        for item in await codex.detectar() if faltantes else []:
             if item.get("itemType") != "PLUGINS":
                 continue
             item = copy.deepcopy(item)
             grupos = []
             for grupo in item.get("details", {}).get("plugins", []):
                 nomes = [n for n in grupo.get("pluginNames", [])
-                         if f"{n}@{grupo.get('marketplaceName')}" in candidatos - ja_instalados]
+                         if f"{n}@{grupo.get('marketplaceName')}" in faltantes]
                 if nomes:
                     grupos.append({**grupo, "pluginNames": nomes})
             if grupos:
@@ -541,8 +643,8 @@ class IntegracaoCodex:
             for tipo in result.get("itemTypeResults", []):
                 if tipo.get("failures"):
                     self._erro(msg("erro_plugins_incompletos"))
-        mercados = _toml(cfg_path).get("marketplaces", {})
-        inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
+            mercados = _toml(cfg_path).get("marketplaces", {})
+            inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
         identidades = {}
         for id_ in sorted(candidatos):
             try:
@@ -557,8 +659,11 @@ class IntegracaoCodex:
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
         atualizar = forcar or agora - ultima >= _INTERVALO or bool(falhas_anteriores and agora - ultima >= 300)
         falhas = set()
+        mercados_alvo = sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}) if atualizar else []
+        total_sub = len(mercados_alvo) + len(candidatos)
         if atualizar:
-            for marketplace in sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}):
+            for i, marketplace in enumerate(mercados_alvo, 1):
+                self._sub(i, total_sub)
                 source = _toml(cfg_path).get("marketplaces", {}).get(marketplace, {})
                 if source.get("source_type") != "git":
                     continue
@@ -574,13 +679,14 @@ class IntegracaoCodex:
             registro["marketplaces_pendentes"] = sorted(falhas)
             if not falhas:
                 registro["marketplaces_em"] = agora
+            inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
         else:
             for marketplace in sorted(falhas_anteriores):
                 self._erro(msg("erro_marketplace_pendente", marketplace=marketplace))
-        inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
         plugins_pendentes = set(registro.get("plugins_pendentes", [])) & desejados
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
-        for id_ in sorted(candidatos):
+        for i, id_ in enumerate(sorted(candidatos), 1):
+            self._sub(len(mercados_alvo) + i, total_sub)
             try:
                 id_codex = identidades[id_]
                 conhecido = anteriores.get(id_)
@@ -663,6 +769,7 @@ class IntegracaoCodex:
 
     async def _importar_fragmentos(self, codex, registro: dict) -> None:
         from app.codex_fragmentos import reconciliar_arquivos
+        memoria = memoria_ligada()
         historico = await self._historico(codex)
         inicio = self.fingerprint(fontes=True)
         settings_raw = ler(self.home / ".claude" / "settings.json")
@@ -688,6 +795,16 @@ class IntegracaoCodex:
                 origem = self.home / ".claude" / nome
                 if origem.is_dir():
                     shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+            if memoria:
+                projetos = self.home / ".claude" / "projects"
+                if not projetos.is_dir():
+                    # Opção ligada e nada a importar é um estado que precisa aparecer: calado, a
+                    # reconciliação termina "ok" e a pessoa espera uma memória que nunca vai existir.
+                    self._estado["avisos"].append(msg("aviso_memoria_sem_fonte"))
+                erros = copiar_memorias(projetos, cc / "projects")
+                if erros:
+                    self._estado["avisos"].append(msg(
+                        "aviso_memoria_erro", n=len(erros), exemplos=", ".join(erros[:3])))
             source_mcp = self.home / ".claude.json"
             mcp_raw = ler(source_mcp)
             if mcp_raw is not None:
@@ -701,8 +818,9 @@ class IntegracaoCodex:
                         raise ValueError("Entrada MCP inválida; servidores existentes preservados")
                 gravar(stage / ".claude.json", json_bytes({"mcpServers": mcp}), None)
             congelados: set[str] = set()
-            async with self.nativo(stage, cx, self.binario) as importer:
-                itens = [i for i in await importer.detectar() if i.get("itemType") in _IMPORTAVEIS]
+            async with self.nativo(stage, cx, self.binario, memoria=memoria) as importer:
+                aceitos = _IMPORTAVEIS | {"MEMORY"} if memoria else _IMPORTAVEIS
+                itens = [i for i in await importer.detectar() if i.get("itemType") in aceitos]
                 for pasta, tipo, detalhe in (("agents", "SUBAGENTS", "subagents"), ("commands", "COMMANDS", "commands")):
                     nomes = {e.get("name", "") for i in itens if i.get("itemType") == tipo
                              for e in i.get("details", {}).get(detalhe, []) if isinstance(e, dict)}
@@ -715,10 +833,34 @@ class IntegracaoCodex:
                         self._estado["avisos"].append(msg(
                             "aviso_ignorados", pasta=pasta,
                             arquivos=", ".join(str(md.relative_to(cc / pasta)) for md in ignorados)))
-                if itens:
-                    result = await importer.importar(itens)
+                # A memória vai numa chamada à parte: falha dela é aviso, não derruba hooks, skills
+                # e MCP, que não dependem dela. As demais continuam abortando a etapa.
+                essenciais = [i for i in itens if i.get("itemType") != "MEMORY"]
+                memorias = [i for i in itens if i.get("itemType") == "MEMORY"]
+                if memoria:
+                    # Copiar não é ser reconhecido: o que o detector exige da conversa ao lado não é
+                    # documentado, e um transcrito curto demais faria a memória sumir sem aviso —
+                    # a falha que este caminho já teve. Aqui a diferença aparece, seja qual for a causa.
+                    vistos = {p for i in memorias for p in i.get("details", {}).get("memory", [])
+                              if isinstance(p, str)}
+                    copiados = {d.name for d in (cc / "projects").glob("*") if d.is_dir()}
+                    if ignorados_mem := sorted(copiados - vistos):
+                        self._estado["avisos"].append(msg(
+                            "aviso_memoria_nao_reconhecida", n=len(ignorados_mem),
+                            exemplos=", ".join(ignorados_mem[:3])))
+                if essenciais:
+                    result = await importer.importar(essenciais)
                     if any(r.get("failures") for r in result.get("itemTypeResults", [])):
                         raise CodexNativoErro("Importação de fragmentos incompleta")
+                if memorias:
+                    try:
+                        result = await importer.importar(memorias)
+                        falhas = [f for r in result.get("itemTypeResults", []) for f in (r.get("failures") or [])]
+                    except CodexNativoErro as erro:
+                        falhas = [str(erro)]
+                    if falhas:
+                        _log.warning("importação de memórias incompleta: %s", falhas)
+                        self._estado["avisos"].append(msg("aviso_memoria_incompleta", n=len(falhas)))
             def remap(value):
                 # CODEX_HOME personalizado não precisa ser filho do HOME real.
                 return remapear(remapear(value, cx, self.codex_home), stage, self.home)
@@ -732,8 +874,15 @@ class IntegracaoCodex:
             if self.fingerprint(fontes=True) != inicio:
                 raise AlteradoExternamente("Fontes do Claude mudaram durante a importação")
             desejados, confiaveis = {}, set()
-            for src_root, dst_root in ((cx / "agents", self.codex_home / "agents"),
-                                       (stage / ".agents" / "skills", self.home / ".agents" / "skills")):
+            raizes = [(cx / "agents", self.codex_home / "agents"),
+                      (stage / ".agents" / "skills", self.home / ".agents" / "skills")]
+            if memoria:
+                # Só a pasta da extensão, nunca `memories/` inteira: MEMORY.md, memory_summary.md e
+                # rollout_summaries/ são escritos pela consolidação do Codex, e entrar no manifesto
+                # faria a reconciliação seguinte apagá-los por não virem do stage.
+                extensao = Path("memories") / "extensions" / "external_agent_import"
+                raizes.append((cx / extensao, self.codex_home / extensao))
+            for src_root, dst_root in raizes:
                 if not src_root.is_dir():
                     continue
                 for src in sorted(src_root.rglob("*")):
@@ -749,7 +898,7 @@ class IntegracaoCodex:
                     if src_root == cx / "agents":
                         if src.stem in historico["agents"]:
                             confiaveis.add(dst)
-                    elif src.relative_to(src_root).parts[0] in historico["commands"]:
+                    elif src_root == stage / ".agents" / "skills" and src.relative_to(src_root).parts[0] in historico["commands"]:
                         confiaveis.add(dst)
             anteriores = registro.get("artefatos", {})
             guardados = {k: v for k, v in anteriores.items() if Path(k).stem in congelados}
@@ -767,7 +916,7 @@ class IntegracaoCodex:
             agentes = {n: v for n, v in agentes.items() if not isinstance(v, dict) or
                        not v.get("config_file") or str(v["config_file"]) in manifesto}
             await self._config(codex, native_cfg.get("mcp_servers", {}), agentes,
-                               hooks=native_cfg.get("features", {}).get("hooks") is True,
+                               hooks=native_cfg.get("features", {}).get("hooks") is True, memoria=memoria,
                                registro=registro, historico=historico, env=native_env)
 
     def _skills(self, registro: dict) -> None:

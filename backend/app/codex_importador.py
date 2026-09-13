@@ -13,6 +13,7 @@ import tempfile
 from typing import TYPE_CHECKING
 
 from app.atomico import substituir
+from app import diag, log_paths
 
 if TYPE_CHECKING:
     from app.codex_contas import Account
@@ -22,6 +23,7 @@ _log = logging.getLogger("hangar.codex.importador")
 _READ_LIMIT = 8 * 1024 * 1024
 _COMPLETED = "externalAgentConfig/import/completed"
 _AUTO_UPGRADE_EM_CURSO = "auto-upgrade was in flight"
+_ADMIN_CONFIG = ("-c", "project_root_markers=[]")
 
 
 class CodexNativoErro(RuntimeError):
@@ -36,20 +38,28 @@ class CodexNativoErro(RuntimeError):
         self.data = data
 
 
+class CodexAusente(CodexNativoErro):
+    """O executável do Codex não existe nesta máquina — estado, não falha do processo."""
+
+
 class CodexNativo:
     def __init__(
         self, home: Path, codex_home: Path, binario: str = "codex", *,
         timeout: float = 120.0, close_timeout: float = 3.0,
-        account: "Account | None" = None,
+        account: "Account | None" = None, memoria: bool = False,
     ) -> None:
         self.home = home.absolute()
         self.codex_home = codex_home.absolute()
+        # Por linha de comando, não no config.toml do stage: o arquivo é lido de volta como
+        # resultado da importação nativa, e uma chave nossa ali viraria diferença a conciliar.
+        self.memoria = memoria
         self.account = account
         self.binario = binario
         self.timeout = timeout
         self.close_timeout = close_timeout
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
+        self._work_dir: tempfile.TemporaryDirectory | None = None
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 0
         self._closed = True
@@ -73,10 +83,15 @@ class CodexNativo:
             })
         return env
 
+    def _config_memoria(self) -> tuple[str, ...]:
+        if not self.memoria:
+            return ()
+        return ("-c", "features.external_agent_memory_import=true")
+
     def _comando(self) -> list[str]:
         caminho = shutil.which(self.binario)
         if not caminho:
-            raise CodexNativoErro("Codex CLI não encontrado; instale ou configure o executável.")
+            raise CodexAusente("Codex CLI não encontrado; instale ou configure o executável.")
         if os.name != "nt" or Path(caminho).suffix.lower() not in {".cmd", ".bat"}:
             return [caminho]
         # O shim npm exige cmd.exe; chamar seu JS por Node evita interpretação de argumentos.
@@ -94,8 +109,11 @@ class CodexNativo:
         if self._proc is not None:
             raise CodexNativoErro("O cliente nativo do Codex já está aberto.")
         try:
+            # Administração da conta não deve carregar configuração de nenhum projeto.
+            self._work_dir = tempfile.TemporaryDirectory(prefix="hangar-codex-admin-")
             self._proc = await asyncio.create_subprocess_exec(
-                *self._comando(), "app-server", "--stdio", cwd=self.home, env=self._env(),
+                *self._comando(), *_ADMIN_CONFIG, *self._config_memoria(), "app-server", "--stdio",
+                cwd=self._work_dir.name, env=self._env(),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, limit=_READ_LIMIT,
             )
@@ -292,13 +310,16 @@ class CodexNativo:
                     await self._reader_task
                 self._reader_task = None
             self._proc = None
+            if self._work_dir is not None:
+                self._work_dir.cleanup()
+                self._work_dir = None
 
     def _diagnostico_cli(self, args: list[str], codigo: int | None,
                         stdout: bytes, stderr: bytes) -> None:
         """Guarda a última falha por comando; saída bruta pode conter credenciais."""
         temporario = None
         try:
-            pasta = self.codex_home / ".hangar-diagnosticos"
+            pasta = log_paths.base() / "privado" / "codex" / diag.conta_id(self.codex_home)
             pasta.mkdir(mode=0o700, parents=True, exist_ok=True)
             chave = hashlib.sha256(json.dumps(args).encode()).hexdigest()[:16]
             destino = pasta / f"cli-{chave}.log"
@@ -321,39 +342,40 @@ class CodexNativo:
 
     async def cli(self, args: list[str], *, esperado: str = "") -> dict:
         """`esperado`: trecho do stderr que o chamador trata como benigno — sem diagnóstico nem aviso."""
-        proc = await asyncio.create_subprocess_exec(
-            *self._comando(), *args, cwd=self.home, env=self._env(),
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
+        with tempfile.TemporaryDirectory(prefix="hangar-codex-admin-") as work_dir:
+            proc = await asyncio.create_subprocess_exec(
+                *self._comando(), *_ADMIN_CONFIG, *args, cwd=work_dir, env=self._env(),
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), self.timeout)
-            except TimeoutError:
-                raise CodexNativoErro("O comando do Codex excedeu o tempo limite.") from None
-            # O arquivo vai pro thread: `substituir` pode dormir no Windows, e isto roda no loop do SSE.
-            diagnostico = functools.partial(asyncio.to_thread, self._diagnostico_cli,
-                                            args, proc.returncode, stdout, stderr)
-            if proc.returncode:
-                # A cauda vai só em `data`, pra decisão interna (auto-upgrade em curso); nunca no log.
-                cauda = stderr.decode(errors="replace")[-500:].strip()
-                if not (esperado and esperado in cauda):
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), self.timeout)
+                except TimeoutError:
+                    raise CodexNativoErro("O comando do Codex excedeu o tempo limite.") from None
+                # O arquivo vai pro thread: `substituir` pode dormir no Windows, e isto roda no loop do SSE.
+                diagnostico = functools.partial(asyncio.to_thread, self._diagnostico_cli,
+                                                args, proc.returncode, stdout, stderr)
+                if proc.returncode:
+                    # A cauda vai só em `data`, pra decisão interna (auto-upgrade em curso); nunca no log.
+                    cauda = stderr.decode(errors="replace")[-500:].strip()
+                    if not (esperado and esperado in cauda):
+                        await diagnostico()
+                    raise CodexNativoErro(f"O comando do Codex falhou (código {proc.returncode}).",
+                                          data={"stderr": cauda})
+                try:
+                    result = json.loads(stdout)
+                except (ValueError, UnicodeError):
                     await diagnostico()
-                raise CodexNativoErro(f"O comando do Codex falhou (código {proc.returncode}).",
-                                      data={"stderr": cauda})
-            try:
-                result = json.loads(stdout)
-            except (ValueError, UnicodeError):
-                await diagnostico()
-                raise CodexNativoErro("O comando do Codex não retornou JSON válido.") from None
-            if not isinstance(result, dict):
-                await diagnostico()
-                raise CodexNativoErro("O comando do Codex retornou um resultado inválido.")
-            if result.get("errors"):
-                await diagnostico()
-            return result
-        finally:
-            await self._stop(proc)
+                    raise CodexNativoErro("O comando do Codex não retornou JSON válido.") from None
+                if not isinstance(result, dict):
+                    await diagnostico()
+                    raise CodexNativoErro("O comando do Codex retornou um resultado inválido.")
+                if result.get("errors"):
+                    await diagnostico()
+                return result
+            finally:
+                await self._stop(proc)
 
     async def instalar_plugin(self, plugin_id: str) -> dict:
         return await self.cli(["plugin", "add", plugin_id, "--json"])

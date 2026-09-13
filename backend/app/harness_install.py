@@ -40,7 +40,7 @@ import logging
 import os
 import shutil
 
-from app import atualizar, harness_saude
+from app import atualizar, diag, harness_saude
 
 _log = logging.getLogger("hangar.harness_install")
 
@@ -171,6 +171,7 @@ class Instalador:
 
     # ── o trabalho, já dentro da thread ────────────────────────────────────────────────────────
 
+    @diag.rastrear("harness.instalar")
     def _executar(self, cli: str, argv: list[str]) -> None:
         try:
             p = atualizar._rodar(_resolver(argv), timeout=_TIMEOUT, log=self._anotar)
@@ -224,11 +225,21 @@ class Instalador:
     def _wrapper(self, cli: str) -> bool:
         """Os wrappers do Hangar e os lançadores de `~/.local/bin`. `False` = parou aqui.
 
-        No Windows não há o que rodar: os wrappers de lá são do `install.ps1` (que dot-sourceia
-        `claude.ps1` do perfil do PowerShell) e não há wrapper de `codex`. Aí a etapa é PULADA, e o
-        pulo vira aviso no estado — não só uma linha perdida no meio do log, porque a manchete da
-        tela promete "ligado ao app" e nessa máquina isso não aconteceu.
+        No Windows não há o que rodar: os wrappers de lá são do `install.ps1`, que dot-sourceia os
+        `.ps1` no perfil do PowerShell. Se a releitura já acha o do CLI, está ligado e não há o que
+        avisar. Senão a etapa é PULADA, e o pulo vira aviso no estado — não só uma linha perdida no
+        meio do log, porque a manchete da tela promete "ligado ao app".
         """
+        if harness_saude._E_WINDOWS:
+            if harness_saude._wrapper(cli).get("ok") is not True:
+                # O mesmo conserto do botão: o bloco no perfil do PowerShell.
+                self._anotar(f"$ wrapper\n{harness_saude.consertar('wrapper')}")
+                if harness_saude._wrapper(cli).get("ok") is False:
+                    self._falhou("wrapper", "o perfil do PowerShell continua sem o wrapper")
+                    return False
+            else:
+                self._anotar(f"[wrapper] {cli} já é carregado pelo perfil do PowerShell")
+            return True
         try:
             comando = harness_saude.cmd_instalador()
         except ValueError as e:
@@ -261,6 +272,11 @@ class Instalador:
         # Troca o dict inteiro em vez de mutá-lo: quem lê é o loop de eventos, noutra thread, e uma
         # leitura no meio de várias mutações veria um estado pela metade.
         self._estado = {**self._estado, **campos}
+        if any(key in campos for key in ("fase", "etapa", "ok", "avisos")):
+            diag.registrar("harness.instalacao", "erro" if self._estado.get("ok") is False else "ok",
+                           provider=self._estado.get("harness"), etapa=self._estado.get("etapa"),
+                           codigo="falhou" if self._estado.get("ok") is False else str(self._estado["fase"]),
+                           quantidade=len(self._avisos()))
 
     def _passo(self, chave: str) -> None:
         self._pub(fase="rodando", etapa=chave, passo=ETAPAS.index(chave) + 1)
@@ -268,6 +284,7 @@ class Instalador:
     def _anotar(self, texto: str) -> None:
         """Uma LINHA por item, mesmo recebendo um bloco: o teto conta itens, e um bloco
         multi-linha o furaria (mesma conta do `atualizar._log_do_estado`)."""
+        _log.info("%s", texto)
         linhas = [*self._estado.get("log", []), *(texto.splitlines() or [texto])]
         self._pub(log=linhas[-_TETO_LOG:])
 

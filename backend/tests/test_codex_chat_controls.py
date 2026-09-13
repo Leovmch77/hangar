@@ -89,7 +89,12 @@ async def test_reabrir_stream_recupera_turno_e_permite_orientar(chat):
 
     async def request(method, params):
         result = await original(method, params)
-        return snapshot if method == "thread/read" else result
+        if method != "thread/read":
+            return result
+        thread = dict(snapshot["thread"])
+        if not params["includeTurns"]:
+            thread["turns"] = []
+        return {"thread": thread}
 
     async def notifications():
         await asyncio.Event().wait()
@@ -100,8 +105,10 @@ async def test_reabrir_stream_recupera_turno_e_permite_orientar(chat):
     try:
         first = await anext(stream)
         assert first.state == "working"
-        assert client.calls[0] == ("thread/read", {"threadId": "thread-1", "includeTurns": True})
+        assert client.calls[0] == ("thread/read", {"threadId": "thread-1", "includeTurns": False})
+        assert adapter._sessions["sess"].get("turn_id") is None
         await adapter.steer("sess", "ajuste durante o turno")
+        assert client.calls[-2] == ("thread/read", {"threadId": "thread-1", "includeTurns": True})
         assert client.calls[-1][1]["expectedTurnId"] == "atual"
         assert await adapter.deliverable("sess") is False
         second = adapter.state_monitor("sess", lambda: "thread-1")
@@ -153,17 +160,23 @@ async def test_conexao_recupera_turno_antes_de_aceitar_envio(chat, monkeypatch):
     adapter, client = chat
     async def connect(endpoint):
         return endpoint
+    calls = []
     async def request(method, params):
-        return {"thread": {"status": {"type": "active"},
-                           "turns": [{"id": "atual", "status": "inProgress"}]}}
+        calls.append((method, params))
+        turns = ([{"id": "atual", "status": "inProgress"}]
+                 if method == "thread/read" and params["includeTurns"] else [])
+        return {"thread": {"status": {"type": "active"}, "turns": turns}}
     client.connect, client.request = connect, request
     monkeypatch.setattr(module, "AppServerClient", lambda: client)
     monkeypatch.setattr(module, "pid_vivo", lambda pid: True)
     monkeypatch.setattr(adapter, "_start_tmux_watcher", lambda name: None)
     monkeypatch.setattr(adapter, "start_subscription", lambda name, cwd: None)
     await adapter._conectar("sess", {"thread_id": "thread-1", "app_pid": 123, "endpoint": "ws://fake"})
-    assert adapter._sessions["sess"]["turn_id"] == "atual"
+    assert calls[1] == ("thread/read", {"threadId": "thread-1", "includeTurns": False})
+    assert adapter._sessions["sess"].get("turn_id") is None
     assert await adapter.deliverable("sess") is False
+    await adapter.steer("sess", "ajuste")
+    assert calls[-2] == ("thread/read", {"threadId": "thread-1", "includeTurns": True})
 
 
 async def test_modelo_rejeitado_nao_altera_estado(chat):
@@ -250,7 +263,8 @@ async def test_nova_principal_religa_adapter_e_ignora_subagente(chat, monkeypatc
     assert await adapter.ensure_running("sess") is new
     assert old.closed and subscriptions == [("sess", "/p")]
     assert adapter._sessions["sess"]["thread_id"] == "new"
-    assert adapter._sessions["sess"]["turn_id"] == "new-turn"
+    assert adapter._sessions["sess"].get("turn_id") is None
+    assert adapter._sessions["sess"]["in_progress"] is True
     assert adapter._sessions["sess"].get("mode") is None
     await adapter._consumir("sess", old, previous, lambda event: pytest.fail("evento antigo publicado"))
     assert adapter._sessions["sess"]["client"] is new
@@ -358,17 +372,28 @@ async def test_controles_no_codex_real_sem_inferencia(tmp_path, monkeypatch):
     client = AppServerClient()
     reconnected = AppServerClient()
     adapter = CodexAdapter()
+    settings_updates: asyncio.Queue = asyncio.Queue()
     try:
         await client.start_shared()
         await client.request("initialize", {"clientInfo": {"name": "hangar-test", "version": "1"},
                                             "capabilities": {"experimentalApi": True}})
         result = await client.request("thread/start", {"cwd": str(tmp_path), "model": "gpt-6-astra", "ephemeral": True})
+        notifications = client.notifications
+
+        async def observar_notifications():
+            async for notification in notifications():
+                if notification.get("method") == "thread/settings/updated":
+                    settings_updates.put_nowait(notification)
+                yield notification
+
+        client.notifications = observar_notifications
         adapter.attach("native", client, result["thread"]["id"], subscribed=True)
         await adapter.set_model("native", "gpt-6-astra", "high")
         assert (await adapter.read_settings("native"))["effort"] == "high"
         await adapter.set_mode("native", "plan")
         async with asyncio.timeout(10):
-            async for notification in client.notifications():
+            while True:
+                notification = await settings_updates.get()
                 if notification.get("method") == "thread/settings/updated":
                     settings = notification["params"]["threadSettings"]
                     if settings["collaborationMode"]["mode"] == "plan":

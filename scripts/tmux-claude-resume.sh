@@ -14,9 +14,13 @@
 #   claude  id = uuid on the cmdline (--session-id/--resume)      -> claude --resume <uuid>
 #   kimi    id = ticket .hangar-kimi/<pane>.json           -> kimi -S <session_id>
 #   pi      id = ticket .hangar-pi/<pane>.json             -> pi --session <uuid>
+#   codex   id = thread_id in ~/.hangar/codex-sessions/<name>.json -> hangar-codex-tui --resume <id>
 # Kimi has no caller-chosen id (no --session-id; -S only resumes) and pi rewrites its argv, so for
 # both the per-pane ticket written by the app's hooks is the ONLY link pane -> session.
-# Codex is deliberately out: its session lives in the app-server sidecar, not in a pane command.
+# Codex keeps its own durable sidecar (the app writes it), so the id comes from there instead of the
+# cmdline: a session STARTED here has no thread on it (the app-server mints the thread) and switching
+# conversation in the TUI updates the sidecar. The pane command is the launcher, which brings up the
+# app-server and the TUI together — resuming `codex` alone would leave the TUI with no server.
 #
 # Account and engine ride along because a resumed agent that lands on the DEFAULT account can't find
 # the transcript at all: `--conta` sessions carry CLAUDE_CONFIG_DIR and `--engine` ones CP_ENGINE,
@@ -36,7 +40,15 @@
 set -euo pipefail
 
 MAP="${TMUX_RESURRECT_DIR:-$HOME/.local/share/tmux/resurrect}/claude-sessions.tsv"
-LOG="${TMUX_RESURRECT_DIR:-$HOME/.local/share/tmux/resurrect}/claude-resume.log"
+LOG="$HOME/.hangar/logs/privado/claude-resume.log"
+if [[ ${OS:-} == Windows_NT ]]; then
+  LOG="${LOCALAPPDATA:-${USERPROFILE:-$HOME}/AppData/Local}/hangar/logs/privado/claude-resume.log"
+fi
+(
+  umask 077
+  mkdir -p "$(dirname "$LOG")"
+  touch "$LOG"
+)
 # session-id (uuid) on claude's command line: --session-id <uuid> / --resume <uuid> (= the .jsonl).
 SID_RE='--(session-id|resume)[ =]([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'
 
@@ -68,7 +80,13 @@ scan_pane() {
       claude)         prov=claude ;;
       kimi|kimi-code) prov=kimi ;;
       pi)             prov=pi ;;
-      *)              continue ;;
+      # Codex nao casa por argv0: o pane roda o LANCADOR (`python3 .../hangar-codex-tui`, e um
+      # venv proprio quando existe), e `codex` cru pegaria o `codex app-server` filho, que nao e
+      # a TUI. Por isso a busca e no cmdline inteiro, no fim da lista.
+      *)              case "$cl" in
+                        *hangar-codex-tui*) prov=codex ;;
+                        *) continue ;;
+                      esac ;;
     esac
     AGENT_PROV=$prov; AGENT_PID=$p; AGENT_CMD=$cl
     return 0
@@ -107,6 +125,30 @@ ticket_field() {  # <kimi|pi> <pane id> <agent pid> <json key>
   sed -n "s/.*\"$4\" *: *\"\([^\"]*\)\".*/\1/p" <<<"$data" | head -1
 }
 
+# Um campo do sidecar duravel da sessao Codex (`~/.hangar/codex-sessions/<nome>.json`, escrito pelo
+# lancador). E ele que liga o NOME da sessao ao thread do Codex, e o unico dos quatro agentes cujo
+# ponteiro de conversa sobrevive sozinho ao reboot -- endpoint e app_pid de dentro dele e que morrem.
+# Ceiling: nome com acento/espaco e sanitizado pelo app antes de virar arquivo; aqui casamos o nome
+# do tmux cru, que na pratica ja vem sanitizado (foi o app que criou a sessao).
+codex_field() {  # <session name> <json key>
+  python3 - "$HOME/.hangar/codex-sessions/$1.json" "$2" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        data = json.load(source)
+    value = data.get(sys.argv[2], "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ValueError("campo não textual")
+    print(value)
+except (OSError, ValueError, AttributeError):
+    sys.exit(1)
+PY
+}
+
 save() {
   mkdir -p "$(dirname "$MAP")"
   # tmp no MESMO fs do MAP: o mv vira rename atomico (de /tmp era copia, e um crash no meio deixava
@@ -124,6 +166,12 @@ save() {
               fi ;;
       kimi)   id=$(ticket_field kimi "$pane" "$AGENT_PID" session_id) || id="" ;;
       pi)     id=$(ticket_field pi "$pane" "$AGENT_PID" id) || id="" ;;
+      # Thread do sidecar, nao do `--resume` do cmdline: sessao Codex nasce SEM thread nenhum na
+      # linha de comando (o id sai do app-server) e trocar de conversa na TUI atualiza o sidecar.
+      codex)  if ! id=$(codex_field "$name" thread_id) || [ -z "$id" ]; then
+                echo "  $name: codex sem thread no sidecar legivel — save ignorado" >> "$LOG"
+                continue
+              fi ;;
     esac
     [ -n "$id" ] || continue
     # `|| cfg=""`: o processo pode morrer ENTRE o scan_pane e esta leitura — e o instante mais
@@ -133,6 +181,9 @@ save() {
     # racea derruba a atualizacao de TODAS as outras daquele ciclo. Mesma guarda do _cmdline.
     cfg=$(_env_of "$AGENT_PID" CLAUDE_CONFIG_DIR) || cfg=""
     engine=$(_env_of "$AGENT_PID" CP_ENGINE) || engine=""
+    # O Codex nao le nenhum dos dois (conta dele e `--codex-account`; motor nao se aplica): manter o
+    # que o pane herdou faria o restore prefixar `env CLAUDE_CONFIG_DIR=` num comando que o ignora.
+    if [ "$AGENT_PROV" = codex ]; then cfg=""; engine=""; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$AGENT_PROV" "$id" "$cfg" "$engine" >> "$tmp"
   done < <(tmux list-sessions -F '#{session_name} #{pane_id} #{pane_pid}' 2>/dev/null)
   sync "$tmp"
@@ -157,7 +208,7 @@ restore() {
   # debug — log every decision so the next failure is diagnosable.
   echo "$(date '+%F %T') restore: start (map: $(wc -l < "$MAP" 2>/dev/null || echo 0) entries)" >> "$LOG"
   [ -f "$MAP" ] || return 0
-  local name prov id cfg engine cur cmd
+  local name prov id cfg engine cur cmd cwd home conta
   while IFS=$'\t' read -r name prov id cfg engine; do
     # Map written before providers existed: <name>\t<uuid>, claude on the default account.
     if [ -z "${id:-}" ] && [ -n "${prov:-}" ]; then id=$prov; prov=claude; fi
@@ -178,6 +229,22 @@ restore() {
       claude) cmd="claude --resume $id" ;;
       kimi)   cmd="kimi -S $id" ;;
       pi)     cmd="pi --session $id" ;;
+      # O pane do Codex e o lancador, nao o binario: ele sobe o app-server e a TUI juntos, e sem
+      # ele a TUI ficaria sem servidor pra falar. `--name` e obrigatorio aqui porque o pane
+      # restaurado pelo resurrect nasce sem o CP_SESSION_NAME que o `tmux new-session -e` carimba.
+      # cwd/conta saem do sidecar (o MAP guarda so o thread): sao os mesmos campos que o app grava,
+      # uma fonte so. Sidecar apagado = sem como retomar; some do restore com log em vez de abrir
+      # conversa nova calada.
+      codex)  if ! cwd=$(codex_field "$name" cwd) || [ -z "$cwd" ]; then
+                echo "  $name: codex sem cwd no sidecar legivel — nao retomado" >> "$LOG"; continue
+              fi
+              cmd="hangar-codex-tui --name $(printf '%q' "$name") --cwd $(printf '%q' "$cwd")"
+              if ! home=$(codex_field "$name" codex_home) || ! conta=$(codex_field "$name" codex_account); then
+                echo "  $name: sidecar Codex ilegivel durante leitura da conta — nao retomado" >> "$LOG"; continue
+              fi
+              if [ -n "$home" ]; then cmd="$cmd --codex-home $(printf '%q' "$home")"; fi
+              if [ -n "$conta" ]; then cmd="$cmd --codex-account $(printf '%q' "$conta")"; fi
+              cmd="$cmd --resume $id" ;;
       *)      echo "  $name: unknown provider '$prov'" >> "$LOG"; continue ;;
     esac
     # Engine env is applied INSIDE the pane by hangar-engine (os.execvpe), same as registry does when it

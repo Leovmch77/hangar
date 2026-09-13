@@ -29,6 +29,20 @@ async function clicaNaRow(el: HTMLElement) {
 }
 
 describe('SessionCard: clique em sessão "sem id"', () => {
+  it.each([0, 2])('perguntas pendentes (%i) preservam a sessão trabalhando e o clique', async (pending_questions) => {
+    const { el, comp, onClick } = montar(sessao({
+      provider: 'codex', state: 'working', pending_questions,
+      question: 'Qual servidor?', label: 'Continuando o trabalho',
+    }));
+    const badge = el.querySelector('.pending-questions');
+    expect(badge?.textContent ?? null).toBe(pending_questions ? '? 2' : null);
+    expect(el.querySelector('.work-mark')).not.toBeNull();
+    expect(el.querySelector('.status-sub')?.textContent).toBe(pending_questions ? 'Qual servidor?' : 'Continuando o trabalho');
+    await clicaNaRow(el);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    unmount(comp);
+  });
+
   it('kimi sem id ABRE o chat (é o pré-1º-prompt por design, não um erro)', async () => {
     const { el, comp, onClick } = montar(sessao({ tracked: false, provider: 'kimi' }));
     await clicaNaRow(el);
@@ -91,16 +105,23 @@ describe('SessionCard: diff stats e tempo (referência super.engineering)', () =
     unmount(comp);
   });
 
-  it('chip de provider carrega o glifo colorido — texto só nas não-Claude', () => {
+  it('chip de provider é só o glifo; o nome fica no leitor de tela', () => {
+    // O que a tela mostra, sem o texto que só o leitor de tela lê.
+    const visivel = (n: Element | null | undefined) => {
+      const c = n?.cloneNode(true) as Element | undefined;
+      c?.querySelector('.sr-only')?.remove();
+      return (c?.textContent ?? '').trim();
+    };
     const { el, comp } = montar(sessao({ provider: 'kimi' }));
     const chipKimi = el.querySelector('.prov-chip');
     expect(chipKimi?.querySelector('.pg svg')).not.toBeNull();
-    expect(chipKimi?.textContent).toContain('Kimi');
-    // Claude tem a marca igual (pedido do usuário), mas sem rótulo: o default se reconhece pelo ícone.
+    expect(visivel(chipKimi), 'o nome não vai pra tela — cada provider tem marca própria').toBe('');
+    expect(chipKimi?.querySelector('.sr-only')?.textContent).toContain('Kimi');
     const { el: el2, comp: comp2 } = montar(sessao({ provider: 'claude' }));
     const chipClaude = el2.querySelector('.prov-chip--so-icone');
     expect(chipClaude?.querySelector('.pg svg')).not.toBeNull();
-    expect(chipClaude?.textContent).not.toContain('Claude');
+    expect(visivel(chipClaude)).toBe('');
+    expect(chipClaude?.querySelector('.sr-only')?.textContent).toContain('Claude');
     unmount(comp);
     unmount(comp2);
   });

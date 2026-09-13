@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from app import agentpane
+from app import diag as usage_diag
 from app import codex_permissions as cxperm
 from app import kimi_models
 from app.askquestion import pergunta_aberta
@@ -376,10 +377,13 @@ def _sem_borda(s: str) -> str:
 # ponytail: e uma lista de desenhos medidos, igual ao _READY_MARKERS_BY_PROVIDER — provider novo que
 # colapse paste entra aqui, com a forma medida no pane, nunca chutada.
 _PASTE_ID_RE = re.compile(r"\[(?:Pasted text|paste) #(\d+)")
+# Imagem: o Claude Code troca o CAMINHO colado por "[Image #N]" e o caminho nunca e desenhado
+# (medido 12/09/2026). Id com prefixo para o `#1` da imagem nao se confundir com o do texto colado.
+_IMAGE_ID_RE = re.compile(r"\[Image #(\d+)\]")
 
 
 def _paste_ids(regiao: str) -> set[str]:
-    return set(_PASTE_ID_RE.findall(regiao))
+    return set(_PASTE_ID_RE.findall(regiao)) | {f"img{n}" for n in _IMAGE_ID_RE.findall(regiao)}
 
 
 def _linhas_uteis(pane: str) -> list[str]:
@@ -476,6 +480,7 @@ def _composer_residuo(pane: str, texto: str, nome_sessao: str = "",
 # Teto de caracteres da regiao despejada na linha de diagnostico — cauda de log serve pra explicar
 # o PROXIMO caso real (ver _diag_composer), nao pra empilhar a tela inteira no journal.
 _DIAG_MAX = 400
+_DIAG_FIM_LINHAS = 8
 
 
 def _diag_composer(pane: str, texto: str, name: str, pastes_antes: set[str] | None) -> str:
@@ -512,8 +517,13 @@ def _diag_composer(pane: str, texto: str, name: str, pastes_antes: set[str] | No
         # nome_sessao="" pra este helper so LER a regiao, nunca repetir o aviso-uma-vez de composer
         # ilegivel — esse efeito colateral pertence ao caminho principal, ja disparado la se for o caso.
         regiao = _composer_regiao(pane, "")
-        regiao_txt = ("ilegivel (menos de 2 reguas validas, ou fora de _COMPOSER_FUNDO/_ALTURA)"
-                      if regiao is None else regiao.replace("\n", "\\n")[:_DIAG_MAX])
+        if regiao is None:
+            # O fim da tela e o que diz QUAL desenho o detector nao reconheceu; so "ilegivel" nao da.
+            fim = "\n".join(linhas[-_DIAG_FIM_LINHAS:]).replace("\n", "\\n")[-_DIAG_MAX:]
+            regiao_txt = ("ilegivel (menos de 2 reguas validas, ou fora de _COMPOSER_FUNDO/_ALTURA)"
+                          f" fim_da_tela={fim!r}")
+        else:
+            regiao_txt = regiao.replace("\n", "\\n")[:_DIAG_MAX]
         cauda = texto.strip().split("\n")[-1].strip()[-_RESIDUO_CAUDA:]
         inicio = texto.strip()[:_RESIDUO_INICIO]
         pastes_depois = _paste_ids(regiao or "")
@@ -808,7 +818,7 @@ class DriveError(RuntimeError):
 
 # Linha destacada do picker: "❯ 3. OPT-TWO" -> 3 (1-based). Numerico de proposito: robusto a label
 # longo/quebrado em multiplas linhas, que um match por texto erraria.
-_CURSOR_ROW = re.compile(r"❯\s*(\d+)\.")
+_CURSOR_ROW = re.compile(r"[❯›]\s*(\d+)\.")
 
 
 def _cursor_row(screen: str) -> int | None:
@@ -1411,6 +1421,52 @@ _PARTIAL_MAX_TENTATIVAS = 2
 # chama send_prompt na MESMA thread, sincronamente, entao so ela ve o que ela mesma escreveu.
 _ULTIMA_LIMPEZA = threading.local()
 
+# Glifo do prompt que o Claude Code desenha no composer vazio — e tudo o que aparece entre as reguas
+# quando nao ha texto (medido no pane).
+_GLIFO_COMPOSER_CLAUDE = "❯"
+
+
+def _texto_composer_claude(name: str) -> str | None:
+    """O que esta escrito no composer do Claude, sem glifo e sem espaco. "" = vazio, None = ilegivel."""
+    regiao = _composer_regiao(_capture(name), name)
+    if regiao is None:
+        return None
+    miolo = "\n".join(regiao.split("\n")[1:-1])          # tira as duas reguas das pontas
+    return _sem_espaco(miolo.replace(_GLIFO_COMPOSER_CLAUDE, ""))
+
+
+def _esvaziar_composer_claude(name: str) -> bool:
+    """Apaga o que estiver parado no composer do Claude antes de digitar. True = confirmado vazio.
+
+    Digitar por cima de texto parado faz o Enter mandar tudo numa mensagem so, e o reconcile, sem
+    achar o prompt exato no transcript, reentrega — a duplicata. No Pi a guarda ADIA
+    (`_composer_ocupado_pi`); no Claude a decisao foi APAGAR, sabendo que um rascunho sendo escrito
+    no terminal some junto. Nao confundir com `_limpar_composer`: aquele e o caminho do envio parcial
+    e so apaga o que e NOSSO — la a regra continua valendo.
+
+    C-u apaga uma linha, entao repete enquanto o conteudo DIMINUI. Se uma tecla nao muda nada, o que
+    sobrou e moldura ou placeholder (texto digitado sempre sai com C-u): desiste sem gastar o teto e
+    deixa o envio seguir. Ilegivel -> nao aperta nada.
+    """
+    atual = _texto_composer_claude(name)
+    if not atual:
+        return atual is not None
+    for _ in range(_LIMPEZA_MAX_TECLAS):
+        send_keys(name, "C-u")
+        depois = _texto_composer_claude(name)
+        if depois is None:
+            return False
+        if not depois:
+            return True
+        if len(depois) >= len(atual):
+            _log.warning("composer de %r nao esvaziou com C-u (%d caracteres resistiram) — segue o "
+                         "envio: o que resiste ao C-u nao e texto digitado", name, len(depois))
+            return False
+        atual = depois
+    _log.warning("composer de %r nao esvaziou apos %d x C-u — segue o envio", name,
+                 _LIMPEZA_MAX_TECLAS)
+    return False
+
 
 def _limpar_composer(name: str, texto: str, pastes_antes: set[str] | None) -> bool:
     """Tira do composer o texto que NOS digitamos e nao conseguimos submeter.
@@ -1443,16 +1499,35 @@ def _limpar_composer(name: str, texto: str, pastes_antes: set[str] | None) -> bo
     return False
 
 
-def _partial(name: str, motivo: str, texto: str, pastes_antes: set[str] | None = None) -> str:
+def _partial(name: str, motivo: str, texto: str, pastes_antes: set[str] | None = None,
+             *, etapa: str = "desconhecida", provider: str = "claude") -> str:
     """Unico ponto que devolve "partial": loga com o diagnostico do composer, limpa e registra se a
     limpeza pegou (o `drain` le isso pra decidir entre reenfileirar e parar).
 
     Uma funcao so para os seis sites porque o conserto e o mesmo em todos — limpar em cada caller
     daria seis chances de esquecer um, e foi assim que o residuo sobreviveu ate agora.
     """
+    pane = _capture(name)
     _log.error("envio PARCIAL name=%s: %s — %s", name, motivo,
-               _diag_composer(_capture(name), texto, name, pastes_antes))
+               _diag_composer(pane, texto, name, pastes_antes))
     _ULTIMA_LIMPEZA.limpou = _limpar_composer(name, texto, pastes_antes)
+    # A captura já existe, mas só geometria e contagens podem sair no arquivo compartilhável.
+    fields = {}
+    try:
+        lines = _linhas_uteis(pane)
+        rules = [i for i, line in enumerate(lines) if line.count("─") >= 20]
+        region = _composer_regiao(pane, "")
+        fields = {"composer_legivel": region is not None, "reguas": len(rules),
+                  "pastes_antes": len(pastes_antes) if pastes_antes is not None else -1,
+                  "pastes_depois": len(_paste_ids(region)) if region is not None else -1}
+        if len(rules) >= 2:
+            fields.update(altura_composer=rules[-1] - rules[-2],
+                          fundo_composer=len(lines) - rules[-1])
+    except Exception as exc:
+        fields["erro_tipo"] = type(exc).__name__
+    usage_diag.registrar("envio.parcial", "erro", sessao=name, provider=provider, etapa=etapa,
+                         detalhe=motivo, caracteres=len(texto), linhas=texto.count("\n") + 1,
+                         limpou=_ULTIMA_LIMPEZA.limpou, **fields)
     return "partial"
 
 
@@ -1588,6 +1663,11 @@ class TerminalInput:
                                 _OCUPADO_DEFER_COUNT, _diag_composer(_capture(name), text, name, None))
                 return "deferred"
             _limpa_deferred(name, _OCUPADO_WARNED, _OCUPADO_DEFER_COUNT)
+            # Claude: apaga o que estiver parado no composer ANTES de digitar — por cima, o Enter
+            # manda tudo grudado e o reconcile reentrega. ANTES da foto dos placeholders abaixo, pra
+            # um `[Pasted text #N]` velho sair junto e nao confundir a prova de entrega.
+            if provider == "claude":
+                _esvaziar_composer_claude(name)
             if "\n" in text or _exige_clipboard(text, provider):
                 # Foto dos placeholders de paste ANTES do nosso: so um numero NOVO conta como
                 # evidencia de entrega (ver _composer_residuo — paste alheio nao pode virar prova).
@@ -1606,24 +1686,27 @@ class TerminalInput:
                     # porque ha outras evidencias; aqui nao ha.
                     if regiao_antes is None:
                         return _partial(name, "composer ilegivel antes de colar — sem foto dos "
-                                              "placeholders nao ha como provar entrega", text, None)
+                                              "placeholders nao ha como provar entrega", text, None,
+                                        etapa="clipboard.antes", provider=provider)
                     # O lock e segurado da escrita ATE o fim da prova. Soltar antes reabre a janela em
                     # que outra sessao sobrescreve o clipboard e o nosso M-v cola o texto dela — com
                     # um `[Pasted text #N]` novo aparecendo do mesmo jeito, entao a prova nao ve.
                     with tmux._CLIP_LOCK:
                         if not tmux.paste_via_clipboard(name, text):
                             return _partial(name, "clipboard nao escrito — nada foi digitado no "
-                                                  "pane", text, pastes_antes)
+                                                  "pane", text, pastes_antes,
+                                            etapa="clipboard.colar", provider=provider)
                         if not _provou_entrega(name, text, pastes_antes):
                             # Sem fallback pro caminho antigo DE PROPOSITO: ele e justamente o que
                             # perde 291 de 600 linhas afirmando entrega. Aqui vira partial, que limpa
                             # o composer e deixa a fila reenfileirar.
                             return _partial(name, "colagem pelo clipboard sem prova no composer — "
-                                                  "Enter NAO enviado", text, pastes_antes)
+                                                  "Enter NAO enviado", text, pastes_antes,
+                                            etapa="clipboard.prova", provider=provider)
                     send_keys(name, "Enter")
                     if not _submeteu(name, text, pastes_antes):
                         return _partial(name, "colagem submetida mas a cauda continua no composer",
-                                        text, pastes_antes)
+                                        text, pastes_antes, etapa="clipboard.submeter", provider=provider)
                     return "sent"
                 # `is False` e nao `not ...` — MESMO raciocinio do ramo de uma linha logo abaixo: o
                 # UNICO produtor de False e uma falha CONFIRMADA (ver tmux.paste_text/
@@ -1641,7 +1724,7 @@ class TerminalInput:
                 if tmux.paste_text(name, text) is False:
                     return _partial(name, "multi-linha PAROU no meio da digitacao (falha "
                                     "confirmada em tmux.paste_text) — Enter nao enviado",
-                                    text, pastes_antes)
+                                    text, pastes_antes, etapa="multilinha.colar", provider=provider)
                 # Settle ANTES do Enter, como no ramo de uma linha. Ver _MULTILINE_SUBMIT_SETTLE:
                 # os 0.05 antigos eram menores que a ingestao MINIMA medida (0.08s) e o Enter
                 # submetia o texto pela metade.
@@ -1652,7 +1735,7 @@ class TerminalInput:
                     return _partial(name,
                                     f"multi-linha NAO chegou no composer em {_SUBMIT_CHECK_PRAZO:.1f}s "
                                     "(o multiplexador aceitou e nao entregou) — Enter nao enviado",
-                                    text, pastes_antes)
+                                    text, pastes_antes, etapa="multilinha.prova", provider=provider)
                 send_keys(name, "Enter")
                 # CONFERE em vez de confiar no settle. Caso real medido: tres recados longos
                 # cross-server sairam com delivered=True e NUNCA viraram entrada no transcript do
@@ -1663,7 +1746,7 @@ class TerminalInput:
                     return _partial(name,
                                     f"multi-linha nao submeteu (a cauda do texto continua no "
                                     f"composer apos {_SUBMIT_CHECK_PRAZO:.1f}s) — nao afirmando entrega",
-                                    text, pastes_antes)
+                                    text, pastes_antes, etapa="multilinha.submeter", provider=provider)
             elif text.lstrip().startswith("/"):
                 # Slash command: ao digitar "/..." o Claude Code abre um menu de autocomplete. Sem dar
                 # tempo do menu renderizar, o Enter corre com o redraw e e ENGOLIDO pelo menu (o comando
@@ -1694,7 +1777,7 @@ class TerminalInput:
                     # o usuário nunca escreveu. Devolve "partial" pro caller reportar em vez de afirmar
                     # entrega — via `_partial`, que agora também limpa o composer antes de devolver.
                     return _partial(name, "texto ficou pela metade no input, Enter NAO enviado",
-                                    text, pastes_antes)
+                                    text, pastes_antes, etapa="linha.digitar", provider=provider)
                 # Settle ANTES do Enter: sem isto o Enter corria a ingestao do texto e o claude (que
                 # detecta input rapido como paste) tratava o Enter como parte do conteudo -> o texto
                 # ficava no input SEM submeter (usuario tinha que reenviar). Espelha o gap multiline.
@@ -1704,7 +1787,8 @@ class TerminalInput:
                 if not _entrou_no_composer(name, text, pastes_antes):
                     return _partial(name,
                                     f"o texto NAO chegou no composer em {_SUBMIT_CHECK_PRAZO:.1f}s "
-                                    "— Enter nao enviado", text, pastes_antes)
+                                    "— Enter nao enviado", text, pastes_antes,
+                                    etapa="linha.prova", provider=provider)
                 send_keys(name, "Enter")
                 # Mesma conferencia do ramo multi-linha: e o upgrade que o comentario acima ja anotava
                 # ("capturar o pane e reenviar Enter se o input nao limpou"). Aqui em vez de reenviar
@@ -1714,7 +1798,7 @@ class TerminalInput:
                     return _partial(name,
                                     f"uma linha nao submeteu (texto continua no composer apos "
                                     f"{_SUBMIT_CHECK_PRAZO:.1f}s) — nao afirmando entrega",
-                                    text, pastes_antes)
+                                    text, pastes_antes, etapa="linha.submeter", provider=provider)
             return "sent"
 
     # Teclas de navegacao liberadas pro espelho do pane (TerminalMirror dirige overlays so-TUI:
@@ -1759,7 +1843,7 @@ class TerminalInput:
     # atingido; a 4a e folga barata (uma captura de pane).
     _SELECT_TENTATIVAS = 4
 
-    def select(self, name: str, option: int) -> None:
+    def select(self, name: str, option: int, *, require_cursor: bool = False) -> None:
         """Escolhe a opcao `option` (1-based) do picker cru, em MALHA FECHADA.
 
         As cegas (Down*(n-1) + Enter) partia de duas suposicoes falsas, as duas medidas em
@@ -1781,6 +1865,8 @@ class TerminalInput:
                 return ""  # pane ilegivel -> _cursor_row None -> caminho aberto, como antes
 
         antes = tela()
+        if require_cursor and _cursor_row(antes) is None:
+            raise DriveError("cursor ilegível — opção NÃO confirmada")
 
         # Caminho CURTO: a tecla do numero. Medido na TUI em 28/08/2026, com o picker vivo:
         #   - escolha unica  -> o digito MARCA E SUBMETE, numa tecla so (nem Enter precisa);

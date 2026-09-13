@@ -134,6 +134,24 @@ código de saída do processo só reflete falha de transporte (sessão sem naveg
 ar), não falha do comando em si (`erro: ref @eN nao existe` sai com código 0, porque é uma resposta
 válida do navegador, não uma falha de chamada).
 
+## Se um comando falhar
+
+**Falha não autoriza trocar de navegador.** Continue pelo `hangar-preview`: não abra outro
+navegador nem use agent-browser, Playwright, ferramentas do Chrome ou cliques por JavaScript
+para contornar o problema. A falha pode ser temporária; investigue e tente novamente.
+
+1. Leia o erro e confira se a ação anterior já aconteceu antes de repeti-la, principalmente
+   envio de formulário. `ok: click` sozinho não prova que o botão executou a ação: confirme com `wait`.
+2. Tire outro `snapshot` e use referências novas. Se a página estiver navegando ou montando,
+   espere uma condição com `wait` antes de repetir.
+3. Se clique, teclado ou preenchimento não funcionarem, confira foco, visibilidade e carregamento.
+   Para esse diagnóstico, `eval '({visible:document.visibilityState,focus:document.hasFocus(),active:document.activeElement?.tagName})'`
+   lê o estado sem simular uma interação. Conseguir ler ou tirar print não prova que a página
+   está recebendo os cliques e as teclas. Não afirme a causa sem conferir.
+4. Depois de verificar a condição, tente a ação novamente e confirme o resultado. Não repita
+   às cegas. Se persistir, informe ao usuário o erro exato e o que foi verificado e ajude a
+   resolver o problema no navegador embutido; não abandone a ferramenta nem escolha outra por conta própria.
+
 ## Esperar: `wait`, nunca `sleep`
 
 Depois de clicar ou navegar, espere a página responder com `wait` — nunca `sleep`/`timeout` fixo.

@@ -100,6 +100,13 @@ def test_list_sessions_route(api_client):
     assert r.json()[0]["name"] == "cc"
 
 
+def test_resposta_json_grande_usa_gzip(api_client):
+    r = api_client.get("/api/config", headers={**_h(), "Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers["content-encoding"] == "gzip"
+    assert "Accept-Encoding" in r.headers["vary"]
+
+
 def test_input_eager_send_marks_delivered(api_client):
     with patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
          patch("app.pqueue.PromptQueue.append") as ap:
@@ -546,6 +553,7 @@ def test_broadcast_codex_uses_adapter(api_client):
 
 def test_interrupt_codex_calls_adapter(api_client):
     fake = _fake_codex_adapter()
+    fake.interrupt = AsyncMock(return_value=True)
     with patch("app.api._provider_of", return_value="codex"), \
          patch("app.api.get_adapter", return_value=fake), \
          patch("app.api.terminal.interrupt") as term_int:
@@ -553,6 +561,16 @@ def test_interrupt_codex_calls_adapter(api_client):
     assert r.status_code == 200
     fake.interrupt.assert_awaited_once_with("cx")
     term_int.assert_not_called()
+
+
+def test_interrupt_codex_reports_when_no_turn_is_active(api_client):
+    fake = _fake_codex_adapter()
+    fake.interrupt = AsyncMock(return_value=False)
+    with patch("app.api._provider_of", return_value="codex"), \
+         patch("app.api.get_adapter", return_value=fake):
+        r = api_client.post("/api/sessions/cx/interrupt", headers=_h())
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "erro_codex_controle"
 
 
 def test_interrupt_claude_uses_terminal(api_client):
@@ -694,6 +712,40 @@ def test_select_route(api_client):
         r = api_client.post("/api/sessions/cc/select", json={"option": 2}, headers=_h())
     assert r.status_code == 200
     sel.assert_called_once_with("cc", 2)
+
+
+def test_implement_codex_plan_answers_native_tui_without_terminal_panel_guard(api_client):
+    picker = """Implement this plan?
+  1. Yes, implement this plan
+  2. Yes, clear context and implement
+  3. No, stay in Plan mode
+Press enter to confirm or esc to go back
+"""
+    with patch("app.api._session_exists", return_value=True), \
+         patch("app.api._provider_of", return_value="codex"), \
+         patch("app.api._recusa_se_painel_aberto",
+               side_effect=AssertionError("o seletor exato e seguro mesmo com o painel aberto")), \
+         patch("app.api.tmux.capture_pane", side_effect=[picker, "normal prompt"]), \
+         patch("app.api.terminal.select") as sel:
+        r = api_client.post("/api/sessions/cx/codex/plan/implement", headers=_h())
+    assert r.status_code == 200
+    sel.assert_called_once_with("cx", 1, require_cursor=True)
+
+
+def test_implement_codex_plan_refuses_another_picker(api_client):
+    picker = """Review hooks?
+  1. Review hooks
+  2. Continue
+Press enter to confirm or esc to go back
+"""
+    with patch("app.api._session_exists", return_value=True), \
+         patch("app.api._provider_of", return_value="codex"), \
+         patch("app.api.tmux.capture_pane", return_value=picker), \
+         patch("app.api.terminal.select") as sel:
+        r = api_client.post("/api/sessions/cx/codex/plan/implement", headers=_h())
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "erro_codex_controle"
+    sel.assert_not_called()
 
 
 def test_select_404_when_session_missing(api_client, monkeypatch):
@@ -927,6 +979,19 @@ def test_create_codex_provider_routes_to_create_normal(api_client):
     assert r.json()["jsonl"] is None
     cr.assert_called_once_with("cx", "/tmp", None, provider="codex", engine=None,
                                model=None, effort=None, context_window=None)
+
+
+def test_create_codex_descarta_snapshot_da_sessao_anterior(api_client, monkeypatch):
+    from app import api as api_mod
+    old = SessionInfo(name="cx", provider="claude", jsonl="/antiga.jsonl")
+    new = SessionInfo(name="cx", provider="codex", tracked=False, jsonl=None)
+    monkeypatch.setattr(api_mod, "_list_snap", {"snap": (api_mod.time.monotonic(), [old])})
+    with patch.object(api_mod.registry, "create", return_value=new), \
+         patch.object(api_mod.registry, "list", return_value=[new]):
+        r = api_client.post("/api/sessions", headers=_h(),
+                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
+        assert r.status_code == 200
+        assert api_mod._cached_info_sync("cx").provider == "codex"
 
 
 def test_create_codex_forwards_wrapper_initial_prompt(api_client):
@@ -1892,6 +1957,13 @@ import subprocess as _subprocess
 
 def _completed(returncode=0, stdout="", stderr=""):
     return _subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+@pytest.fixture(autouse=True)
+def _claude_resolvido(monkeypatch):
+    # O refinador resolve o `claude` pelo PATH; o subprocess e mockado, entao o teste nao pode
+    # depender de haver um instalado (o CI nao tem).
+    monkeypatch.setattr("app.loop._exe_claude", lambda: "claude")
 
 
 def test_loop_refine_ok(api_client):

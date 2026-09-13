@@ -163,6 +163,22 @@ def test_select_corrige_tecla_engolida(sem_espera, monkeypatch):
     ]
 
 
+def test_select_codex_le_o_cursor_antes_de_confirmar(sem_espera, monkeypatch):
+    telas = iter([_picker(3).replace("❯", "›"), _picker(1).replace("❯", "›")])
+    monkeypatch.setattr(terminal_input, "_capture", lambda _n: next(telas))
+    with patch.object(terminal_input, "send_keys") as sk:
+        TerminalInput().select("cx", 1, require_cursor=True)
+    assert sk.call_args_list == [call("cx", "Up"), call("cx", "Up"), call("cx", "Enter")]
+
+
+def test_select_codex_ilegivel_nao_confirma(sem_espera, monkeypatch):
+    monkeypatch.setattr(terminal_input, "_capture", lambda _n: "tela sem cursor")
+    with patch.object(terminal_input, "send_keys") as sk:
+        with pytest.raises(terminal_input.DriveError):
+            TerminalInput().select("cx", 1, require_cursor=True)
+    sk.assert_not_called()
+
+
 def test_select_ilegivel_no_meio_da_correcao_nao_manda_enter(sem_espera, monkeypatch):
     # Achado da revisão: a 1a leitura dá um número, a 2a vem ilegível (pane piscou, `❯ N.` sumiu).
     # Tratar isso como convergência mandava o Enter às CEGAS — exatamente o "opção errada calada"
@@ -436,6 +452,32 @@ def test_paste_do_pi_alheio_nao_conta_como_entrega():
     assert r is not True
 
 
+# --- imagem anexada: o Claude Code troca o CAMINHO colado por "[Image #N]" (medido 12/09/2026) ---
+# O app manda "<texto> — 📎 imagem: <caminho>.png". A cauda procurada e o caminho, que nunca e
+# desenhado; em mensagem CURTA o comeco (40 caracteres) alcanca o "C:" do caminho, que tambem some.
+# Virava "colagem sem prova", o Enter nao ia e a mensagem nao chegava. Composer copiado do log real.
+_TEXTO_IMAGEM = ("Ai ta colocando até emoji — 📎 imagem: "
+                 r"C:\Users\Lhais\.hangar\uploads\hangar-b510f3\e40d0536\1789233552-ead082.png")
+
+
+def test_imagem_nova_conta_como_entrega():
+    pane = _pane_claude(["❯ [Image #1]Ai ta colocando até emoji — 📎 imagem:"])
+    assert terminal_input._composer_residuo(pane, _TEXTO_IMAGEM, "cc", pastes_antes=set()) is True
+
+
+def test_imagem_alheia_nao_conta_como_entrega():
+    # Mesma trava de identidade: imagem que o dono ja tinha anexado no rascunho nao prova a nossa.
+    pane = _pane_claude(["❯ [Image #1]"])
+    antes = terminal_input._paste_ids(pane)
+    r = terminal_input._composer_residuo(pane, _TEXTO_IMAGEM, "cc", pastes_antes=antes)
+    assert r is not True
+
+
+def test_imagem_e_texto_colado_nao_se_confundem():
+    # `[Image #1]` e `[Pasted text #1]` sao chips diferentes: o numero igual nao pode esconder um novo.
+    assert terminal_input._paste_ids("[Image #1][Pasted text #1 +3 lines]") !=         terminal_input._paste_ids("[Pasted text #1 +3 lines]")
+
+
 def test_paste_ids_le_os_dois_desenhos():
     assert terminal_input._paste_ids("[Pasted text #3 +42 lines]") == {"3"}
     assert terminal_input._paste_ids(" [paste #1 1171 chars]") == {"1"}
@@ -608,6 +650,15 @@ def test_diag_composer_pane_ilegivel_nao_lanca():
     # Sem reguas -> _composer_regiao devolve None; o helper tem que descrever a ausencia, nao explodir.
     diag = terminal_input._diag_composer("tela sem nenhuma regua aqui", "oi", "cc", None)
     assert "ilegivel" in diag
+
+
+def test_diag_composer_ilegivel_traz_o_fim_da_tela():
+    # "ilegivel" sozinho nao diz o que a tela TINHA: dois envios com print se perderam assim em
+    # 12/09/2026 e nao havia como saber qual desenho o detector nao reconheceu.
+    pane = "\n".join(["conversa"] * 30 + ["✽ Inferring… (5m 14s)", "desenho novo do composer", "", ""])
+    diag = terminal_input._diag_composer(pane, "oi", "cc", None)
+    assert "desenho novo do composer" in diag
+    assert "Inferring" in diag
 
 
 def test_diag_composer_degrada_em_string_quando_algo_exploda(monkeypatch):
@@ -1414,3 +1465,99 @@ def test_cursor_row_nao_mistura_os_dois_pickers():
     assert terminal_input._pi_cursor_row(pi, "omp") is None
     assert terminal_input._pi_cursor_row(pi) == 1
     assert terminal_input._pi_cursor_row(_omp_picker(2)) is None
+
+
+# --- _esvaziar_composer_claude: antes de digitar, tira o que estiver parado no composer do Claude.
+# Caso real (12/09/2026): rascunho e restos de "/model" encalhados no composer, o prompt digitado em
+# cima, o Enter mandou UMA mensagem grudada e o reconcile, sem achar o prompt exato, reentregou a
+# copia limpa — o dono viu a mensagem duas vezes. A guarda equivalente existia so pro Pi.
+
+def test_esvaziar_composer_claude_vazio_nao_aperta_tecla():
+    # Medido: composer vazio do Claude e so o glifo. O caso normal nao pode custar tecla nenhuma.
+    with patch("app.terminal_input.tmux.capture_pane", return_value=_pane_claude(["❯"])), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert terminal_input._esvaziar_composer_claude("cc") is True
+    sk.assert_not_called()
+
+
+def test_esvaziar_composer_claude_apaga_residuo_e_confere():
+    panes = iter([
+        _pane_claude(["❯ pq eu quero ele atualizado/modelmodelmodelmodel"]),
+        _pane_claude(["❯"]),
+    ])
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=lambda *_a, **_k: next(panes)), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert terminal_input._esvaziar_composer_claude("cc") is True
+    assert sk.call_args_list == [call("cc", "C-u")]
+
+
+def test_esvaziar_composer_claude_residuo_de_varias_linhas_sai_linha_a_linha():
+    # C-u apaga UMA linha: repete enquanto o conteudo diminui, e reconfere a cada tecla.
+    panes = iter([
+        _pane_claude(["❯ linha um", "  linha dois", "  linha tres"]),
+        _pane_claude(["❯ linha um", "  linha dois"]),
+        _pane_claude(["❯ linha um"]),
+        _pane_claude(["❯"]),
+    ])
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=lambda *_a, **_k: next(panes)), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert terminal_input._esvaziar_composer_claude("cc") is True
+    assert sk.call_args_list == [call("cc", "C-u")] * 3
+
+
+def test_esvaziar_composer_claude_para_quando_c_u_nao_muda_nada(caplog):
+    # Moldura ou placeholder que o C-u nao apaga: uma tecla e desiste — nunca as 12 do teto a cada
+    # envio — e o envio segue, porque texto digitado sempre some com C-u.
+    pane = _pane_claude(['❯ Try "alguma sugestao do proprio claude"'])
+    with patch("app.terminal_input.tmux.capture_pane", return_value=pane), \
+         patch.object(terminal_input, "send_keys") as sk, \
+         caplog.at_level("WARNING", logger="hangar.terminal_input"):
+        assert terminal_input._esvaziar_composer_claude("cc") is False
+    assert sk.call_args_list == [call("cc", "C-u")]
+    assert "nao esvaziou" in caplog.text
+
+
+def test_esvaziar_composer_claude_nunca_passa_do_teto():
+    # Conteudo que diminui sem nunca acabar (TUI se redesenhando) nao vira laco sem fim. Uma linha
+    # so, encolhendo um caractere por leitura: sempre legivel, sempre "progredindo", nunca vazia.
+    panes = iter([_pane_claude(["❯ " + "x" * (40 - n)]) for n in range(41)])
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=lambda *_a, **_k: next(panes)), \
+         patch.object(terminal_input, "send_keys") as sk:
+        terminal_input._esvaziar_composer_claude("cc")
+    assert len(sk.call_args_list) <= terminal_input._LIMPEZA_MAX_TECLAS
+
+
+def test_esvaziar_composer_claude_ilegivel_nao_mexe():
+    # Sem as reguas nao da pra ver o composer: na duvida nao aperta nada (mesma politica do arquivo).
+    with patch("app.terminal_input.tmux.capture_pane", return_value="? for shortcuts\n"), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert terminal_input._esvaziar_composer_claude("cc") is False
+    sk.assert_not_called()
+
+
+def test_send_prompt_claude_esvazia_residuo_antes_de_digitar(monkeypatch):
+    # Regressao do caso real: o C-u tem de sair ANTES do texto, senao o Enter gruda as mensagens.
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    panes = iter([_pane_claude(["❯ residuo parado no composer"]), _pane_claude(["❯"])])
+    ultimo = [None]
+
+    def captura(*_a, **_k):
+        ultimo[0] = next(panes, ultimo[0])
+        return ultimo[0]
+
+    with patch("app.terminal_input.tmux.capture_pane", side_effect=captura), \
+         patch.object(terminal_input, "_entrou_no_composer", lambda *_a: True), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("cc", "corrige o bug") == "sent"
+    assert sk.call_args_list[:2] == [call("cc", "C-u"), call("cc", "corrige o bug", literal=True)]
+
+
+def test_send_prompt_pi_nao_ganha_a_limpeza_do_claude(monkeypatch):
+    # Pi e omp tem a guarda propria (adiam em vez de apagar). A limpeza e decisao so do Claude.
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+    with patch.object(terminal_input, "_capture", return_value=_pane_pi(["rascunho do dono"])), \
+         patch.object(terminal_input, "send_keys") as sk:
+        assert TerminalInput().send_prompt("pi-x", "mensagem nova", provider="pi") == "deferred"
+    sk.assert_not_called()

@@ -7,7 +7,10 @@ import asyncio
 import json
 import re
 import shutil
+import os
+import subprocess
 import tomllib
+import time
 from pathlib import Path
 
 import pytest
@@ -95,6 +98,189 @@ def fake_writer(monkeypatch):
 def _config(path: Path, **values):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(_dump_toml(values))
+
+
+@pytest.mark.parametrize("invalidate", ["expiry", "force", "source", "destination", "cli", "clock"])
+async def test_plugin_preparation_cache_is_short_and_invalidated(isolated, fake_writer, monkeypatch, invalidate):
+    from app import codex_contas_plugins as plugins
+
+    _, source, account = isolated
+    _config(source / "config.toml", plugins={"sample@market": {"enabled": True}})
+    now = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    monkeypatch.setattr(sync, "_cli_version", lambda: "test")
+    calls = []
+
+    async def synchronize(*args):
+        calls.append(args)
+        return {"manifest": {"plugins": {}}, "issues": [], "trust_pending": False}
+
+    monkeypatch.setattr(plugins, "sync_plugins", synchronize)
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    now[0] += 1
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert len(calls) == 1
+
+    if invalidate == "expiry":
+        now[0] = 1300.0
+    elif invalidate == "clock":
+        now[0] = 999.0
+    elif invalidate in ("source", "destination"):
+        root = source if invalidate == "source" else account.home
+        with (root / "config.toml").open("a") as config:
+            config.write("\n# alteração externa\n")
+    elif invalidate == "cli":
+        monkeypatch.setattr(sync, "_cli_version", lambda: "updated")
+    await sync.prepare_account(account, force=invalidate == "force")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("issue,trust", [(True, False), (False, True)])
+async def test_plugin_preparation_does_not_cache_pending_results(isolated, fake_writer, monkeypatch, issue, trust):
+    from app import codex_contas_plugins as plugins
+
+    _, source, account = isolated
+    _config(source / "config.toml", plugins={"sample@market": {"enabled": True}})
+    monkeypatch.setattr(sync, "_cli_version", lambda: "test")
+    calls = []
+
+    async def synchronize(*args):
+        calls.append(args)
+        return {"manifest": {"plugins": {}}, "trust_pending": trust,
+                "issues": [{"code": "codex_account_plugin_inventory_failed"}] if issue else []}
+
+    monkeypatch.setattr(plugins, "sync_plugins", synchronize)
+    await sync.prepare_account(account)
+    await sync.prepare_account(account)
+    assert len(calls) == 2
+
+
+async def test_plugin_cache_preserves_informational_mcp_exclusions(isolated, fake_writer, monkeypatch):
+    from app import codex_contas_plugins as plugins
+
+    _, source, account = isolated
+    _config(source / "config.toml", plugins={"sample@market": {"enabled": True}},
+            mcp_servers={"probe": {"command": "probe", "env": {
+                "CODEX_HOME": str(source), "OPENAI_API_KEY": "secret",
+            }}})
+    monkeypatch.setattr(sync, "_cli_version", lambda: "test")
+    calls = []
+
+    async def synchronize(*args):
+        calls.append(args)
+        return {"manifest": {"plugins": {}}, "issues": [], "trust_pending": False}
+
+    monkeypatch.setattr(plugins, "sync_plugins", synchronize)
+    first = await sync.prepare_account(account)
+    assert first["status"] == "ready"
+    assert {issue["code"] for issue in first["issues"]} == {
+        "codex_account_mcp_runtime_excluded", "codex_account_mcp_auth_excluded",
+    }
+    assert await sync.prepare_account(account) == first
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="permissão de execução POSIX")
+async def test_resource_execution_survives_copy_and_mode_only_changes(isolated, fake_writer):
+    _, source, account = isolated
+    hook = source / "hooks/probe.sh"
+    hook.parent.mkdir()
+    hook.write_text("#!/bin/sh\nprintf 'ok'\n")
+    hook.chmod(0o755)
+    target = account.home / "hooks/probe.sh"
+
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert subprocess.check_output([str(target)], text=True) == "ok"
+    target.chmod(0o600)
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert subprocess.check_output([str(target)], text=True) == "ok"
+    hook.chmod(0o644)
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert not target.stat().st_mode & 0o100
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sonda shell POSIX")
+async def test_external_hook_keeps_helper_and_repairs_legacy_copy(isolated, fake_writer):
+    root, source, account = isolated
+    script = '#!/bin/sh\nbash "$(dirname "$(readlink -f "$0")")/helper.sh"\n'
+    originals = []
+    for name in ("first", "second"):
+        folder = root / name
+        folder.mkdir()
+        original = folder / "probe.sh"
+        original.write_text(script)
+        original.chmod(0o755)
+        (folder / "helper.sh").write_text(f"printf '{name}'\n")
+        originals.append(original)
+    hook = source / "hooks/probe.sh"
+    hook.parent.mkdir()
+    hook.symlink_to(originals[0])
+    target = account.home / "hooks/probe.sh"
+    target.parent.mkdir()
+    target.write_text(script)
+    target.chmod(0o600)
+    sync._write_state(account, {"public": {"status": "ready"}, "resources": {
+        "hooks/probe.sh": {"hash": sync.hash_bytes(script.encode())},
+    }})
+
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert target.is_symlink()
+    assert subprocess.check_output([str(target)], text=True) == "first"
+    hook.unlink()
+    hook.symlink_to(originals[1])
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert subprocess.check_output([str(target)], text=True) == "second"
+    hook.unlink()
+    hook.write_text(script)
+    hook.chmod(0o755)
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert not target.is_symlink()
+    assert target.read_text() == script
+    assert originals[1].stat().st_mode & 0o777 == 0o755
+    hook.unlink()
+    hook.symlink_to(originals[1])
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    hook.unlink()
+    assert (await sync.prepare_account(account))["status"] == "ready"
+    assert not target.is_symlink()
+    assert all(path.read_text() == script for path in originals)
+
+
+async def test_external_hook_link_failure_is_not_ready(isolated, fake_writer, monkeypatch):
+    root, source, account = isolated
+    original = root / "probe.sh"
+    original.write_text("exit 0\n")
+    hook = source / "hooks/probe.sh"
+    hook.parent.mkdir()
+    hook.symlink_to(original)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("symlinks indisponíveis")
+
+    monkeypatch.setattr(Path, "symlink_to", denied)
+    result = await sync.prepare_account(account)
+    assert result["status"] == "partial"
+    assert not (account.home / "hooks/probe.sh").exists()
+    assert result["issues"]
+
+
+async def test_hook_repair_preserves_personal_destination_link(isolated, fake_writer):
+    root, source, account = isolated
+    original = root / "probe.py"
+    original.write_text("print('source')\n")
+    personal = root / "personal.py"
+    personal.write_text("print('personal')\n")
+    hook = source / "hooks/probe.py"
+    hook.parent.mkdir()
+    hook.symlink_to(original)
+    target = account.home / "hooks/probe.py"
+    target.parent.mkdir()
+    target.symlink_to(personal)
+
+    result = await sync.prepare_account(account)
+    assert result["status"] == "partial"
+    assert target.resolve() == personal
+    assert personal.read_text() == "print('personal')\n"
 
 
 def test_project_preferences_excludes_identity_and_runtime_state():
@@ -308,7 +494,10 @@ async def test_status_is_read_only_and_private_state_is_restricted(isolated, fak
 
     status = sync.preparation_status(account)
 
-    assert set(status) == {"status", "trust_pending", "issues"}
+    # Conjunto EXATO, e continua exato: a trava existe pra barrar estado interno vazando no status
+    # público. `etapa` e `herdado` entram porque são contrato com a tela — ela mostra em que passo a
+    # herança está e quanto a conta recebeu de cada tipo. Campo novo aqui exige decidir se é público.
+    assert set(status) == {"status", "trust_pending", "issues", "etapa", "herdado"}
     assert status["status"] == "ready"
     assert len(fake_writer) == before
     state = sync._state_path(account)

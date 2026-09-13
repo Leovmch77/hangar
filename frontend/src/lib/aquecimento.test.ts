@@ -30,6 +30,20 @@ describe('aquecimento', () => {
     expect(await liberado(A)).toBe(true);
   });
 
+  it('cancelar a tela retira seu aquecimento sem atrasar o próximo', async () => {
+    segurarAquecimento(A);
+    const tela = new AbortController();
+    const cancelado = aoAquecer(A, tela.signal);
+    const proximo = vi.fn();
+    void aoAquecer(A).then(proximo);
+    tela.abort();
+    expect(await cancelado).toBe(false);
+    expect(await aoAquecer(A, tela.signal)).toBe(false);
+    soltarAquecimento(A);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(proximo).toHaveBeenCalledWith(true);
+  });
+
   it('segura enquanto o histórico não chega e solta quando ele chega', async () => {
     segurarAquecimento(A);
     expect(await liberado(A)).toBe(false);

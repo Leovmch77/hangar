@@ -860,6 +860,30 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
+  it('mostra cada etapa do preparo e a abertura depois de concluir', async () => {
+    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({
+      status: 'running', etapa: 'configuracoes', trust_pending: false, issues: [],
+    });
+    vi.mocked(api.getCodexPreparationForServer)
+      .mockResolvedValueOnce({ status: 'running', etapa: 'plugins', trust_pending: false, issues: [] })
+      .mockResolvedValueOnce({ status: 'ready', trust_pending: false, issues: [] });
+    let finish!: (value: api.SessionInfo) => void;
+    vi.mocked(api.createSessionForServer).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { comp } = await abrirNoCodex();
+    try {
+      (document.querySelector('.primary-btn') as HTMLElement).click();
+      await flush();
+      expect(document.body.textContent).toContain(m.codex_etapa_configuracoes());
+      await vi.waitFor(() => expect(document.body.textContent).toContain(m.codex_etapa_plugins()), { timeout: 2000 });
+      await vi.waitFor(() => expect(document.body.textContent).toContain(m.codex_ui_abrindo_sessao()), { timeout: 2000 });
+      expect(document.body.textContent).not.toContain(m.codex_etapa_plugins());
+      finish({ name: 'x', state: 'idle' });
+      await flush();
+    } finally {
+      await unmount(comp);
+    }
+  });
+
   it('trocar provider durante preparo libera criação e descarta preparo antigo', async () => {
     const { comp } = await abrirNoCodex();
     let resolve!: (value: api.CodexAccount['sync']) => void;
@@ -963,15 +987,13 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
-  it('falha no preparo é visível e não cria; nova tentativa reaproveita a conta', async () => {
+  it.each(['partial', 'error'] as const)('preparo %s não impede abrir com a conta escolhida', async (status) => {
     const { comp } = await abrirNoCodex();
-    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({ status: 'error', trust_pending: false, issues: [] });
-    (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
-    expect(document.body.textContent).toContain(m.codex_ui_prepare_error());
-    expect(api.createSessionForServer).not.toHaveBeenCalled();
-    expect(document.querySelector('#codex-account')?.textContent).toContain('Default');
+    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({ status, trust_pending: false, issues: [] });
     (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
     expect(api.createSessionForServer).toHaveBeenCalledOnce();
+    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
+      expect.objectContaining({ codex_account: 'default' }));
     unmount(comp);
   });
 

@@ -309,6 +309,46 @@ def test_enfileirada_na_tui_fica_visivel_ate_ser_consumida(tmp_path):
     assert q.load()[0]["confirmed"] is True
 
 
+def test_dequeue_sem_content_solta_a_mais_antiga(tmp_path):
+    # O `dequeue` do Claude Code (2.1.x) vem SEM `content`: diz que a fila entregou a proxima, nao
+    # qual. Descartado, o contador ficava preso e a entrada nunca confirmava — a bolha reaparecia a
+    # cada reconexao do SSE, no meio de eventos recentes (medido 11/09/2026 num transcript real:
+    # 17 enqueue, 16 remove com texto e 1 dequeue sem).
+    import json
+    j = tmp_path / "t.jsonl"
+    def op(operation, content=None, ts="2026-09-11T15:51:47.181Z"):
+        linha = {"type": "queue-operation", "operation": operation, "timestamp": ts}
+        if content is not None:
+            linha["content"] = content
+        return json.dumps(linha)
+
+    j.write_text("\n".join([
+        op("enqueue", "primeira"), op("enqueue", "segunda"),
+        op("dequeue", ts="2026-09-11T15:51:49.105Z"),
+    ]) + "\n", encoding="utf-8")
+
+    # Sai a mais antiga; a outra continua segurando a confirmacao dela.
+    assert pqueue.fila_interna_pendente(str(j)) == {"segunda"}
+
+    j.write_text("\n".join([op("enqueue", "primeira"), op("dequeue")]) + "\n", encoding="utf-8")
+    assert pqueue.fila_interna_pendente(str(j)) == set()
+
+    # Sem nada pendente, um dequeue solto não quebra nem inventa entrada.
+    j.write_text(op("dequeue") + "\n", encoding="utf-8")
+    assert pqueue.fila_interna_pendente(str(j)) == set()
+
+
+def test_dequeue_respeita_ordem_de_textos_repetidos(tmp_path):
+    import json
+    j = tmp_path / "repetidos.jsonl"
+    operations = [("enqueue", "A"), ("enqueue", "B"), ("enqueue", "A"),
+                  ("dequeue", None), ("dequeue", None)]
+    j.write_text("\n".join(json.dumps({"type": "queue-operation", "operation": operation,
+                                     **({"content": content} if content is not None else {})})
+                           for operation, content in operations) + "\n", encoding="utf-8")
+    assert pqueue.fila_interna_pendente(str(j)) == {"A"}
+
+
 def test_merged_history_skips_confirmed_entries(tmp_path):
     # Entrada CONFIRMADA (texto comprovado no transcript pelo reconcile) nao vira bolha nunca mais
     # — nem no history nem no follow (mesmo flag) — mesmo que o dedup por texto nao a alcance.
@@ -377,6 +417,27 @@ def test_reconcile_confirma_msg_com_imagem_prefixo_image_n(tmp_path):
         encoding="utf-8")
     requeued = q.reconcile_delivered(pqueue.committed_user_lines(str(j)), 0.0, now=1000.0)
     assert requeued == []                       # texto TA no transcript -> nao redigitar
+    assert q.load()[0]["confirmed"] is True
+
+
+def test_reconcile_confirma_msg_so_de_imagem_gravada_como_image_source(tmp_path):
+    # Mensagem SO de imagem: o Claude Code grava "[Image: source: <path>]" em vez do
+    # "📎 imagem: <path>" digitado (medido 13/09/2026, Claude Code 2.1.270). Sem casar, o print
+    # entregue era redigitado ate max_attempts e chegava 3x na conversa.
+    import json
+    caminho = r"C:\Users\Lhais\.hangar\uploads\hangar-b510f3\2d2167a0\1789299027-82332d.png"
+    j = tmp_path / "t.jsonl"
+    j.write_text(
+        json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"role": "user",
+                                "content": [{"type": "text", "text": f"[Image: source: {caminho}]"}]}}) + "\n",
+        encoding="utf-8")
+    q = PromptQueue("s")
+    q.path.write_text(
+        json.dumps({"id": "e1", "text": f"📎 imagem: {caminho}", "ts": 100.0, "delivered": True}) + "\n",
+        encoding="utf-8")
+    requeued = q.reconcile_delivered(pqueue.committed_user_lines(str(j)), 0.0, now=1000.0)
+    assert requeued == []
     assert q.load()[0]["confirmed"] is True
 
 

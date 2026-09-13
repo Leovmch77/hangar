@@ -401,6 +401,29 @@ describe('Sidebar — trilho original no modo rail', () => {
   const sess = (name: string, serverId: string, state: string, extra: Record<string, unknown> = {}) =>
     ({ name, serverId, state, ...extra });
 
+  it.each([false, true])('perguntas durante execução aparecem com rail recolhido=%s', async (collapsed) => {
+    navMode.mode = 'rail';
+    sidebarPin.setUser(collapsed);
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [
+      sess('codex', 'srv-a', 'working', { pending_questions: 2, question: 'Qual servidor?' }),
+      sess('outra', 'srv-a', 'working', { pending_questions: 0 }),
+    ] }]);
+    const t = montar();
+    await tick();
+    const badge = t.el.querySelector('.pending-questions');
+    expect(t.el.querySelectorAll('.pending-questions')).toHaveLength(1);
+    expect(badge?.textContent).toBe('? 2');
+    expect(badge?.getAttribute('title')).toBe(`${m.ask_perguntas()}: 2`);
+    if (collapsed) {
+      expect(t.el.querySelector('.estado-marca')).not.toBeNull();
+      expect(t.el.querySelector('.sess-main')?.getAttribute('aria-label')).toContain(`${m.ask_perguntas()}: 2`);
+    } else {
+      expect(t.el.querySelector('.row-mark')).not.toBeNull();
+      expect(t.el.querySelector('.status-sub.asking')?.textContent).toBe('Qual servidor?');
+    }
+    unmount(t.comp);
+  });
+
   it('RAIL no chat: sem WorkspaceNav, filtro nem cabeçalho de grupo', async () => {
     navMode.mode = 'rail';
     sidebarPin.setUser(true);   // pin recolhido -> trilho
@@ -632,13 +655,14 @@ describe('Sidebar — filesInContext (Task 14/15): o Git do menu e a sessão hos
   function comSessao() {
     // Mock do store é plain: os deriveds leem as arrays uma vez, no mount (mesmo padrão
     // do comUmaSessao do describe de renomear — comStore/sess são escopados ao describe deles).
-    // cwd presente de propósito: o item Git do SessionContextMenu só renderiza com `{#if cwd}`.
+    // cwd e branch presentes de propósito: o item Git do SessionContextMenu só renderiza com
+    // `{#if cwd}` e `{#if branch != null}` (cwd sem repositório não mostra git).
     storeState.servers.length = 0;
     storeState.servers.push({ id: 'srv-a', label: 'Servidor A', baseUrl: 'http://a', token: 'x' });
     storeState.byServer.length = 0;
     storeState.byServer.push({
       server: { id: 'srv-a', label: 'Servidor A' },
-      sessions: [{ name: 'sess-1', serverId: 'srv-a', state: 'idle', cwd: '/repo/x' }],
+      sessions: [{ name: 'sess-1', serverId: 'srv-a', state: 'idle', cwd: '/repo/x', branch: 'main' }],
       error: null, loaded: true,
     });
   }
@@ -668,7 +692,7 @@ describe('Sidebar — filesInContext (Task 14/15): o Git do menu e a sessão hos
   async function abrirGitDaSessao() {
     sidebarBridge.openSessionMenu(
       new MouseEvent('contextmenu', { clientX: 5, clientY: 5 }),
-      { name: 'sess-1', serverId: 'srv-a', cwd: '/repo/x' } as unknown as AggSession,
+      { name: 'sess-1', serverId: 'srv-a', cwd: '/repo/x', branch: 'main' } as unknown as AggSession,
       'srv-a',
     );
     await tick();

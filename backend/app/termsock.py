@@ -14,6 +14,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import struct
@@ -24,6 +25,7 @@ from typing import Optional
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
+from uvicorn.protocols.utils import ClientDisconnected
 
 from app import tmux
 from app.auth import _LOOPBACK, _blocked, _record_fail
@@ -132,6 +134,29 @@ def origens_extras() -> list[str]:
             if extra and extra not in vistos:
                 vistos.append(extra)
     return vistos
+
+
+_DIAG_RESPOSTA_RE = re.compile(rb"^[0-9;?$]*[Rcn~y]?$")
+
+
+def _diag_entrada(name: str, b: bytes) -> None:
+    """Registra RESPOSTA de terminal vinda do cliente, nunca o que a pessoa digita.
+
+    Existe para um defeito medido no Windows: com o painel do terminal aberto, caracteres que
+    ninguem digitou aparecem no composer da TUI (ex. "3", "33", "434" na frente do texto). A
+    suspeita e a conversa de capacidades do attach — o cliente RESPONDE a pergunta que o tmux/psmux
+    fez (CPR `ESC[linha;colunaR`, DA, XTVERSION) e a resposta atravessa ate o pane em vez de ser
+    consumida por quem perguntou.
+
+    Filtro deliberado: so passa o que tem ESC ou o que e curto e parece resposta (digitos, `;`, `R`).
+    Tecla e texto de quem digita ficam FORA do log — o diagnostico nao pode virar gravador do
+    terminal. Desligado por padrao: `CP_DIAG_TERM_INPUT=1` no `.env` liga.
+    """
+    if not settings.diag_term_input:
+        return
+    if b"\x1b" not in b and not (len(b) <= 8 and _DIAG_RESPOSTA_RE.match(b)):
+        return
+    _log.warning("termsock: %r entrada do cliente %r (%d bytes)", name, b[:64], len(b))
 
 
 def _origem_aceita(origem: str, host_req: Optional[str]) -> bool:
@@ -495,6 +520,7 @@ async def _motor_posix(ws: WebSocket, name: str, cols: int, rows: int) -> None:
             pass
 
     def escrever_no_pty(b: bytes) -> None:
+        _diag_entrada(name, b)
         # `add_writer`, nao `time.sleep` bloqueante: isto roda DENTRO do laco de eventos (chamado
         # direto de leitor_do_socket) — um `time.sleep` ali travava o backend inteiro (SSE de
         # todas as sessoes, listagem, tudo) enquanto o buffer do pty estivesse cheio (paste
@@ -598,13 +624,7 @@ async def _motor_posix(ws: WebSocket, name: str, cols: int, rows: int) -> None:
         # imprimia o traceback, tarde e feio, mas imprimia) por silencio total — um bug de verdade
         # no escritor ou no leitor sumiria, e o usuario so veria o terminal cair sem nenhuma linha
         # no log dizendo por que. CancelledError fica de fora: e o encerramento normal, nao falha.
-        for tarefa in (tarefa_leitor, tarefa_escritor):
-            try:
-                await tarefa
-            except asyncio.CancelledError:
-                pass
-            except BaseException:
-                _log.exception("termsock: %r — task terminou com excecao", name)
+        await _colher_tarefas(name, tarefa_leitor, tarefa_escritor)
         # So remove reader/writer se ESTA Sessao ainda nao foi desmontada por outro caminho: o
         # `pty.fork()` reusa o MESMO numero de fd, e o caminho de derrubada (acima) ja fez essa
         # remocao e fechou o fd antes de devolver o numero pro SO. Se o handler velho acorda
@@ -849,6 +869,7 @@ async def _motor_windows(ws: WebSocket, name: str, cols: int, rows: int) -> None
                     # sobreposto, entao `write()` nunca bloqueia o laco de eventos — que era a
                     # restricao que obrigou aquele desenho la (um `time.sleep` no laco travava o
                     # backend inteiro). Reimplementar a fila aqui seria duas filas.
+                    _diag_entrada(name, b)
                     transporte_escrita.write(b)
                 elif (t := msg.get("text")) is not None:
                     try:
@@ -878,13 +899,7 @@ async def _motor_windows(ws: WebSocket, name: str, cols: int, rows: int) -> None
             with contextlib.suppress(BaseException):
                 await asyncio.wait_for(tarefa_escritor, timeout=1.0)
         tarefa_escritor.cancel()
-        for tarefa in (tarefa_leitor, tarefa_escritor):
-            try:
-                await tarefa
-            except asyncio.CancelledError:
-                pass
-            except BaseException:
-                _log.exception("termsock: %r — task terminou com excecao", name)
+        await _colher_tarefas(name, tarefa_leitor, tarefa_escritor)
         if not s.desmontada:
             s.fechar_transportes()
         # Identidade, nao nome: um `pop(name)` cru removeria a Sessao NOVA de uma reconexao que ja
@@ -897,6 +912,21 @@ async def _motor_windows(ws: WebSocket, name: str, cols: int, rows: int) -> None
         except RuntimeError:
             pass
         _log.info("termsock: %r desanexado", name)
+
+
+async def _colher_tarefas(name: str, *tarefas: asyncio.Future) -> None:
+    """Recupera o resultado das tasks da conexao, logando so o que e falha de verdade.
+
+    Cliente que fecha no meio de um `send_bytes` termina a task com `ClientDisconnected`: e o
+    painel fechando, nao defeito, e virava ERROR com traceback a cada fechamento.
+    """
+    for tarefa in tarefas:
+        try:
+            await tarefa
+        except (asyncio.CancelledError, WebSocketDisconnect, ClientDisconnected):
+            pass
+        except BaseException:
+            _log.exception("termsock: %r — task terminou com excecao", name)
 
 
 def _pipe_handle(h: int):

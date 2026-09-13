@@ -160,7 +160,7 @@ import { openEventStreamForServer, getHistoryTailForServer } from '@hangar/core'
         </div>
         <div class="cc-body">
           {#if c.previewText}
-            <AssistantBubble text={c.previewText} preview animate={false} />
+            <AssistantBubble text={c.previewText} preview animate={false} streaming={c.stateEvent?.state === 'working'} />
           {:else if last}
             <!-- Sem sessionName: FileAttachment resolveria pelo servidor ATIVO, que pode não ser o
                  dono desta sessão num relance cross-server -> tapping abre o chat completo pra isso. -->

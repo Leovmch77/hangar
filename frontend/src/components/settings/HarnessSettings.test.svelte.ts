@@ -21,7 +21,7 @@ const ociosa = {
 };
 const estado = (dados: Partial<IntegracaoCodex> = {}): IntegracaoCodex => ({
   estado: 'ocioso', etapa: '', ultima_execucao: null, proxima_atualizacao: null,
-  plugins: [], erros: [], avisos: [], confianca_pendente: false, automatica: true, ...dados,
+  plugins: [], erros: [], avisos: [], confianca_pendente: false, automatica: true, memoria: false, ...dados,
 });
 const resposta = (dados: unknown) => ({ ok: true, status: 200, json: async () => dados }) as Response;
 const harnesses = ['codex', 'claude'].map((id) => ({ id, nome: id, instalado: true, versao: '1', itens: [] }));
@@ -598,5 +598,53 @@ describe('opções dentro do card', () => {
 
     terminar(resposta(config(true))); await estabilizar();
     expect(automatica().disabled).toBe(true);
+  });
+
+  it('o interruptor de memória grava codex_memory_import e o prazo só aparece com ele ligado', async () => {
+    let memoria = false;
+    ler = async () => resposta(estado({ memoria }));
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/api/config')) {
+        memoria = JSON.parse(String(init?.body)).codex_memory_import;
+        return resposta({ campos: {} });
+      }
+      if (String(url).endsWith(ROTA_CODEX)) return lerOpcoesCodex(init);
+      return String(url).endsWith(ROTA) ? ler(String(url), init) : resposta(harnesses);
+    });
+    const { el } = await montar();
+    // O aviso do prazo é a razão de a opção existir: sem ele a pessoa liga e acha que já vale.
+    expect(el.textContent).not.toContain(m.harness_codex_memoria_prazo());
+    const caixa = el.querySelectorAll<HTMLInputElement>('input.switch')[1]!;
+    expect(caixa.checked).toBe(false);
+    caixa.click(); await estabilizar();
+    const gravacao = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/config'));
+    expect(JSON.parse(String(gravacao?.[1]?.body))).toEqual({ codex_memory_import: true });
+    expect(caixa.checked).toBe(true);
+    expect(el.textContent).toContain(m.harness_codex_memoria_prazo());
+  });
+});
+
+describe('HarnessSettings — andamento da integração do Codex', () => {
+  // O card só dizia o nome da etapa: sem "quanto falta", a rodada longa parecia travada
+  // (pedido de 13/09/2026). O servidor manda a etapa X de N (fixas) e, na importação, plugin i de N.
+  it('rodando: mostra etapa X de N, o sub-andamento e a barra proporcional', async () => {
+    ler = async () => resposta(estado({
+      estado: 'executando', etapa: 'Instalando ou atualizando superpowers',
+      progresso: { passo: 3, total: 5, sub: { atual: 2, total: 4 } },
+    }));
+    const t = await montar(B);
+    const andamento = t.el.querySelector<HTMLElement>('.hs-integracao .hs-progresso')!;
+    expect(andamento).not.toBeNull();
+    expect(andamento.textContent).toContain(m.harness_codex_progresso({ passo: 3, total: 5 }));
+    expect(andamento.textContent).toContain(m.harness_codex_progresso_sub({ atual: 2, total: 4 }));
+    // (3-1 + (2-1)/4) / 5 = 45%
+    const barra = andamento.querySelector<HTMLElement>('[role="progressbar"]')!;
+    expect(barra.getAttribute('aria-valuenow')).toBe('45');
+  });
+
+  it('parada: sem barra', async () => {
+    ler = async () => resposta(estado({ estado: 'ok', progresso: null }));
+    const t = await montar(B);
+    expect(t.el.querySelector('.hs-integracao .hs-progresso')).toBeNull();
   });
 });

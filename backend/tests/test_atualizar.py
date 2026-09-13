@@ -758,11 +758,83 @@ def test_reinicio_que_falha_deixa_rastro_no_estado(repo, monkeypatch):
     nenhum. Sem gravar no estado, um `systemctl` que falha some por completo e a tela fica esperando
     um servidor que nunca cai."""
     monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
     monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
     monkeypatch.setattr(atualizar, "_reiniciar",
                         lambda topo: (_ for _ in ()).throw(RuntimeError("systemctl explodiu")))
     atualizar.executar_reinicio()
     assert "systemctl explodiu" in atualizar.estado()["reinicio_erro"]
+
+
+def _dist_do_ci(repo, monkeypatch, sha: str, index: bool = True):
+    """Dublê do release `dist-latest`: um `.sha` e um tar.gz com (ou sem) index.html."""
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if index:
+            dado = b"<html>novo</html>"
+            info = tarfile.TarInfo("index.html")
+            info.size = len(dado)
+            tar.addfile(info, io.BytesIO(dado))
+    corpo = {"frontend-dist.sha": sha.encode(), "frontend-dist.tar.gz": buf.getvalue()}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda url, timeout=0: _Resp(corpo[url.rsplit("/", 1)[1]]))
+
+
+def test_reinicio_troca_o_dist_pelo_do_ci(repo, monkeypatch):
+    """Reiniciar com o disco à frente do processo subia o backend novo servindo a tela velha:
+    repo == processo, a tela dizia "em dia", e o navegador seguia no bundle de antes."""
+    (repo / "frontend" / "dist").mkdir(parents=True)
+    (repo / "frontend" / "dist" / "index.html").write_text("velho", encoding="utf-8")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "dist")
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    _dist_do_ci(repo, monkeypatch, head)
+    assert atualizar._atualizar_dist() is None
+    assert (repo / "frontend" / "dist" / "index.html").read_text() == "<html>novo</html>"
+    assert not list((repo / "frontend").glob(".dist-baixado.*"))
+
+
+def test_reinicio_com_edicao_local_da_tela_compila_em_vez_de_baixar(repo, monkeypatch):
+    """Árvore suja em frontend/packages é quem desenvolve: o dist do CI apagaria o código dela da
+    tela, e recusar deixava a máquina de desenvolvimento sem jeito de atualizar a tela pelo app."""
+    (repo / "packages" / "core").mkdir(parents=True)
+    (repo / "packages" / "core" / "x.ts").write_text("edit", encoding="utf-8")
+    chamadas = []
+    monkeypatch.setattr(atualizar.shutil, "which", lambda n: "/usr/bin/npm" if n == "npm" else None)
+    rodar_real = atualizar._rodar   # `_git` também passa por `_rodar`: só o npm é dublado
+    def _build(args, cwd=None, timeout=0, log=None):
+        if args[0] != "/usr/bin/npm":
+            return rodar_real(args, cwd=cwd, timeout=timeout, log=log)
+        chamadas.append(args)
+        (repo / "frontend" / "dist").mkdir(parents=True, exist_ok=True)
+        (repo / "frontend" / "dist" / "index.html").write_text("local", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(atualizar, "_rodar", _build)
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("não devia baixar do CI")))
+    assert atualizar._atualizar_dist() is None
+    assert chamadas == [["/usr/bin/npm", "--prefix", "frontend", "run", "build"]]
+
+
+def test_reinicio_com_edicao_local_e_build_quebrado_avisa(repo, monkeypatch):
+    (repo / "frontend").mkdir(exist_ok=True)
+    (repo / "frontend" / "x.ts").write_text("edit", encoding="utf-8")
+    monkeypatch.setattr(atualizar.shutil, "which", lambda n: "/usr/bin/npm")
+    rodar_real = atualizar._rodar
+    monkeypatch.setattr(atualizar, "_rodar",
+                        lambda args, cwd=None, timeout=0, log=None: subprocess.CompletedProcess(args, 1, "", "erro X")
+                        if args[0] == "/usr/bin/npm" else rodar_real(args, cwd=cwd, timeout=timeout, log=log))
+    aviso = atualizar._atualizar_dist()
+    assert aviso and "build local" in aviso and "erro X" in aviso
 
 
 def test_reiniciar_agora_limpa_a_falha_anterior(repo, monkeypatch):

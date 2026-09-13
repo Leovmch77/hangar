@@ -94,6 +94,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   codex_account_plugin_update_failed: () => m.codex_account_plugin_update_failed(),
   codex_account_plugin_version_conflict: () => m.codex_account_plugin_version_conflict(),
   codex_account_source_destination_conflict: () => m.codex_account_source_destination_conflict(),
+  codex_account_source_sync_incomplete: () => m.codex_account_source_sync_incomplete(),
   codex_account_changed_during_prepare: () => m.codex_account_changed_during_prepare(),
   codex_account_destination_invalid: () => m.codex_account_destination_invalid(),
   codex_account_local_change: () => m.codex_account_local_change(),
@@ -118,6 +119,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   codex_login_attempt_mismatch: () => m.codex_login_attempt_mismatch(),
   erro_codex_resposta_invalida: () => m.erro_codex_resposta_invalida(),
   erro_codex_resposta_envio: () => m.erro_codex_resposta_envio(),
+  erro_codex_controle: () => m.erro_codex_controle(),
   erro_plano_removido: () => m.chat_plan_ausente(),
   erro_plano_ilegivel: () => m.chat_plan_erro(),
   // /api/claude-configs — apagar conta recusado por alguma condicao da maquina
@@ -128,6 +130,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_conta_inexistente: (p) => m.erro_conta_inexistente({ nome: String(p.nome) }),
   erro_login_ja_em_curso: () => m.erro_login_ja_em_curso(),
   erro_login_sem_tentativa: () => m.erro_login_sem_tentativa(),
+  erro_login_credencial_ilegivel: () => m.erro_login_credencial_ilegivel(),
   erro_login_timeout: () => m.erro_login_timeout(),
   erro_config_dir_sessao: (p) => m.erro_config_dir_sessao({ nome: String(p.nome) }),
   erro_sessao_usa_conta: (p) => m.erro_sessao_usa_conta({ nome: String(p.nome) }),
@@ -207,6 +210,9 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   alcance_endereco_desconhecido: () => m.erro_alcance_endereco_desconhecido(),
   alcance_sem_credencial: () => m.erro_alcance_sem_credencial(),
 
+  // /api/peers/descobrir — tailscale ausente, deslogado ou parado (não é "ninguém achado")
+  descoberta_sem_tailscale: () => m.erro_descoberta_sem_tailscale(),
+
   // require_auth / require_loopback — 429 do backoff, 403 do loopback
   erro_so_loopback: () => m.erro_so_loopback(),
 
@@ -277,6 +283,14 @@ const ERROS: Record<string, (params: Parametros) => string> = {
 
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),
+  erro_btw_so_claude: () => m.erro_btw_so_claude(),
+  erro_btw_vazia: () => m.erro_btw_vazia(),
+  erro_btw_nao_abriu: () => m.erro_btw_nao_abriu(),
+  erro_btw_sem_resposta: () => m.erro_btw_sem_resposta(),
+  erro_btw_ilegivel: () => m.erro_btw_ilegivel(),
+  erro_btw_composer_ocupado: () => m.erro_btw_composer_ocupado(),
+  erro_btw_fechado: () => m.erro_btw_fechado(),
+  erro_btw_nao_digitou: () => m.erro_btw_nao_digitou(),
   erro_terminal_invalido: (p) => m.erro_terminal_invalido({ nome: String(p.nome) }),
   erro_terminal_ausente: () => m.erro_terminal_ausente(),
   erro_terminal_abertura_falhou: (p) => m.erro_terminal_abertura_falhou({ erro: String(p.erro) }),

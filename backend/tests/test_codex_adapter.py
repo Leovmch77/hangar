@@ -312,6 +312,39 @@ async def test_send_prompt_deferred_when_not_attached():
     assert await adapter.send_prompt("ghost", "oi") == "deferred"
 
 
+async def test_warm_sessions_reconnects_all_sidecars_without_stopping_on_error(monkeypatch):
+    adapter = CodexAdapter()
+    monkeypatch.setattr(codex_sessions, "list_all", lambda: [
+        {"name": "um"}, {"name": "dois"}, {"sem_nome": True},
+    ])
+    seen = []
+
+    async def ensure(name):
+        seen.append(name)
+        if name == "um":
+            raise RuntimeError("fora")
+
+    monkeypatch.setattr(adapter, "ensure_running", ensure)
+    await adapter.warm_sessions()
+    assert seen == ["um", "dois"]
+
+
+async def test_warm_descobre_nova_sessao_sem_reconectar_as_existentes(monkeypatch):
+    from types import SimpleNamespace
+    adapter = CodexAdapter()
+    metas = [{"name": "um", "thread_id": "thread-um"}]
+    monkeypatch.setattr(codex_sessions, "list_all", lambda: list(metas))
+    seen = []
+    async def ensure(name):
+        seen.append(name)
+        adapter._sessions[name] = {"thread_id": "thread-" + name, "client": SimpleNamespace(closed=False)}
+    monkeypatch.setattr(adapter, "ensure_running", ensure)
+    await adapter.warm_sessions()
+    metas.append({"name": "dois", "thread_id": "thread-dois"})
+    await adapter.warm_sessions()
+    assert seen == ["um", "dois"]
+
+
 async def test_send_prompt_uses_turn_start_not_tmux(monkeypatch):
     # O prompt vai por turn/start no app-server, NAO digitado no pane. Medido (probe contra
     # codex-cli 0.144.6): a TUI `codex --remote` renderiza turno iniciado por outro cliente, entao
@@ -382,6 +415,25 @@ async def test_interrupt_noop_when_no_turn_in_flight():
     adapter.attach("sess", client, "thread-1")
     assert await adapter.interrupt("sess") is False
     assert client.requests == []
+
+
+async def test_interrupt_reconnects_cold_session_before_reading_turn(monkeypatch):
+    adapter = CodexAdapter()
+    client = _FakeClient([])
+    calls = []
+
+    async def ensure(name):
+        calls.append(name)
+        adapter._sessions[name] = {
+            "client": client, "thread_id": "thread-1", "in_progress": True,
+            "turn_id": "turn-1", "state": "working",
+        }
+        return client
+
+    monkeypatch.setattr(adapter, "ensure_running", ensure)
+    assert await adapter.interrupt("fria") is True
+    assert calls == ["fria"]
+    assert ("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"}) in client.requests
 
 
 # --- CodexAdapter drain-on-complete (P2) ----------------------------------------------------
@@ -1005,6 +1057,106 @@ async def test_rename_nao_reassina_sessao_ja_assinada():
     assert "novo" not in adapter._subscribers
 
 
+async def test_rename_sync_rearma_bomba_no_loop_do_backend():
+    codex_sessions.save("novo", "thread-1", "/rollout.jsonl", "/tmp/proj")
+    adapter = _fast_subscribe(CodexAdapter())
+    client = _LiveQueueClient()
+    adapter.attach("velho", client, "thread-1", subscribed=True)
+    antiga = adapter._sessions["velho"]["bomba"]
+
+    await asyncio.to_thread(adapter.rename, "velho", "novo")
+    async with asyncio.timeout(1):
+        while adapter._sessions["novo"].get("bomba") is antiga:
+            await asyncio.sleep(0)
+        while not antiga.done():
+            await asyncio.sleep(0)
+
+    assert antiga.cancelled()
+    assert client.aberturas == 2
+    await client._q.put(None)
+    await adapter._sessions["novo"]["bomba"]
+
+
+@pytest.mark.parametrize("blocked_method,fail", [("skills/list", False), ("turn/start", False), ("skills/list", True)])
+async def test_rename_espera_a_entrega_reivindicada(tmp_path, monkeypatch, blocked_method, fail):
+    from app import api, pqueue
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class Client(_LiveQueueClient):
+        async def request(self, method, params, timeout=30.0):
+            result = await super().request(method, params, timeout)
+            if method == blocked_method:
+                entered.set()
+                await release.wait()
+                if fail:
+                    raise RuntimeError("falha antes do envio")
+            return result
+
+    client = Client()
+    adapter = CodexAdapter()
+    adapter.attach("velho", client, "thread-1", subscribed=True)
+    monkeypatch.setattr(api, "get_adapter", lambda _provider: adapter)
+    renamed = []
+
+    def rename(name, body):
+        renamed.append(name)
+        adapter.rename(name, body.new)
+        pqueue.PromptQueue(name).rename(body.new)
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "_rename_session", rename)
+    pqueue.PromptQueue("velho").append("/review investigar bug")
+    await client._q.put({"method": "turn/completed", "params": {"threadId": "thread-1"}})
+    async with asyncio.timeout(3):
+        await entered.wait()
+        task = asyncio.create_task(api.rename_session("velho", api.RenameBody(new="novo")))
+        await asyncio.sleep(0)
+        assert renamed == []
+        assert pqueue.PromptQueue("velho").load()[0]["delivered"] is True
+        release.set()
+        await task
+    assert len([method for method, _ in client.requests if method == "turn/start"]) == (0 if fail else 1)
+    assert pqueue.PromptQueue("novo").load()[0]["delivered"] is (not fail)
+    assert pqueue.PromptQueue("velho").load() == []
+    await client._q.put(None)
+    await adapter._sessions["novo"]["bomba"]
+
+
+async def test_rename_protege_fila_do_destino_e_permite_voltar(tmp_path, monkeypatch):
+    import threading
+    from app import api, pqueue
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    adapter = CodexAdapter()
+    monkeypatch.setattr(api, "get_adapter", lambda _provider: adapter)
+    monkeypatch.setattr(api, "_session_exists", lambda _name: True)
+    monkeypatch.setattr(adapter, "deliverable", lambda _name: asyncio.sleep(0, result=False))
+    entered, release = threading.Event(), threading.Event()
+
+    def rename(name, body):
+        entered.set()
+        assert release.wait(3)
+        pqueue.PromptQueue(name).rename(body.new)
+        adapter.rename(name, body.new)
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "_rename_session", rename)
+    pqueue.PromptQueue("velho").append("pedido anterior")
+    async with asyncio.timeout(5):
+        task = asyncio.create_task(api.rename_session("velho", api.RenameBody(new="novo")))
+        assert await asyncio.to_thread(entered.wait, 3)
+        send = asyncio.create_task(api._send_one_codex("novo", "pedido durante a renomeação"))
+        await asyncio.sleep(0)
+        assert not send.done()
+        release.set()
+        await task
+        assert (await send)["ok"]
+        assert [e["text"] for e in pqueue.PromptQueue("novo").load()] == [
+            "pedido anterior", "pedido durante a renomeação"]
+        await api.rename_session("novo", api.RenameBody(new="velho"))
+        assert len(pqueue.PromptQueue("velho").load()) == 2
+
+
 async def test_deliverable_libera_turno_preso_em_sessao_nao_assinada():
     # Sem assinatura nao chega turn/completed -> in_progress nunca seria limpo e TODO envio virava
     # "deferred" pra sempre, em silencio. Expira por tempo (com log) em vez de bloquear.
@@ -1056,6 +1208,96 @@ class _QueueClient:
         return {}
 
 
+class _LiveQueueClient:
+    closed = False
+
+    def __init__(self):
+        self._q: asyncio.Queue = asyncio.Queue()
+        self.aberturas = 0
+        self.requests: list[tuple[str, dict]] = []
+
+    async def notifications(self):
+        self.aberturas += 1
+        while (item := await self._q.get()) is not None:
+            yield item
+
+    async def request(self, method: str, params: dict, timeout: float = 30.0) -> dict:
+        self.requests.append((method, params))
+        return {}
+
+
+async def test_bomba_continua_consumindo_sem_sse_aberto():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    adapter.attach("viva", client, "t")
+    monitor = adapter.state_monitor("viva", lambda: "viva")
+    await monitor.__anext__()
+    await monitor.aclose()
+
+    await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+    async with asyncio.timeout(1):
+        while adapter._sessions["viva"]["state"] != "working":
+            await asyncio.sleep(0)
+
+    bomba = adapter._sessions["viva"]["bomba"]
+    await client._q.put(None)
+    await bomba
+
+
+async def test_bomba_publica_na_fonte_recriada_depois_que_sse_fecha():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    adapter.attach("volta", client, "t")
+    async with asyncio.timeout(1):
+        while client.aberturas != 1:
+            await asyncio.sleep(0)
+
+    fonte_antiga = CodexPreviewSource.get("volta")
+    assinatura = fonte_antiga.subscribe()
+    await assinatura.__anext__()
+    await assinatura.aclose()
+    fonte_nova = CodexPreviewSource.get("volta")
+
+    await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+    await client._q.put({"method": "item/agentMessage/delta",
+                         "params": {"threadId": "t", "delta": "voltou"}})
+    async with asyncio.timeout(1):
+        while fonte_nova.text != "voltou":
+            await asyncio.sleep(0)
+
+    bomba = adapter._sessions["volta"]["bomba"]
+    await client._q.put(None)
+    await bomba
+
+
+async def test_bomba_encerrada_reinicia_na_proxima_abertura():
+    class _FalhaUmaVez(_LiveQueueClient):
+        async def notifications(self):
+            self.aberturas += 1
+            if self.aberturas == 1:
+                raise RuntimeError("falha transitória")
+            while (item := await self._q.get()) is not None:
+                yield item
+
+    adapter = CodexAdapter()
+    client = _FalhaUmaVez()
+    adapter.attach("reinicia", client, "t")
+    primeira = adapter._sessions["reinicia"]["bomba"]
+    async with asyncio.timeout(1):
+        while not primeira.done():
+            await asyncio.sleep(0)
+
+    stream = adapter.state_monitor("reinicia", lambda: "reinicia")
+    await stream.__anext__()
+    await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+    assert (await stream.__anext__()).state == "working"
+    assert client.aberturas == 2
+    assert "bomba_error" not in adapter._sessions["reinicia"]
+    await stream.aclose()
+    await client._q.put(None)
+    await adapter._sessions["reinicia"]["bomba"]
+
+
 async def test_dois_sse_na_mesma_sessao_recebem_a_resposta_inteira():
     # Desktop + celular no mesmo chat: cada SSE abre um state_monitor. Com um consumidor por SSE
     # os deltas eram DIVIDIDOS entre eles (cada um ficava com metade da frase) e os dois empurravam
@@ -1080,23 +1322,24 @@ async def test_dois_sse_na_mesma_sessao_recebem_a_resposta_inteira():
     assert CodexPreviewSource.get("dois").text == "Faria em mudancas pequenas"
 
 
-async def test_ouvinte_que_chega_na_janela_do_cancel_ganha_bomba_nova():
-    # `Task.cancel()` so agenda; a task continua `not done()` ate a proxima volta do loop. Um
-    # ouvinte que entra nessa janela (celular reconectando) nao pode herdar a bomba que esta
-    # morrendo — ela nunca mais espalha nada, e ele ficaria mudo.
+async def test_ouvinte_novo_reusa_a_bomba_permanente():
     adapter = CodexAdapter()
-    client = _QueueClient([{"method": "turn/started", "params": {}}] * 6)
+    client = _LiveQueueClient()
     adapter.attach("janela", client, "t")
     primeiro = adapter.state_monitor("janela", lambda: "janela")
-    await primeiro.__anext__()                 # retrato
-    await primeiro.__anext__()                 # 1o evento da bomba
-    await primeiro.aclose()                    # ultimo ouvinte sai -> cancel() agendado
-    vistos = []
-    async with asyncio.timeout(5):
-        async for ev in adapter.state_monitor("janela", lambda: "janela"):
-            vistos.append(ev.state)
-    assert client.aberturas == 2, "o 2o ouvinte precisa de uma bomba nova, nao da que morre"
-    assert len(vistos) >= 2                    # retrato + pelo menos um evento vivo
+    await primeiro.__anext__()
+    await primeiro.aclose()
+
+    segundo = adapter.state_monitor("janela", lambda: "janela")
+    await segundo.__anext__()
+    await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+    assert (await segundo.__anext__()).state == "working"
+    assert client.aberturas == 1
+
+    await segundo.aclose()
+    bomba = adapter._sessions["janela"]["bomba"]
+    await client._q.put(None)
+    await bomba
 
 
 async def test_excecao_na_bomba_chega_no_ouvinte_em_vez_de_pendurar():

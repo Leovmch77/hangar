@@ -39,10 +39,11 @@ def test_primeira_rodada_tira_so_o_que_o_instalador_antigo_escreveu(tmp_path):
     service._estado = codex_integracao._snapshot()
     service._migrar_ponte_antiga()
     novo = json.loads((home / ".codex/hooks.json").read_text())
-    estado_novo = _grupo(codex_hook_installer._STATE_COMMAND)
+    estado_novo = _grupo(codex_hook_installer.comando_estado())
+    guarda_nova = _grupo(codex_hook_installer.comando_guarda(), matcher="Bash")
     assert novo == {"hooks": {"SessionStart": [_grupo(depois_a_mao), estado_novo],
                               "UserPromptSubmit": [estado_novo, _grupo(codex_hook_installer.comando_navegador())],
-                              "PreToolUse": [estado_novo],
+                              "PreToolUse": [estado_novo, guarda_nova],
                               "PostToolUse": [estado_novo], "Stop": [estado_novo]}}
     assert not (home / ".codex/.hangar-hooks.json").exists()
     assert list(service.backups.iterdir()), "o espelho e o hooks.json anterior vão pro backup"
@@ -65,7 +66,10 @@ def test_sem_espelho_nao_toca_no_hooks_json(tmp_path):
 def test_hooks_do_app_nao_vao_pro_importador_os_do_usuario_vao():
     hooks = {"SessionStart": [_grupo(PESSOAL, ESTADO)],
              "Stop": [_grupo('"/x/backend/hooks/preview_hook.py" || exit 0')],
-             "PreToolUse": [_grupo("rtk hook claude", matcher="Bash")],
+             "PreToolUse": [
+                 _grupo("rtk hook claude", matcher="Bash"),
+                 _grupo('"/venv/python" "/home/x/.claude/hooks/guard_tmux.py"', matcher="Bash"),
+             ],
              "Estranho": "não é lista"}
     assert sem_hooks_do_app(hooks) == {"SessionStart": [_grupo(PESSOAL)],
                                        "PreToolUse": [_grupo("rtk hook claude", matcher="Bash")],
@@ -77,19 +81,19 @@ def test_instalador_acrescenta_uma_vez_e_nao_reescreve_entrada_existente(tmp_pat
     codex.mkdir()
     (codex / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [_grupo(ESTADO)],
                                                              "PreToolUse": [_grupo(PESSOAL)]}}))
-    assert codex_hook_installer.ensure_codex_state_hook_installed(codex) == [
+    assert codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=False) == [
         "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
     data = json.loads((codex / "hooks.json").read_text())
     assert data["hooks"]["SessionStart"] == [_grupo(ESTADO)], "formato antigo fica como está"
     assert [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]] == [
-        PESSOAL, codex_hook_installer._STATE_COMMAND]
+        PESSOAL, codex_hook_installer._STATE_COMMAND, codex_hook_installer.comando_guarda(False)]
     assert [h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]] == [
-        codex_hook_installer._STATE_COMMAND, codex_hook_installer.comando_navegador()]
-    assert codex_hook_installer.ensure_codex_state_hook_installed(codex) == []
+        codex_hook_installer._STATE_COMMAND, codex_hook_installer.comando_navegador(False)]
+    assert codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=False) == []
     assert json.loads((codex / "hooks.json").read_text()) == data
 
 
-def test_no_windows_o_hook_de_estado_vai_em_powershell_e_o_formato_cmd_e_reescrito(tmp_path, monkeypatch):
+def test_no_windows_o_hook_de_estado_vai_em_powershell_e_o_formato_cmd_e_reescrito(tmp_path):
     # Medido na VM (codex 0.154.0): hooks rodam no PowerShell 7; `"exe" "arg" || exit 0` e
     # UnexpectedToken e sai com 1 em todo evento. Formato antigo nosso e reescrito SO no Windows.
     ps = codex_hook_installer.comando_estado(windows=True)
@@ -99,20 +103,37 @@ def test_no_windows_o_hook_de_estado_vai_em_powershell_e_o_formato_cmd_e_reescri
     codex.mkdir()
     (codex / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [_grupo(ESTADO)],
                                                              "PreToolUse": [_grupo(PESSOAL)]}}))
-    monkeypatch.setattr(codex_hook_installer.os, "name", "nt")
-    gravados = codex_hook_installer.ensure_codex_state_hook_installed(codex)
+    gravados = codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=True)
     assert "SessionStart" in gravados
     data = json.loads((codex / "hooks.json").read_text())
     assert data["hooks"]["SessionStart"] == [_grupo(ps)], "formato cmd reescrito no Windows"
-    assert [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]] == [PESSOAL, ps]
-    assert codex_hook_installer.ensure_codex_state_hook_installed(codex) == []
+    assert [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]] == [
+        PESSOAL, ps, codex_hook_installer.comando_guarda(True)]
+    assert codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=True) == []
     # Forma PowerShell de OUTRO venv/checkout ja funciona: nao e reescrita (preserva a aprovacao).
     # Barras normais: o basename POSIX deste teste nao separa `\`; no Windows real os dois valem.
     outro = '& "D:/outro/python.exe" "D:/outro/hooks/state_hook.py" ; exit 0'
     (codex / "hooks.json").write_text(json.dumps({"hooks": {"SessionStart": [_grupo(outro)]}}))
-    gravados = codex_hook_installer.ensure_codex_state_hook_installed(codex)
+    gravados = codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=True)
     assert "SessionStart" not in gravados
     assert json.loads((codex / "hooks.json").read_text())["hooks"]["SessionStart"] == [_grupo(outro)]
+
+
+def test_no_windows_o_guard_importado_e_substituido_pelo_hook_proprio_do_codex(tmp_path):
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    antigo = f'"{sys.executable}" "C:/Users/x/.claude/hooks/guard_tmux.py"'
+    (codex / "hooks.json").write_text(json.dumps({"hooks": {
+        "PreToolUse": [_grupo(antigo, matcher="Bash")],
+    }}))
+    assert codex_hook_installer.ensure_codex_state_hook_installed(codex, windows=True).count("PreToolUse") == 1
+    data = json.loads((codex / "hooks.json").read_text())
+    comandos = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]]
+    guard = [c for c in comandos if "guard_tmux.py" in c]
+    assert len(guard) == 1
+    assert guard[0].startswith('& "')
+    assert guard[0].endswith('; exit $LASTEXITCODE')
+    assert "backend/hooks/guard_tmux.py" in guard[0].replace("\\", "/")
 
 
 def test_instalador_nao_zera_evento_que_nao_e_lista(tmp_path):
@@ -130,12 +151,12 @@ def test_navegador_preserva_comando_existente_e_confianca(tmp_path):
     (tmp_path / "hooks.json").write_text(json.dumps({"hooks": {
         "state": confianca, "UserPromptSubmit": [_grupo(comando)],
     }}))
-    codex_hook_installer.ensure_codex_state_hook_installed(tmp_path)
+    codex_hook_installer.ensure_codex_state_hook_installed(tmp_path, windows=False)
     data = json.loads((tmp_path / "hooks.json").read_text())
     comandos = [h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
     assert comandos == [comando, codex_hook_installer._STATE_COMMAND]
     assert data["hooks"]["state"] == confianca
-    assert codex_hook_installer.ensure_codex_state_hook_installed(tmp_path) == []
+    assert codex_hook_installer.ensure_codex_state_hook_installed(tmp_path, windows=False) == []
 
 
 def test_navegador_tem_comando_powershell_no_windows():
@@ -297,7 +318,7 @@ async def test_md_solto_em_agents_e_ignorado_com_aviso_sem_derrubar_a_etapa(tmp_
     (home / ".claude/settings.json").write_text('{"enabledPlugins": {}, "hooks": {}, "env": {}}')
 
     class Importer:
-        def __init__(self, stage, cx, binario):
+        def __init__(self, stage, cx, binario, **kwargs):
             self.stage, self.cx = stage, cx
         async def __aenter__(self): return self
         async def __aexit__(self, *a): pass

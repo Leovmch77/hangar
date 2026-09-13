@@ -50,3 +50,49 @@ export function appendTail(tail: ChatEvent[], current: ChatEvent[]): ChatEvent[]
   if (fresh.length === tail.length) return tail;
   return fresh.length ? [...current, ...fresh] : current;
 }
+
+/** Junta a cauda REST com eventos que o SSE já colocou na tela durante a mesma carga. */
+export function mergeHistoryWithLive(
+  history: ChatEvent[],
+  current: ChatEvent[],
+  options: {
+    preserveNoSeam?: boolean;
+    removedIds?: ReadonlySet<string>;
+    cachedEvents?: ReadonlySet<ChatEvent>;
+  } = {},
+): ChatEvent[] {
+  const removed = options.removedIds ?? new Set<string>();
+  const clean = history.filter(e => !removed.has(e.id));
+  current = current.filter(e => !removed.has(e.id));
+  let merged: ChatEvent[];
+  if (!hasSeam(clean, current)) {
+    const live = options.preserveNoSeam
+      ? current
+      : options.cachedEvents
+        ? current.filter((e) => !options.cachedEvents!.has(e))
+        : [];
+    merged = [...clean, ...live];
+  } else {
+    const historyIds = new Set(clean.map(e => e.id));
+    const positions = new Map(current.map((e, i) => [e.id, i]));
+    const first = current.findIndex(e => historyIds.has(e.id));
+    // A fila também chega por SSE; um eco novo não é parte do histórico anterior à cauda.
+    merged = current.slice(0, Math.max(first, 0))
+      .filter(e => !e.id.startsWith('queued-') || options.cachedEvents?.has(e));
+    const precedingIds = new Set(merged.map(e => e.id));
+    let cursor = 0;
+    for (const event of clean) {
+      const position = positions.get(event.id);
+      if (position !== undefined) {
+        while (cursor < position) {
+          const preceding = current[cursor++];
+          if (!historyIds.has(preceding.id) && !precedingIds.has(preceding.id)) merged.push(preceding);
+        }
+        cursor = Math.max(cursor, position + 1);
+      }
+      merged.push(position === undefined ? event : current[position]);
+    }
+    merged.push(...current.slice(cursor).filter(e => !historyIds.has(e.id)));
+  }
+  return merged.filter(e => !removed.has(e.id));
+}

@@ -86,6 +86,11 @@ function montar(props: Record<string, unknown> = {}) {
 const tecla = (rotulo: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('.tx-key')]
     .find((b) => b.textContent?.trim() === rotulo || b.getAttribute('aria-label') === rotulo)!;
+// Igual ao `tecla`, mas admite ausencia: quem espera um botao APARECER precisa poder ler undefined
+// sem estourar (o `tecla` afirma com `!` porque toda tecla da barra existe desde a montagem).
+const botao = (rotulo: string) =>
+  [...document.querySelectorAll<HTMLButtonElement>('.tx-key')]
+    .find((b) => b.textContent?.trim() === rotulo);
 
 // Bytes do PTY chegando: e por aqui que o programa entra em tela alternada (o mesmo `\x1b[?1049h`
 // que o Claude Code, o vim e o less mandam ao abrir).
@@ -219,6 +224,61 @@ describe('TerminalMobile', () => {
     t.estado.open = false;
     await ate(() => FakeWS.fechados > 0);
     expect(FakeWS.fechados).toBe(1);
+    unmount(t.comp);
+  });
+
+  it('origem recusada: um toque libera a origem e reconecta', async () => {
+    // O 403 por Origin chega como close MUDO (o navegador nao entrega corpo de handshake recusado):
+    // a tela pergunta por HTTP e, sendo isso, oferece o botao que GRAVA a origem. Sem ele, a saida
+    // era achar Configuracoes -> Maquinas e digitar a URL num teclado de celular.
+    vi.spyOn(api, 'getConfigForServer').mockResolvedValue({
+      campos: { term_origins: { valor: 'https://outra.test', definido: true, origem: 'app' } },
+      somente_leitura: { terminal_origem_ok: false },
+    } as never);
+    const patch = vi.spyOn(api, 'patchConfigForServer').mockResolvedValue({ campos: {} } as never);
+    const t = montar();
+    await socketPronto();
+    FakeWS.ultimo!.onclose!();                   // close sem reason = o caso do 403 por Origin
+    await ate(() => botao(m.term_liberar_origem_btn()) !== undefined);
+    const antes = FakeWS.abertos;
+    botao(m.term_liberar_origem_btn())!.click();
+    await ate(() => FakeWS.abertos > antes);
+    // SOMA, nunca sobrescreve: term_origins e lista, e apagar a origem que alguem declarou antes
+    // tiraria o OUTRO aparelho do ar (o backend soma env + tela pelo mesmo motivo).
+    expect(patch).toHaveBeenCalledWith(expect.anything(),
+      { term_origins: `https://outra.test,${window.location.origin}` });
+    expect(FakeWS.abertos).toBe(antes + 1);      // reconectou sozinho, sem segundo toque
+    unmount(t.comp);
+  });
+
+  it('origem recusada: falha ao gravar aparece na tela e nao reconecta', async () => {
+    vi.spyOn(api, 'getConfigForServer').mockResolvedValue({
+      campos: {}, somente_leitura: { terminal_origem_ok: false },
+    } as never);
+    vi.spyOn(api, 'patchConfigForServer').mockRejectedValue(new Error('401'));
+    const t = montar();
+    await socketPronto();
+    FakeWS.ultimo!.onclose!();
+    await ate(() => botao(m.term_liberar_origem_btn()) !== undefined);
+    const antes = FakeWS.abertos;
+    botao(m.term_liberar_origem_btn())!.click();
+    await ate(() => document.querySelector('.tx-caiu')?.textContent?.includes('401') === true);
+    // Reconectar depois de um Salvar que falhou so repete o 403 e apaga a mensagem do erro.
+    expect(FakeWS.abertos).toBe(antes);
+    unmount(t.comp);
+  });
+
+  it('pergunta de cor do terminal morre no xterm, sem virar digitacao no pane', async () => {
+    const t = montar();
+    await socketPronto();
+    // Quem pergunta a paleta e o psmux ao anexar um cliente (OSC 4 por cor, 10 frente, 11 fundo).
+    // No Windows ele nao consome a resposta: ela desce pro pane e o composer da TUI engole os
+    // pedacos ("434", "33" sao substrings de `]4;3;rgb:...`). Responder e que e o bug.
+    doPty(']11;?');
+    doPty(']4;3;?');
+    doPty(']10;?');
+    await quadros(20);
+    expect(enviados()).toEqual([]);
     unmount(t.comp);
   });
 

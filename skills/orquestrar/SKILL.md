@@ -1,11 +1,22 @@
 ---
 name: orquestrar
 description: |
-  Do NOT pick this skill on your own because a task looks large, risky, multi-step or about to become an MR/push - planning, implementing and reviewing on your own, however big, is NOT this skill. It is invoked in exactly two situations - (1) the user asks for the pipeline by name or in their own words - "orquestra", "executa esse plano sem eu ficar em cima", "monta o time e toca", "quero revisao independente por commit", "portao entre as Tasks", "abre uma sessao pra revisar", "arbitro/executor/revisor" - or (2) a kick-off message literally says to invoke the `orquestrar` skill and carries a `Role:` line (executor, reviewer, branch review, retrospective, arbiter). Nothing else triggers it. What it does - one large piece of work with independent review per commit, a gate between Tasks and little interaction from the user after planning; one repo or several, plan in any format or none. Not for a small task one session can solve, nor for a one-off review of a diff (dispatch a review subagent directly).
+  Orquestre um trabalho com revisão independente quando o usuário pedir esse fluxo — por nome
+  ou em palavras ("monta o time", "revisão independente por commit") — ou um kick-off mandar
+  invocar orquestrar com uma linha Role:. A rota (audit: quem planejou escreve e uma revisão
+  fresca fecha; full: time com portão por Task) é decidida DENTRO do fluxo, com o usuário.
+  NÃO ativa por tamanho ou risco da tarefa, por execução comum de plano, por revisão avulsa de
+  diff, nem para trabalho que uma sessão só entrega — a rota solo não existe aqui, e o modelo
+  nunca invoca esta skill para decidir se precisa dela.
 allowed-tools: Bash(hangar-send:*), Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*), Bash(git branch:*), Bash(git grep:*), Bash(tmux display:*), Bash(date:*)
 ---
 
 # Pipeline: research → plan → autonomous execution with a gate
+
+Pedidos do fluxo podem vir pelo nome ou em palavras como "monta o time e toca" e
+"quero revisão independente por commit". Um pedido genérico para executar um plano não
+basta: ele precisa indicar a orquestração. O fluxo aceita um ou vários repositórios e
+plano em qualquer formato; uma revisão avulsa de diff usa um revisor, sem abrir o pipeline.
 
 > **Before anything else: were you told to invoke this skill by name?** Either the user asked for
 > the pipeline (by name or in their own words) or a kick-off message says "invoke the `orquestrar`
@@ -26,6 +37,15 @@ what the plan left open.
 | 3. Execution | executor + reviewer, **separate sessions** | only the executor | every Task with `APROVA` |
 | 4. Branch review | fresh session that took no part | no | the whole set approved |
 | 5. Retrospective | fresh session that took no part | no | proposed patch for **this skill**, in the user's hands |
+
+**The table is the `full` route. There is a second one, `audit`, decided in phase 1 with the
+team**: whoever planned writes the code in their own session — no arbiter, no executor, no
+per-Task reviewer, no phase 2 or 3 — and the branch goes whole to phase 4, a fresh read-only
+session, then phase 5. It is the route for work whose Tasks are bounded, fully specified and few
+enough for one writer in one context; `full` is the default. The route goes into the contract
+(`Route:`) and only ever escalates — `audit` → `full`, through `references/replanejar.md`, when
+the work reveals a risk the plan didn't see. It never downgrades, and there is no `solo`: work one
+session delivers without independent review does not invoke this skill.
 
 **The work does not end at phase 4.** An approved branch is finished code; phase 5 is what makes
 the next run better than this one. It is short (one session, the work's durable directory and the
@@ -61,6 +81,10 @@ confirming it is a reviewer while it is in the middle of a commit.
 | **reviewer** | `references/revisor.md` (+ 2 per-moment pages, which it lists) | the kick-off says `Role: reviewer` |
 | **final review** | `references/revisao-final.md` | the kick-off says `Role: branch review` |
 | **retrospective** | `references/retrospectiva.md` | the kick-off says `Role: retrospective` |
+
+On the `audit` route the planner is also the **writer**: after the user's "go ahead" they write
+the code themselves, one Task = one commit, reading no arbiter or executor page — the only
+kick-offs they send are phase 4's and phase 5's.
 
 Two pages that are not roles:
 
@@ -114,13 +138,18 @@ plans nor executes.** Two other things do, and both are declared in `regras-<gid
 each, written at launch and repeated in every kick-off:
 
 ```markdown
-Method: superpowers          # which skill family plans and executes (superpowers | mattpocock | none)
-Domain skill: portar-tela    # the step-by-step of this kind of work, when one exists (name | none)
+Method: <name | none>            # what plans and executes — the user names it; `none` = the plan is theirs
+Executes with: <command | none>  # the method's executing half; the executor's kick-off starts with it
+Domain skill: portar-tela        # the step-by-step of this kind of work, when one exists (name | none)
+Route: <audit | full>            # who writes and who reviews — decided in phase 1, escalates only
 ```
 
-- The **method** is who plans and who executes — `superpowers` (the default, the user's decision),
-  `mattpocock`, or `none` when the plan is the user's own. A *method* is not an *engine*: the engine
-  is the model provider (`--engine`, `engines.json`); a session has both, decided separately.
+- The **method** is who plans and who executes — whatever the user names, or `none` when the plan
+  is the user's own. **This skill names no method and has no default**: what it demands of any
+  method is two halves, one that plans and one that executes, both installed and tested in the
+  account that executes (`planejamento.md`, "Before phase 0"). `Executes with:` carries the
+  executing half's command, or `none`. A *method* is not an *engine*: the engine is the model
+  provider (`--engine`, `engines.json`); a session has both, decided separately.
 - The **domain skill** describes *the work itself*, step by step, because someone has done it dozens
   of times (porting a screen, creating a module). When one exists, the plan does not repeat it: it
   **instantiates** it, each Task citing the skill step it executes, and the executor re-reads the
@@ -137,15 +166,15 @@ the two domain-skill checks before Task 1, and what the arbiter writes at launch
 The work has two layers, and this skill talks about both all the time. They belong to no method:
 
 - **Task** — the unit of work: it has a name, a set of files, a verification and whatever blocks
-  it. It is what the gate opens and closes, and what becomes **one** commit. In `superpowers` it's
-  a Task; in `mattpocock` it's a ticket; in a hand-written plan it's an item.
-- **step** — the smallest **checkable** thing inside a Task. In `superpowers` it's a Step; in
-  `mattpocock` it's an acceptance criterion (its template already uses `- [ ]`); in a hand-written
-  plan it's whatever the planner writes in the orchestration plan.
+  it. It is what the gate opens and closes, and what becomes **one** commit. A method may call it
+  a Task, a ticket or an item — the name is the method's, the unit is this skill's.
+- **step** — the smallest **checkable** thing inside a Task. A method may call it an acceptance
+  criterion, a checkbox or a numbered item; in a hand-written plan it's whatever the planner writes in
+  the orchestration plan.
 
 Everything this skill hangs on the step — tracking progress, predicting the context-rotation
 point, requiring a smoke test, declaring owned preconditions, splitting parallel arms, triggering
-the reviewer's mutation test — works the same in all three forms. **The single exception is
+the reviewer's mutation test — works the same whatever the method calls them. **The single exception is
 literal and isolated:** the phone's progress bar matches the word `Step` by regex
 (`planejamento.md`, "The app's progress bar"), and the bar is optional.
 
@@ -160,8 +189,8 @@ there, by name. The kick-off is an address, not a manual.
 ```
 Invoke the orquestrar skill and read your role's page.
 Role: <executor | reviewer | branch review>.
-Method: <superpowers | mattpocock | none — the plan is the user's>.
-Domain skill: <name | none>.
+Method: <name | none — the plan is the user's>.   Executes with: <command | none>.
+Domain skill: <name | none>.   Route: <audit | full>.
 Repo/branch: <path> / <branch>.   Expected HEAD: <hash>.
 Group rules: <path to regras-<gid>.md>.
 Durable dir: <~/.hangar/orq/<date>-<gid>/ — reports, diffs and screenshots go here, never /tmp>.
@@ -235,10 +264,10 @@ First line of the rules file, so an amnesiac session can re-anchor itself:
 ```markdown
 > Sessions of this group: invoke the `orquestrar` skill and read your role's page.
 > Branch: <branch> · Repo: <path>
-> Method: <superpowers | mattpocock | none> · Domain skill: <name | none>
+> Method: <name | none> · Executes with: <command | none> · Domain skill: <name | none> · Route: <audit | full>
 ```
 
-The `Method:` and `Domain skill:` lines are mandatory (see "Method and domain skill come from the
+The `Method:`, `Executes with:`, `Domain skill:` and `Route:` lines are mandatory (see "Method and domain skill come from the
 contract", above) and never change midway.
 
 **What changes per Task goes in no file at all**: which Task is released, what the hash is, who
@@ -254,8 +283,8 @@ reviews one. How that is done depends on the material's format:
   of a whole plan.
 - **One file per unit** (tickets) → **point at the user's file**, without copying. Copies go
   stale: the executor checks the criteria off in the original and the copy starts lying about
-  what's done. The work context the ticket doesn't carry — because `to-tickets` says to write only
-  the slice — goes **pasted** into the kick-off, three or four lines, as is already done with the
+  what's done. The work context the ticket doesn't carry — a ticket method writes only the
+  slice — goes **pasted** into the kick-off, three or four lines, as is already done with the
   lessons.
 
 **Who belongs to the group comes from the contract, never from `hangar-send --list`.** A live

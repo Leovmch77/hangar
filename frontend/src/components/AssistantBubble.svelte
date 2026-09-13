@@ -2,7 +2,7 @@
   import { renderMarkdown } from '../lib/markdown';
   import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
-  import { parseFilePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
+  import { parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { textoFalavelComCodigo } from '../lib/speakable';
   import { abrirComTexto } from '../lib/ttsSelection.svelte';
@@ -19,13 +19,14 @@
     ts?: number | null;
     sessionName?: string;
     preview?: boolean;
+    streaming?: boolean;
     md?: boolean;        // previa cujo texto e markdown CRU (veio do agente, nao raspado da tela)
     full?: boolean;      // previa INCREMENTAL (so cresce no fim: deltas, ou a costura do pane do
                          // Kimi) -> texto plano SEM o teto de 10 linhas do ramo raspado comum
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade/slide
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
   }
-  let { text, ts, sessionName = '', preview = false, md = false, full = false, animate = true, onForward = null }: Props = $props();
+  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, animate = true, onForward = null }: Props = $props();
 
   // Previa em texto PLANO era consequencia da FONTE, nao escolha: raspada do pane, ela ja vinha
   // pintada pela TUI e renderizar de novo estragaria. Quando o proprio agente publica o texto
@@ -75,14 +76,16 @@
   // Gate pelo preview: bolha de HISTORICO (preview=false) nunca le tw.texto, e alimentar a
   // maquina mesmo assim acordava um rAF por bolha — ate 120 de uma vez ao abrir conversa longa
   // (achado da review).
-  $effect(() => { if (preview) tw.set(textoPreviaBruto); else tw.parar(); });
+  $effect(() => { if (preview) tw.set(textoPreviaBruto, streaming); else tw.parar(); });
   $effect(() => () => tw.parar());
   const textoPrevia = $derived(preview ? tw.texto : textoPreviaBruto);
 
-  const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia)) : '');
-  const html = $derived(preview ? '' : renderMarkdown(text));
+  const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia, { fileLinks: !!sessionName })) : '');
+  const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName }));
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
-  const fileRefs = $derived(!preview && sessionName ? parseFilePaths(text) : []);
+  const codePaths = $derived(new Set(parseCodePaths(text)));
+  const fileRefs = $derived(!preview && sessionName
+    ? parseFilePaths(text).filter((ref) => !codePaths.has(ref.path)) : []);
   // Midia remota (URL http) -> preview inline; nao depende do backend/sessionName.
   const mediaRefs = $derived(preview ? [] : parseMediaUrls(text));
 
@@ -268,9 +271,18 @@
   .msg-copy.copied { color: var(--accent); opacity: 1; }
   .msg-copy.copied::before { content: '✓'; }
 
+  /* O horário entra na mesma regra de hover dos botões: visível em toda mensagem ele vira uma linha
+     de meta a cada bloco ("10:14 / 10:15 / 10:15"), e no mouse quem quer saber a hora passa por
+     cima. No toque não há hover, então lá ele continua sempre à vista. A faixa já tem a altura dos
+     botões, então esconder o texto não mexe no layout. */
   @media (hover: hover) and (pointer: fine) {
-    .msg-copy, .msg-fwd, .msg-tts { opacity: 0; }
-    .assistant-msg:hover .msg-copy, .assistant-msg:hover .msg-fwd, .assistant-msg:hover .msg-tts { opacity: 0.55; }
+    .msg-copy, .msg-fwd, .msg-tts, .ts { opacity: 0; }
+    /* O :focus-within anda junto do :hover porque estes são BOTÕES: sem ele, chegar neles por Tab
+       foca um alvo invisível (o foco existe, o olho não acha). Vale pro horário pela mesma razão —
+       quem navega por teclado não tem como passar o mouse pra ler a hora. */
+    .assistant-msg:hover .ts, .assistant-msg:focus-within .ts { opacity: 1; }
+    .assistant-msg:hover .msg-copy, .assistant-msg:hover .msg-fwd, .assistant-msg:hover .msg-tts,
+    .assistant-msg:focus-within .msg-copy, .assistant-msg:focus-within .msg-fwd, .assistant-msg:focus-within .msg-tts { opacity: 0.55; }
     .msg-copy:hover, .msg-fwd:hover, .msg-tts:hover { opacity: 1 !important; background: var(--bg-hover); color: var(--text-primary); }
   }
 
@@ -376,6 +388,22 @@
 
   .prose :global(a) { color: var(--accent); text-decoration: underline; }
 
+  .prose :global(.file-citation) {
+    display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; min-height: 0;
+    vertical-align: baseline; padding: 0 5px; border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+    color: var(--text-primary); font: inherit; font-size: 0.85em; line-height: 1.5;
+    cursor: pointer; text-align: left; transition: background 150ms ease-out, border-color 150ms ease-out;
+  }
+  .prose :global(.file-citation:hover) { background: var(--surface-raised); border-color: var(--text-muted); }
+  .prose :global(.file-citation:active) { background: var(--surface-inset); }
+  .prose :global(.file-citation:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .prose :global(.file-citation-name) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prose :global(.file-citation-line) { color: var(--text-muted); margin-left: -4px; flex: none; }
+  .prose :global(.file-citation-icon) { display: inline-flex; align-self: center; width: 14px; height: 14px; flex: none; }
+  .prose :global(.file-citation-icon svg) { width: 100%; height: 100%; }
+
   /* ── Leitura em linha longa ─────────────────────────────────────────────
      SEM cap de medida: largura cheia e decisao registrada no DESIGN.md, e no uso real (texto
      tecnico intercalado com codigo e saida de comando) a coluna estreita custa mais do que ajuda —
@@ -439,6 +467,7 @@
     font-size: var(--text-xs);
     color: var(--text-muted);
     margin-right: var(--space-1);
+    transition: opacity 120ms var(--ease-out);
   }
 
   /* Preview plano: preserva quebras de linha do pane (sem markdown -> sem blocos). */

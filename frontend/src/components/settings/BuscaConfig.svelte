@@ -17,6 +17,7 @@
     avancado: m.config_modal_avancado,
     orquestracao: m.config_modal_orquestracao,
     harnesses: m.harness_titulo,
+    sincronizacao: m.sync_config_titulo,
   };
 
   export interface EntradaBusca {
@@ -79,6 +80,11 @@
     { tela: 'harnesses', rotulo: m.harness_codex_reconciliar, descricao: m.harness_codex_reconciliar_porque },
     { tela: 'harnesses', rotulo: m.codex_contexto_titulo, descricao: m.codex_contexto_ajuda },
     { tela: 'harnesses', rotulo: m.codex_voice_config_title, descricao: m.codex_voice_config_help },
+
+    { tela: 'sincronizacao', rotulo: m.sync_config_ativar, descricao: m.sync_config_ganho },
+    { tela: 'sincronizacao', rotulo: m.sync_config_desativar, descricao: m.sync_config_desativada },
+    { tela: 'sincronizacao', rotulo: m.sync_config_copiar, descricao: m.sync_config_como_entrar },
+    { tela: 'sincronizacao', rotulo: m.sync_config_abrir, descricao: m.sync_config_como_entrar },
 
     { tela: 'voz', rotulo: m.voz_transcrever, descricao: m.voz_transcrever_ajuda },
     { tela: 'voz', rotulo: m.voz_limpar, descricao: m.voz_limpar_ajuda },

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -66,6 +66,14 @@ export default function ChatScreen() {
 
   const events = chat.use((s) => s.events);
   const stateEvent = chat.use((s) => s.stateEvent);
+  const bufferingAnnounced = useRef(false);
+  useEffect(() => {
+    const buffering = !!stateEvent?.codex_buffering;
+    if (buffering && !bufferingAnnounced.current && Platform.OS === 'ios') {
+      AccessibilityInfo.announceForAccessibilityWithOptions(m.chat_codex_buffering(), { queue: true });
+    }
+    bufferingAnnounced.current = buffering;
+  }, [stateEvent?.codex_buffering]);
   const preview = chat.use((s) => s.preview);
   const previewMd = chat.use((s) => s.previewMd);
   const previewFull = chat.use((s) => s.previewFull);
@@ -210,6 +218,9 @@ export default function ChatScreen() {
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
       <KeyboardAvoidingView behavior="padding" style={styles.body}>
+        {stateEvent?.codex_buffering ? (
+          <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
+        ) : null}
         <View style={styles.inner}>
           {servidorSumiu ? (
             <View style={styles.erro}>
@@ -360,5 +371,11 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.tokens.status.error,
     textAlign: 'center',
     paddingVertical: theme.base.space[1],
+  },
+  notice: {
+    fontSize: theme.base.text.sm,
+    color: theme.tokens.text.secondary,
+    paddingVertical: theme.base.space[2],
+    paddingHorizontal: theme.base.space[4],
   },
 }));

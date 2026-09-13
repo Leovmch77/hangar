@@ -350,6 +350,32 @@ def test_aviso_de_largada_antes_da_primeira_mensagem_nao_vira_previa():
     assert extract_assistant_text(pane) == ""
 
 
+def test_aviso_de_plugin_reimpresso_no_meio_da_conversa_nao_vira_previa():
+    # Pane real de 11/09 (sessão cux-rev-t3): o Claude Code reimprime o aviso do hooks.json DEPOIS
+    # do último ❯, então nem o corte pela mensagem do usuário nem o do banner o alcançam.
+    pane = (
+        "❯ [de: hangar] 'cux-rev-t5' encerrou a sessão e saiu do grupo de trabalho.\n"
+        "\n"
+        "● Ciente — grupo agora é hangar, cux-t3 e eu. Aguardando a rodada 1 do cux-t3.\n"
+        "\n"
+        '● ecc: hooks.json: unknown keys "$schema", "description" in hooks.PreToolUse[0] and 40 more\n'
+        "  ignored\n"
+        "\n"
+        + "─" * 40 + "\n"
+        "❯ \n"
+        + "─" * 40 + "\n"
+    )
+    # Vazio, e não o "Ciente…" anterior: aquele bloco já está no transcript, e reelegê-lo o
+    # traria de volta como bolha em voo.
+    assert extract_assistant_text(pane) == ""
+    # Prosa DEPOIS do aviso continua sendo a prévia (o aviso pode vir no começo do turno).
+    depois = pane.replace("  ignored\n", "  ignored\n\n● Agora sim, lendo o arquivo.\n")
+    assert extract_assistant_text(depois) == "Agora sim, lendo o arquivo."
+    # Prosa comum que começa parecida não é aviso.
+    prosa = pane.replace("● ecc: hooks.json: unknown keys", "● Nota: hooks.json: define os hooks")
+    assert extract_assistant_text(prosa).startswith("Nota: hooks.json: define")
+
+
 def test_prosa_depois_da_mensagem_do_usuario_continua_sendo_previa():
     # O corte nao pode zerar o caso normal: o ❯ da caixa de digitar (regua/❯/regua) nao conta.
     pane = PANE_AVISO_DE_LARGADA.replace(
@@ -472,6 +498,22 @@ def test_sidecar_ausente_ou_velho_cai_no_pane(tmp_path, monkeypatch):
     # broker raspar o pane parado e o ultimo bloco commitado virava bolha fantasma ao reabrir o app.
     assert read_sidecar(_sidecar(tmp_path, monkeypatch,
                                  {"text": "", "ts": _t.time() - 10_000})) == ""
+
+
+def test_sidecar_velho_com_sessao_trabalhando_segue_valendo(tmp_path, monkeypatch):
+    # Turno longo só de ferramentas não publica texto novo: cair no pane mostrava como mensagem a
+    # linha que a TUI desenha ao lado do spinner. Parada, a sessão velha continua caindo no pane.
+    import time as _t
+    from app.hook_state import hook_state
+    from app.preview import read_sidecar
+    stem = _sidecar(tmp_path, monkeypatch, {"text": "antigo", "ts": _t.time() - 10_000})
+    monkeypatch.setitem(hook_state._map, stem, ("working", _t.time()))
+    assert read_sidecar(stem) == "antigo"
+    monkeypatch.setitem(hook_state._map, stem, ("idle", _t.time()))
+    assert read_sidecar(stem) is None
+    # Marcador "working" velho = agente morreu no meio do turno: não pode congelar a prévia.
+    monkeypatch.setitem(hook_state._map, stem, ("working", _t.time() - 10_000))
+    assert read_sidecar(stem) is None
 
 
 def test_sidecar_de_tipo_errado_nao_derruba_nada(tmp_path, monkeypatch):

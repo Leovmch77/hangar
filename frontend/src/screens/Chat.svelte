@@ -15,12 +15,13 @@
   import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
   import { proposedPlan } from '@hangar/core';
-  import { setCodexMode } from '@hangar/core';
+  import { implementCodexPlan as requestCodexPlanImplementation } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
   import CodexLimitsSheet from '../components/CodexLimitsSheet.svelte';
   import ForwardSheet from '../components/ForwardSheet.svelte';
+  import BtwSheet from '../components/BtwSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
@@ -35,6 +36,8 @@
   import DesktopSessionContext from '../components/DesktopSessionContext.svelte';
   import FileViewer from '../components/files/FileViewer.svelte';
   import { filesStores } from '../lib/filesStore.svelte';
+  import { caminhosCitadosPorNome, fileUrl, resolverCitados } from '@hangar/core';
+  import type { GitTabId } from '../lib/gitTabs';
   import { navegadorPanel, marcarNavAberto, atualizarNavUrl } from '../lib/navegadorPanel.svelte';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import {
@@ -62,10 +65,10 @@
     descartarDaFila,
   } from '@hangar/core';
   import { formataErro } from '@hangar/core';
-  import { appendTail, hasSeam, prependOlder } from '@hangar/core';
+  import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { listServers, getActiveId } from '../lib/auth';
+  import { listServers, getActiveId, getBaseUrl } from '../lib/auth';
   import { createActivityFolder } from '@hangar/core';
   import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
@@ -146,8 +149,11 @@
   // amarrados a ela. E o `finally` do loadHistory PRECISA soltar exatamente a mesma chave.
   const sessaoDoPortao = sessionName;
   segurarAquecimento(sessaoDoPortao);
+  const aquecimento = new AbortController();
+  onDestroy(() => aquecimento.abort());
 
   let events = $state<ChatEvent[]>([]);
+  const retiredQueuedIds = new Set<string>();
   // Sobe a cada CARGA de histórico (pintar do cache, chegar a cauda, trocar de transcript). A
   // MessageList re-ancora a janela na cauda a cada mudança — sem isso, uma carga que chega com a
   // lista já montada pode ficar fora da fatia visível e a conversa para na mensagem anterior.
@@ -232,7 +238,7 @@
     void tick().then(() => {
       if (!visorAberto || visorFocou) return;   // fechou/trocou no meio do tick
       visorFocou = true;
-      (screenEl?.querySelector<HTMLElement>('.arq-visor .fechar'))?.focus();
+      (screenEl?.querySelector<HTMLElement>('.arq-visor button'))?.focus();
     });
   });
 
@@ -331,6 +337,7 @@
   let error = $state('');
   let es: EventSourceLike | null = null;
   let watchdog: ReturnType<typeof setTimeout> | undefined;     // liveness: reconecta se a conexao morrer calada
+  let reabertoPeloWatchdogEm = 0;
   // Última posição recebida do transcript; reenviada no reconnect pra retomar exatamente dali.
   let lastEventId: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -343,10 +350,39 @@
   // Snapshot do mount de proposito: o App remonta o Chat por {#key sessionName} a cada troca.
   // svelte-ignore state_referenced_locally
   const draftKey = `cp-draft:${sessionName}`;
-  let composerText = $state(localStorage.getItem(draftKey) ?? '');
+  // O rascunho guarda o TRANSCRIPT de quem o escreveu: a chave é o nome, e nome se repete. Uma
+  // sessão morta e recriada com o mesmo nome (a época de recriação só vive com o app aberto) abria
+  // com o texto da anterior. Valor antigo, só texto, vale como "transcript desconhecido".
+  function lerRascunho(): { text: string; jsonl: string | null } {
+    let cru: string | null = null;
+    try { cru = localStorage.getItem(draftKey); } catch { return { text: '', jsonl: null }; }
+    if (!cru) return { text: '', jsonl: null };
+    try {
+      const d = JSON.parse(cru);
+      if (d && typeof d === 'object' && typeof d.text === 'string') {
+        return { text: d.text, jsonl: typeof d.jsonl === 'string' ? d.jsonl : null };
+      }
+    } catch { /* texto cru de versão anterior */ }
+    return { text: cru, jsonl: null };
+  }
+  const rascunhoSalvo = lerRascunho();
+  // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
+  let rascunhoConferido = $state(rascunhoSalvo.jsonl === null);
+  let composerText = $state(rascunhoSalvo.jsonl === null ? rascunhoSalvo.text : '');
   $effect(() => {
-    if (composerText) localStorage.setItem(draftKey, composerText);
-    else localStorage.removeItem(draftKey);
+    if (rascunhoConferido || !sessionJsonl) return;
+    rascunhoConferido = true;
+    if (sessionJsonl === rascunhoSalvo.jsonl) { if (!composerText) composerText = rascunhoSalvo.text; }
+    else try { localStorage.removeItem(draftKey); } catch { /* sem storage */ }
+  });
+  $effect(() => {
+    const texto = composerText;
+    const jsonl = sessionJsonl;
+    if (!rascunhoConferido) return;      // antes de conferir, apagar aqui perderia o rascunho certo
+    try {
+      if (texto) localStorage.setItem(draftKey, JSON.stringify({ text: texto, jsonl }));
+      else localStorage.removeItem(draftKey);
+    } catch { /* sem storage: o rascunho vive só na memória */ }
   });
   // Preview AO VIVO do bloco de assistente em voo (lido do pane via SSE 'preview'). Texto-completo,
   // full-replace; some quando o assistant_msg canonico (do .jsonl) cobre o texto — sair de working
@@ -385,13 +421,81 @@
   let switcherOpen = $state(false);
   let createOpen = $state(false);
   let usageOpen = $state(false);
+  let btwOpen = $state(false);
+  let btwPergunta = $state('');
   let gitOpen = $state(false);
+  let gitInitialTab = $state<GitTabId>('changes');
+
+  // O listener pertence a este Chat, inclusive em split view e conversa de um par.
+  $effect(() => {
+    const el = screenEl;
+    if (!el) return;
+    const abrir = (event: MouseEvent) => {
+      const chip = event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>('button.file-citation') : null;
+      if (!chip || chip.closest('.chat-screen') !== el) return;
+      const path = chip.dataset.filePath;
+      if (!path) return;
+      event.preventDefault();
+      void abrirArquivoCitado(path, Number(chip.dataset.fileLine) || null);
+    };
+    el.addEventListener('click', abrir);
+    return () => el.removeEventListener('click', abrir);
+  });
+
+  let aberturaCitada = 0;
+  async function abrirArquivoCitado(path: string, linha: number | null) {
+    const pedido = ++aberturaCitada;
+    const geracao = histGen;
+    try {
+      let resposta = await resolverCitados(sessionName, [path]);
+      if (pedido !== aberturaCitada || geracao !== histGen) return;
+      let resolvido = resposta.ok[path];
+      if (!resolvido && !path.includes('/')) {
+        let candidatos = caminhosCitadosPorNome(events, path);
+        if (!candidatos.length && (temMaisNoServidor || histGap)) {
+          await loadOlderInBackground(geracao);
+          if (pedido !== aberturaCitada || geracao !== histGen) return;
+          if (histGap === 'failed') {
+            filesStore.erro = m.chat_erro_carregar_historico();
+            if (!filesInContext) { gitInitialTab = 'files'; gitOpen = true; }
+            return;
+          }
+          candidatos = caminhosCitadosPorNome(events, path);
+        }
+        if (candidatos.length) {
+          resposta = await resolverCitados(sessionName, candidatos);
+          if (pedido !== aberturaCitada || geracao !== histGen) return;
+          const distintos = new Map(Object.entries(resposta.ok).map(([cru, alvo]) => [alvo.real, { cru, alvo }]));
+          const encontrado = distintos.values().next().value;
+          if (encontrado) { path = encontrado.cru; resolvido = encontrado.alvo; }
+        }
+      }
+      if (!resolvido) {
+        filesStore.erro = m.erro_arq_inexistente();
+        if (!filesInContext) { gitInitialTab = 'files'; gitOpen = true; }
+        return;
+      }
+      const abertura = resolvido.relativo === null
+        ? filesStore.abrirExterno(path, fileUrl(sessionName, path), linha)
+        : filesStore.abrir(resolvido.relativo, linha);
+      if (!filesInContext) { gitInitialTab = 'files'; gitOpen = true; }
+      await abertura;
+    } catch (e) {
+      if (pedido === aberturaCitada && geracao === histGen) {
+        filesStore.erro = formataErro(e) ?? m.erro_arq_inexistente();
+        if (!filesInContext) { gitInitialTab = 'files'; gitOpen = true; }
+      }
+    }
+  }
+  onDestroy(() => { aberturaCitada++; });
   let runOpen = $state(false);
   let runRunning = $state(false);
   // Só acende o indicador do botão Rodar — nada na tela depende dele pra abrir. Espera a conversa.
   onMount(() => {
-    void aoAquecer(sessionName).then(() =>
-      getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted
+        && getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
   });
   let previewOpen = $state(false);
   let activityOpen = $state(false);
@@ -418,10 +522,7 @@
 
   async function implementCodexPlan(plan: string) {
     if (currentState !== 'idle' || plan !== codexPlan) throw new Error(m.chat_plan_indisponivel());
-    const confirmed = await setCodexMode(sessionName, 'default');
-    if (confirmed.mode !== 'default') throw new Error(m.chat_plan_indisponivel());
-    if (stateEvent) stateEvent = { ...stateEvent, codex_mode: 'default' };
-    await handleSend(m.chat_plan_pedido(), false, true);
+    await requestCodexPlanImplementation(sessionName);
   }
   // Pergunta nativa sintetizada do transcript (Pi: tool `question`; Kimi: `AskUserQuestion`): qual
   // tool_use_id abriu o sheet e qual o usuario ja DISPENSOU sem responder (fechou o sheet -> nao
@@ -458,7 +559,12 @@
       window.removeEventListener('resize', onResize);
     };
   });
-  let allSessions = $state<SessionInfo[]>([]);
+  let polledSessions = $state<SessionInfo[]>([]);
+  const allSessions = $derived<SessionInfo[]>(
+    desktop
+      ? sessionsStore.sessionsForServer(servidorDaCauda)
+      : polledSessions,
+  );
   // Servidores fora do ar, só pra folha de "Nova sessão" não oferecer máquina desligada. LÊ o store
   // sem `retain`: leitura não abre stream nenhum, então a regra do comentário abaixo continua de pé.
   // Consequência assumida: no celular nenhuma view de lista fica montada junto com o Chat, então o
@@ -468,8 +574,8 @@
     new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id)),
   );
   // Detalhe do plano (Task 5b): NÃO usa o sessionsStore (mesmo motivo do loopChip acima — reter o
-  // store aqui abria 1 stream de lista por servidor no celular). `allSessions` já é populada por
-  // getSessions() (loadSessionsForNav, a cada 5s nas DUAS views) — reusa ela pra achar plan_name.
+  // store aqui abriria 1 stream de lista por servidor no celular). No desktop a Sidebar já retém
+  // esse store; no celular `allSessions` continua vindo do poll local.
   const planSession = $derived(allSessions.find((s) => s.name === sessionName) ?? null);
   let planDetail = $state<PlanDetail | null>(null);
   let planLoading = $state(false);
@@ -478,8 +584,8 @@
   // pra comparar dentro do efeito — se fosse reativo, o efeito leria e escreveria a mesma coisa.
   let planDetailKey: string | null = null;
   // Nome do plano como PRIMITIVO, não o objeto `planSession` — mesmo bug do `pairPeersKey` umas
-  // linhas abaixo: `allSessions` troca de referência a CADA poll de 5s (getSessions), então um
-  // $effect que lê `planSession?.plan_name` direto re-executava em TODO poll, mesmo com o mesmo
+  // linhas abaixo: `allSessions` troca de referência a cada atualização da lista, então um
+  // $effect que lê `planSession?.plan_name` direto re-executava mesmo com o mesmo
   // plano (medido: 4 fetches em 4 polls idênticos). O /plan devolve o markdown inteiro (66 KB
   // neste repo) e passa pelo mesmo scan de tmux+/proc do registry que o poll da lista — refazer
   // isso a cada 5s dobrava a taxa de scan e ~47 MB/h de tráfego à toa no celular via Tailscale.
@@ -507,9 +613,10 @@
     planError = false;
     // Painel docado no desktop: este GET (105 KB de markdown) saía junto do histórico. Espera a
     // conversa pintar, como os outros aquecimentos.
-    aoAquecer(sessionName).then(() => getPlan(sessionName))
+    aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted ? getPlan(sessionName) : null)
       .then((d) => {
-        if (planKey !== key) return;   // chegou tarde: já tem fetch mais novo no ar, descarta
+        if (aquecimento.signal.aborted || planKey !== key) return;
         planDetail = d;
         planDetailKey = key;
         planLoading = false;
@@ -537,7 +644,9 @@
   // ladrão da abertura — a conversa esperava a política que ninguém tinha pedido ainda.
   $effect(() => {
     const sn = sessionName;
-    void aoAquecer(sn).then(() => prefetchOrq(sn));
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado !== false && !aquecimento.signal.aborted) prefetchOrq(sn);
+    });
   });
   // Membro do grupo aberto no modal (null = fechado). É string, não lista, de propósito: um modal
   // por vez mantém o teto em 2 SSE (este chat + o do par) e o navegador corta em ~6 por host.
@@ -545,8 +654,8 @@
   // Grupo de trabalho: os OUTROS membros (null = sem grupo). Estado vivo só quando o grupo tem 1
   // par (bolinha de 1 sessão faz sentido; de N vira ruído).
   const pairPeers = $derived(allSessions.find((s) => s.name === sessionName)?.pair_peers ?? null);
-  // Chave PRIMITIVA do grupo: pair_peers é um array NOVO por referência a cada poll de 5s do
-  // getSessions — efeitos que dependessem do array re-rodavam sem o grupo ter mudado (toggle se
+  // Chave PRIMITIVA do grupo: pair_peers é um array NOVO por referência a cada atualização —
+  // efeitos que dependessem do array re-rodavam sem o grupo ter mudado (toggle se
   // autodesligava, sheet resetava). String igual não re-notifica.
   const pairPeersKey = $derived(pairPeers?.join(',') ?? '');
   const pairedState = $derived(pairPeers?.length === 1
@@ -554,11 +663,7 @@
 
   async function openSwitcher() {
     switcherOpen = true;
-    try {
-      allSessions = await getSessions();
-    } catch {
-      // sem lista -> o sheet ainda oferece "Nova sessão"
-    }
+    await loadSessionsForNav();
   }
 
   function pickSession(name: string) {
@@ -604,21 +709,18 @@
     }
   }
 
-  // Lista pra navegar sessao com Ctrl/Cmd+setas (desktop) e pra pilula "N aguardando" (mobile,
-  // feature #4). Carregada no mount nos dois; no mobile reconsulta a cada 5s pra o contador da
-  // pilula refletir sessoes que entram/saem de awaiting_input enquanto o usuario fica parado aqui
-  // (esta tela nao tem SSE agregado de sessoes — reusa o mesmo REST de sempre, so com poll).
+  // No desktop, a Sidebar já mantém esta lista viva por SSE. No celular, onde ela não fica montada
+  // junto com o Chat, o poll de 5s alimenta navegação e a pílula "N aguardando".
   let navInFlight = false;   // socket pendurado empilhava 1 fetch por tick de 5s ate esgotar o host
   async function loadSessionsForNav() {
-    if (navInFlight) return;
+    if (desktop || navInFlight) return;
     navInFlight = true;
-    try { allSessions = await getSessions(); } catch { /* sem lista -> setas/pilula viram no-op */ }
+    try { polledSessions = await getSessions(); } catch { /* sem lista -> setas/pilula viram no-op */ }
     finally { navInFlight = false; }
   }
   onMount(() => {
+    if (desktop) return;
     loadSessionsForNav();
-    // Poll nos DOIS views (era só mobile): o chip 🤝 mostra o estado vivo do PAR — sem reconsultar,
-    // a bolinha congelava no desktop. Mesmo REST leve de sempre, a cada 5s.
     const id = setInterval(loadSessionsForNav, 5000);
     return () => clearInterval(id);
   });
@@ -642,9 +744,9 @@
   }
 
   const anyOverlayOpen = () =>
-    switcherOpen || createOpen || usageOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
+    switcherOpen || createOpen || usageOpen || btwOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
   function closeOverlays() {
-    switcherOpen = createOpen = usageOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
+    switcherOpen = createOpen = usageOpen = btwOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
     if (mirrorOpen) closeMirror();
     xtermOpen = false;
     askOpen = false;
@@ -900,17 +1002,24 @@
   // traz tracked=true, e sem isto a conversa so aparecia saindo da sessao e voltando — a tela diz
   // "responda e a conversa aparece aqui", e essa promessa e este efeito que cumpre.
   let estavaSemId = false;
+  let historicoAusente = $state(false);
+  let recuperadoJsonl: string | null = null;
   $effect(() => {
     const semId = kimiPreNascimento || codexPreThread;
     const nasceu = !semId && (sessionProvider === 'kimi' || sessionProvider === 'codex')
       && sessionTracked === true;
-    if (estavaSemId && nasceu) {
+    // A primeira lista pode chegar depois do 404 e já trazer a thread pronta.
+    const recuperar = historicoAusente && sessionJsonl && sessionJsonl !== recuperadoJsonl;
+    if ((estavaSemId || recuperar) && nasceu) {
+      recuperadoJsonl = sessionJsonl;
+      historicoAusente = false;
       kimiSemTranscript = false;
       // O SSE pode ter sido recusado enquanto nao havia transcript (/events 404 -> CLOSED); sem
       // limpar, a faixa de "servidor recusou" sobrevive a chegada do transcript.
       sseRecusado = false;
       error = '';
-      loadHistory().then(() => { if (alive) connectSSE(); });
+      connectSSE();
+      void loadHistory();
     }
     estavaSemId = semId;
   });
@@ -1188,20 +1297,26 @@
 
   // Quando perguntar: enquanto TRABALHA (é quando nasce subagente) e uma vez ao parar, pra pegar o
   // último que terminou junto com o turno. Sessão parada não fica batendo no backend.
+  let subagentesEmVoo: ReturnType<typeof getSubagents> | null = null;
   $effect(() => {
     const trabalhando = currentState === 'working';
     let vivo = true;
     async function contar() {
       try {
-        const lista = await getSubagents(sessionName);
+        const lista = await (subagentesEmVoo ??= getSubagents(sessionName)
+          .finally(() => { subagentesEmVoo = null; }));
         if (vivo) subagentesNoDisco = lista.length;
       } catch { /* offline / sessão sem transcript -> mantém o que tinha */ }
     }
     // A 1ª contagem espera a conversa pintar (ver lib/aquecimento): ela só acende o ponto do botão
     // de Atividade. Depois que o histórico chega a espera já está resolvida e o ciclo de 5s corre
     // no ritmo de sempre.
-    void aoAquecer(sessionName).then(() => { if (vivo) void contar(); });
-    const id = trabalhando ? setInterval(contar, 5000) : undefined;
+    let id: ReturnType<typeof setInterval> | undefined;
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) => {
+      if (!vivo || liberado === false) return;
+      void contar();
+      if (trabalhando) id = setInterval(contar, 5000);
+    });
     return () => { vivo = false; if (id !== undefined) clearInterval(id); };
   });
 
@@ -1211,6 +1326,7 @@
   // poll (kick) que, se estiver rodando, liga o loop de 4s até terminar. Antes: qualquer workflow
   // no histórico (mesmo finalizado há dias) pollava a cada 4s pra sempre.
   let workflowRunning = $state(false);
+  let workflowsEmVoo: ReturnType<typeof getWorkflows> | null = null;
   const wfCount = $derived(activity.agents.filter((a) => a.kind === 'workflow').length);
   const activityRunning = $derived(workflowRunning || activity.runningAgents > 0);
   $effect(() => {
@@ -1219,7 +1335,8 @@
     let alive = true;
     async function poll() {
       try {
-        const ws = await getWorkflows(sessionName);
+        const ws = await (workflowsEmVoo ??= getWorkflows(sessionName)
+          .finally(() => { workflowsEmVoo = null; }));
         if (alive) workflowRunning = ws.some((w) => w.running);
       } catch { /* offline / sem run -> ignora */ }
     }
@@ -1267,6 +1384,7 @@
   // /clear no meio deixava vários /history completos disputando a rede — no celular, justamente o
   // caso que a carga em dois tempos existe pra resolver.
   let histAbort: AbortController | null = null;
+  let cacheDaCarga: Set<ChatEvent> | null = null;
   function newHistLoad(): AbortSignal {
     histGen++;
     histAbort?.abort();
@@ -1312,6 +1430,7 @@
     const cache = lerCaudaChat(servidorDaCauda, sessionJsonl);
     if (!cache?.eventos.length) return false;
     events = cache.eventos;
+    for (const event of events) cacheDaCarga?.add(event);
     etagCauda = cache.etag;
     rebuildIndex();
     reseedDerived();
@@ -1326,11 +1445,11 @@
   // da rede que o cache existe pra evitar. Só pinta enquanto a rede não respondeu (tela ainda
   // vazia); chegando depois disso, quem manda é a resposta do servidor.
   $effect(() => {
-    if (!sessionJsonl || !loading || events.length) return;
+    if (!sessionJsonl || !cacheDaCarga || !loading || events.length) return;
     pintarDoCache();
   });
 
-  async function loadHistory() {
+  async function loadHistory(useCache = true) {
     const signal = newHistLoad();
     const g = histGen;
     histGap = '';
@@ -1343,7 +1462,9 @@
     // celular e leva `events` junto. Pintar cedo já existiu e foi revertido (b9db4367) porque a
     // janela da MessageList não re-ancorava numa carga que chegasse com a lista montada — quem
     // conserta isso é a `ancora`, e ela sobe aqui e a cada resposta do servidor.
-    const pintouDoCache = pintarDoCache();
+    const registroCache = useCache ? new Set<ChatEvent>() : null;
+    cacheDaCarga = registroCache;
+    const pintouDoCache = useCache && pintarDoCache();
     try {
       const r = await tailComRetentativa(signal, g, pintouDoCache ? etagCauda : null);
       if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
@@ -1353,13 +1474,12 @@
         // ~200 bytes em vez de 313 KB.
         temMaisNoServidor = events.length >= TAIL_FIRST;
       } else {
-        // Costura SÓ quando o cache pintou; sem ele, substitui como sempre foi. `appendTail` assume
-        // que a cauda é a parte MAIS RECENTE, e no caminho do /clear o SSE pode ter posto uma
-        // mensagem nova em `events` durante o fetch — ali a suposição se inverte e o histórico
-        // entraria DEPOIS dela, fora de ordem. Com a condição no cache, esse caminho segue no
-        // comportamento antigo, byte por byte. Quando NENHUM id bate (transcript trocado por
-        // /clear), `appendTail` devolve só a cauda nova e joga o cache fora.
-        events = pintouDoCache ? appendTail(r.eventos, events) : r.eventos;
+        // O SSE abre antes desta carga: a costura preserva prefixo antigo, sufixo novo e fila local.
+        events = mergeHistoryWithLive(r.eventos, events, {
+          preserveNoSeam: !registroCache?.size,
+          removedIds: retiredQueuedIds,
+          cachedEvents: registroCache ?? undefined,
+        });
         etagCauda = r.etag;
         rebuildIndex();
         reseedDerived();
@@ -1374,8 +1494,10 @@
       }
       error = '';
       kimiSemTranscript = false;   // transcript existe -> sai do modo "kimi pre-1o-prompt"
+      historicoAusente = false;
     } catch (err) {
       if (isAbortError(err) || g !== histGen) return;   // cancelado ≠ falhou: nada na tela
+      historicoAusente = (err as { status?: number } | null)?.status === 404;
       // Teto estourado vira frase traduzida: o texto que o navegador poe no TimeoutError e
       // "signal timed out", que nao diz nada pra quem le a tela (mesma troca que o
       // apiFetchForServer ja faz em lib/api.ts).
@@ -1398,8 +1520,14 @@
         kimiSemTranscript = sessionProvider === 'kimi';
         return;
       }
-      error = msg;
+      if (events.length) {
+        error = '';
+        histGap = 'failed';
+      } else {
+        error = msg;
+      }
     } finally {
+      if (cacheDaCarga === registroCache) cacheDaCarga = null;
       if (g === histGen) loading = false;
       // Conversa na tela (ou desistimos dela): o trabalho especulativo pode correr. Vale também no
       // ramo de ERRO — histórico que falhou não é motivo pra a pílula de modelo ficar sem catálogo.
@@ -1412,6 +1540,7 @@
   // fase 2 já trouxe tudo — sem isso, cada rolagem até o topo repetiria a busca do arquivo inteiro.
   let temMaisNoServidor = false;
   let buscandoAntigos = false;
+  let cargaAntigos: Promise<void> | null = null;
 
   // Chamado pela MessageList quando a rolagem chega ao topo do que há em memória.
   function pedirMaisAntigos() {
@@ -1419,28 +1548,21 @@
     loadOlderInBackground(histGen);
   }
 
-  // Fase 2: o histórico ANTERIOR à cauda, sob demanda. Não devolve promise de propósito —
-  // ninguém espera por ela, a tela já está utilizável. Anda junto com a carga da geração `g`: usa o
-  // MESMO controller (não cria um novo), então quem invalida a geração aborta as duas fases.
+  // Rolagem e abertura de citação compartilham a mesma carga, cancelada com a geração do chat.
   function loadOlderInBackground(g: number) {
     // A trava mora AQUI, não em quem chama: os outros dois caminhos — a pílula de "tentar de novo"
     // e a retomada do segundo plano — chamam esta função direto, e dois toques rápidos na pílula
     // (que não desabilita durante a busca) disparavam dois downloads do arquivo inteiro.
-    if (buscandoAntigos) return;
+    if (buscandoAntigos) return cargaAntigos;
     buscandoAntigos = true;
-    getHistory(sessionName, undefined, histAbort?.signal)
+    cargaAntigos = getHistory(sessionName, undefined, histAbort?.signal)
       .then((full) => {
         if (g !== histGen || !alive) return;   // resposta velha/pós-destroy: NÃO aplica
-        // prependOlder só ACRESCENTA o que é mais antigo que a nossa primeira bolha: o que o SSE
-        // entregou durante o fetch fica intacto, e nada que o dedup removeu volta.
-        const merged = prependOlder(full, events);
-        if (!merged) {
-          // null tem dois motivos e só um é problema: sem ponto de costura a conversa segue
-          // truncada (avisa); "já temos desde o começo" é o caso feliz (silêncio).
-          histGap = hasSeam(full, events) ? '' : 'unjoinable';
+        if (!hasSeam(full, events)) {
+          histGap = 'unjoinable';
           return;
         }
-        events = merged;
+        events = mergeHistoryWithLive(full, events, { removedIds: retiredQueuedIds });
         rebuildIndex();
         reseedDerived();
         histGap = '';
@@ -1456,35 +1578,22 @@
         // repetiria o download completo. Falha some daqui de propósito: quem avisa é o `histGap`,
         // e o toque nele é que tenta de novo.
         buscandoAntigos = false;
+        cargaAntigos = null;
         temMaisNoServidor = false;
       });
+    return cargaAntigos;
   }
 
   // Watchdog de liveness: o backend manda um evento 'ping' a cada 10s. 25s sem NADA (msg/state/ping)
   // = conexao morta sem aviso (half-open: mobile trocou de rede / app no background / backend caiu).
-  // O EventSource.onerror NAO dispara em half-open -> sem isto o front congela no ultimo estado.
-  function armWatchdog() {
-    clearTimeout(watchdog);
-    // Mesmo guard do onerror: sessao 'dead' nao ganha reconexao infinita de 25s (o estado final
-    // ja chegou; reviver e acao do usuario via resume, nao do watchdog).
-    watchdog = setTimeout(() => {
-      // Conexão MEIO-ABERTA: 25s sem um único evento, nem o ping de 10s do backend. É o caso que
-      // não dispara `onerror` e que, sem registro, some sem deixar rastro.
-      diag.registrar({ evento: 'sse.mudo', nivel: 'aviso', tela: 'chat', sessao: sessionName,
-                       ms: 25000 });
-      if (currentState !== 'dead') connectSSE();
-    }, 25000);
-  }
-  // Qualquer evento recebido = conexao viva: rearma o watchdog E zera o backoff do onerror.
-  function noteAlive() {
-    sseRetryDelay = SSE_RETRY_MIN;
-    armWatchdog();
-  }
   // Backoff do reconnect por erro (3s -> 30s). Auditoria: sem isto, com a VPN caida, o retry
   // nativo do EventSource + o setTimeout de 3s martelavam ~2 conexoes a cada 3s pra sempre.
   const SSE_RETRY_MIN = 3000;
   const SSE_RETRY_MAX = 30000;
   let sseRetryDelay = SSE_RETRY_MIN;
+  // CLOSED seguidos com a sessao viva na lista: o teto que impede o laco que a faixa existe pra cortar.
+  const SSE_RECUSAS_MAX = 3;
+  let sseRecusasSeguidas = 0;
   // Servidor recusou o stream de vez (readyState CLOSED no onerror). Mostra a faixa com
   // "tentar de novo" em vez de reconectar em laço.
   let sseRecusado = $state(false);
@@ -1500,20 +1609,57 @@
     // Codex junto: sem thread o /events 404a igual, e o EventSource fecha em CLOSED — a faixa
     // "o servidor recusou" aparecia sobre uma sessao que so ainda nao comecou.
     if (kimiPreNascimento || codexPreThread) return;
+    const destino = getBaseUrl();
+    const inicio = Date.now();
+    const req = diag.novoReq();
+    let primeiroQuadro = true;
+    const quadroFalhou = (codigo: string) => diag.registrar({ evento: 'sse.quadro_falhou',
+      nivel: 'erro', tela: 'chat', sessao: sessionName, req, codigo }, destino);
+    // O callback mantém o destino da conexão mesmo se o usuário trocar de servidor.
+    function armWatchdog() {
+      clearTimeout(watchdog);
+      // Primeiro quadro com prazo curto: na volta do iOS o pedido às vezes fica preso na rede e
+      // uma nova tentativa passa antes de a pessoa desistir e reabrir o app. Mesmo prazo da lista.
+      const ms = primeiroQuadro ? 10_000 : 25_000;
+      watchdog = setTimeout(() => {
+        diag.registrar({ evento: 'sse.mudo', nivel: 'aviso', tela: 'chat', sessao: sessionName,
+          req, ms, codigo: primeiroQuadro ? 'primeiro_quadro_timeout' : undefined }, destino);
+        if (currentState === 'dead') return;
+        if (primeiroQuadro) {
+          // Com backoff: servidor lento pra responder viraria um laço de reabertura a cada 10s.
+          es?.close(); es = null;
+          reagendarSSE();
+          return;
+        }
+        reabertoPeloWatchdogEm = Date.now();
+        connectSSE();
+      }, ms);
+    }
+    function noteAlive() {
+      if (primeiroQuadro) {
+        primeiroQuadro = false;
+        diag.registrar({ evento: 'sse.conectou', tela: 'chat', sessao: sessionName,
+          req, ms: Date.now() - inicio }, destino);
+      }
+      sseRetryDelay = SSE_RETRY_MIN;
+      sseRecusasSeguidas = 0;
+      armWatchdog();
+    }
     clearTimeout(reconnectTimer);
     if (es) { es.close(); es = null; }
     sseRecusado = false;
 
-    es = openEventStream(sessionName, lastEventId);
+    es = openEventStream(sessionName, lastEventId, req);
     // Ciclo de vida da conexão no diário de uso. É o que faltava nos relatos de "a conversa parou"
     // e "as sessões sumiram": sem isto não dá pra distinguir queda de rede, reconexão em laço e
     // conexão viva com a lista congelada, e a análise vira chute.
     diag.registrar({ evento: 'sse.abrir', tela: 'chat', sessao: sessionName,
-                     provider: sessionProvider });
+                     provider: sessionProvider, req }, destino);
     armWatchdog();
 
     const onMessage = (e: { data: string; lastEventId?: string }) => {
       noteAlive();
+      if (loading) loading = false;
       // Chegou conversa: o aviso de "não carregou o histórico" não pode continuar na frente dela.
       // A tela de erro SUBSTITUI a lista inteira ({:else if error}), então um erro aceso por uma
       // carga que falhou ficava preso mesmo depois de o SSE se recuperar sozinho e voltar a
@@ -1526,7 +1672,9 @@
       if (e.lastEventId) lastEventId = e.lastEventId;
       try {
         const ev = JSON.parse(e.data) as ChatEvent;
+        if (retiredQueuedIds.has(ev.id)) return;
         if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+          retiredQueuedIds.add(ev.id);
           events = events.filter((x) => x.id !== ev.id);
           rebuildIndex();
           return;
@@ -1564,6 +1712,7 @@
             const dono = donoDaLinha(ev.text, filas.map((f) => f.text));
             if (dono >= 0) {
               const qi = filas[dono].i;
+              retiredQueuedIds.add(events[qi].id);
               events = [...events.slice(0, qi), ...events.slice(qi + 1)];
               rebuildIndex();
             }
@@ -1599,7 +1748,7 @@
             }
           }
         }
-      } catch {}
+      } catch { quadroFalhou('message'); }
     };
     es.addEventListener('message', onMessage);
     es.addEventListener('queue_confirmed', onMessage);
@@ -1622,6 +1771,7 @@
         // regra -> so o caso do Claude, que abre pelo evento SSE.
         if (askOpen && !askPiId && askPayload?.provider !== 'codex' && stateEvent?.state !== 'awaiting_input') askOpen = false;
       } catch (err) {
+        quadroFalhou('state');
         // Mesmo motivo do handler de `preview` logo abaixo: engolir aqui congela a prévia na tela
         // (este handler virou o OUTRO dono dela) e ainda deixa o `stateEvent` preso no valor
         // antigo. O erro não pode derrubar o SSE, mas tem que dar pra ver no dev.
@@ -1631,7 +1781,7 @@
 
     // Faixa de estatísticas da sessão (app/stats.py). Full-replace; ausência de evento = sem faixa.
     es.addEventListener('stats', (e) => {
-      try { statsEvent = JSON.parse(e.data) as StatsEvent; } catch {}
+      try { statsEvent = JSON.parse(e.data) as StatsEvent; } catch { quadroFalhou('stats'); }
     });
 
     // Heartbeat do backend: so prova de vida (reseta o watchdog numa conexao ociosa, sem msgs).
@@ -1647,7 +1797,7 @@
             && next.request_id === askPayload.request_id) return;
         askPayload = next;
         askOpen = true;
-      } catch {}
+      } catch { quadroFalhou('ask_question'); }
     });
 
     // O agente abriu/empurrou o navegador embutido desta sessão (POST /api/sessions/<nome>/nav,
@@ -1663,6 +1813,7 @@
         ctxPanel.recolhido = false;
         ctxPanel.aba = 'navegador';
       } catch (err) {
+        quadroFalhou('nav');
         // Mesmo motivo dos handlers ao lado: engolir calado esconderia um evento 'nav' malformado.
         if (import.meta.env.DEV) console.debug('nav: evento ilegivel', err);
       }
@@ -1704,6 +1855,7 @@
         previewMd = !!ev.md;
         previewFull = !!ev.full;
       } catch (err) {
+        quadroFalhou('preview');
         // Engolir aqui congela a previa (texto E flag) no ultimo frame bom, sem rastro nenhum. O
         // erro nao pode derrubar o handler do SSE, mas tem que dar pra ver no dev.
         if (import.meta.env.DEV) console.debug('preview: evento ilegivel', err);
@@ -1717,19 +1869,20 @@
       // No diário também, não só no journal do servidor: o journal só existe no Linux, e este
       // evento é o único que APAGA a conversa da tela — sem ele registrado, "ficou vazio" e "nunca
       // carregou" são indistinguíveis no arquivo que a pessoa manda.
-      diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName });
+      diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName, req }, destino);
       lastEventId = null;   // transcript trocado (/clear): id do arquivo antigo não vale mais
       // A cauda do transcript antigo fica sob a chave dele e nunca mais é lida — a chave é o
       // `jsonl`, e o /clear abre outro. Não há o que apagar aqui.
       etagCauda = null;
       events = [];
+      retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
       cancelPreviewDrop();
       previewText = '';
       stateEvent = null;
       statsEvent = null;      // transcript novo -> a faixa zera junto (o backend recomeça o fold)
-      loadHistory();
+      loadHistory(false);
     });
 
     es.onerror = () => {
@@ -1744,45 +1897,69 @@
       // parava aí.
       const motivo = estadoSSE === 0 ? 'reconectando (rede/servidor)' : 'fechado pelo servidor';
       diag.registrar({ evento: 'sse.caiu', nivel: 'erro', tela: 'chat', sessao: sessionName,
-                       codigo: String(estadoSSE), ms: sseRetryDelay, detalhe: motivo });
+                       codigo: String(estadoSSE), ms: Date.now() - inicio,
+                       espera_ms: sseRetryDelay, detalhe: motivo, req }, destino);
       if (currentState === 'dead' || !alive) return;
       // CLOSED = recusa definitiva (404/401): insistir a cada 30s não muda a resposta — medido
       // 2h14 de laço, duas madrugadas seguidas, numa sessão que o servidor dizia não existir.
       // Para, e deixa a pessoa tentar de novo (ou o onVisible, quando a aba voltar).
-      if (estadoSSE === 2) { sseRecusado = true; return; }
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connectSSE, sseRetryDelay);
-      sseRetryDelay = Math.min(sseRetryDelay * 2, SSE_RETRY_MAX);
+      if (estadoSSE === 2) { void avaliarRecusa(); return; }
+      reagendarSSE();
     };
   }
 
-  // App voltou pro foreground (mobile suspende a conexao no background). Agora o backfill do SSE so
-  // traz o TAIL (ultimas _BACKFILL_LINES linhas), entao um background LONGO pode ter perdido mais que
-  // isso. Re-seed do history (REST, completo e ordenado) ANTES de reconectar fecha o buraco; o backfill
-  // tail do SSE so faz a ponte ate a subscricao (dedup por id, sem reordenar). Falha aqui NAO trava a
-  // tela (o connectSSE/onerror re-sincroniza) -> ignora e segue. Reconexoes de blip (watchdog/onerror)
-  // continuam SO com o tail-K: cobrem poucos segundos sem re-shippar o arquivo inteiro.
+  function reagendarSSE() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectSSE, sseRetryDelay);
+    sseRetryDelay = Math.min(sseRetryDelay * 2, SSE_RETRY_MAX);
+  }
+
+  // CLOSED nao distingue "sessao nao existe" de "proxy sem backend": o `tailscale serve` responde
+  // 502 na hora durante um reinicio e o EventSource fecha igual a um 404. A lista desempata.
+  async function avaliarRecusa() {
+    let recusa: boolean;
+    try {
+      const rows = await getSessions();
+      recusa = !rows.some((s) => s.name === sessionName) || ++sseRecusasSeguidas >= SSE_RECUSAS_MAX;
+    } catch (e) {
+      const status = (e as Error & { status?: number }).status;
+      recusa = status === 401 || status === 403;
+    }
+    if (!alive || es || currentState === 'dead') return;
+    if (recusa) sseRecusado = true;
+    else reagendarSSE();
+  }
+
+  // App voltou pro foreground (mobile suspende a conexão no background). Reconecta primeiro para o
+  // texto vivo não esperar o REST; a cauda ordenada chega em paralelo e fecha qualquer buraco longo.
   async function onVisible() {
     if (document.visibilityState !== 'visible') return;
     // Segura watchdog/retry DURANTE o re-seed: no wake do iOS o watchdog vencido disparava um
     // connectSSE proprio e o onVisible outro logo atras — 2 reconexoes + replay em toda volta.
-    clearTimeout(watchdog);
-    clearTimeout(reconnectTimer);
+    // O iOS roda o watchdog vencido ANTES do visibilitychange: a conexão que ele acabou de abrir
+    // fica. Só essa — uma aberta pelo backoff pode ser a mesma tentativa presa na rede que caiu.
     sseRetryDelay = SSE_RETRY_MIN;   // rede provavelmente voltou: reconexao rapida de novo
+    if (!es || Date.now() - reabertoPeloWatchdogEm > 1500) {
+      clearTimeout(watchdog);
+      clearTimeout(reconnectTimer);
+      connectSSE();
+    }
     const signal = newHistLoad();   // aborta a carga de fundo que ficou pendurada no background
     const g = histGen;
+    const before = new Set(events);
     try {
       // So a CAUDA: o buraco do background e no FIM da conversa, e o historico antigo ja esta em
       // memoria — re-baixar o jsonl inteiro a cada volta pro foreground era o custo que sobrava.
       const fresh = await getHistory(sessionName, TAIL_FIRST, signal);
       if (g !== histGen || !alive) return;   // resposta velha/pos-destroy: NAO sobrescreve nem conecta
-      const head = events[0]?.id;
-      events = appendTail(fresh, events);
+      const gap = !hasSeam(fresh, events);
+      events = mergeHistoryWithLive(fresh, events, {
+        cachedEvents: before, removedIds: retiredQueuedIds,
+      });
       rebuildIndex();
       reseedDerived();
-      // Sem sobreposicao a appendTail re-ancorou na cauda (background longo demais): o historico
-      // antigo saiu da lista e volta em segundo plano, como na abertura.
-      if (events[0]?.id !== head) loadOlderInBackground(g);
+      // Sem sobreposição, recupera também o histórico anterior à nova cauda.
+      if (gap) loadOlderInBackground(g);
     } catch (err) {
       // Com bolha na tela, seguir calado está certo: é um blip, e o SSE re-sincroniza.
       // Com a lista VAZIA, não: o `connectSSE` abaixo retoma pelo `lastEventId`, e quando um
@@ -1795,18 +1972,13 @@
       }
     }
     if (g !== histGen || !alive) return;
-    connectSSE();
   }
 
-  onMount(async () => {
+  onMount(() => {
     alive = true;
-    await loadHistory();
-    // Pos-await: o componente pode ter morrido durante o loadHistory (troca rapida de sessao via
-    // {#key}). Sem o guard, o addEventListener rodava DEPOIS do removeEventListener do destroy ->
-    // listener orfao preso pra sempre fazendo getHistory fantasma a cada visibilitychange.
-    if (!alive) return;
     connectSSE();
     document.addEventListener('visibilitychange', onVisible);
+    void loadHistory();
   });
 
   onDestroy(() => {
@@ -1994,6 +2166,7 @@
   });
 
   async function handleSend(text: string, steer = false, onlyThisSession = false) {
+    if (abrirBtwSe(text)) return;
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
     // começa — sessão ocupada num turno longo deixava a msg invisível por minutos, e a corrida de
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
@@ -2121,7 +2294,18 @@
 
   // Slash commands gerais do Claude Code (ex: /clear, /compact) -> sessao viva. Modelo e
   // esforco NAO passam por aqui: vao pelos popovers de modelo/esforco -> endpoint /model-effort.
+  // `/btw` não é mensagem nem entra na fila: abre a folha de pergunta lateral, que dirige o
+  // overlay da TUI. Só Claude tem o comando; nos outros providers segue como texto.
+  function abrirBtwSe(text: string): boolean {
+    const btw = /^\/btw(?:\s+([\s\S]*))?$/i.exec(text.trim());
+    if (!btw || (sessionProvider ?? 'claude') !== 'claude') return false;
+    btwPergunta = (btw[1] ?? '').trim();
+    btwOpen = true;
+    return true;
+  }
+
   async function handleCommand(cmd: string) {
+    if (abrirBtwSe(cmd)) return;
     try {
       await sendInput(sessionName, cmd);
     } catch (err) {
@@ -2335,6 +2519,7 @@
     <div class="arq-visor" data-arq-visor>
       <FileViewer
         path={arquivoAberto}
+        linha={filesStore.linha}
         diff={filesStore.diff}
         conteudo={filesStore.conteudo}
         loading={filesStore.loading}
@@ -2349,6 +2534,9 @@
        visor aberto — Tab não alcança controles escondidos sob o arquivo. O painel de contexto
        (árvore viva) e o próprio visor ficam FORA deste wrapper de propósito. -->
   <div class="chat-underlay" inert={visorAberto}>
+  {#if stateEvent?.codex_buffering}
+    <p class="codex-notice" role="status">{m.chat_codex_buffering()}</p>
+  {/if}
   {#if loading}
     <!-- Entrando na sessao: skeleton shimmer (familia Respiracao) enquanto o /history carrega. -->
     <div class="chat-skeleton" aria-label={m.chat_carregando_historico()} aria-busy="true">
@@ -2417,7 +2605,7 @@
         <p class="chat-error-hint">{error}</p>
       {/if}
       <div class="chat-error-actions">
-        <button class="retry-btn" onclick={loadHistory}>{m.lista_tentar_novamente()}</button>
+        <button class="retry-btn" onclick={() => loadHistory()}>{m.lista_tentar_novamente()}</button>
         <button class="back-btn-inline" onclick={onBack}>{m.chat_voltar_sessoes()}</button>
       </div>
     </div>
@@ -2608,8 +2796,9 @@
   {/if}
 
   <UsageSheet open={usageOpen} {status} onClose={() => (usageOpen = false)} />
+  <BtwSheet open={btwOpen} {sessionName} pergunta={btwPergunta} onClose={() => (btwOpen = false)} />
 
-  <Git open={gitOpen} {sessionName} {desktop} {filesInContext} onClose={() => (gitOpen = false)}
+  <Git open={gitOpen} {sessionName} {desktop} {filesInContext} initialTab={gitInitialTab} onClose={() => { gitOpen = false; gitInitialTab = 'changes'; }}
        {events} {histGap} cwd={planSession?.cwd ?? null} />
 
   <RunSheet open={runOpen} {sessionName} onClose={() => (runOpen = false)} onRunningChange={(r) => (runRunning = r)} />
@@ -2644,6 +2833,11 @@
 </div>
 
 <style>
+  .codex-notice {
+    margin: 0; padding: var(--space-2) var(--space-4);
+    color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5;
+    border-bottom: 1px solid var(--border-default);
+  }
   /* Underlay da conversa (B5): envolve MessageList + pills + dock pra ficar `inert` com o
      visor aberto. Repete o flex column do pai — sem isto o skeleton/MessageList (flex:1)
      perderia a altura e a coluna colapsaria. Nenhum estilo proprio: so o percurso de teclado. */

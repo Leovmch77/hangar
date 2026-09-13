@@ -1,4 +1,4 @@
-"""Instalador dos hooks de estado e navegador do Hangar no `~/.codex/hooks.json`.
+"""Instalador dos hooks de estado, navegador e proteção do Hangar no `~/.codex/hooks.json`.
 
 Irmao do hook_installer.py (Claude) e do kimi_hook_installer.py (Kimi): cada harness recebe o
 hook do app pelo instalador dele, nunca pelo importador do Codex — que arrastaria junto os outros
@@ -6,15 +6,24 @@ hooks so-Claude do app (previa, AskUserQuestion, pareamento) e reescreveria o co
 checkout diferente. O adapter do Codex le o marcador deste hook como segunda fonte de "turno
 fechou" (adapters/codex/adapter.py), entao ele precisa existir mesmo com a integracao desligada.
 
-So ACRESCENTA: entrada que ja aponta pro hook (qualquer formato, qualquer checkout) fica
-como esta. Reescrever o comando muda o hook, e no Codex hook alterado e hook nao aprovado.
+Só reescreve formatos Windows que já falham: qualquer entrada funcional de outro checkout fica
+como está, pois no Codex hook alterado é hook não aprovado.
 """
 import logging
 import os
 import sys
 from pathlib import Path
 
-from app.hook_installer import NAV_HOOK, STATE_HOOK, _NAV_COMMAND, _STATE_COMMAND, _load_settings, _refers_to, _write
+from app.hook_installer import (
+    GUARD_HOOK,
+    NAV_HOOK,
+    STATE_HOOK,
+    _NAV_COMMAND,
+    _STATE_COMMAND,
+    _load_settings,
+    _refers_to,
+    _write,
+)
 
 _log = logging.getLogger("hangar.codex_hook_installer")
 
@@ -46,6 +55,14 @@ def comando_navegador(windows: bool | None = None) -> str:
     return f'& "{sys.executable}" "{NAV_HOOK}" ; exit 0'
 
 
+def comando_guarda(windows: bool | None = None) -> str:
+    """Preserva o rc=2 com que o guard bloqueia a derrubada do servidor de sessões."""
+    windows = os.name == "nt" if windows is None else windows
+    if not windows:
+        return f'"{sys.executable}" "{GUARD_HOOK}"'
+    return f'& "{sys.executable}" "{GUARD_HOOK}" ; exit $LASTEXITCODE'
+
+
 def _tem_hook(grupos: object, script: str = STATE_HOOK) -> bool:
     return isinstance(grupos, list) and any(
         isinstance(g, dict) and isinstance(g.get("hooks"), list)
@@ -54,7 +71,7 @@ def _tem_hook(grupos: object, script: str = STATE_HOOK) -> bool:
         for g in grupos)
 
 
-def _reescrever_formato_cmd(hooks: dict, comando: str) -> list[str]:
+def _reescrever_formato_cmd(hooks: dict, comando: str, script: str = STATE_HOOK) -> list[str]:
     tocados: list[str] = []
     for ev, grupos in hooks.items():
         if not isinstance(grupos, list):
@@ -63,16 +80,17 @@ def _reescrever_formato_cmd(hooks: dict, comando: str) -> list[str]:
             for h in (g.get("hooks") if isinstance(g, dict) and isinstance(g.get("hooks"), list) else []):
                 # So o formato cmd (sem `&`): um `& ...` de outro venv/checkout ja funciona e
                 # reescreve-lo invalidaria a aprovacao a cada subida de outra arvore.
-                if (isinstance(h, dict) and _refers_to(h.get("command"), STATE_HOOK, por_nome=True)
+                if (isinstance(h, dict) and _refers_to(h.get("command"), script, por_nome=True)
                         and not str(h.get("command") or "").lstrip().startswith("&")):
                     h["command"] = comando
                     tocados.append(ev)
     return tocados
 
 
-def ensure_codex_state_hook_installed(home: Path | None = None) -> list[str]:
-    """Idempotente e fail-soft: devolve os eventos em que gravou (so pra log), [] senao."""
+def ensure_codex_state_hook_installed(home: Path | None = None, *, windows: bool | None = None) -> list[str]:
+    """Instala os hooks próprios do Codex; devolve os eventos gravados (só para log)."""
     try:
+        windows = os.name == "nt" if windows is None else windows
         base = home or codex_home()
         if not base.is_dir():
             return []
@@ -83,7 +101,7 @@ def ensure_codex_state_hook_installed(home: Path | None = None) -> list[str]:
         hooks = data.setdefault("hooks", {})
         # Evento com valor que não é lista é arquivo editado à mão: não se mexe (mesma regra do
         # _sync_hook do Claude), em vez de zerar o que estava lá.
-        comando = comando_estado()
+        comando = comando_estado(windows)
         faltando = [ev for ev in _EVENTOS
                     if isinstance(hooks.get(ev, []), list) and not _tem_hook(hooks.get(ev))]
         for ev in faltando:
@@ -91,15 +109,25 @@ def ensure_codex_state_hook_installed(home: Path | None = None) -> list[str]:
         evento = "UserPromptSubmit"
         if isinstance(hooks.get(evento, []), list) and not _tem_hook(hooks.get(evento), NAV_HOOK):
             hooks.setdefault(evento, []).append({"hooks": [{
-                "type": "command", "command": comando_navegador(),
+                "type": "command", "command": comando_navegador(windows),
             }]})
+            if evento not in faltando:
+                faltando.append(evento)
+        evento = "PreToolUse"
+        guarda = comando_guarda(windows)
+        if isinstance(hooks.get(evento, []), list) and not _tem_hook(hooks.get(evento), GUARD_HOOK):
+            hooks.setdefault(evento, []).append({
+                "matcher": "Bash", "hooks": [{"type": "command", "command": guarda}],
+            })
             if evento not in faltando:
                 faltando.append(evento)
         # Entrada nossa no formato cmd (`"exe" "arg" || exit 0`) e reescrita SO no Windows: la ela
         # falha em todo evento, e hook que falha nao tem aprovacao a preservar. No POSIX o formato
         # antigo fica como esta (reescrever invalidaria a confianca dada no Codex).
-        if os.name == "nt":
+        if windows:
             faltando += _reescrever_formato_cmd(hooks, comando)
+            faltando += _reescrever_formato_cmd(hooks, guarda, GUARD_HOOK)
+            faltando = list(dict.fromkeys(faltando))
         if faltando:
             _write(path, data)
         return faltando

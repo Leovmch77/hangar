@@ -28,6 +28,8 @@ def test_account_creation_is_isolated(isolated_home):
         "version": 1,
         "id": "work",
     }
+    # Nasce pronta pro login: credencial em arquivo, dentro da pasta da conta.
+    assert (account.home / "config.toml").read_text() == 'cli_auth_credentials_store = "file"\n'
     assert [a.id for a in accounts.list_accounts()] == ["default", "work"]
 
 
@@ -184,6 +186,22 @@ def test_default_home_is_always_listed_without_creating_it(isolated_home):
     assert accounts.default_home() == isolated_home / ".codex"
     assert accounts.list_accounts() == [accounts.Account("default", isolated_home / ".codex", True)]
     assert not (isolated_home / ".codex").exists()
+
+
+def test_padrao_fantasma_nao_aparece_na_tela(isolated_home, monkeypatch):
+    # Maquina sem Codex e sem ~/.codex: a padrao era um cartao inventado, "precisa entrar" numa
+    # conta que nunca existiu (medido 12/09/2026). A lista completa continua com ela, pra resolver id.
+    monkeypatch.setattr(accounts.shutil, "which", lambda nome: None)
+    assert accounts.list_visible_accounts() == []
+    assert [a.id for a in accounts.list_accounts()] == ["default"]
+
+
+def test_padrao_aparece_com_codex_instalado_ou_com_a_pasta(isolated_home, monkeypatch):
+    monkeypatch.setattr(accounts.shutil, "which", lambda nome: r"C:\bin\codex.exe")
+    assert [a.id for a in accounts.list_visible_accounts()] == ["default"]
+    monkeypatch.setattr(accounts.shutil, "which", lambda nome: None)
+    (isolated_home / ".codex").mkdir()
+    assert [a.id for a in accounts.list_visible_accounts()] == ["default"]
 
 
 def test_rollout_outside_registered_accounts_is_not_adopted(isolated_home):

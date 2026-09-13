@@ -7,6 +7,7 @@ import * as m from '../paraglide/messages';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import { planBadge } from '@hangar/core';
   import PlanBar from './PlanBar.svelte';
+  import IconFolder from './icons/IconFolder.svelte';
   import StateChip from './StateChip.svelte';
   import BottomSheet from './BottomSheet.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
@@ -35,6 +36,7 @@ import * as m from '../paraglide/messages';
 
 
   const title = $derived(session.name);
+  const pendingQuestions = $derived(session.pending_questions ?? 0);
 
   const cwdPartes = $derived(cwdParts(session.cwd));
 
@@ -289,12 +291,15 @@ import * as m from '../paraglide/messages';
           />
         {:else}
           <span class="session-name">{title}</span>
+          {#if pendingQuestions > 0}
+            <span class="untracked-badge pending-questions" title={`${m.ask_perguntas()}: ${pendingQuestions}`} aria-label={`${m.ask_perguntas()}: ${pendingQuestions}`}>? {pendingQuestions}</span>
+          {/if}
         {/if}
         {#if untracked}
           <span class="untracked-badge" title={untrackedReason(session.provider)}>⚠ {m.sessao_sem_id()}</span>
         {/if}
       </span>
-      {#if session.state === 'awaiting_input' && session.question}
+      {#if (session.state === 'awaiting_input' || pendingQuestions > 0) && session.question}
         <span class="status-sub asking" title={session.question}>{session.question}</span>
       {:else if session.state === 'working' && session.label}
         <span class="status-sub working" title={session.label}>{session.label}</span>
@@ -324,7 +329,10 @@ import * as m from '../paraglide/messages';
             <span class="diff-stats" aria-hidden="true">{#if session.git_added}<span class="diff-add">+{session.git_added}</span>{/if}{#if session.git_removed}<span class="diff-del">−{session.git_removed}</span>{/if}</span>
           {/if}
           {#if showCwd}
-            <span class="cwd" title={session.cwd}><span class="cwd-prefix">{cwdPartes.prefix}</span><span class="cwd-base">{cwdPartes.base}</span></span>
+            <!-- Só a última pasta, com ícone no lugar do prefixo (mesma razão da Sidebar: o
+                 prefixo truncava o nome que identifica). Caminho inteiro no title. -->
+            <!-- sr-only com o caminho inteiro: mesma razão da Sidebar, onde está o comentário. -->
+            <span class="cwd" title={session.cwd}><span class="sr-only">{session.cwd}</span><span class="cwd-icone" aria-hidden="true"><IconFolder size={11} /></span><span class="cwd-base" aria-hidden="true">{cwdPartes.base}</span></span>
           {/if}
           {#if agoLabel}
             {#if serverBadge || session.branch || showCwd}<span class="meta-sep" aria-hidden="true">·</span>{/if}
@@ -339,7 +347,9 @@ import * as m from '../paraglide/messages';
           <!-- Marca do provider pra TODOS (pedido do usuário): o glifo colorido sempre; o TEXTO
                só nas não-Claude — a exceção se nomeia, o default se reconhece pelo ícone.
                provider ausente = Claude (o campo só viaja quando não é Claude). -->
-          <span class="prov-chip" class:prov-chip--so-icone={!provTag} title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;</span><ProviderGlyph provider={session.provider} size={12} />{#if provTag}{provTag}{/if}</span>
+          <!-- Só o glifo, como na Sidebar: cada provider tem marca própria e o nome ao lado repetia
+               o desenho. O nome segue no title e no leitor de tela. -->
+          <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={session.provider} size={12} /></span>
           {#if session.pair_peers?.length}
             <span class="paired-chip" title={m.sessao_grupo_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} />&nbsp;{session.pair_peers.length === 1 ? session.pair_peers[0] : session.pair_peers.length + 1}</span>
           {/if}
@@ -361,7 +371,7 @@ import * as m from '../paraglide/messages';
           {#if contaChip}
             <!-- Qual conta Anthropic paga esta sessão. No celular não havia isto em lugar nenhum,
                  e três sessões paradas no limite da mesma conta pareciam três problemas. -->
-            <span class="conta-chip" style="color: {contaChip.cor}; border-color: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
+            <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
           {/if}
         </span>
       <PlanBar {session} />
@@ -722,12 +732,11 @@ import * as m from '../paraglide/messages';
     flex-shrink: 4;
     font-family: var(--font-mono);
   }
-  .cwd-prefix {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .cwd-icone {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    margin-right: 3px;
     color: var(--text-muted);
   }
   .cwd-base {
@@ -858,12 +867,18 @@ import * as m from '../paraglide/messages';
   /* Claude (sem texto, só a marca): chip só-ícone fica redondo e menor que os chips com texto. */
   .prov-chip--so-icone { padding: 1px 3px; }
 
-  /* Conta Anthropic da sessão: contorno na cor da conta, fundo transparente (é rótulo de
-     identidade, como o prov-chip — não disputa com estado nem com o motor). */
+  /* Conta da sessão (Anthropic ou Codex): chip neutro com um ponto na cor da conta — mesma receita
+     da Sidebar, onde está o porquê. */
   .conta-chip {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
-    padding: 0 6px; border: 1px solid; border-radius: var(--radius-full);
-    background: transparent; flex-shrink: 0;
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: var(--fw-medium); letter-spacing: 0.02em;
+    padding: 1px 6px; border-radius: var(--radius-full);
+    background: var(--fill-subtle); color: var(--text-secondary); flex-shrink: 0;
+  }
+  .conta-chip::before {
+    content: ''; flex: 0 0 auto;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--conta-cor, currentColor);
   }
 
   /* Escondido do layout (mouse/touch usam swipe) mas SEMPRE na arvore de a11y (SR anuncia "Excluir
