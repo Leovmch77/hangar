@@ -26,10 +26,14 @@ vi.mock('../../lib/credenciais', () => ({
   estadoContaCodex: vi.fn(async () => ({ status: 'ready', trust_pending: false, issues: [] })),
   instalacaoEstado: vi.fn(),
   instalarHarness: vi.fn(),
+  codexOpcoes: vi.fn(() => new Promise(() => {})),
 }));
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
   patchConfig: vi.fn(), patchConfigForServer: vi.fn(),
+  // Este arquivo cobre o botão "Instalar": a leitura de configuração do card do Claude não pode
+  // sair pra rede aqui, nem resolver e repintar no meio de um caso.
+  getConfig: vi.fn(() => new Promise(() => {})), getConfigForServer: vi.fn(() => new Promise(() => {})),
 }));
 
 const c = vi.mocked(cred);
@@ -55,7 +59,16 @@ async function montar(cards: Harness[], inst: Instalacao) {
   c.instalacaoEstado.mockResolvedValue(inst);
   const el = document.createElement('div');
   document.body.appendChild(el);
-  const comp = mount(HarnessSettings, { target: el, props: { apiTarget: null } });
+  // A configuração vem do modal (store), não de um GET desta tela — aqui ela nem importa: o caso é
+  // o card do CLI ausente.
+  const store = {
+    get campos() { return {}; }, get leitura() { return {}; },
+    get carregando() { return false; }, get salvando() { return false; },
+    get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
+    valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+    carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
+  } as never;
+  const comp = mount(HarnessSettings, { target: el, props: { apiTarget: null, store } });
   montados.push(comp);
   await tick(); await Promise.resolve(); await Promise.resolve(); await tick();
   return { el, comp: comp as never };
@@ -125,6 +138,9 @@ describe('HarnessSettings — instalar um CLI que falta', () => {
     expect(t.el.textContent).toContain(
       m.harness_inst_andamento({ passo: 1, total: 4, etapa: m.harness_inst_etapa_comando() }));
     expect(t.el.querySelector('.hs-inst-log')!.textContent).toContain('baixando kimi 0.38.0');
+    // Barra igual à da integração: etapas concluídas sobre o total (1ª etapa em curso = 0%).
+    expect(t.el.querySelector('.hs-inst [role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('0');
+    expect(t.el.querySelector('.hs-inst [role="progressbar"]')?.getAttribute('aria-label')).toBe(m.harness_inst_progresso());
     unmount(t.comp);
   });
 
@@ -248,7 +264,7 @@ describe('HarnessSettings — conta da integração Codex', () => {
     const t = await montar([
       { id: 'codex', nome: 'Codex', instalado: true, versao: '0.154.0', itens: [] },
     ], estado());
-    const seletorConta = `[aria-label="${m.codex_ui_account()}"]`;
+    const seletorConta = '#codex-conta';
     await vi.waitFor(() => expect(
       t.el.querySelector<HTMLSelectElement>(seletorConta),
     ).not.toBeNull());
@@ -302,5 +318,50 @@ describe('HarnessSettings — conta da integração Codex', () => {
     await vi.waitFor(() => expect(t.el.textContent).toContain('work@x'));
     await unmount(t.comp);
     montados = montados.filter((comp) => comp !== t.comp);
+  });
+});
+
+describe('HarnessSettings — consertar mostra o andamento no próprio item', () => {
+  // O botão virava "…" e o resultado ia pro rodapé da página inteira: quem clicou em Consertar no
+  // tmux não sabia se estava rodando, e o erro aparecia longe do item (pedido de 13/09/2026).
+  const CARD_TMUX: Harness = {
+    id: 'tmux', nome: 'tmux', instalado: true, versao: 'tmux 3.3.8',
+    itens: [
+      { id: 'bloco', ok: false, codigo: 'tmux_bloco_ausente', conserto: 'tmux', params: {} },
+      { id: 'mouse', ok: true, codigo: 'tmux_mouse_on', conserto: null, params: {}, info: true },
+    ],
+  } as Harness;
+  const itemBloco = (el: HTMLElement) => el.querySelectorAll<HTMLElement>('.hs-item')[0];
+
+  it('rodando: diz o que está consertando, há quanto tempo, com barra de andamento', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      c.consertarHarness.mockReturnValue(new Promise(() => {}));
+      const t = await montar([CARD_TMUX], estado());
+      itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+      await tick();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await tick();
+      const andamento = t.el.querySelector<HTMLElement>('.hs-conserto[role="status"]')!;
+      expect(andamento).not.toBeNull();
+      expect(andamento.textContent).toContain(m.harness_consertando({ item: m.harness_item_tmux_bloco(), s: 3 }));
+      expect(andamento.querySelector('.hs-barra')).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('terminou: o resultado aparece junto do item, não no rodapé', async () => {
+    c.consertarHarness.mockResolvedValue({ feito: 'config do psmux reaplicada', harnesses: [CARD_TMUX] });
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-conserto')?.textContent).toContain('config do psmux reaplicada'));
+    expect(t.el.querySelector('.hs-card .hs-conserto')).not.toBeNull();
+  });
+
+  it('falhou: o erro aparece junto do item que falhou', async () => {
+    c.consertarHarness.mockRejectedValue(new Error('setup-windows-tmux.ps1 saiu com 1'));
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-card .hs-conserto[role="alert"]')?.textContent)
+      .toContain('saiu com 1'));
   });
 });

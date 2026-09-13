@@ -1209,10 +1209,32 @@ export interface CampoConfig {
   definido: boolean;
   origem: 'app' | 'env';
 }
+/**
+ * Uma variável do `.env` mostrada em Avançado, só leitura.
+ *
+ * `valor` é `null` quando `segredo` — o backend nunca o devolve, nem mascarado, e `definida` é a
+ * única coisa que a tela sabe sobre ele. `descricao` e `alerta` são CÓDIGOS que a tela traduz
+ * (padrão do repo); código desconhecido não vira texto nenhum, e a linha mostra só o nome cru —
+ * nunca o identificador da mensagem.
+ */
+export interface VariavelEnv {
+  nome: string;
+  valor: string | number | boolean | null;
+  definida: boolean;
+  segredo: boolean;
+  descricao: string | null;
+  alerta: string | null;
+}
 export interface ConfigServidor {
   campos: Record<string, CampoConfig>;
   // `terminal_panel` (Task 6, Step 8) e o unico booleano aqui -- `pty` e POSIX-only.
   somente_leitura: Record<string, string | number | boolean>;
+  /**
+   * IRMÃ do `somente_leitura`, nunca dentro dele: aquele é um mapa chave -> valor simples,
+   * desenhado linha a linha. Opcional porque é ACRÉSCIMO — o app nativo continua lendo o que lia,
+   * e um backend mais antigo responde sem a chave.
+   */
+  variaveis_env?: VariavelEnv[];
 }
 
 export function getConfig(): Promise<ConfigServidor> {
@@ -1783,6 +1805,27 @@ export async function interrupt(name: string, clear = false): Promise<void> {
   });
 }
 
+// Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
+// Demora o que a resposta demorar (ate 120s no backend) — quem chama mostra espera.
+export interface PerguntaLateral {
+  question: string;
+  answer: string;
+  fonte: 'buffer' | 'pane';   // 'pane' = lida da tela, pode estar cortada
+  ts: number;
+  salvo?: boolean;            // false = respondeu, mas o histórico não foi gravado
+}
+
+export async function perguntaLateral(name: string, question: string): Promise<PerguntaLateral> {
+  return apiFetch<PerguntaLateral>(`/api/sessions/${encodeURIComponent(name)}/btw`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function historicoLateral(name: string): Promise<PerguntaLateral[]> {
+  return apiFetch<PerguntaLateral[]>(`/api/sessions/${encodeURIComponent(name)}/btw`);
+}
+
 // Espelho do pane (overlays so-TUI): le o pane cru e manda teclas de navegacao (allowlist no backend).
 export type NavKey =
   | 'Up' | 'Down' | 'Left' | 'Right'
@@ -2021,6 +2064,31 @@ export function openEventStream(name: string, lastEventId?: string | null, req =
   const url = `${base}${path}${qs ? `?${qs}` : ''}`;
 
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
+}
+
+export interface SyncSetup {
+  enabled: boolean;
+  registered: boolean;
+  user: string | null;
+}
+
+export interface SyncSetupBody {
+  user: string;
+  salt: string;
+  auth_hash: string;
+  enc_blob: { iv: string; data: string };
+}
+
+export function getSyncSetupForServer(server: Server, signal?: AbortSignal): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { signal: comTeto(signal, 8000) });
+}
+
+export function setupSyncForServer(server: Server, body?: SyncSetupBody): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { method: 'POST', body: JSON.stringify(body ?? {}) });
+}
+
+export function disableSyncForServer(server: Server): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup/disable', { method: 'POST' });
 }
 
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource

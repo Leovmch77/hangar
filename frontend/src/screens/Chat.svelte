@@ -21,6 +21,7 @@
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
   import CodexLimitsSheet from '../components/CodexLimitsSheet.svelte';
   import ForwardSheet from '../components/ForwardSheet.svelte';
+  import BtwSheet from '../components/BtwSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
@@ -150,6 +151,8 @@
   // amarrados a ela. E o `finally` do loadHistory PRECISA soltar exatamente a mesma chave.
   const sessaoDoPortao = sessionName;
   segurarAquecimento(sessaoDoPortao);
+  const aquecimento = new AbortController();
+  onDestroy(() => aquecimento.abort());
 
   let events = $state<ChatEvent[]>([]);
   const retiredQueuedIds = new Set<string>();
@@ -336,6 +339,7 @@
   let error = $state('');
   let es: EventSourceLike | null = null;
   let watchdog: ReturnType<typeof setTimeout> | undefined;     // liveness: reconecta se a conexao morrer calada
+  let reabertoPeloWatchdogEm = 0;
   // Última posição recebida do transcript; reenviada no reconnect pra retomar exatamente dali.
   let lastEventId: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -348,10 +352,39 @@
   // Snapshot do mount de proposito: o App remonta o Chat por {#key sessionName} a cada troca.
   // svelte-ignore state_referenced_locally
   const draftKey = `cp-draft:${sessionName}`;
-  let composerText = $state(localStorage.getItem(draftKey) ?? '');
+  // O rascunho guarda o TRANSCRIPT de quem o escreveu: a chave é o nome, e nome se repete. Uma
+  // sessão morta e recriada com o mesmo nome (a época de recriação só vive com o app aberto) abria
+  // com o texto da anterior. Valor antigo, só texto, vale como "transcript desconhecido".
+  function lerRascunho(): { text: string; jsonl: string | null } {
+    let cru: string | null = null;
+    try { cru = localStorage.getItem(draftKey); } catch { return { text: '', jsonl: null }; }
+    if (!cru) return { text: '', jsonl: null };
+    try {
+      const d = JSON.parse(cru);
+      if (d && typeof d === 'object' && typeof d.text === 'string') {
+        return { text: d.text, jsonl: typeof d.jsonl === 'string' ? d.jsonl : null };
+      }
+    } catch { /* texto cru de versão anterior */ }
+    return { text: cru, jsonl: null };
+  }
+  const rascunhoSalvo = lerRascunho();
+  // Com transcript gravado, só restaura depois de conferir que é o desta sessão.
+  let rascunhoConferido = $state(rascunhoSalvo.jsonl === null);
+  let composerText = $state(rascunhoSalvo.jsonl === null ? rascunhoSalvo.text : '');
   $effect(() => {
-    if (composerText) localStorage.setItem(draftKey, composerText);
-    else localStorage.removeItem(draftKey);
+    if (rascunhoConferido || !sessionJsonl) return;
+    rascunhoConferido = true;
+    if (sessionJsonl === rascunhoSalvo.jsonl) { if (!composerText) composerText = rascunhoSalvo.text; }
+    else try { localStorage.removeItem(draftKey); } catch { /* sem storage */ }
+  });
+  $effect(() => {
+    const texto = composerText;
+    const jsonl = sessionJsonl;
+    if (!rascunhoConferido) return;      // antes de conferir, apagar aqui perderia o rascunho certo
+    try {
+      if (texto) localStorage.setItem(draftKey, JSON.stringify({ text: texto, jsonl }));
+      else localStorage.removeItem(draftKey);
+    } catch { /* sem storage: o rascunho vive só na memória */ }
   });
   // Preview AO VIVO do bloco de assistente em voo (lido do pane via SSE 'preview'). Texto-completo,
   // full-replace; some quando o assistant_msg canonico (do .jsonl) cobre o texto — sair de working
@@ -390,6 +423,8 @@
   let switcherOpen = $state(false);
   let createOpen = $state(false);
   let usageOpen = $state(false);
+  let btwOpen = $state(false);
+  let btwPergunta = $state('');
   let gitOpen = $state(false);
   let gitInitialTab = $state<GitTabId>('changes');
 
@@ -460,8 +495,9 @@
   let runRunning = $state(false);
   // Só acende o indicador do botão Rodar — nada na tela depende dele pra abrir. Espera a conversa.
   onMount(() => {
-    void aoAquecer(sessionName).then(() =>
-      getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted
+        && getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
   });
   let previewOpen = $state(false);
   let activityOpen = $state(false);
@@ -579,9 +615,10 @@
     planError = false;
     // Painel docado no desktop: este GET (105 KB de markdown) saía junto do histórico. Espera a
     // conversa pintar, como os outros aquecimentos.
-    aoAquecer(sessionName).then(() => getPlan(sessionName))
+    aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
+      liberado !== false && !aquecimento.signal.aborted ? getPlan(sessionName) : null)
       .then((d) => {
-        if (planKey !== key) return;   // chegou tarde: já tem fetch mais novo no ar, descarta
+        if (aquecimento.signal.aborted || planKey !== key) return;
         planDetail = d;
         planDetailKey = key;
         planLoading = false;
@@ -609,7 +646,9 @@
   // ladrão da abertura — a conversa esperava a política que ninguém tinha pedido ainda.
   $effect(() => {
     const sn = sessionName;
-    void aoAquecer(sn).then(() => prefetchOrq(sn));
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado !== false && !aquecimento.signal.aborted) prefetchOrq(sn);
+    });
   });
   // Membro do grupo aberto no modal (null = fechado). É string, não lista, de propósito: um modal
   // por vez mantém o teto em 2 SSE (este chat + o do par) e o navegador corta em ~6 por host.
@@ -708,9 +747,9 @@
   }
 
   const anyOverlayOpen = () =>
-    switcherOpen || createOpen || usageOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
+    switcherOpen || createOpen || usageOpen || btwOpen || gitOpen || runOpen || previewOpen || activityOpen || limitsOpen || mirrorOpen || xtermOpen || askOpen || moreOpen || anexosOpen;
   function closeOverlays() {
-    switcherOpen = createOpen = usageOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
+    switcherOpen = createOpen = usageOpen = btwOpen = gitOpen = runOpen = previewOpen = activityOpen = limitsOpen = moreOpen = anexosOpen = false;
     if (mirrorOpen) closeMirror();
     xtermOpen = false;
     askOpen = false;
@@ -1295,20 +1334,26 @@
 
   // Quando perguntar: enquanto TRABALHA (é quando nasce subagente) e uma vez ao parar, pra pegar o
   // último que terminou junto com o turno. Sessão parada não fica batendo no backend.
+  let subagentesEmVoo: ReturnType<typeof getSubagents> | null = null;
   $effect(() => {
     const trabalhando = currentState === 'working';
     let vivo = true;
     async function contar() {
       try {
-        const lista = await getSubagents(sessionName);
+        const lista = await (subagentesEmVoo ??= getSubagents(sessionName)
+          .finally(() => { subagentesEmVoo = null; }));
         if (vivo) subagentesNoDisco = lista.length;
       } catch { /* offline / sessão sem transcript -> mantém o que tinha */ }
     }
     // A 1ª contagem espera a conversa pintar (ver lib/aquecimento): ela só acende o ponto do botão
     // de Atividade. Depois que o histórico chega a espera já está resolvida e o ciclo de 5s corre
     // no ritmo de sempre.
-    void aoAquecer(sessionName).then(() => { if (vivo) void contar(); });
-    const id = trabalhando ? setInterval(contar, 5000) : undefined;
+    let id: ReturnType<typeof setInterval> | undefined;
+    void aoAquecer(sessionName, aquecimento.signal).then((liberado) => {
+      if (!vivo || liberado === false) return;
+      void contar();
+      if (trabalhando) id = setInterval(contar, 5000);
+    });
     return () => { vivo = false; if (id !== undefined) clearInterval(id); };
   });
 
@@ -1318,6 +1363,7 @@
   // poll (kick) que, se estiver rodando, liga o loop de 4s até terminar. Antes: qualquer workflow
   // no histórico (mesmo finalizado há dias) pollava a cada 4s pra sempre.
   let workflowRunning = $state(false);
+  let workflowsEmVoo: ReturnType<typeof getWorkflows> | null = null;
   const wfCount = $derived(activity.agents.filter((a) => a.kind === 'workflow').length);
   const activityRunning = $derived(workflowRunning || activity.runningAgents > 0);
   $effect(() => {
@@ -1326,7 +1372,8 @@
     let alive = true;
     async function poll() {
       try {
-        const ws = await getWorkflows(sessionName);
+        const ws = await (workflowsEmVoo ??= getWorkflows(sessionName)
+          .finally(() => { workflowsEmVoo = null; }));
         if (alive) workflowRunning = ws.some((w) => w.running);
       } catch { /* offline / sem run -> ignora */ }
     }
@@ -1608,11 +1655,22 @@
     // O callback mantém o destino da conexão mesmo se o usuário trocar de servidor.
     function armWatchdog() {
       clearTimeout(watchdog);
+      // Primeiro quadro com prazo curto: na volta do iOS o pedido às vezes fica preso na rede e
+      // uma nova tentativa passa antes de a pessoa desistir e reabrir o app. Mesmo prazo da lista.
+      const ms = primeiroQuadro ? 10_000 : 25_000;
       watchdog = setTimeout(() => {
         diag.registrar({ evento: 'sse.mudo', nivel: 'aviso', tela: 'chat', sessao: sessionName,
-          req, ms: 25000 }, destino);
-        if (currentState !== 'dead') connectSSE();
-      }, 25000);
+          req, ms, codigo: primeiroQuadro ? 'primeiro_quadro_timeout' : undefined }, destino);
+        if (currentState === 'dead') return;
+        if (primeiroQuadro) {
+          // Com backoff: servidor lento pra responder viraria um laço de reabertura a cada 10s.
+          es?.close(); es = null;
+          reagendarSSE();
+          return;
+        }
+        reabertoPeloWatchdogEm = Date.now();
+        connectSSE();
+      }, ms);
     }
     function noteAlive() {
       if (primeiroQuadro) {
@@ -1923,10 +1981,14 @@
     if (document.visibilityState !== 'visible') return;
     // Segura watchdog/retry DURANTE o re-seed: no wake do iOS o watchdog vencido disparava um
     // connectSSE proprio e o onVisible outro logo atras — 2 reconexoes + replay em toda volta.
-    clearTimeout(watchdog);
-    clearTimeout(reconnectTimer);
+    // O iOS roda o watchdog vencido ANTES do visibilitychange: a conexão que ele acabou de abrir
+    // fica. Só essa — uma aberta pelo backoff pode ser a mesma tentativa presa na rede que caiu.
     sseRetryDelay = SSE_RETRY_MIN;   // rede provavelmente voltou: reconexao rapida de novo
-    connectSSE();
+    if (!es || Date.now() - reabertoPeloWatchdogEm > 1500) {
+      clearTimeout(watchdog);
+      clearTimeout(reconnectTimer);
+      connectSSE();
+    }
     const signal = newHistLoad();   // aborta a carga de fundo que ficou pendurada no background
     const g = histGen;
     const before = new Set(events);
@@ -2149,6 +2211,7 @@
   });
 
   async function handleSend(text: string, steer = false, onlyThisSession = false) {
+    if (abrirBtwSe(text)) return;
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
     // começa — sessão ocupada num turno longo deixava a msg invisível por minutos, e a corrida de
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
@@ -2276,7 +2339,18 @@
 
   // Slash commands gerais do Claude Code (ex: /clear, /compact) -> sessao viva. Modelo e
   // esforco NAO passam por aqui: vao pelos popovers de modelo/esforco -> endpoint /model-effort.
+  // `/btw` não é mensagem nem entra na fila: abre a folha de pergunta lateral, que dirige o
+  // overlay da TUI. Só Claude tem o comando; nos outros providers segue como texto.
+  function abrirBtwSe(text: string): boolean {
+    const btw = /^\/btw(?:\s+([\s\S]*))?$/i.exec(text.trim());
+    if (!btw || (sessionProvider ?? 'claude') !== 'claude') return false;
+    btwPergunta = (btw[1] ?? '').trim();
+    btwOpen = true;
+    return true;
+  }
+
   async function handleCommand(cmd: string) {
+    if (abrirBtwSe(cmd)) return;
     try {
       await sendInput(sessionName, cmd);
     } catch (err) {
@@ -2769,6 +2843,7 @@
   {/if}
 
   <UsageSheet open={usageOpen} {status} onClose={() => (usageOpen = false)} />
+  <BtwSheet open={btwOpen} {sessionName} pergunta={btwPergunta} onClose={() => (btwOpen = false)} />
 
   <Git open={gitOpen} {sessionName} {desktop} {filesInContext} initialTab={gitInitialTab} onClose={() => { gitOpen = false; gitInitialTab = 'changes'; }}
        {events} {histGap} cwd={planSession?.cwd ?? null} />

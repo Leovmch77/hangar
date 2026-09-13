@@ -49,15 +49,18 @@ def _active_jsonls(config_dir: Path) -> list:
 
 
 def _run_sob_claude(payload: dict, config_dir: Path) -> None:
-    """Roda o hook como FILHO de um processo com "claude" no cmdline — o ancestral que o marcador
+    """Roda o hook como FILHO de um processo cujo argv[0] é "claude" — o ancestral que o marcador
     de ativo exige. Rodar a suite dentro de um claude de verdade satisfazia isso por acidente do
-    ambiente; no CI não há claude nenhum na árvore e o hook (corretamente) não grava nada. O
-    argumento extra "claude" no wrapper é o que a subida de árvore encontra."""
+    ambiente; no CI não há claude nenhum na árvore e o hook (corretamente) não grava nada. Tem
+    que ser o argv[0] (o hook não olha o resto do cmdline), por isso o wrapper nasce com esse
+    nome via `executable=` e não recebe "claude" como argumento."""
+    # O interpretador vai por argumento: com argv[0] "claude" o `sys.executable` do wrapper não é
+    # confiável (o CPython o deriva do argv[0]).
     wrapper = ("import subprocess, sys; "
-               "sys.exit(subprocess.run([sys.executable, sys.argv[1]], "
+               "sys.exit(subprocess.run([sys.argv[2], sys.argv[1]], "
                "input=sys.stdin.buffer.read(), timeout=5).returncode)")
     env = {**os.environ, "CLAUDE_CONFIG_DIR": str(config_dir)}
-    subprocess.run([sys.executable, "-c", wrapper, HOOK, "claude"],
+    subprocess.run(["claude", "-c", wrapper, HOOK, sys.executable], executable=sys.executable,
                    input=json.dumps(payload).encode(), env=env, check=True, timeout=10)
 
 

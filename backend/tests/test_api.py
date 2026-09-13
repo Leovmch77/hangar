@@ -1976,6 +1976,13 @@ def _completed(returncode=0, stdout="", stderr=""):
     return _subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+@pytest.fixture(autouse=True)
+def _claude_resolvido(monkeypatch):
+    # O refinador resolve o `claude` pelo PATH; o subprocess e mockado, entao o teste nao pode
+    # depender de haver um instalado (o CI nao tem).
+    monkeypatch.setattr("app.loop._exe_claude", lambda: "claude")
+
+
 def test_loop_refine_ok(api_client):
     with patch("app.api.automations_enabled", return_value=True), \
          patch("app.loop.subprocess.run",

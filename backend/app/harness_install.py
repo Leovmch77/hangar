@@ -225,11 +225,21 @@ class Instalador:
     def _wrapper(self, cli: str) -> bool:
         """Os wrappers do Hangar e os lançadores de `~/.local/bin`. `False` = parou aqui.
 
-        No Windows não há o que rodar: os wrappers de lá são do `install.ps1` (que dot-sourceia
-        `claude.ps1` do perfil do PowerShell) e não há wrapper de `codex`. Aí a etapa é PULADA, e o
-        pulo vira aviso no estado — não só uma linha perdida no meio do log, porque a manchete da
-        tela promete "ligado ao app" e nessa máquina isso não aconteceu.
+        No Windows não há o que rodar: os wrappers de lá são do `install.ps1`, que dot-sourceia os
+        `.ps1` no perfil do PowerShell. Se a releitura já acha o do CLI, está ligado e não há o que
+        avisar. Senão a etapa é PULADA, e o pulo vira aviso no estado — não só uma linha perdida no
+        meio do log, porque a manchete da tela promete "ligado ao app".
         """
+        if harness_saude._E_WINDOWS:
+            if harness_saude._wrapper(cli).get("ok") is not True:
+                # O mesmo conserto do botão: o bloco no perfil do PowerShell.
+                self._anotar(f"$ wrapper\n{harness_saude.consertar('wrapper')}")
+                if harness_saude._wrapper(cli).get("ok") is False:
+                    self._falhou("wrapper", "o perfil do PowerShell continua sem o wrapper")
+                    return False
+            else:
+                self._anotar(f"[wrapper] {cli} já é carregado pelo perfil do PowerShell")
+            return True
         try:
             comando = harness_saude.cmd_instalador()
         except ValueError as e:

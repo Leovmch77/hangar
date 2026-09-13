@@ -444,6 +444,27 @@ def test_reconcile_confirma_msg_com_imagem_prefixo_image_n(tmp_path):
     assert q.load()[0]["confirmed"] is True
 
 
+def test_reconcile_confirma_msg_so_de_imagem_gravada_como_image_source(tmp_path):
+    # Mensagem SO de imagem: o Claude Code grava "[Image: source: <path>]" em vez do
+    # "📎 imagem: <path>" digitado (medido 13/09/2026, Claude Code 2.1.270). Sem casar, o print
+    # entregue era redigitado ate max_attempts e chegava 3x na conversa.
+    import json
+    caminho = r"C:\Users\Lhais\.hangar\uploads\hangar-b510f3\2d2167a0\1789299027-82332d.png"
+    j = tmp_path / "t.jsonl"
+    j.write_text(
+        json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z",
+                    "message": {"role": "user",
+                                "content": [{"type": "text", "text": f"[Image: source: {caminho}]"}]}}) + "\n",
+        encoding="utf-8")
+    q = PromptQueue("s")
+    q.path.write_text(
+        json.dumps({"id": "e1", "text": f"📎 imagem: {caminho}", "ts": 100.0, "delivered": True}) + "\n",
+        encoding="utf-8")
+    requeued = q.reconcile_delivered(pqueue.committed_user_lines(str(j)), 0.0, now=1000.0)
+    assert requeued == []
+    assert q.load()[0]["confirmed"] is True
+
+
 def test_assistant_event_carrega_ts_e_janela_de_cache():
     """O turno do assistente leva a hora e a janela de cache MEDIDA (não suposta).
 

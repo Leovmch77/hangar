@@ -27,6 +27,7 @@ vi.mock('../../lib/credenciais', async (importOriginal) => {
     ...real,
     listarCredenciais: vi.fn(),
     definirApelido: vi.fn(async () => ({ id: 'x', apelido: null })),
+    definirCookie: vi.fn(async () => ({ id: 'x', cookie_definido: false })),
     sincronizarNosAgentes: vi.fn(async () => ({ resultado: { pi: { ok: true, motivo: '' } } })),
   };
 });
@@ -99,6 +100,13 @@ function montar(contas: Credencial[], alvo: Server | null = ALVO) {
   document.body.appendChild(el);
   const comp = mount(ContasSettings, { target: el, props: { apiTarget: alvo } });
   return { el, comp: comp as never };
+}
+
+// Os fluxos que clicavam no kebab agora clicam no botão NOMEADO do card. O seletor é o texto,
+// não a classe: é o que o usuário lê, e é o que cai se o rótulo sumir de novo atrás de um menu.
+function botaoNomeado(escopo: ParentNode, texto: string) {
+  return [...escopo.querySelectorAll<HTMLButtonElement>('.ct-acao')]
+    .find((b) => b.textContent?.trim() === texto);
 }
 
 // O cache das queries é um singleton de módulo e sobrevive à desmontagem — de propósito, é o que
@@ -272,12 +280,35 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     unmount(t.comp);
   });
 
-  it('apagar: kebab → menu → confirmação → apagarConta com o NOME (label) da conta', async () => {
+  it('a conta do Claude gerenciada tem Remover NOMEADO, sem menu de três pontos', async () => {
     const t = montar([LOGADA]);
     await tick(); await tick();
-    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
-    await tick();
-    t.el.querySelector<HTMLButtonElement>('.ct-menu-item')!.click();
+    // O kebab saiu da tela inteira, não só deste card.
+    expect(t.el.querySelector('.ct-kebab')).toBeNull();
+    expect(t.el.querySelector('.ct-menu')).toBeNull();
+    expect(botaoNomeado(t.el, m.lista_remover())).not.toBeUndefined();
+    unmount(t.comp);
+  });
+
+  it('cada Remover diz de QUAL credencial é — a lista tem vários iguais', async () => {
+    const outra = claude({ id: 'claude:/home/u/.claude-b', path: '/home/u/.claude-b',
+      nome: 'segunda', nome_natural: 'segunda', ativa: false });
+    const t = montar([LOGADA, outra]);
+    await tick(); await tick();
+    const rotulos = [...t.el.querySelectorAll<HTMLButtonElement>('.ct-acao')]
+      .filter((b) => b.textContent?.trim() === m.lista_remover())
+      .map((b) => b.getAttribute('aria-label'));
+    expect(rotulos).toEqual([
+      m.contas_remover_aria({ nome: 'jefferson' }),
+      m.contas_remover_aria({ nome: 'segunda' }),
+    ]);
+    unmount(t.comp);
+  });
+
+  it('Remover → confirmação → apagarConta com o NOME (label) da conta', async () => {
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    botaoNomeado(t.el, m.lista_remover())!.click();
     await tick();
     expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.criar_apagar_fim());
     t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
@@ -297,9 +328,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
         { status: 404 }));
     const t = montar([LOGADA]);
     await tick(); await tick();
-    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
-    await tick();
-    t.el.querySelector<HTMLButtonElement>('.ct-menu-item')!.click();
+    botaoNomeado(t.el, m.lista_remover())!.click();
     await tick();
     t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
     await tick(); await tick();
@@ -321,9 +350,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
       await tick(); await tick();
       expect(t.el.querySelectorAll('.ct-card')).toHaveLength(2);
       const card = t.el.querySelectorAll('.ct-card')[1];
-      card.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
-      await tick();
-      card.querySelector<HTMLButtonElement>('.ct-menu-item')!.click();
+      botaoNomeado(card, m.lista_remover())!.click();
       await tick();
       credMock.listarCredenciais.mockResolvedValue([original]);
       card.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
@@ -773,7 +800,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
   const SEM_MOTORES = { motores: {}, arquivo_corrompido: false, arquivo_caminho: '' };
   const botao = (raiz: Element, rotulo: string) =>
     [...raiz.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
-  const abrirMotor = (raiz: Element) => botao(raiz, m.config_motores_editar()).click();
+  const abrirMotor = (raiz: Element) => botao(raiz, m.contas_motor_editar()).click();
   // `vi.clearAllMocks()` do arquivo limpa CONTAGENS, não `mockResolvedValue`/`mockRejectedValue`:
   // sem repor aqui, o caso do arquivo corrompido (e o do erro) vazaria para o seguinte.
   beforeEach(() => {
@@ -793,7 +820,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     // A janela mudou de lugar (virou chip), não sumiu: a linha do modelo é só o id do modelo.
     expect(t.el.querySelector('.ct-modelo')!.textContent).toBe('kimi-k3');
     expect(t.el.textContent).toContain(m.contas_chip_janela({ n: '256k' }));
-    const btn = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.config_motores_editar());
+    const btn = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_motor_editar());
     expect(btn).toBeDefined();
     unmount(t.comp);
   });
@@ -804,7 +831,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(t.el.querySelector('.ct-card')!.textContent).toContain('https://api.kimi.com/coding/v1');
-    [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.config_motores_editar())!.click();
+    [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_motor_editar())!.click();
     await tick();
     const card = t.el.querySelector('.ct-card')!;
     expect(card.textContent).toContain(m.config_motores_avancado());
@@ -899,9 +926,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(apiMock.getEnginesForServer).toHaveBeenCalledTimes(1);
-    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
-    await tick();
-    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-menu-item')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
+    botaoNomeado(t.el, m.lista_remover())!.click();
     await tick();
     [...t.el.querySelectorAll<HTMLButtonElement>('.ct-confirma-btn')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
     await tick(); await tick(); await tick();
@@ -915,7 +940,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(t.el.textContent).toContain('HTTP 500');
-    expect(t.el.textContent).not.toContain(m.config_motores_editar());
+    expect(t.el.textContent).not.toContain(m.contas_motor_editar());
     unmount(t.comp);
   });
 
@@ -956,7 +981,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
     const t = montar([LOGADA, chave({ id: 'kimi:/home/u/.kimi-code', nome: 'Kimi CLI', nome_natural: 'Kimi CLI', usos: ['kimi_cli'], base_url: null })]);
     await tick(); await tick(); await tick();
-    expect(t.el.textContent).not.toContain(m.config_motores_editar());
+    expect(t.el.textContent).not.toContain(m.contas_motor_editar());
     expect(t.el.textContent).not.toContain('kimi-k3');
     unmount(t.comp);
   });
@@ -967,7 +992,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     await tick(); await tick(); await tick();
     expect(t.el.textContent).toContain(m.config_motores_nao_consegui_1());
     expect(t.el.textContent).toContain('/home/u/.claude/engines.json');
-    expect(t.el.textContent).not.toContain(m.config_motores_editar());
+    expect(t.el.textContent).not.toContain(m.contas_motor_editar());
     const nova = t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
     expect(nova.disabled).toBe(true);
     unmount(t.comp);
@@ -1048,9 +1073,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
   it('confirmação de apagar uma chave avisa que sessões abertas continuam', async () => {
     const t = montar([chave()]);
     await tick(); await tick();
-    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
-    await tick();
-    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-menu-item')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
+    botaoNomeado(t.el, m.lista_remover())!.click();
     await tick();
     expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.config_motores_sessoes_abertas());
     unmount(t.comp);
@@ -1249,7 +1272,7 @@ describe('ContasSettings — as três seções da lista', () => {
     await tick(); await tick(); await tick();
     const cc = cardDe(t.el, 'Command Code');
     const acoes = [...cc.querySelectorAll<HTMLButtonElement>('.ct-acao')].map((b) => b.textContent?.trim());
-    expect(acoes).toContain(m.config_motores_editar());
+    expect(acoes).toContain(m.contas_motor_editar());
     expect(acoes).toContain(m.lista_remover());
     // Remover cai na MESMA confirmação inline do kebab, com o aviso das sessões abertas.
     [...cc.querySelectorAll<HTMLButtonElement>('.ct-acao')]
@@ -1257,6 +1280,86 @@ describe('ContasSettings — as três seções da lista', () => {
     await tick();
     const confirma = cardDe(t.el, 'Command Code').querySelector('.ct-confirma')!;
     expect(confirma.textContent).toContain(m.config_motores_sessoes_abertas());
+    unmount(t.comp);
+  });
+});
+
+describe('ContasSettings — o cookie e os rótulos dos ícones', () => {
+  const COM_COOKIE = chave({ id: 'chave:opencode', nome: 'OpenCode', nome_natural: 'OpenCode',
+    aceita_cookie: true, cookie_definido: false });
+
+  it('a linha do cookie aparece só na credencial que aceita, com a instrução de onde copiar', async () => {
+    const t = montar([LOGADA, COM_COOKIE]);
+    await tick(); await tick();
+    const cards = [...t.el.querySelectorAll<HTMLElement>('.ct-card')];
+    const aceita = cards.find((c) => c.querySelector('.ct-nome')?.textContent === 'OpenCode')!;
+    const naoAceita = cards.find((c) => c.querySelector('.ct-nome')?.textContent === 'jefferson')!;
+    expect(aceita.textContent).toContain(m.contas_cookie_como());
+    expect(botaoNomeado(aceita, m.contas_cookie_acao())).not.toBeUndefined();
+    // A negativa importa tanto quanto: a conta do Claude não lê cota por painel nenhum.
+    expect(naoAceita.textContent).not.toContain(m.contas_cookie_como());
+    expect(botaoNomeado(naoAceita, m.contas_cookie_acao())).toBeUndefined();
+    unmount(t.comp);
+  });
+
+  it('"Parar de ler" não aparece sem cookie guardado', async () => {
+    const t = montar([COM_COOKIE]);
+    await tick(); await tick();
+    expect(botaoNomeado(t.el, m.contas_cookie_apagar())).toBeUndefined();
+    unmount(t.comp);
+  });
+
+  // Caso separado de propósito: o cache das queries é por alvo e sobrevive à desmontagem, então
+  // remontar dentro do MESMO caso serviria a lista do começo dele, com o cookie ainda ausente.
+  it('"Parar de ler" apaga o cookie pela mesma rota', async () => {
+    const t = montar([chave({ id: 'chave:opencode', nome: 'OpenCode', nome_natural: 'OpenCode',
+      aceita_cookie: true, cookie_definido: true })]);
+    await tick(); await tick();
+    botaoNomeado(t.el, m.contas_cookie_apagar())!.click();
+    await tick(); await tick();
+    expect(credMock.definirCookie).toHaveBeenCalledWith(ALVO, 'chave:opencode', '', '');
+    unmount(t.comp);
+  });
+
+  it('"Ler cota pelo painel" abre o formulário no próprio card', async () => {
+    const t = montar([COM_COOKIE]);
+    await tick(); await tick();
+    expect(t.el.querySelector('.ct-cookie')).toBeNull();
+    botaoNomeado(t.el, m.contas_cookie_acao())!.click();
+    await tick();
+    expect(t.el.querySelector('.ct-cookie')!.textContent).toContain(m.contas_cookie_ws());
+    unmount(t.comp);
+  });
+
+  it('os botões de ícone mostram o rótulo, não só o aria-label', async () => {
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    const cab = t.el.querySelector<HTMLElement>('.ct-cab')!;
+    expect(cab.textContent).toContain(m.contas_densidade_compacta());
+    expect(cab.textContent).toContain(m.cota_atualizar());
+    expect(t.el.querySelector<HTMLElement>('.ct-card')!.textContent).toContain(m.ctx_renomear());
+    unmount(t.comp);
+  });
+
+  // A frase "só muda o nome que você vê aqui" tem que estar NA TELA, não num `title`: no toque não
+  // existe hover. Ela abre junto com o campo, e o campo aponta para ela.
+  it('ao abrir o renomear, a frase de escopo aparece na tela e o campo aponta pra ela', async () => {
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    const card = t.el.querySelector<HTMLElement>('.ct-card')!;
+    expect(card.textContent).not.toContain(m.contas_renomear_so_aqui());
+
+    [...card.querySelectorAll<HTMLButtonElement>('.ct-lapis')][0].click();
+    await tick();
+
+    const campo = card.querySelector<HTMLInputElement>('.ct-campo-nome')!;
+    expect(campo).not.toBeNull();
+    const id = campo.getAttribute('aria-describedby');
+    expect(id).toBeTruthy();
+    // Busca pela propriedade `id`, não por `#id`: o id carrega o identificador da conta, que pode
+    // ter caracteres que um seletor CSS não aceita.
+    const frase = [...card.querySelectorAll<HTMLElement>('p')].find((p) => p.id === id);
+    expect(frase?.textContent).toBe(m.contas_renomear_so_aqui());
     unmount(t.comp);
   });
 });

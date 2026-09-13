@@ -250,12 +250,17 @@ class ClaudePError(Exception):
 _REFINE_DISALLOWED = ("Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch")
 
 
+def _exe_claude() -> str | None:
+    """Caminho resolvido: no Windows o `claude` do npm e um `.CMD` (ver tests/test_cli_argv.py).
+    Funcao propria pra teste trocar sem depender de haver `claude` na maquina."""
+    return shutil.which("claude")
+
+
 def _claude_p(prompt: str) -> str:
     """Roda um claude -p efemero (sonnet) com o prompt por STDIN, tools de efeito colateral negadas,
     cwd neutro (tempdir), argv sem shell, timeout 60s. Devolve o stdout (strip). Levanta ClaudePError
     em qualquer falha (CLI ausente/timeout/exit≠0/vazio) — o endpoint mapeia pra 502."""
-    # Caminho resolvido: no Windows o `claude` do npm e um `.CMD` (ver tests/test_cli_argv.py).
-    exe = shutil.which("claude")
+    exe = _exe_claude()
     if exe is None:
         raise ClaudePError("claude CLI não encontrado")
     try:

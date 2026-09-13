@@ -1,6 +1,10 @@
 import * as m from '../paraglide/messages';
-import { errorDetail, registrarDiag, novoReqDiag } from '@hangar/core';
-import type { Server } from './auth';
+import { errorDetail, registrarDiag, novoReqDiag, comTeto, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from '@hangar/core';
+import type { SyncSetup } from '@hangar/core';
+import { listServers, type Server } from './auth';
+
+export type { SyncSetup } from '@hangar/core';
+export const getSyncSetup = getSyncSetupForServer;
 
 // Zero-knowledge: the password never leaves the browser. From PBKDF2(masterKey) we split two HKDF
 // branches — authHash (sent to the hub) and encKey (stays here, encrypts the server list).
@@ -79,6 +83,7 @@ async function jf(path: string, init?: RequestInit): Promise<Response> {
   const destino = window.location.origin;
   try {
     const resposta = await fetch(path, { credentials: 'include', ...init,
+      signal: comTeto(init?.signal ?? undefined, 8000),
       headers: { 'Content-Type': 'application/json', 'X-Hangar-Req': req, ...init?.headers } });
     if (init?.method || !resposta.ok) registrarDiag({ evento: 'sync.pedido', req, detalhe,
       nivel: resposta.ok ? 'ok' : 'aviso', codigo: String(resposta.status), ms: Date.now() - inicio }, destino);
@@ -90,14 +95,84 @@ async function jf(path: string, init?: RequestInit): Promise<Response> {
   }
 }
 
-export async function syncStatus(): Promise<{ enabled: boolean; registered: boolean } | null> {
+type SyncStatus = { enabled: boolean; registered: boolean };
+const STATUS_KEY = 'cp_sync_status';
+let statusEmVoo: Promise<SyncStatus | null> | null = null;
+
+export function cachedSyncStatus(): SyncStatus | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null');
+    return typeof value?.enabled === 'boolean' && typeof value?.registered === 'boolean' ? value : null;
+  } catch { return null; }
+}
+
+function rememberStatus(value: SyncStatus) {
+  try { localStorage.setItem(STATUS_KEY, JSON.stringify(value)); } catch { /* Vale só nesta abertura. */ }
+}
+
+export function syncStatus(): Promise<SyncStatus | null> {
+  return statusEmVoo ??= readStatus().finally(() => { statusEmVoo = null; });
+}
+
+async function readStatus(): Promise<SyncStatus | null> {
   try {
     const r = await jf('/api/sync/status');
-    if (!r.ok) return null;
-    return await r.json();
+    const cached = cachedSyncStatus();
+    if (r.status === 404) {
+      const value = { enabled: false, registered: false };
+      rememberStatus(value);
+      return value;
+    }
+    if (!r.ok) return cached?.enabled ? cached : null;
+    const value = await r.json();
+    if (typeof value?.enabled !== 'boolean' || typeof value?.registered !== 'boolean') {
+      return cached?.enabled ? cached : null;
+    }
+    rememberStatus(value);
+    return value;
   } catch {
-    return null; // route absent / network -> sync disabled
+    const cached = cachedSyncStatus();
+    return cached?.enabled ? cached : null;
   }
+}
+
+export async function activateSync(server: Server, credentials?: { user: string; password: string }): Promise<SyncSetup> {
+  if (!credentials) {
+    const result = await setupSyncForServer(server);
+    if (sameOrigin(server)) rememberStatus(result);
+    return result;
+  }
+  if (credentials.password.length < 8) throw new Error(m.sync_password_min());
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)).buffer);
+  const { authHash, encKey } = await deriveKeys(credentials.password, salt, PBKDF2_ITERATIONS);
+  const result = await setupSyncForServer(server, {
+    user: credentials.user.trim(), salt, auth_hash: authHash,
+    enc_blob: await encryptList(encKey, listServers()),
+  });
+  if (sameOrigin(server)) {
+    rememberStatus(result);
+    try {
+      const r = await jf('/api/sync/login', {
+        method: 'POST', body: JSON.stringify({ user: credentials.user.trim(), auth_hash: authHash }),
+      });
+      if (!r.ok) throw new Error('login');
+      await stashKey(encKey);
+    } catch { throw new Error(m.sync_setup_login_error()); }
+  }
+  return result;
+}
+
+function sameOrigin(server: Server): boolean {
+  return new URL(server.baseUrl || window.location.origin).origin === window.location.origin;
+}
+
+export async function disableSync(server: Server): Promise<SyncSetup> {
+  const result = await disableSyncForServer(server);
+  if (sameOrigin(server)) {
+    rememberStatus(result);
+    window.dispatchEvent?.(new Event('hangar-sync-disabled'));
+  }
+  return result;
 }
 
 export async function prelogin(user: string): Promise<{ salt: string; iterations: number }> {
@@ -131,8 +206,18 @@ export async function logout(): Promise<void> {
 
 export async function getVault(): Promise<{ enc_blob: { iv: string; data: string } | null; rev: number }> {
   const r = await jf('/api/sync/vault');
-  if (!r.ok) throw new Error('vault read failed');
+  if (!r.ok) throw new SyncRequestError('vault read failed', r.status);
   return await r.json();
+}
+
+export class SyncRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+export function isSyncUnauthorized(error: unknown): boolean {
+  return error instanceof SyncRequestError && error.status === 401;
 }
 
 export async function putVault(

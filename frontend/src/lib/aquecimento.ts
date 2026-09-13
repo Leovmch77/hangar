@@ -97,9 +97,22 @@ export function soltarAquecimento(sessao: string, imediato = false): void {
 }
 
 /** Quem aquece espera aqui antes de tocar no backend. Sessão sem portão (Quadro, Canvas, chat já
- *  carregado) não espera nada; com portão, espera a vez na fila. */
-export function aoAquecer(sessao: string): Promise<void> {
+ *  carregado) não espera nada; com portão, espera a vez na fila. Cancelamento devolve false. */
+export function aoAquecer(sessao: string, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
   const p = portoes.get(sessao);
-  if (!p) return Promise.resolve();
-  return new Promise<void>((resolve) => { p.fila.push(resolve); });
+  if (!p) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const acordar = () => {
+      signal?.removeEventListener('abort', cancelar);
+      resolve(!signal?.aborted);
+    };
+    const cancelar = () => {
+      const i = p.fila.indexOf(acordar);
+      if (i >= 0) p.fila.splice(i, 1);
+      acordar();
+    };
+    p.fila.push(acordar);
+    signal?.addEventListener('abort', cancelar, { once: true });
+  });
 }

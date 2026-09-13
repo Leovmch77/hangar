@@ -163,6 +163,9 @@ def test_chave_no_omp_nao_duplica(tmp_path, monkeypatch):
 def test_wrapper_por_shell_que_a_pessoa_tem(tmp_path, monkeypatch):
     """Um CLI instalado à mão ficava todo verde sem esta linha, e nada que ele abrisse aparecia no app."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(h, "_E_WINDOWS", False)          # cenário POSIX: fish e bash
+    monkeypatch.setattr(h.shutil, "which", lambda nome: "/bin/bash" if nome == "bash" else None)
     (tmp_path / ".config" / "fish" / "functions").mkdir(parents=True)
     # O caminho é de OUTRO clone de propósito: wrapper apontando pra outro checkout funciona igual,
     # e chamá-lo de ausente seria mentira.
@@ -187,7 +190,92 @@ def test_wrapper_por_shell_que_a_pessoa_tem(tmp_path, monkeypatch):
     assert h._wrapper("codex")["ok"] is True
 
 
+def test_wrapper_windows_le_o_perfil_que_o_instalador_escreve(tmp_path, monkeypatch):
+    # O instalador grava o bloco no `profile.ps1` (CurrentUserAllHosts) do 5.1, com contrabarra.
+    # A checagem olhava so o `Microsoft.PowerShell_profile.ps1` do 7 e procurava barra normal: o
+    # Codex instalado pelo app aparecia "nenhum rc de shell" com o wrapper carregado (12/09/2026).
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(h, "_E_WINDOWS", True)
+    perfil = tmp_path / "Documents" / "WindowsPowerShell" / "profile.ps1"
+    perfil.parent.mkdir(parents=True)
+    perfil.write_text('# >>> hangar >>>\n. "C:\\Users\\x\\hangar\\scripts\\shell\\codex.ps1"\n',
+                      encoding="utf-8-sig")
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    for nome in ("hangar-codex", "hangar-codex-tui"):
+        (tmp_path / ".local" / "bin" / nome).write_text("")
+    item = h._wrapper("codex")
+    assert item["ok"] is True and item["params"]["onde"] == "PowerShell"
+    # Perfil presente sem o bloco daquele CLI e falta de verdade, com o conserto do Windows.
+    item = h._wrapper("pi")
+    assert item["codigo"] == "wrapper_falta" and item["conserto"] == "wrapper"
+
+
+def test_conserto_wrapper_no_windows_usa_o_script_do_perfil(monkeypatch):
+    # Sem isto o wrapper faltando no Windows nao tinha botao: o unico conserto era o bash.
+    monkeypatch.setattr(h, "_E_WINDOWS", True)
+    monkeypatch.setattr(h.shutil, "which", lambda cli: "/resolved/powershell.exe" if cli == "powershell.exe" else None)
+    chamado = {}
+
+    def _run(argv, **kw):
+        chamado["argv"] = argv
+        return h.subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(h.subprocess, "run", _run)
+    h.consertar("wrapper")
+    assert chamado["argv"][0] == "/resolved/powershell.exe"
+    assert chamado["argv"][-2:] == [str(h._REPO / "scripts" / "setup-windows-wrappers.ps1"), "-Apply"]
+
+
+def _tmux_windows(tmp_path, monkeypatch, titulos="off"):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("PSMUX_CONFIG_FILE", raising=False)
+    monkeypatch.setattr(h, "_E_WINDOWS", True)
+    monkeypatch.setattr(h, "_versao", lambda cli: "tmux 3.3.8")
+    respostas = {"default-terminal": "xterm-256color", "set-titles-string": titulos, "mouse": "on"}
+    monkeypatch.setattr(h, "_tmux", lambda args: (
+        "COLORTERM=truecolor\nCLAUDE_CODE_TMUX_TRUECOLOR=1" if args[0] == "show-environment"
+        else respostas.get(args[-1], "")))
+
+
+def test_tmux_windows_le_o_bloco_do_psmux_e_nao_exige_titulo(tmp_path, monkeypatch):
+    # No Windows o bloco e o do setup-windows-tmux.ps1 (outro marcador) e os titulos ficam
+    # desligados de proposito. O card acusava os dois e o Consertar chamava o instalador bash.
+    _tmux_windows(tmp_path, monkeypatch)
+    (tmp_path / ".tmux.conf").write_text("# >>> hangar windows-tmux >>>\nset -g set-titles off\n"
+                                         "# <<< hangar windows-tmux <<<\n")
+    itens = {i["id"]: i for i in h._card_tmux()["itens"]}
+    assert itens["bloco"]["ok"] is True
+    assert "titulo" not in itens
+
+
+def test_tmux_windows_sem_bloco_segue_a_precedencia_do_psmux(tmp_path, monkeypatch):
+    # O psmux le o PRIMEIRO arquivo que existe e para: bloco no .tmux.conf com .psmux.conf
+    # presente e config morta.
+    _tmux_windows(tmp_path, monkeypatch)
+    (tmp_path / ".psmux.conf").write_text("set -g mouse on\n")
+    (tmp_path / ".tmux.conf").write_text("# >>> hangar windows-tmux >>>\n")
+    item = next(i for i in h._card_tmux()["itens"] if i["id"] == "bloco")
+    assert item["ok"] is False and item["conserto"] == "tmux"
+
+
+def test_conserto_tmux_no_windows_usa_o_script_do_psmux(monkeypatch):
+    monkeypatch.setattr(h, "_E_WINDOWS", True)
+    monkeypatch.setattr(h.shutil, "which", lambda cli: "/resolved/powershell.exe" if cli == "powershell.exe" else None)
+    chamado = {}
+
+    def _run(argv, **kw):
+        chamado["argv"] = argv
+        return h.subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(h.subprocess, "run", _run)
+    h.consertar("tmux")
+    assert chamado["argv"][0] == "/resolved/powershell.exe"
+    assert chamado["argv"][-3:] == [str(h._REPO / "scripts" / "setup-windows-tmux.ps1"), "-Apply", "-SkipInstall"]
+
+
 def test_wrapper_sem_rc_nenhum_nao_acusa_falta(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     item = h._wrapper("pi")
     assert item["ok"] is None and item["codigo"] == "wrapper_sem_shell"

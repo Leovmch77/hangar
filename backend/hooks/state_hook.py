@@ -27,16 +27,17 @@ _SID_RE = re.compile(r"--(?:session-id|resume)[ =]([0-9a-fA-F]{8}-[0-9a-fA-F]{4}
 
 
 def _e_claude(argv: list[str]) -> bool:
-    # Mesma regra de app/renova_token._e_cli_claude (stdlib-only aqui, por isso duplicada): um
-    # argumento cujo nome é `claude`/`claude.exe` (binário nativo, ou o symlink `claude` do npm
-    # que o node recebe) ou cujo caminho passa por `claude-code` (cli.js do pacote). Substring
-    # no cmdline inteiro casava o `sh -c` que roda este hook quando o caminho dele tem "claude"
-    # (worktree `claude-headless`), e o marcador saía na chave errada.
-    for arg in argv:
-        partes = re.split(r"[\\/]", arg)
-        nome = partes[-1].lower()
-        if nome in ("claude", "claude.exe") or "claude-code" in partes:
-            return True
+    # Só o argv[0] decide. Substring no cmdline inteiro casava o `sh -c` que roda este hook quando
+    # o caminho dele tem "claude" (ex: worktree `claude-headless`), e o marcador saía na chave errada.
+    if not argv:
+        return False
+    base = os.path.basename(argv[0])
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    if base == "claude":
+        return True
+    if base == "node":
+        return any("claude-code" in a.replace("\\", "/").split("/") for a in argv[1:])
     return False
 
 

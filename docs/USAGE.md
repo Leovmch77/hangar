@@ -636,37 +636,41 @@ reportes de teste e consolida o painel final — você só aprova os marcos (pus
 o ambiente; manual: `./scripts/install-hangar-panel.sh`. Outros desktops ainda não têm painel
 — use a view board/canvas do app no navegador.
 
-## 6. Sync na nuvem (opcional)
+## 6. Sincronização entre aparelhos (opcional)
 
-Para sincronizar a lista de servidores entre múltiplos PCs no mesmo celular, ative o hub de sincronização na nuvem:
+A sincronização permite cadastrar suas máquinas uma vez e recuperar a lista e os
+tokens de acesso em outros celulares, PCs e notebooks. As conversas continuam nas
+máquinas onde as sessões rodam. O servidor principal pode ser qualquer computador
+com Hangar; escolha um que costume ficar ligado e acessível pelos outros aparelhos.
 
-**Ativar:**
-Defina `CP_SYNC=1` no backend. Na primeira execução, defina também `CP_SYNC_BOOTSTRAP=<secret>`:
+**Ativar e criar o acesso pela tela:**
 
-```bash
-cd backend
-CP_AUTH_TOKEN=$(openssl rand -hex 24) CP_SYNC=1 CP_SYNC_BOOTSTRAP=$(openssl rand -hex 24) uv run python -m app.main
-```
+1. Abra **Configurações → Sincronização** e selecione a máquina que será a principal.
+   Você precisa já ter acesso a ela pelo token normal do Hangar.
+2. Preencha usuário, senha e confirmação. Clique em **Ativar sincronização**.
+3. O Hangar cria o acesso e salva sua lista atual criptografada nessa máquina.
+   Não é preciso editar arquivos, usar um token de ativação ou reiniciar o servidor.
+4. Use **Abrir Hangar sincronizado**. Nos outros aparelhos, abra o endereço mostrado
+   na tela e entre com o mesmo usuário e senha. Existe um único cadastro por servidor principal.
 
-**Primeira vez ("Criar acesso"):**
+Abra por HTTPS para o navegador poder proteger a senha; HTTP só permite essa
+criptografia em `localhost`/loopback. A senha não é enviada ao servidor, e a lista
+de acessos é cifrada no navegador. Guarde a senha: não há recuperação pelo Hangar.
 
-1. Abra a PWA naquele host.
-2. Aparece **"Criar acesso"** em vez de "Adicionar servidor".
-3. Escolha um **nome de usuário** e uma **master password** (forte!) — cole o token bootstrap.
-4. Pronto — a lista de servidores fica criptografada no hub.
+**Desativar e reativar:**
 
-**⚠ Aviso: Zero-knowledge (sem recuperação):**
-- A master password **nunca sai do seu celular**.
-- O hub armazena apenas salt + verificador de autenticação + ciphertext AES-GCM. **Nunca vê a senha nem os tokens dos servidores.**
-- **Se esquecer a master password, os dados sincronizados ficam irrecuperáveis.**
-- Não há "recuperar senha" ou reset — guarde-a bem.
+Na mesma tela, clique em **Desativar sincronização** e confirme. Isso interrompe o
+serviço de sincronização dessa máquina imediatamente, preservando a conta, a lista
+cifrada e as sessões. Os acessos já salvos em cada aparelho continuam disponíveis.
+Ao reativar, o Hangar reutiliza o mesmo cadastro e senha; não cria outra conta.
 
-**HTTPS obrigatório (produção):**
-- Localmente (LAN): HTTP funciona.
-- Fora de casa: o hub **deve estar em HTTPS** (Tailscale, Caddy, …). O cookie de sessão só fica seguro sob TLS.
+**Sem sincronização:** cada navegador/PWA mantém sua lista local. A abertura lembra
+o modo conhecido desse endereço e verifica alterações em segundo plano. No primeiro
+acesso, a verificação tem prazo e mostra uma opção de tentar novamente se a conexão
+falhar, em vez de deixar apenas o papel de parede.
 
-**Padrão (desativado):**
-- Sem `CP_SYNC=1`: o app funciona como antes — servidor único + token/QR, zero sincronização.
+Instalações antigas com `CP_SYNC=1` e `CP_SYNC_BOOTSTRAP` continuam compatíveis.
+As escolhas feitas na tela ficam salvas na configuração do Hangar.
 
 ## 7. Problemas comuns
 

@@ -1,6 +1,5 @@
 import anyio.to_thread
 import asyncio
-import contextvars
 import json
 import logging
 import mimetypes
@@ -14,7 +13,6 @@ import threading
 import time
 import urllib.request
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -26,9 +24,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  migracao_sidecars, pensamento_pt, procinfo, tmux)
 from app.auth import require_auth, require_loopback
+from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import list_commands
@@ -71,7 +70,7 @@ from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, Up
 from app.video import is_video, extract_frames, extract_audio
 from app.transcribe import transcribe, TranscribeError
 from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, settings,
-                        automations_enabled, resolve_bind_ip)
+                        automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -104,7 +103,7 @@ from app.hook_state import hook_state
 from app import push
 from app import stall_watch
 from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
-from app.sync import sync_router
+from app.sync import sync_admin_router, sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
 from app import plano_claude
@@ -429,6 +428,8 @@ async def _lifespan(app: FastAPI):
     )
     app.state.codex_contas_login = codex_contas_login
     cotas.registrar_codex_auth_cache(codex_contas_login.cached_auth)
+    # Referência guardada: task sem dono pode ser coletada no meio.
+    app.state.codex_auth_aquecer = asyncio.create_task(codex_contas_login.aquecer())
     app.state.codex_creation_tasks = set()
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
@@ -445,7 +446,8 @@ async def _lifespan(app: FastAPI):
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
-        await asyncio.gather(codex_warm_task, return_exceptions=True)
+        app.state.codex_auth_aquecer.cancel()
+        await asyncio.gather(codex_warm_task, app.state.codex_auth_aquecer, return_exceptions=True)
         creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
         for creation_task in creation_tasks:
             creation_task.cancel()
@@ -575,8 +577,8 @@ app.add_middleware(
 )
 # JSON e assets grandes cruzam LAN/VPN; o Starlette exclui `text/event-stream`, sem segurar o SSE.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
-if settings.sync:
-    app.include_router(sync_router)
+app.include_router(sync_admin_router)
+app.include_router(sync_router)
 app.include_router(deploy_router)
 # Roteadores por assunto (Task 1 do plano descoberta-e-configuracao): cada Task do lote escreve
 # só no módulo dela. Última edição de api.py deste plano.
@@ -1566,6 +1568,10 @@ class BroadcastBody(_StrictBody):
 
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
+
+
+class BtwBody(_StrictBody):
+    question: str = Field(min_length=1, max_length=4000)
 
 
 class KeyBody(_StrictBody):
@@ -2726,20 +2732,6 @@ async def events(name: str, request: Request):
         merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset))
 
 
-# Pool DEDICADO ao caminho de ENVIO (nucleo sagrado). Separado do executor default do asyncio, que a
-# decoracao da lista (git_summary/capture_pane via asyncio.to_thread) pode ocupar em rajada -> sem isto,
-# um burst de decoracao lenta atrasaria o POST /input. Poucos workers bastam (single-user; envios a uma
-# mesma sessao ja serializam no _send_lock do terminal_input).
-_send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-send")
-
-
-def _send_thread(fn, *args):
-    """Roda `fn(*args)` no pool DEDICADO de envio (nao no executor default, saturavel pela decoracao)."""
-    # run_in_executor não leva sozinho o id do pedido até os eventos de envio.
-    return asyncio.get_running_loop().run_in_executor(
-        _send_executor, contextvars.copy_context().run, fn, *args)
-
-
 def _erro_texto(e) -> str:
     """Texto de um erro de envio: string crua (endpoint antigo) ou o `msg` do envelope {code, params, msg}.
 
@@ -2965,11 +2957,11 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
-    source = await asyncio.to_thread(codex_sessions.load, name)
+    source = await _send_thread(codex_sessions.load, name)
     async with get_adapter("codex").delivery_lock(name):
-        current = await asyncio.to_thread(codex_sessions.load, name)
+        current = await _send_thread(codex_sessions.load, name)
         changed = source is not None and (current or {}).get("thread_id") != source.get("thread_id")
-        if changed or not await asyncio.to_thread(_session_exists, name):
+        if changed or not await _send_thread(_session_exists, name):
             return {"ok": False, "error": erro("erro_sessao_inexistente", "sessao nao encontrada")}
         return await _send_one_codex_locked(name, text, track_entry=track_entry)
 
@@ -3002,7 +2994,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
     broadcast: devolve ok/error por sessao).
 
     IMPORTANT 2: PromptQueue.append/set_delivered fazem I/O de arquivo sincrono com lock -- chamados
-    direto aqui (corrotina) bloqueariam o event loop. Mesmo padrao de to_thread do drain do Codex."""
+    direto aqui (corrotina) bloqueariam o event loop. O pool de envio evita disputar com funcionalidades secundárias."""
     adapter = get_adapter(chave)
     try:
         deliverable = await adapter.deliverable(name)
@@ -3014,7 +3006,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         deliverable = False
     # Enfileira sempre como pendente; so marca entregue apos a TUI REALMENTE receber o prompt.
     try:
-        entry = await asyncio.to_thread(PromptQueue(name).append, text, delivered=False)
+        entry = await _send_thread(PromptQueue(name).append, text, delivered=False)
     except OSError as e:
         # Mesma regra do _send_one: sidecar nao gravou + NAO entregavel = a msg nao esta em lugar
         # NENHUM, e responder "ok, na fila" era a mentira que o eeba30a tirou do caminho Claude.
@@ -3043,7 +3035,7 @@ async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = Fa
         if entry is not None:
             # turno iniciou -> marca entregue pra o drain-on-complete nao reenviar a mesma entrada.
             try:
-                await asyncio.to_thread(PromptQueue(name).set_delivered, entry["id"], True)
+                await _send_thread(PromptQueue(name).set_delivered, entry["id"], True)
             except OSError:
                 pass
     elif entry is None:
@@ -4105,6 +4097,39 @@ async def interrupt(name: str, clear: bool = False):
     return {"ok": True}
 
 
+def _exige_claude_de_terminal(name: str) -> None:
+    # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
+    provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
+    if provider != "claude":
+        raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
+
+
+@app.post("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def pergunta_lateral(name: str, body: BtwBody):
+    if not await _send_thread(_session_exists, name):
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    await _send_thread(_exige_claude_de_terminal, name)
+    _recusa_se_painel_aberto(name)
+    try:
+        item = await asyncio.to_thread(btw.perguntar, name, body.question)
+    except btw.BtwError as e:
+        raise HTTPException(e.status, detail=erro(e.code, e.detail))
+    # A TUI já respondeu e gastou a chamada: falha ao guardar o histórico não pode virar 500 e
+    # levar o cliente a perguntar de novo. Vai marcada, não escondida.
+    try:
+        await asyncio.to_thread(btw.registrar, name, item)
+        item["salvo"] = True
+    except OSError:
+        _log.exception("btw de %s: resposta entregue, historico nao gravado", name)
+        item["salvo"] = False
+    return item
+
+
+@app.get("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
+async def historico_lateral(name: str):
+    return await asyncio.to_thread(btw.historico, name)
+
+
 def _normalize_rate_window(window: dict | None) -> dict | None:
     # RateLimitWindow (app-server) -> shape neutro do front: usedPercent/windowMins/resetsAt.
     # window None (secondary/credits costumam vir null) -> None, o front so mostra o que existe.
@@ -4582,6 +4607,10 @@ def get_config(request: Request):
             # `diag.VERSAO_EM_EXECUCAO` corrigiu em f4013343).
             "versao": diag.VERSAO_EM_EXECUCAO,
         },
+        # IRMÃ do `somente_leitura`, nunca dentro dele: aquele bloco é um mapa chave -> valor
+        # simples, tipado assim no core e desenhado linha a linha pela tela. Uma lista lá dentro
+        # quebraria o tipo e desenharia "[object Object]".
+        "variaveis_env": variaveis_env(),
     }
 
 

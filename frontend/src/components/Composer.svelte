@@ -58,7 +58,7 @@
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
-  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
+  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
   import type { UploadFile } from '@hangar/core';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '@hangar/core';
@@ -211,7 +211,9 @@
     // Depois do historico (ver lib/aquecimento): a lista so importa quando a pessoa digita "/", e
     // este GET varre o tmux inteiro — disputando com a conversa, era um dos maiores ladroes da
     // abertura. O cache em memoria acima segue respondendo na hora numa sessao ja visitada.
-    void aoAquecer(sn).then(() => {
+    const aquecimento = new AbortController();
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado === false || aquecimento.signal.aborted) return;
       if (sn !== sessionName) return;   // trocou de sessao na espera: esta busca nao serve mais
       getCommands(sn)
         .then((c) => {
@@ -222,6 +224,7 @@
           // endpoint indisponivel -> segue com lista vazia, sem quebrar a UI
         });
     });
+    return () => aquecimento.abort();
   });
 
   let textareaEl: HTMLTextAreaElement | undefined = $state();
@@ -837,21 +840,20 @@
   let permSondavel = $state(true);
   let permCarregando = $state(false);
   const isClaude = $derived(!isCodex && !isPi && !isKimi);
-  // Aquece o catálogo do seletor desta sessão ANTES do toque na pill (cache de 60s na api.ts):
-  // o popover abre com a lista pronta em vez de "Carregando…". O catch é silencioso de propósito:
-  // falha de verdade aparece no GET que o popover refaz ao abrir, com o erro na caixa.
-  // Espera a conversa pintar (ver lib/aquecimento): "antes do toque na pill" nao quer dizer "antes
-  // da conversa" — o toque vem sempre depois dela, e no Claude este GET chega a DIRIGIR o terminal.
+  // O catálogo Claude dirige o terminal: só o popover pode pedi-lo, após o toque.
   $effect(() => {
     const sn = sessionName;
     const kimi = isKimi, pi = isPi, codex = isCodex;
-    void aoAquecer(sn).then(() => {
+    if (!kimi && !pi && !codex) return;
+    const aquecimento = new AbortController();
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado === false || aquecimento.signal.aborted) return;
       if (sn !== sessionName) return;
       if (kimi) void getKimiModels(sn).catch(() => {});
       else if (pi) void getPiModels(sn).catch(() => {});
       else if (codex) void getCodexModels(sn).catch(() => {});
-      else void getModelOptions(sn).catch(() => {});
     });
+    return () => aquecimento.abort();
   });
   // Token de sequência: o poll de fundo e a sonda da pílula correm juntos, e sem isto a resposta
   // atrasada de um pisava no resultado do outro — inclusive zerando `permModes` (o poll pede sem
@@ -871,7 +873,9 @@
     // Atrás do histórico na PRIMEIRA rodada (ver lib/aquecimento); depois que ele pinta, a espera
     // já está resolvida e os polls seguintes seguem no ritmo de sempre. O `permSeq` continua sendo
     // tomado ANTES da espera: é ele que faz a rodada nova invalidar a que ficou esperando.
-    void aoAquecer(sn).then(() => {
+    const aquecimento = new AbortController();
+    void aoAquecer(sn, aquecimento.signal).then((liberado) => {
+      if (liberado === false || aquecimento.signal.aborted) return;
       if (seq !== permSeq) return;
       getPermissionModes(sn, false)
         .then((res) => {
@@ -889,6 +893,7 @@
           if ((e as { code?: string })?.code === 'erro_permissao_so_claude') permSoClaudeEm = chave;
         });
     });
+    return () => aquecimento.abort();
   });
   async function abrirPermissao() {
     if (!permSondavel || permModes.length > 0 || permCarregando) return;
@@ -1083,6 +1088,13 @@
         && window.matchMedia('(min-width: 820px)').matches) {
       e.preventDefault();
       submit();
+      return;
+    }
+    // Esc com a sessão trabalhando = o Esc do terminal: interrompe o turno. Parada, deixa
+    // passar pro resto da tela (overlays, visor).
+    if (e.key === 'Escape' && isWorking) {
+      e.preventDefault();
+      onInterrupt();
       return;
     }
     // Shift+Tab no campo = a tecla do terminal do Claude. Só com o foco aqui, pra não roubar a

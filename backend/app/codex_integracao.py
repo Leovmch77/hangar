@@ -104,7 +104,13 @@ def copiar_memorias(origem: Path, destino: Path) -> list[str]:
 def _e_hook_do_app(command: object) -> bool:
     """Hook do próprio Hangar (backend/hooks/): cada harness recebe o seu pelo instalador dele
     (codex_hook_installer aqui), então ele não atravessa pelo importador do Codex."""
-    return isinstance(command, str) and "backend/hooks/" in command.replace("\\", "/")
+    if not isinstance(command, str):
+        return False
+    normalizado = command.replace("\\", "/")
+    # O guard fica sob ~/.claude/hooks para caber na allowlist do Pi, mas continua sendo hook do
+    # Hangar. No Codex ele recebe uma entrada própria, com a sintaxe do shell daquele harness.
+    return ("backend/hooks/" in normalizado
+            or bool(re.search(r"(?:^|/)guard_tmux\.py(?:[\"'\s;]|$)", normalizado)))
 
 
 def sem_hooks_do_app(hooks: dict) -> dict:
@@ -135,7 +141,12 @@ def _iso(tempo: float | None) -> str | None:
 def _snapshot() -> dict:
     return {"estado": "ocioso", "etapa": "", "ultima_execucao": None,
             "proxima_atualizacao": None, "plugins": [], "erros": [], "avisos": [],
-            "confianca_pendente": False}
+            "confianca_pendente": False, "progresso": None}
+
+
+# Etapas de uma rodada, na ordem: o card mostra "etapa X de N" e a barra. Fixas, entao a conta e
+# medida, nao estimativa.
+_TOTAL_ETAPAS = 5
 
 
 def _toml(path: Path) -> dict:
@@ -311,6 +322,16 @@ class IntegracaoCodex:
     def _etapa(self, texto: str) -> None:
         self._estado["etapa"] = texto
 
+    def _passo(self, passo: int, texto: str) -> None:
+        self._estado["etapa"] = texto
+        self._estado["progresso"] = {"passo": passo, "total": _TOTAL_ETAPAS, "sub": None}
+
+    def _sub(self, atual: int, total: int) -> None:
+        """Andamento DENTRO da etapa (plugin i de N): sem ele a etapa de importar, a mais longa,
+        ficava parada no mesmo ponto da barra."""
+        if self._estado.get("progresso"):
+            self._estado["progresso"]["sub"] = {"atual": atual, "total": total}
+
     def _erro(self, texto: str) -> None:
         self._estado["erros"].append(texto)
         _log.warning("%s", texto)
@@ -324,13 +345,14 @@ class IntegracaoCodex:
     async def reconciliar(self, motivo: str = "manual", forcar: bool = False) -> dict:
         anterior = self.status()
         self._estado = {**_snapshot(), "estado": "executando", "etapa": msg("etapa_inventariando"),
+                        "progresso": {"passo": 1, "total": _TOTAL_ETAPAS, "sub": None},
                         "plugins": anterior["plugins"], "ultima_execucao": anterior["ultima_execucao"],
                         "confianca_pendente": anterior["confianca_pendente"]}
         if not (self.home / ".claude" / "settings.json").is_file():
-            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_claude"))
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_claude"), progresso=None)
             return self.status()
         if self.nativo is CodexNativo and not shutil.which(self.binario):
-            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_codex"))
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_codex"), progresso=None)
             return self.status()
         registro = {}
         self._plugins_confirmados = set()
@@ -347,21 +369,21 @@ class IntegracaoCodex:
             self.codex_home.mkdir(parents=True, exist_ok=True)
             settings = json_obj(self.home / ".claude" / "settings.json")
             desejados = _plugins_desejados(settings)
-            self._etapa(msg("etapa_instrucoes"))
+            self._passo(2, msg("etapa_instrucoes"))
             await self._mutacao(self._instrucoes)
             await self._mutacao(self._migrar_ponte_antiga)
             await self._mutacao(self._hooks, {}, registro)
             async with self.nativo(self.home, self.codex_home, self.binario) as codex:
                 await self._config(codex, {}, {})
-                self._etapa(msg("etapa_importando"))
+                self._passo(3, msg("etapa_importando"))
                 await self._plugins(codex, desejados, registro, forcar)
-                self._etapa(msg("etapa_fragmentos"))
+                self._passo(4, msg("etapa_fragmentos"))
                 await self._fragmentos(codex, settings, registro)
                 # DEPOIS da importação: é ela que reescreve os comandos pra `<codex>/hooks/` e
                 # decide o que copiar. Antes dela não há o que materializar.
                 await self._mutacao(self._hooks_arquivos)
                 self._checkpoint(registro)
-                self._etapa(msg("etapa_skills"))
+                self._passo(5, msg("etapa_skills"))
                 await self._mutacao(self._skills, registro)
                 self._checkpoint(registro)
                 await self._conferir_confianca(codex)
@@ -381,6 +403,7 @@ class IntegracaoCodex:
             self._estado["estado"] = "erro"
             _log.exception("Falha inesperada da integração")
         finally:
+            self._estado["progresso"] = None
             if carregado:
                 self._estado["ultima_execucao"] = _iso(time.time())
                 if self._estado["estado"] != "ocioso":
@@ -636,8 +659,11 @@ class IntegracaoCodex:
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
         atualizar = forcar or agora - ultima >= _INTERVALO or bool(falhas_anteriores and agora - ultima >= 300)
         falhas = set()
+        mercados_alvo = sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}) if atualizar else []
+        total_sub = len(mercados_alvo) + len(candidatos)
         if atualizar:
-            for marketplace in sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}):
+            for i, marketplace in enumerate(mercados_alvo, 1):
+                self._sub(i, total_sub)
                 source = _toml(cfg_path).get("marketplaces", {}).get(marketplace, {})
                 if source.get("source_type") != "git":
                     continue
@@ -659,7 +685,8 @@ class IntegracaoCodex:
                 self._erro(msg("erro_marketplace_pendente", marketplace=marketplace))
         plugins_pendentes = set(registro.get("plugins_pendentes", [])) & desejados
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
-        for id_ in sorted(candidatos):
+        for i, id_ in enumerate(sorted(candidatos), 1):
+            self._sub(len(mercados_alvo) + i, total_sub)
             try:
                 id_codex = identidades[id_]
                 conhecido = anteriores.get(id_)

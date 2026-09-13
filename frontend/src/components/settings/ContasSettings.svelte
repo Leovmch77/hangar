@@ -28,6 +28,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   import { createQuery } from '@tanstack/svelte-query';
   import { clienteQuery, credenciais, motores as qMotoresDef } from '../../lib/queries';
   import MotorForm from './MotorForm.svelte';
+  import EscopoChip from './EscopoChip.svelte';
   import * as m from '../../paraglide/messages';
 
   // Contrato do apiTarget (o mesmo de ServidoresSettings): null = servidor ATIVO (API global com
@@ -122,14 +123,13 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   let apelidoTexto = $state('');
   let salvandoApelido = $state(false);
   // Cookie do painel do OpenCode: ele não tem rota de cota (ver backend/app/opencode_cota.py),
-  // então a leitura é a página do painel. Fica atrás do kebab e só na credencial que aceita —
+  // então a leitura é a página do painel. É uma linha do card, só na credencial que aceita —
   // oferecer o campo pra quem tem rota de verdade seria prometer trabalho inútil.
   let cookieDe = $state<string | null>(null);   // id da credencial com o formulário aberto
   let cookieWs = $state('');
   let cookieValor = $state('');
   let salvandoCookie = $state(false);
-  // Apagar: kebab por linha abre o menu; confirmar apaga e recarrega.
-  let menuDe = $state<string | null>(null);       // id da credencial com o menu aberto
+  // Apagar: "Remover" nomeado no card abre a confirmação inline; confirmar apaga e recarrega.
   let confirmando = $state<string | null>(null);  // id da credencial com a confirmação aberta
   let apagando = $state(false);
   let aviso = $state('');
@@ -236,7 +236,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     ultimaContaConectada = null;
     loginErro = ''; loginEnviando = false; loginIniciando = false; loginParado = false;
     aviso = ''; avisoErro = false;
-    confirmando = null; menuDe = null;
+    confirmando = null;
     renomeando = null; apelidoTexto = ''; salvandoApelido = false;
     cookieDe = null; cookieWs = ''; cookieValor = ''; salvandoCookie = false;
     motorAberto = null;
@@ -331,7 +331,6 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
       }
       if (g !== geracao) return;
       confirmando = null;
-      menuDe = null;
       aviso = m.criar_conta_apagada({ nome: conta.nome });
       // A conta pode ter sumido da lista entre o clique e o fim do DELETE (outro painel, outra
       // sessão) — recarregar é a fonte única, não remover item por item.
@@ -381,7 +380,6 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     loginFalhou = false;
     ultimaContaConectada = null;
     aviso = ''; avisoErro = false;
-    menuDe = null;
     // Alvo desta tentativa, capturado AGORA: se o ?srv= trocar no meio do voo, este é o alvo
     // ANTIGO — o cancelamento do efeito de geração e o ramo `g !== geracao` abaixo usam o
     // capturado, nunca o apiTarget corrente.
@@ -642,9 +640,9 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   {:else}
   <!-- Cabeçalho da coleção: título + "atualizado há X" + botão de atualizar na mesma linha
        (referência Cloudscape/AWS: refresh no cabeçalho, timestamp ao lado, lista visível
-       durante a busca). O ícone é SVG traçado 2, como o lápis e o kebab. -->
+       durante a busca). O ícone é SVG traçado 2, como o lápis. -->
   <div class="ct-cab">
-    <p class="st-secao ct-topo">{m.contas_secao_lista()}</p>
+    <p class="st-secao ct-topo">{m.contas_secao_lista()} <EscopoChip escopo="servidor" /></p>
     {#if atualizadoEm != null}
       <span class="ct-atualizado" aria-live="polite">{m.contas_atualizado_ha({ n: idadeAtualizacao })}</span>
     {/if}
@@ -671,6 +669,9 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
           <path d="M4 5h16" /><path d="M4 10h16" /><path d="M4 15h16" /><path d="M4 20h16" />
         </svg>
       {/if}
+      <!-- Texto ao lado do ícone, nas duas larguras: o que existia era `title`, e no toque não há
+           hover — quem usa o celular nunca via o que o botão faz. -->
+      <span class="ct-refresh-txt">{compacta ? m.contas_densidade_completa() : m.contas_densidade_compacta()}</span>
     </button>
     <button type="button" class="ct-refresh" onclick={atualizar}
       disabled={atualizando || carregando} aria-label={m.contas_atualizar()}
@@ -679,6 +680,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
       </svg>
+      <span class="ct-refresh-txt">{m.cota_atualizar()}</span>
     </button>
   </div>
   <p class="ct-legenda">{m.contas_legenda()}</p>
@@ -755,9 +757,14 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
           <span class="ct-txt">
             <span class="ct-nome-l">
               {#if renomeando === conta.id}
+                <!-- A frase vive AQUI, não num `title` do lápis: quem precisa saber que o nome é só
+                     local é quem está digitando o nome, e no toque não há hover. Mesmo desenho da
+                     instrução do cookie, que também mora dentro do formulário dela. -->
+                <p class="ct-form-leg ct-renomear-leg" id="rn-como-{conta.id}">{m.contas_renomear_so_aqui()}</p>
                 <!-- svelte-ignore a11y_autofocus -->
                 <input class="ct-campo ct-campo-nome" type="text" autofocus bind:value={apelidoTexto}
-                  aria-label={m.contas_renomear({ nome: conta.nome })} disabled={salvandoApelido}
+                  aria-label={m.contas_renomear({ nome: conta.nome })} aria-describedby="rn-como-{conta.id}"
+                  disabled={salvandoApelido}
                   onkeydown={(e) => {
                     if (e.key === 'Enter') { e.preventDefault(); salvarApelido(conta); }
                     else if (e.key === 'Escape') { renomeando = null; apelidoTexto = ''; }
@@ -768,16 +775,20 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                   disabled={salvandoApelido}>{m.comum_cancelar()}</button>
               {:else}
                 <span class="ct-nome">{conta.nome}</span>
-                <!-- Lápis e kebab em SVG traçado 2, como o resto do app (components/icons,
-                     DesktopSessionContext): glifo de texto (✎ / ⋯) no meio de uma UI de ícone
-                     desenhado muda de peso e de linha de base conforme a fonte do sistema. -->
+                <!-- Lápis em SVG traçado 2, como o resto do app (components/icons,
+                     DesktopSessionContext): glifo de texto (✎) no meio de uma UI de ícone
+                     desenhado muda de peso e de linha de base conforme a fonte do sistema.
+                     O rótulo visível ao lado vale nas duas larguras: o aria-label sozinho não
+                     chega a quem enxerga, e no toque não há hover pra um `title`. -->
                 <button type="button" class="ct-lapis" aria-label={m.contas_renomear({ nome: conta.nome })}
+                  title={m.contas_renomear_so_aqui()}
                   onclick={() => { renomeando = conta.id; apelidoTexto = conta.apelido ?? ''; }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M12 20h9" />
                     <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
                   </svg>
+                  <span class="ct-lapis-txt">{m.ctx_renomear()}</span>
                 </button>
                 <!-- Sem selo "Claude · assinatura" em toda linha: o ícone já diz o tipo.
                      Etiqueta só pra chave de API (a exceção), na ponta da linha. "em uso" é
@@ -874,7 +885,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
             </span>
           {/if}
 
-          <!-- Um envelope só para as ações: o Entrar é condicional e mora junto do kebab. -->
+          <!-- Um envelope só para as ações: Entrar, Editar e Remover, todos nomeados. -->
           <span class="ct-acoes">
             {#if conta.tipo === 'codex' && conta.codex_account && credentialAuth(conta) === 'none'}
               <button type="button" class="ct-acao primaria" onclick={() => { codexHerdar = null; codexLogin = conta.codex_account ?? null; }}>{m.contas_entrar()}</button>
@@ -883,9 +894,11 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
               <button type="button" class="ct-acao" onclick={() => { codexHerdar = conta.codex_account ?? null; codexLogin = codexHerdar; }}>{m.codex_ui_herdar_botao()}</button>
             {/if}
             <!-- Só a conta adicional (~/.codex-<nome>) sai; a padrão é o ~/.codex da máquina. -->
+            <!-- O `aria-label` diz QUAL credencial: a lista tem vários "Remover" idênticos, e quem
+                 navega por elementos ouviria só "Remover" em todos (mesmo padrão do lápis). -->
             {#if conta.tipo === 'codex' && conta.codex_account && !conta.ativa}
-              <button type="button" class="ct-acao"
-                onclick={() => { menuDe = null; confirmando = conta.id; }}>{m.lista_remover()}</button>
+              <button type="button" class="ct-acao" aria-label={m.contas_remover_aria({ nome: conta.nome })}
+                onclick={() => (confirmando = conta.id)}>{m.lista_remover()}</button>
             {/if}
             {#if conta.tipo === 'claude' && ((conta.login?.estado === 'ok' && !conta.login.loggedIn) || conta.cota?.estado === 'expirada')}
               <button type="button" class="ct-acao primaria"
@@ -897,24 +910,20 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
             {#if motor}
               <!-- Editar e Remover NOMEADOS: as duas ações do dia a dia de um modelo estavam
                    escondidas atrás de um kebab e de um rótulo ("Modelo e opções") que não dizia
-                   qual delas ele abria. O kebab continua, com o cookie e o apagar. -->
+                   qual delas ele abria. -->
               <button type="button" class="ct-acao ct-modelo-btn" aria-expanded={motorEmEdicao}
                 onclick={() => (motorAberto = motorEmEdicao ? null : conta.id)}
-                >{motorEmEdicao ? m.sessao_fechar() : m.config_motores_editar()}</button>
-              <button type="button" class="ct-acao"
-                onclick={() => { menuDe = null; confirmando = conta.id; }}>{m.lista_remover()}</button>
+                >{motorEmEdicao ? m.sessao_fechar() : m.contas_motor_editar()}</button>
+              <button type="button" class="ct-acao" aria-label={m.contas_remover_aria({ nome: conta.nome })}
+                onclick={() => (confirmando = conta.id)}>{m.lista_remover()}</button>
             {/if}
 
-            {#if conta.tipo !== 'codex' && (conta.gerenciada !== false || conta.aceita_cookie)}
-            <button type="button" class="ct-kebab" aria-haspopup="true" aria-expanded={menuDe === conta.id}
-              aria-label={m.comum_fechar_menu_conta()} onclick={() => (menuDe = menuDe === conta.id ? null : conta.id)}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="5" r="1" />
-                <circle cx="12" cy="12" r="1" />
-                <circle cx="12" cy="19" r="1" />
-              </svg>
-            </button>
+            <!-- O kebab saiu: eram no máximo três ações, e uma delas (apagar) é a mesma que o card
+                 do modelo e a conta Codex adicional já mostram nomeada. A conta do Claude
+                 gerenciada passa a usar ESSE botão, com a mesma confirmação inline. -->
+            {#if conta.tipo !== 'codex' && !motor && conta.gerenciada !== false}
+              <button type="button" class="ct-acao" aria-label={m.contas_remover_aria({ nome: conta.nome })}
+                onclick={() => (confirmando = conta.id)}>{m.lista_remover()}</button>
             {/if}
           </span>
           </div>
@@ -961,28 +970,29 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
             {/if}
           {/if}
 
-          {#if menuDe === conta.id && confirmando !== conta.id}
-            <div class="ct-menu">
-              {#if conta.aceita_cookie}
-                <button type="button" class="ct-menu-item"
-                  onclick={() => { menuDe = null; cookieDe = conta.id; cookieWs = ''; cookieValor = ''; }}
+          <!-- Cookie: linha do card, não item de menu — quem cai aqui precisa saber ONDE copiar o
+               cookie, e a instrução não cabe num item de menu. Só na credencial que aceita. -->
+          {#if conta.aceita_cookie && cookieDe !== conta.id}
+            <div class="ct-cookie-linha">
+              <span class="ct-cookie-como">{m.contas_cookie_como()}</span>
+              <span class="ct-cookie-acoes">
+                <button type="button" class="ct-acao"
+                  onclick={() => { cookieDe = conta.id; cookieWs = ''; cookieValor = ''; }}
                   >{m.contas_cookie_acao()}</button>
                 {#if conta.cookie_definido}
-                  <button type="button" class="ct-menu-item"
-                    onclick={() => { menuDe = null; salvarCookie(conta, true); }}
-                    >{m.contas_cookie_apagar()}</button>
+                  <button type="button" class="ct-acao" disabled={salvandoCookie}
+                    onclick={() => salvarCookie(conta, true)}>{m.contas_cookie_apagar()}</button>
                 {/if}
-              {/if}
-              {#if conta.gerenciada !== false}
-                <button type="button" class="ct-menu-item"
-                  onclick={() => { menuDe = null; confirmando = conta.id; }}>{m.comum_apagar()}</button>
-              {/if}
+              </span>
             </div>
           {/if}
 
           {#if cookieDe === conta.id}
             <div class="ct-cookie">
               <p class="ct-form-leg">{m.contas_cookie_legenda()}</p>
+              <!-- O "onde copiar" fica aqui dentro também: a linha do card some quando o formulário
+                   abre, e era justamente ao preencher o campo que a instrução fazia falta. -->
+              <p class="ct-form-leg" id="ck-como-{conta.id}">{m.contas_cookie_como()}</p>
               <div class="ct-form-linha">
                 <label class="ct-campo-l">
                   <span>{m.contas_cookie_ws()}</span>
@@ -993,6 +1003,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                 <label class="ct-campo-l larga">
                   <span>{m.contas_cookie_valor()}</span>
                   <input class="ct-campo" type="password" autocomplete="off"
+                    aria-describedby="ck-como-{conta.id}"
                     bind:value={cookieValor} disabled={salvandoCookie} />
                 </label>
               </div>
@@ -1064,10 +1075,14 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
             margin: 0 var(--space-2) var(--space-1); }
   .ct-cab .st-secao { flex: 1; min-width: 0; margin: 0; }
   .ct-atualizado { font-size: var(--text-2xs); color: var(--text-muted); white-space: nowrap; }
-  .ct-refresh { flex-shrink: 0; width: 28px; height: 28px; min-height: 0; min-width: 0;
-                display: grid; place-items: center; border-radius: var(--radius-full);
+  /* Ícone + rótulo: a pílula deixou de ser redonda porque agora carrega texto. Altura e cor
+     continuam as mesmas do cabeçalho. */
+  .ct-refresh { flex-shrink: 0; height: 28px; min-height: 0; min-width: 0;
+                display: inline-flex; align-items: center; gap: 5px;
+                padding: 0 var(--space-2); border-radius: var(--radius-full);
                 border: 1px solid var(--border-subtle); background: transparent;
                 color: var(--text-muted); cursor: pointer; }
+  .ct-refresh-txt { font-size: var(--text-2xs); white-space: nowrap; }
   @media (hover: hover) and (pointer: fine) {
     .ct-refresh:hover { color: var(--text-primary); border-color: var(--border-default); }
   }
@@ -1127,7 +1142,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
      (o flex encolhe o texto antes de quebrar a linha). A cota que não coube desce inteira pra
      segunda linha, que é melhor que um nome ilegível. */
   .compacta .ct-top { align-items: center; flex-wrap: wrap; row-gap: 2px; }
-  /* Quem embrulha primeiro é a COTA, nunca o kebab: medido no celular, o kebab sozinho caía pra
+  /* Quem embrulha primeiro é a COTA, nunca as ações: medido no celular, o botão sozinho caía pra
      uma linha de 44px no pé do card e a linha lia quebrada. Ordem explícita: ações ficam na 1ª
      linha (canto direito), a mini-cota desce inteira quando não cabe. */
   .compacta .ct-acoes { order: 2; }
@@ -1138,6 +1153,10 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
      quem desce pra linha de baixo é a cota/etiqueta que não coube. */
   .compacta .ct-txt { min-width: 14ch; }
   .compacta .ct-sub, .compacta .ct-sub-l { display: none; }
+  /* No compacto some a INSTRUÇÃO, não a ação: o modo é de escaneamento (mesma regra dos
+     subtítulos acima), mas o botão do cookie continua alcançável — esconder a ação de novo
+     seria o kebab com outro nome. */
+  .compacta .ct-cookie-como { display: none; }
   .ct-ico { display: grid; place-items: center; }
   .ct-card.fora .ct-ico { opacity: .55; }
   .ct-acoes { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
@@ -1200,36 +1219,27 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
              font-family: inherit; cursor: pointer; }
   .ct-acao.primaria { background: var(--accent); border-color: var(--accent); color: #fff; }
   .ct-modelo-btn { white-space: nowrap; }
-  /* Kebab fantasma (19/08): a ação é rara e o círculo com borda/fundo disputava a linha com o
-     nome da conta. Vira ícone solto como o lápis; o alvo de toque de 44px no estreito continua
-     (container query abaixo). */
-  .ct-kebab { flex-shrink: 0; width: 28px; height: 28px; min-height: 0; min-width: 0;
-              display: grid; place-items: center;
-              border-radius: var(--radius-full); border: none;
-              background: transparent; color: var(--text-muted); font-size: var(--text-xs);
-              cursor: pointer; }
-  @media (hover: hover) and (pointer: fine) {
-    .ct-kebab:hover { color: var(--text-primary); background: var(--bg-hover); }
-  }
 
   /* Feedback de toque (escala sutil no :active): todo botão da tela confirma na hora que o dedo
      chegou — 160ms ease-out, curva de saída, nada de ease-in. Desabilitado não responde, porque
      inerte não pode parecer vivo. */
-  .ct-btn, .ct-acao, .ct-menu-item, .ct-confirma-btn, .ct-mini, .ct-refresh, .ct-lapis, .ct-kebab {
+  .ct-btn, .ct-acao, .ct-confirma-btn, .ct-mini, .ct-refresh, .ct-lapis {
     transition: transform 160ms ease-out;
   }
   .ct-btn:not(:disabled):active, .ct-acao:not(:disabled):active,
-  .ct-menu-item:not(:disabled):active, .ct-confirma-btn:not(:disabled):active,
+  .ct-confirma-btn:not(:disabled):active,
   .ct-mini:not(:disabled):active, .ct-refresh:not(:disabled):active,
-  .ct-lapis:not(:disabled):active, .ct-kebab:not(:disabled):active {
+  .ct-lapis:not(:disabled):active {
     transform: scale(0.97);
   }
 
-  .ct-menu { display: flex; justify-content: flex-end; margin-top: var(--space-2); }
-  .ct-menu-item { height: 30px; min-height: 0; padding: 0 var(--space-3); border-radius: var(--radius-sm);
-                  border: 1px solid var(--border-subtle); background: var(--surface-raised);
-                  color: var(--text-primary); font-size: var(--text-xs); font-family: inherit;
-                  cursor: pointer; }
+  /* Linha do cookie: instrução à esquerda, ações à direita, largura cheia abaixo da identidade —
+     mesma posição do formulário que ela abre. */
+  .ct-cookie-linha { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+                     margin-top: var(--space-2); }
+  .ct-cookie-como { flex: 1; min-width: 12ch; font-size: var(--text-2xs);
+                    color: var(--text-muted); line-height: 1.4; }
+  .ct-cookie-acoes { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
   .ct-confirma { display: flex; align-items: center; gap: var(--space-2);
                  flex-wrap: wrap; margin-top: var(--space-2); }
@@ -1309,16 +1319,16 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     .ct-login-links .ct-btn { width: 100%; box-sizing: border-box; }
   }
 
-  /* Teclado: quem chega no Tab tem de VER onde está. Sem isto o lápis e o kebab (fundo
-     transparente / sutil) só mostravam o anel padrão do navegador, que some no fundo escuro. */
-  .ct-lapis:focus-visible, .ct-kebab:focus-visible, .ct-acao:focus-visible,
-  .ct-menu-item:focus-visible, .ct-btn:focus-visible, .ct-mini:focus-visible,
+  /* Teclado: quem chega no Tab tem de VER onde está. Sem isto o lápis (fundo transparente) só
+     mostrava o anel padrão do navegador, que some no fundo escuro. */
+  .ct-lapis:focus-visible, .ct-acao:focus-visible,
+  .ct-btn:focus-visible, .ct-mini:focus-visible,
   .ct-confirma-btn:focus-visible, .ct-refresh:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px;
   }
   /* Desabilitado PARECE desabilitado — o Entrar fica inerte enquanto há outro login em curso, e
      os botões do formulário do cookie enquanto ele salva. */
-  .ct-lapis:disabled, .ct-kebab:disabled, .ct-acao:disabled, .ct-menu-item:disabled,
+  .ct-lapis:disabled, .ct-acao:disabled,
   .ct-btn:disabled, .ct-mini:disabled, .ct-confirma-btn:disabled, .ct-refresh:disabled {
     opacity: .55; cursor: default;
   }
@@ -1326,17 +1336,25 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   /* Tangível no celular: target de toque >= 44px quando o painel aperta (o mock é desktop
      1440px, onde 30px é confortável em mouse). */
   @container (max-width: 620px) {
-    .ct-acao, .ct-kebab, .ct-menu-item, .ct-confirma-btn { height: 44px; min-height: 44px; }
+    .ct-acao, .ct-confirma-btn { height: 44px; min-height: 44px; }
     /* O lápis também: o `min-height: 0` lá em cima é o que dá a densidade no desktop (mouse),
        e sem esta linha ele descia a 18px no celular — abaixo do alvo tangível, justo num botão
        que fica colado no nome. A linha do nome volta a 44px aqui, e é o certo: quem lê no
        celular precisa acertar o dedo, não caber mais uma conta na tela. */
-    .ct-lapis { min-height: 44px; min-width: 44px; }
-    .ct-kebab { width: 44px; }
-    /* O refresh do cabeçalho também é alvo de dedo no estreito. */
-    .ct-refresh { width: 36px; height: 36px; }
+    .ct-lapis { min-height: 44px; }
+    /* O refresh do cabeçalho também é alvo de dedo no estreito. A largura sai do rótulo. */
+    .ct-refresh { height: 36px; }
+    /* Com rótulo, os três botões do cabeçalho não cabem ao lado do título no estreito: o último
+       saía pra fora do painel. O título passa a ocupar a primeira linha inteira e os botões
+       descem juntos — mesma saída do `.mq-caixas` da lista de máquinas. */
+    .ct-cab { flex-wrap: wrap; }
+    .ct-cab .st-secao { flex-basis: 100%; }
+    /* Mesmo remédio na linha do cookie: com os dois botões (227px) sobravam 86px pra instrução,
+       que virava uma coluna de seis linhas. Em largura cheia ela lê em duas, e os botões descem.
+       O `min-width: 12ch` fica: na faixa larga a instrução divide a linha com eles de propósito. */
+    .ct-cookie-como { flex-basis: 100%; }
     .ct-btn { height: 44px; }
-    /* Com "Modelo e opções" na linha, a chave de API passou a ter etiqueta + botão + kebab, todos
+    /* Com "Modelo e opções" na linha, a chave de API passou a ter etiqueta + Editar + Remover, todos
        `flex-shrink: 0`, e no estreito não sobrava largura pro nome: como o `.ct-nome` tem
        `overflow-wrap: anywhere`, o min-content dele é UM caractere e o flex encolhia até isso —
        "Deepseek Claude" virava uma coluna vertical de letras. Mesma dupla que o modo compacto já
@@ -1353,13 +1371,14 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   .ct-lapis {
     /* Sobrescreve o alvo de toque global de 44px (app.css): sem isto o BOTÃO define a altura da
        linha do nome — 44px de linha para um lápis de 14px, e a linha da conta inteira herdava
-       isso (medido: linha de 98px, sendo 44 só a do nome). Mesmo remédio do .ct-kebab e da
-       árvore de arquivos. O container query estreito devolve os 44px de alvo (regra lá embaixo). */
+       isso (medido: linha de 98px, sendo 44 só a do nome). Mesmo remédio da árvore de arquivos.
+       O container query estreito devolve os 44px de alvo (regra lá embaixo). */
     min-height: 0; min-width: 0;
-    flex-shrink: 0; display: grid; place-items: center;
+    flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;
     background: transparent; border: none; padding: 0 2px; cursor: pointer;
     color: var(--text-muted); line-height: 1; opacity: .75;
   }
+  .ct-lapis-txt { font-size: var(--text-2xs); white-space: nowrap; }
   @media (hover: hover) and (pointer: fine) {
     .ct-lapis:hover { opacity: 1; color: var(--text-secondary); }
   }
@@ -1402,6 +1421,8 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     background: var(--surface-inset);
   }
   .ct-form-leg { color: var(--text-muted); font-size: 12px; margin: 0 0 var(--space-3); }
+  /* Linha inteira dentro da faixa flex do nome, senão ela disputa espaço com o campo e os botões. */
+  .ct-renomear-leg { flex-basis: 100%; margin-bottom: 2px; }
   /* Container query, não media query: quem aperta a linha é a largura do PAINEL. */
   .ct-form-linha { display: flex; gap: var(--space-3); }
   @container (max-width: 460px) { .ct-form-linha { flex-direction: column; } }

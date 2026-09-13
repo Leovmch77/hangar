@@ -15,6 +15,7 @@ function avanca(tw: Typewriter, ms: number, passo = 40) {
 describe('Typewriter', () => {
   it('revela texto que estende aos poucos, não de uma vez', () => {
     const tw = new Typewriter(false);
+    tw.set('');
     tw.set('Primeiro parágrafo da resposta, com umas palavras a mais pra dar corpo.');
     expect(tw.texto).toBe(''); // nada revelado antes do primeiro passo
     avanca(tw, 120);
@@ -26,7 +27,8 @@ describe('Typewriter', () => {
 
   it('acelera com backlog grande: nunca fica mais de ~1.2s atrás', () => {
     const tw = new Typewriter(false);
-    tw.set('x'.repeat(5000)); // chegou num tranco (ex: bolha montada no meio da mensagem)
+    tw.set('');
+    tw.set('x'.repeat(5000));
     avanca(tw, 1400);
     expect(tw.texto.length).toBe(5000); // 5000/1.2 ≈ 4166 chars/s -> 1.4s sobra
   });
@@ -51,5 +53,33 @@ describe('Typewriter', () => {
     avanca(tw, 5000);
     tw.set('abc'); // prefixo do revelado -> não estende -> snap pro novo tamanho
     expect(tw.texto).toBe('abc');
+  });
+
+  it('mostra a prévia recebida ao entrar ou voltar inteira e anima só o acréscimo ao vivo', () => {
+    const recebido = 'Texto que já estava na sessão. '.repeat(100);
+    for (let entrada = 0; entrada < 2; entrada++) {
+      const tw = new Typewriter(false);
+      tw.set(recebido);
+      expect(tw.texto).toBe(recebido);
+      tw.set(recebido + ' Continuação nova em streaming. '.repeat(10));
+      expect(tw.texto).toBe(recebido);
+      avanca(tw, 120);
+      expect(tw.texto.startsWith(recebido)).toBe(true);
+      expect(tw.texto.length).toBeGreaterThan(recebido.length);
+      expect(tw.texto.length).toBeLessThan(tw.alvo.length);
+      avanca(tw, 2000);
+      expect(tw.texto).toBe(tw.alvo);
+    }
+  });
+
+  it('revela todo o texto ao parar, sem repetir typing em atualizações da sessão parada', () => {
+    const tw = new Typewriter(false);
+    tw.set('Início');
+    tw.set('Início de uma resposta longa ainda chegando. '.repeat(20));
+    expect(tw.texto).toBe('Início');
+    tw.set(tw.alvo, false);
+    expect(tw.texto).toBe(tw.alvo);
+    tw.set(tw.alvo + ' Final recebido.', false);
+    expect(tw.texto).toBe(tw.alvo);
   });
 });

@@ -12,6 +12,7 @@
   import ListaMaquinas from './ListaMaquinas.svelte';
   import ServerEditSheet from '../ServerEditSheet.svelte';
   import LinhaConfig from './LinhaConfig.svelte';
+  import EscopoChip from './EscopoChip.svelte';
   import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
   import type { RemovalSnapshot, Server } from '../../lib/auth';
   import * as m from '../../paraglide/messages';
@@ -464,7 +465,7 @@
     <p class="id-aviso">{m.peers_aviso_nao_definido()}</p>
   {/if}
   <div class="id-linha">
-    <span class="id-rot">{m.peers_identificador()}
+    <span class="id-rot">{m.peers_identificador()} <EscopoChip escopo="env" />
       {#if identificador}
         <small>{m.peers_identificador_definido({ nome: identificador })}</small>
       {:else}
@@ -523,10 +524,14 @@
   onTestarDeNovo={testarDeNovo}
   onRemover={(l) => (removerLinha = l)}
   onAdicionar={() => { addEndereco = ''; showAdd = true; }} />
+<!-- O botão existe sempre: sem máquina escolhida ele fica apagado com o motivo, como o seletor
+     do topo — sumir esconderia que a busca existe. Só lê a rede; não cadastra nada sozinho. -->
+<button class="ss-btn mq-buscar" onclick={buscarNoTailscale} disabled={descobrindo || !resolvedServer}
+  aria-describedby="mq-buscar-ajuda">
+  {descobrindo ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
+</button>
+<p class="ss-legenda" id="mq-buscar-ajuda">{resolvedServer ? m.maquinas_buscar_ajuda() : m.maquinas_buscar_sem_maquina()}</p>
 {#if resolvedServer}
-  <button class="ss-btn mq-buscar" onclick={buscarNoTailscale} disabled={descobrindo}>
-    {descobrindo ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
-  </button>
   {#if descobertasErro}<p class="id-erro" role="status">{descobertasErro}</p>{/if}
   {#if descobertas !== null && !descobrindo}
     {#if novasDescobertas.length === 0}
@@ -540,7 +545,7 @@
               <span class="mq-achada-nome">{d.nome}</span>
               <span class="mq-achada-url">{d.base_url}</span>
             </span>
-            <button class="ss-btn" onclick={() => { addEndereco = d.base_url; showAdd = true; }}>+ {m.sessao_adicionar_servidor()}</button>
+            <button class="ss-btn" onclick={() => { addEndereco = d.base_url; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
           </li>
         {/each}
       </ul>
@@ -550,7 +555,7 @@
 {#if peersErro}<p class="id-erro" role="status">{peersErro}</p>{/if}
 {#if removerLadoDeLaFalhou}<p class="ss-aviso" role="status">{m.maquinas_remover_peer_lado_de_la_falhou()}</p>{/if}
 <div class="ss-acoes">
-  <button class="ss-btn" onclick={() => sessionsStore.reconnect()} disabled={logoutInFlight}>{m.config_servidores_reconectar()}</button>
+  <button class="ss-btn" onclick={() => sessionsStore.reconnect()} disabled={logoutInFlight}>{m.maquinas_reconectar()}</button>
   <button class="ss-btn ss-danger" onclick={() => (confirmLogout = true)} disabled={logoutInFlight}>{m.sessao_sair_curto()}</button>
 </div>
 
@@ -581,7 +586,11 @@
       { label: m.comum_cancelar(), onClick: () => (removerLinha = null) },
       { label: m.lista_remover(), kind: 'danger', onClick: () => void removerLinhaConfirmado() },
     ]}>
-    <p class="ss-dialog-copy">{m.maquinas_remover_linha()}</p>
+    <!-- Os mesmos dois campos que a ação lê, e esta é a última tela antes de apagar: sem peer a
+         remoção nem chega ao servidor; sem navegador ela não sai daqui e o lado de lá nem é
+         tentado (`removerPeerDoisLados` para no `if (!remoto)`), que é a mesma razão do ternário
+         do diálogo irmão, logo acima. -->
+    <p class="ss-dialog-copy">{!removerLinha.peer ? m.maquinas_remover_linha_local() : removerLinha.navegador ? m.maquinas_remover_linha() : m.maquinas_remover_peer_so_aqui()}</p>
   </ConfirmDialog>
 {/if}
 

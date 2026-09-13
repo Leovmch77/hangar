@@ -11,13 +11,14 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app import atomico, diag
-from app.auth import registrar_acesso
+from app import atomico, diag, runtime_config
+from app.auth import registrar_acesso, require_auth
 
 from app.config import settings, _LOOPBACK
 from app.mensagens import erro
+from app.uploads import MAX_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -158,7 +159,118 @@ def record_fail(ip: str) -> None:
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────────────────────
-sync_router = APIRouter(prefix="/api/sync")
+def require_enabled() -> None:
+    if not runtime_config.get("sync"):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+sync_router = APIRouter(prefix="/api/sync", dependencies=[Depends(require_enabled)])
+sync_admin_router = APIRouter(prefix="/api/sync", dependencies=[Depends(require_auth)])
+
+
+class SetupBlob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    iv: str = Field(min_length=16, max_length=16)
+    data: str = Field(min_length=24, max_length=MAX_BYTES)
+
+    @field_validator("iv", "data")
+    @classmethod
+    def validate_base64(cls, value: str, info):
+        decoded = base64.b64decode(value, validate=True)
+        if (info.field_name == "iv" and len(decoded) != 12
+                or info.field_name == "data" and len(decoded) < 16):
+            raise ValueError("tamanho inválido do conteúdo cifrado")
+        return value
+
+
+class SetupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user: str | None = Field(default=None, min_length=1, max_length=100)
+    salt: str | None = Field(default=None, max_length=24)
+    auth_hash: str | None = Field(default=None, max_length=44)
+    enc_blob: SetupBlob | None = None
+
+    @field_validator("user")
+    @classmethod
+    def validate_user(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("usuário obrigatório")
+        return value
+
+    @field_validator("salt", "auth_hash")
+    @classmethod
+    def validate_base64(cls, value, info):
+        if value is not None and len(base64.b64decode(value, validate=True)) != (
+                16 if info.field_name == "salt" else 32):
+            raise ValueError("tamanho inválido da credencial")
+        return value
+
+    @model_validator(mode="after")
+    def validate_account(self):
+        if self.model_fields_set and any(value is None for value in (self.user, self.salt, self.auth_hash)):
+            raise ValueError("informe usuário, salt e auth_hash juntos")
+        return self
+
+
+def _load_setup_vault() -> dict | None:
+    vault = load_vault()
+    if vault is None and not _data_path().exists():
+        return None
+    fields = ("user", "salt", "verifier_salt", "auth_verifier")
+    if (not isinstance(vault, dict)
+            or any(not isinstance(vault.get(key), str) or not vault[key] for key in fields)
+            or type(vault.get("rev")) is not int or vault["rev"] < 0
+            or "enc_blob" not in vault):
+        raise ValueError("estrutura do cofre inválida")
+    for key, size in (("salt", 16), ("verifier_salt", 16), ("auth_verifier", 32)):
+        if len(base64.b64decode(vault[key], validate=True)) != size:
+            raise ValueError("estrutura do cofre inválida")
+    if vault["enc_blob"] is not None:
+        SetupBlob.model_validate(vault["enc_blob"])
+    return vault
+
+
+def _setup_status(vault: dict | None) -> dict:
+    return {"enabled": bool(runtime_config.get("sync")), "registered": vault is not None,
+            "user": vault["user"] if vault else None}
+
+
+@sync_admin_router.get("/setup")
+def setup_status() -> dict:
+    return _setup_status(_load_setup_vault())
+
+
+@sync_admin_router.post("/setup")
+def setup(body: SetupBody) -> dict:
+    with _vault_lock:
+        vault = _load_setup_vault()
+        if vault is not None and body.model_fields_set:
+            raise HTTPException(status_code=409, detail=erro("erro_ja_registrado", "already registered"))
+        if vault is None:
+            if body.user is None:
+                raise HTTPException(status_code=422, detail="Informe os dados da conta")
+            vsalt = secrets.token_bytes(16)
+            vault = {
+                "user": body.user, "salt": body.salt,
+                "verifier_salt": base64.b64encode(vsalt).decode(),
+                "auth_verifier": make_verifier(body.auth_hash, vsalt),
+                "enc_blob": body.enc_blob.model_dump() if body.enc_blob else None,
+                "rev": 1 if body.enc_blob else 0,
+            }
+            save_vault(vault)
+        # A conta fica preservada se ativar falhar; repetir com {} conclui a ativação.
+        runtime_config.aplicar({"sync": True})
+        diag.registrar("sync.ativado")
+        return _setup_status(vault)
+
+
+@sync_admin_router.post("/setup/disable")
+def disable() -> dict:
+    with _vault_lock:
+        vault = _load_setup_vault()
+        runtime_config.aplicar({"sync": False})
+        diag.registrar("sync.desativado")
+        return _setup_status(vault)
 
 
 class RegisterBody(BaseModel):

@@ -50,6 +50,8 @@ vi.mock('@hangar/core', async (original) => ({
   getRunners: vi.fn().mockResolvedValue({ running: false }),
   getPlan: vi.fn().mockResolvedValue(null),
   getWorkflows: vi.fn().mockResolvedValue([]),
+  getSubagents: vi.fn().mockResolvedValue([]),
+  getModelOptions: vi.fn().mockResolvedValue({ kind: 'anthropic', models: [] }),
   getCommands: vi.fn().mockResolvedValue([]),
   getCodexModels: vi.fn().mockResolvedValue({ models: [], current: { model: 'gpt-6-astra', effort: 'high', mode: 'default' } }),
   sendInput: vi.fn().mockResolvedValue({ ok: true, queued: true }),
@@ -144,6 +146,44 @@ it('digita, enfileira, orienta e reconcilia a mensagem definitiva sem duplicaç�
   await emit('message', { id: 'mensagem-real', kind: 'user_msg', text: 'Preserve a configuração atual', ts: '2026-09-07T12:00:01Z' });
   expect(bolhas('Preserve a configuração atual')).toHaveLength(1);
   expect(orientar()).toBeNull();
+});
+
+it('não sobrepõe consultas de subagentes mesmo se o estado mudar durante a resposta', async () => {
+  let responder!: (lista: Awaited<ReturnType<typeof api.getSubagents>>) => void;
+  vi.mocked(api.getSubagents).mockImplementationOnce(() => new Promise(resolve => { responder = resolve; }));
+  const intervalos = vi.spyOn(globalThis, 'setInterval');
+  await montar();
+  const poll = intervalos.mock.calls.find(([, ms]) => ms === 5000)?.[0];
+  expect(typeof poll).toBe('function');
+  (poll as () => void)();
+  (poll as () => void)();
+  await emit('state', { session: 'codex-flow', state: 'idle' });
+  expect(api.getSubagents).toHaveBeenCalledTimes(1);
+  responder([]);
+  await flush();
+});
+
+it('abrir uma conversa Claude não consulta o seletor de modelos', async () => {
+  harness.provider = 'claude';
+  await montarClaude();
+  expect(api.getModelOptions).not.toHaveBeenCalled();
+});
+
+it('não sobrepõe consultas de workflows enquanto a resposta está pendente', async () => {
+  const intervalos = vi.spyOn(globalThis, 'setInterval');
+  await montar();
+  let responder!: (lista: Awaited<ReturnType<typeof api.getWorkflows>>) => void;
+  vi.mocked(api.getWorkflows)
+    .mockResolvedValueOnce([{ running: true }] as Awaited<ReturnType<typeof api.getWorkflows>>)
+    .mockImplementationOnce(() => new Promise(resolve => { responder = resolve; }));
+  await emit('message', { id: 'workflow', kind: 'tool_use', tool_use_id: 'workflow', tool_name: 'Workflow', tool_input: {} });
+  const poll = intervalos.mock.calls.find(([, ms]) => ms === 4000)?.[0];
+  expect(typeof poll).toBe('function');
+  (poll as () => void)();
+  (poll as () => void)();
+  expect(api.getWorkflows).toHaveBeenCalledTimes(2);
+  responder([]);
+  await flush();
 });
 
 it('uma falha ao orientar preserva a bolha da fila e permite tentar novamente', async () => {

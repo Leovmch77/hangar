@@ -2,7 +2,9 @@
   import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
   import { criarSeletorNativo } from '../../lib/pastaNativa.svelte';
   import LinhaConfig from './LinhaConfig.svelte';
+  import EscopoChip from './EscopoChip.svelte';
   import type { Server } from '../../lib/auth';
+  import type { VariavelEnv } from '@hangar/core';
   import PushQuiet from '../PushQuiet.svelte';
   import { pushSupported } from '../../lib/push';
   import type { PushTarget } from '../../lib/quietHours';
@@ -39,13 +41,16 @@
     sufixo?: string;
     secao: Props['secao'];
     opcoes?: { value: string; label: string }[];
+    veredito?: string;
+    motivo?: string;
   }
 
   const CAMPOS: Campo[] = [
     { chave: 'upload_retention_days', rotulo: m.config_server_guardar_anexos(), tipo: 'numero', sufixo: m.config_server_dias(), secao: 'anexos',
       ajuda: m.config_server_guardar_ajuda() },
     { chave: 'automations', rotulo: m.config_server_automacoes(), tipo: 'liga', secao: 'avancado',
-      ajuda: m.config_server_automacoes_ajuda() },
+      ajuda: m.config_server_automacoes_ajuda(),
+      veredito: m.config_motores_recomendado_ligado(), motivo: m.config_server_automacoes_porque() },
     // Não mora no runtime-config.json como os outros: escreve `showThinkingSummaries` no
     // settings.json do Claude Code (app/pensamento.py). Vale só pra sessão NOVA.
     { chave: 'mostrar_pensamento', rotulo: m.config_server_pensamento(), tipo: 'liga', secao: 'avancado',
@@ -72,8 +77,54 @@
   const LEITURA_EM_MAQUINAS = new Set(['port', 'lan_bind_ip', 'server_id', 'public_url', 'terminal_origem_ok']);
   const ROTULO_LEITURA: Record<string, string> = {
     terminal_panel: m.config_server_painel_terminal(),
+    traducao_pensamento: m.config_server_traducao_pensamento(),
+    versao: m.config_server_versao(),
   };
   const leituraVisivel = $derived(Object.entries(store.leitura).filter(([k]) => !LEITURA_EM_MAQUINAS.has(k)));
+
+  // Variáveis do .env: o backend manda um CÓDIGO e a tela traduz. Código que não está neste mapa
+  // não vira texto nenhum — a linha fica só com o nome cru, nunca com o identificador da mensagem.
+  const DESCRICAO_ENV: Record<string, string> = {
+    terminal: m.config_server_env_terminal(),
+    pricing_offline: m.config_server_env_pricing_offline(),
+    claude_config_dirs: m.config_server_env_claude_config_dirs(),
+    engines_file: m.config_server_env_engines_file(),
+    codex_sync_enabled: m.config_server_env_codex_sync_enabled(),
+    auto_resume: m.config_server_env_auto_resume(),
+    omp_plugin_sync: m.config_server_env_omp_plugin_sync(),
+    omp_claude_context: m.config_server_env_omp_claude_context(),
+    lan_bind_ip: m.config_server_env_lan_bind_ip(),
+    port: m.config_server_env_port(),
+    auth_token: m.config_server_env_auth_token(),
+    projects_dir: m.config_server_env_projects_dir(),
+    reload: m.config_server_env_reload(),
+    diag_term_input: m.config_server_env_diag_term_input(),
+    front_port: m.config_server_env_front_port(),
+    public_url: m.config_server_env_public_url(),
+    server_id: m.config_server_env_server_id(),
+    vapid_public: m.config_server_env_vapid_public(),
+    vapid_private: m.config_server_env_vapid_private(),
+    vapid_subject: m.config_server_env_vapid_subject(),
+    stall_poll_seconds: m.config_server_env_stall_poll_seconds(),
+    omp_plugin_sync_interval: m.config_server_env_omp_plugin_sync_interval(),
+    sync: m.config_server_env_sync(),
+    sync_bootstrap: m.config_server_env_sync_bootstrap(),
+    sync_data: m.config_server_env_sync_data(),
+    sync_session_secret: m.config_server_env_sync_session_secret(),
+    sync_rate_max: m.config_server_env_sync_rate_max(),
+    sync_rate_window: m.config_server_env_sync_rate_window(),
+    forwarded_allow_ips: m.config_server_env_forwarded_allow_ips(),
+    deploy_secret: m.config_server_env_deploy_secret(),
+  };
+  const ALERTA_ENV: Record<string, string> = {
+    codex_sync_desligado: m.config_server_env_alerta_codex_sync(),
+  };
+  /** Segredo NÃO tem valor aqui (o backend nunca o manda): a linha diz só se está definida. */
+  function valorEnv(v: VariavelEnv): string {
+    if (v.segredo) return v.definida ? m.config_server_env_definida() : m.config_server_env_nao_definida();
+    if (typeof v.valor === 'boolean') return v.valor ? m.config_server_sim() : m.config_server_nao();
+    return v.valor === '' || v.valor === null ? '—' : String(v.valor);
+  }
 
   // Pastas mapeadas do seletor de pasta (scan_roots): o valor no runtime_config é a string "a,b"
   // (mesmo formato do CP_SCAN_ROOTS); a tela edita como lista de linhas.
@@ -112,7 +163,6 @@
 <div class="cfg" class:com-rodape={rodapeVisivel && secao !== 'notificacoes'}>
   <header class="cfg-head">
     <h2>{TITULOS[secao]}</h2>
-    <p class="sub">{m.config_server_valem()}</p>
   </header>
 
   {#if store.carregando}
@@ -123,7 +173,7 @@
   {:else}
     <div class="lista">
       {#each visiveis as c (c.chave)}
-        <LinhaConfig campo={c} {store} />
+        <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} />
       {/each}
     </div>
 
@@ -131,6 +181,7 @@
       <div class="raizes">
         <h3>
           {m.config_server_raizes()}
+          <EscopoChip escopo="servidor" />
           {#if store.campos['scan_roots']?.origem === 'app'}<span class="tag">{m.config_server_editado()}</span>{/if}
         </h3>
         <p class="ajuda">{m.config_server_raizes_ajuda()}</p>
@@ -140,7 +191,9 @@
         {#each raizes as r (r)}
           <div class="raiz-linha">
             <span class="raiz-caminho">{r}</span>
-            <button class="raiz-x" onclick={() => raizRemover(r)} aria-label={m.config_server_raiz_remover({ p: r })}>✕</button>
+            <!-- Ícone com o rótulo ao lado, como em ListaMaquinas: no toque não existe hover, e o
+                 ✕ sozinho só se explicava pelo aria-label. -->
+            <button class="raiz-x" onclick={() => raizRemover(r)} aria-label={m.config_server_raiz_remover({ p: r })}><span aria-hidden="true">✕</span> <span class="raiz-x-txt">{m.lista_remover()}</span></button>
           </div>
         {/each}
         <form class="raiz-add" onsubmit={(e) => { e.preventDefault(); if (raizAdicionar(novaRaiz)) novaRaiz = ''; }}>
@@ -166,15 +219,44 @@
       {#if leituraVisivel.length}
         <div class="somente-leitura">
           <h3>{m.config_server_so_servidor()}</h3>
-          <p class="ajuda">
-            {m.config_server_so_servidor_1()} <code>.env</code>{m.config_server_so_servidor_2()}
-          </p>
+          <!-- Sem etiqueta de escopo, e é o ponto do bloco: estas linhas não são configuração, são
+               leitura do que a máquina consegue fazer agora. A etiqueta ".env" que estava aqui dizia
+               o falso nas três — a tradução do raciocínio depende da chave de LLM que a tela de Voz
+               edita, no mesmo modal, com efeito imediato. -->
+          <p class="ajuda">{m.config_server_so_servidor_ajuda()}</p>
           {#each leituraVisivel as [k, v] (k)}
             <div class="ro-linha">
               <span class="ro-rot">{ROTULO_LEITURA[k] ?? k}</span>
               <span class="ro-val">{v === '' ? '—' : typeof v === 'boolean' ? (v ? m.config_server_sim() : m.config_server_nao()) : v}</span>
             </div>
           {/each}
+        </div>
+      {/if}
+
+      {#if store.variaveisEnv.length}
+        <div class="env">
+          <h3>{m.config_server_env_titulo()} <EscopoChip escopo="env" /></h3>
+          <p class="ajuda">{m.config_server_env_ajuda()}</p>
+          <!-- Lista de definição, não <div>s soltas: sem ela um leitor de tela anuncia nome, valor
+               e descrição como três pedaços sem vínculo. O <div> por linha é o agrupamento que o
+               HTML permite dentro de um <dl>. -->
+          <dl class="env-lista">
+            {#each store.variaveisEnv as v (v.nome)}
+              <div class="env-linha">
+                <dt class="env-nome"
+                    aria-describedby={v.alerta && ALERTA_ENV[v.alerta] ? `env-alerta-${v.nome}` : undefined}>
+                  <code>{v.nome}</code>
+                </dt>
+                <dd class="env-val" class:vazio={!v.definida}>{valorEnv(v)}</dd>
+                {#if v.descricao && DESCRICAO_ENV[v.descricao]}
+                  <dd class="env-desc">{DESCRICAO_ENV[v.descricao]}</dd>
+                {/if}
+                {#if v.alerta && ALERTA_ENV[v.alerta]}
+                  <dd class="env-alerta" role="note" id="env-alerta-{v.nome}">{ALERTA_ENV[v.alerta]}</dd>
+                {/if}
+              </div>
+            {/each}
+          </dl>
         </div>
       {/if}
     {/if}
@@ -219,7 +301,6 @@
      veio do bloco de campos acima dele. */
   .push { padding-top: 0; }
   .cfg-head h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
-  .cfg-head .sub { margin: 2px 0 var(--space-4); font-size: var(--text-xs); color: var(--text-muted); }
 
   .lista { display: flex; flex-direction: column; }
   /* "editado" = veio de override, não do .env — sem isso não dá pra saber de onde o valor vem.
@@ -252,9 +333,11 @@
   }
   input:focus { border-color: var(--accent); }
 
-  .raizes { margin-top: var(--space-5); }
+  /* Container da etiqueta de escopo do <h3> abaixo: sem ele a container query do chip cairia num
+     ancestral mais largo e a etiqueta nunca desceria de linha no celular. */
+  .raizes { container-type: inline-size; margin-top: var(--space-5); }
   .raizes h3 {
-    display: flex; align-items: center; gap: var(--space-2);
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0;
     margin: 0 0 4px; font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
   }
   .raiz-linha {
@@ -266,9 +349,11 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
   }
   .raiz-x {
-    flex-shrink: 0; background: none; border: none; padding: 2px 6px;
+    flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;
+    background: none; border: none; padding: 2px 6px;
     color: var(--text-muted); font-size: var(--text-sm);
   }
+  .raiz-x-txt { font-size: var(--text-xs); white-space: nowrap; }
   .raiz-x:hover { color: var(--error); }
   /* Com o botão do seletor nativo a linha tem TRÊS itens, e ela vale nas duas views: no celular e
      no modal estreito o campo espremeria os dois botões até virar um traço. Quebra em vez de
@@ -281,14 +366,62 @@
     margin: 0 0 4px; font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
   }
   .ro-linha {
-    display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4);
-    padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle);
+    /* Container da etiqueta de escopo: quem aperta esta linha é a largura do PAINEL. */
+    container-type: inline-size;
+    display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap;
+    gap: var(--space-4); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle);
   }
-  .ro-rot { font-size: var(--text-sm); color: var(--text-secondary); }
+  /* `flex` + `wrap`: apertado, a etiqueta desce em vez de espremer o rótulo. */
+  .ro-rot {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+    font-size: var(--text-sm); color: var(--text-secondary); min-width: 0;
+  }
+  /* Quebra em vez de cortar, mesma razão da `.env-val`: com os rótulos longos que estas chaves
+     ganharam ("Tradução do raciocínio disponível"), o corte comia o valor até virar "s…".
+     A base de 12ch é o que faz o valor DESCER pra linha de baixo em vez de espremer: sem ela, o
+     `overflow-wrap` deixa o flex encolher o item até uma letra por linha, e "sim" virava "si/m".
+     E o `grow` é o que o mantém colado na direita quando desce: com base fixa ele ficava pendurado
+     no meio da linha, longe do rótulo e longe da borda. */
   .ro-val {
     font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+    flex: 1 0 12ch; text-align: right; overflow-wrap: anywhere;
   }
+
+  /* Container da etiqueta de escopo do <h3>, como em `.raizes`: sem ele a container query do chip
+     cairia num ancestral mais largo e a etiqueta nunca desceria de linha no celular. */
+  .env { container-type: inline-size; margin-top: var(--space-5); }
+  .env h3 {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0;
+    margin: 0 0 4px; font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary);
+  }
+  .env-lista { margin: 0; }
+  /* Nome e valor na MESMA linha quando cabem; a descrição e o aviso ficam embaixo, ocupando a
+     largura toda (`flex-basis: 100%`) — são frases, e espremidas ao lado do nome virariam uma
+     palavra por linha. */
+  .env-linha {
+    display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap;
+    gap: var(--space-4); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle);
+  }
+  /* `dd` nasce com recuo do navegador; aqui quem posiciona é o flex. */
+  .env-linha dd { margin: 0; }
+  .env-nome {
+    font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-secondary);
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  /* QUEBRA em vez de cortar com reticências, ao contrário do `.ro-val` vizinho: aqui os valores
+     são caminho de arquivo e lista de pastas, e no celular o corte escondia o fim sem nenhum jeito
+     de ver o resto (não há hover pra um `title`). Alinhado à direita pra manter a coluna quando
+     ocupa mais de uma linha. */
+  .env-val {
+    font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted);
+    flex: 1 0 12ch; text-align: right; overflow-wrap: anywhere;
+  }
+  .env-val.vazio { font-style: italic; }
+  .env-desc, .env-alerta {
+    flex-basis: 100%; margin: 4px 0 0; font-size: var(--text-xs); line-height: 1.45;
+  }
+  .env-desc { color: var(--text-muted); }
+  .env-alerta { color: var(--warning); }
 
   .aviso { font-size: var(--text-sm); color: var(--text-muted); margin: var(--space-3) 0; }
   .aviso.erro { color: var(--error); }

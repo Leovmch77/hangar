@@ -15,6 +15,10 @@ def _make_client(tmp_path, monkeypatch, bind_ip="127.0.0.1", **extra_env):
         monkeypatch.setenv(k, str(v))
     import app.config as config
     importlib.reload(config)
+    from app import auth, runtime_config
+    monkeypatch.setattr(auth, "settings", config.settings)
+    monkeypatch.setattr(runtime_config, "settings", config.settings)
+    monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
     import app.sync as sync
     importlib.reload(sync)
     import app.api as api
@@ -128,3 +132,115 @@ def test_session_slides_on_authed_request(client):
     r = client.get("/api/sync/vault")
     assert r.status_code == 200
     assert "cp_sync=" in r.headers.get("set-cookie", "")
+
+
+def _setup_payload():
+    return {"user": "jefferson", "salt": SALT,
+            "auth_hash": base64.b64encode(b"a" * 32).decode(),
+            "enc_blob": {"iv": base64.b64encode(b"i" * 12).decode(),
+                         "data": base64.b64encode(b"d" * 16).decode()}}
+
+
+def _admin_client(tmp_path, monkeypatch):
+    c = _make_client(tmp_path, monkeypatch, CP_SYNC=0, CP_AUTH_TOKEN="setup-token")
+    c.headers["Authorization"] = "Bearer setup-token"
+    return c
+
+
+def test_setup_exige_token_normal_mesmo_desligado(tmp_path, monkeypatch):
+    c = _admin_client(tmp_path, monkeypatch)
+    c.headers.clear()
+    assert c.get("/api/sync/setup").status_code == 401
+    assert c.post("/api/sync/setup", json=_setup_payload()).status_code == 401
+    assert c.post("/api/sync/setup/disable").status_code == 401
+    assert not (tmp_path / "vault.json").exists()
+
+
+def test_setup_ativa_imediatamente_e_persiste_conta_cifrada(tmp_path, monkeypatch):
+    c = _admin_client(tmp_path, monkeypatch)
+    assert c.get("/api/sync/status").status_code == 404
+    assert c.get("/api/sync/setup").json() == {
+        "enabled": False, "registered": False, "user": None}
+    payload = _setup_payload()
+    response = c.post("/api/sync/setup", json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"enabled": True, "registered": True, "user": "jefferson"}
+    assert "set-cookie" not in response.headers
+    c.headers.clear()
+    assert c.get("/api/sync/status").json() == {"enabled": True, "registered": True}
+    assert c.post("/api/sync/login", json={key: payload[key] for key in ("user", "auth_hash")}).status_code == 200
+    assert c.get("/api/sync/vault").json() == {"enc_blob": payload["enc_blob"], "rev": 1}
+    restarted = _admin_client(tmp_path, monkeypatch)
+    assert restarted.get("/api/sync/status").json() == {"enabled": True, "registered": True}
+
+
+def test_setup_existente_so_reativa_sem_sobrescrever(tmp_path, monkeypatch):
+    c = _admin_client(tmp_path, monkeypatch)
+    assert c.post("/api/sync/setup", json=_setup_payload()).status_code == 200
+    before = (tmp_path / "vault.json").read_bytes()
+    payload = _setup_payload()
+    assert c.post("/api/sync/login", json={key: payload[key] for key in ("user", "auth_hash")}).status_code == 200
+    cookie = c.cookies.get("cp_sync")
+    assert c.post("/api/sync/setup/disable").json() == {
+        "enabled": False, "registered": True, "user": "jefferson"}
+    assert c.get("/api/sync/vault").status_code == 404
+    assert c.cookies.get("cp_sync") == cookie
+    assert c.post("/api/sync/setup", json=_setup_payload()).status_code == 409
+    assert c.get("/api/sync/setup").json()["enabled"] is False
+    assert c.post("/api/sync/setup", json={}).status_code == 200
+    assert (tmp_path / "vault.json").read_bytes() == before
+    assert c.get("/api/sync/vault").json() == {"enc_blob": payload["enc_blob"], "rev": 1}
+
+
+@pytest.mark.parametrize("bad", [None, {}, {"user": None}, {"user": " "}, {"user": "x" * 101},
+                                  {"salt": "!" * 24}, {"auth_hash": SALT},
+                                  {"enc_blob": {"iv": SALT, "data": AUTH}},
+                                  {"enc_blob": {"iv": "a" * 16, "data": "!" * 24}}])
+def test_setup_invalido_nao_cria_nem_ativa(tmp_path, monkeypatch, bad):
+    c = _admin_client(tmp_path, monkeypatch)
+    payload = _setup_payload() | bad if bad else bad
+    response = c.post("/api/sync/setup", json=payload)
+    assert response.status_code == 422
+    assert not (tmp_path / "vault.json").exists()
+    assert c.get("/api/sync/status").status_code == 404
+
+
+@pytest.mark.parametrize("content", ["null", "[]", "{}", "{broken"])
+def test_setup_cofre_invalido_falha_sem_sobrescrever(tmp_path, monkeypatch, content):
+    c = _admin_client(tmp_path, monkeypatch)
+    c = TestClient(c.app, raise_server_exceptions=False)
+    c.headers["Authorization"] = "Bearer setup-token"
+    path = tmp_path / "vault.json"
+    path.write_text(content)
+    assert c.get("/api/sync/setup").status_code == 500
+    assert c.post("/api/sync/setup", json=_setup_payload()).status_code == 500
+    assert path.read_text() == content
+    assert c.get("/api/sync/status").status_code == 404
+
+
+def test_setup_falha_na_ativacao_preserva_conta_para_repetir(tmp_path, monkeypatch):
+    from app import runtime_config
+    c = _admin_client(tmp_path, monkeypatch)
+    original = runtime_config.aplicar
+
+    def fail(*args, **kwargs):
+        raise OSError("disco indisponível")
+
+    monkeypatch.setattr(runtime_config, "aplicar", fail)
+    with pytest.raises(OSError):
+        c.post("/api/sync/setup", json=_setup_payload())
+    before = (tmp_path / "vault.json").read_bytes()
+    assert c.get("/api/sync/setup").json()["enabled"] is False
+    monkeypatch.setattr(runtime_config, "aplicar", original)
+    assert c.post("/api/sync/setup", json={}).status_code == 200
+    assert (tmp_path / "vault.json").read_bytes() == before
+
+
+def test_setup_sem_blob_cria_cofre_vazio(tmp_path, monkeypatch):
+    from app import sync
+    c = _admin_client(tmp_path, monkeypatch)
+    payload = _setup_payload()
+    del payload["enc_blob"]
+    assert c.post("/api/sync/setup", json=payload).status_code == 200
+    assert sync.load_vault()["enc_blob"] is None
+    assert sync.load_vault()["rev"] == 0

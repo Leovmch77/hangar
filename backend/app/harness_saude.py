@@ -172,6 +172,17 @@ def _tmux(args: list[str]) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _conf_psmux() -> Path:
+    """O arquivo que o psmux lê: o PRIMEIRO que existe, sem merge — mesma precedência do
+    `scripts/setup-windows-tmux.ps1`, que é quem escreve o bloco."""
+    if env := os.environ.get("PSMUX_CONFIG_FILE"):
+        return Path(env)
+    home = Path.home()
+    candidatos = [home / ".psmux.conf", home / ".psmuxrc", home / ".tmux.conf",
+                  home / ".config" / "psmux" / "psmux.conf"]
+    return next((c for c in candidatos if c.exists()), home / ".tmux.conf")
+
+
 def _card_tmux() -> dict:
     """As opções que o app EXIGE do tmux e por quê (o texto de cada uma mora no front). Lidas do
     servidor vivo, não do arquivo: é o que as sessões estão usando agora. O conserto único refaz o
@@ -180,9 +191,10 @@ def _card_tmux() -> dict:
     itens = []
     if v is None:
         return {"id": "tmux", "nome": "tmux", "instalado": False, "versao": None, "itens": []}
-    conf = Path.home() / ".tmux.conf"
+    conf, marca = (_conf_psmux(), "# >>> hangar windows-tmux >>>") if _E_WINDOWS \
+        else (Path.home() / ".tmux.conf", "# >>> hangar >>>")
     try:
-        bloco = "# >>> hangar >>>" in conf.read_text(encoding="utf-8")
+        bloco = marca in conf.read_text(encoding="utf-8-sig")
     except OSError:
         bloco = False
     itens.append(_item("bloco", bloco, "tmux_bloco_ok" if bloco else "tmux_bloco_ausente", None if bloco else "tmux"))
@@ -194,10 +206,13 @@ def _card_tmux() -> dict:
     ok_tc = "COLORTERM=truecolor" in env and "CLAUDE_CODE_TMUX_TRUECOLOR=1" in env
     itens.append(_item("truecolor", ok_tc, "tmux_truecolor_ok" if ok_tc else "tmux_truecolor_ruim",
                        None if ok_tc else "tmux"))
-    titulos = _tmux(["show", "-gv", "set-titles-string"]) or ""
-    ok_tit = titulos == "#S"
-    itens.append(_item("titulo", ok_tit, "tmux_titulo_ok" if ok_tit else "tmux_titulo_ruim",
-                       None if ok_tit else "tmux", valor=titulos or "?"))
+    # Título `#S` é pro gerenciador de janelas do Linux. A config do Windows desliga os títulos de
+    # propósito, pra não reescrever o do Windows Terminal: exigir ali seria acusar o que é certo.
+    if not _E_WINDOWS:
+        titulos = _tmux(["show", "-gv", "set-titles-string"]) or ""
+        ok_tit = titulos == "#S"
+        itens.append(_item("titulo", ok_tit, "tmux_titulo_ok" if ok_tit else "tmux_titulo_ruim",
+                           None if ok_tit else "tmux", valor=titulos or "?"))
     mouse = _tmux(["show", "-gv", "mouse"]) == "on"
     itens.append(_item("mouse", True, "tmux_mouse_on" if mouse else "tmux_mouse_off", info=True))
     tpm = (Path.home() / ".tmux" / "plugins" / "tmux-resurrect").is_dir()
@@ -233,11 +248,15 @@ def _ponte_skills(nome: str, home: Path) -> dict:
 _E_WINDOWS = os.name == "nt"
 
 
-def _perfil_powershell(home: Path) -> Path:
-    """O `$PROFILE` do PowerShell 7 — é nele que o `install.ps1` dot-sourceia os wrappers."""
+def _perfis_powershell(home: Path) -> list[Path]:
+    """Perfis onde o `install.ps1` dot-sourceia os wrappers: o `profile.ps1` (CurrentUserAllHosts)
+    do 5.1 e do 7, mais os por-host, que a pessoa também usa. Olhar só o por-host do 7 dava
+    "nenhum rc de shell" com o bloco carregado no 5.1, o terminal padrão do Windows."""
     docs = os.environ.get("USERPROFILE")
-    raiz = Path(docs) if docs else home
-    return raiz / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    raiz = (Path(docs) if docs else home) / "Documents"
+    return [raiz / pasta / arquivo
+            for pasta in ("WindowsPowerShell", "PowerShell")
+            for arquivo in ("profile.ps1", "Microsoft.PowerShell_profile.ps1")]
 
 
 def _wrapper(cli: str) -> dict:
@@ -264,8 +283,6 @@ def _wrapper(cli: str) -> dict:
     # No Windows o wrapper é o dot-source do `claude.ps1` no perfil do PowerShell (install.ps1,
     # passo 5/8). Sem esta linha a checagem caía em "nenhum rc conhecido" nos cinco cards — ou
     # seja, ficava cega justamente onde a cegueira que ela existe pra pegar é mais provável.
-    if _E_WINDOWS:
-        candidatos.append(("PowerShell", _perfil_powershell(home), f"shell/{cli}.ps1"))
     for nome, marca, agulha in candidatos:
         if not marca.exists():
             continue
@@ -277,6 +294,13 @@ def _wrapper(cli: str) -> dict:
             except OSError:
                 return _item("wrapper", None, "config_ilegivel")
         (onde if ok else faltam).append(nome)
+    if _E_WINDOWS and (perfis := [p for p in _perfis_powershell(home) if p.exists()]):
+        try:
+            # Contrabarra vira barra: o bloco grava o caminho do Windows (`scripts\shell\x.ps1`).
+            texto = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in perfis)
+        except OSError:
+            return _item("wrapper", None, "config_ilegivel")
+        (onde if f"shell/{cli}.ps1" in texto.replace("\\", "/") else faltam).append("PowerShell")
     # O Codex não sobe pelo wrapper sozinho: quem cria o par app-server+TUI é o lançador, e o
     # BACKEND também o chama por este caminho. Faltando ele, nem o terminal nem o app abrem sessão.
     # Vai rotulado porque a lista é lida como frase: sem o rótulo, "falta em: fish, hangar-codex"
@@ -290,7 +314,9 @@ def _wrapper(cli: str) -> dict:
         # Sem bash não há conserto a oferecer: o instalador é POSIX. Um botão que só sabe errar
         # nessa máquina é pior que nenhum — e, na etapa de instalação, ele transformava "não deu
         # pra ligar o wrapper aqui" em falha dura DEPOIS de o CLI já ter sido instalado.
-        conserto = "wrapper" if shutil.which("bash") else None
+        # No Windows o conserto é o script do perfil do PowerShell, nunca o bash (que escreveria no
+        # `.bashrc` e "consertaria" o shell errado).
+        conserto = "wrapper" if _E_WINDOWS or shutil.which("bash") else None
         return _item("wrapper", False, "wrapper_falta", conserto, lista=", ".join(faltam))
     return _item("wrapper", True, "wrapper_ok", onde=", ".join(onde))
 
@@ -672,6 +698,23 @@ def consertar(id_: str) -> str:
         if any(not v["ok"] and v["motivo"] != "nao-instalado" for v in r.values()):
             raise ValueError(linha)
         return linha
+    if id_ in ("tmux", "wrapper") and _E_WINDOWS:
+        # No Windows cada um tem o seu script (os mesmos que o install.ps1 usa): o do psmux respeita
+        # a precedência de config, o do wrapper grava o bloco no perfil do PowerShell.
+        powershell = shutil.which("powershell.exe")
+        if not powershell:
+            raise ValueError("powershell.exe não encontrado")
+        script, extra, feito = (
+            ("setup-windows-tmux.ps1", ["-SkipInstall"], "config do psmux reaplicada — vale nas sessões novas")
+            if id_ == "tmux" else
+            ("setup-windows-wrappers.ps1", [], "bloco dos wrappers no perfil do PowerShell — vale em terminal novo"))
+        r = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                            str(_REPO / "scripts" / script), "-Apply", *extra],
+                           capture_output=True, text=True, timeout=TIMEOUT_INSTALADOR,
+                           encoding="utf-8", errors="replace", cwd=str(_REPO))
+        if r.returncode != 0:
+            raise ValueError(f"{script} saiu com {r.returncode}: {(r.stderr or r.stdout)[-300:]}")
+        return feito
     if id_ in ("tmux", "wrapper"):
         r = subprocess.run(cmd_instalador(), capture_output=True, text=True,
                            timeout=TIMEOUT_INSTALADOR, encoding="utf-8", errors="replace",
