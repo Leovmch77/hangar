@@ -28,12 +28,14 @@ import os
 import re
 import shutil
 import signal
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
 from app import atomico, cotas, model_args
+from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
 from app.adapters.codex.preview import CodexPreviewSource
@@ -53,7 +55,14 @@ CHAVE = "claude-headless"
 
 _TETO_INIT_S = 25.0        # os hooks de SessionStart rodam antes do initialize responder
 _TETO_CTRL_S = 15.0
-_MARCADOR_PAI = "HANGAR_HEADLESS_PARENT"
+_TETO_CANO_S = 10.0        # do spawn do cano até ele escutar
+_LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
+# Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
+# distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
+_MARCADOR_CANO = "HANGAR_CANO_KEY"
+_CANO_PY = Path(__file__).with_name("cano.py")
+# Valores literais, não `subprocess.CREATE_*`: os atributos só existem no Windows (ver atualizar.py).
+_FLAGS_WINDOWS = 0x00000200 | 0x08000000   # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 OPCOES_PERMISSAO = ["Permitir", "Negar"]
 # 3ª opção só quando a CLI mandou `permission_suggestions` (a regra que a TUI ofereceria como
@@ -61,13 +70,33 @@ OPCOES_PERMISSAO = ["Permitir", "Negar"]
 OPCAO_SEMPRE = "Sempre permitir"
 
 
+class _Ligacao:
+    """Conexão com o cano — o que o adapter antes chamava de processo. Mesma forma (stdin,
+    stdout, pid, returncode, wait) pra o resto do adapter não saber que há um socket no meio."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, pid: int | None):
+        self.stdout = reader
+        self.stdin = writer
+        self.pid = pid
+        self.returncode: int | None = None
+        self._fim = asyncio.Event()
+
+    def saiu(self, rc: int | None) -> None:
+        self.returncode = rc
+        self._fim.set()
+
+    async def wait(self) -> int | None:
+        await self._fim.wait()
+        return self.returncode
+
+
 class _Sessao:
     def __init__(self, name: str, meta: dict):
         self.name = name
         self.meta = meta
-        self.proc: asyncio.subprocess.Process | None = None
+        self.proc: _Ligacao | None = None
         self.leitor: asyncio.Task | None = None
-        self.leitor_err: asyncio.Task | None = None
+        self.desligando = False    # backend saindo: fecha a conexão, o cano continua
         self.state = "idle"
         self.label: str | None = None
         self.in_progress = False
@@ -367,7 +396,9 @@ class ClaudeHeadlessAdapter:
 
     async def _reabrir(self, sess: _Sessao) -> None:
         """Mata o processo e sobe outro com `--resume` (mesma conversa, flags novas)."""
-        self.close_sync(sess.name)
+        self._matar(sess)
+        if self._sessions.get(sess.name) is sess:
+            self._sessions.pop(sess.name, None)
         if sess.leitor is not None:
             try:
                 await asyncio.wait_for(sess.leitor, 5)
@@ -376,8 +407,12 @@ class ClaudeHeadlessAdapter:
         await self.ensure_running(sess.name)
 
     # ── processo ────────────────────────────────────────────────────────────────────────────
+    # O `claude` não é filho do backend: é filho do CANO (cano.py), um processo por sessão que
+    # segura stdin/stdout e escuta num socket local. O backend conecta, e reconecta quando volta
+    # de um restart — o processo, o turno em voo e a permissão pendente sobrevivem. Ver o
+    # snapshot em cano.py e a decisão em docs/decisoes/harnesses.md.
 
-    async def ensure_running(self, name: str) -> _Sessao | None:
+    async def ensure_running(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
@@ -387,11 +422,15 @@ class ClaudeHeadlessAdapter:
             meta = hl_sessions.load(name)
             if meta is None:
                 return None
+            if so_reconectar and not meta.get("cano"):
+                return None
             sess = _Sessao(name, meta)
             sess.loop = asyncio.get_running_loop()
             self._sessions[name] = sess
             try:
-                await self._spawn(sess)
+                if not await self._spawn(sess, so_reconectar=so_reconectar):
+                    self._sessions.pop(name, None)
+                    return None
             except Exception as e:
                 _log.exception("claude headless: não subiu name=%s", name)
                 if self._sessions.get(name) is sess:
@@ -401,18 +440,41 @@ class ClaudeHeadlessAdapter:
                 raise
             return sess
 
+    async def reconectar_todas(self) -> int:
+        """Na subida do backend: religa em todo cano que ficou vivo (sidecar com `cano`). Sem
+        isto a lista mostraria "ociosa" uma sessão parada numa permissão."""
+        n = 0
+        for meta in hl_sessions.list_all():
+            if not meta.get("cano"):
+                continue
+            try:
+                if await self.ensure_running(meta["name"], so_reconectar=True):
+                    n += 1
+            except Exception:
+                _log.warning("claude headless: reconexão falhou name=%s", meta["name"], exc_info=True)
+        return n
+
+    def desligar_todas(self) -> None:
+        """Backend saindo: fecha as conexões e deixa os canos vivos pro próximo backend."""
+        for sess in list(self._sessions.values()):
+            sess.desligando = True
+            if sess.proc is not None:
+                try:
+                    sess.proc.stdin.close()
+                except Exception:
+                    pass
+
     @staticmethod
-    def _matar(sess: _Sessao) -> None:
-        """SIGTERM no grupo do processo (idempotente). O leitor vê o EOF e fecha o resto."""
-        if sess.proc is None or sess.proc.returncode is not None:
-            return
+    def _matar(sess: _Sessao, meta: dict | None = None) -> None:
+        """Mata o cano (e com ele o claude, mesmo grupo de processos). Idempotente; o leitor vê
+        o EOF e fecha o resto. `meta` serve quando a sessão nem chegou a conectar."""
+        # As duas fontes: o meta passado (sidecar já apagado) pode não ter `cano`; o da memória tem.
+        cano = ((meta or {}).get("cano")) or ((sess.meta or {}).get("cano")) or {}
+        pid = cano.get("pid")
+        if pid is None:
+            return      # nunca ligou num cano: não há o que matar
         sess.encerrando = True
-        try:
-            os.killpg(os.getpgid(sess.proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except OSError:
-            _log.warning("claude headless: SIGTERM falhou name=%s pid=%s", sess.name, sess.proc.pid, exc_info=True)
+        _matar_grupo(int(pid), sess.name)
 
     def _argv(self, sid: str, *, resume: bool, model=None, effort=None, permission_mode=None) -> list[str]:
         base = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stream-json",
@@ -423,7 +485,40 @@ class ClaudeHeadlessAdapter:
         # passar o modo explícito é o que faz a sessão nascer no modo que o Hangar mostra.
         return base + model_args.args_de("claude", model, effort, permission_mode)
 
-    async def _spawn(self, sess: _Sessao) -> None:
+    async def _spawn(self, sess: _Sessao, *, so_reconectar: bool = False) -> bool:
+        """Liga a sessão a um cano: o que já existe (sidecar com `cano`), ou um novo. Devolve
+        False só em `so_reconectar` sem cano vivo."""
+        meta = sess.meta
+        cano = meta.get("cano")
+        if cano:
+            ligado = await self._conectar(cano)
+            if ligado is not None:
+                lig, snap = ligado
+                sess.proc = lig
+                sess.leitor = asyncio.create_task(self._ler(sess))
+                await self._aplicar_snapshot(sess, snap)
+                _log.info("claude headless: religou name=%s pid=%s aberto=%s pendentes=%d",
+                          sess.name, snap.get("pid"), snap.get("aberto"), len(snap.get("pendentes") or []))
+                if (snap.get("versao") != cano_mod.VERSAO and not snap.get("aberto")
+                        and not snap.get("pendentes") and snap.get("saiu") is None):
+                    # Cano de outra versão e sessão ociosa: troca agora, que não custa nada.
+                    _log.info("claude headless: cano versão %s != %s, reabrindo name=%s",
+                              snap.get("versao"), cano_mod.VERSAO, sess.name)
+                    await self._reabrir(sess)
+                self._agendar_cota(sess)
+                return True
+            # Sem snapshot: cano morto, ou vivo e mudo. Mata antes de subir outro — dois canos
+            # com o mesmo --resume escreveriam no mesmo .jsonl, e o antigo ficaria invisível.
+            if cano.get("pid") is not None:
+                _matar_grupo(int(cano["pid"]), sess.name)
+            _esquecer_cano(sess.name, cano.get("pid"))
+            meta = sess.meta = hl_sessions.load(sess.name) or {**meta, "cano": None}
+        if so_reconectar:
+            return False
+        await self._subir_cano(sess)
+        return True
+
+    async def _subir_cano(self, sess: _Sessao) -> None:
         meta = sess.meta
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
@@ -448,18 +543,46 @@ class ClaudeHeadlessAdapter:
             meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta
         if meta.get("key"):
             env["CP_SESSION_KEY"] = meta["key"]
-        env[_MARCADOR_PAI] = str(os.getpid())
+        env[_MARCADOR_CANO] = meta["key"]
         if meta.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
         if shutil.which(argv[0]) is None:
             raise RuntimeError(f"binário não encontrado: {argv[0]}")
-        sess.proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=meta["cwd"], env=env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True, limit=16 << 20)
+        escuta, token = _escuta_nova(meta["key"])
+        log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
+        cmd = [sys.executable, str(_CANO_PY), "--escuta", escuta, "--log", str(log), "--cwd", meta["cwd"]]
+        if token:
+            cmd += ["--token", token]
+        cmd += ["--", *argv]
+        extra: dict = {}
+        if os.name == "nt":
+            extra["creationflags"] = _FLAGS_WINDOWS
+        else:
+            extra["start_new_session"] = True
+            # Escopo transiente do systemd: fora do cgroup do serviço, senão o `systemctl restart`
+            # mata o cano junto (mesmo motivo do tmux._scope_prefix).
+            from app import tmux
+            cmd = tmux._scope_prefix() + cmd
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=meta["cwd"], env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            **extra)
+        ceifador = asyncio.create_task(proc.wait())      # só pra não deixar zumbi
+        self._tarefas.add(ceifador)
+        ceifador.add_done_callback(self._tarefas.discard)
+        cano = {"pid": proc.pid, "escuta": escuta, "token": token}
+        sess.meta = hl_sessions.update(sess.name, cano=cano) or {**meta, "cano": cano}
+        ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
+        if ligado is None:
+            cauda = _cauda(log)
+            _matar_grupo(proc.pid, sess.name)
+            hl_sessions.update(sess.name, cano=None)
+            raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
+        sess.proc, snap = ligado
         sess.leitor = asyncio.create_task(self._ler(sess))
-        sess.leitor_err = asyncio.create_task(self._ler_err(sess))
-        _log.info("claude headless: subiu name=%s pid=%s resume=%s", sess.name, sess.proc.pid, resume)
+        for linha in snap.get("stderr_tail") or []:
+            sess.stderr_tail.append(linha)
+        _log.info("claude headless: subiu name=%s cano=%s claude=%s resume=%s", sess.name, proc.pid, sess.proc.pid, resume)
         try:
             await asyncio.wait_for(self._ctrl(sess, "initialize"), _TETO_INIT_S)
         except asyncio.TimeoutError:
@@ -472,12 +595,84 @@ class ClaudeHeadlessAdapter:
         sess.initialized.set()
         self._agendar_cota(sess)
 
+    async def _conectar(self, cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
+        """Abre a conexão com o cano e lê o snapshot. None = não há cano escutando ali (morto, ou
+        ainda subindo além de `esperar` segundos)."""
+        escuta, token = cano.get("escuta") or "", cano.get("token")
+        fim = time.monotonic() + esperar
+        while True:
+            try:
+                # limit: o `control_response` do initialize passa de 100 KB numa linha só; o teto
+                # padrão do asyncio (64 KB) estourava a leitura e o leitor ficava pendurado.
+                if escuta.startswith("unix:"):
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_unix_connection(escuta[5:], limit=_LIMITE_LINHA), 3)
+                elif escuta.startswith("tcp:"):
+                    host, porta = escuta[4:].rsplit(":", 1)
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(host, int(porta), limit=_LIMITE_LINHA), 3)
+                else:
+                    return None
+                break
+            except (OSError, asyncio.TimeoutError):
+                if time.monotonic() >= fim:
+                    return None
+                await asyncio.sleep(0.1)
+        try:
+            if token:
+                writer.write((token + "\n").encode())
+                await writer.drain()
+            linha = await asyncio.wait_for(reader.readline(), 5)
+            snap = json.loads(linha)
+            if not isinstance(snap, dict) or snap.get("type") != "cano_snapshot":
+                raise ValueError("primeira linha não é snapshot")
+        except (OSError, ValueError, asyncio.TimeoutError):
+            _log.warning("claude headless: cano em %s não deu snapshot", escuta, exc_info=True)
+            writer.close()
+            return None
+        return _Ligacao(reader, writer, snap.get("pid")), snap
+
+    async def _aplicar_snapshot(self, sess: _Sessao, snap: dict) -> None:
+        # O que estava em aberto quando o backend anterior saiu — na ordem em que aconteceu.
+        for linha in snap.get("stderr_tail") or []:
+            sess.stderr_tail.append(linha)
+        for chave in ("init", "ultimo_result", "rate_limit"):
+            bruto = snap.get(chave)
+            if not bruto:
+                continue
+            try:
+                ev = json.loads(bruto)
+            except ValueError:
+                continue
+            if chave == "ultimo_result":
+                self._aplicar_uso(sess, ev)
+            else:
+                await self._on_event(sess, ev)
+        sess.initialized.set()
+        if snap.get("aberto"):
+            sess.in_progress = True
+        for bruto in snap.get("pendentes") or []:
+            try:
+                await self._on_control_request(sess, json.loads(bruto))
+            except ValueError:
+                continue
+        self._recalcular_estado(sess)
+        await self._notify(sess)
+
     async def _ler(self, sess: _Sessao) -> None:
         assert sess.proc and sess.proc.stdout
         try:
             while True:
-                linha = await sess.proc.stdout.readline()
+                try:
+                    linha = await sess.proc.stdout.readline()
+                except (OSError, ValueError, asyncio.IncompleteReadError) as e:
+                    # Conexão quebrou (ou linha acima do teto): sem tratar, o leitor morria com a
+                    # exceção e o `wait()` do finally esperava pra sempre — sessão presa em working.
+                    _log.warning("claude headless: leitura do cano falhou name=%s: %s", sess.name, e)
+                    linha = b""
                 if not linha:
+                    # EOF sem `cano_saiu`: fomos nós (desligando/encerrando) ou o cano sumiu.
+                    sess.proc.saiu(None if (sess.desligando or sess.encerrando) else -1)
                     break
                 try:
                     ev = json.loads(linha)
@@ -486,16 +681,35 @@ class ClaudeHeadlessAdapter:
                     if sess.linhas_ruins <= 3:
                         _log.warning("claude headless: linha não-JSON no stdout name=%s: %r", sess.name, linha[:200])
                     continue
+                t = ev.get("type")
+                if t == "cano_stderr":
+                    sess.stderr_tail.append(str(ev.get("linha") or ""))
+                    continue
+                if t == "cano_saiu":
+                    for l in ev.get("stderr_tail") or []:
+                        if l not in sess.stderr_tail:
+                            sess.stderr_tail.append(l)
+                    sess.proc.saiu(ev.get("rc"))
+                    break
                 try:
                     await self._on_event(sess, ev)
                 except Exception:
                     _log.exception("claude headless: evento mal digerido name=%s tipo=%s", sess.name, ev.get("type"))
         finally:
             rc = await sess.proc.wait() if sess.proc else None
-            _log.info("claude headless: processo saiu name=%s rc=%s", sess.name, rc)
+            try:
+                sess.proc.stdin.close()
+            except Exception:
+                pass
+            if sess.desligando:
+                _log.info("claude headless: desligou name=%s (cano segue vivo)", sess.name)
+            else:
+                _log.info("claude headless: processo saiu name=%s rc=%s", sess.name, rc)
+                # Processo foi embora: o próximo prompt sobe outro cano, não tenta este.
+                _esquecer_cano(sess.name, ((sess.meta or {}).get("cano") or {}).get("pid"))
             # A CLI apanha o SIGTERM e sai com 143 (128+15), não com -15 — só o nosso encerramento
-            # marca `encerrando`; qualquer outra saída não-zero é queda.
-            caiu = not sess.encerrando and rc not in (0, None, -signal.SIGTERM, -signal.SIGKILL)
+            # marca `encerrando`; qualquer outra saída não-zero é queda (-1 = o cano sumiu).
+            caiu = not sess.encerrando and not sess.desligando and rc not in (0, None, -signal.SIGTERM, -signal.SIGKILL)
             if caiu:
                 self._registrar_problema(sess, "headless_processo_caiu",
                                          f"rc={rc}\n" + "\n".join(sess.stderr_tail))
@@ -515,16 +729,6 @@ class ClaudeHeadlessAdapter:
             sess.state = "dead"
             await CodexPreviewSource.get(sess.name).push("")
             await self._notify(sess)
-
-    async def _ler_err(self, sess: _Sessao) -> None:
-        assert sess.proc and sess.proc.stderr
-        while True:
-            linha = await sess.proc.stderr.readline()
-            if not linha:
-                return
-            texto = linha.decode(errors="replace").rstrip()
-            sess.stderr_tail.append(texto)
-            _log.debug("claude headless stderr name=%s: %s", sess.name, texto)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
         if not sess.vivo or sess.proc is None or sess.proc.stdin is None:
@@ -654,17 +858,7 @@ class ClaudeHeadlessAdapter:
                 itens = "; ".join(" ".join(_alvo_da_permissao({"tool_name": d.get("tool_name"), "input": d.get("tool_input")})).strip()
                                   for d in negadas[:5])
                 await self._nota_local(sess, f"⛔ Negado sem perguntar ({len(negadas)}): {itens}")
-            if isinstance(ev.get("total_cost_usd"), (int, float)):
-                sess.cost = float(ev["total_cost_usd"])
-            u = ev.get("usage")
-            # Turno interrompido vem com uso zerado: o contexto anterior continua valendo.
-            if isinstance(u, dict) and any(u.get(k) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
-                sess.usage = u
-                mu = ev.get("modelUsage") or {}
-                for m, dados in mu.items():
-                    if isinstance(dados, dict) and dados.get("contextWindow"):
-                        sess.model = sess.model or m
-                        sess.context_window = int(dados["contextWindow"])
+            self._aplicar_uso(sess, ev)
             self._recalcular_estado(sess)
             await CodexPreviewSource.get(sess.name).push("")
             await self._notify(sess)
@@ -781,6 +975,21 @@ class ClaudeHeadlessAdapter:
             sess.pending[rid] = req
         self._recalcular_estado(sess)
         await self._notify(sess)
+
+    @staticmethod
+    def _aplicar_uso(sess: _Sessao, ev: dict) -> None:
+        """Custo, uso e janela de contexto de um `result` — também do que veio no snapshot."""
+        if isinstance(ev.get("total_cost_usd"), (int, float)):
+            sess.cost = float(ev["total_cost_usd"])
+        u = ev.get("usage")
+        # Turno interrompido vem com uso zerado: o contexto anterior continua valendo.
+        if isinstance(u, dict) and any(u.get(k) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")):
+            sess.usage = u
+            mu = ev.get("modelUsage") or {}
+            for m, dados in mu.items():
+                if isinstance(dados, dict) and dados.get("contextWindow"):
+                    sess.model = sess.model or m
+                    sess.context_window = int(dados["contextWindow"])
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
         antes = sess.state
@@ -962,16 +1171,22 @@ class ClaudeHeadlessAdapter:
 
     # ── encerramento ───────────────────────────────────────────────────────────────────────
 
-    def close_sync(self, name: str) -> None:
-        """SIGTERM no grupo do processo (chamado do registry.kill, numa thread). O leitor vê o
-        EOF e fecha o resto; o sidecar é apagado por quem chamou — ANTES de chamar aqui, senão
-        um drain no meio acha o sidecar e sobe outro processo.
+    def close_sync(self, name: str, meta: dict | None = None) -> None:
+        """Mata o cano da sessão (chamado do registry.kill, numa thread). O leitor vê o EOF e
+        fecha o resto; o sidecar é apagado por quem chamou — ANTES de chamar aqui, senão um drain
+        no meio acha o sidecar e sobe outro processo — e vem em `meta`, porque é nele que está o
+        pid do cano (que pode estar vivo sem este backend nunca ter conectado).
 
         Os dicionários são do event loop: mexer neles daqui é corrida. A retirada vai pro loop
         por `call_soon_threadsafe`; o sinal pode sair já, é só `os.kill`."""
+        _limpar_rastros_do_cano(meta)
         sess = self._sessions.get(name)
         if sess is None:
             CodexPreviewSource._sources.pop(name, None)
+            self._problemas.pop(name, None)
+            pid = ((meta or {}).get("cano") or {}).get("pid")
+            if pid is not None:
+                _matar_grupo(int(pid), name)
             return
 
         def _retirar() -> None:
@@ -989,7 +1204,7 @@ class ClaudeHeadlessAdapter:
             _retirar()
         else:
             loop.call_soon_threadsafe(_retirar)
-        self._matar(sess)
+        self._matar(sess, meta)
 
     def rename(self, old: str, new: str) -> None:
         sess = self._sessions.pop(old, None)
@@ -1077,15 +1292,89 @@ def _hora_local(epoch) -> str | None:
     return time.strftime("%H:%M", time.localtime(epoch))
 
 
+def _matar_grupo(pid: int, name: str) -> None:
+    """SIGTERM no grupo do cano (cano + claude, que é filho dele no mesmo grupo). Idempotente."""
+    if os.name == "nt":
+        import subprocess
+        exe = shutil.which("taskkill")
+        if exe is None:
+            _log.warning("claude headless: taskkill não encontrado; cano name=%s pid=%s segue vivo", name, pid)
+            return
+        try:
+            r = subprocess.run([exe, "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            _log.warning("claude headless: taskkill falhou name=%s pid=%s", name, pid, exc_info=True)
+            return
+        # 128 = processo não existe (já morreu): não é falha. Outro código é.
+        if r.returncode not in (0, 128):
+            _log.warning("claude headless: taskkill rc=%s name=%s pid=%s: %s", r.returncode, name, pid,
+                         (r.stderr or b"").decode(errors="replace").strip()[:200])
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        _log.warning("claude headless: não matou o cano name=%s pid=%s", name, pid, exc_info=True)
+
+
+def _esquecer_cano(name: str, pid: int | None) -> None:
+    """Tira o `cano` do sidecar SÓ se ainda for este (pid): o leitor de um cano velho terminando
+    tarde não pode apagar o cano novo que `_reabrir` acabou de subir — senão o novo vira um
+    processo invisível escrevendo no mesmo .jsonl."""
+    meta = hl_sessions.load(name)
+    atual = ((meta or {}).get("cano") or {}).get("pid")
+    if meta is not None and (pid is None or atual == pid):
+        hl_sessions.update(name, cano=None)
+
+
+def _escuta_nova(key: str) -> tuple[str, str | None]:
+    """Endereço do cano de uma sessão nova: socket unix na pasta dos sidecars (Linux/mac), TCP em
+    loopback com token onde não há socket unix ou o caminho passa do limite do kernel."""
+    if os.name != "nt":
+        # Sufixo por subida: o cano anterior (mesma chave) pode ainda estar morrendo, e um path
+        # igual faria o novo roubar o socket dele. A limpeza vai por `cano-<chave>*`.
+        caminho = hl_sessions._dir() / f"cano-{key[:16]}-{uuid.uuid4().hex[:4]}.sock"
+        if len(str(caminho).encode()) < 100:
+            return f"unix:{caminho}", None
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        porta = s.getsockname()[1]
+    return f"tcp:127.0.0.1:{porta}", uuid.uuid4().hex
+
+
+def _limpar_rastros_do_cano(meta: dict | None) -> None:
+    """Sessão encerrada: socket e log do cano vão junto (o log fica só enquanto a sessão vive)."""
+    key = (meta or {}).get("key")
+    if not key:
+        return
+    for arq in hl_sessions._dir().glob(f"cano-{key[:16]}*"):
+        try:
+            arq.unlink()
+        except OSError:
+            pass
+
+
+def _cauda(log: Path, n: int = 5) -> str:
+    try:
+        return "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-n:])
+    except OSError:
+        return ""
+
+
 def matar_orfaos() -> int:
-    """Processos `claude` de um backend anterior (marcador de env com pid que não existe mais).
-    Chamado na subida: sem isto, reiniciar o serviço deixava um `claude` por sessão pendurado."""
+    """Canos cuja sessão já não existe (encerrada com o backend fora, ou sidecar perdido). Os
+    outros são de propósito: sobreviveram ao restart e o backend religa neles. Chamado na subida.
+    Só Linux (/proc); sem ele não há varredura, e o kill de sessão continua matando pelo pid."""
     mortos = 0
     proc = Path("/proc")
     if not proc.exists():
         return 0
+    vivas = {m.get("key") for m in hl_sessions.list_all() if m.get("key")}
     meu_uid = os.getuid()
     sem_permissao = 0
+    marca = f"{_MARCADOR_CANO}=".encode()
     for p in proc.iterdir():
         if not p.name.isdigit():
             continue
@@ -1098,11 +1387,10 @@ def matar_orfaos() -> int:
             continue
         except OSError:
             continue
-        marca = f"{_MARCADOR_PAI}=".encode()
         for item in env.split(b"\0"):
             if item.startswith(marca):
-                pai = item[len(marca):].decode(errors="replace")
-                if pai.isdigit() and not (proc / pai).exists():
+                chave = item[len(marca):].decode(errors="replace")
+                if chave and chave not in vivas:
                     try:
                         os.kill(int(p.name), signal.SIGTERM)
                         mortos += 1

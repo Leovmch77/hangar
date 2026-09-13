@@ -251,6 +251,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
   trabalhando" existe para o `/model`, que é texto.
+- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** `cano.py` é stdlib, um
+  por sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
+  snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no
+  backend. Leitura do socket com `limit=16 MB` e embrulhada — leitor pendurado é sessão presa.
+  Órfão é cano sem sidecar, não cano de backend anterior.
 - **Runtime por conta não vira atalho** (`telemetry/`, `feedback/`, `image-cache/`, caches por
   config dir) — senão cada reconciliação acha "deriva" e gaveta de novo.
 - **O diálogo de confiança do Claude Code derruba três coisas**: a chave do pre-trust usa barra

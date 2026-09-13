@@ -1067,6 +1067,61 @@ inchar o contexto: o corpo (`MEMORY.md`, `rollout_summaries/`, os resources impo
 é lido por busca, com orçamento de 4-6 passos declarado no próprio prompt. Medido: sem memória, o
 bloco não é injetado; com a memória desta máquina, 8.657 tokens contra 4.835 no mesmo prompt.
 
+## Claude sem terminal vive num cano, não no backend (13/09/2026, CLI 2.1.270)
+
+`adapters/claude_headless/cano.py` + `adapter.py`. O `claude -p --input-format stream-json` da
+sessão sem terminal nasceu como filho direto do backend, com stdin/stdout em pipe. Consequência
+medida: todo restart do backend (atualizar pelo app, `systemctl restart`, o restart de
+desenvolvimento que acontece dezenas de vezes por dia) matava o processo; o `--resume` do prompt
+seguinte recuperava a conversa, mas o turno em voo era interrompido e uma permissão pendente sumia
+sem resposta. A sessão no tmux não tem esse custo — o pane é dono do processo, não o backend.
+
+Dois desenhos foram considerados e um recusado:
+
+- **Mover o adapter inteiro pra um "escravo" único** (todos os claudes num processo, backend
+  cliente). Recusado por três motivos: o adapter é o código que mais muda (cada mudança
+  reiniciaria o escravo e mataria as sessões do mesmo jeito); um processo pra N sessões é um
+  domínio de falha pior que o tmux (uma exceção no laço de eventos derruba todas); e o protocolo
+  ficaria largo (13 métodos, dois streams, prévia em pubsub de memória, cota, fila).
+- **Um cano por sessão** (adotado). O que sai do backend é a parte que não muda: um script stdlib
+  (~250 linhas) que sobe o `claude`, segura stdin/stdout e escuta num socket local (unix; TCP em
+  loopback com token no Windows ou quando o caminho passa dos 107 bytes do kernel). O adapter,
+  com toda a máquina de estado, fica no backend e reconecta. Sem replay de eventos: o cano vê os
+  dois sentidos e sintetiza um **snapshot** do que está em aberto — última `system/init`, turno
+  aberto (viu `user` sem `result` depois), `control_request` ainda sem `control_response` (a
+  permissão pendente, literal), último `result` e `rate_limit_event`, cauda do stderr e o `rc`
+  se o claude já saiu. Sem cliente, as linhas são descartadas; o snapshot carrega o que importa.
+
+O que a sonda real confirmou, nesta ordem: sessão em modo `manual` pede permissão de `touch`;
+`kill -9` no backend; backend novo religa (`aberto=True pendentes=1`) e a lista mostra
+`awaiting_input` com a mesma pergunta; `Permitir` responde pelo cano; o turno fecha, o arquivo
+existe, o status line traz custo e contexto (do `ultimo_result` do snapshot).
+
+Armadilhas que custaram tempo:
+
+- **`asyncio.open_unix_connection` tem teto de 64 KB por linha**, e o `control_response` do
+  `initialize` passa de 100 KB. A leitura estourava com `ValueError`, o leitor morria com a
+  exceção e o `wait()` do `finally` esperava pra sempre: sessão presa em `working`. Mesmo
+  `limit=16 MB` que o subprocess já usava, e a leitura embrulhada em `try` — EOF ou erro viram
+  "o cano sumiu", nunca leitor pendurado.
+- **O cano nasce no escopo transiente do systemd** (`tmux._scope_prefix`), pelo mesmo motivo do
+  tmux e do atualizador: sem isso o `systemctl restart` do serviço mata o cgroup inteiro, cano e
+  claude juntos. Conferido em `/proc/<pid>/cgroup`: `run-p<pid>.scope`, fora do serviço.
+- **Claude e cano no mesmo grupo de processos** (o cano é `start_new_session`, o claude não): matar
+  o grupo pelo pid do cano mata os dois, e `close_sync` recebe o `meta` do sidecar (que o registry
+  apaga antes) porque é nele que mora o pid — a sessão pode ser encerrada sem este backend jamais
+  ter conectado nela.
+- **Órfão mudou de sentido.** Antes, todo claude de backend anterior era órfão (marcador com o pid
+  do pai). Agora órfão é só o cano cuja `HANGAR_CANO_KEY` não tem sidecar — os outros são de
+  propósito, e o backend religa em todos na subida (`reconectar_todas`), senão a lista mostraria
+  "ociosa" uma sessão parada numa permissão.
+- **`makefile()` segura o socket**: fechar só o socket não entrega EOF ao outro lado. Cano e
+  cliente de teste fecham os dois.
+- **Cano de outra versão** (`versao` no snapshot): com a sessão ociosa o adapter reabre na hora;
+  com turno ou permissão em aberto continua falando com o velho. O que nada resolve é atualização
+  da CLI do Claude ou do próprio cano com sessão trabalhando — o processo tem que morrer; o portão
+  é reabrir só ocioso.
+
 ## Voz Codex no web
 
 (`codex_voice.py`, `CodexVoice.svelte`, `lib/codexVoice.ts`, 10/09/2026):

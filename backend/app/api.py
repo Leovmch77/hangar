@@ -306,15 +306,19 @@ async def _lifespan(app: FastAPI):
     # abas os 40 acabam e a API inteira congela, sem erro e sem log. Watcher parado nao gasta CPU,
     # so o slot, entao subir o teto e barato.
     anyio.to_thread.current_default_thread_limiter().total_tokens = 200
-    # Claude sem terminal de um backend anterior: o processo filho não morre com o pai (grupo
-    # próprio) e ficaria pendurado sem ninguém lendo o stdout. O marcador de env aponta o pai.
+    # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
+    # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
+    # backend religa e recupera o que estava em aberto (turno, permissão pendente).
     try:
         from app.adapters.claude_headless.adapter import matar_orfaos
         mortos = await asyncio.to_thread(matar_orfaos)
         if mortos:
-            _log.info("claude headless: %d processo(s) órfão(s) de backend anterior encerrado(s)", mortos)
+            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
+        if religadas:
+            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
     except Exception:
-        _log.warning("claude headless: varredura de órfãos falhou", exc_info=True)
+        _log.warning("claude headless: varredura/religação de canos falhou", exc_info=True)
     _state_dirs =list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
     hook_state.on_awaiting = _on_awaiting  # transicao -> awaiting_input dispara web push
     hook_state.on_transition = _on_hook_transition  # drain server-side + confirmacao de entrega
@@ -438,11 +442,8 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         diag.registrar("backend.encerrando")
-        # Claude sem terminal morre com o backend (o próximo prompt sobe outro com --resume);
-        # deixar o processo vivo sem leitor no stdout só cria órfão pra próxima subida ceifar.
-        hl = get_adapter(CLAUDE_HEADLESS)
-        for nome in list(hl._sessions):
-            hl.close_sync(nome)
+        # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
+        get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
         await asyncio.gather(codex_warm_task, return_exceptions=True)
         creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))

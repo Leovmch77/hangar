@@ -229,26 +229,28 @@ def test_turno_com_erro_vira_problema_e_sucesso_limpa(adapter):
     _run(fluxo())
 
 
+class _Escritor:
+    def close(self) -> None:
+        pass
+
+
+def _ligacao_com(linhas: list[dict]) -> "A._Ligacao":
+    # Conexão com um cano que já mandou estas linhas e fechou.
+    reader = asyncio.StreamReader()
+    for l in linhas:
+        reader.feed_data((json.dumps(l) + "\n").encode())
+    reader.feed_eof()
+    return A._Ligacao(reader, _Escritor(), 4242)   # type: ignore[arg-type]
+
+
 def test_processo_caindo_registra_problema_com_stderr(adapter, sidecar):
     sess = adapter._sessions["s1"]
-    sess.stderr_tail.append("Error: not logged in")
-
-    class _Fim:
-        async def readline(self):
-            return b""
-
-    class _Morto:
-        returncode = 3
-        pid = 4242
-        stdout = _Fim()
-
-        async def wait(self):
-            return 3
-
-    sess.proc = _Morto()   # type: ignore[assignment]
 
     async def fluxo():
-        await adapter._ler(sess)   # stdout no EOF: é o caminho da morte do processo
+        # O cano entrega o stderr e a saída do claude (rc=3) e fecha: é o caminho da queda.
+        sess.proc = _ligacao_com([{"type": "cano_stderr", "linha": "Error: not logged in"},
+                                  {"type": "cano_saiu", "rc": 3, "stderr_tail": ["Error: not logged in"]}])
+        await adapter._ler(sess)
         assert sess.state == "dead"
         assert adapter.problema_de("s1")[0] == "headless_processo_caiu"
         assert "not logged in" in adapter.problema_de("s1")[1]
@@ -265,10 +267,11 @@ def test_ensure_running_nao_sobe_dois_processos(sidecar, monkeypatch):
     ad = ClaudeHeadlessAdapter()
     subidas = []
 
-    async def spawn_falso(sess):
+    async def spawn_falso(sess, **kw):
         subidas.append(sess.sid)
         await asyncio.sleep(0.05)
         sess.proc = _Proc()
+        return True
     monkeypatch.setattr(ad, "_spawn", spawn_falso)
 
     async def fluxo():
@@ -465,12 +468,20 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
 
     async def exec_falso(*argv, env, **kw):
         visto["env"] = env
+        visto["argv"] = argv
 
         class _P:
             pid = 1
             returncode = None
-            stdout = stderr = stdin = None
+
+            async def wait(self):
+                return 0
         return _P()
+
+    async def conectar_falso(cano, **kw):
+        visto["cano"] = cano
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
+                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
     monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
     monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
     ad = ClaudeHeadlessAdapter()
@@ -478,11 +489,54 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
 
     async def ctrl(s, sub, **kw):
         return {}
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
     ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
-    ad._ler_err = lambda s: asyncio.sleep(0)      # type: ignore[method-assign]
     ad._ctrl = ctrl                               # type: ignore[method-assign]
     ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
     _run(ad._spawn(sess))
     env = visto["env"]
     assert "TMUX" not in env and "TMUX_PANE" not in env
     assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]
+    assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
+    # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
+    # onde ele escuta, pra o próximo backend religar.
+    argv = list(visto["argv"])
+    ultimo = len(argv) - 1 - argv[::-1].index("--")   # o escopo do systemd também tem um `--`
+    assert argv[ultimo + 1] == "claude" and str(A._CANO_PY) in argv
+    assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
+    assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
+
+
+def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch):
+    # Backend novo, cano de antes ainda vivo com turno aberto e permissão sem resposta: o
+    # snapshot reconstrói tudo sem subir processo.
+    S.update("s1", cano={"pid": 7, "escuta": "unix:/x.sock", "token": None})
+    pendente = json.dumps({"type": "control_request", "request_id": "perm-1",
+                           "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}})
+    init = json.dumps({"type": "system", "subtype": "init", "session_id": "11111111-1111-1111-1111-111111111111",
+                       "model": "haiku", "permissionMode": "default"})
+    result = json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.02,
+                         "usage": {"input_tokens": 3, "cache_read_input_tokens": 1000, "output_tokens": 5},
+                         "modelUsage": {"claude-haiku-4-5": {"contextWindow": 200000}}})
+
+    async def conectar_falso(cano, **kw):
+        assert cano["pid"] == 7
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 9,
+                                  "init": init, "aberto": True, "pendentes": [pendente],
+                                  "ultimo_result": result, "stderr_tail": ["x"], "saiu": None}
+    subiu = []
+    ad = ClaudeHeadlessAdapter()
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
+    ad._subir_cano = lambda s: subiu.append(s)    # type: ignore[method-assign]
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+
+    async def fluxo():
+        sess = await ad.ensure_running("s1", so_reconectar=True)
+        assert sess is not None and not subiu
+        assert sess.initialized.is_set() and sess.permission_mode == "manual"
+        assert sess.in_progress and sess.state == "awaiting_input"
+        assert list(sess.pending) == ["perm-1"] and sess.cost == 0.02 and sess.context_window == 200000
+        ev = ad._evento(sess)
+        assert ev.question == "Permitir Bash? ls" and "39k" not in (ev.status_line or "")
+    _run(fluxo())
