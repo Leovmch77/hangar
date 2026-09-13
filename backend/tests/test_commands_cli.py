@@ -62,7 +62,8 @@ def test_lista_da_cli_manda_nos_nomes_e_descricao_local_vem_primeiro(tmp_path):
 
 def test_sonda_roda_uma_vez_e_depois_serve_do_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "_cache_path", lambda: tmp_path / "slash.json")
-    monkeypatch.setattr(C, "_chave_cli", lambda cdir: f"bin|1|2|{cdir or ''}")
+    assinatura = {"v": "bin|1|2"}
+    monkeypatch.setattr(C, "_chave_cli", lambda cdir: assinatura["v"])
     monkeypatch.setattr(C, "_sonda_falhou_em", {})
     chamadas = []
     liberar = threading.Event()
@@ -81,11 +82,19 @@ def test_sonda_roda_uma_vez_e_depois_serve_do_cache(tmp_path, monkeypatch):
         threading.Event().wait(0.02)
     assert C.comandos_da_cli(None) == [{"name": "usage"}]
     assert chamadas == [None]
+    # Plugin instalado muda a assinatura: o cache velho não serve mais e sai outra sonda.
+    assinatura["v"] = "bin|1|3"
+    assert C.comandos_da_cli(None) is None
+    for _ in range(100):
+        if not C._sonda_em_voo:
+            break
+        threading.Event().wait(0.02)
+    assert chamadas == [None, None]
 
 
 def test_sonda_que_falha_loga_e_nao_repete_na_hora(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(C, "_cache_path", lambda: tmp_path / "slash.json")
-    monkeypatch.setattr(C, "_chave_cli", lambda cdir: "bin|1|2|")
+    monkeypatch.setattr(C, "_chave_cli", lambda cdir: "bin|1|2")
     monkeypatch.setattr(C, "_sonda_falhou_em", {})
     chamadas = []
 

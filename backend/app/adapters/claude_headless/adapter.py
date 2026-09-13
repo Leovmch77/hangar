@@ -707,8 +707,11 @@ class ClaudeHeadlessAdapter:
                 self._registrar_problema(sess, "headless_sem_resposta", "\n".join(sess.stderr_tail) or None)
                 await self._notify(sess)
             resposta = await pedido
-            if isinstance(resposta, dict) and isinstance(resposta.get("commands"), list):
-                sess.comandos = [c for c in resposta["commands"] if isinstance(c, dict) and isinstance(c.get("name"), str)]
+            validos = [c for c in (resposta or {}).get("commands") or [] if isinstance(c, dict) and isinstance(c.get("name"), str)]
+            if validos:
+                sess.comandos = validos
+            else:
+                _log.warning("claude headless: initialize sem lista de comandos name=%s; / usa a sonda ou a lista fixa", sess.name)
         except asyncio.TimeoutError:
             _log.warning("claude headless: initialize desistiu em %.0fs name=%s", _TETO_INIT_S, sess.name)
         except RuntimeError as e:

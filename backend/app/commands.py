@@ -204,35 +204,53 @@ def _cache_path() -> Path:
     return Path.home() / ".hangar" / "claude-slash-commands.json"
 
 
+_cache_trava = threading.Lock()
+
+
 def _chave_cli(config_dir: Optional[str]) -> Optional[str]:
-    # Binario resolvido + mtime/tamanho = versao instalada, sem pagar um `claude --version` por chamada.
+    """Assinatura do que muda a lista: binario resolvido (versao, sem pagar `claude --version`) e o
+    mtime do que instala comando — settings, plugins, skills e commands do config dir."""
     exe = shutil.which("claude")
     if not exe:
+        _log.warning("commands: binario claude nao encontrado; lista fixa no lugar")
         return None
     try:
         real = Path(exe).resolve()
         st = real.stat()
-    except OSError:
+    except OSError as e:
+        _log.warning("commands: binario claude ilegivel (%s); lista fixa no lugar", e)
         return None
-    return f"{real}|{st.st_mtime_ns}|{st.st_size}|{config_dir or ''}"
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    partes = [str(real), str(st.st_mtime_ns), str(st.st_size)]
+    for rel in ("settings.json", "plugins/installed_plugins.json", "skills", "commands"):
+        try:
+            partes.append(str((base / rel).stat().st_mtime_ns))
+        except OSError:
+            partes.append("-")
+    return "|".join(partes)
 
 
 def _ler_cache() -> dict:
+    path = _cache_path()
     try:
-        data = json.loads(_cache_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        _log.warning("commands: cache da lista ilegivel em %s (%s); sondando de novo", path, e)
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def _gravar_cache(chave: str, comandos: list[dict]) -> None:
+def _gravar_cache(config_dir: Optional[str], assinatura: str, comandos: list[dict]) -> None:
     path = _cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {k: v for k, v in _ler_cache().items() if not k.endswith("|" + chave.rsplit("|", 1)[1])}
-    data[chave] = {"comandos": comandos, "em": time.time()}
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    atomico.substituir(tmp, path)
+    with _cache_trava:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = _ler_cache()
+        data[config_dir or ""] = {"assinatura": assinatura, "comandos": comandos, "em": time.time()}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        atomico.substituir(tmp, path)
 
 
 def _matar_arvore(proc: subprocess.Popen) -> None:
@@ -245,7 +263,10 @@ def _matar_arvore(proc: subprocess.Popen) -> None:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass    # já saiu entre o poll e o kill: nada a matar
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -289,9 +310,11 @@ def sondar_cli(config_dir: Optional[str]) -> list[dict]:
                 if r.get("subtype") == "error":
                     raise RuntimeError(f"initialize recusado: {str(r.get('error'))[:200]}")
                 comandos = (r.get("response") or {}).get("commands")
-                if not isinstance(comandos, list) or not comandos:
+                validos = [c for c in comandos if isinstance(c, dict) and isinstance(c.get("name"), str)] \
+                    if isinstance(comandos, list) else []
+                if not validos:
                     raise RuntimeError("initialize sem lista de comandos")
-                return [c for c in comandos if isinstance(c, dict) and isinstance(c.get("name"), str)]
+                return validos
             raise RuntimeError(f"claude saiu sem responder ao initialize (rc={proc.poll()})")
         finally:
             carrasco.cancel()
@@ -302,7 +325,7 @@ def _sondar_em_fundo(chave: str, config_dir: Optional[str]) -> None:
     try:
         inicio = time.monotonic()
         comandos = sondar_cli(config_dir)
-        _gravar_cache(chave, comandos)
+        _gravar_cache(config_dir, chave.split("\0", 1)[1], comandos)
         _log.info("commands: CLI sondada (%d comandos, %.1fs) config_dir=%s", len(comandos),
                   time.monotonic() - inicio, config_dir or "~/.claude")
     except Exception as e:  # noqa: BLE001 — thread de fundo: erro escapando sumiria sem log
@@ -315,15 +338,16 @@ def _sondar_em_fundo(chave: str, config_dir: Optional[str]) -> None:
 
 
 def comandos_da_cli(config_dir: Optional[str]) -> Optional[list[dict]]:
-    """Lista cacheada por (binario, config_dir). Sem cache: dispara UMA sonda em fundo (custa ~20s
-    de subida da CLI) e devolve None, pro chamador servir a lista fixa enquanto isso."""
-    chave = _chave_cli(config_dir)
-    if chave is None:
-        _log.warning("commands: binario claude nao encontrado; lista fixa no lugar")
+    """Lista cacheada por config_dir, valida enquanto a assinatura (binario + instalados) nao muda.
+    Sem cache valido: dispara UMA sonda em fundo (~20s de subida da CLI) e devolve None, pro
+    chamador servir a lista fixa enquanto isso."""
+    assinatura = _chave_cli(config_dir)
+    if assinatura is None:
         return None
-    hit = _ler_cache().get(chave)
-    if isinstance(hit, dict) and isinstance(hit.get("comandos"), list):
+    hit = _ler_cache().get(config_dir or "")
+    if isinstance(hit, dict) and hit.get("assinatura") == assinatura and hit.get("comandos"):
         return hit["comandos"]
+    chave = f"{config_dir or ''}\0{assinatura}"
     with _sonda_trava:
         falhou = _sonda_falhou_em.get(chave)
         if chave in _sonda_em_voo or (falhou and time.monotonic() - falhou < _SONDA_RETRY_S):

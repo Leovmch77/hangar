@@ -6889,7 +6889,7 @@ def _commands_claude(name: str):
     if _headless(name):
         meta = headless_sessions.load(name) or {}
         cli, so_tui = get_adapter(CLAUDE_HEADLESS).comandos(name)
-        if cli is None:
+        if not cli:
             cli = comandos_da_cli(meta.get("config_dir"))
         # Sem o `init` ainda, os só-de-TUI conhecidos saem mesmo assim: não rodam sem terminal.
         return list_commands(meta.get("cwd"), cli, so_tui or frozenset({"color", "doctor", "reload-plugins"}),
