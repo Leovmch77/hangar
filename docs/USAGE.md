@@ -201,6 +201,15 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 - **Criar:** botão **＋ / Nova sessão** → escolha a pasta (cwd). O backend roda
   `claude --session-id <novo>` num tmux novo → vem **limpa** (resolve o transcript pelo
   processo, não pelo mais recente).
+- **Sem terminal (só Claude):** na Nova sessão, em **Como rodar**, escolha **Sem terminal
+  (processo do Hangar)**. Pelo terminal: `hangar-send --new <nome> [cwd] --headless`, que combina
+  com `--model`, `--effort`, `--permissao` e `--conta`. O Claude Code roda fora do tmux:
+  permissões e perguntas chegam direto no chat, e um restart do Hangar não interrompe o turno.
+  - Não há painel de terminal nem espelho; `/btw` e os comandos que só existem na TUI
+    (`/color`, `/doctor`, `/reload-plugins`) ficam fora.
+  - O histórico continua no `.jsonl` do Claude: dá pra retomar no terminal com `claude --resume`.
+  - Login e confiança na pasta precisam ter sido feitos uma vez no terminal (`claude` naquela
+    pasta); sem isso a sessão avisa no chat que não conseguiu subir.
 - **Trocar:** toque no título (mobile) / clique na sidebar (desktop).
 - **Renomear:** **toque longo** no nome (sidebar/desktop) → edita inline → Enter salva.
   Não quebra o histórico (resolve por `/proc`, não pelo nome).
@@ -608,6 +617,7 @@ hangar-send api-fix "mensagem"        # manda prompt pra outra sessão (fila se 
 hangar-send --pair api-fix "tarefa"   # pareia ESTA sessão com outra num grupo de trabalho
 hangar-send --group "terminei"        # aviso de marco pro grupo todo (unidirecional)
 hangar-send --new front ~/repo/front  # cria sessão nova gerenciada pelo app (visível na UI)
+hangar-send --new front ~/repo/front --headless  # idem, Claude sem terminal (ver "Sessões")
 ```
 
 **Instalar** (uma vez por máquina; o passo 6/6 do `install.sh` também oferece):
