@@ -34,11 +34,11 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, model_args
+from app import atomico, cotas, model_args, pensamento
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
-from app.adapters.preview_push import PushPreviewSource
+from app.adapters.preview_push import PushPreviewSource, fonte_pensamento
 from app.config import settings
 from app.pqueue import PromptQueue
 from app.procinfo import pid_vivo
@@ -123,6 +123,7 @@ class _Sessao:
         self.pending: dict[str, dict] = {}
         self.question: dict | None = None      # AskUserQuestion pendente (payload pro front)
         self.previa = ""
+        self.pensamento = ""       # resumo do raciocínio em voo (só chega com --thinking-display)
         self.version = 0
         self.cond = asyncio.Condition()
         self.waiters: dict[str, asyncio.Future] = {}
@@ -623,6 +624,10 @@ class ClaudeHeadlessAdapter:
                 "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
                 "--setting-sources", "user,project,local"]
         base += ["--resume", sid] if resume else ["--session-id", sid]
+        if pensamento.ler():
+            # Com `-p` a CLI ignora `showThinkingSummaries` e o bloco vem cifrado; só a flag
+            # explícita traz o texto, no stream e no .jsonl.
+            base += ["--thinking-display", "summarized"]
         # A CLI nasce no `permissions.defaultMode` do settings.json da conta, não num padrão dela;
         # passar o modo explícito é o que faz a sessão nascer no modo que o Hangar mostra.
         return base + model_args.args_de("claude", model, effort, permission_mode)
@@ -924,6 +929,7 @@ class ClaudeHeadlessAdapter:
                 self._gravar_marcador(sess, "idle")
             sess.state = "dead"
             await PushPreviewSource.get(sess.name).push("")
+            await self._limpar_pensamento(sess)
             await self._notify(sess)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
@@ -997,6 +1003,9 @@ class ClaudeHeadlessAdapter:
                 # O bloco fechou: o .jsonl já tem a mensagem, a prévia sai de cena.
                 sess.previa = ""
                 await PushPreviewSource.get(sess.name).push("")
+            if any(isinstance(b, dict) and b.get("type") == "thinking" for b in blocos):
+                # Mesmo raciocínio: o bloco já está no .jsonl e vira o ThinkingBlock da conversa.
+                await self._limpar_pensamento(sess)
             await self._notify(sess)
             return
         if t == "user":
@@ -1058,6 +1067,7 @@ class ClaudeHeadlessAdapter:
             self._aplicar_uso(sess, ev)
             self._recalcular_estado(sess)
             await PushPreviewSource.get(sess.name).push("")
+            await self._limpar_pensamento(sess)
             await self._notify(sess)
             if time.time() - sess.janelas_ts > 300:
                 self._agendar_cota(sess)
@@ -1138,6 +1148,11 @@ class ClaudeHeadlessAdapter:
             return
         await self._notify(sess)
 
+    @staticmethod
+    async def _limpar_pensamento(sess: _Sessao) -> None:
+        sess.pensamento = ""
+        await fonte_pensamento(sess.name).push("")
+
     def _rotulo_tarefas(self, sess: _Sessao) -> str | None:
         vivas = list(sess.tarefas.values())
         if not vivas:
@@ -1172,6 +1187,9 @@ class ClaudeHeadlessAdapter:
             if d.get("type") == "text_delta" and d.get("text"):
                 sess.previa += d["text"]
                 await PushPreviewSource.get(sess.name).push(sess.previa)
+            elif d.get("type") == "thinking_delta" and d.get("thinking"):
+                sess.pensamento += d["thinking"]
+                await fonte_pensamento(sess.name).push(sess.pensamento)
             elif d.get("type") == "input_json_delta" and sess.tool_nome is not None:
                 sess.tool_json += d.get("partial_json") or ""
                 rotulo = _rotulo_tool(sess.tool_nome, _input_parcial(sess.tool_json))

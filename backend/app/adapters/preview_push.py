@@ -71,3 +71,9 @@ class PushPreviewSource:
             self._subs -= 1
             if self._subs <= 0 and self._sources.get(self.name) is self:
                 self._sources.pop(self.name, None)
+
+
+def fonte_pensamento(name: str) -> PushPreviewSource:
+    """Pensamento em voo do Claude sem terminal: fonte à parte da prévia, senão o raciocínio
+    viraria bolha de resposta e o dedup contra o transcript o compararia com texto errado."""
+    return PushPreviewSource.get(f"{name}#pensamento")

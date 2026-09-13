@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from app import atomico, diag
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
-from app.adapters.preview_push import PushPreviewSource
+from app.adapters.preview_push import PushPreviewSource, fonte_pensamento
 from app.difusor import Difusor
 from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
@@ -801,6 +801,23 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa="previa", erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    pensamento_slot = {"text": "", "pending": False}
+
+    async def pensamento_pump():
+        # Raciocínio em voo (só o Claude sem terminal publica). Mesmo slot coalescido da prévia:
+        # rajada de deltas não pode atrasar o transcript na fila compartilhada. Sessão de outro
+        # provider só fica esperando uma fonte que nunca muda.
+        try:
+            async for text, _md, _full in fonte_pensamento(name).subscribe():
+                pensamento_slot["text"] = text
+                if not pensamento_slot["pending"]:
+                    pensamento_slot["pending"] = True
+                    queue.put_nowait(("pensamento", None))
+        except Exception as exc:  # surface, never swallow
+            diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
+                           etapa="pensamento", erro_tipo=type(exc).__name__)
+            await queue.put(("__error__", exc))
+
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
     ultimo_estado = None           # ultimo `state` emitido; None ate o primeiro tick
@@ -838,6 +855,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(ping_loop()),
         asyncio.create_task(nav_pump()),
         preview_task,
+        asyncio.create_task(pensamento_pump()),
         asyncio.create_task(jsonl_watcher()),
     ]
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
@@ -944,6 +962,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                                             md=bool(preview_slot["md"]),
                                             full=bool(preview_slot["full"]),
                                             vivo=isinstance(broker, PushPreviewSource)).model_dump_json()}
+                continue
+            if event == "pensamento":
+                # SEM id, como a prévia: reconexão não pode replayar raciocínio velho.
+                pensamento_slot["pending"] = False
+                yield {"event": "pensamento", "data": json.dumps({"text": pensamento_slot["text"]})}
                 continue
             if event == "state":
                 # Rastreia transicoes do awaiting_input pra resetar o guard de emissao unica.

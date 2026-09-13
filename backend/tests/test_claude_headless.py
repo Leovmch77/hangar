@@ -140,6 +140,35 @@ def test_rotulo_da_tool_mostra_o_alvo_enquanto_o_input_escreve(adapter):
     assert A._rotulo_tool("Grep", A._input_parcial('{"pattern": "def ')) == "Grep: def"
 
 
+def test_pensamento_em_voo_vai_pra_fonte_propria_e_sai_quando_o_bloco_cai_no_jsonl(adapter):
+    from app.adapters.preview_push import fonte_pensamento
+    sess = adapter._sessions["s1"]
+
+    def stream(ev):
+        return adapter._on_event(sess, {"type": "stream_event", "event": ev})
+
+    async def fluxo():
+        await stream({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}})
+        for p in ("Vou ", "conferir o teste."):
+            await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": p}})
+        await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "abc"}})
+        assert fonte_pensamento("s1").text == "Vou conferir o teste."
+        assert PushPreviewSource.get("s1").text == ""   # nunca vira bolha de resposta
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "Vou conferir o teste.", "signature": "abc"}]}})
+        assert fonte_pensamento("s1").text == "" and sess.pensamento == ""
+    _run(fluxo())
+
+
+def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
+    from app import pensamento
+    monkeypatch.setattr(pensamento, "ler", lambda: True)
+    argv = adapter._argv("sid", resume=True)
+    assert argv[argv.index("--thinking-display") + 1] == "summarized"
+    monkeypatch.setattr(pensamento, "ler", lambda: False)
+    assert "--thinking-display" not in adapter._argv("sid", resume=False)
+
+
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
     # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
     ad = ClaudeHeadlessAdapter()
