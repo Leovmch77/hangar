@@ -1975,6 +1975,9 @@ async def create_session(body: CreateBody):
                         if body.headless:
                             _kw["headless"] = True
                         info = await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw)
+                        if body.headless:
+                            # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
+                            get_adapter(CLAUDE_HEADLESS).acordar(info.name)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
                         code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
@@ -2000,7 +2003,10 @@ async def create_session(body: CreateBody):
             _kw2["read_only"] = True
         if body.headless:
             _kw2["headless"] = True
-        return await _create_registry(_kw2)
+        info = await _create_registry(_kw2)
+        if body.headless:
+            get_adapter(CLAUDE_HEADLESS).acordar(info.name)
+        return info
     except ValueError as e:
         code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
         raise HTTPException(409, detail=erro(code, str(e)))

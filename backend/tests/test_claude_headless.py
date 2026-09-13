@@ -246,6 +246,13 @@ def test_rotulo_do_modelo_na_grafia_da_statusline(modelo, rotulo):
     assert A._rotulo_modelo(modelo) == rotulo
 
 
+def test_sessao_parada_mostra_modelo_e_esforco_da_abertura(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)
+    meta = {"model": "claude-opus-5[1m]", "effort": "high", "config_dir": str(tmp_path)}
+    assert A._linha_parada(meta) == "🤖 Opus5·1M (high)"
+    assert A._linha_parada({**meta, "model": None}) is None
+
+
 def test_esforco_cai_no_padrao_da_conta(adapter, tmp_path, monkeypatch):
     monkeypatch.setattr(A, "_esforco_padrao", _ESFORCO_PADRAO_REAL)   # tira o stub da fixture
     monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)

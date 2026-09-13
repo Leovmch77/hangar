@@ -1344,7 +1344,7 @@ class ClaudeHeadlessAdapter:
                 yield StateEvent(session=name, state="idle", headless=True,
                                  claude_permission_mode=meta.get("permission_mode"),
                                  claude_previous_non_plan=meta.get("previous_non_plan"),
-                                 status_line=(f"🤖 {_rotulo_modelo(meta['model'])}" if meta.get("model") else None),
+                                 status_line=_linha_parada(meta),
                                  problema=prob[0] if prob else None,
                                  problema_detalhe=prob[1] if prob else None)
                 while True:
@@ -1549,6 +1549,14 @@ def _rotulo_modelo(modelo: str) -> str:
     familia = partes[0].capitalize()
     rotulo = (f"{familia}{versao}" if familia == "Opus" else f"{familia} {versao}").strip()
     return rotulo + ("·1M" if um else "")
+
+
+def _linha_parada(meta: dict) -> str | None:
+    """Sessão sem processo: modelo e esforço escolhidos na abertura, no mesmo formato da viva."""
+    if not meta.get("model"):
+        return None
+    esforco = meta.get("effort") or _esforco_padrao(meta.get("config_dir"))
+    return f"🤖 {_rotulo_modelo(meta['model'])}" + (f" ({esforco})" if esforco else "")
 
 
 def _esforco_padrao(config_dir: str | None) -> str | None:

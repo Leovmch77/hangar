@@ -1073,6 +1073,18 @@ def test_rename_falha_usa_a_mesma_chave_da_sidebar(api_client):
     assert r.json()["detail"]["code"] == "sessao_falha_renomear"
 
 
+def test_create_sem_terminal_sobe_o_processo_na_criacao(api_client):
+    from app.models import SessionInfo
+    info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
+    adapter = MagicMock()
+    with patch("app.api.registry.create", return_value=info), \
+         patch("app.api.get_adapter", return_value=adapter):
+        r = api_client.post("/api/sessions", headers=_h(),
+                            json={"name": "hl", "cwd": "/tmp", "provider": "claude", "headless": True})
+    assert r.status_code == 200
+    adapter.acordar.assert_called_once_with("hl")
+
+
 def test_create_codex_conflict_maps_to_409(api_client):
     fake = MagicMock(side_effect=ValueError("ja existe uma sessao com esse nome"))
     with patch("app.api.registry.create", fake):
