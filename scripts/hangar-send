@@ -23,6 +23,9 @@
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
 #                                  nova (default claude). Ex: --provider kimi abre o Kimi Code.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
+#                                  --headless (só claude) abre a sessão SEM terminal: o Claude roda
+#                                  fora do tmux e conversa só pelo app. Combina com --model/--effort/
+#                                  --permissao/--conta.
 #                                  --engine <motor> nasce num motor de ~/.claude/engines.json
 #                                  (outro modelo, conta do provedor — ver "Par noutro modelo").
 #                                  --conta <nome> nasce em OUTRA CONTA Anthropic (ver abaixo).
@@ -256,7 +259,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless]}"
     shift
     if [[ "$name" == *::* ]]; then
         echo "erro: '::' é reservado pro endereço servidor::sessao — escolha outro nome" >&2
@@ -267,7 +270,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -287,9 +290,14 @@ if [[ "$1" == "--new" ]]; then
     # os valores aqui, senão o script envelhece separado do backend (mesma regra do --provider).
     # --profile: perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x.
     # Só com --provider omp; o backend recusa o resto e valida o nome.
-    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""
+    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            # --headless: sessão Claude sem terminal (o campo `headless` do POST, o mesmo da tela de
+            # criar sessão). Sem o flag aqui, quem orquestra por hangar-send só abria com terminal.
+            --headless)
+                [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
+                headless="true"; shift ;;
             --read-only)
                 [[ -n "$read_only" ]] && { echo "erro: --read-only informado duas vezes" >&2; exit 2; }
                 read_only="true"; shift ;;
@@ -322,6 +330,11 @@ if [[ "$1" == "--new" ]]; then
         esac
     done
     cwd="${cwd:-$HOME}"
+    # Sessão sem terminal só existe pro Claude; parar aqui evita criar nada com provider errado.
+    if [[ -n "$headless" && -n "$provider" && "$provider" != "claude" ]]; then
+        echo "erro: --headless só vale com provider claude (veio: $provider)" >&2
+        exit 2
+    fi
     # Conta inexistente para AQUI, antes do POST: o backend recusaria com 400, mas o erro do
     # hangar-conta já diz o nome errado e o `hangar-conta --list` mostra os certos.
     # --conta auto: o backend escolhe a conta Claude com mais folga na janela que mais aperta
@@ -365,10 +378,12 @@ if sys.argv[9]:
     d["omp_profile"] = sys.argv[9]
 if sys.argv[10]:
     d["read_only"] = True
+if sys.argv[11]:
+    d["headless"] = True
 print(json.dumps(d))' \
-           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only")
+           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless")
     api POST /api/sessions "$body" >/dev/null
-    echo "sessão criada: $name ($cwd)${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]} — fala com ela via: hangar-send $name \"msg\""
+    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]} — fala com ela via: hangar-send $name \"msg\""
     exit 0
 fi
 
