@@ -207,7 +207,22 @@ def test_wrapper_windows_le_o_perfil_que_o_instalador_escreve(tmp_path, monkeypa
     item = h._wrapper("codex")
     assert item["ok"] is True and item["params"]["onde"] == "PowerShell"
     # Perfil presente sem o bloco daquele CLI e falta de verdade, com o conserto do Windows.
-    assert h._wrapper("pi")["codigo"] == "wrapper_falta"
+    item = h._wrapper("pi")
+    assert item["codigo"] == "wrapper_falta" and item["conserto"] == "wrapper"
+
+
+def test_conserto_wrapper_no_windows_usa_o_script_do_perfil(monkeypatch):
+    # Sem isto o wrapper faltando no Windows nao tinha botao: o unico conserto era o bash.
+    monkeypatch.setattr(h, "_E_WINDOWS", True)
+    chamado = {}
+
+    def _run(argv, **kw):
+        chamado["argv"] = argv
+        return h.subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(h.subprocess, "run", _run)
+    h.consertar("wrapper")
+    assert chamado["argv"][-2:] == [str(h._REPO / "scripts" / "setup-windows-wrappers.ps1"), "-Apply"]
 
 
 def _tmux_windows(tmp_path, monkeypatch, titulos="off"):

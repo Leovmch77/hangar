@@ -230,12 +230,19 @@ class Instalador:
         avisar. Senão a etapa é PULADA, e o pulo vira aviso no estado — não só uma linha perdida no
         meio do log, porque a manchete da tela promete "ligado ao app".
         """
+        if harness_saude._E_WINDOWS:
+            if harness_saude._wrapper(cli).get("ok") is not True:
+                # O mesmo conserto do botão: o bloco no perfil do PowerShell.
+                self._anotar(f"$ wrapper\n{harness_saude.consertar('wrapper')}")
+                if harness_saude._wrapper(cli).get("ok") is False:
+                    self._falhou("wrapper", "o perfil do PowerShell continua sem o wrapper")
+                    return False
+            else:
+                self._anotar(f"[wrapper] {cli} já é carregado pelo perfil do PowerShell")
+            return True
         try:
             comando = harness_saude.cmd_instalador()
         except ValueError as e:
-            if harness_saude._wrapper(cli).get("ok") is True:
-                self._anotar(f"[wrapper] {cli} já é carregado pelo perfil do shell")
-                return True
             self._anotar(f"[wrapper pulado] {e}")
             self._pub(avisos=[*self._avisos(), f"a etapa do wrapper foi pulada: {e}"])
             return True

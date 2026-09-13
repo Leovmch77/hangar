@@ -314,9 +314,9 @@ def _wrapper(cli: str) -> dict:
         # Sem bash não há conserto a oferecer: o instalador é POSIX. Um botão que só sabe errar
         # nessa máquina é pior que nenhum — e, na etapa de instalação, ele transformava "não deu
         # pra ligar o wrapper aqui" em falha dura DEPOIS de o CLI já ter sido instalado.
-        # No Windows nem com Git Bash: o instalador POSIX escreve no `.bashrc`, não no perfil do
-        # PowerShell, e o botão "consertaria" o shell errado.
-        conserto = "wrapper" if shutil.which("bash") and not _E_WINDOWS else None
+        # No Windows o conserto é o script do perfil do PowerShell, nunca o bash (que escreveria no
+        # `.bashrc` e "consertaria" o shell errado).
+        conserto = "wrapper" if _E_WINDOWS or shutil.which("bash") else None
         return _item("wrapper", False, "wrapper_falta", conserto, lista=", ".join(faltam))
     return _item("wrapper", True, "wrapper_ok", onde=", ".join(onde))
 
@@ -698,15 +698,20 @@ def consertar(id_: str) -> str:
         if any(not v["ok"] and v["motivo"] != "nao-instalado" for v in r.values()):
             raise ValueError(linha)
         return linha
-    if id_ == "tmux" and _E_WINDOWS:
-        # O bloco do psmux é do script de Windows, que respeita a precedência de config.
+    if id_ in ("tmux", "wrapper") and _E_WINDOWS:
+        # No Windows cada um tem o seu script (os mesmos que o install.ps1 usa): o do psmux respeita
+        # a precedência de config, o do wrapper grava o bloco no perfil do PowerShell.
+        script, extra, feito = (
+            ("setup-windows-tmux.ps1", ["-SkipInstall"], "config do psmux reaplicada — vale nas sessões novas")
+            if id_ == "tmux" else
+            ("setup-windows-wrappers.ps1", [], "bloco dos wrappers no perfil do PowerShell — vale em terminal novo"))
         r = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                            str(_REPO / "scripts" / "setup-windows-tmux.ps1"), "-Apply", "-SkipInstall"],
+                            str(_REPO / "scripts" / script), "-Apply", *extra],
                            capture_output=True, text=True, timeout=TIMEOUT_INSTALADOR,
                            encoding="utf-8", errors="replace", cwd=str(_REPO))
         if r.returncode != 0:
-            raise ValueError(f"setup-windows-tmux saiu com {r.returncode}: {(r.stderr or r.stdout)[-300:]}")
-        return "config do psmux reaplicada — vale nas sessões novas"
+            raise ValueError(f"{script} saiu com {r.returncode}: {(r.stderr or r.stdout)[-300:]}")
+        return feito
     if id_ in ("tmux", "wrapper"):
         r = subprocess.run(cmd_instalador(), capture_output=True, text=True,
                            timeout=TIMEOUT_INSTALADOR, encoding="utf-8", errors="replace",
