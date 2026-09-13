@@ -20,6 +20,7 @@ precisa sobreviver está no sidecar (sessions.py).
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import json
 import logging
@@ -159,7 +160,7 @@ class ClaudeHeadlessAdapter:
         try:
             await self._write(sess, {
                 "type": "user", "session_id": "", "parent_tool_use_id": None,
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+                "message": {"role": "user", "content": await asyncio.to_thread(_blocos_do_prompt, text)},
             })
         except Exception:
             _log.exception("claude headless: escrita no stdin falhou name=%s", name)
@@ -211,7 +212,7 @@ class ClaudeHeadlessAdapter:
             raise RuntimeError("o processo encerrou antes de receber a mensagem")
         await self._write(sess, {
             "type": "user", "session_id": "", "parent_tool_use_id": None,
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            "message": {"role": "user", "content": await asyncio.to_thread(_blocos_do_prompt, text)},
         })
         if not sess.in_progress:
             sess.in_progress = True
@@ -618,7 +619,11 @@ class ClaudeHeadlessAdapter:
             if ev.get("is_error") or (sub.startswith("error") and sub != "error_during_execution"):
                 # `error_during_execution` é o interrupt (medido); o resto é falha de verdade
                 # (limite de turnos, credencial, API) e some calado se não for dito aqui.
-                self._registrar_problema(sess, "headless_turno_erro", f"{sub}: {str(ev.get('result') or '')[:300]}")
+                detalhe = str(ev.get("result") or "")
+                # Sem login a CLI responde `success` + is_error com este texto (medido) e segue
+                # viva; o app precisa dizer o que fazer, não só "deu erro".
+                codigo = "headless_sem_login" if "not logged in" in detalhe.lower() else "headless_turno_erro"
+                self._registrar_problema(sess, codigo, f"{sub}: {detalhe[:300]}")
             elif sub == "success":
                 self._limpar_problema(sess)
             if isinstance(ev.get("total_cost_usd"), (int, float)):
@@ -933,6 +938,34 @@ class ClaudeHeadlessAdapter:
         lock = self._delivery_locks.pop(old, None)
         if lock is not None:
             self._delivery_locks[new] = lock
+
+
+# Anexo de imagem do composer ("legenda — 📎 imagem: <path>"). No terminal a TUI reconhece o path
+# e anexa a imagem de verdade; aqui é o adapter que anexa, como bloco `image` ao lado do texto.
+# O texto vai inteiro (com o path): é o que o .jsonl grava e o que a fila usa pra confirmar.
+_IMG_RE = re.compile(r"📎\s*imagem:\s*(\S+)")
+_IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".gif": "image/gif", ".webp": "image/webp"}
+_IMG_TETO = 5 * 1024 * 1024   # teto da API por imagem; acima disso fica só o path (o Read abre)
+
+
+def _blocos_do_prompt(text: str) -> list[dict]:
+    blocos: list[dict] = [{"type": "text", "text": text}]
+    for caminho in _IMG_RE.findall(text):
+        mime = _IMG_MIME.get(Path(caminho).suffix.lower())
+        if not mime:
+            continue
+        try:
+            dados = Path(caminho).read_bytes()
+        except OSError:
+            _log.warning("claude headless: imagem do anexo ilegível, vai só o path: %s", caminho)
+            continue
+        if len(dados) > _IMG_TETO:
+            _log.warning("claude headless: imagem acima do teto (%d bytes), vai só o path: %s", len(dados), caminho)
+            continue
+        blocos.append({"type": "image", "source": {"type": "base64", "media_type": mime,
+                                                   "data": base64.b64encode(dados).decode("ascii")}})
+    return blocos
 
 
 def _modo_do_app(modo: str) -> str:

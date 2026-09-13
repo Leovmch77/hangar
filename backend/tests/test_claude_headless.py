@@ -2,6 +2,7 @@
 O processo é trocado por um stub que só guarda o que seria escrito; os eventos são os do
 stream-json medido contra a CLI (docs/research/claude-sem-terminal-monocode.md)."""
 import asyncio
+import base64
 import json
 
 import pytest
@@ -362,6 +363,29 @@ def test_modo_de_permissao_sobrevive_ao_resume_e_ao_nome_da_cli(adapter):
     assert sess.permission_mode == "manual"
     argv = adapter._argv(sess.sid, resume=True, permission_mode=sess.permission_mode)
     assert "--resume" in argv and argv[argv.index("--permission-mode") + 1] == "manual"
+
+
+def test_anexo_de_imagem_vira_bloco_nativo_e_texto_fica_inteiro(adapter, tmp_path):
+    # No terminal a TUI anexa a imagem pelo path; aqui é o adapter, como bloco `image`. O texto
+    # segue inteiro (é o que o .jsonl grava e o que a fila confirma). Arquivo que não é imagem
+    # ou não abre fica só como path.
+    img = tmp_path / "foto.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    texto = f"olha isso — 📎 imagem: {img} 📎 arquivo: {tmp_path}/nota.txt 📎 imagem: {tmp_path}/sumiu.jpg"
+    _run(adapter.send_prompt("s1", texto))
+    blocos = adapter.escritos[-1]["message"]["content"]
+    assert blocos[0] == {"type": "text", "text": texto}
+    assert len(blocos) == 2 and blocos[1]["type"] == "image"
+    assert blocos[1]["source"]["media_type"] == "image/png"
+    assert base64.b64decode(blocos[1]["source"]["data"]) == img.read_bytes()
+
+
+def test_sem_login_vira_problema_com_instrucao(adapter):
+    sess = adapter._sessions["s1"]
+    sess.in_progress = True
+    _run(adapter._on_event(sess, {"type": "result", "subtype": "success", "is_error": True,
+                                  "result": "Not logged in · Please run /login", "usage": {}}))
+    assert adapter.problema_de("s1")[0] == "headless_sem_login"
 
 
 def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
