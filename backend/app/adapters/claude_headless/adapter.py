@@ -103,6 +103,8 @@ class _Sessao:
         self.model: str | None = meta.get("model")
         self.effort: str | None = meta.get("effort")
         self.permission_mode: str | None = meta.get("permission_mode")
+        # Último modo que não era `plan`: é pra onde "Implementar o plano" volta.
+        self.modo_nao_plan: str | None = meta.get("previous_non_plan")
         self.context_window: int | None = meta.get("context_window")
         self.usage: dict | None = None
         self.cost: float | None = None
@@ -360,10 +362,17 @@ class ClaudeHeadlessAdapter:
         if sess is None:
             raise ValueError("sessão indisponível")
         r = await self._ctrl(sess, "set_permission_mode", mode=mode)
-        sess.permission_mode = _modo_do_app((r or {}).get("mode") or mode)
+        self._definir_modo(sess, (r or {}).get("mode") or mode)
         hl_sessions.update(name, permission_mode=sess.permission_mode)
         await self._notify(sess)
         return sess.permission_mode
+
+    @staticmethod
+    def _definir_modo(sess: _Sessao, modo: str) -> None:
+        sess.permission_mode = _modo_do_app(modo)
+        if sess.permission_mode != "plan" and sess.permission_mode != sess.modo_nao_plan:
+            sess.modo_nao_plan = sess.permission_mode
+            hl_sessions.update(sess.name, previous_non_plan=sess.modo_nao_plan)
 
     async def set_model(self, name: str, model: str | None, effort: str | None) -> bool:
         """Troca modelo em voo (`set_model`). Esforço vai como o comando local `/effort <x>` pelo
@@ -934,11 +943,11 @@ class ClaudeHeadlessAdapter:
             if ev.get("model"):
                 sess.model = ev["model"]
             if ev.get("permissionMode"):
-                sess.permission_mode = _modo_do_app(ev["permissionMode"])
+                self._definir_modo(sess, ev["permissionMode"])
             sess.initialized.set()
         elif sub == "status":
             if ev.get("permissionMode"):
-                sess.permission_mode = _modo_do_app(ev["permissionMode"])
+                self._definir_modo(sess, ev["permissionMode"])
             if ev.get("status") == "requesting" and sess.in_progress:
                 sess.label = "Pensando…"
         elif sub == "thinking_tokens":
@@ -1150,6 +1159,7 @@ class ClaudeHeadlessAdapter:
                           question=question, options=options,
                           status_line=self.status_line(sess),
                           claude_permission_mode=sess.permission_mode,
+                          claude_previous_non_plan=sess.modo_nao_plan,
                           limited=sess.limited, limit_reset=sess.limit_reset,
                           codex_question=sess.question,
                           problema=sess.problema, problema_detalhe=sess.problema_detalhe)
@@ -1189,6 +1199,7 @@ class ClaudeHeadlessAdapter:
                 prob = self._problemas.get(name)
                 yield StateEvent(session=name, state="idle",
                                  claude_permission_mode=meta.get("permission_mode"),
+                                 claude_previous_non_plan=meta.get("previous_non_plan"),
                                  status_line=(f"🤖 {meta['model']}" if meta.get("model") else None),
                                  problema=prob[0] if prob else None,
                                  problema_detalhe=prob[1] if prob else None)

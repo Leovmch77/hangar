@@ -368,6 +368,31 @@ def test_modo_de_permissao_sobrevive_ao_resume_e_ao_nome_da_cli(adapter):
     assert "--resume" in argv and argv[argv.index("--permission-mode") + 1] == "manual"
 
 
+def test_modo_plan_lembra_o_modo_anterior_para_o_botao_implementar(adapter):
+    sess = adapter._sessions["s1"]
+    ctrl_calls = []
+
+    async def ctrl(s, subtype, **req):
+        ctrl_calls.append((subtype, req))
+        return {"mode": req.get("mode")}
+    adapter._ctrl = ctrl   # type: ignore[method-assign]
+
+    async def fluxo():
+        await adapter._on_event(sess, {"type": "system", "subtype": "init", "session_id": sess.sid,
+                                       "permissionMode": "acceptEdits", "model": "haiku"})
+        assert await adapter.set_permission_mode("s1", "plan") == "plan"
+        ev = adapter._evento(sess)
+        assert ev.claude_permission_mode == "plan" and ev.claude_previous_non_plan == "acceptEdits"
+        # Voltar pro modo anterior (o que o card faz ao implementar) atualiza o "anterior".
+        await adapter.set_permission_mode("s1", "acceptEdits")
+        await adapter._on_event(sess, {"type": "system", "subtype": "status", "permissionMode": "default"})
+        assert adapter._evento(sess).claude_previous_non_plan == "manual"
+    _run(fluxo())
+    assert [c[1]["mode"] for c in ctrl_calls] == ["plan", "acceptEdits"]
+    meta = S.load("s1")
+    assert meta["permission_mode"] == "acceptEdits" and meta["previous_non_plan"] == "manual"
+
+
 def test_anexo_de_imagem_vira_bloco_nativo_e_texto_fica_inteiro(adapter, tmp_path, monkeypatch):
     # No terminal a TUI anexa a imagem pelo path; aqui é o adapter, como bloco `image`. O texto
     # segue inteiro (é o que o .jsonl grava e o que a fila confirma). Arquivo que não é imagem

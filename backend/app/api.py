@@ -6154,9 +6154,11 @@ async def permission_modes(name: str, sondar: bool = False):
         # lista é a fechada da CLI — `set_permission_mode` aceita qualquer um, sem sondar.
         hl = get_adapter(CLAUDE_HEADLESS)
         vivo = hl._sessions.get(name)
-        atual = (vivo.permission_mode if vivo and vivo.vivo else None) or (headless_sessions.load(name) or {}).get("permission_mode")
+        meta = headless_sessions.load(name) or {}
+        atual = (vivo.permission_mode if vivo and vivo.vivo else None) or meta.get("permission_mode")
+        anterior = (vivo.modo_nao_plan if vivo and vivo.vivo else None) or meta.get("previous_non_plan")
         return {"current": atual, "modes": list(model_args.MODOS_PERMISSAO_CLAUDE), "sondavel": False,
-                "previous_non_plan": None}
+                "previous_non_plan": anterior}
     _guard_perm(name, info)
     key = _cache_key_perm(name, info)
     # leitura do atual sem tecla (bloqueador 1)
@@ -6232,11 +6234,14 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if _headless(name):
         # `control_request set_permission_mode` no stdin: o processo responde com o modo que ficou.
+        hl = get_adapter(CLAUDE_HEADLESS)
         try:
-            ficou = await get_adapter(CLAUDE_HEADLESS).set_permission_mode(name, alvo)
+            ficou = await hl.set_permission_mode(name, alvo)
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
-        return {"mode": ficou, "current": ficou, "previous_non_plan": None}
+        vivo = hl._sessions.get(name)
+        return {"mode": ficou, "current": ficou,
+                "previous_non_plan": vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
     tracking_key = _tracking_key_perm(name, info)
     try:

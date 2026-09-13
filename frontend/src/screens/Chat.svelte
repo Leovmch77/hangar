@@ -44,6 +44,7 @@
     getHistory,
     getHistoryDesde,
     sendInput,
+    setPermissionMode,
     steerSession,
     broadcast,
     selectOption,
@@ -900,8 +901,33 @@
         claudePlanDiscoveryError = m.chat_plan_erro();
       });
   });
+  // Sem terminal não existe o diálogo de ExitPlanMode da TUI: em modo `plan` a CLI ainda grava o
+  // plano em ~/.claude/plans (a descoberta acha o arquivo e ancora na última resposta), mas
+  // ninguém pergunta "implementar?". O card ganha o botão: volta pro modo anterior (ou
+  // acceptEdits) e manda o pedido. Sem arquivo descoberto, a última resposta do turno é o plano.
+  const headlessPlanEvent = $derived.by(() => {
+    if (!sessionHeadless || stateEvent?.claude_permission_mode !== 'plan' || currentState !== 'idle') return null;
+    const anchor = claudePlanDiscovery?.anchor_id ?? null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
+      if (event.kind === 'assistant_msg' && event.text && !event.id.startsWith('local-')
+          && (!anchor || event.id === anchor)) {
+        return { id: event.id, plan: event.text };
+      }
+    }
+    return null;
+  });
+  const headlessPlan = $derived(headlessPlanEvent?.plan ?? null);
+
+  async function implementHeadlessPlan(plan: string) {
+    if (currentState !== 'idle' || plan !== headlessPlan) throw new Error(m.chat_plan_indisponivel());
+    await setPermissionMode(sessionName, stateEvent?.claude_previous_non_plan || 'acceptEdits');
+    await handleSend(m.chat_plan_pedido(), false, true);
+  }
   const planAnchorId = $derived.by(() => {
     if (sessionProvider === 'codex') return codexPlanEvent?.id ?? null;
+    if (sessionHeadless) return headlessPlanEvent?.id ?? null;
     if (sessionProvider !== 'claude') return null;
     const id = claudePlanDiscovery?.anchor_id;
     if (!id) return null;
@@ -918,9 +944,9 @@
     provider: sessionProvider ?? 'claude',
     revision: currentState,
     desktop,
-    codexPlan,
+    codexPlan: sessionHeadless ? headlessPlan : codexPlan,
     disabled: currentState !== 'idle' || pending.length > 0,
-    onImplement: implementCodexPlan,
+    onImplement: sessionHeadless ? implementHeadlessPlan : implementCodexPlan,
     discovery: sessionProvider === 'claude' ? (planAnchorId ? claudePlanDiscovery : null) : undefined,
     discoveryLoading: sessionProvider === 'claude' ? claudePlanDiscoveryLoading : false,
     discoveryError: sessionProvider === 'claude' ? claudePlanDiscoveryError : '',

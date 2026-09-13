@@ -103,7 +103,9 @@
     modalMetadata = null;
     loading = true;
     try {
-      if (provider === 'codex') markdown = codexPlan ?? '';
+      // Sem arquivo descoberto o plano É o texto da resposta (Codex, Claude sem terminal sem
+      // arquivo): nada a buscar no servidor.
+      if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
       else {
         const result = await getSessionPlanPreview(sessionName) as ClaudePlanPreview | null;
         if (request !== generation) return;
