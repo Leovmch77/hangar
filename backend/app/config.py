@@ -291,13 +291,35 @@ VARIAVEIS_DO_AMBIENTE: dict[str, str] = {
     "CP_CODEX_SYNC_ENABLED": "codex_sync_enabled",
 }
 
-# Campos do Settings cujo efeito aparece na tela, e só eles ganham descrição traduzida: o resto
-# (porta, IP, VAPID, sync, proxy) se explica pelo nome. Decisão do usuário, pra não criar dezenas
-# de entradas de i18n numa seção que ninguém edita.
+# Todo campo do Settings que a tela lista ganha uma frase de efeito (o código é o nome do campo,
+# a tela traduz). Metade dos nomes não se explica sozinha (STALL_POLL, FORWARDED_ALLOW_IPS,
+# SYNC_BOOTSTRAP), e uma lista de leitura sem a frase é só o `.env` copiado pra tela.
 DESCRICAO_DE_CAMPO: dict[str, str] = {
+    "lan_bind_ip": "lan_bind_ip",
+    "port": "port",
+    "auth_token": "auth_token",
+    "projects_dir": "projects_dir",
+    "reload": "reload",
+    "diag_term_input": "diag_term_input",
+    "front_port": "front_port",
+    "public_url": "public_url",
+    "server_id": "server_id",
+    "vapid_public": "vapid_public",
+    "vapid_private": "vapid_private",
+    "vapid_subject": "vapid_subject",
+    "stall_poll_seconds": "stall_poll_seconds",
     "auto_resume": "auto_resume",
     "omp_plugin_sync_enabled": "omp_plugin_sync",
+    "omp_plugin_sync_interval": "omp_plugin_sync_interval",
     "omp_claude_context_enabled": "omp_claude_context",
+    "sync": "sync",
+    "sync_bootstrap": "sync_bootstrap",
+    "sync_data": "sync_data",
+    "sync_session_secret": "sync_session_secret",
+    "sync_rate_max": "sync_rate_max",
+    "sync_rate_window": "sync_rate_window",
+    "forwarded_allow_ips": "forwarded_allow_ips",
+    "deploy_secret": "deploy_secret",
 }
 
 # Aqui o valor NUNCA sai, nem mascarado — só `definida`. É a diferença desta lista pro `campos` do

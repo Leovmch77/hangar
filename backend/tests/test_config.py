@@ -162,19 +162,15 @@ def test_variaveis_env_traz_as_lidas_direto_do_ambiente_com_codigo_de_descricao(
     assert por_nome["CP_TERMINAL"]["definida"] is True
 
 
-def test_campos_que_mudam_comportamento_visivel_tem_codigo_de_descricao():
-    # As 8 com descrição são as 5 lidas do ambiente (testadas acima) mais estas três. As demais
-    # (porta, IP, VAPID, sync, proxy) ficam sem: o nome se explica, e a decisão do usuário foi não
-    # criar dezenas de entradas de i18n numa seção de leitura.
+def test_toda_variavel_listada_tem_codigo_de_descricao():
+    # Uma variável sem frase é o `.env` copiado pra tela: campo novo no Settings que não for
+    # editável pela tela entra na lista sozinho, e este teste é o que obriga a frase a nascer junto.
     por_nome = _por_nome(variaveis_env(_settings()))
     assert por_nome["CP_AUTO_RESUME"]["descricao"] == "auto_resume"
     assert por_nome["CP_OMP_PLUGIN_SYNC_ENABLED"]["descricao"] == "omp_plugin_sync"
-    assert por_nome["CP_OMP_CLAUDE_CONTEXT_ENABLED"]["descricao"] == "omp_claude_context"
-    assert por_nome["CP_PORT"]["descricao"] is None
-    assert por_nome["CP_VAPID_SUBJECT"]["descricao"] is None
-    # São OITO, nem mais nem menos: a lista é decisão do usuário, não algo que cresce sozinho.
-    com_descricao = [v["nome"] for v in variaveis_env(_settings()) if v["descricao"]]
-    assert len(com_descricao) == 8, com_descricao
+    assert por_nome["CP_STALL_POLL_SECONDS"]["descricao"] == "stall_poll_seconds"
+    sem_descricao = [v["nome"] for v in variaveis_env(_settings()) if not v["descricao"]]
+    assert sem_descricao == []
 
 
 def test_variaveis_env_le_o_ambiente_e_nao_o_settings(monkeypatch):
