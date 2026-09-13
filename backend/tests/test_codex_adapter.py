@@ -11,7 +11,7 @@ from app.adapters.codex import adapter as codex_adapter
 from app.adapters.codex.adapter import (
     CodexAdapter, ensure_tmux_tui, format_status_line, map_state,
 )
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 from app.state import StateEvent
 
 
@@ -259,7 +259,7 @@ async def test_state_monitor_accumulates_token_usage_and_rate_limits_across_even
 
 async def test_state_monitor_accumulates_deltas_into_preview_source():
     # item/agentMessage/delta e INCREMENTAL (docs/codex-app-server-contract.md: "o","k" -> "ok").
-    # state_monitor acumula no buffer do turno e empurra pro CodexPreviewSource -- efeito colateral
+    # state_monitor acumula no buffer do turno e empurra pro PushPreviewSource -- efeito colateral
     # ADICIONAL aos StateEvent (working/idle), que continuam saindo como antes (Task 4).
     adapter = CodexAdapter()
     client = _FakeClient([
@@ -272,7 +272,7 @@ async def test_state_monitor_accumulates_deltas_into_preview_source():
     events = [ev async for ev in adapter.state_monitor("sess-preview", lambda: "sess-preview")]
     assert [e.state for e in events[1:]] == ["working", "idle"]  # StateEvents intactos (nao regrediu)
     # o preview foi empurrado a cada delta (visivel via subscribe: "o" depois "ok") e limpo no fim.
-    assert CodexPreviewSource.get("sess-preview").text == ""  # turn/completed -> push("") limpa
+    assert PushPreviewSource.get("sess-preview").text == ""  # turn/completed -> push("") limpa
 
 
 async def test_state_monitor_pushes_incremental_deltas_before_clearing():
@@ -284,7 +284,7 @@ async def test_state_monitor_pushes_incremental_deltas_before_clearing():
     adapter.attach("sess-preview2", client, "t")
     events = [ev async for ev in adapter.state_monitor("sess-preview2", lambda: "sess-preview2")]
     assert [e.state for e in events[1:]] == ["working"]
-    assert CodexPreviewSource.get("sess-preview2").text == "o"  # sem turn/completed, nao limpou
+    assert PushPreviewSource.get("sess-preview2").text == "o"  # sem turn/completed, nao limpou
 
 
 async def test_state_monitor_resets_buffer_on_new_turn_started():
@@ -302,7 +302,7 @@ async def test_state_monitor_resets_buffer_on_new_turn_started():
     adapter.attach("sess-preview3", client, "t")
     async for _ in adapter.state_monitor("sess-preview3", lambda: "sess-preview3"):
         pass
-    assert CodexPreviewSource.get("sess-preview3").text == "!"
+    assert PushPreviewSource.get("sess-preview3").text == "!"
 
 
 # --- CodexAdapter.send_prompt / deliverable -------------------------------------------------
@@ -1252,11 +1252,11 @@ async def test_bomba_publica_na_fonte_recriada_depois_que_sse_fecha():
         while client.aberturas != 1:
             await asyncio.sleep(0)
 
-    fonte_antiga = CodexPreviewSource.get("volta")
+    fonte_antiga = PushPreviewSource.get("volta")
     assinatura = fonte_antiga.subscribe()
     await assinatura.__anext__()
     await assinatura.aclose()
-    fonte_nova = CodexPreviewSource.get("volta")
+    fonte_nova = PushPreviewSource.get("volta")
 
     await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
     await client._q.put({"method": "item/agentMessage/delta",
@@ -1301,7 +1301,7 @@ async def test_bomba_encerrada_reinicia_na_proxima_abertura():
 async def test_dois_sse_na_mesma_sessao_recebem_a_resposta_inteira():
     # Desktop + celular no mesmo chat: cada SSE abre um state_monitor. Com um consumidor por SSE
     # os deltas eram DIVIDIDOS entre eles (cada um ficava com metade da frase) e os dois empurravam
-    # buffers diferentes pro mesmo CodexPreviewSource — a previa mostrava "Faria em pequenas, o
+    # buffers diferentes pro mesmo PushPreviewSource — a previa mostrava "Faria em pequenas, o
     # atual." em vez de "Faria em mudancas pequenas, preservando o comportamento atual.".
     adapter = CodexAdapter()
     client = _QueueClient([
@@ -1319,7 +1319,7 @@ async def test_dois_sse_na_mesma_sessao_recebem_a_resposta_inteira():
     a, b = await asyncio.wait_for(asyncio.gather(ver(), ver()), timeout=5)
     assert client.aberturas == 1, "a fila do app-server tem UM consumidor por sessao"
     assert a[-1] == "working" and b[-1] == "working"
-    assert CodexPreviewSource.get("dois").text == "Faria em mudancas pequenas"
+    assert PushPreviewSource.get("dois").text == "Faria em mudancas pequenas"
 
 
 async def test_ouvinte_novo_reusa_a_bomba_permanente():
@@ -1377,7 +1377,7 @@ async def test_previa_zera_a_cada_agent_message_do_mesmo_turno():
     adapter.attach("itens", client, "t")
     async for _ in adapter.state_monitor("itens", lambda: "itens"):
         pass
-    assert CodexPreviewSource.get("itens").text == "Resposta"
+    assert PushPreviewSource.get("itens").text == "Resposta"
 
 
 async def test_state_monitor_abre_com_o_estado_e_a_statusline_ja_conhecidos():

@@ -10,7 +10,7 @@ import pytest
 from app.adapters.claude_headless import adapter as A
 from app.adapters.claude_headless import sessions as S
 from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _Sessao
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 
 
 class _Proc:
@@ -21,7 +21,7 @@ class _Proc:
 @pytest.fixture
 def sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
-    monkeypatch.setattr(CodexPreviewSource, "_sources", {})
+    monkeypatch.setattr(PushPreviewSource, "_sources", {})
     monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
     return S.save("s1", str(tmp_path), "11111111-1111-1111-1111-111111111111", model="haiku", permission_mode="manual")
 
@@ -54,9 +54,9 @@ def test_prompt_vai_pro_stdin_e_turno_fecha_no_result(adapter):
         assert sess.label == "Pensando…"
         await adapter._on_event(sess, {"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "text"}}})
         await adapter._on_event(sess, {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}}})
-        assert CodexPreviewSource.get("s1").text == "ok"
+        assert PushPreviewSource.get("s1").text == "ok"
         await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}})
-        assert CodexPreviewSource.get("s1").text == ""
+        assert PushPreviewSource.get("s1").text == ""
         await adapter._on_event(sess, {"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.04,
                                        "usage": {"input_tokens": 2, "cache_read_input_tokens": 39000, "output_tokens": 4},
                                        "modelUsage": {"claude-haiku-4-5": {"contextWindow": 200000}}})
@@ -417,7 +417,7 @@ def test_subagente_rotula_o_que_faz_e_nao_vaza_na_previa(adapter):
         assert sess.label == "Explore: List files"
         await adapter._on_event(sess, {"type": "stream_event", "parent_tool_use_id": "toolu_1",
                                        "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "eu sou o filho"}}})
-        assert CodexPreviewSource.get("s1").text == ""
+        assert PushPreviewSource.get("s1").text == ""
         await adapter._on_event(sess, {"type": "assistant", "parent_tool_use_id": "toolu_1",
                                        "message": {"content": [{"type": "tool_use", "name": "Grep"}]}})
         assert sess.label == "Explore: List files"

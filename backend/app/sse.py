@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from app import atomico, diag
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 from app.difusor import Difusor
 from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
@@ -588,7 +588,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     pqueue = PromptQueue(name)
     # Fonte do preview ao vivo ramifica por provider: Claude nao tem push (o app-server manda os
     # deltas, o TUI do Claude nao) -> continua no PreviewBroker (poll do pane). Codex nao tem pane
-    # -> CodexPreviewSource, alimentado por push do CodexAdapter.state_monitor. Mesma interface
+    # -> PushPreviewSource, alimentado por push do CodexAdapter.state_monitor. Mesma interface
     # publica (get/subscribe) -> o resto do pump (preview_pump/_enqueue_preview/_already_committed)
     # fica IGUAL pras duas fontes. Pi tambem e pane -> mesmo PreviewBroker, mas o provider VAI
     # JUNTO: o chrome que fecha o bloco em voo e outro (caixa do composer), ver preview.py.
@@ -596,7 +596,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     # so a extensao do Pi). Fecha sobre `current_jsonl` pelo mesmo motivo do monitor: o /clear troca
     # o transcript, e um stem congelado leria o marcador da sessao anterior.
     def _broker_de(prov):
-        return (CodexPreviewSource.get(name) if prov in ("codex", CLAUDE_HEADLESS)
+        return (PushPreviewSource.get(name) if prov in ("codex", CLAUDE_HEADLESS)
                 else PreviewBroker.get(name, prov,
                                        lambda: session_key(current_jsonl) if current_jsonl else None))
 
@@ -785,7 +785,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
 
     async def preview_pump(fonte):
         # Assina a fonte COMPARTILHADA da sessao (1 broker pra N conexoes: PreviewBroker faz 1 loop
-        # de capture do pane; CodexPreviewSource so guarda o ultimo push, sem loop). Coalesce (slot +
+        # de capture do pane; PushPreviewSource so guarda o ultimo push, sem loop). Coalesce (slot +
         # 1 marcador). SUPRIME texto JA COMMITADO no .jsonl (gap entre blocos) -> manda "" pra nao
         # duplicar. Fail-loud como os outros pumps.
         try:

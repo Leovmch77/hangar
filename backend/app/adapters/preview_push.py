@@ -3,16 +3,17 @@ from typing import AsyncIterator
 
 # Espelha PreviewBroker (backend/app/preview.py): mesma interface publica (get/subscribe,
 # version + Condition + ref-count) e mesma semantica de coalescimento (full-replace, subscriber
-# lento perde frames intermediarios). A DIFERENCA: Codex nao tem pane de tmux pra fazer poll --
-# o texto em voo chega por PUSH (deltas do app-server, via CodexAdapter.state_monitor). Por isso
-# nao ha _loop/_task; so um setter publico (push) que atualiza o slot e acorda os subscribers.
+# lento perde frames intermediarios). A DIFERENCA: quem usa esta fonte nao tem pane de tmux pra
+# fazer poll -- o texto em voo chega por PUSH (deltas do app-server do Codex, stream-json do
+# Claude sem terminal). Por isso nao ha _loop/_task; so um setter publico (push) que atualiza o
+# slot e acorda os subscribers.
 
 
-class CodexPreviewSource:
+class PushPreviewSource:
     """UMA instancia por sessao (por nome), igual ao PreviewBroker. Sem _loop: o texto chega via
     push(), nao poll. Ref-count: instancia sai do registry quando o ultimo subscriber sai."""
 
-    _sources: dict[str, "CodexPreviewSource"] = {}
+    _sources: dict[str, "PushPreviewSource"] = {}
 
     # Texto vindo dos deltas do app-server: markdown CRU, nunca raspado de tela -> a bolha renderiza.
     # Mesmo campo que o PreviewBroker publica, pra o pump do SSE ler os dois sem saber a diferenca.
@@ -26,7 +27,7 @@ class CodexPreviewSource:
         self._subs = 0
 
     @classmethod
-    def get(cls, name: str) -> "CodexPreviewSource":
+    def get(cls, name: str) -> "PushPreviewSource":
         s = cls._sources.get(name)
         if s is None:
             s = cls(name)

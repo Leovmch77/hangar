@@ -30,7 +30,7 @@ from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, SANDBOX,
 from app.hook_state import hook_state
 from app.models import session_key
 from app.procinfo import pid_vivo
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 from app.adapters.codex.rollout import parse_rollout_line
 from app import codex_contas
 from app import tmux
@@ -143,7 +143,7 @@ class MappedState:
     """Resultado CRU e testavel de map_state — NAO e o StateEvent do app (StateEvent exige
     `state` e nao tem campo de preview). state_monitor() traduz isto pro StateEvent real;
     preview_delta e consumido em paralelo por CodexAdapter._state_stream (acumula por turno e
-    empurra pro CodexPreviewSource — ver Task 5b), fora do StateEvent. token_usage/rate_limits
+    empurra pro PushPreviewSource — ver Task 5b), fora do StateEvent. token_usage/rate_limits
     sao os snapshots CRUS (shape do app-server) das notifications de mesmo nome — quem acumula
     por sessao e monta o status_line completo e o _state_stream (Task D), nao este mapper."""
     state: Optional[str] = None          # "working" | "idle" | None (neutro/sem info)
@@ -438,7 +438,7 @@ class CodexAdapter:
             if registry_mod.apos_saida_codex:
                 registry_mod.apos_saida_codex(name)
             await asyncio.to_thread(PromptQueue(name).clear)
-            CodexPreviewSource._sources.pop(name, None)
+            PushPreviewSource._sources.pop(name, None)
             _log.info("codex tmux encerrou: cleanup automatico name=%s", name)
         except asyncio.CancelledError:
             raise
@@ -664,7 +664,7 @@ class CodexAdapter:
                         task.cancel()
                 await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
                 await sess["client"].close()
-                await CodexPreviewSource.get(name).push("")
+                await PushPreviewSource.get(name).push("")
             if meta.get("endpoint") and meta.get("app_pid"):
                 return await self._conectar(name, meta)
             # Daqui pra baixo o app-server e SPAWNADO e a TUI e RECRIADA — o pane atual morre. Isso
@@ -761,7 +761,7 @@ class CodexAdapter:
         sub = self._subscribers.pop(name, None)
         if sub is not None:
             sub.cancel()
-        CodexPreviewSource._sources.pop(name, None)
+        PushPreviewSource._sources.pop(name, None)
         if sess is None:
             return
         bomba = sess.get("bomba")
@@ -779,7 +779,7 @@ class CodexAdapter:
             for task in (self._tmux_watchers.pop(old, None), self._subscribers.pop(old, None)):
                 if task is not None:
                     task.cancel()
-            CodexPreviewSource._sources.pop(old, None)
+            PushPreviewSource._sources.pop(old, None)
             sess = self._sessions.pop(old, None)
             lock = self._locks.pop(old, None)
             if lock is not None:
@@ -1025,19 +1025,19 @@ class CodexAdapter:
                     sess["turn_id"] = turn_id
             elif mapped.preview_delta is not None:
                 buf += mapped.preview_delta
-                await CodexPreviewSource.get(name).push(buf)
+                await PushPreviewSource.get(name).push(buf)
             elif method in ("item/started", "item/completed") and \
                     ((notif.get("params") or {}).get("item") or {}).get("type") == "agentMessage":
                 # Um turno pode ter varios agentMessage (preambulo "Vou conferir…" + resposta). O
                 # completado vira bolha propria pelo rollout; se ficasse no buffer, a previa
                 # mostrava "Vou conferir.Resposta" ate o turno fechar.
                 buf = ""
-                await CodexPreviewSource.get(name).push("")
+                await PushPreviewSource.get(name).push("")
             elif method == "turn/completed":
                 # o texto final ja caiu no rollout -> vira ChatEvent autoritativo via
                 # transcript_stream; o sse.py tambem suprime via _already_committed. Limpa aqui pra
                 # nao deixar o ultimo delta pendurado ate o proximo turno.
-                await CodexPreviewSource.get(name).push("")
+                await PushPreviewSource.get(name).push("")
                 # Marca idle ANTES de drenar (nao depender do thread/status/changed idle ter chegado
                 # antes -- a ordem das notifications do app-server nao e garantida). A drain chama
                 # send_prompt -> deliverable(), que le in_progress: se ficasse True aqui, deliverable
@@ -1091,7 +1091,7 @@ class CodexAdapter:
         if getattr(client, "closed", False) and self._sessions.get(name) is sess:
             sess["state"] = "dead"
             self._sessions.pop(name, None)
-            CodexPreviewSource._sources.pop(name, None)
+            PushPreviewSource._sources.pop(name, None)
             espalhar(StateEvent(session=name, state="dead"))
 
     async def send_prompt(self, name: str, text: str) -> str:

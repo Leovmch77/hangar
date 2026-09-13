@@ -38,7 +38,7 @@ from app import atomico, cotas, model_args
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 from app.config import settings
 from app.pqueue import PromptQueue
 from app.state import StateEvent
@@ -754,7 +754,7 @@ class ClaudeHeadlessAdapter:
             elif sess.state == "awaiting_input":
                 self._gravar_marcador(sess, "idle")
             sess.state = "dead"
-            await CodexPreviewSource.get(sess.name).push("")
+            await PushPreviewSource.get(sess.name).push("")
             await self._notify(sess)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
@@ -826,7 +826,7 @@ class ClaudeHeadlessAdapter:
             if any(isinstance(b, dict) and b.get("type") == "text" for b in blocos):
                 # O bloco fechou: o .jsonl já tem a mensagem, a prévia sai de cena.
                 sess.previa = ""
-                await CodexPreviewSource.get(sess.name).push("")
+                await PushPreviewSource.get(sess.name).push("")
             await self._notify(sess)
             return
         if t == "user":
@@ -891,7 +891,7 @@ class ClaudeHeadlessAdapter:
                 await self._nota_local(sess, f"⛔ Negado sem perguntar ({len(negadas)}): {itens}")
             self._aplicar_uso(sess, ev)
             self._recalcular_estado(sess)
-            await CodexPreviewSource.get(sess.name).push("")
+            await PushPreviewSource.get(sess.name).push("")
             await self._notify(sess)
             if time.time() - sess.janelas_ts > 300:
                 self._agendar_cota(sess)
@@ -995,7 +995,7 @@ class ClaudeHeadlessAdapter:
             d = e.get("delta") or {}
             if d.get("type") == "text_delta" and d.get("text"):
                 sess.previa += d["text"]
-                await CodexPreviewSource.get(sess.name).push(sess.previa)
+                await PushPreviewSource.get(sess.name).push(sess.previa)
         elif tipo == "message_start":
             if not sess.in_progress:
                 # Turno iniciado por outro caminho (steer, hook): o estado acompanha o stream.
@@ -1227,7 +1227,7 @@ class ClaudeHeadlessAdapter:
         _limpar_rastros_do_cano(meta)
         sess = self._sessions.get(name)
         if sess is None:
-            CodexPreviewSource._sources.pop(name, None)
+            PushPreviewSource._sources.pop(name, None)
             self._problemas.pop(name, None)
             pid = ((meta or {}).get("cano") or {}).get("pid")
             if pid is not None:
@@ -1237,7 +1237,7 @@ class ClaudeHeadlessAdapter:
         def _retirar() -> None:
             if self._sessions.get(name) is sess:
                 self._sessions.pop(name, None)
-            CodexPreviewSource._sources.pop(name, None)
+            PushPreviewSource._sources.pop(name, None)
             self._problemas.pop(name, None)
 
         loop = sess.loop

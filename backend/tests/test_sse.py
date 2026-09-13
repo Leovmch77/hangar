@@ -3,7 +3,7 @@ import asyncio
 import json
 from app.sse import merged_events
 from app.models import ChatEvent, StateEvent
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 
 
 class _StubModel:
@@ -125,7 +125,7 @@ class _StubAdapterSeq:
 
 
 class _StubAdapterCodex:
-    # provider="codex" -> merged_events deve ramificar pro CodexPreviewSource (push), NAO pro
+    # provider="codex" -> merged_events deve ramificar pro PushPreviewSource (push), NAO pro
     # PreviewBroker (poll de pane, que nem existe pro Codex).
     provider = "codex"
 
@@ -143,7 +143,7 @@ class _StubAdapterCodex:
 async def test_codex_provider_uses_codex_preview_source(monkeypatch):
     monkeypatch.setattr("app.sse.get_adapter", lambda provider: _StubAdapterCodex())
     name = "codex-sse-preview"
-    await CodexPreviewSource.get(name).push("ok")  # simula delta ja acumulado pelo state_monitor
+    await PushPreviewSource.get(name).push("ok")  # simula delta ja acumulado pelo state_monitor
     async for ev in merged_events(name, "j", provider="codex"):
         if ev["event"] == "preview":
             assert json.loads(ev["data"])["text"] == "ok"

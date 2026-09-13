@@ -202,11 +202,11 @@ async def test_notificacao_terminal_atualiza_modo_e_esforco(chat):
 
 
 async def test_eventos_de_outra_thread_nao_alteram_sessao_principal(chat, monkeypatch):
-    from app.adapters.codex.adapter import CodexPreviewSource
+    from app.adapters.preview_push import PushPreviewSource
     adapter, client = chat
     sess = adapter._sessions["sess"]
     sess.update(state="working", in_progress=True, turn_id="turno-main")
-    preview = CodexPreviewSource.get("sess")
+    preview = PushPreviewSource.get("sess")
     await preview.push("prévia principal")
     drained = []
     async def drain(*args):

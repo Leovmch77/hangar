@@ -1,11 +1,11 @@
-"""Testes do CodexPreviewSource: mesma interface publica do PreviewBroker (get/subscribe,
+"""Testes do PushPreviewSource: mesma interface publica do PreviewBroker (get/subscribe,
 version + Condition + ref-count), mas alimentado por PUSH (deltas do app-server) em vez de
 POLL do pane (Codex nao tem pane de tmux)."""
 import asyncio
 
 import pytest
 
-from app.adapters.codex.preview import CodexPreviewSource
+from app.adapters.preview_push import PushPreviewSource
 
 
 @pytest.mark.asyncio
@@ -13,7 +13,7 @@ async def test_push_before_subscribe_is_seen_as_current_text():
     # Mesma semantica do PreviewBroker: subscribe() sempre entrega o snapshot ATUAL no 1o yield
     # (version=0 != last=-1 dispara sem esperar notify), sem precisar de push posterior.
     name = "push-basic"
-    src = CodexPreviewSource.get(name)
+    src = PushPreviewSource.get(name)
     await src.push("ok")
     text, md, full = await asyncio.wait_for(src.subscribe().__anext__(), timeout=1)
     assert (text, md, full) == ("ok", True, True)
@@ -22,7 +22,7 @@ async def test_push_before_subscribe_is_seen_as_current_text():
 @pytest.mark.asyncio
 async def test_push_wakes_a_subscriber_already_waiting():
     name = "push-wake"
-    src = CodexPreviewSource.get(name)
+    src = PushPreviewSource.get(name)
     agen = src.subscribe()
     await agen.__anext__()  # consome o snapshot inicial ("") -> subscriber passa a esperar mudanca
     task = asyncio.create_task(agen.__anext__())
@@ -36,7 +36,7 @@ async def test_push_wakes_a_subscriber_already_waiting():
 @pytest.mark.asyncio
 async def test_two_pushes_coalesce_to_last_for_slow_subscriber():
     name = "push-coalesce"
-    src = CodexPreviewSource.get(name)
+    src = PushPreviewSource.get(name)
     agen = src.subscribe()
 
     await src.push("o")
@@ -50,7 +50,7 @@ async def test_two_pushes_coalesce_to_last_for_slow_subscriber():
 @pytest.mark.asyncio
 async def test_get_returns_same_instance_for_same_name():
     name = "push-samename"
-    assert CodexPreviewSource.get(name) is CodexPreviewSource.get(name)
+    assert PushPreviewSource.get(name) is PushPreviewSource.get(name)
 
 
 @pytest.mark.asyncio
@@ -58,7 +58,7 @@ async def test_reset_limpa_o_texto_sem_notificar():
     # Mesmo contrato do PreviewBroker.reset (o __reset__ do SSE chama pra qualquer fonte): zera
     # sem acordar subscriber — quem limpa o front e o proprio SSE.
     name = "reset-basic"
-    src = CodexPreviewSource.get(name)
+    src = PushPreviewSource.get(name)
     await src.push("texto em voo")
     src.reset()
     assert src.text == ""
@@ -69,22 +69,22 @@ async def test_reset_limpa_o_texto_sem_notificar():
 @pytest.mark.asyncio
 async def test_last_subscriber_leaving_drops_the_instance():
     name = "push-refcount"
-    src = CodexPreviewSource.get(name)
+    src = PushPreviewSource.get(name)
     agen = src.subscribe()
     await agen.__anext__()  # entra no generator (roda o try, incrementa _subs)
     await agen.aclose()     # dispara o finally -> _subs volta a 0 -> registry limpa
-    assert name not in CodexPreviewSource._sources
+    assert name not in PushPreviewSource._sources
 
 
 @pytest.mark.asyncio
 async def test_old_subscriber_does_not_drop_recreated_instance():
     name = "push-recreated"
-    old = CodexPreviewSource.get(name)
+    old = PushPreviewSource.get(name)
     agen = old.subscribe()
     await agen.__anext__()
-    CodexPreviewSource._sources.pop(name)
-    new = CodexPreviewSource.get(name)
+    PushPreviewSource._sources.pop(name)
+    new = PushPreviewSource.get(name)
 
     await agen.aclose()
 
-    assert CodexPreviewSource.get(name) is new
+    assert PushPreviewSource.get(name) is new
