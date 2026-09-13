@@ -539,7 +539,7 @@
               {m.harness_inst_andamento({ passo: inst.passo, total: inst.total, etapa: etapaInst(inst.etapa) })}
               <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
                 aria-valuenow={pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}
-                aria-label={m.harness_inst_log()}
+                aria-label={m.harness_inst_progresso()}
                 ><span style="width: {pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}%"></span></span>
             {:else if inst.ok}
               {m.harness_inst_pronto()}
@@ -735,7 +735,10 @@
   /* Determinada: a largura é a medida que o servidor informou, sem animação de vai-e-vem. */
   .hs-progresso { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-barra.det span { animation: none; transition: width .4s ease; }
-  @media (prefers-reduced-motion: reduce) { .hs-barra span { animation: none; width: 100%; opacity: .5; } }
+    @media (prefers-reduced-motion: reduce) {
+      .hs-barra span { animation: none; width: 100%; opacity: .5; }
+      .hs-barra.det span { transition: none; }
+    }
   .hs-link { color: var(--accent); overflow-wrap: anywhere; }
   /* `--surface-raised`, e não `--bg-elevated` cru: o card já é `--surface-inset` e as duas
      superfícies precisam acompanhar o véu do papel de parede juntas (regra do CLAUDE.md). */

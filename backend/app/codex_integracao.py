@@ -659,10 +659,11 @@ class IntegracaoCodex:
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
         atualizar = forcar or agora - ultima >= _INTERVALO or bool(falhas_anteriores and agora - ultima >= 300)
         falhas = set()
+        mercados_alvo = sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}) if atualizar else []
+        total_sub = len(mercados_alvo) + len(candidatos)
         if atualizar:
-            mercados_alvo = sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos})
             for i, marketplace in enumerate(mercados_alvo, 1):
-                self._sub(i, len(mercados_alvo))
+                self._sub(i, total_sub)
                 source = _toml(cfg_path).get("marketplaces", {}).get(marketplace, {})
                 if source.get("source_type") != "git":
                     continue
@@ -685,7 +686,7 @@ class IntegracaoCodex:
         plugins_pendentes = set(registro.get("plugins_pendentes", [])) & desejados
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
         for i, id_ in enumerate(sorted(candidatos), 1):
-            self._sub(i, len(candidatos))
+            self._sub(len(mercados_alvo) + i, total_sub)
             try:
                 id_codex = identidades[id_]
                 conhecido = anteriores.get(id_)
