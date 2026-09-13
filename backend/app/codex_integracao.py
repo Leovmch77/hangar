@@ -104,7 +104,13 @@ def copiar_memorias(origem: Path, destino: Path) -> list[str]:
 def _e_hook_do_app(command: object) -> bool:
     """Hook do próprio Hangar (backend/hooks/): cada harness recebe o seu pelo instalador dele
     (codex_hook_installer aqui), então ele não atravessa pelo importador do Codex."""
-    return isinstance(command, str) and "backend/hooks/" in command.replace("\\", "/")
+    if not isinstance(command, str):
+        return False
+    normalizado = command.replace("\\", "/")
+    # O guard fica sob ~/.claude/hooks para caber na allowlist do Pi, mas continua sendo hook do
+    # Hangar. No Codex ele recebe uma entrada própria, com a sintaxe do shell daquele harness.
+    return ("backend/hooks/" in normalizado
+            or bool(re.search(r"(?:^|/)guard_tmux\.py(?:[\"'\s;]|$)", normalizado)))
 
 
 def sem_hooks_do_app(hooks: dict) -> dict:

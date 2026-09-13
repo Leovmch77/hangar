@@ -90,8 +90,15 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
     Kimi —, e `adapters/codex/adapter.py` lê esse marcador como segunda fonte de "turno fechou",
     então ele precisa existir mesmo com a integração desligada. Sem o filtro, `askq_capture`,
     `preview_hook`, `pair_hook`, `nav_hook` e `subagent_hook` (que só entendem o stdin do Claude)
-    iam junto. O instalador só ACRESCENTA: reescrever o comando muda o hook, e hook alterado é
-    hook não aprovado no Codex.
+    iam junto. O instalador preserva entradas funcionais: reescrever o comando muda o hook, e hook
+    alterado é hook não aprovado no Codex.
+    O `guard_tmux.py` também é do app, embora no Claude seu caminho fique sob `~/.claude/hooks`
+    para atender à allowlist do Pi. Em 13/09/2026 ele atravessou o importador com a forma
+    `"python" "guard_tmux.py"`: no PowerShell usado pelos hooks do Codex 0.154.0, o comando saiu
+    com código 1 em cada `PreToolUse`. O instalador do Codex agora fornece a entrada própria em
+    forma PowerShell e preserva `$LASTEXITCODE`, pois o código 2 é o contrato que bloqueia uma
+    derrubada do servidor. A migração troca somente o `guard_tmux.py` antigo; hooks pessoais
+    continuam intocados e nenhuma confiança é gravada automaticamente.
   - **A primeira rodada adota o que o instalador antigo escreveu** (`_migrar_ponte_antiga`): o
     espelho `~/.codex/.hangar-hooks.json` é o registro exato do que `install-skills-bridge.sh`
     gravava, então ele diz o que sai, sem chute. Sem isso a máquina ficava com cada hook em
