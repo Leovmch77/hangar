@@ -87,6 +87,7 @@ def test_create_codex_usa_o_lancador_e_nao_pre_semeia_transcript(tmp_path):
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
+         patch.object(codex_sessions, "pretrust_cwd") as pretrust, \
          patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
         info = reg.create("mysess", "/tmp/proj", provider="codex",
                           initial_prompt="revise este projeto")
@@ -101,6 +102,7 @@ def test_create_codex_usa_o_lancador_e_nao_pre_semeia_transcript(tmp_path):
     assert "hangar-codex-tui" in comando
     assert "/tmp/proj" in comando
     assert "revise este projeto" in comando
+    pretrust.assert_called_once()
 
 
 def test_create_codex_transporta_a_conta_secundaria_ao_lancador(tmp_path, monkeypatch):
@@ -110,12 +112,13 @@ def test_create_codex_transporta_a_conta_secundaria_ao_lancador(tmp_path, monkey
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
+         patch.object(codex_sessions, "pretrust_cwd") as pretrust, \
          patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
         reg.create("mysess", "/tmp/proj", provider="codex", codex_account="work")
     comando = new_sess.call_args[0][2]
     assert "--codex-home" in comando
     assert str(account.home) in comando
-    assert (account.home / "config.toml").exists()
+    pretrust.assert_not_called()
 
 
 def test_create_codex_com_resume_abre_a_conversa_existente(tmp_path):

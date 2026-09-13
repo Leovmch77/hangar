@@ -1823,16 +1823,16 @@ class SessionRegistry:
         # lista de pastas confiadas do Claude com pasta que ele talvez nunca abra.
         # Kimi tem trust PROPRIO (medido: pasta nova trava no "Trust this folder?" do boot) ->
         # pré-confia no formato dele (~/.kimi-code/workspace-trust), nao no do Claude.
-        # Codex tem trust PROPRIO tambem (medido: pasta nova trava no "Do you trust the contents of
-        # this directory?" da TUI, e ali a sessao nem abre a thread -> nasce sem sidecar, invisivel
-        # no app que a criou) -> pre-confia no formato dele, nao no do Claude.
+        # A conta Codex secundaria pre-confia pelo endpoint de preparo chamado DENTRO do launcher:
+        # assim termina a sincronizacao antes de qualquer escrita no config e antes da TUI. A
+        # padrao nao tem esse preparo e continua pre-confiando aqui, antes de criar o pane.
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="confiar_pasta")
         if provider == "kimi":
             from app.adapters.kimi import sessions as kimi_sessions
             kimi_sessions.pretrust_cwd(cwd)
-        elif provider == "codex":
+        elif provider == "codex" and account.is_default:
             codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        elif provider not in ("pi", "omp"):
+        elif provider not in ("pi", "omp", "codex"):
             _pretrust_cwd(cwd, config_dir)
         if protected_prefix:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])

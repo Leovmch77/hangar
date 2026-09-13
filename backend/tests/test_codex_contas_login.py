@@ -558,6 +558,25 @@ async def test_preparacao_em_curso_reserva_a_conta(contas, service, monkeypatch)
     await asyncio.gather(*service._preparations.values())
 
 
+async def test_preparacao_em_curso_nao_impede_criar_outro_terminal(contas, service, monkeypatch):
+    _, work = contas
+    gate = asyncio.Event()
+
+    async def blocked_prepare(account):
+        await gate.wait()
+        return {"status": "ready", "trust_pending": False, "issues": []}
+
+    monkeypatch.setattr("app.codex_contas_login.codex_contas_sync.prepare_account", blocked_prepare)
+    await service.prepare(work)
+    await asyncio.sleep(0)
+
+    lease = service.reserve_creation(work)
+
+    lease.release()
+    gate.set()
+    await asyncio.gather(*service._preparations.values())
+
+
 async def test_payload_publico_preserva_home_credencial_e_status(contas, service):
     default, _ = contas
 

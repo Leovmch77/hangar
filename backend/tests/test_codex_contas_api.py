@@ -100,6 +100,18 @@ def test_post_prepare_manual_forca_a_cadeia_completa(painel):
     assert service.prepare.await_args.kwargs == {"forcar": True}
 
 
+def test_get_prepare_concluido_confia_cwd_antes_de_liberar_lancador(painel, monkeypatch):
+    client, _ = painel
+    confiar = Mock()
+    monkeypatch.setattr("app.adapters.codex.sessions.pretrust_cwd", confiar)
+
+    response = client.get("/api/codex-contas/work/prepare", headers=AUTH,
+                          params={"cwd": "/repo"})
+
+    assert response.status_code == 200
+    confiar.assert_called_once_with("/repo", codex_home=accounts.resolve_account("work").home)
+
+
 def test_nome_invalido_e_conta_ausente_falham(painel):
     client, service = painel
     async def create(name):

@@ -646,9 +646,11 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   retomado pela mesma conta. AVD e Windows continuam sem verificação.
 
   Abertura da adicional (12/09/2026): o log registrou 51s entre pedir a preparação e criar a
-  sessão; numa abertura posterior foram 3s. Esses intervalos não medem cada etapa. O formulário
-  descartava as etapas do polling e mostrava apenas “Preparando conta”. Web e app nativo agora
-  mostram a atualização da principal, configurações, recursos, plugins e abertura da sessão.
+  sessão; numa abertura posterior foram 3s. Em 13/09, essa espera saiu do formulário: ele cria o
+  pane e navega, enquanto `hangar-codex-tui` inicia/acompanha o preparo no terminal e só depois
+  sobe o app-server e a TUI. O GET final do preparo grava a confiança da pasta no backend, depois
+  que as escritas da sincronização terminaram. Preparo já em curso é compartilhado por todos os
+  launchers daquela conta; falha fica visível no pane, e não num callback descartado do backend.
   A conferência nativa dos plugins pode ser reutilizada por até 5min, com hashes de origem e
   destino e versão do CLI iguais. Falha, confiança pendente, relógio regressivo ou pedido manual
   forçado exigem nova conferência; avisos de credenciais excluídas continuam visíveis e não

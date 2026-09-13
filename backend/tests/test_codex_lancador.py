@@ -127,6 +127,42 @@ def _espera(cond, limite=15.0):
     return False
 
 
+def test_conta_secundaria_espera_preparo_e_confia_a_pasta(monkeypatch):
+    lancador = runpy.run_path(str(_LANCADOR))
+    chamadas = []
+    respostas = iter([
+        {"status": "running", "etapa": "plugins", "issues": []},
+        {"status": "ready", "trust_pending": False, "issues": []},
+    ])
+
+    def api(method, path):
+        chamadas.append((method, path))
+        return next(respostas)
+
+    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend", api)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+
+    result = lancador["_preparar_conta_codex"]("work", "/repo com espaço")
+
+    path = "/api/codex-contas/work/prepare?cwd=%2Frepo%20com%20espa%C3%A7o"
+    assert chamadas == [("POST", path), ("GET", path)]
+    assert result["status"] == "ready"
+
+
+def test_conta_ja_preparada_ainda_confirma_trust_da_pasta(monkeypatch):
+    lancador = runpy.run_path(str(_LANCADOR))
+    chamadas = []
+
+    def api(method, path):
+        chamadas.append(method)
+        return {"status": "ready", "trust_pending": False, "issues": []}
+
+    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend", api)
+
+    assert lancador["_preparar_conta_codex"]("work", "/repo")["status"] == "ready"
+    assert chamadas == ["POST", "GET"]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
 def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     cwd = tmp_path / "proj"

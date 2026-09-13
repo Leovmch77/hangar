@@ -93,9 +93,14 @@ async def prepare_codex_account(account_id: str, request: Request,
 
 
 @codex_contas_router.get("/{account_id}/prepare", dependencies=[Depends(require_auth)])
-def codex_account_preparation(account_id: str, request: Request) -> dict:
+def codex_account_preparation(account_id: str, request: Request,
+                              cwd: str | None = Query(None, max_length=4096)) -> dict:
     account = _account(account_id)
-    return _service(request).preparation_status(account)
+    result = _service(request).preparation_status(account)
+    if cwd and result.get("status") != "running":
+        from app.adapters.codex import sessions
+        sessions.pretrust_cwd(cwd, codex_home=account.home)
+    return result
 
 
 @codex_contas_router.post("/{account_id}/login", dependencies=[Depends(require_auth)])

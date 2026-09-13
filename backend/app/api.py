@@ -219,29 +219,6 @@ def _codex_account_in_use(account) -> bool:
     return False
 
 
-def _start_codex_preparation(account, service) -> None:
-    if account is None or account.is_default or service is None:
-        return
-    task = asyncio.create_task(service.prepare(account), name=f"codex-prepare-{account.id}")
-    tasks = getattr(app.state, "codex_creation_tasks", None)
-    if tasks is None:
-        tasks = set()
-        app.state.codex_creation_tasks = tasks
-    tasks.add(task)
-
-    def finished(done: asyncio.Task) -> None:
-        tasks.discard(done)
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            _log.warning("sincronização automática da conta Codex %s falhou", account.id,
-                         exc_info=True)
-
-    task.add_done_callback(finished)
-
-
 class _BodyTooLarge(Exception):
     """Sinaliza corpo da request acima do limite (estoura no receive, antes de bufferizar tudo)."""
 
@@ -1921,7 +1898,6 @@ async def create_session(body: CreateBody):
                 raise
             _hold_codex_lease(info.name, codex_lease)
             codex_lease = None
-            _start_codex_preparation(codex_account_obj, codex_service)
             raise
         except BaseException:
             codex_lease.release()
@@ -1929,7 +1905,6 @@ async def create_session(body: CreateBody):
             raise
         _hold_codex_lease(info.name, codex_lease)
         codex_lease = None
-        _start_codex_preparation(codex_account_obj, codex_service)
         return info
 
     # Reconciliar e criar a sessão sob a MESMA trava (ciclo_conta), só no caminho que consome o

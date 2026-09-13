@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -78,6 +79,24 @@ def _integracao_codex(prazo: float = _PRAZO_INTEGRACAO) -> dict:
     if resultado.get("estado") == "executando":
         resultado = {**resultado, "avisos": [*resultado.get("avisos", []),
                      f"reconciliação ainda em andamento após {prazo:.0f}s; a sessão abre sem ela"]}
+    return resultado
+
+
+def _preparar_conta_codex(account_id: str, cwd: str) -> dict:
+    """Espera o preparo da conta no pane; o modal ja foi liberado."""
+    path = (f"/api/codex-contas/{urllib.parse.quote(account_id, safe='')}/prepare"
+            f"?cwd={urllib.parse.quote(cwd, safe='')}")
+    resultado = _api_backend("POST", path)
+    if resultado.get("status") != "running":
+        return _api_backend("GET", path)
+    ultima = ""
+    while resultado.get("status") == "running":
+        etapa = str(resultado.get("etapa") or "")
+        if etapa and etapa != ultima:
+            print(f"hangar-codex-tui: sincronizando conta Codex: {etapa}", file=sys.stderr)
+            ultima = etapa
+        time.sleep(0.5)
+        resultado = _api_backend("GET", path)
     return resultado
 # Quanto esperamos a TUI abrir a thread. Estourar NAO e fatal: o pane segue sendo um Codex
 # utilizavel; o que se perde e o vinculo com o app ate a proxima abertura.
@@ -304,6 +323,20 @@ def main() -> int:
     ambiente = codex_contas.environment(account, base=os.environ)
     os.environ.clear()
     os.environ.update(ambiente)
+
+    if not account.is_default:
+        try:
+            print("hangar-codex-tui: sincronizando a conta Codex…", file=sys.stderr)
+            resultado = _preparar_conta_codex(account.id, cwd)
+            if resultado.get("status") != "ready":
+                print(f"hangar-codex-tui: sincronização da conta: {resultado.get('status', 'desconhecida')}",
+                      file=sys.stderr)
+            for issue in resultado.get("issues", []):
+                print(f"hangar-codex-tui: {_texto(issue) or issue.get('code', 'aviso da sincronização')}",
+                      file=sys.stderr)
+        except Exception as exc:                          # noqa: BLE001
+            print(f"hangar-codex-tui: sincronização da conta falhou ({exc}); a sessão abre assim mesmo",
+                  file=sys.stderr)
 
     # O cwd novo ainda pode não estar no config do Codex. O alias precisa existir antes do app-server.
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.

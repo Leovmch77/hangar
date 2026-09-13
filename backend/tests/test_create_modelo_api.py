@@ -118,7 +118,7 @@ def test_preparacao_codex_em_andamento_nao_impede_sessao(monkeypatch, tmp_path):
         r = TestClient(app).post("/api/sessions", headers=AUTH, json={
             "name": "x", "cwd": "/tmp", "provider": "codex", "codex_account": "work"})
     assert r.status_code == 200
-    assert service.preparou.wait(1)
+    assert not service.preparou.wait(0.1)
     cr.assert_called_once()
 
 
@@ -142,7 +142,7 @@ def test_sync_incompleta_nao_bloqueia_sessao_nem_modelos(monkeypatch, tmp_path, 
         response = client.post("/api/sessions", headers=AUTH, json={
             "name": "cx-pending", "cwd": "/tmp", "provider": "codex", "codex_account": "work"})
         assert response.status_code == 200, response.text
-        service.prepare.assert_awaited_once_with(account)
+        service.prepare.assert_not_awaited()
         response = client.get("/api/model-options?provider=codex&codex_account=work", headers=AUTH)
         assert response.status_code == 200, response.text
     assert create.call_args.kwargs["codex_account"] == "work"

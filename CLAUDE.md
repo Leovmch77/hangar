@@ -235,6 +235,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   para autoaprovar hooks. Fonte inválida nunca significa remoção.
 - **Contas Codex adicionais têm `CODEX_HOME` próprio**; a identidade é `credential_id=codex:<home>`,
   nunca a chave. Sem migração, rotação ou troca automática por cota.
+- **Abrir Codex adicional não espera no modal**: o pane nasce primeiro, e o lançador espera o
+  preparo da conta e a confiança da pasta antes de subir a TUI. O backend não prepara por trás.
 - **A memória do Claude só é vista pelo Codex com uma CONVERSA ao lado dela** — e não basta o
   `.jsonl` existir: sessão que abriu e nunca conversou é descartada igual. Copiar só a `memory/`
   faz a reconciliação terminar `ok` sem trazer nada. Como o critério do detector não é documentado,
