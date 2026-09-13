@@ -788,7 +788,8 @@
                 {@const p = integracao.progresso}
                 <div class="hs-progresso">
                   <span>{m.harness_codex_progresso({ passo: p.passo, total: p.total })}{#if p.sub}
-                    · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}</span>
+                    · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}{#if integracao.etapa_segundos != null}
+                    · {m.harness_codex_etapa_tempo({ s: integracao.etapa_segundos })}{/if}</span>
                   <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
                     aria-valuenow={pctIntegracao(p)} aria-label={m.harness_codex_integracao()}
                     ><span style="width: {pctIntegracao(p)}%"></span></span>

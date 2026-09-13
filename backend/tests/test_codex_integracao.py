@@ -592,3 +592,37 @@ async def test_rodada_informa_etapa_x_de_n_e_limpa_no_fim(tmp_path, monkeypatch)
     assert vistos["_fragmentos"]["passo"] == 4
     assert vistos["_skills"]["passo"] == 5
     assert final["progresso"] is None
+
+
+async def test_rodada_mostra_tempo_da_acao_e_o_erro_diz_onde_parou(tmp_path, monkeypatch):
+    from app.codex_importador import CodexNativoErro
+    from app.codex_msgs import msg
+    home = _home(tmp_path)
+    (home / ".claude/CLAUDE.md").write_text("Instruções globais\n", encoding="utf-8")
+    class Native:
+        def __init__(self, *args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+
+    service = IntegracaoCodex(home, home / ".codex", nativo=Native)
+    async def async_noop(*args, **kwargs): pass
+    def noop(*args, **kwargs): pass
+    monkeypatch.setattr(service, "_config", async_noop)
+    for nome in ("_instrucoes", "_migrar_ponte_antiga", "_hooks"):
+        monkeypatch.setattr(service, nome, noop)
+    visto = {}
+
+    async def importa_e_estoura(*args):
+        service._etapa(msg("etapa_importando_plugins", plugins="superpowers@oficial"))
+        service._estado["etapa_desde"] -= 42
+        visto.update(service.status())
+        raise CodexNativoErro("tempo esgotado")
+
+    monkeypatch.setattr(service, "_plugins", importa_e_estoura)
+    final = await service.reconciliar()
+    assert visto["etapa"]["codigo"] == "etapa_importando_plugins"
+    assert visto["etapa_segundos"] >= 42
+    assert final["etapa_segundos"] is None
+    erro = final["erros"][0]
+    assert erro["codigo"] == "erro_falha_etapa"
+    assert erro["params"] == {"tipo": "CodexNativoErro", "etapa": "Codex importando superpowers@oficial"}

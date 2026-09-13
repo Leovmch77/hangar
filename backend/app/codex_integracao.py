@@ -240,6 +240,9 @@ class IntegracaoCodex:
         estado = self._status()
         estado["skills"] = self._resumo_skills()
         # Código + parâmetros pra tela traduzir; o texto vai junto pro log e pro lançador.
+        # Relógio do servidor: o Codex só avisa quando termina, e tempo correndo é o que separa lento de preso.
+        desde = estado.pop("etapa_desde", None)
+        estado["etapa_segundos"] = int(time.time() - desde) if desde and estado.get("estado") == "executando" else None
         estado["etapa"] = serializar(estado.get("etapa"))
         estado["avisos"] = [serializar(a) for a in estado.get("avisos", [])]
         estado["erros"] = [serializar(e) for e in estado.get("erros", [])]
@@ -321,9 +324,10 @@ class IntegracaoCodex:
 
     def _etapa(self, texto: str) -> None:
         self._estado["etapa"] = texto
+        self._estado["etapa_desde"] = time.time()
 
     def _passo(self, passo: int, texto: str) -> None:
-        self._estado["etapa"] = texto
+        self._etapa(texto)
         self._estado["progresso"] = {"passo": passo, "total": _TOTAL_ETAPAS, "sub": None}
 
     def _sub(self, atual: int, total: int) -> None:
@@ -345,7 +349,7 @@ class IntegracaoCodex:
     async def reconciliar(self, motivo: str = "manual", forcar: bool = False) -> dict:
         anterior = self.status()
         self._estado = {**_snapshot(), "estado": "executando", "etapa": msg("etapa_inventariando"),
-                        "progresso": {"passo": 1, "total": _TOTAL_ETAPAS, "sub": None},
+                        "etapa_desde": time.time(), "progresso": {"passo": 1, "total": _TOTAL_ETAPAS, "sub": None},
                         "plugins": anterior["plugins"], "ultima_execucao": anterior["ultima_execucao"],
                         "confianca_pendente": anterior["confianca_pendente"]}
         if not (self.home / ".claude" / "settings.json").is_file():
@@ -393,7 +397,7 @@ class IntegracaoCodex:
             raise
         except (OSError, ValueError, RuntimeError) as exc:
             # Não devolve conteúdo de config ou saídas de subprocessos que podem conter chaves.
-            self._erro(msg("erro_falha", tipo=type(exc).__name__))
+            self._erro(msg("erro_falha_etapa", tipo=type(exc).__name__, etapa=str(self._estado.get("etapa") or "")))
             self._estado["estado"] = "erro"
             # Traceback no log (caminhos, não conteúdo): a tela só diz o tipo, e sem isto um
             # PermissionError no Windows não tinha onde ser lido.
@@ -611,6 +615,7 @@ class IntegracaoCodex:
                 bloqueados.add(id_)
                 self._erro(msg("erro_marketplace_origem", marketplace=mercado))
         candidatos = desejados - bloqueados
+        self._etapa(msg("etapa_lendo_plugins"))
         inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
         ja_instalados = set()
         for id_ in candidatos:
@@ -625,6 +630,8 @@ class IntegracaoCodex:
         # Recorta a seleção nativa pela identidade completa, inclusive em marketplaces homônimos.
         itens = []
         faltantes = candidatos - ja_instalados
+        if faltantes:
+            self._etapa(msg("etapa_detectando"))
         for item in await codex.detectar() if faltantes else []:
             if item.get("itemType") != "PLUGINS":
                 continue
@@ -639,6 +646,8 @@ class IntegracaoCodex:
                 item["details"]["plugins"] = grupos
                 itens.append(item)
         if itens:
+            self._etapa(msg("etapa_importando_plugins", plugins=", ".join(
+                f"{n}@{g['marketplaceName']}" for i in itens for g in i["details"]["plugins"] for n in g["pluginNames"])))
             result = await codex.importar(itens)
             for tipo in result.get("itemTypeResults", []):
                 if tipo.get("failures"):

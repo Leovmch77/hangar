@@ -110,7 +110,8 @@ class CodexNativo:
             raise CodexNativoErro("O cliente nativo do Codex já está aberto.")
         try:
             # Administração da conta não deve carregar configuração de nenhum projeto.
-            self._work_dir = tempfile.TemporaryDirectory(prefix="hangar-codex-admin-")
+            # Windows: filho do Codex ainda segura o cwd ao fechar; falhar aqui escondia o erro real.
+            self._work_dir = tempfile.TemporaryDirectory(prefix="hangar-codex-admin-", ignore_cleanup_errors=True)
             self._proc = await asyncio.create_subprocess_exec(
                 *self._comando(), *_ADMIN_CONFIG, *self._config_memoria(), "app-server", "--stdio",
                 cwd=self._work_dir.name, env=self._env(),
