@@ -89,19 +89,34 @@ def _preparar_conta_codex(account_id: str, cwd: str, prazo: float = _PRAZO_CONTA
             f"?cwd={urllib.parse.quote(cwd, safe='')}")
     resultado = _api_backend("POST", path)
     if resultado.get("status") != "running":
-        return _api_backend("GET", path)
-    limite = time.monotonic() + prazo
-    ultima = ""
-    while resultado.get("status") == "running":
-        if time.monotonic() >= limite:
-            raise TimeoutError(f"preparo da conta não terminou em {prazo:.0f}s")
-        etapa = str(resultado.get("etapa") or "")
-        if etapa and etapa != ultima:
-            print(f"hangar-codex-tui: sincronizando conta Codex: {etapa}", file=sys.stderr)
-            ultima = etapa
-        time.sleep(0.5)
         resultado = _api_backend("GET", path)
+    else:
+        limite = time.monotonic() + prazo
+        ultima = ""
+        while resultado.get("status") == "running":
+            if time.monotonic() >= limite:
+                raise TimeoutError(f"preparo da conta não terminou em {prazo:.0f}s")
+            etapa = str(resultado.get("etapa") or "")
+            if etapa and etapa != ultima:
+                print(f"hangar-codex-tui: sincronizando conta Codex: {etapa}", file=sys.stderr)
+                ultima = etapa
+            time.sleep(0.5)
+            resultado = _api_backend("GET", path)
+    if resultado.get("status") not in ("ready", "partial"):
+        issues = ", ".join(str(item.get("code")) for item in resultado.get("issues", [])
+                           if isinstance(item, dict) and item.get("code"))
+        raise RuntimeError(f"preparo terminou com status {resultado.get('status', 'desconhecido')}"
+                           + (f" ({issues})" if issues else ""))
     return resultado
+
+
+def _parar_com_erro(mensagem: str) -> int:
+    print(f"hangar-codex-tui: {mensagem}", file=sys.stderr)
+    try:
+        input("Pressione Enter para fechar esta sessão.")
+    except EOFError:
+        pass
+    return 1
 # Quanto esperamos a TUI abrir a thread. Estourar NAO e fatal: o pane segue sendo um Codex
 # utilizavel; o que se perde e o vinculo com o app ate a proxima abertura.
 _ESPERA_THREAD = 60.0
@@ -339,9 +354,7 @@ def main() -> int:
                 print(f"hangar-codex-tui: {_texto(issue) or issue.get('code', 'aviso da sincronização')}",
                       file=sys.stderr)
         except Exception as exc:                          # noqa: BLE001
-            print(f"hangar-codex-tui: sincronização da conta falhou ({exc}); Codex não foi aberto",
-                  file=sys.stderr)
-            return 1
+            return _parar_com_erro(f"sincronização da conta falhou ({exc}); Codex não foi aberto")
 
     # O cwd novo ainda pode não estar no config do Codex. O alias precisa existir antes do app-server.
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.

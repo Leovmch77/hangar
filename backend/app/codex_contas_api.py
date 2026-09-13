@@ -97,7 +97,7 @@ def codex_account_preparation(account_id: str, request: Request,
                               cwd: str | None = Query(None, max_length=4096)) -> dict:
     account = _account(account_id)
     result = _service(request).preparation_status(account)
-    if cwd and result.get("status") != "running":
+    if cwd and result.get("status") in ("ready", "partial"):
         from app.adapters.codex import sessions
         sessions.pretrust_cwd(cwd, codex_home=account.home)
     return result

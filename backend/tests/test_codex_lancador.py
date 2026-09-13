@@ -175,6 +175,25 @@ def test_preparo_da_conta_tem_prazo_total(monkeypatch):
         lancador["_preparar_conta_codex"]("work", "/repo", prazo=180)
 
 
+def test_preparo_com_erro_nao_libera_a_tui(monkeypatch):
+    lancador = runpy.run_path(str(_LANCADOR))
+    monkeypatch.setitem(lancador["_preparar_conta_codex"].__globals__, "_api_backend",
+                        lambda *_: {"status": "error", "issues": [{"code": "sync_failed"}]})
+
+    with pytest.raises(RuntimeError, match="error"):
+        lancador["_preparar_conta_codex"]("work", "/repo")
+
+
+def test_falha_do_preparo_fica_no_pane_ate_enter(monkeypatch, capsys):
+    lancador = runpy.run_path(str(_LANCADOR))
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt))
+
+    assert lancador["_parar_com_erro"]("sincronização falhou") == 1
+    assert "sincronização falhou" in capsys.readouterr().err
+    assert prompts == ["Pressione Enter para fechar esta sessão."]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
 def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     cwd = tmp_path / "proj"

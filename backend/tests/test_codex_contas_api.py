@@ -112,6 +112,17 @@ def test_get_prepare_concluido_confia_cwd_antes_de_liberar_lancador(painel, monk
     confiar.assert_called_once_with("/repo", codex_home=accounts.resolve_account("work").home)
 
 
+def test_get_prepare_com_erro_nao_confia_a_pasta(painel, monkeypatch):
+    client, service = painel
+    service.preparation_status.return_value = {"status": "error", "issues": []}
+    confiar = Mock()
+    monkeypatch.setattr("app.adapters.codex.sessions.pretrust_cwd", confiar)
+
+    assert client.get("/api/codex-contas/work/prepare", headers=AUTH,
+                      params={"cwd": "/repo"}).status_code == 200
+    confiar.assert_not_called()
+
+
 def test_nome_invalido_e_conta_ausente_falham(painel):
     client, service = painel
     async def create(name):
