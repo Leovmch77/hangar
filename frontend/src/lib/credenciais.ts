@@ -173,6 +173,8 @@ export interface IntegracaoCodex {
   automatica: boolean;
   memoria: boolean;
   skills?: { ponte: number; nativas: number };
+  /** Só com a rodada andando: etapa X de N (fixas no servidor) e, dentro dela, item i de N. */
+  progresso?: { passo: number; total: number; sub: { atual: number; total: number } | null } | null;
 }
 
 export { comTeto } from '@hangar/core';

@@ -2414,6 +2414,8 @@
   "harness_codex_confianca": "Some items are awaiting your trust confirmation in Codex.",
   "harness_codex_skills": "Skills: {ponte} bridged, {nativas} native",
   "harness_codex_m_aviso_hooks_sem_arquivo": "Hooks with no file in Codex and no counterpart in ~/.claude/hooks: {arquivos}",
+  "harness_codex_progresso": "Step {passo} of {total}",
+  "harness_codex_progresso_sub": "{atual} of {total}",
   "harness_codex_m_etapa_reinicio": "Waiting for a reconciliation after restart",
   "harness_codex_m_etapa_aguardando": "Waiting for the integration",
   "harness_codex_m_etapa_inventariando": "Inventorying configuration",

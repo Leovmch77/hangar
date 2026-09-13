@@ -223,3 +223,28 @@ describe('integração do Codex em Harnesses', () => {
     expect(el.textContent).toContain(m.harness_codex_memoria_prazo());
   });
 });
+
+describe('HarnessSettings — andamento da integração do Codex', () => {
+  // O card só dizia o nome da etapa: sem "quanto falta", a rodada longa parecia travada
+  // (pedido de 13/09/2026). O servidor manda a etapa X de N (fixas) e, na importação, plugin i de N.
+  it('rodando: mostra etapa X de N, o sub-andamento e a barra proporcional', async () => {
+    ler = async () => resposta(estado({
+      estado: 'executando', etapa: 'Instalando ou atualizando superpowers',
+      progresso: { passo: 3, total: 5, sub: { atual: 2, total: 4 } },
+    }));
+    const t = await montar(B);
+    const andamento = t.el.querySelector<HTMLElement>('.hs-integracao .hs-progresso')!;
+    expect(andamento).not.toBeNull();
+    expect(andamento.textContent).toContain(m.harness_codex_progresso({ passo: 3, total: 5 }));
+    expect(andamento.textContent).toContain(m.harness_codex_progresso_sub({ atual: 2, total: 4 }));
+    // (3-1 + (2-1)/4) / 5 = 45%
+    const barra = andamento.querySelector<HTMLElement>('[role="progressbar"]')!;
+    expect(barra.getAttribute('aria-valuenow')).toBe('45');
+  });
+
+  it('parada: sem barra', async () => {
+    ler = async () => resposta(estado({ estado: 'ok', progresso: null }));
+    const t = await montar(B);
+    expect(t.el.querySelector('.hs-integracao .hs-progresso')).toBeNull();
+  });
+});

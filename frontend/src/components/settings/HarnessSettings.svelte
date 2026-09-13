@@ -304,6 +304,13 @@
     finally { if (g === ger) carregando = false; }
   }
 
+  // Etapas concluídas + a fração da etapa atual que o sub-andamento (item i de N) mede. Sem sub, a
+  // etapa em curso conta zero: a barra nunca promete um avanço que o servidor não informou.
+  function pctIntegracao(p: NonNullable<IntegracaoCodex['progresso']>): number {
+    const dentro = p.sub && p.sub.total > 0 ? (p.sub.atual - 1) / p.sub.total : 0;
+    return Math.round(Math.min(1, Math.max(0, (p.passo - 1 + dentro) / p.total)) * 100);
+  }
+
   // Andamento e desfecho moram JUNTO do item: o botão virava "…" e o resultado ia pro rodapé da
   // página, longe de quem clicou. Tempo decorrido, não estimativa: um conserto é um comando só, e
   // "quanto falta" seria inventado.
@@ -530,6 +537,10 @@
           <p class="hs-aviso" role="status">
             {#if instalando}
               {m.harness_inst_andamento({ passo: inst.passo, total: inst.total, etapa: etapaInst(inst.etapa) })}
+              <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                aria-valuenow={pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}
+                aria-label={m.harness_inst_log()}
+                ><span style="width: {pctIntegracao({ passo: inst.passo, total: inst.total, sub: null })}%"></span></span>
             {:else if inst.ok}
               {m.harness_inst_pronto()}
             {:else}
@@ -593,6 +604,16 @@
                 {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
                 {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
               </p>
+              {#if integracao.estado === 'executando' && integracao.progresso}
+                {@const p = integracao.progresso}
+                <div class="hs-progresso">
+                  <span>{m.harness_codex_progresso({ passo: p.passo, total: p.total })}{#if p.sub}
+                    · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}</span>
+                  <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                    aria-valuenow={pctIntegracao(p)} aria-label={m.harness_codex_integracao()}
+                    ><span style="width: {pctIntegracao(p)}%"></span></span>
+                </div>
+              {/if}
               <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
               {#if integracao.proxima_atualizacao}
                 <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
@@ -711,6 +732,9 @@
   .hs-barra span { position: absolute; inset: 0; width: 35%; border-radius: 2px;
                    background: var(--accent); animation: hs-barra 1.2s ease-in-out infinite; }
   @keyframes hs-barra { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  /* Determinada: a largura é a medida que o servidor informou, sem animação de vai-e-vem. */
+  .hs-progresso { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
+  .hs-barra.det span { animation: none; transition: width .4s ease; }
   @media (prefers-reduced-motion: reduce) { .hs-barra span { animation: none; width: 100%; opacity: .5; } }
   .hs-link { color: var(--accent); overflow-wrap: anywhere; }
   /* `--surface-raised`, e não `--bg-elevated` cru: o card já é `--surface-inset` e as duas

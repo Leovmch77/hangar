@@ -125,6 +125,8 @@ describe('HarnessSettings — instalar um CLI que falta', () => {
     expect(t.el.textContent).toContain(
       m.harness_inst_andamento({ passo: 1, total: 4, etapa: m.harness_inst_etapa_comando() }));
     expect(t.el.querySelector('.hs-inst-log')!.textContent).toContain('baixando kimi 0.38.0');
+    // Barra igual à da integração: etapas concluídas sobre o total (1ª etapa em curso = 0%).
+    expect(t.el.querySelector('.hs-inst [role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('0');
     unmount(t.comp);
   });
 

@@ -2414,6 +2414,8 @@
   "harness_codex_confianca": "Há itens aguardando sua confirmação de confiança no Codex.",
   "harness_codex_skills": "Skills: {ponte} na ponte, {nativas} nativas",
   "harness_codex_m_aviso_hooks_sem_arquivo": "Hooks sem arquivo no Codex e sem equivalente em ~/.claude/hooks: {arquivos}",
+  "harness_codex_progresso": "Etapa {passo} de {total}",
+  "harness_codex_progresso_sub": "{atual} de {total}",
   "harness_codex_m_etapa_reinicio": "Aguardando reconciliação após reinício",
   "harness_codex_m_etapa_aguardando": "Aguardando integração",
   "harness_codex_m_etapa_inventariando": "Inventariando configuração",

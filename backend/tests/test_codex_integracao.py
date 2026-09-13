@@ -546,3 +546,34 @@ def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     assert target.is_symlink()
     assert (home / '.codex/AGENTS.override.md').read_text() == source.read_text()
     assert source.read_text() == 'Texto global que deve permanecer somente na fonte'
+
+
+async def test_rodada_informa_etapa_x_de_n_e_limpa_no_fim(tmp_path):
+    # O card so dizia o nome da etapa: sem "quanto falta", uma rodada longa parecia travada
+    # (pedido de 13/09/2026). As etapas sao fixas, entao "etapa X de N" e medida, nao estimativa.
+    home = _home(tmp_path)
+    # `_home` grava sem encoding: no Windows sai cp1252 e a integracao le UTF-8.
+    (home / ".claude/CLAUDE.md").write_text("Instruções globais\n", encoding="utf-8")
+    service = IntegracaoCodex(home, home / ".codex")
+    vistos = {}
+
+    def espiar(nome):
+        original = getattr(service, nome)
+        if asyncio.iscoroutinefunction(original):
+            async def envolto(*a, **k):
+                vistos[nome] = service.status()["progresso"]
+                return await original(*a, **k)
+        else:
+            def envolto(*a, **k):
+                vistos[nome] = service.status()["progresso"]
+                return original(*a, **k)
+        setattr(service, nome, envolto)
+
+    for nome in ("_instrucoes", "_fragmentos", "_skills"):
+        espiar(nome)
+    final = await service.reconciliar()
+    assert final["estado"] == "ok", final
+    assert vistos["_instrucoes"]["passo"] == 2 and vistos["_instrucoes"]["total"] == 5
+    assert vistos["_fragmentos"]["passo"] == 4
+    assert vistos["_skills"]["passo"] == 5
+    assert final["progresso"] is None
