@@ -414,6 +414,8 @@ async def _lifespan(app: FastAPI):
     )
     app.state.codex_contas_login = codex_contas_login
     cotas.registrar_codex_auth_cache(codex_contas_login.cached_auth)
+    # Referência guardada: task sem dono pode ser coletada no meio.
+    app.state.codex_auth_aquecer = asyncio.create_task(codex_contas_login.aquecer())
     app.state.codex_creation_tasks = set()
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
@@ -428,7 +430,8 @@ async def _lifespan(app: FastAPI):
     finally:
         diag.registrar("backend.encerrando")
         codex_warm_task.cancel()
-        await asyncio.gather(codex_warm_task, return_exceptions=True)
+        app.state.codex_auth_aquecer.cancel()
+        await asyncio.gather(codex_warm_task, app.state.codex_auth_aquecer, return_exceptions=True)
         creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
         for creation_task in creation_tasks:
             creation_task.cancel()

@@ -120,6 +120,7 @@ class CodexContasLogin:
         self._preparation_results: dict[str, dict] = {}
         self._auth_cache: dict[str, tuple[tuple, int, float, dict]] = {}
         self._auth_generation: dict[str, int] = {}
+        self._renovando: dict[str, asyncio.Future] = {}
         self._indisponivel: dict[str, tuple[tuple, float, dict]] = {}
         self._lock = threading.RLock()
 
@@ -244,6 +245,32 @@ class CodexContasLogin:
                 and time.monotonic() - cached[2] <= _AUTH_TTL:
             return copy.deepcopy(cached[3])
         return None
+
+    async def aquecer(self) -> None:
+        """Lê o login das contas visíveis uma vez, na subida: a primeira abertura da criação de
+        sessão encontra o cache pronto em vez de esperar um app-server. Falha fica pra leitura normal."""
+        for account in accounts.list_visible_accounts():
+            try:
+                await self.read_auth(account)
+            except Exception:  # noqa: BLE001 — aquecimento é só adiantamento
+                _log.debug("aquecimento do login Codex falhou: %s", account.id, exc_info=True)
+
+    async def read_auth_rapido(self, account: accounts.Account) -> dict:
+        """Pra listar: o último login conhecido na hora, mesmo vencido, e a leitura nova por trás.
+
+        Com o cache vencido, abrir a criação de sessão esperava um app-server do Codex subir (2,7s
+        medidos só pra listar as contas). Sem leitura anterior, ou com a credencial trocada desde
+        ela (assinatura/geração diferentes), não há o que mostrar e a leitura é esperada."""
+        key = self._key(account)
+        cached = self._auth_cache.get(key)
+        if (cached and cached[0] == self._auth_signature(account)
+                and cached[1] == self._auth_generation.get(key, 0)):
+            if time.monotonic() - cached[2] > _AUTH_TTL and key not in self._renovando:
+                tarefa = asyncio.ensure_future(self.read_auth(account))
+                self._renovando[key] = tarefa
+                tarefa.add_done_callback(lambda _t, k=key: self._renovando.pop(k, None))
+            return copy.deepcopy(cached[3])
+        return await self.read_auth(account)
 
     async def read_auth(self, account: accounts.Account, *, refresh: bool = False) -> dict:
         key = self._key(account)
@@ -595,7 +622,7 @@ class CodexContasLogin:
                                sync: dict | None = None) -> dict:
         sync = sync if sync is not None else self.preparation_status(account)
         if read_auth:
-            auth = await self.read_auth(account)
+            auth = await self.read_auth_rapido(account)
         elif sync.get("status") == "running":
             auth = self._cached_auth(account)
         else:
