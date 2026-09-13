@@ -692,8 +692,8 @@
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless);
+                              headless?: boolean, subagentModel?: string | null) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel);
     onNavigateToChat(name);
   }
 

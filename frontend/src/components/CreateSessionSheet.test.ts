@@ -220,6 +220,18 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     unmount(comp);
   });
 
+  it('modelo dos subagentes escolhido vai no fim do onCreate', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#subagent-pick', 'sonnet');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet');
+    unmount(comp);
+  });
+
   it('C: rejeição de chamada SUPERADA não apaga a escolha feita depois (guarda de geração)', async () => {
     // 1ª chamada fica pendente (a do "servidor A", que depois cai); a 2ª resolve.
     let rejeitar1!: (e: Error) => void;

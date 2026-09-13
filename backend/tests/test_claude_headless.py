@@ -784,7 +784,7 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
     monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
     ad = ClaudeHeadlessAdapter()
-    sess = _Sessao("s1", sidecar)
+    sess = _Sessao("s1", S.update("s1", subagent_model="claude-opus-5"))
 
     async def ctrl(s, sub, **kw):
         return {}
@@ -797,6 +797,7 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     assert "TMUX" not in env and "TMUX_PANE" not in env
     assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]
     assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
     # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
     # onde ele escuta, pra o próximo backend religar.
     argv = list(visto["argv"])

@@ -648,7 +648,7 @@ def claude_json_de(config_dir: str | None) -> Path:
 
 
 def new_session(name: str, cwd: str, command: str, config_dir: str | None = None,
-                *, provider: str | None = None) -> bool:
+                *, provider: str | None = None, env: dict[str, str] | None = None) -> bool:
     # -e: cores corretas do Claude Code DENTRO do tmux (o claude e spawnado via `exec`, virando o
     # processo do pane sem shell intermediario). COLORTERM=24-bit + CLAUDE_CODE_TMUX_TRUECOLOR curto-circuita o downgrade pra 256
     # (gate pink). O TERM nao-tmux (gate teal) vem do default-terminal no ~/.tmux.conf.
@@ -696,6 +696,8 @@ def new_session(name: str, cwd: str, command: str, config_dir: str | None = None
     if wl:
         # sem isto o wl-paste dentro do pane nao conecta -> paste de imagem no Claude Code morre.
         args += ["-e", f"WAYLAND_DISPLAY={wl}"]
+    for chave, valor in (env or {}).items():
+        args += ["-e", f"{chave}={valor}"]
     # Config dir escolhido (ou o do backend, ou o padrao). NAO e um `-e` incondicional: no psmux
     # exportar o valor PADRAO e o proprio bug — `_e_config_dir` explica, com a medicao. No POSIX a
     # lista sai byte por byte igual a de antes.

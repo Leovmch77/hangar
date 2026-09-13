@@ -680,6 +680,8 @@ class ClaudeHeadlessAdapter:
         env[_MARCADOR_CANO] = meta["key"]
         if meta.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
+        if meta.get("subagent_model"):
+            env["CLAUDE_CODE_SUBAGENT_MODEL"] = meta["subagent_model"]
         if shutil.which(argv[0]) is None:
             raise RuntimeError(f"binário não encontrado: {argv[0]}")
         escuta, token = _escuta_nova(meta["key"])

@@ -30,7 +30,7 @@
     onCreate: (name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                engine?: string | null, model?: string | null, effort?: string | null,
                permissionMode?: string | null, ompProfile?: string | null,
-               headless?: boolean) => Promise<void>;
+               headless?: boolean, subagentModel?: string | null) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -174,6 +174,7 @@
   // nenhuma flag no comando: comportamento de hoje, byte por byte. A lista vem do
   // GET /api/model-options (Task 4), que já traz contexto/👁 pros provedores que informam.
   let modelo = $state('');
+  let subagente = $state('');
   let esforco = $state('');
   let modelos = $state<ModelOption[]>([]);
   let listaReduzida = $state(false);
@@ -243,7 +244,7 @@
 
   async function carregarModelos() {
     const seq = ++modSeq;
-    modelos = []; erroModelos = ''; listaReduzida = false; modelo = ''; esforco = '';
+    modelos = []; erroModelos = ''; listaReduzida = false; modelo = ''; esforco = ''; subagente = '';
     if (!temEscolhaDeModelo(provider)) return;
     if (provider === 'codex' && (!codexAccount || !codexServer)) return;
     try {
@@ -576,7 +577,7 @@
       // anterior sobrevive à reabertura quando o fetch de contas falha — o reset de carregarModelos
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
-      modelo = ''; esforco = ''; permissao = ''; semTerminal = false;
+      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
       modelos = []; listaReduzida = false; erroModelos = '';
       // Mesmo motivo do bloco acima, pro atalho de retomar: um `retomando` que sobreviveu a um
       // fechamento durante a chamada deixa o seletor E o botao travados na reabertura, com o botao
@@ -824,7 +825,10 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, true);
+                       esforco || null, permissao || null, null, true, (!engine && subagente) || null);
+      } else if (provider === 'claude' && !engine && subagente) {
+        await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
+                       esforco || null, permissao || null, null, false, subagente);
       } else {
         await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                        provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
@@ -1244,8 +1248,20 @@
           <label class="field-label" for="perm-pick">{m.criar_permissao()}</label>
           <Select id="perm-pick" class="field-input" ariaLabel={m.criar_permissao()} value={permissao}
             opcoes={[{ value: '', label: m.criar_permissao_padrao() },
-                     ...MODOS_PERMISSAO.map((n) => ({ value: n, label: n }))]} 
+                     ...MODOS_PERMISSAO.map((n) => ({ value: n, label: n }))]}
             onchange={(v) => (permissao = v)} />
+        </div>
+      {/if}
+
+      {#if !conversaAlvo && !bastao && provider === 'claude' && !engine && modelos.length > 0}
+        <div class="field">
+          <label class="field-label" for="subagent-pick">{m.criar_subagente()}</label>
+          <Select id="subagent-pick" class="field-input" ariaLabel={m.criar_subagente()} value={subagente}
+            opcoes={[{ value: '', label: m.criar_subagente_padrao() },
+                     ...modelos.filter((mod) => mod.id !== 'default').map((mod) => ({
+                       value: valorModelo(mod), label: mod.name ?? mod.id }))]}
+            onchange={(v) => (subagente = v)} />
+          <p class="hint">{m.criar_subagente_ajuda()}</p>
         </div>
       {/if}
       </div>

@@ -527,6 +527,8 @@ export interface CreateSessionBody {
   codex_account?: string | null;
   // Claude sem terminal (processo filho do backend, sem tmux). Só com provider claude.
   headless?: boolean;
+  // CLAUDE_CODE_SUBAGENT_MODEL da sessão. Só claude na conta Anthropic (motor já define o seu).
+  subagent_model?: string | null;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
@@ -550,6 +552,7 @@ export function createSession(
   ompProfile?: string | null,
   codexAccount?: string | null,
   headless?: boolean,
+  subagentModel?: string | null,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
@@ -558,6 +561,7 @@ export function createSession(
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
   if (headless && provider === 'claude') body.headless = true;
+  if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),

@@ -1622,20 +1622,25 @@ class SessionRegistry:
                omp_profile: str | None = None,
                codex_account: str | None = None,
                read_only: bool = False,
-               headless: bool = False) -> SessionInfo:
+               headless: bool = False,
+               subagent_model: str | None = None) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="validar")
         if not name:
             raise ValueError("nome invalido")
+        if subagent_model is not None:
+            if provider != "claude" or engine:
+                raise ValueError("modelo dos subagentes so vale para claude sem motor")
+            model_args.validar("claude", subagent_model, None)
         if headless:
             if provider != "claude":
                 raise ValueError("sessao sem terminal so vale para provider claude")
             if read_only or initial_prompt:
                 raise ValueError("sessao sem terminal nao aceita read_only nem prompt inicial")
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
-                                         effort, context_window, permission_mode)
+                                         effort, context_window, permission_mode, subagent_model)
         codex_home = None
         if provider == "codex":
             try:
@@ -1838,7 +1843,8 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
-        if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider):
+        env_pane = {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": subagent_model}} if subagent_model else {}
+        if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")
             raise ValueError("falha ao criar sessao no tmux")
@@ -1868,7 +1874,7 @@ class SessionRegistry:
     def _create_headless(self, name: str, cwd: str, config_dir: str | None,
                          resume_session_id: str | None, engine: str | None, model: str | None,
                          effort: str | None, context_window: int | None,
-                         permission_mode: str | None) -> SessionInfo:
+                         permission_mode: str | None, subagent_model: str | None = None) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -1896,7 +1902,7 @@ class SessionRegistry:
         self._forget(name)
         meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
                                       model=model, effort=effort, context_window=context_window,
-                                      permission_mode=permission_mode)
+                                      permission_mode=permission_mode, subagent_model=subagent_model)
         PromptQueue(name).clear()
         ThenLink(name).clear()
         self._clear_pair(name)
@@ -2208,6 +2214,9 @@ class SessionRegistry:
                   if pane.get("pid") else None)
         if motor_sumiu:
             modelo = esforco = janela = None
+        # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
+        subagente = (procinfo._env_var_of(pane["pid"], "CLAUDE_CODE_SUBAGENT_MODEL")
+                     if pane.get("pid") and not motor and not motor_sumiu else None)
         proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
         jsonl = proj / f"{session_id}.jsonl"
         if not jsonl.exists():
@@ -2236,7 +2245,8 @@ class SessionRegistry:
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
-        if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None):
+        env_pane = {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": subagente}} if subagente else {}
+        if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),
         # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.

@@ -1453,6 +1453,8 @@ class CreateBody(_StrictBody):
     effort: str | None = None
     # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
     permission_mode: str | None = None
+    # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
+    subagent_model: str | None = None
     # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
     # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
     omp_profile: str | None = None
@@ -1822,6 +1824,14 @@ async def create_session(body: CreateBody):
         raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
     if body.omp_profile and body.provider != "omp":
         raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
+    if body.subagent_model is not None:
+        if body.provider != "claude" or body.engine:
+            raise HTTPException(400, detail=erro("erro_subagente_so_claude",
+                                                 "modelo dos subagentes so vale para claude sem motor"))
+        try:
+            model_args.validar("claude", body.subagent_model, None)
+        except ValueError as e:
+            raise HTTPException(400, str(e).replace("model:", "subagent_model:", 1)) from None
     # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
@@ -1952,6 +1962,8 @@ async def create_session(body: CreateBody):
                                    effort=body.effort, context_window=janela)
                         if body.permission_mode is not None:
                             _kw["permission_mode"] = body.permission_mode
+                        if body.subagent_model is not None:
+                            _kw["subagent_model"] = body.subagent_model
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
                         if body.read_only:
@@ -1977,6 +1989,8 @@ async def create_session(body: CreateBody):
                      effort=body.effort, context_window=janela)
         if body.permission_mode is not None:
             _kw2["permission_mode"] = body.permission_mode
+        if body.subagent_model is not None:
+            _kw2["subagent_model"] = body.subagent_model
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt
         if body.omp_profile:

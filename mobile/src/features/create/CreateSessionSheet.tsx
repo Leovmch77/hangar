@@ -103,6 +103,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [engine, setEngine] = useState('');
   const [modelos, setModelos] = useState<ModelOption[]>([]);
   const [modelo, setModelo] = useState('');
+  const [subagente, setSubagente] = useState('');
   const [esforco, setEsforco] = useState('');
   const [permissao, setPermissao] = useState('');
   const [listaReduzida, setListaReduzida] = useState(false);
@@ -196,6 +197,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     // reset incondicional — igual à PWA (CreateSessionSheet.svelte:141), evita vazar modelo/esforço pro Codex
     setModelo('');
     setEsforco('');
+    setSubagente('');
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi') {
       setModelos([]);
       setListaReduzida(false);
@@ -338,6 +340,10 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
         (provider === 'claude' || provider === 'pi' || provider === 'kimi') ? (modelo || null) : null,
         (provider === 'claude' || provider === 'pi') ? (esforco || null) : null,
         provider === 'claude' ? permissao || null : null,
+        null,
+        null,
+        false,
+        provider === 'claude' && !engine ? subagente || null : null,
       );
       // sucesso → abre chat da nova sessão — não chamar onClose (router.back) que desfaz o replace
       if (!mounted.current || generation !== codexGeneration.current) return;
@@ -526,6 +532,18 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                   options={[{ value: '', label: m.criar_permissao_padrao() }, ...MODOS_PERMISSAO.map((n) => ({ value: n, label: n }))]}
                   onChange={(v) => setPermissao(v)}
                 />
+              </View>
+            )}
+
+            {provider === 'claude' && !engine && modelos.length > 0 && (
+              <View style={styles.field}>
+                <Text style={styles.label}>{m.criar_subagente()}</Text>
+                <MenuSelect
+                  value={subagente}
+                  options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
+                  onChange={(v) => setSubagente(v)}
+                />
+                <Text style={styles.hintSm}>{m.criar_subagente_ajuda()}</Text>
               </View>
             )}
 

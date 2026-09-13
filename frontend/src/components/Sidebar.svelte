@@ -212,9 +212,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean) {
+                              headless?: boolean, subagentModel?: string | null) {
     // O CreateSessionSheet já posicionou o servidor-alvo como ativo (selectServer).
-    const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless);
+    const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel);
     abrirSessaoDoSheet(name);
     // Aviso da reconciliação da conta (plugin ligado sem instalação etc): antes só ia pro log do
     // backend e a sessão abria "normal" sem o plugin. Texto vem pronto do backend.
