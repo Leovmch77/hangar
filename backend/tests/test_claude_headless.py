@@ -580,3 +580,26 @@ def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch)
         ev = ad._evento(sess)
         assert ev.question == "Permitir Bash? ls" and "39k" not in (ev.status_line or "")
     _run(fluxo())
+
+
+def test_buracos_calados_viram_nota_no_chat(adapter, tmp_path, monkeypatch):
+    from app import pqueue
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    sess = adapter._sessions["s1"]
+    q = pqueue.PromptQueue("s1"); q.clear()
+
+    async def fluxo():
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "c-1",
+                                       "request": {"subtype": "hook_callback", "callback_id": "x"}})
+        await adapter._on_event(sess, {"type": "novo_tipo", "x": 1})
+        await adapter._on_event(sess, {"type": "novo_tipo", "x": 2})   # repetido: sem 2ª nota
+        await adapter._on_event(sess, {"type": "keep_alive"})          # conhecido: nada
+    _run(fluxo())
+    # A CLI destrava com resposta vazia, e a pessoa vê o que foi respondido sem ela.
+    assert adapter.escritos == [{"type": "control_response",
+                                 "response": {"subtype": "success", "request_id": "c-1", "response": {}}}]
+    textos = [r["text"] for r in q.load()]
+    assert textos == ["⚙️ A CLI pediu `hook_callback`; respondi vazio",
+                      "⚙️ Evento desconhecido da CLI: novo_tipo"]
+    assert sess.pending == {} and sess.state == "idle"
+    q.clear()

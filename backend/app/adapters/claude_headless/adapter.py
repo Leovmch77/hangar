@@ -133,6 +133,7 @@ class _Sessao:
         self.tarefas: dict[str, dict] = {}          # subagentes em voo: task_id -> {tipo, passo}
         self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
         self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
+        self.tipos_desconhecidos: set[str] = set()  # eventos do stdout já avisados (uma nota por tipo)
 
     @property
     def sid(self) -> str:
@@ -915,8 +916,12 @@ class ClaudeHeadlessAdapter:
             sess.limit_reset = _hora_local(info.get("resetsAt")) if sess.limited else None
             await self._notify(sess)
             return
-        if t not in ("keep_alive", "conversation_reset", "tool_progress"):
-            _log.debug("claude headless: evento não tratado name=%s tipo=%s", sess.name, t)
+        if t not in ("keep_alive", "conversation_reset", "tool_progress") and t not in sess.tipos_desconhecidos:
+            # Evento que este adapter não conhece: no terminal teria tela, aqui sumiria calado.
+            # Uma nota por tipo por sessão, senão vira spam.
+            sess.tipos_desconhecidos.add(str(t))
+            _log.warning("claude headless: evento não tratado name=%s tipo=%s", sess.name, t)
+            await self._nota_local(sess, f"⚙️ Evento desconhecido da CLI: {t}")
 
     async def _on_system(self, sess: _Sessao, ev: dict) -> None:
         sub = ev.get("subtype")
@@ -1003,8 +1008,10 @@ class ClaudeHeadlessAdapter:
         req = ev.get("request") or {}
         sub = req.get("subtype")
         if sub != "can_use_tool":
-            # Subtype que não tratamos: responder vazio destrava a CLI (mesma escolha do MonoCode).
+            # Subtype que não tratamos: responder vazio destrava a CLI (mesma escolha do MonoCode),
+            # mas a pessoa precisa saber que algo foi pedido e decidido sem ela.
             await self._responder(sess, rid, {})
+            await self._nota_local(sess, f"⚙️ A CLI pediu `{sub}`; respondi vazio")
             return
         if req.get("tool_name") == "AskUserQuestion":
             perguntas = (req.get("input") or {}).get("questions") or []
