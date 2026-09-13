@@ -113,6 +113,7 @@ def test_sem_bash_o_wrapper_e_anotado_e_a_instalacao_segue(inst, monkeypatch):
         raise ValueError("sem bash nesta máquina")
 
     monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": False, "params": {}})
     monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
                         subprocess.CompletedProcess(argv, 0, "", ""))
     monkeypatch.setattr(hi.harness_saude, "diagnosticar",
@@ -181,6 +182,7 @@ def test_sem_bash_o_pulo_do_wrapper_vira_aviso_no_estado(inst, monkeypatch):
         raise ValueError("sem bash nesta máquina")
 
     monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": False, "params": {}})
     monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
                         subprocess.CompletedProcess(argv, 0, "", ""))
     monkeypatch.setattr(hi.harness_saude, "diagnosticar",
@@ -188,6 +190,23 @@ def test_sem_bash_o_pulo_do_wrapper_vira_aviso_no_estado(inst, monkeypatch):
     e = _rodar(inst, "codex")
     assert e["ok"] is True
     assert any("wrapper foi pulada" in a for a in e["avisos"])
+
+
+def test_sem_bash_com_o_wrapper_ja_no_perfil_nao_avisa(inst, monkeypatch):
+    # Windows: o bloco do install.ps1 no perfil do PowerShell ja carrega o `codex.ps1`. Avisar
+    # "wrapper pulado" ali mandava consertar o que estava certo (12/09/2026).
+    def _sem_bash():
+        raise ValueError("sem bash nesta máquina")
+
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar",
+                        lambda: [{"id": "codex", "instalado": True, "itens": []}])
+    e = _rodar(inst, "codex")
+    assert e["ok"] is True
+    assert not e["avisos"]
+    assert not any("wrapper pulado" in l for l in e["log"])
 
 
 def test_instalador_que_sai_zero_sem_ligar_o_wrapper_e_falha(inst, monkeypatch):
