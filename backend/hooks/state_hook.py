@@ -26,6 +26,20 @@ _STATE = {
 _SID_RE = re.compile(r"--(?:session-id|resume)[ =]([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 
 
+def _e_claude(argv: list[str]) -> bool:
+    # Mesma regra de app/renova_token._e_cli_claude (stdlib-only aqui, por isso duplicada): um
+    # argumento cujo nome é `claude`/`claude.exe` (binário nativo, ou o symlink `claude` do npm
+    # que o node recebe) ou cujo caminho passa por `claude-code` (cli.js do pacote). Substring
+    # no cmdline inteiro casava o `sh -c` que roda este hook quando o caminho dele tem "claude"
+    # (worktree `claude-headless`), e o marcador saía na chave errada.
+    for arg in argv:
+        partes = re.split(r"[\\/]", arg)
+        nome = partes[-1].lower()
+        if nome in ("claude", "claude.exe") or "claude-code" in partes:
+            return True
+    return False
+
+
 def _write_marker(base: str, subdir: str, key: str, payload: dict) -> None:
     d = os.path.join(base, subdir)
     os.makedirs(d, exist_ok=True)
@@ -56,11 +70,11 @@ def _boot_claude_sem_proc(start_pid: int) -> tuple[str | None, int | None]:
         return None, None
     for _ in range(12):
         try:
-            cl = " ".join(proc.cmdline())
+            argv = proc.cmdline()
         except Exception:
             return None, None
-        if "claude" in cl:
-            m = _SID_RE.search(cl)
+        if _e_claude(argv):
+            m = _SID_RE.search(" ".join(argv))
             return (m.group(1) if m else None), proc.pid
         try:
             proc = proc.parent()
@@ -83,11 +97,11 @@ def _boot_claude(start_pid: int) -> tuple[str | None, int | None]:
     for _ in range(12):
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                cl = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+                argv = fh.read().decode("utf-8", "replace").split("\x00")
         except OSError:
             return None, None
-        if "claude" in cl:
-            m = _SID_RE.search(cl)
+        if _e_claude(argv):
+            m = _SID_RE.search(" ".join(argv))
             return (m.group(1) if m else None), pid
         try:
             with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
