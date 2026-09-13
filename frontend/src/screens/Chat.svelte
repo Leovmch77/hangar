@@ -1636,6 +1636,8 @@
   // Servidor recusou o stream de vez (readyState CLOSED no onerror). Mostra a faixa com
   // "tentar de novo" em vez de reconectar em laço.
   let sseRecusado = $state(false);
+  // O stream caiu desde a última conexão boa: a próxima, ao abrir, ressincroniza a cauda.
+  let cairaAntes = false;
   // Componente vivo? connectSSE pos-destroy criava EventSource FANTASMA (watchdog proprio,
   // reconectando pra sempre, nada nunca fecha) — 1 leak por ciclo background->foreground->navegar.
   let alive = false;
@@ -1664,6 +1666,7 @@
         diag.registrar({ evento: 'sse.mudo', nivel: 'aviso', tela: 'chat', sessao: sessionName,
           req, ms, codigo: primeiroQuadro ? 'primeiro_quadro_timeout' : undefined }, destino);
         if (currentState === 'dead') return;
+        cairaAntes = true;   // conexão muda também é buraco
         if (primeiroQuadro) {
           // Com backoff: servidor lento pra responder viraria um laço de reabertura a cada 10s.
           es?.close(); es = null;
@@ -1679,6 +1682,12 @@
         primeiroQuadro = false;
         diag.registrar({ evento: 'sse.conectou', tela: 'chat', sessao: sessionName,
           req, ms: Date.now() - inicio }, destino);
+        if (cairaAntes) {
+          // A queda pode ter sido longa: o stream novo não reemite nota local antiga (ela vem só
+          // pelo /history, no lugar do relógio), então o buraco é fechado pela cauda.
+          cairaAntes = false;
+          void ressincronizarCauda();
+        }
       }
       sseRetryDelay = SSE_RETRY_MIN;
       sseRecusasSeguidas = 0;
@@ -1947,6 +1956,7 @@
                        codigo: String(estadoSSE), ms: Date.now() - inicio,
                        espera_ms: sseRetryDelay, detalhe: motivo, req }, destino);
       if (currentState === 'dead' || !alive) return;
+      cairaAntes = true;
       // CLOSED = recusa definitiva (404/401): insistir a cada 30s não muda a resposta — medido
       // 2h14 de laço, duas madrugadas seguidas, numa sessão que o servidor dizia não existir.
       // Para, e deixa a pessoa tentar de novo (ou o onVisible, quando a aba voltar).
@@ -1989,8 +1999,15 @@
     if (!es || Date.now() - reabertoPeloWatchdogEm > 1500) {
       clearTimeout(watchdog);
       clearTimeout(reconnectTimer);
+      cairaAntes = false;   // a cauda vem logo abaixo; a conexão nova não precisa buscar de novo
       connectSSE();
     }
+    await ressincronizarCauda();
+  }
+
+  // Cauda do /history fundida com o que chegou ao vivo: fecha o buraco de um background ou de uma
+  // queda do stream.
+  async function ressincronizarCauda() {
     const signal = newHistLoad();   // aborta a carga de fundo que ficou pendurada no background
     const g = histGen;
     const before = new Set(events);
