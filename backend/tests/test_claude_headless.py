@@ -365,19 +365,30 @@ def test_modo_de_permissao_sobrevive_ao_resume_e_ao_nome_da_cli(adapter):
     assert "--resume" in argv and argv[argv.index("--permission-mode") + 1] == "manual"
 
 
-def test_anexo_de_imagem_vira_bloco_nativo_e_texto_fica_inteiro(adapter, tmp_path):
+def test_anexo_de_imagem_vira_bloco_nativo_e_texto_fica_inteiro(adapter, tmp_path, monkeypatch):
     # No terminal a TUI anexa a imagem pelo path; aqui é o adapter, como bloco `image`. O texto
     # segue inteiro (é o que o .jsonl grava e o que a fila confirma). Arquivo que não é imagem
-    # ou não abre fica só como path.
-    img = tmp_path / "foto.png"
+    # fica só como path; imagem que não abre fica só como path E avisa no chat.
+    from app import pqueue
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    q = pqueue.PromptQueue("s1"); q.clear()
+    (tmp_path / "com espaco").mkdir()
+    img = tmp_path / "com espaco" / "foto.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
-    texto = f"olha isso — 📎 imagem: {img} 📎 arquivo: {tmp_path}/nota.txt 📎 imagem: {tmp_path}/sumiu.jpg"
+    img2 = tmp_path / "b.jpg"
+    img2.write_bytes(b"jpgfake")
+    texto = (f"olha isso — 📎 imagem: {img} 📎 arquivo: {tmp_path}/nota.txt "
+             f"📎 imagem: {tmp_path}/sumiu.jpg\n📎 imagem: {img2}, viu?")
     _run(adapter.send_prompt("s1", texto))
     blocos = adapter.escritos[-1]["message"]["content"]
     assert blocos[0] == {"type": "text", "text": texto}
-    assert len(blocos) == 2 and blocos[1]["type"] == "image"
+    assert [b["type"] for b in blocos] == ["text", "image", "image"]
     assert blocos[1]["source"]["media_type"] == "image/png"
     assert base64.b64decode(blocos[1]["source"]["data"]) == img.read_bytes()
+    assert blocos[2]["source"]["media_type"] == "image/jpeg"
+    notas = [r["text"] for r in q.load() if r.get("papel") == "assistant"]
+    assert len(notas) == 1 and "sumiu.jpg" in notas[0] and notas[0].startswith("⚠️ Imagem não anexada")
+    q.clear()
 
 
 def test_sem_login_vira_problema_com_instrucao(adapter):
@@ -408,7 +419,7 @@ def test_subagente_rotula_o_que_faz_e_nao_vaza_na_previa(adapter):
                                        "message": {"content": [{"type": "tool_use", "name": "Grep"}]}})
         assert sess.label == "Explore: List files"
         await adapter._on_event(sess, {"type": "system", "subtype": "task_notification", "task_id": "t1", "status": "completed"})
-        assert not sess.tarefas
+        assert not sess.tarefas and sess.label is None   # rótulo não fica congelado no filho
     _run(fluxo())
 
 
@@ -428,12 +439,22 @@ def test_permissao_decidida_por_hook_e_negacao_automatica_viram_nota(adapter, tm
         assert sess.state == "working"
         # Cancelamento de pedido que já não existe (interrupt nosso) não gera nota.
         await adapter._on_event(sess, {"type": "control_cancel_request", "request_id": "r1"})
+        # Pergunta nativa cancelada por hook também avisa.
+        sess.question = {"provider": "claude", "request_id": "q1", "questions": [{"question": "Qual banco?"}]}
+        await adapter._on_event(sess, {"type": "control_cancel_request", "request_id": "q1"})
+        assert sess.question is None
+        # Interrupt nosso: pendência respondida some antes; o cancel que a CLI manda depois é mudo.
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r2", "request": req})
+        await adapter.interrupt("s1")
+        await adapter._on_event(sess, {"type": "control_cancel_request", "request_id": "r2"})
         await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {},
                                        "permission_denials": [{"tool_name": "Edit", "tool_use_id": "t", "tool_input": {"file_path": "/x.py"}}]})
         await sess.drenador
     _run(fluxo())
     notas = [r["text"] for r in q.load() if r.get("papel") == "assistant"]
-    assert notas == ["⚙️ Permitir Bash? ls — decidido por hook, sem você", "⛔ Negado sem perguntar (1): Edit /x.py"]
+    assert notas == ["⚙️ Permitir Bash? ls — decidido por hook, sem você",
+                     "⚙️ Pergunta cancelada antes da resposta: Qual banco?",
+                     "⛔ Negado sem perguntar (1): Edit /x.py"]
     q.clear()
 
 

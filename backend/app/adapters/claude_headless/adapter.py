@@ -159,10 +159,7 @@ class ClaudeHeadlessAdapter:
         if sess is None or not await self.deliverable(name):
             return "deferred"
         try:
-            await self._write(sess, {
-                "type": "user", "session_id": "", "parent_tool_use_id": None,
-                "message": {"role": "user", "content": await asyncio.to_thread(_blocos_do_prompt, text)},
-            })
+            await self._escrever_prompt(sess, text)
         except Exception:
             _log.exception("claude headless: escrita no stdin falhou name=%s", name)
             return "deferred"
@@ -171,6 +168,15 @@ class ClaudeHeadlessAdapter:
         sess.label = None
         await self._notify(sess)
         return "sent"
+
+    async def _escrever_prompt(self, sess: _Sessao, text: str) -> None:
+        blocos, avisos = await asyncio.to_thread(_blocos_do_prompt, text)
+        await self._write(sess, {
+            "type": "user", "session_id": "", "parent_tool_use_id": None,
+            "message": {"role": "user", "content": blocos},
+        })
+        for aviso in avisos:
+            await self._nota_local(sess, aviso)
 
     async def drain(self, name: str, path: str) -> int:
         async with self.delivery_lock(name):
@@ -211,10 +217,7 @@ class ClaudeHeadlessAdapter:
         # Só no processo que está aí: subir outro "pra orientar" seria começar outra conversa.
         if not sess.vivo:
             raise RuntimeError("o processo encerrou antes de receber a mensagem")
-        await self._write(sess, {
-            "type": "user", "session_id": "", "parent_tool_use_id": None,
-            "message": {"role": "user", "content": await asyncio.to_thread(_blocos_do_prompt, text)},
-        })
+        await self._escrever_prompt(sess, text)
         if not sess.in_progress:
             sess.in_progress = True
             sess.state = "working"
@@ -257,6 +260,7 @@ class ClaudeHeadlessAdapter:
         # Pedido pendente some junto com o turno: negar antes evita a tool rodar depois do Esc.
         for rid in list(sess.pending):
             await self._responder(sess, rid, {"behavior": "deny", "message": "Interrompido pelo usuário."})
+        sess.pending.clear()   # já respondido: um cancel da CLI depois disto não é "decisão de hook"
         if sess.question:
             await self._responder(sess, sess.question["request_id"],
                                   {"behavior": "deny", "message": "Interrompido pelo usuário."})
@@ -552,9 +556,10 @@ class ClaudeHeadlessAdapter:
 
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
         t = ev.get("type")
-        if ev.get("parent_tool_use_id") and t in ("assistant", "user", "stream_event"):
+        if ev.get("parent_tool_use_id") and not str(t).startswith("control_"):
             # Conversa de subagente: fica fora do rótulo e da prévia do principal (o transcript
             # dele mora em subagents/agent-*.jsonl; o que ele faz agora vem por task_progress).
+            # Vale pra qualquer tipo: um `result` de filho fechando o turno do pai seria pior.
             return
         if t == "control_response":
             r = ev.get("response") or {}
@@ -601,14 +606,20 @@ class ClaudeHeadlessAdapter:
         if t == "control_cancel_request":
             rid = str(ev.get("request_id"))
             req = sess.pending.pop(rid, None)
-            if sess.question and str(sess.question["request_id"]) == rid:
+            nota = None
+            if req is not None:
+                nota = f"⚙️ {self._permissao_texto(req)} — decidido por hook, sem você"
+            elif sess.question and str(sess.question["request_id"]) == rid:
+                perguntas = sess.question.get("questions") or []
+                primeira = (perguntas[0].get("question") if perguntas and isinstance(perguntas[0], dict) else "") or ""
+                nota = f"⚙️ Pergunta cancelada antes da resposta: {primeira[:120]}".rstrip(": ")
                 sess.question = None
             self._recalcular_estado(sess)
             await self._notify(sess)
-            if req is not None:
+            if nota:
                 # Alguém decidiu antes do usuário (hook PermissionRequest, ou a CLI desistiu):
                 # no terminal isso aparece como uma linha; aqui a pergunta sumiria calada.
-                await self._nota_local(sess, f"⚙️ {self._permissao_texto(req)} — decidido por hook, sem você")
+                await self._nota_local(sess, nota)
             return
         if t == "result":
             sess.in_progress = False
@@ -715,7 +726,7 @@ class ClaudeHeadlessAdapter:
             status = ev.get("status") or (ev.get("patch") or {}).get("status")
             if status in ("completed", "failed", "killed", "cancelled"):
                 sess.tarefas.pop(str(ev.get("task_id")), None)
-                sess.label = self._rotulo_tarefas(sess) if sess.tarefas else sess.label
+                sess.label = self._rotulo_tarefas(sess)   # None quando era o último
         else:
             return
         await self._notify(sess)
@@ -815,9 +826,10 @@ class ClaudeHeadlessAdapter:
         fila durável, que o histórico e o SSE já sabem ler. Falha vira log e problema visível."""
         try:
             await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
-        except OSError:
+        except Exception:
             _log.exception("claude headless: nota local não gravada name=%s", sess.name)
-            self._registrar_problema(sess, "headless_turno_erro", f"aviso perdido: {texto[:120]}")
+            if not sess.problema:   # um problema real (login, turno) não pode ser coberto por este
+                self._registrar_problema(sess, "headless_turno_erro", f"aviso perdido: {texto[:120]}")
 
     def status_line(self, sess: _Sessao) -> str | None:
         parts: list[str] = []
@@ -993,29 +1005,43 @@ class ClaudeHeadlessAdapter:
 # Anexo de imagem do composer ("legenda — 📎 imagem: <path>"). No terminal a TUI reconhece o path
 # e anexa a imagem de verdade; aqui é o adapter que anexa, como bloco `image` ao lado do texto.
 # O texto vai inteiro (com o path): é o que o .jsonl grava e o que a fila usa pra confirmar.
-_IMG_RE = re.compile(r"📎\s*imagem:\s*(\S+)")
+_IMG_RE = re.compile(r"📎\s*imagem:\s*(.+?)(?=\s*📎|$)", re.M)
 _IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
              ".gif": "image/gif", ".webp": "image/webp"}
 _IMG_TETO = 5 * 1024 * 1024   # teto da API por imagem; acima disso fica só o path (o Read abre)
 
 
-def _blocos_do_prompt(text: str) -> list[dict]:
+def _caminho_de_imagem(trecho: str) -> Path | None:
+    # O que vem depois de "📎 imagem:" até o próximo marcador: path gerado pelo upload (sem espaço)
+    # ou digitado à mão (pode ter espaço, ou texto colado depois). Tenta o trecho inteiro e
+    # depois só a primeira palavra; pontuação colada no fim (vírgula, ponto) não conta.
+    for cand in (trecho.strip(), trecho.split()[0] if trecho.split() else ""):
+        cand = cand.rstrip(".,;:)")
+        if cand and Path(cand).suffix.lower() in _IMG_MIME:
+            return Path(cand)
+    return None
+
+
+def _blocos_do_prompt(text: str) -> tuple[list[dict], list[str]]:
+    """(blocos da mensagem `user`, avisos de imagem que ficou só como path)."""
     blocos: list[dict] = [{"type": "text", "text": text}]
-    for caminho in _IMG_RE.findall(text):
-        mime = _IMG_MIME.get(Path(caminho).suffix.lower())
-        if not mime:
+    avisos: list[str] = []
+    for trecho in _IMG_RE.findall(text):
+        caminho = _caminho_de_imagem(trecho)
+        if caminho is None:
             continue
+        mime = _IMG_MIME[caminho.suffix.lower()]
         try:
-            dados = Path(caminho).read_bytes()
-        except OSError:
-            _log.warning("claude headless: imagem do anexo ilegível, vai só o path: %s", caminho)
+            dados = caminho.read_bytes()
+        except OSError as e:
+            avisos.append(f"⚠️ Imagem não anexada (não abre: {e.strerror or e}); só o path foi: {caminho.name}")
             continue
         if len(dados) > _IMG_TETO:
-            _log.warning("claude headless: imagem acima do teto (%d bytes), vai só o path: %s", len(dados), caminho)
+            avisos.append(f"⚠️ Imagem não anexada ({len(dados) // (1024 * 1024)} MB, teto 5 MB); só o path foi: {caminho.name}")
             continue
         blocos.append({"type": "image", "source": {"type": "base64", "media_type": mime,
                                                    "data": base64.b64encode(dados).decode("ascii")}})
-    return blocos
+    return blocos, avisos
 
 
 def _alvo_da_permissao(req: dict) -> tuple[str, str]:
