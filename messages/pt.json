@@ -3,6 +3,7 @@
   "sync_boot_loading": "Conectando ao Hangar…",
   "sync_boot_error": "Não foi possível verificar a conexão. Confira a rede e tente novamente.",
   "sync_retry": "Tentar novamente",
+  "sync_login_again": "Entrar novamente",
   "sync_password_min": "Use uma senha com pelo menos 8 caracteres.",
   "sync_setup_login_error": "A sincronização foi ativada, mas não foi possível entrar. Abra este servidor e use o usuário e a senha que você criou.",
   "sync_config_titulo": "Sincronização",

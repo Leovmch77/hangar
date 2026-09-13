@@ -117,12 +117,22 @@ export function syncStatus(): Promise<SyncStatus | null> {
 async function readStatus(): Promise<SyncStatus | null> {
   try {
     const r = await jf('/api/sync/status');
-    const value = r.status === 404 ? { enabled: false, registered: false } : r.ok ? await r.json() : null;
-    if (typeof value?.enabled !== 'boolean' || typeof value?.registered !== 'boolean') return cachedSyncStatus();
+    const cached = cachedSyncStatus();
+    if (r.status === 404) {
+      const value = { enabled: false, registered: false };
+      rememberStatus(value);
+      return value;
+    }
+    if (!r.ok) return cached?.enabled ? cached : null;
+    const value = await r.json();
+    if (typeof value?.enabled !== 'boolean' || typeof value?.registered !== 'boolean') {
+      return cached?.enabled ? cached : null;
+    }
     rememberStatus(value);
     return value;
   } catch {
-    return cachedSyncStatus();
+    const cached = cachedSyncStatus();
+    return cached?.enabled ? cached : null;
   }
 }
 
@@ -196,8 +206,18 @@ export async function logout(): Promise<void> {
 
 export async function getVault(): Promise<{ enc_blob: { iv: string; data: string } | null; rev: number }> {
   const r = await jf('/api/sync/vault');
-  if (!r.ok) throw new Error('vault read failed');
+  if (!r.ok) throw new SyncRequestError('vault read failed', r.status);
   return await r.json();
+}
+
+export class SyncRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+export function isSyncUnauthorized(error: unknown): boolean {
+  return error instanceof SyncRequestError && error.status === 401;
 }
 
 export async function putVault(

@@ -3,6 +3,7 @@
   "sync_boot_loading": "Connecting to Hangar…",
   "sync_boot_error": "Unable to check the connection. Check your network and try again.",
   "sync_retry": "Try again",
+  "sync_login_again": "Sign in again",
   "sync_password_min": "Use a password with at least 8 characters.",
   "sync_setup_login_error": "Sync was enabled, but sign-in failed. Open this server and use the username and password you created.",
   "sync_config_titulo": "Sync",

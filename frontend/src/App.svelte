@@ -1,7 +1,7 @@
 <script lang="ts">
   import { isAuthenticated, setServers, listServers, mergeServers, onServersChanged, clearCredentials, selectServer, getActiveId, serverIdentidade, type Server } from './lib/auth';
   import { logoutLocal } from './lib/logout';
-  import { getVault, decryptList, encryptList, putVault, logout as syncLogout, syncStatus, cachedSyncStatus, stashKey, loadKey, clearKey } from './lib/sync';
+  import { getVault, decryptList, encryptList, putVault, logout as syncLogout, syncStatus, cachedSyncStatus, isSyncUnauthorized, stashKey, loadKey, clearKey } from './lib/sync';
   import * as m from './paraglide/messages';
   import { vaultPush } from './lib/vaultPush.svelte';
   import { ttsPlayer } from './lib/ttsPlayer.svelte';
@@ -95,9 +95,10 @@
   // syncReady: ha encKey (login fresco OU restaurado do sessionStorage). Com sync ligado, o app so
   // entra com syncReady -> senao forca o login do hub, mesmo havendo servers em cache (senao os
   // pushes pro hub ficariam mudos por falta de chave).
-  let syncEnabled = $state<boolean | null>(cachedSyncStatus()?.enabled ?? null);
+  let syncEnabled = $state<boolean | null>(cachedSyncStatus()?.enabled ? true : null);
   let syncReady = $state(false);
   let syncBootError = $state(false);
+  let syncRestoring = $state(true);
 
   // Duas variaveis, uma variavel so tentando significar duas coisas foi o bug da rodada anterior:
   // --cp-tts-bar-h e SO a barra do player (ttsPlayer.barH, MEDIDA pela propria TtsBar via
@@ -142,7 +143,7 @@
   });
 
   const route: Route = $derived(
-    syncEnabled === null
+    syncRestoring || syncBootError || syncEnabled === null
       ? { name: 'loading' }                                            // sondando o hub
       : syncEnabled
         ? (syncReady ? parseHash(currentHash) : { name: 'login' })     // sync: exige sessao com chave
@@ -261,7 +262,9 @@
   // Boot: sonda o hub. Se ligado, tenta restaurar a sessao do sessionStorage (encKey sobrevive ao
   // reload) sem repedir senha; senao cai no login do hub. Sem sync, segue a regra de localStorage.
   async function restoreSync() {
-      syncBootError = false;
+    syncBootError = false;
+    syncRestoring = true;
+    try {
       const s = await syncStatus();
       if (!s) { syncBootError = true; return; }
       if (!s.enabled) { syncEnabled = false; return; }
@@ -270,10 +273,26 @@
       if (key) {
         try {
           await establishSync(key);          // cookie ainda valido -> restaura sem repedir senha
-        } catch {
-          clearKey();                         // sessao morta (cookie expirado) -> cai no login do hub
+        } catch (error) {
+          if (isSyncUnauthorized(error)) clearKey();
+          else {
+            console.error('sync: não foi possível restaurar o cofre', error);
+            syncBootError = true;
+          }
         }
       }
+    } finally {
+      syncRestoring = false;
+    }
+  }
+
+  function reopenSyncLogin() {
+    clearKey();
+    encKey = null;
+    syncReady = false;
+    syncBootError = false;
+    syncRestoring = false;
+    syncEnabled = true;
   }
   $effect(() => { void restoreSync(); });
 
@@ -479,7 +498,12 @@
   {#if route.name === 'loading'}
     <div class="boot" aria-busy={!syncBootError}>
       <p role="status">{syncBootError ? m.sync_boot_error() : m.sync_boot_loading()}</p>
-      {#if syncBootError}<button class="btn" onclick={restoreSync}>{m.sync_retry()}</button>{/if}
+      {#if syncBootError}
+        <div class="boot-actions">
+          <button class="btn" onclick={restoreSync}>{m.sync_retry()}</button>
+          {#if cachedSyncStatus()?.enabled}<button class="btn" onclick={reopenSyncLogin}>{m.sync_login_again()}</button>{/if}
+        </div>
+      {/if}
     </div>
   {:else if route.name === 'login'}
     <Login {onLogin} onSyncLogin={onSyncLogin} />
@@ -586,4 +610,5 @@
     color: var(--text-primary);
     text-align: center;
   }
+  .boot-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-3); }
 </style>

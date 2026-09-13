@@ -19,7 +19,7 @@ const store = new Map<string, string>();
 (globalThis as any).document = { cookie: '' };
 (globalThis as any).window = { location: { origin: 'https://app.test' } };
 
-const { deriveKeys, encryptList, decryptList, register, syncStatus, cachedSyncStatus, activateSync, disableSync, loadKey } = await import('./sync');
+const { deriveKeys, encryptList, decryptList, register, syncStatus, cachedSyncStatus, activateSync, disableSync, loadKey, getVault, isSyncUnauthorized } = await import('./sync');
 
 beforeEach(() => {
   store.clear();
@@ -84,16 +84,31 @@ describe('register (erro da API de sync)', () => {
   });
 });
 
-it('lembra acesso direto por origem e preserva o modo conhecido quando a rede falha', async () => {
+it('só libera acesso direto após 404 confirmado', async () => {
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 404 }));
   expect(cachedSyncStatus()).toBeNull();
   await expect(syncStatus()).resolves.toEqual({ enabled: false, registered: false });
   expect(cachedSyncStatus()?.enabled).toBe(false);
   fetchMock.mockRejectedValue(new TypeError('offline'));
-  await expect(syncStatus()).resolves.toEqual({ enabled: false, registered: false });
+  await expect(syncStatus()).resolves.toBeNull();
   store.clear();
   await expect(syncStatus()).resolves.toBeNull();
   expect(cachedSyncStatus()).toBeNull();
+});
+
+it('distingue sessão expirada de falhas temporárias ao abrir o cofre', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch');
+  fetchMock.mockResolvedValueOnce(new Response('', { status: 401 }));
+  const unauthorized = await getVault().catch((error) => error);
+  expect(isSyncUnauthorized(unauthorized)).toBe(true);
+
+  fetchMock.mockRejectedValueOnce(new TypeError('offline'));
+  const offline = await getVault().catch((error) => error);
+  expect(isSyncUnauthorized(offline)).toBe(false);
+
+  fetchMock.mockResolvedValueOnce(new Response('', { status: 500 }));
+  const serverError = await getVault().catch((error) => error);
+  expect(isSyncUnauthorized(serverError)).toBe(false);
 });
 
 it('consulta pendurada termina no prazo e não é gravada como modo direto', async () => {
