@@ -482,6 +482,35 @@ def test_conexao_tomada_com_cano_vivo_religa_sem_esquecer_nem_acusar_queda(adapt
     assert adapter.problema_de("s1") is None
 
 
+def test_entrega_agenda_a_confirmacao_da_fila(adapter):
+    agendadas = []
+    adapter.apos_entrega = agendadas.append
+    assert _run(adapter.send_prompt("s1", "oi")) == "sent"
+    assert agendadas == ["s1"]
+
+
+def test_problema_sobrevive_ao_restart_e_limpa_no_turno_bom(adapter, sidecar):
+    sess = adapter._sessions["s1"]
+    adapter._registrar_problema(sess, "headless_processo_caiu", "rc=143")
+    novo = ClaudeHeadlessAdapter()                      # backend reiniciado: memória vazia
+    assert novo.problema_de("s1") == ("headless_processo_caiu", "rc=143")
+
+    async def fluxo():
+        gen = novo.state_monitor("s1", lambda: None)
+        ev = await gen.__anext__()
+        assert ev.state == "idle" and ev.problema == "headless_processo_caiu"
+        await gen.aclose()
+        viva = _Sessao("s1", S.load("s1"))
+        viva.proc = _Proc()
+        novo._sessions["s1"] = viva
+        assert novo._evento(viva).problema == "headless_processo_caiu"
+        viva.in_progress = True
+        await novo._on_event(viva, {"type": "result", "subtype": "success", "usage": {"input_tokens": 1}})
+        await viva.drenador
+    _run(fluxo())
+    assert S.load("s1").get("problema") is None and ClaudeHeadlessAdapter().problema_de("s1") is None
+
+
 def test_cano_mudo_e_vivo_nao_e_morto(sidecar, monkeypatch):
     ad = ClaudeHeadlessAdapter()
     S.update("s1", cano={"pid": 777, "escuta": "tcp:127.0.0.1:1", "token": "t"})

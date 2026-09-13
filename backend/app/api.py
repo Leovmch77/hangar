@@ -293,6 +293,10 @@ async def _lifespan(app: FastAPI):
         religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
         if religadas:
             _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
+        # A conferência de entrega é um Timer em memória: o restart apagou as agendadas, e a
+        # mensagem que morreu com o processo ficava "entregue" pra sempre.
+        for meta in await asyncio.to_thread(headless_sessions.list_all):
+            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
     except Exception:
         _log.warning("claude headless: varredura/religação de canos falhou", exc_info=True)
     _state_dirs =list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
@@ -1117,8 +1121,13 @@ def _confirm_and_drain(name: str) -> None:
         # o mesmo arquivo uma segunda vez, e o 0.0 dele desliga a poda por idade — sem ela, entrada
         # de sessao ANTERIOR nao e mais dispensada e vai parar no caminho que REDIGITA. Ou seja: o
         # mesmo defeito, pela porta do lado. Aqui "nao sei" nunca decide nada.
-        committed = committed_user_lines(info.jsonl, info.provider)
-        inicio_ts = _transcript_start_ts(info.jsonl)
+        if headless and not os.path.exists(info.jsonl):
+            # Sem terminal, .jsonl que nunca nasceu não é "ilegível": o processo morreu antes de
+            # gravar o prompt. Sem isto a entrada ficava entregue e calada pra sempre.
+            committed, inicio_ts = [], 0.0
+        else:
+            committed = committed_user_lines(info.jsonl, info.provider)
+            inicio_ts = _transcript_start_ts(info.jsonl)
         # Enfileirada na TUI e ainda nao consumida: entregue, mas sem bolha real — segue visivel
         # como bolha da fila em vez de ser confirmada (escondida) pela linha de enqueue.
         na_fila = fila_interna_pendente(info.jsonl, info.provider)
@@ -1202,6 +1211,12 @@ def _confirm_and_drain(name: str) -> None:
         # aqui e a confirmacao de entrega. Falhando calado, a msg do usuario fica sem confirmar pra
         # sempre e nao ha onde olhar. Best-effort segue (o proximo idle tenta de novo).
         _log.warning("confirmacao de entrega falhou name=%s", name, exc_info=True)
+
+
+# Sem terminal, quem entrega a fila é o drain do adapter (fim de turno, initialize), fora do /input:
+# sem este gatilho nenhuma confirmação era agendada e a entrega que morreu com o processo sumia.
+get_adapter(CLAUDE_HEADLESS).apos_entrega = (
+    lambda name: threading.Timer(_CONFIRM_GRACE_HEADLESS + 0.5, _confirm_and_drain, args=(name,)).start())
 
 
 def _maybe_chain(name: str) -> None:

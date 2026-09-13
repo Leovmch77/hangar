@@ -130,8 +130,9 @@ class _Sessao:
         self.initialized = asyncio.Event()
         # Código + detalhe do último problema (turno com erro, processo caiu, sem resposta):
         # vai pro StateEvent e pro card. Limpa quando um turno fecha bem.
-        self.problema: str | None = None
-        self.problema_detalhe: str | None = None
+        gravado = meta.get("problema") or (None, None)   # do sidecar: sobrevive ao restart
+        self.problema: str | None = gravado[0]
+        self.problema_detalhe: str | None = gravado[1]
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
         self.linhas_ruins = 0
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -202,9 +203,11 @@ class ClaudeHeadlessAdapter:
         # Problema da última vida do processo, por nome: a sessão sai de `_sessions` quando o
         # processo morre, e o card/chat ainda precisam dizer por quê.
         self._problemas: dict[str, tuple[str, str | None]] = {}
+        self._problemas_lidos: set[str] = set()     # nomes cujo problema do sidecar já foi lido
         self._spawn_locks: dict[str, asyncio.Lock] = {}
         self._tarefas: set[asyncio.Task] = set()
         self._religadas: dict[str, float] = {}
+        self.apos_entrega: Callable[[str], None] | None = None   # api agenda a confirmação da fila
 
     # ── contrato Adapter ────────────────────────────────────────────────────────────────────
 
@@ -270,6 +273,8 @@ class ClaudeHeadlessAdapter:
         sess.label = None
         sess.iniciar_turno()
         await self._notify(sess)
+        if self.apos_entrega is not None:
+            self.apos_entrega(name)
         return "sent"
 
     async def _escrever_prompt(self, sess: _Sessao, text: str) -> None:
@@ -1351,16 +1356,27 @@ class ClaudeHeadlessAdapter:
         sess = self._sessions.get(name)
         if sess is not None and sess.problema:
             return sess.problema, sess.problema_detalhe
+        if name not in self._problemas_lidos:
+            # Depois de um restart a memória está vazia; o sidecar guarda o último problema.
+            self._problemas_lidos.add(name)
+            gravado = (hl_sessions.load(name) or {}).get("problema")
+            if gravado and name not in self._problemas:
+                self._problemas[name] = (gravado[0], gravado[1])
         return self._problemas.get(name)
 
     def _registrar_problema(self, sess: _Sessao, codigo: str, detalhe: str | None) -> None:
         sess.problema, sess.problema_detalhe = codigo, (detalhe or None)
         self._problemas[sess.name] = (codigo, detalhe or None)
+        # Durável: um restart do backend não pode apagar da tela por que a sessão parou.
+        sess.meta = hl_sessions.update(sess.name, problema=[codigo, detalhe or None]) or sess.meta
         _log.warning("claude headless: %s name=%s %s", codigo, sess.name, (detalhe or "")[:200])
 
     def _limpar_problema(self, sess: _Sessao) -> None:
         sess.problema = sess.problema_detalhe = None
         self._problemas.pop(sess.name, None)
+        self._problemas_lidos.add(sess.name)
+        if (sess.meta or {}).get("problema"):
+            sess.meta = hl_sessions.update(sess.name, problema=None) or sess.meta
 
     def snapshot(self, name: str) -> StateEvent | None:
         """Estado atual sem abrir stream (lista/board). None = sem processo vivo (sessão parada)."""
@@ -1382,7 +1398,7 @@ class ClaudeHeadlessAdapter:
                 # Sessão parada (o processo morre com o backend): ociosa até o próximo prompt
                 # subir outro. Não sobe aqui — abrir o chat não deve custar um processo.
                 meta = hl_sessions.load(name) or {}
-                prob = self._problemas.get(name)
+                prob = self.problema_de(name)
                 yield StateEvent(session=name, state="idle", headless=True,
                                  claude_permission_mode=meta.get("permission_mode"),
                                  claude_previous_non_plan=meta.get("previous_non_plan"),
@@ -1437,6 +1453,7 @@ class ClaudeHeadlessAdapter:
         if sess is None:
             PushPreviewSource._sources.pop(name, None)
             self._problemas.pop(name, None)
+            self._problemas_lidos.discard(name)
             pid = ((meta or {}).get("cano") or {}).get("pid")
             if pid is not None:
                 _matar_grupo(int(pid), name)
@@ -1447,6 +1464,7 @@ class ClaudeHeadlessAdapter:
                 self._sessions.pop(name, None)
             PushPreviewSource._sources.pop(name, None)
             self._problemas.pop(name, None)
+            self._problemas_lidos.discard(name)
 
         loop = sess.loop
         try:

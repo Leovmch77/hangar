@@ -757,6 +757,28 @@ def _cenario_engolida(tmp_path, monkeypatch, estado, provider="claude"):
     return chamou, q.load()[0]
 
 
+def test_confirm_sem_terminal_com_jsonl_que_nunca_nasceu_desiste_visivel(tmp_path, monkeypatch):
+    # O processo morreu antes de gravar o prompt: o .jsonl nem existe. Antes, "transcript ilegível"
+    # saía sem decidir e sem reagendar, e a mensagem ficava entregue e calada pra sempre.
+    import json
+    import time as _t
+    from types import SimpleNamespace
+    import app.api as api
+    monkeypatch.setattr(api, "_headless", lambda name: True)
+    monkeypatch.setattr(api, "_CONFIRM_GRACE_HEADLESS", 10.0)
+    q = PromptQueue("hl-morta")
+    q.path.write_text(json.dumps({"id": "e1", "text": "ação café", "ts": _t.time() - 30,
+                                  "delivered": True}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(api.registry, "list", lambda: [_sessao_fake("hl-morta", tmp_path / "nunca.jsonl")])
+    monkeypatch.setattr(api, "_list_snap", {"snap": None})
+    monkeypatch.setattr(api.hook_state, "get_state", lambda _sid: None)
+    monkeypatch.setattr(api.threading, "Timer", lambda *a, **k: SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(api, "drain", lambda *a, **k: pytest.fail("redigitou"))
+    api._confirm_and_drain("hl-morta")
+    row = q.load()[0]
+    assert row["desistiu"] is True and "confirmed" not in row
+
+
 def test_confirm_nao_redigita_com_estado_desconhecido(tmp_path, monkeypatch):
     # Marcador ausente (sessao ressuscitada apos o tmux morrer): NAO pode redigitar.
     chamou, row = _cenario_engolida(tmp_path, monkeypatch, None)
