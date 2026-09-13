@@ -86,8 +86,27 @@ Referência completa: skill hangar-preview.`);
 }
 
 // --- resolve a sessão (chave serverId::nome) ---
+function nomeHeadless() {
+  // Sessão SEM terminal: a chave do sidecar (env do processo) não muda no rename nem no /clear.
+  const chave = process.env.CP_SESSION_KEY;
+  if (!chave) return null;
+  const pasta = join(homedir(), '.hangar', 'claude-headless');
+  try {
+    for (const arq of readdirSync(pasta)) {
+      if (!arq.endsWith('.json')) continue;
+      try {
+        const meta = JSON.parse(readFileSync(join(pasta, arq), 'utf8'));
+        if (meta && meta.key === chave && meta.name) return String(meta.name);
+      } catch { /* sidecar em escrita ou inválido */ }
+    }
+  } catch { /* sem pasta: nunca houve sessão sem terminal aqui */ }
+  return null;
+}
+
 function nomeSessao() {
   if (flags.sessao) return flags.sessao;
+  const semTerminal = nomeHeadless();
+  if (semTerminal) return semTerminal;
   // O carimbo do nascimento (posto pelo new_session do tmux.py) vem do env do PANE, então é imune
   // a qual cliente está anexado. Só vale se a sessão ainda se chamar assim: `rename-session` não
   // reescreve env de processo já rodando, e nome obsoleto endereçaria OUTRA sessão — pior que

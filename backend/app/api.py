@@ -965,6 +965,8 @@ def _awaiting_body(info) -> str:
     askq = read_pending_askq(info.jsonl) if info.jsonl else None
     if askq and askq.questions:
         return askq.questions[0].question
+    if getattr(info, "headless", False):
+        return info.question or None   # sem pane: a pergunta/permissão vem do processo, já na lista
     if info.name:
         from app import tmux
         from app.state import classify
@@ -1005,6 +1007,10 @@ def _do_notify_awaiting(session_id: str) -> None:
     if info is None:
         return
     def _real() -> bool:
+        if getattr(info, "headless", False):
+            # Sem pane e sem Notification de "idle 60s": o marcador só existe porque o adapter
+            # tem permissão ou pergunta em aberto — e a lista já traz esse estado.
+            return info.state == "awaiting_input"
         askq = read_pending_askq(info.jsonl) if info.jsonl else None
         return bool(askq and askq.questions) or _pane_wants_input(info.name)
 
@@ -1048,16 +1054,24 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
     O `terminal_input.drain` digita no pane, e no Codex isso poria a mensagem do usuario duas vezes
     na conversa (a entrega de verdade e o `turn/start` do app-server). Como o adapter do Codex e
     assincrono e quem chama isto e sempre uma thread (Timer, hook, request fora do loop), a ponte e
-    a mesma do `pi_inbox.entregar_sync`: agendar no loop do servidor e esperar o resultado."""
-    if provider != "codex":
+    a mesma do `pi_inbox.entregar_sync`: agendar no loop do servidor e esperar o resultado.
+
+    O Claude sem terminal segue o mesmo caminho: seu provider e "claude", mas nao ha pane — o
+    `terminal_input.drain` reivindicava a entrada e falhava ao resolver o pane, e o prompt ficava
+    pendente ate alguem abrir o chat (o drain do SSE)."""
+    if provider == "codex":
+        chave = "codex"
+    elif _headless(name):
+        chave = CLAUDE_HEADLESS
+    else:
         return drain(name, jsonl, provider)
     loop = _loop_servidor
     if loop is None:
-        _log.warning("drain codex name=%s: sem loop do servidor (fila fica pendente)", name)
+        _log.warning("drain %s name=%s: sem loop do servidor (fila fica pendente)", chave, name)
         return 0
     fut = None
     try:
-        fut = asyncio.run_coroutine_threadsafe(get_adapter("codex").drain(name, jsonl), loop)
+        fut = asyncio.run_coroutine_threadsafe(get_adapter(chave).drain(name, jsonl), loop)
         # Teto so pra nao pendurar a thread se o loop morrer no meio (restart): quem manda no
         # relogio e o proprio adapter, que ja tem os timeouts do app-server.
         return fut.result(120)
@@ -1071,7 +1085,7 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
             fut.cancel()
         # Falha VISIVEL, nunca mensagem duplicada: a entrada segue pendente e o proximo fim de
         # turno tenta de novo; a bolha "na fila" continua na tela enquanto isso.
-        _log.warning("drain codex name=%s falhou (fila segue pendente)", name, exc_info=True)
+        _log.warning("drain %s name=%s falhou (fila segue pendente)", chave, name, exc_info=True)
         return 0
 
 
@@ -2100,10 +2114,9 @@ def set_then_link(name: str, body: ThenLinkBody):
     """Arma o vinculo 'then' (feature #12): quando `name` confirmar idle (turno terminado), `body.text`
     e enviado pra `body.target` -- ver app.chain.ThenLink e app.api._maybe_chain. Um hop so (nao DAG):
     setar de novo so troca alvo/texto, nao encadeia mais niveis."""
-    from app import tmux
     if body.target == name:
         raise HTTPException(400, detail=erro("erro_encadeamento_proprio", "sessao nao pode encadear pra si mesma"))
-    if not tmux.has_session(body.target):
+    if not _session_exists(body.target):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao alvo nao encontrada"))
     ThenLink(name).set(body.target, body.text)
     return {"ok": True}
@@ -2156,7 +2169,7 @@ def _loop_ctx(name: str) -> "loop_mod.TickCtx | None":
 
     def deliver(prompt: str) -> bool:
         PromptQueue(name).append(prompt, delivered=False)
-        drain(name, jsonl, provider)
+        _drenar(name, jsonl, provider)
         return True
 
     return loop_mod.TickCtx(
@@ -2197,7 +2210,7 @@ def loop_create(name: str, body: LoopCreate):
         d["goal_entry_id"] = entry["id"]
         link.set(d)
     if info.jsonl:
-        drain(name, info.jsonl, info.provider)   # entrega ja se a sessao estiver entregavel; senao o drain server-side entrega depois
+        _drenar(name, info.jsonl, info.provider)   # entrega ja se a sessao estiver entregavel; senao o drain server-side entrega depois
     return {"loop": link.get()}
 
 
@@ -2960,6 +2973,16 @@ async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) ->
         return await _send_one_codex_locked(name, text, track_entry=track_entry)
 
 
+async def _enviar(name: str, text: str) -> dict:
+    """Envio comum ramificado por transporte (Codex, Claude sem terminal, pane) — a mesma esteira
+    do /input pra quem manda por fora dele (broadcast, grupo, par, orquestração). Nunca levanta."""
+    if _provider_of(name) == "codex":
+        return await _send_one_codex(name, text)
+    if _headless(name):
+        return await _send_one_headless(name, text)
+    return await _send_thread(_send_one, name, text)
+
+
 async def _send_one_headless(name: str, text: str, *, track_entry: bool = False) -> dict:
     """Mesmo caminho de fila do Codex (adapter em vez de tty), com o adapter do Claude sem terminal."""
     async with get_adapter(CLAUDE_HEADLESS).delivery_lock(name):
@@ -3202,10 +3225,7 @@ async def broadcast(body: BroadcastBody):
         if not await _send_thread(_session_exists, name):
             results[name] = {"ok": False, "error": erro("erro_sessao_inexistente", "sessão não encontrada"), "delivered": False}
             continue
-        if _provider_of(name) == "codex":
-            results[name] = await _send_one_codex(name, body.text)
-        else:
-            results[name] = await _send_thread(_send_one, name, body.text)
+        results[name] = await _enviar(name, body.text)
     return {"results": results}
 
 
@@ -3230,10 +3250,7 @@ async def _deliver(name: str, text: str) -> dict | None:
     # Devolve o envelope {code, params, msg} (ou string crua de erro tecnico ainda nao migrado)
     # ou None — _send_one/_send_one_codex NUNCA levantam, reportam no dict; engolir isso fazia o
     # pareamento dizer "ok" com o aviso jamais entregue.
-    if _provider_of(name) == "codex":
-        res = await _send_one_codex(name, text)
-    else:
-        res = await _send_thread(_send_one, name, text)
+    res = await _enviar(name, text)
     return None if res.get("ok") else (res.get("error")
                                            or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio"))
 
@@ -3477,10 +3494,7 @@ async def group_message(name: str, body: GroupMsgBody):
         if not await _send_thread(_session_exists, p):
             results[p] = {"ok": False, "error": erro("erro_sessao_inexistente", "sessão não encontrada"), "delivered": False}
             continue
-        if _provider_of(p) == "codex":
-            results[p] = await _send_one_codex(p, text)
-        else:
-            results[p] = await _send_thread(_send_one, p, text)
+        results[p] = await _enviar(p, text)
     failed = [{"sessao": n, "erro": r.get("error")} for n, r in results.items() if not r.get("ok")]
     return {"ok": True, "peers": membros, "pulados": pulados,
             "warning": erro("erro_pareamento_grupo_falha",
@@ -3685,7 +3699,7 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
     arbitro = orq_papeis.casar_viva(arb, infos) if arb and gid != orq_papeis.GID_PADRAO else None
     aviso, err = "sem_arbitro", None
     if arbitro:
-        res = await _send_thread(_send_one, arbitro, _recado_arbitro(novos, gid))
+        res = await _enviar(arbitro, _recado_arbitro(novos, gid))
         if res["ok"]:
             aviso = "enviado" if res.get("delivered") else "enfileirado"
         else:
@@ -3741,7 +3755,7 @@ async def orq_comecar(name: str, body: ComecarBody):
         f"Plano: `{plano.path}` — {plano.done} de {plano.total} steps, Task {plano.task_idx} de {plano.task_total}.\n"
         "Comece pelo portão: confira o que já passou, e só então despache a próxima Task."
     )
-    res = await _send_thread(_send_one, name, texto)
+    res = await _enviar(name, texto)
     if not res["ok"]:
         raise HTTPException(409, detail=erro("erro_orq_comecar_falhou",
                                              f"não deu pra avisar a sessão: {_erro_texto(res['error'])}",
@@ -6493,6 +6507,19 @@ async def engine_model_set(name: str, body: EngineModelBody):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
         # pra um modelo que o provedor nao tem, e a falha apareceria so no proximo turno.
         raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", f"modelo fora do catalogo do motor {info.engine!r}: {body.model}", motor=info.engine, modelo=body.model))
+
+    if _headless(name):
+        # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
+        # nada a repor no settings.json. O esforço reabre o processo quando a sessão está ociosa.
+        try:
+            esforco_ja_vale = await get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort)
+        except Exception as e:
+            _log.exception("claude headless: troca de modelo falhou name=%s", name)
+            raise HTTPException(409, detail=erro("erro_headless_modelo", f"troca de modelo falhou: {e}", erro=str(e)))
+        res = {"ok": True, "model": body.model}
+        if body.effort and not esforco_ja_vale:
+            res["effort_error"] = "esforço vale no próximo processo (turno em andamento)"
+        return res
 
     cfg_dir = _session_config_dir(name)  # mesma leitura de /proc que resolve o config dir das outras rotas
     antes = await asyncio.to_thread(default_model.snapshot, cfg_dir)

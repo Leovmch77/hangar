@@ -18,9 +18,36 @@ def _tmux(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=3)
 
 
+def _nome_headless() -> str | None:
+    # Sessão SEM terminal: a chave do sidecar (env do processo) não muda no rename nem no /clear.
+    chave = os.environ.get("CP_SESSION_KEY")
+    if not chave:
+        return None
+    pasta = os.path.join(os.path.expanduser("~"), ".hangar", "claude-headless")
+    try:
+        arquivos = os.listdir(pasta)
+    except OSError:
+        return None
+    for arq in arquivos:
+        if not arq.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(pasta, arq), encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue   # sidecar alheio em escrita ou corrompido não pode esconder o certo
+        if isinstance(meta, dict) and meta.get("key") == chave and meta.get("name"):
+            return meta["name"]
+    return None
+
+
 def _nome_da_sessao() -> str | None:
-    # Mesma ordem do me() do hangar-send: pane (dono de verdade; conta ocorrências porque o psmux
-    # repete %N entre sessões) -> carimbo do nascimento, se a sessão ainda se chamar assim.
+    # Mesma ordem do me() do hangar-send: sidecar da sessão sem terminal -> pane (dono de verdade;
+    # conta ocorrências porque o psmux repete %N entre sessões) -> carimbo do nascimento, se a
+    # sessão ainda se chamar assim.
+    nome = _nome_headless()
+    if nome:
+        return nome
     pane = os.environ.get("TMUX_PANE")
     if pane:
         try:

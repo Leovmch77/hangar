@@ -10,6 +10,7 @@ Local: ~/.hangar/claude-headless/<nome>.json, um arquivo por sessão, keyed pelo
 import json
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 from app import atomico
@@ -42,6 +43,10 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          context_window: int | None = None, permission_mode: str | None = None) -> dict:
     meta = {
         "name": name, "provider": "claude", "headless": True,
+        # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
+        # o nome muda no rename e o session_id no /clear; a chave, nunca. Vai no env como
+        # CP_SESSION_KEY e o script acha o sidecar por ela.
+        "key": uuid.uuid4().hex,
         "cwd": cwd, "session_id": session_id,
         "config_dir": config_dir, "engine": engine,
         "model": model, "effort": effort, "context_window": context_window,

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from app.adapters.claude_headless import adapter as A
 from app.adapters.claude_headless import sessions as S
 from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _Sessao
 from app.adapters.codex.preview import CodexPreviewSource
@@ -20,6 +21,7 @@ class _Proc:
 def sidecar(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
     monkeypatch.setattr(CodexPreviewSource, "_sources", {})
+    monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
     return S.save("s1", str(tmp_path), "11111111-1111-1111-1111-111111111111", model="haiku", permission_mode="manual")
 
 
@@ -285,3 +287,108 @@ def test_registry_renomeia_sem_tmux(tmp_path, monkeypatch):
     reg.rename("hl", "hl2")
     assert not S.exists("hl") and S.load("hl2")["name"] == "hl2"
     reg.kill("hl2")
+
+
+def test_espera_grava_marcador_do_state_hook_e_desfaz_ao_resolver(adapter, tmp_path):
+    # Sem pane não há hook Notification: é o adapter que põe o awaiting_input na esteira de
+    # push/loop, e tira quando a permissão é respondida.
+    sess = adapter._sessions["s1"]
+    marcador = tmp_path / "state" / f"{sess.sid}.json"
+    req = {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r1", "request": req})
+        assert json.loads(marcador.read_text())["state"] == "awaiting_input"
+        await adapter.select("s1", 1)
+        assert json.loads(marcador.read_text())["state"] == "working"
+    _run(fluxo())
+
+
+def test_fim_de_turno_drena_a_fila(adapter, tmp_path, monkeypatch):
+    from app import pqueue
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    sess = adapter._sessions["s1"]
+    q = pqueue.PromptQueue("s1"); q.clear()
+    q.append("depois", delivered=False)
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {}})
+        await sess.drenador
+        assert all(e.get("delivered") for e in q.load())
+    _run(fluxo())
+    assert adapter.escritos[-1]["message"]["content"][0]["text"] == "depois"
+    q.clear()
+
+
+def test_comando_local_vira_bolha_na_fila_e_nao_no_transcript(adapter, tmp_path, monkeypatch):
+    from app import pqueue
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    sess = adapter._sessions["s1"]
+    q = pqueue.PromptQueue("s1"); q.clear()
+    comum = q.append("oi", delivered=True)      # prompt comum ainda no prazo do reconcile
+    comando = q.append("/cost", delivered=True)
+    ev = {"type": "assistant", "local_command_source": "<local-command-stdout>uso: 4%</local-command-stdout>",
+          "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "uso: 4%"}]}}
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, ev)
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "local_command": "cost", "usage": {}})
+        await sess.drenador
+    _run(fluxo())
+    rows = q.load()
+    assert len(rows) == 3
+    # O comando digitado fica confirmado pelo `result` (o .jsonl não o grava como linha `user`,
+    # e o reconcile o redigitaria); o prompt comum segue com o reconcile de sempre; a saída vira
+    # bolha do assistente.
+    assert rows[0]["id"] == comum["id"] and not rows[0].get("confirmed")
+    assert rows[1]["id"] == comando["id"] and rows[1]["confirmed"] is True
+    assert rows[2]["papel"] == "assistant" and rows[2]["confirmed"] is True
+    evento = pqueue._entry_event(rows[2])
+    assert evento.kind == "assistant_msg" and evento.id.startswith("local-") and evento.text == "uso: 4%"
+    # Nunca é drenada nem reconciliada: já nasce entregue e confirmada.
+    assert q.claim_undelivered() == []
+    q.clear()
+
+
+def test_modo_de_permissao_sobrevive_ao_resume_e_ao_nome_da_cli(adapter):
+    # A CLI reporta "default" pro que a flag chama de "manual"; sem normalizar, o próximo
+    # processo (--resume) nasceria sem flag válida e cairia no defaultMode da conta.
+    sess = adapter._sessions["s1"]
+    _run(adapter._on_event(sess, {"type": "system", "subtype": "init", "session_id": sess.sid,
+                                  "permissionMode": "default", "model": "haiku"}))
+    assert sess.permission_mode == "manual"
+    argv = adapter._argv(sess.sid, resume=True, permission_mode=sess.permission_mode)
+    assert "--resume" in argv and argv[argv.index("--permission-mode") + 1] == "manual"
+
+
+def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    monkeypatch.setenv("TMUX", "/tmp/x")
+    visto = {}
+
+    async def exec_falso(*argv, env, **kw):
+        visto["env"] = env
+
+        class _P:
+            pid = 1
+            returncode = None
+            stdout = stderr = stdin = None
+        return _P()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
+    monkeypatch.setattr(A.shutil, "which", lambda b: "/usr/bin/claude")
+    ad = ClaudeHeadlessAdapter()
+    sess = _Sessao("s1", sidecar)
+
+    async def ctrl(s, sub, **kw):
+        return {}
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._ler_err = lambda s: asyncio.sleep(0)      # type: ignore[method-assign]
+    ad._ctrl = ctrl                               # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+    _run(ad._spawn(sess))
+    env = visto["env"]
+    assert "TMUX" not in env and "TMUX_PANE" not in env
+    assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]

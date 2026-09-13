@@ -28,10 +28,11 @@ import re
 import shutil
 import signal
 import time
+import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import cotas, model_args
+from app import atomico, cotas, model_args
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
 from app.adapters.codex.preview import CodexPreviewSource
@@ -98,6 +99,7 @@ class _Sessao:
         # stream só diz "allowed" e o reset, não o percentual.
         self.janelas: list = []
         self.janelas_ts = 0.0
+        self.drenador: asyncio.Task | None = None   # referência viva do drain de fim de turno
 
     @property
     def sid(self) -> str:
@@ -320,7 +322,7 @@ class ClaudeHeadlessAdapter:
         if sess is None:
             raise ValueError("sessão indisponível")
         r = await self._ctrl(sess, "set_permission_mode", mode=mode)
-        sess.permission_mode = (r or {}).get("mode") or mode
+        sess.permission_mode = _modo_do_app((r or {}).get("mode") or mode)
         hl_sessions.update(name, permission_mode=sess.permission_mode)
         await self._notify(sess)
         return sess.permission_mode
@@ -419,8 +421,10 @@ class ClaudeHeadlessAdapter:
         meta = sess.meta
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
+        # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
+        # (medido: sessão "manual" reaberta após restart rodou Bash sem perguntar).
         argv = self._argv(sess.sid, resume=resume, model=sess.model, effort=sess.effort,
-                          permission_mode=None if resume else sess.permission_mode)
+                          permission_mode=sess.permission_mode)
         if meta.get("engine"):
             pre = ["hangar-engine", "--exec", meta["engine"]]
             if sess.model:
@@ -429,7 +433,15 @@ class ClaudeHeadlessAdapter:
                     pre += ["--context", str(sess.context_window)]
             argv = pre + ["--"] + argv
         env = dict(os.environ)
+        # Backend subido de dentro de um tmux (dev) passaria o pane do OPERADOR pro processo, e
+        # o hangar-send de dentro da sessão se identificaria como a sessão dele.
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
         env["CP_SESSION_NAME"] = sess.name
+        if not meta.get("key"):
+            meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta
+        if meta.get("key"):
+            env["CP_SESSION_KEY"] = meta["key"]
         env[_MARCADOR_PAI] = str(os.getpid())
         if meta.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
@@ -477,7 +489,8 @@ class ClaudeHeadlessAdapter:
             _log.info("claude headless: processo saiu name=%s rc=%s", sess.name, rc)
             # A CLI apanha o SIGTERM e sai com 143 (128+15), não com -15 — só o nosso encerramento
             # marca `encerrando`; qualquer outra saída não-zero é queda.
-            if not sess.encerrando and rc not in (0, None, -signal.SIGTERM, -signal.SIGKILL):
+            caiu = not sess.encerrando and rc not in (0, None, -signal.SIGTERM, -signal.SIGKILL)
+            if caiu:
                 self._registrar_problema(sess, "headless_processo_caiu",
                                          f"rc={rc}\n" + "\n".join(sess.stderr_tail))
             for fut in sess.waiters.values():
@@ -487,6 +500,12 @@ class ClaudeHeadlessAdapter:
             sess.in_progress = False
             sess.pending.clear()
             sess.question = None
+            # Queda vira marcador `dead` (push de "caiu", como no tmux); saída nossa com espera
+            # em aberto só desfaz o `awaiting_input` que o adapter gravou.
+            if caiu:
+                self._gravar_marcador(sess, "dead")
+            elif sess.state == "awaiting_input":
+                self._gravar_marcador(sess, "idle")
             sess.state = "dead"
             await CodexPreviewSource.get(sess.name).push("")
             await self._notify(sess)
@@ -548,6 +567,15 @@ class ClaudeHeadlessAdapter:
             return
         if t == "assistant":
             blocos = (ev.get("message") or {}).get("content") or []
+            if ev.get("local_command_source") is not None:
+                # Saída de comando local (/context, /cost…): a CLI responde no stdout e NÃO grava
+                # no .jsonl — no terminal ela aparece na tela; aqui, sem tela, vai pra fila
+                # durável como bolha do assistente (histórico, reload e SSE já sabem lê-la).
+                texto = "\n".join(b.get("text", "") for b in blocos
+                                  if isinstance(b, dict) and b.get("type") == "text").strip()
+                if texto:
+                    await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
+                return
             tools = [b.get("name") for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:
                 sess.label = f"{tools[-1]}…"
@@ -579,6 +607,14 @@ class ClaudeHeadlessAdapter:
             sess.label = None
             sess.previa = ""
             sub = ev.get("subtype") or ""
+            if ev.get("local_command"):
+                # Comando local não vira linha `user` no .jsonl (só `<command-name>`, às vezes com
+                # outro nome: /cost grava /usage), então o reconcile nunca o acharia e o
+                # redigitaria até desistir — medido: /context executado 3 vezes. A CLI já o
+                # consumiu; a entrada está confirmada. Só a de slash: um prompt comum entregue
+                # há pouco continua com o reconcile normal (confirmado só quando cair no .jsonl).
+                await asyncio.to_thread(PromptQueue(sess.name).confirm_delivered,
+                                        lambda r: str(r.get("text") or "").lstrip().startswith("/"))
             if ev.get("is_error") or (sub.startswith("error") and sub != "error_during_execution"):
                 # `error_during_execution` é o interrupt (medido); o resto é falha de verdade
                 # (limite de turnos, credencial, API) e some calado se não for dito aqui.
@@ -601,6 +637,12 @@ class ClaudeHeadlessAdapter:
             await self._notify(sess)
             if time.time() - sess.janelas_ts > 300:
                 self._agendar_cota(sess)
+            # Fim de turno é o momento certo de entregar o que ficou na fila. O hook Stop também
+            # dispara o drain server-side, mas pode correr ANTES deste `result` chegar — aí o
+            # adapter ainda se acha em turno e devolve "deferred".
+            sess.drenador = asyncio.create_task(self._drenar_fim_de_turno(sess))
+            self._tarefas.add(sess.drenador)
+            sess.drenador.add_done_callback(self._tarefas.discard)
             return
         if t == "rate_limit_event":
             info = ev.get("rate_limit_info") or {}
@@ -622,11 +664,11 @@ class ClaudeHeadlessAdapter:
             if ev.get("model"):
                 sess.model = ev["model"]
             if ev.get("permissionMode"):
-                sess.permission_mode = ev["permissionMode"]
+                sess.permission_mode = _modo_do_app(ev["permissionMode"])
             sess.initialized.set()
         elif sub == "status":
             if ev.get("permissionMode"):
-                sess.permission_mode = ev["permissionMode"]
+                sess.permission_mode = _modo_do_app(ev["permissionMode"])
             if ev.get("status") == "requesting" and sess.in_progress:
                 sess.label = "Pensando…"
         elif sub == "thinking_tokens":
@@ -679,6 +721,7 @@ class ClaudeHeadlessAdapter:
         await self._notify(sess)
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
+        antes = sess.state
         if not sess.vivo:
             sess.state = "dead"
         elif sess.pending or sess.question:
@@ -687,6 +730,23 @@ class ClaudeHeadlessAdapter:
             sess.state = "working"
         else:
             sess.state = "idle"
+        # Sem pane não há hook `Notification`: é o adapter que sabe que a sessão está esperando.
+        # Gravar o marcador do state_hook põe a espera na mesma esteira das sessões no tmux
+        # (push de "aguardando", pausa do loop) sem outro caminho. O state_hook continua
+        # escrevendo working/idle no mesmo arquivo, sem corrida: a CLI espera o PreToolUse
+        # terminar antes de pedir permissão, e o PostToolUse só roda depois da resposta.
+        if sess.state != antes and "awaiting_input" in (sess.state, antes):
+            self._gravar_marcador(sess, sess.state)
+
+    def _gravar_marcador(self, sess: _Sessao, state: str) -> None:
+        base = _dir_marcadores(sess.meta)
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            tmp = base / f"{sess.sid}.json.tmp"
+            tmp.write_text(json.dumps({"state": state, "ts": time.time()}), encoding="utf-8")
+            atomico.substituir(tmp, base / f"{sess.sid}.json")
+        except OSError:
+            _log.warning("claude headless: marcador de estado não gravado name=%s", sess.name, exc_info=True)
 
     async def _notify(self, sess: _Sessao) -> None:
         async with sess.cond:
@@ -728,6 +788,13 @@ class ClaudeHeadlessAdapter:
                 seg += f" ↺{_format_reset(j.reset_ts, agora)}"
             parts.append(seg)
         return " │ ".join(parts) or None
+
+    async def _drenar_fim_de_turno(self, sess: _Sessao) -> None:
+        try:
+            await self.drain(sess.name, self.transcript_path_de(sess.meta))
+        except Exception:
+            # A fila segue pendente (nada foi marcado); o próximo fim de turno tenta de novo.
+            _log.exception("claude headless: drain de fim de turno falhou name=%s", sess.name)
 
     def _agendar_cota(self, sess: _Sessao) -> None:
         # Referência guardada e falha logada: tarefa solta some com a exceção junto.
@@ -866,6 +933,17 @@ class ClaudeHeadlessAdapter:
         lock = self._delivery_locks.pop(old, None)
         if lock is not None:
             self._delivery_locks[new] = lock
+
+
+def _modo_do_app(modo: str) -> str:
+    # A CLI aceita `--permission-mode manual` mas reporta "default" no stream; o app (e a flag do
+    # próximo processo) só conhecem "manual".
+    return "manual" if modo == "default" else modo
+
+
+def _dir_marcadores(meta: dict) -> Path:
+    # Mesmo diretório que o state_hook da conta usa (`<config_dir>/.hangar-state`).
+    return Path(meta.get("config_dir") or Path.home() / ".claude") / ".hangar-state"
 
 
 def _sugestoes_de(req: dict) -> list[dict]:

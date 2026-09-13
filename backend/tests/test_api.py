@@ -920,8 +920,8 @@ def test_set_then_link_rejects_self_target(api_client, _tmp_chain_dir):
 
 
 def test_set_then_link_rejects_missing_target_session(api_client, _tmp_chain_dir, monkeypatch):
-    from app import tmux
-    monkeypatch.setattr(tmux, "has_session", lambda name: False)
+    # A mesma guarda do /input (pane tmux, sidecar Codex ou sessão sem terminal) decide o alvo.
+    monkeypatch.setattr(api_mod, "_session_exists", lambda name: name != "ghost")
     r = api_client.put("/api/sessions/a/then", json={"target": "ghost", "text": "x"}, headers=_h())
     assert r.status_code == 404
 
@@ -1348,6 +1348,23 @@ def test_do_notify_awaiting_resolves_name_and_body(monkeypatch):
     monkeypatch.setattr(api_mod.push, "notify_awaiting", lambda name, body: calls.append((name, body)))
     api_mod._do_notify_awaiting("uuid1")
     assert calls == [("minha-sessao", "corpo rico")]
+
+
+def test_do_notify_awaiting_sem_terminal_usa_o_estado_da_lista(monkeypatch):
+    # Claude sem terminal: não há pane pra raspar nem askq no sidecar — o marcador só existe
+    # porque o adapter tem permissão/pergunta em aberto, e a lista já traz pergunta e estado.
+    calls = []
+    info = SimpleNamespace(name="hl", jsonl="/x/uuid1.jsonl", cwd="/x", headless=True,
+                           state="awaiting_input", question="Permitir Bash? ls")
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
+    monkeypatch.setattr(api_mod, "read_pending_askq", lambda jsonl: None)
+    monkeypatch.setattr(api_mod, "_pane_wants_input", lambda name: pytest.fail("raspou pane inexistente"))
+    monkeypatch.setattr(api_mod.push, "notify_awaiting", lambda name, body: calls.append((name, body)))
+    api_mod._do_notify_awaiting("uuid1")
+    assert calls == [("hl", "Permitir Bash? ls")]
+    info.state = "working"
+    api_mod._do_notify_awaiting("uuid1")
+    assert len(calls) == 1
 
 
 def test_do_notify_awaiting_skips_idle_notification(monkeypatch):

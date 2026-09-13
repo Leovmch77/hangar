@@ -1,5 +1,6 @@
 """Cobertura do sidecar de fila durável (pqueue): append/load, clear, e rename (move preservando
 entradas). Isola o queue dir apontando settings.projects_dir pra um tmp."""
+import asyncio
 import os
 
 import pytest
@@ -158,6 +159,29 @@ def test_merged_history_dedup_ts_race(tmp_path, monkeypatch):
     hist = pqueue.merged_history("s", str(j))
     assert [e.text for e in hist] == ["inicio", "JANELA-X"]   # uma bolha so, nao duas
     assert not any(e.id.startswith("queued-") for e in hist)  # entrada absorvida pelo user_msg real
+
+
+def test_merged_history_e_follow_mostram_saida_local_como_assistente(tmp_path):
+    # Saída de comando local (sessão sem terminal): confirmada de nascença, mas NÃO some do
+    # histórico como uma entrada confirmada de usuário — é bolha do assistente, com id "local-".
+    j = tmp_path / "t.jsonl"
+    j.write_text("", encoding="utf-8")
+    q = PromptQueue("s")
+    q.append("prompt antigo", delivered=True)
+    q.append_saida_local("## Context\n32k/200k")
+    hist = pqueue.merged_history("s", str(j))
+    local = [e for e in hist if e.id.startswith("local-")]
+    assert len(local) == 1 and local[0].kind == "assistant_msg" and local[0].text.startswith("## Context")
+    assert q.claim_undelivered() == []
+
+    async def primeiro():
+        gen = q.follow(emit_confirmed=True)
+        evs = [await gen.__anext__(), await gen.__anext__()]
+        await gen.aclose()
+        return evs
+    evs = asyncio.run(primeiro())
+    ev_local = next(e for e in evs if e.id.startswith("local-"))
+    assert ev_local.kind == "assistant_msg" and not ev_local.queued_confirmed
 
 
 def test_merged_history_ignores_delivered_flag(tmp_path):

@@ -80,6 +80,19 @@ else
     echo "FALHA degradação silenciosa — o dono não fica sabendo"; falhas=$((falhas + 1))
 fi
 
+# 5) Sessão SEM terminal: a chave do sidecar vence tudo — inclusive um pane herdado do
+#    operador que subiu o backend de dentro de um tmux, e um carimbo obsoleto pós-rename.
+mkdir -p "$TMP/headless"
+printf '{"name": "renomeada", "provider": "claude", "key": "abc123", "session_id": "x"}\n' > "$TMP/headless/renomeada.json"
+export HANGAR_HEADLESS_DIR="$TMP/headless" CP_SESSION_KEY="abc123" CP_SESSION_NAME="nome-do-nascimento"
+export TMUX=1 TMUX_PANE="%1" PANES_FAKE=$'%1 outra' SESSAO_ATUAL="outra"
+checa "sem terminal (chave do sidecar)" "renomeada" "$(me 2>/dev/null)"
+
+# 6) Chave sem sidecar (sessão encerrada e arquivo apagado): segue pros passos de sempre.
+export CP_SESSION_KEY="nao-existe"
+checa "chave órfã cai no pane" "outra" "$(me 2>/dev/null)"
+unset CP_SESSION_KEY HANGAR_HEADLESS_DIR
+
 echo
 if (( falhas )); then echo "$falhas falha(s)"; exit 1; fi
 echo "tudo ok"

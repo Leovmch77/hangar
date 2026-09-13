@@ -204,6 +204,18 @@ me() {
     # devolveria UMA delas, calado — nome errado é pior que nome ausente. Contando, ambiguidade vira
     # "não sei" e cai no carimbo. O awk monta o nome a partir do 2o campo em diante porque nome de
     # sessão pode ter espaço.
+    # 0) Sessão SEM terminal: não há pane nem sessão tmux. A chave vem do env do processo
+    #    (CP_SESSION_KEY, posta pelo adapter) e não muda no rename nem no /clear; o nome atual é
+    #    o do sidecar que carrega essa chave.
+    if [[ -n "${CP_SESSION_KEY:-}" ]]; then
+        local sidecar
+        sidecar=$(grep -ls "\"key\": \"$CP_SESSION_KEY\"" "${HANGAR_HEADLESS_DIR:-$HOME/.hangar/claude-headless}"/*.json 2>/dev/null | head -1)
+        if [[ -n "$sidecar" ]]; then
+            local nome
+            nome=$(sed -n 's/.*"name": "\([^"]*\)".*/\1/p' "$sidecar" | head -1)
+            if [[ -n "$nome" ]]; then echo "$nome"; return; fi
+        fi
+    fi
     local dono=""
     if [[ -n "${TMUX_PANE:-}" ]]; then
         dono=$(tmux list-panes -a -F '#{pane_id} #{session_name}' 2>/dev/null |

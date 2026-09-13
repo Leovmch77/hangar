@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from watchfiles import awatch
 
@@ -195,7 +195,16 @@ def _da_sessao_atual(entry: dict, min_ts: float, ts: float | None = None) -> boo
     return quando >= min_ts - folga
 
 
+def _saida_local(entry: dict) -> bool:
+    # Entrada que NAO e prompt: texto que o agente respondeu fora do transcript (comando local
+    # da sessao sem terminal). Nasce entregue e confirmada — drain e reconcile nunca a tocam — e
+    # vira bolha do assistente com id "local-", que o front trata como mensagem comum.
+    return entry.get("papel") == "assistant"
+
+
 def _entry_event(entry: dict) -> ChatEvent:
+    if _saida_local(entry):
+        return ChatEvent(kind="assistant_msg", id="local-" + str(entry.get("id")), text=entry.get("text"))
     # user_msg sintetico com id prefixado ("queued-") pro front distinguir de evento real do
     # transcript. ts fica None de proposito: o ts so serve pra ORDENAR no historico, nao pra
     # exibir (senao bubble enfileirada mostraria hora e as do transcript nao -> inconsistente).
@@ -511,6 +520,19 @@ class PromptQueue:
             self._write_atomic(rows)
         return entry
 
+    def append_saida_local(self, text: str) -> dict:
+        """Texto do AGENTE que nao entra no transcript (ver _saida_local). Entregue e confirmada
+        de nascenca: nunca e drenada, redigitada nem reconciliada."""
+        entry = {"id": uuid.uuid4().hex, "text": scrub_surrogates(text), "ts": time.time(),
+                 "delivered": True, "confirmed": True, "papel": "assistant"}
+        with _append_lock:
+            rows = self.load()
+            rows.append(entry)
+            if len(rows) > _MAX_ENTRIES:
+                rows = rows[-_MAX_ENTRIES:]
+            self._write_atomic(rows)
+        return entry
+
     def claim_undelivered(self, min_ts: float = 0.0, limit: int | None = None,
                           *, entry_id: str | None = None) -> list[dict]:
         """Reivindica (atomicamente) entradas ainda nao entregues: vira delivered=True e devolve as
@@ -575,7 +597,7 @@ class PromptQueue:
                 return bool(r.get("delivered"))
         return None
 
-    def confirm_delivered(self) -> int:
+    def confirm_delivered(self, apenas: Callable[[dict], bool] | None = None) -> int:
         """Carimba `confirmed` em TODA entrada delivered ainda não confirmada. Devolve quantas.
 
         Quem chama é o steer do Kimi (POST /steer): o ctrl-s promove a fila INTERNA da TUI pro
@@ -583,12 +605,15 @@ class PromptQueue:
         digitado, mas ainda fora do wire, porque o Kimi só grava o append_message da msg steerada
         no FIM do turno (medido em 19/08/2026: 34s depois do ctrl-s). Sem este carimbo a bolha
         "na fila" ficava acesa o turno inteiro sobre uma mensagem que já estava no turno.
+
+        `apenas`: restringe às entradas que o predicado aceita (o comando local da sessão sem
+        terminal confirma só slash, nunca um prompt comum de carona).
         """
         with _append_lock:
             rows = self.load()
             n = 0
             for r in rows:
-                if r.get("delivered") is True and not r.get("confirmed"):
+                if r.get("delivered") is True and not r.get("confirmed") and (apenas is None or apenas(r)):
                     r["confirmed"] = True
                     n += 1
             if n:
@@ -791,7 +816,7 @@ class PromptQueue:
                 if not eid:
                     continue
                 # Codex recebe a baixa explícita; os demais mantêm a supressão do eco.
-                confirmed = bool(entry.get("confirmed"))
+                confirmed = bool(entry.get("confirmed")) and not _saida_local(entry)
                 if confirmed and not emit_confirmed:
                     continue
                 event = _entry_event(entry)
@@ -954,12 +979,16 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
 
     # Entradas da fila entram com tiebreaker alto -> caem DEPOIS de eventos do transcript de mesmo ts.
     for entry in PromptQueue(name).load():
-        if entry.get("confirmed"):
-            continue  # comprovadamente no transcript (reconcile) -> a bolha real ja cobre
         text = (entry.get("text") or "").strip()
         if not text:
             continue
         ts = float(entry.get("ts") or prev_ts)
+        if _saida_local(entry):
+            if not start_ts or _da_sessao_atual(entry, start_ts, ts):
+                items.append((ts, 10**9, _entry_event(entry)))
+            continue
+        if entry.get("confirmed"):
+            continue  # comprovadamente no transcript (reconcile) -> a bolha real ja cobre
         # Absorvida so se o texto commitou DEPOIS de enfileirada. O ts da entrada e o do INSTANTE DO
         # ENVIO (carimbado antes do send — ver append/api._send_one), nao o do append; por isso o
         # write do transcript e sempre >= ele e o commit da propria msg casa. Antes o ts saia do
