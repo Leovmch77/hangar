@@ -127,7 +127,11 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
             _limpar_composer_as_cegas(name)
             raise BtwError(502, "erro_btw_barra_perdida",
                            "o terminal perdeu a / do /btw; nada foi enviado pra conversa")
-        tmux.send_keys(name, "Enter")
+        if not tmux.send_keys(name, "Enter"):
+            # Sem isto o Enter perdido só aparecia 6s depois como "não abriu", culpando o overlay.
+            _limpar_composer_as_cegas(name)
+            raise BtwError(502, "erro_btw_enter_nao_enviado",
+                           "o Enter do /btw não chegou ao terminal; nada foi enviado pra conversa")
 
         inicio = time.monotonic()
         aberto = False

@@ -2144,6 +2144,7 @@
   "erro_btw_barra_perdida": "o terminal perdeu a / do /btw; nada foi enviado pra conversa, tente de novo",
   "erro_btw_overlay_aberto": "há um /btw aberto no terminal da sessão; feche antes de perguntar",
   "erro_btw_composer_ilegivel": "não consegui conferir o /btw digitado; nada foi enviado pra conversa, tente de novo",
+  "erro_btw_enter_nao_enviado": "o Enter do /btw não chegou ao terminal; nada foi enviado pra conversa, tente de novo",
   "erro_limits_so_codex": "limits só existe pra sessões Codex",
   "erro_models_so_codex": "models só existe pra sessões Codex",
   "erro_model_so_codex": "model só existe pra sessões Codex",

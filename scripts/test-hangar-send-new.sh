@@ -44,10 +44,13 @@ http.server.HTTPServer(("127.0.0.1", porta), H).serve_forever()
 PY
 SERVIDOR=$!
 trap 'kill "$SERVIDOR" 2>/dev/null; rm -rf "$TMP"' EXIT
+no_ar=""
 for _ in $(seq 1 50); do
-    python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 0.2)' "$PORTA" 2>/dev/null && break
+    python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 0.2)' "$PORTA" 2>/dev/null && { no_ar=1; break; }
     sleep 0.1
 done
+# Sem isto a falha aparecia como "valor diferente" nos casos, e não como o que é.
+[[ -n "$no_ar" ]] || { echo "FALHA: o backend falso não subiu na porta $PORTA"; exit 1; }
 
 campo() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get(sys.argv[2])))' "$TMP/corpo.json" "$1"; }
 checa() { # <caso> <esperado> <obtido>

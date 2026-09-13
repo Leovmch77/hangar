@@ -2144,6 +2144,7 @@
   "erro_btw_barra_perdida": "the terminal dropped the / of /btw; nothing was sent to the conversation, try again",
   "erro_btw_overlay_aberto": "a /btw is already open in the session's terminal; close it before asking",
   "erro_btw_composer_ilegivel": "could not verify the typed /btw; nothing was sent to the conversation, try again",
+  "erro_btw_enter_nao_enviado": "the Enter for /btw did not reach the terminal; nothing was sent to the conversation, try again",
   "erro_limits_so_codex": "limits only exists for Codex sessions",
   "erro_models_so_codex": "models only exists for Codex sessions",
   "erro_model_so_codex": "model only exists for Codex sessions",

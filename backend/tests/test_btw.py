@@ -29,6 +29,7 @@ class TmuxFalso:
     # = quantas digitacoes chegam SEM a `/` inicial (o que o Windows fez em 13/09/2026).
     perde_barra = 0
     digitado = ""
+    falha_enter = False
 
     def composer(self, name):
         return self.digitado
@@ -47,7 +48,11 @@ class TmuxFalso:
                 texto = texto[1:]
             self.digitado = "".join(texto.split())
         elif keys == "Enter":
+            self.teclas.append(keys)
+            if self.falha_enter:
+                return False
             self.digitado = ""
+            return True
         self.teclas.append(keys)
         if keys == "c" and self.buffer_apos_c:
             self.buffers.append("buffer7")
@@ -215,6 +220,17 @@ def test_composer_ilegivel_depois_de_digitar_para_sem_enter(falso, monkeypatch):
         btw.perguntar("s", "q")
     assert e.value.code == "erro_btw_composer_ilegivel"
     assert "Enter" not in f.teclas
+    assert f.teclas[-3:] == ["C-u", "C-u", "C-u"]
+
+
+def test_enter_que_nao_chega_diz_isso_na_hora(falso):
+    # Sem conferir o retorno, o Enter perdido so aparecia 6s depois como "nao abriu", culpando o
+    # overlay, e o /btw digitado ficava parado no composer.
+    f = falso([_tela("❯ ")])
+    f.falha_enter = True
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_enter_nao_enviado"
     assert f.teclas[-3:] == ["C-u", "C-u", "C-u"]
 
 
