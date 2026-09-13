@@ -388,6 +388,55 @@ def test_sem_login_vira_problema_com_instrucao(adapter):
     assert adapter.problema_de("s1")[0] == "headless_sem_login"
 
 
+def test_subagente_rotula_o_que_faz_e_nao_vaza_na_previa(adapter):
+    # Eventos medidos na sonda (docs/research): system/task_* pro andamento do subagente, e a
+    # conversa dele chega com parent_tool_use_id — que não pode mexer no rótulo nem na prévia.
+    sess = adapter._sessions["s1"]
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "system", "subtype": "task_started", "task_id": "t1",
+                                       "subagent_type": "Explore", "description": "Listar arquivos"})
+        assert sess.label == "Explore: Listar arquivos"
+        await adapter._on_event(sess, {"type": "system", "subtype": "task_progress", "task_id": "t1",
+                                       "description": "Running List files", "last_tool_name": "Bash"})
+        assert sess.label == "Explore: List files"
+        await adapter._on_event(sess, {"type": "stream_event", "parent_tool_use_id": "toolu_1",
+                                       "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "eu sou o filho"}}})
+        assert CodexPreviewSource.get("s1").text == ""
+        await adapter._on_event(sess, {"type": "assistant", "parent_tool_use_id": "toolu_1",
+                                       "message": {"content": [{"type": "tool_use", "name": "Grep"}]}})
+        assert sess.label == "Explore: List files"
+        await adapter._on_event(sess, {"type": "system", "subtype": "task_notification", "task_id": "t1", "status": "completed"})
+        assert not sess.tarefas
+    _run(fluxo())
+
+
+def test_permissao_decidida_por_hook_e_negacao_automatica_viram_nota(adapter, tmp_path, monkeypatch):
+    from app import pqueue
+    monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
+    sess = adapter._sessions["s1"]
+    q = pqueue.PromptQueue("s1"); q.clear()
+    req = {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r1", "request": req})
+        assert sess.state == "awaiting_input"
+        # Hook PermissionRequest decidiu: a CLI cancela o pedido antes do usuário responder.
+        await adapter._on_event(sess, {"type": "control_cancel_request", "request_id": "r1"})
+        assert sess.state == "working"
+        # Cancelamento de pedido que já não existe (interrupt nosso) não gera nota.
+        await adapter._on_event(sess, {"type": "control_cancel_request", "request_id": "r1"})
+        await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {},
+                                       "permission_denials": [{"tool_name": "Edit", "tool_use_id": "t", "tool_input": {"file_path": "/x.py"}}]})
+        await sess.drenador
+    _run(fluxo())
+    notas = [r["text"] for r in q.load() if r.get("papel") == "assistant"]
+    assert notas == ["⚙️ Permitir Bash? ls — decidido por hook, sem você", "⛔ Negado sem perguntar (1): Edit /x.py"]
+    q.clear()
+
+
 def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setenv("TMUX", "/tmp/x")

@@ -101,6 +101,7 @@ class _Sessao:
         self.janelas: list = []
         self.janelas_ts = 0.0
         self.drenador: asyncio.Task | None = None   # referência viva do drain de fim de turno
+        self.tarefas: dict[str, dict] = {}          # subagentes em voo: task_id -> {tipo, passo}
 
     @property
     def sid(self) -> str:
@@ -551,6 +552,10 @@ class ClaudeHeadlessAdapter:
 
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
         t = ev.get("type")
+        if ev.get("parent_tool_use_id") and t in ("assistant", "user", "stream_event"):
+            # Conversa de subagente: fica fora do rótulo e da prévia do principal (o transcript
+            # dele mora em subagents/agent-*.jsonl; o que ele faz agora vem por task_progress).
+            return
         if t == "control_response":
             r = ev.get("response") or {}
             fut = sess.waiters.get(r.get("request_id"))
@@ -575,7 +580,7 @@ class ClaudeHeadlessAdapter:
                 texto = "\n".join(b.get("text", "") for b in blocos
                                   if isinstance(b, dict) and b.get("type") == "text").strip()
                 if texto:
-                    await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
+                    await self._nota_local(sess, texto)
                 return
             tools = [b.get("name") for b in blocos if isinstance(b, dict) and b.get("type") == "tool_use"]
             if tools:
@@ -595,17 +600,22 @@ class ClaudeHeadlessAdapter:
             return
         if t == "control_cancel_request":
             rid = str(ev.get("request_id"))
-            sess.pending.pop(rid, None)
+            req = sess.pending.pop(rid, None)
             if sess.question and str(sess.question["request_id"]) == rid:
                 sess.question = None
             self._recalcular_estado(sess)
             await self._notify(sess)
+            if req is not None:
+                # Alguém decidiu antes do usuário (hook PermissionRequest, ou a CLI desistiu):
+                # no terminal isso aparece como uma linha; aqui a pergunta sumiria calada.
+                await self._nota_local(sess, f"⚙️ {self._permissao_texto(req)} — decidido por hook, sem você")
             return
         if t == "result":
             sess.in_progress = False
             sess.pending.clear()
             sess.question = None
             sess.label = None
+            sess.tarefas.clear()
             sess.previa = ""
             sub = ev.get("subtype") or ""
             if ev.get("local_command"):
@@ -626,6 +636,13 @@ class ClaudeHeadlessAdapter:
                 self._registrar_problema(sess, codigo, f"{sub}: {detalhe[:300]}")
             elif sub == "success":
                 self._limpar_problema(sess)
+            negadas = [d for d in (ev.get("permission_denials") or []) if isinstance(d, dict)]
+            if negadas:
+                # Negadas pelo modo/regra sem perguntar (dontAsk, deny rule): no terminal fica a
+                # linha vermelha; aqui o turno só "terminava" sem dizer o que faltou.
+                itens = "; ".join(" ".join(_alvo_da_permissao({"tool_name": d.get("tool_name"), "input": d.get("tool_input")})).strip()
+                                  for d in negadas[:5])
+                await self._nota_local(sess, f"⛔ Negado sem perguntar ({len(negadas)}): {itens}")
             if isinstance(ev.get("total_cost_usd"), (int, float)):
                 sess.cost = float(ev["total_cost_usd"])
             u = ev.get("usage")
@@ -681,9 +698,38 @@ class ClaudeHeadlessAdapter:
                 sess.label = "Pensando…"
         elif sub and sub.startswith("compact"):
             sess.label = "Compactando…"
+        elif sub == "task_started":
+            # Subagente (tool Agent/skill que forka): o rótulo passa a dizer o que ELE faz, que é
+            # o que o terminal mostra em vez de "Agent…" parado até o fim.
+            sess.tarefas[str(ev.get("task_id"))] = {
+                "tipo": ev.get("subagent_type") or ev.get("task_type") or "agente",
+                "passo": ev.get("description") or "",
+            }
+            sess.label = self._rotulo_tarefas(sess)
+        elif sub == "task_progress":
+            t = sess.tarefas.get(str(ev.get("task_id")))
+            if t is not None:
+                t["passo"] = ev.get("description") or t["passo"]
+                sess.label = self._rotulo_tarefas(sess)
+        elif sub in ("task_notification", "task_updated"):
+            status = ev.get("status") or (ev.get("patch") or {}).get("status")
+            if status in ("completed", "failed", "killed", "cancelled"):
+                sess.tarefas.pop(str(ev.get("task_id")), None)
+                sess.label = self._rotulo_tarefas(sess) if sess.tarefas else sess.label
         else:
             return
         await self._notify(sess)
+
+    def _rotulo_tarefas(self, sess: _Sessao) -> str | None:
+        vivas = list(sess.tarefas.values())
+        if not vivas:
+            return None
+        t = vivas[-1]
+        passo = t["passo"].removeprefix("Running ").strip()
+        rotulo = f"{t['tipo']}: {passo}" if passo else f"{t['tipo']}…"
+        if len(vivas) > 1:
+            rotulo = f"{len(vivas)} agentes · {rotulo}"
+        return rotulo[:120]
 
     async def _on_stream(self, sess: _Sessao, e: dict) -> None:
         tipo = e.get("type")
@@ -761,13 +807,17 @@ class ClaudeHeadlessAdapter:
     # ── estado pro SSE ─────────────────────────────────────────────────────────────────────
 
     def _permissao_texto(self, req: dict) -> str:
-        tool = req.get("tool_name") or "ferramenta"
-        inp = req.get("input") or {}
-        detalhe = req.get("description") or inp.get("command") or inp.get("file_path") or inp.get("path") or ""
-        detalhe = str(detalhe)
-        if len(detalhe) > 200:
-            detalhe = detalhe[:200] + "…"
+        tool, detalhe = _alvo_da_permissao(req)
         return f"Permitir {tool}? {detalhe}".strip()
+
+    async def _nota_local(self, sess: _Sessao, texto: str) -> None:
+        """Bolha do assistente fora do transcript (comando local, aviso de permissão): vai pela
+        fila durável, que o histórico e o SSE já sabem ler. Falha vira log e problema visível."""
+        try:
+            await asyncio.to_thread(PromptQueue(sess.name).append_saida_local, texto)
+        except OSError:
+            _log.exception("claude headless: nota local não gravada name=%s", sess.name)
+            self._registrar_problema(sess, "headless_turno_erro", f"aviso perdido: {texto[:120]}")
 
     def status_line(self, sess: _Sessao) -> str | None:
         parts: list[str] = []
@@ -966,6 +1016,17 @@ def _blocos_do_prompt(text: str) -> list[dict]:
         blocos.append({"type": "image", "source": {"type": "base64", "media_type": mime,
                                                    "data": base64.b64encode(dados).decode("ascii")}})
     return blocos
+
+
+def _alvo_da_permissao(req: dict) -> tuple[str, str]:
+    """(ferramenta, detalhe curto) de um pedido de permissão ou de uma negação do `result`."""
+    tool = req.get("tool_name") or "ferramenta"
+    inp = req.get("input") or {}
+    detalhe = req.get("description") or inp.get("command") or inp.get("file_path") or inp.get("path") or ""
+    detalhe = str(detalhe)
+    if len(detalhe) > 200:
+        detalhe = detalhe[:200] + "…"
+    return str(tool), detalhe
 
 
 def _modo_do_app(modo: str) -> str:
