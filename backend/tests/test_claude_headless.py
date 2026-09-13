@@ -129,6 +129,25 @@ def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypat
     assert chamadas == [{"esperar_pronta": False}]
 
 
+def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, monkeypatch):
+    ad = ClaudeHeadlessAdapter()
+
+    async def spawn_quebra(sess, **kw):
+        raise RuntimeError("binário não encontrado: claude")
+    monkeypatch.setattr(ad, "_spawn", spawn_quebra)
+
+    async def fluxo():
+        gen = ad.state_monitor("s1", lambda: None)
+        ev = await gen.__anext__()
+        assert ev.state == "idle" and ev.problema is None
+        ad.acordar("s1")
+        await asyncio.gather(*ad._tarefas)
+        ev = await asyncio.wait_for(gen.__anext__(), 3)
+        assert ev.problema == "headless_nao_subiu" and "binário" in (ev.problema_detalhe or "")
+        await gen.aclose()
+    _run(fluxo())
+
+
 def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapter, monkeypatch):
     sess = adapter._sessions["s1"]
     monkeypatch.setattr(A, "_AVISO_INIT_S", 0.01)

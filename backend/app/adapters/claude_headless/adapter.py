@@ -706,8 +706,14 @@ class ClaudeHeadlessAdapter:
             await pedido
         except asyncio.TimeoutError:
             _log.warning("claude headless: initialize desistiu em %.0fs name=%s", _TETO_INIT_S, sess.name)
+        except RuntimeError as e:
+            _log.warning("claude headless: initialize falhou name=%s: %s", sess.name, e)
+            if sess.vivo:
+                # Vivo = a CLI recusou o initialize. Morto = o leitor já registrou a queda.
+                self._registrar_problema(sess, "headless_nao_subiu", str(e)[:300])
         except Exception:
-            _log.warning("claude headless: initialize falhou name=%s", sess.name, exc_info=True)
+            _log.exception("claude headless: initialize quebrou name=%s", sess.name)
+            self._registrar_problema(sess, "headless_nao_subiu", "falha interna ao iniciar a sessão")
         else:
             if sess.problema == "headless_sem_resposta":
                 self._limpar_problema(sess)
@@ -778,7 +784,9 @@ class ClaudeHeadlessAdapter:
             # O snapshot só guarda o `result`, que não diz o contexto: a última chamada está no .jsonl.
             try:
                 uso = await asyncio.to_thread(_uso_da_ultima_chamada, self.transcript_path_de(sess.meta))
-            except (KeyError, TypeError):
+            except Exception:
+                # Contexto é contabilidade: falhar aqui não pode virar "a sessão não subiu".
+                _log.warning("claude headless: contexto do transcript ilegível name=%s", sess.name, exc_info=True)
                 uso = None
             _aplicar_uso_da_chamada(sess, uso)
         sess.initialized.set()
@@ -1326,9 +1334,15 @@ class ClaudeHeadlessAdapter:
                     sess = self._sessions.get(name)
                     if sess is not None and sess.vivo:
                         break
+                    if self._problemas.get(name) != prob:
+                        # Subida em segundo plano (acordar) falhou com o chat já aberto: sem
+                        # reemitir, o problema só apareceria numa conexão nova.
+                        break
                     if not hl_sessions.exists(name):
                         yield StateEvent(session=name, state="dead")
                         return
+                if sess is None or not sess.vivo:
+                    continue
             last = -1
             while True:
                 async with sess.cond:
