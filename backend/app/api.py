@@ -1018,6 +1018,10 @@ _CONFIRM_GRACE = 8.0  # s entre o send e a checagem "o transcript gravou o promp
 # sem segunda chance o prazo tem que ser generoso — senao ruido de timing carimba `desistiu` numa
 # msg que so estava esperando a vez na fila da propria TUI.
 _CONFIRM_GRACE_KIMI = 30.0
+# Claude sem terminal: mesma regra do Kimi (nunca redigita). O .jsonl só ganha a linha depois dos
+# hooks de UserPromptSubmit, que com plugins passam de 8s; o prazo cobre isso e ainda termina em
+# `desistiu` visível quando a entrega morreu de verdade (processo caiu logo após a escrita).
+_CONFIRM_GRACE_HEADLESS = 60.0
 # Kimi: de quanto em quanto tempo reavaliar um "idle" que o transcript desmentiu. Nao ha evento pra
 # esperar (o fim de turno real grava idle sobre idle e nao gera transicao), entao a saida e reolhar.
 # 5s: a sessao demora isso pra aparecer parada, e enquanto o turno anda o custo e um getmtime.
@@ -1101,7 +1105,9 @@ def _confirm_and_drain(name: str) -> None:
         if m and info.provider == "kimi":
             m = corrige_ocioso_kimi(m, info.jsonl)
         # Kimi espera MAIS antes de declarar perdida (30s contra 8s): ver o comentario no else.
-        grace = _CONFIRM_GRACE_KIMI if info.provider == "kimi" else _CONFIRM_GRACE
+        headless = _headless(name)
+        grace = (_CONFIRM_GRACE_KIMI if info.provider == "kimi"
+                 else _CONFIRM_GRACE_HEADLESS if headless else _CONFIRM_GRACE)
         # UMA leitura do oraculo pros dois ramos. None = nao deu pra ler o transcript (ver
         # committed_user_lines): sai SEM decidir e SEM reagendar. Sem reagendar de proposito — um
         # Timer a cada `grace` contra um arquivo que nao abre e tempestade sem fim; o proximo fim
@@ -1120,10 +1126,7 @@ def _confirm_and_drain(name: str) -> None:
             _log.warning("confirmacao adiada name=%s: transcript ilegivel agora (nada foi "
                          "reenfileirado nem dado por perdido)", name)
             return
-        # Sem terminal não há tecla engolida: a escrita no stdin de um processo vivo é a entrega. O
-        # .jsonl só ganha a linha depois dos hooks de UserPromptSubmit (medido: >8s com plugins), e
-        # "ausente do transcript" virava redigitação — cada recado chegava duas vezes ao agente.
-        if (m and m[0] == "working") or _headless(name):
+        if m and m[0] == "working":
             # Turno vivo: REDIGITAR e DESISTIR no meio do turno sao perigosos (o texto pode ainda
             # estar na fila interna da TUI — desistiu viraria aviso falso de "nao chegou" sobre
             # msg que chega depois). CONFIRMAR nao: o transcript e a fonte de verdade, e texto
@@ -1156,7 +1159,10 @@ def _confirm_and_drain(name: str) -> None:
             # fila de uma sessao Kimi (REQUEUE n=3 no log das 08:29). Pior caso agora e o mesmo aceito
             # logo acima pro estado desconhecido: envio de verdade engolido fica VISIVEL como bolha da
             # fila (`desistiu`), que e falha visivel — duplicar a msg do usuario nao e.
-            max_attempts = 0 if (m is None or info.provider == "kimi") else 2
+            # Sem terminal também nunca: não há tecla engolida (a escrita no stdin do processo vivo é
+            # a entrega), e "ausente do transcript" antes dos hooks terminarem virava redigitação —
+            # cada recado chegava duas vezes ao agente (REQUEUE medido em sessões headless).
+            max_attempts = 0 if (m is None or info.provider == "kimi" or headless) else 2
             # Kimi espera MAIS antes de declarar perdida: com max_attempts=0 nao ha segunda chance — a
             # primeira checagem depois do prazo ja carimba `desistiu`. Subir pra 1 nao serve (no
             # reconcile, attempts < max REDIGITA, a duplicacao que este provider nao pode ter). Entao

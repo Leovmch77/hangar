@@ -776,7 +776,20 @@ def test_confirm_nunca_redigita_sessao_sem_terminal(tmp_path, monkeypatch):
     chamou, row = _cenario_engolida(tmp_path, monkeypatch, ("idle", _t.time()))
     assert chamou == []
     assert row["delivered"] is True and not row.get("attempts")
-    assert "desistiu" not in row and "confirmed" not in row   # segue esperando a prova
+    assert "desistiu" not in row and "confirmed" not in row   # 30s < prazo: segue esperando a prova
+
+
+def test_confirm_sem_terminal_desiste_visivel_depois_do_prazo(tmp_path, monkeypatch):
+    # Entrega que morreu de verdade (processo caiu logo após a escrita) não pode ficar reagendando
+    # pra sempre sem aviso: passado o prazo, vira `desistiu` — ainda sem redigitar.
+    import time as _t
+    import app.api as api
+    monkeypatch.setattr(api, "_headless", lambda name: True)
+    monkeypatch.setattr(api, "_CONFIRM_GRACE_HEADLESS", 10.0)
+    chamou, row = _cenario_engolida(tmp_path, monkeypatch, ("idle", _t.time()))
+    assert chamou == []
+    assert row["delivered"] is True and not row.get("attempts")
+    assert row["desistiu"] is True and "confirmed" not in row
 
 
 def test_confirm_ainda_redigita_com_estado_conhecido_ocioso(tmp_path, monkeypatch):
