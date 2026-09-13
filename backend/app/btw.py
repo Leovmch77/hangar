@@ -9,13 +9,15 @@ turno, e o Esc que o fecha não interrompe o turno principal.
 
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 
 from app import tmux
 from app.config import settings
 from app.pqueue import _sanitize
-from app.terminal_input import _SETTLE, _esvaziar_composer_claude, _pane_tail, _send_lock
+from app.terminal_input import (_SETTLE, _esvaziar_composer_claude, _pane_tail, _send_lock,
+                                _texto_composer_claude)
 
 _log = logging.getLogger(__name__)
 
@@ -28,6 +30,10 @@ _PRAZO_ABRIR = 6.0
 _PRAZO_COPIA = 3.0
 _RODAPE_LINHAS = 3
 MAX_HISTORICO = 50
+# Buffers do tmux são do SERVIDOR, não do pane: dois `c` em sessões diferentes na mesma janela
+# trocariam as respostas. O `_send_lock` é por sessão, então o trecho "c → achar → apagar" tem
+# trava própria, global.
+_COPIA_LOCK = threading.Lock()
 
 
 class BtwError(RuntimeError):
@@ -58,19 +64,28 @@ def _resposta_do_pane(name: str, pergunta: str) -> str:
     return "\n".join(l[6:] if l.startswith("      ") else l.strip() for l in linhas[inicio + 1:fim]).strip()
 
 
-def perguntar(name: str, pergunta: str, timeout: float = 120.0) -> dict:
+def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
     """Digita `/btw <pergunta>`, espera a resposta, copia pelo `c`, fecha o overlay e devolve.
 
     Segura o `_send_lock` da sessão o tempo todo: um drain da fila digitando no meio do overlay
-    cairia dentro dele. Um Enter só — o `/btw` é imediato, e um 2º Enter num overlay já aberto
-    seria tecla dentro dele.
+    cairia dentro dele. O custo é que um envio normal pra ESTA sessão espera a resposta — por
+    isso o teto é curto (respostas normais levam segundos) e o overlay que some por fora aborta
+    na hora, sem esperar o teto. Roda fora do pool de envio (`_send_thread`) de propósito: um
+    worker de lá preso por um minuto derrubaria o envio de todas as sessões.
+    Um Enter só — o `/btw` é imediato, e um 2º Enter num overlay já aberto seria tecla dentro dele.
     """
     pergunta = " ".join(pergunta.split())
     if not pergunta:
         raise BtwError(400, "erro_btw_vazia", "pergunta vazia")
     with _send_lock(name):
         _esvaziar_composer_claude(name)
-        tmux.send_keys(name, "/btw " + pergunta, literal=True)
+        # Texto que sobrou no composer viraria "<rascunho>/btw …" submetido como MENSAGEM real
+        # pelo Enter abaixo. Ilegível (None) segue, como o envio normal.
+        if _texto_composer_claude(name):
+            raise BtwError(409, "erro_btw_composer_ocupado",
+                           "há texto parado no terminal da sessão; envie ou apague antes")
+        if not tmux.send_keys(name, "/btw " + pergunta, literal=True):
+            raise BtwError(502, "erro_btw_nao_digitou", "não consegui digitar o /btw no terminal da sessão")
         time.sleep(_SETTLE)
         tmux.send_keys(name, "Enter")
 
@@ -83,6 +98,10 @@ def perguntar(name: str, pergunta: str, timeout: float = 120.0) -> dict:
                 aberto = True
                 if _PRONTO in rodape:
                     break
+            elif aberto:
+                # Alguém fechou o overlay por fora (Esc no terminal, interrupt do app). Sem overlay
+                # não há resposta pra ler — e um Esc nosso agora cairia no turno principal.
+                raise BtwError(409, "erro_btw_fechado", "o /btw foi fechado no terminal antes de eu ler a resposta")
             decorrido = time.monotonic() - inicio
             if not aberto and decorrido > _PRAZO_ABRIR:
                 raise BtwError(409, "erro_btw_nao_abriu", "o /btw não abriu no terminal da sessão")
@@ -90,18 +109,20 @@ def perguntar(name: str, pergunta: str, timeout: float = 120.0) -> dict:
                 tmux.send_keys(name, "Escape")
                 raise BtwError(504, "erro_btw_sem_resposta", "o /btw não respondeu a tempo")
 
-        antes = set(_buffers())
-        tmux.send_keys(name, "c")
-        fim = time.monotonic() + _PRAZO_COPIA
-        novo = None
-        while time.monotonic() < fim:
-            time.sleep(_POLL)
-            novo = next((b for b in _buffers() if b not in antes), None)
-            if novo or _COPIADO in _rodape(name):
-                break
+        with _COPIA_LOCK:
+            antes = set(_buffers())
+            tmux.send_keys(name, "c")
+            fim = time.monotonic() + _PRAZO_COPIA
+            novo = None
+            while time.monotonic() < fim:
+                time.sleep(_POLL)
+                novo = next((b for b in _buffers() if b not in antes), None)
+                if novo or _COPIADO in _rodape(name):
+                    break
+            if novo:
+                resposta = tmux._run(["tmux", "show-buffer", "-b", novo]).stdout or ""
+                tmux._run(["tmux", "delete-buffer", "-b", novo])
         if novo:
-            resposta = tmux._run(["tmux", "show-buffer", "-b", novo]).stdout or ""
-            tmux._run(["tmux", "delete-buffer", "-b", novo])
             fonte = "buffer"
         else:
             resposta = _resposta_do_pane(name, pergunta)
@@ -121,20 +142,23 @@ def _arquivo(name: str) -> Path:
     return d / f"{_sanitize(name)}.jsonl"
 
 
+def _linhas(p: Path) -> list[str]:
+    if not p.exists():
+        return []
+    return [l for l in p.read_text(encoding="utf-8").split("\n") if l.strip()]
+
+
 def registrar(name: str, item: dict) -> None:
-    with _arquivo(name).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    p = _arquivo(name)
+    linhas = _linhas(p) + [json.dumps(item, ensure_ascii=False)]
+    p.write_text("\n".join(linhas[-MAX_HISTORICO:]) + "\n", encoding="utf-8")
 
 
 def historico(name: str) -> list[dict]:
-    p = _arquivo(name)
-    if not p.exists():
-        return []
     itens = []
-    for linha in p.read_text(encoding="utf-8").split("\n"):
-        if linha.strip():
-            try:
-                itens.append(json.loads(linha))
-            except ValueError:
-                continue
+    for linha in _linhas(_arquivo(name)):
+        try:
+            itens.append(json.loads(linha))
+        except ValueError:
+            continue
     return itens[-MAX_HISTORICO:]

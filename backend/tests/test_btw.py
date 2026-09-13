@@ -50,6 +50,7 @@ def falso(monkeypatch):
         monkeypatch.setattr(btw.tmux, "send_keys", f.send_keys)
         monkeypatch.setattr(btw.tmux, "_run", f._run)
         monkeypatch.setattr(btw, "_esvaziar_composer_claude", lambda name: True)
+        monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: "")
         monkeypatch.setattr(btw.time, "sleep", lambda s: None)
         return f
     return montar
@@ -96,3 +97,32 @@ def test_pergunta_vazia_nao_digita(falso):
     with pytest.raises(btw.BtwError):
         btw.perguntar("s", "   ")
     assert f.teclas == []
+
+
+def test_composer_com_texto_parado_nao_digita(falso, monkeypatch):
+    f = falso([_tela("❯ rascunho")])
+    monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: "rascunho")
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_composer_ocupado"
+    assert f.teclas == []
+
+
+def test_overlay_fechado_por_fora_aborta_sem_escape(falso):
+    f = falso([
+        _tela("    /btw q", "      · Answering…", RODAPE_ANDANDO),
+        _tela("❯ "),
+    ])
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar("s", "q")
+    assert e.value.code == "erro_btw_fechado"
+    assert "Escape" not in f.teclas
+
+
+def test_historico_guarda_so_os_ultimos(tmp_path, monkeypatch):
+    monkeypatch.setattr(btw.settings, "projects_dir", tmp_path / "projects")
+    monkeypatch.setattr(btw, "MAX_HISTORICO", 3)
+    for i in range(5):
+        btw.registrar("s", {"question": str(i), "answer": "a", "ts": i})
+    assert [it["question"] for it in btw.historico("s")] == ["2", "3", "4"]
+    assert len(btw._arquivo("s").read_text().splitlines()) == 3

@@ -1784,8 +1784,9 @@ export async function interrupt(name: string, clear = false): Promise<void> {
 export interface PerguntaLateral {
   question: string;
   answer: string;
-  fonte: 'buffer' | 'pane';
+  fonte: 'buffer' | 'pane';   // 'pane' = lida da tela, pode estar cortada
   ts: number;
+  salvo?: boolean;            // false = respondeu, mas o histórico não foi gravado
 }
 
 export async function perguntaLateral(name: string, question: string): Promise<PerguntaLateral> {
@@ -2037,6 +2038,27 @@ export function openEventStream(name: string, lastEventId?: string | null, req =
   const url = `${base}${path}${qs ? `?${qs}` : ''}`;
 
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
+}
+
+export interface SyncSetup {
+  enabled: boolean;
+  registered: boolean;
+  user: string | null;
+}
+
+export interface SyncSetupBody {
+  user: string;
+  salt: string;
+  auth_hash: string;
+  enc_blob: { iv: string; data: string };
+}
+
+export function getSyncSetupForServer(server: Server, signal?: AbortSignal): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { signal: comTeto(signal, 8000) });
+}
+
+export function setupSyncForServer(server: Server, body?: SyncSetupBody): Promise<SyncSetup> {
+  return apiFetchForServer(server, '/api/sync/setup', { method: 'POST', body: JSON.stringify(body ?? {}) });
 }
 
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource

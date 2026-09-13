@@ -37,7 +37,7 @@
       erro = null;
       historicoLateral(sessionName)
         .then((h) => { if (my === epoch) { itens = h; void rolarFim(); } })
-        .catch(() => {});
+        .catch((e) => { if (my === epoch) erro = m.btw_historico_falhou({ erro: formataErro(e) ?? String(e) }); });
       if (q.trim()) void perguntar(q);
       else void tick().then(() => campoEl?.focus());
     });
@@ -50,7 +50,13 @@
 
   async function perguntar(q: string) {
     q = q.trim();
-    if (!q || emVoo) return;
+    if (!q) return;
+    if (emVoo) {
+      // O backend serializa por sessão; descartar calado deixava a 2ª pergunta sumir.
+      erro = m.btw_em_andamento();
+      texto = q;
+      return;
+    }
     emVoo = q;
     erro = null;
     texto = '';
@@ -68,7 +74,7 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && window.matchMedia('(min-width: 820px)').matches) {
+    if (e.key === 'Enter' && !e.shiftKey && desktop.atual) {
       e.preventDefault();
       void perguntar(texto);
     }
@@ -88,6 +94,8 @@
         <div class="item">
           <p class="pergunta">{it.question}</p>
           <div class="resposta md">{@html renderMarkdown(it.answer)}</div>
+          {#if it.fonte === 'pane'}<p class="aviso">{m.btw_talvez_cortada()}</p>{/if}
+          {#if it.salvo === false}<p class="aviso">{m.btw_nao_guardada()}</p>{/if}
         </div>
       {/each}
       {#if emVoo}
@@ -104,7 +112,7 @@
 
     <div class="campo">
       <textarea bind:this={campoEl} bind:value={texto} rows="2" placeholder={m.btw_placeholder()}
-                onkeydown={onKeydown} disabled={!!emVoo}></textarea>
+                aria-label={m.btw_titulo()} onkeydown={onKeydown} disabled={!!emVoo}></textarea>
       <button class="enviar" onclick={() => perguntar(texto)} disabled={!!emVoo || !texto.trim()}>
         {m.btw_perguntar()}
       </button>
@@ -133,6 +141,7 @@
   .resposta :global(pre) { overflow-x: auto; padding: var(--space-2); border-radius: var(--radius-md); background: var(--surface-inset); }
 
   .erro { font-size: var(--text-sm); color: #e5484d; }
+  .aviso { font-size: var(--text-xs); color: var(--text-muted); }
 
   .campo { display: flex; gap: var(--space-2); align-items: flex-end; }
   textarea {
