@@ -11,6 +11,7 @@
   import ToolCard from './ToolCard.svelte';
   import ToolGroup from './ToolGroup.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import PensamentoVivo from './PensamentoVivo.svelte';
   import TaskRows from './TaskRows.svelte';
   import { foldTasks } from '@hangar/core';
   import { taskRows } from '../lib/taskRows.svelte';
@@ -57,6 +58,7 @@
     previewMd?: boolean;   // o texto da previa e markdown cru -> a bolha renderiza
     previewFull?: boolean; // a previa e incremental (so cresce no fim) -> bolha sem o teto de 10 linhas
     previewVivo?: boolean; // deltas do proprio modelo, no ritmo real -> sem maquina de escrever
+    pensamento?: string;   // raciocinio em voo (Claude sem terminal); some quando o bloco cai no transcript
     onSelectOption: (i: number) => void;
     /** Múltipla escolha: envia o que já foi marcado. Ausente = sem botão de enviar. */
     onSubmitSelected?: () => void;
@@ -92,7 +94,7 @@
   }
 
   let {
-    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, onSelectOption, onSubmitSelected, onCancel,
+    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', onSelectOption, onSubmitSelected, onCancel,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0
@@ -548,12 +550,16 @@
       <SessionPlanPreview {...planoProps()} />
     {/if}
 
+    {#if pensamento}
+      <PensamentoVivo texto={pensamento} />
+    {/if}
+
     {#if preview}
       <AssistantBubble text={codex ? planDisplayText(preview) : preview} ts={undefined} {sessionName} preview md={previewMd} full={previewFull} vivo={previewVivo}
                        streaming={stateEvent?.state === 'working'} />
     {/if}
 
-    {#if stateEvent?.state === 'working'}
+    {#if stateEvent?.state === 'working' && !pensamento}
       <Spinner label={stateEvent.label} />
     {/if}
 

@@ -1236,6 +1236,7 @@
   "pensamento_uma_busca": "pensou · 1 busca",
   "pensamento_buscas": "pensou · {n} buscas",
   "pensamento_abrir": "Mostrar ou esconder o pensamento",
+  "pensamento_vivo": "Pensando",
   "config_server_avisar_terminar": "Avisar quando terminar",
   "config_server_avisar_terminar_ajuda": "Notificação quando um turno longo acaba.",
   "config_server_turno_curto": "Turno curto não avisa",

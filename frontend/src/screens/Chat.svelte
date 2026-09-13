@@ -405,6 +405,16 @@
   // e o swap atomico do assistant_msg. O timer so vence se o bloco nunca vier (turno so de
   // ferramentas / interrompido) — a previa orfa nao pode ficar congelada pra sempre.
   let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
+  // Raciocínio em voo (SSE 'pensamento', só Claude sem terminal). O "" do servidor chega antes do
+  // bloco pelo tail do .jsonl: apagar na hora abriria um buraco. Quem apaga é o `thinking` real;
+  // o timer só vence se ele nunca vier (interrupção).
+  let pensamentoVivo = $state('');
+  let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
+  function limparPensamento() {
+    clearTimeout(pensamentoTimer);
+    pensamentoTimer = undefined;
+    pensamentoVivo = '';
+  }
   function dropPreviewSoon() {
     if (previewDropTimer !== undefined || !previewText) return;
     previewDropTimer = setTimeout(() => { previewDropTimer = undefined; previewText = ''; }, 5000);
@@ -1806,6 +1816,7 @@
           events = [...events, ev];
           // Folds incrementais: evento NOVO alimenta o painel de atividade e o contador de
           // assistant_msg (replaces do replay não passam aqui -> não contam dobrado).
+          if (ev.kind === 'thinking' && pensamentoVivo) limparPensamento();
           if (ev.kind === 'tool_use' || ev.kind === 'tool_result') {
             actFolder.push(ev);
             activity = actFolder.snapshot();
@@ -1938,6 +1949,22 @@
       }
     });
 
+    es.addEventListener('pensamento', (e) => {
+      noteAlive();
+      try {
+        const t = (JSON.parse(e.data) as { text?: string }).text ?? '';
+        if (t) {
+          clearTimeout(pensamentoTimer);
+          pensamentoTimer = undefined;
+          pensamentoVivo = t;
+        } else if (pensamentoVivo && pensamentoTimer === undefined) {
+          pensamentoTimer = setTimeout(limparPensamento, 3000);
+        }
+      } catch {
+        quadroFalhou('pensamento');
+      }
+    });
+
     // Reset de sessao (ex: /clear): o backend trocou de transcript. O dedup-por-id NAO limparia as
     // bolhas antigas (ids diferentes) -> zera tudo e recarrega o history do jsonl novo (vem limpo).
     es.addEventListener('reset', () => {
@@ -1956,6 +1983,7 @@
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
       cancelPreviewDrop();
       previewText = '';
+      limparPensamento();
       stateEvent = null;
       statsEvent = null;      // transcript novo -> a faixa zera junto (o backend recomeça o fold)
       loadHistory(false);
@@ -2732,6 +2760,7 @@
       previewMd={previewMd}
       previewFull={previewFull}
       previewVivo={previewVivo}
+      pensamento={pensamentoVivo}
       onSelectOption={handleSelect}
       onSubmitSelected={handleSubmitSelected}
       onCancel={handleInterrupt}

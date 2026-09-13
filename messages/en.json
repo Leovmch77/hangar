@@ -1236,6 +1236,7 @@
   "pensamento_uma_busca": "thought · 1 search",
   "pensamento_buscas": "thought · {n} searches",
   "pensamento_abrir": "Show or hide the thinking",
+  "pensamento_vivo": "Thinking",
   "config_server_avisar_terminar": "Notify when done",
   "config_server_avisar_terminar_ajuda": "Notification when a long turn ends.",
   "config_server_turno_curto": "Short turns don't notify",

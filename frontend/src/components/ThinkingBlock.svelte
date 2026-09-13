@@ -1,5 +1,7 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
+  import { slide } from 'svelte/transition';
+  import IconCerebro from './icons/IconCerebro.svelte';
   import { summarizeToolInput, resumoPensamento } from '@hangar/core';
   import { pensamentoEmPt } from '@hangar/core';
   import { ehBusca } from '../lib/pensamentoTools.svelte';
@@ -112,14 +114,12 @@
     onclick={abrir}
     onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); abrir(); } }}
   >
-    <svg class="th-chevron" class:open={aberto} width="12" height="12" viewBox="0 0 24 24"
-         fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
-         stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+    <span class="th-ic"><IconCerebro size={15} /></span>
     <span class="th-resumo">{aberto ? rotulo : resumo}</span>
   </div>
 
   {#if aberto}
-    <div class="th-corpo">
+    <div class="th-corpo" transition:slide={{ duration: 220 }}>
       {#each eventos as ev (ev.id)}
         {#if ev.kind === 'thinking'}
           {#each paragrafos(pt[ev.id] ?? ev.text ?? '') as p, i (i)}<p>{p}</p>{/each}
@@ -154,8 +154,8 @@
      o mesmo gesto, e duas medidas diferentes leriam como dois controles diferentes. */
   .th-head {
     display: flex;
-    align-items: baseline;
-    gap: 6px;
+    align-items: center;
+    gap: 7px;
     min-width: 0;
     padding: var(--space-1) 0;
     font-size: var(--text-xs);
@@ -164,14 +164,14 @@
     cursor: pointer;
   }
 
-  .th-chevron {
+  .th-ic {
+    display: inline-flex;
     flex-shrink: 0;
-    align-self: center;
     color: var(--text-muted);
-    transition: transform 200ms var(--ease-out);
-    transform: rotate(-90deg);
+    opacity: 0.75;
+    transition: opacity 200ms var(--ease-out);
   }
-  .th-chevron.open { transform: rotate(0deg); }
+  .th-head:hover .th-ic { opacity: 1; }
 
   .th-resumo {
     min-width: 0;
@@ -180,14 +180,15 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    transition: color 200ms var(--ease-out);
   }
+  .th-head:hover .th-resumo { color: var(--text-secondary); }
 
-  /* Aberto: fio à esquerda em vez de caixa. Superfície própria aqui viraria retângulo chapado por
-     cima do papel de parede — o texto é aparte da conversa, não um cartão. */
+  /* Aberto: recuo alinhado ao texto do cabeçalho, sem caixa nem fio. Superfície própria viraria
+     retângulo chapado por cima do papel de parede — o texto é aparte da conversa, não um cartão. */
   .th-corpo {
     margin: 2px 0 var(--space-2);
-    padding-left: 18px;
-    border-left: 1px solid var(--border-subtle);
+    padding-left: 22px;
   }
   /* Mesmo tamanho e mesma cor da linha fechada: aberto, o pensamento continua sendo o aparte, e a
      resposta segue a coisa mais forte da tela. Com 13px em --text-secondary ele competia com a
