@@ -13,6 +13,7 @@
   import { patchConfig, patchConfigForServer } from '@hangar/core';
   import * as m from '../../paraglide/messages';
   import { getLocale } from '../../paraglide/runtime';
+  import { onDestroy } from 'svelte';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import type { Server } from '../../lib/auth';
@@ -303,18 +304,34 @@
     finally { if (g === ger) carregando = false; }
   }
 
-  async function consertar(id: string) {
+  // Andamento e desfecho moram JUNTO do item: o botão virava "…" e o resultado ia pro rodapé da
+  // página, longe de quem clicou. Tempo decorrido, não estimativa: um conserto é um comando só, e
+  // "quanto falta" seria inventado.
+  let consertoDe = $state<{ cli: string; item: string } | null>(null);
+  let resultado = $state<{ cli: string; item: string; ok: boolean; texto: string } | null>(null);
+  let decorrido = $state(0);
+  let relogio: ReturnType<typeof setInterval> | undefined;
+  onDestroy(() => clearInterval(relogio));
+
+  async function consertar(id: string, cli: string, item: string) {
     if (consertando) return;
     const alvo = apiTarget;
     const g = ++ger;
-    consertando = id; erro = ''; feito = '';
+    consertando = id; consertoDe = { cli, item }; resultado = null; erro = ''; feito = '';
+    const inicio = Date.now();
+    decorrido = 0;
+    clearInterval(relogio);
+    relogio = setInterval(() => { decorrido = Math.floor((Date.now() - inicio) / 1000); }, 1000);
     try {
       const r = await consertarHarness(alvo, id);
       if (g !== ger) return;
       lista = r.harnesses;
-      feito = r.feito;
-    } catch (e) { if (g === ger) erro = e instanceof Error ? e.message : String(e); }
-    finally { if (g === ger) consertando = null; }
+      resultado = { cli, item, ok: true, texto: r.feito };
+    } catch (e) {
+      if (g === ger) resultado = { cli, item, ok: false, texto: e instanceof Error ? e.message : String(e) };
+    } finally {
+      if (g === ger) { consertando = null; consertoDe = null; clearInterval(relogio); }
+    }
   }
 
   $effect(() => {
@@ -461,14 +478,28 @@
             >{i.info ? '·' : i.ok === true ? '✓' : i.ok === false ? '✕' : '?'}</span>
           <span class="hs-item-txt"><b>{rotulo(i)}</b> {texto(i)}</span>
           {#if i.conserto}
-            <button type="button" class="hs-btn" onclick={() => consertar(i.conserto!)}
+            <button type="button" class="hs-btn" onclick={() => consertar(i.conserto!, h.id, i.id)}
               disabled={consertando !== null}
               >{consertando === i.conserto ? '…'
                 : i.conserto.startsWith('sync:') ? m.harness_sincronizar()
                 : (i.ok === false ? m.harness_consertar() : m.harness_refazer())}</button>
           {/if}
         </div>
+        {#if consertoDe?.cli === h.id && consertoDe.item === i.id}
+          <div class="hs-conserto" role="status">
+            <span>{m.harness_consertando({ item: rotulo(i), s: decorrido })}</span>
+            <span class="hs-barra" aria-hidden="true"><span></span></span>
+          </div>
+        {:else if resultado?.cli === h.id && resultado.item === i.id}
+          <p class="hs-conserto" class:erro={!resultado.ok} role={resultado.ok ? 'status' : 'alert'}
+            >{resultado.texto}</p>
+        {/if}
       {/each}
+      <!-- Item que sumiu depois do conserto (ele deixou de se aplicar): o desfecho fica no card. -->
+      {#if resultado?.cli === h.id && !h.itens.some((i) => i.id === resultado?.item)}
+        <p class="hs-conserto" class:erro={!resultado.ok} role={resultado.ok ? 'status' : 'alert'}
+          >{resultado.texto}</p>
+      {/if}
       {#if !h.instalado}
         <div class="hs-item">
           <span class="hs-marca" aria-hidden="true">·</span>
@@ -670,6 +701,17 @@
   }
   .hs-aviso { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-aviso.erro { color: var(--error); }
+  .hs-conserto { margin: var(--space-1) 0 0; padding-left: 22px; font-size: var(--text-xs);
+                 color: var(--text-secondary); overflow-wrap: anywhere; }
+  .hs-conserto.erro { color: var(--error); }
+  /* Barra indeterminada: sem porcentagem porque não há medida do quanto falta. A animação é num
+     span HTML (compõe na GPU; em svg repintaria a página a cada quadro). */
+  .hs-barra { display: block; position: relative; height: 3px; margin-top: var(--space-1);
+              border-radius: 2px; overflow: hidden; background: var(--border-subtle); }
+  .hs-barra span { position: absolute; inset: 0; width: 35%; border-radius: 2px;
+                   background: var(--accent); animation: hs-barra 1.2s ease-in-out infinite; }
+  @keyframes hs-barra { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  @media (prefers-reduced-motion: reduce) { .hs-barra span { animation: none; width: 100%; opacity: .5; } }
   .hs-link { color: var(--accent); overflow-wrap: anywhere; }
   /* `--surface-raised`, e não `--bg-elevated` cru: o card já é `--surface-inset` e as duas
      superfícies precisam acompanhar o véu do papel de parede juntas (regra do CLAUDE.md). */

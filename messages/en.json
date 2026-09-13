@@ -2440,6 +2440,7 @@
   "harness_legenda": "The CLIs on this machine and what the app installed in each. A red item has a button that redoes it.",
   "harness_instalado": "installed",
   "harness_nao_instalado": "not installed",
+  "harness_consertando": "Fixing {item}… {s}s",
   "harness_consertar": "Fix",
   "harness_refazer": "Redo",
   "harness_item_hooks": "Hooks",

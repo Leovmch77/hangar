@@ -2440,6 +2440,7 @@
   "harness_legenda": "Os CLIs desta máquina e o que o app instalou em cada um. Item vermelho tem botão que refaz.",
   "harness_instalado": "instalado",
   "harness_nao_instalado": "não instalado",
+  "harness_consertando": "Consertando {item}… {s}s",
   "harness_consertar": "Consertar",
   "harness_refazer": "Refazer",
   "harness_item_hooks": "Hooks",

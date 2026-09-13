@@ -304,3 +304,48 @@ describe('HarnessSettings — conta da integração Codex', () => {
     montados = montados.filter((comp) => comp !== t.comp);
   });
 });
+
+describe('HarnessSettings — consertar mostra o andamento no próprio item', () => {
+  // O botão virava "…" e o resultado ia pro rodapé da página inteira: quem clicou em Consertar no
+  // tmux não sabia se estava rodando, e o erro aparecia longe do item (pedido de 13/09/2026).
+  const CARD_TMUX: Harness = {
+    id: 'tmux', nome: 'tmux', instalado: true, versao: 'tmux 3.3.8',
+    itens: [
+      { id: 'bloco', ok: false, codigo: 'tmux_bloco_ausente', conserto: 'tmux', params: {} },
+      { id: 'mouse', ok: true, codigo: 'tmux_mouse_on', conserto: null, params: {}, info: true },
+    ],
+  } as Harness;
+  const itemBloco = (el: HTMLElement) => el.querySelectorAll<HTMLElement>('.hs-item')[0];
+
+  it('rodando: diz o que está consertando, há quanto tempo, com barra de andamento', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      c.consertarHarness.mockReturnValue(new Promise(() => {}));
+      const t = await montar([CARD_TMUX], estado());
+      itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+      await tick();
+      await vi.advanceTimersByTimeAsync(3_000);
+      await tick();
+      const andamento = t.el.querySelector<HTMLElement>('.hs-conserto[role="status"]')!;
+      expect(andamento).not.toBeNull();
+      expect(andamento.textContent).toContain(m.harness_consertando({ item: m.harness_item_tmux_bloco(), s: 3 }));
+      expect(andamento.querySelector('.hs-barra')).not.toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('terminou: o resultado aparece junto do item, não no rodapé', async () => {
+    c.consertarHarness.mockResolvedValue({ feito: 'config do psmux reaplicada', harnesses: [CARD_TMUX] });
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-conserto')?.textContent).toContain('config do psmux reaplicada'));
+    expect(t.el.querySelector('.hs-card .hs-conserto')).not.toBeNull();
+  });
+
+  it('falhou: o erro aparece junto do item que falhou', async () => {
+    c.consertarHarness.mockRejectedValue(new Error('setup-windows-tmux.ps1 saiu com 1'));
+    const t = await montar([CARD_TMUX], estado());
+    itemBloco(t.el).querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.hs-card .hs-conserto[role="alert"]')?.textContent)
+      .toContain('saiu com 1'));
+  });
+});
