@@ -4215,9 +4215,7 @@ async def interrupt(name: str, clear: bool = False):
 
 def _exige_claude_de_terminal(name: str) -> None:
     # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
-    # Claude sem terminal também não — a CLI responde "/btw isn't available in this environment".
-    if _headless(name):
-        raise HTTPException(400, detail=erro("erro_btw_sem_terminal", "pergunta lateral precisa do terminal; esta sessão não tem"))
+    # (Claude SEM terminal tem caminho próprio — o fork da conversa — e não passa por aqui.)
     provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
     if provider != "claude":
         raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
@@ -4227,10 +4225,14 @@ def _exige_claude_de_terminal(name: str) -> None:
 async def pergunta_lateral(name: str, body: BtwBody):
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    await _send_thread(_exige_claude_de_terminal, name)
-    _recusa_se_painel_aberto(name)
+    # Sem terminal não há overlay pra dirigir: a pergunta vira um fork descartável da conversa.
+    sem_terminal = await _send_thread(_headless, name)
+    if not sem_terminal:
+        await _send_thread(_exige_claude_de_terminal, name)
+        _recusa_se_painel_aberto(name)
     try:
-        item = await asyncio.to_thread(btw.perguntar, name, body.question)
+        perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
+        item = await asyncio.to_thread(perguntar, name, body.question)
     except btw.BtwError as e:
         raise HTTPException(e.status, detail=erro(e.code, e.detail))
     # A TUI já respondeu e gastou a chamada: falha ao guardar o histórico não pode virar 500 e

@@ -35,6 +35,9 @@
     const q = pergunta;
     untrack(() => {
       erro = null;
+      // Pergunta da abertura anterior ainda em voo: o "respondendo…" dela não é desta abertura, e
+      // deixá-lo aceso travava a pergunta nova ("já tem uma em andamento") até a antiga voltar.
+      emVoo = null;
       historicoLateral(sessionName)
         .then((h) => { if (my === epoch) { itens = h; void rolarFim(); } })
         .catch((e) => { if (my === epoch) erro = m.btw_historico_falhou({ erro: formataErro(e) ?? String(e) }); });
@@ -57,19 +60,28 @@
       texto = q;
       return;
     }
+    // Mesma `epoch` do histórico, e pelo mesmo motivo: a folha fica montada entre aberturas e a
+    // resposta pode demorar (sem terminal, até uns minutos). Sem esta guarda, a resposta de uma
+    // pergunta feita ANTES de fechar caía na sessão aberta depois — entrava na lista dela e ainda
+    // apagava o "respondendo…" de uma pergunta nova que estava em voo.
+    const my = epoch;
     emVoo = q;
     erro = null;
     texto = '';
     void rolarFim();
     try {
       const r = await perguntaLateral(sessionName, q);
+      if (my !== epoch) return;
       itens = [...itens, r];
     } catch (e) {
+      if (my !== epoch) return;
       erro = m.btw_nao_deu({ erro: formataErro(e) ?? String(e) });
       texto = q;
     } finally {
-      emVoo = null;
-      void rolarFim();
+      if (my === epoch) {
+        emVoo = null;
+        void rolarFim();
+      }
     }
   }
 

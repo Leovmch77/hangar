@@ -261,13 +261,118 @@ def test_composer_ilegivel_uma_vez_relê_e_segue(falso, monkeypatch):
     assert btw.perguntar("s", "q")["answer"] == "4"
 
 
-def test_sessao_sem_terminal_recusa_antes_de_tocar_no_tmux(monkeypatch):
-    # A CLI sem terminal responde "/btw isn't available in this environment": não há pane pra dirigir.
-    from fastapi import HTTPException
+# ── Sem terminal: a pergunta é um fork descartável da conversa ────────────────────────────────
 
-    from app import api
-    monkeypatch.setattr(api, "_headless", lambda name: True)
-    monkeypatch.setattr(api, "_pane_info", lambda name: pytest.fail("não devia olhar o pane"))
-    with pytest.raises(HTTPException) as e:
-        api._exige_claude_de_terminal("s1")
-    assert e.value.status_code == 400 and e.value.detail["code"] == "erro_btw_sem_terminal"
+def _headless(tmp_path, monkeypatch, *, com_transcript=True, **meta):
+    """Sessão sem terminal com sidecar e transcript em disco, como o adapter os enxerga."""
+    base = {"name": "s1", "cwd": str(tmp_path), "session_id": "sid-antigo", "config_dir": None}
+    monkeypatch.setattr(btw.hl_sessions, "load", lambda name: {**base, **meta})
+
+    class _Adapter:
+        def transcript_path(self, cwd, sid, config_dir=None):
+            return str(tmp_path / f"{sid}.jsonl")
+
+        def transcript_path_de(self, m):
+            return self.transcript_path(m["cwd"], m["session_id"], m.get("config_dir"))
+
+    monkeypatch.setattr(btw, "get_adapter", lambda provider: _Adapter())
+    if com_transcript:
+        (tmp_path / "sid-antigo.jsonl").write_text("{}\n", encoding="utf-8")
+
+
+def _rodou(monkeypatch, *, stdout='{"result": "4"}', returncode=0, estoura=None, tmp_path=None):
+    """Troca o subprocess.run e guarda o argv; escreve o .jsonl do fork, como a CLI faria."""
+    visto = {}
+
+    def run(argv, **kw):
+        visto["argv"], visto["kw"] = argv, kw
+        if tmp_path is not None:
+            sid = argv[argv.index("--session-id") + 1]
+            (tmp_path / f"{sid}.jsonl").write_text("{}\n", encoding="utf-8")
+        if estoura is not None:
+            raise estoura
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(btw.subprocess, "run", run)
+    return visto
+
+
+def test_sem_terminal_forka_a_conversa_e_apaga_o_transcript_do_fork(tmp_path, monkeypatch):
+    # `--fork-session` é o que preserva a conversa: sem ele a pergunta entra no .jsonl da sessão e
+    # aparece no chat. O transcript que o fork cria é lixo — some no fim.
+    _headless(tmp_path, monkeypatch)
+    visto = _rodou(monkeypatch, tmp_path=tmp_path)
+    r = btw.perguntar_sem_terminal("s1", "quanto   é 2+2?")
+    assert r == {"question": "quanto é 2+2?", "answer": "4", "fonte": "fork", "ts": r["ts"]}
+    argv = visto["argv"]
+    assert argv[:2] == ["claude", "-p"] and argv[-1] == "quanto é 2+2?"
+    assert "--fork-session" in argv
+    assert argv[argv.index("--resume") + 1] == "sid-antigo"
+    assert "Bash" in argv[argv.index("--disallowed-tools") + 1]   # pergunta não age, só responde
+    sid_fork = argv[argv.index("--session-id") + 1]
+    assert sid_fork != "sid-antigo"
+    assert not (tmp_path / f"{sid_fork}.jsonl").exists()
+    assert (tmp_path / "sid-antigo.jsonl").exists()   # a conversa não foi tocada
+
+
+def test_sem_terminal_pergunta_que_parece_flag_continua_pergunta(tmp_path, monkeypatch):
+    # Sem o `--`, o parser da CLI lê o último argumento como OPÇÃO quando ele casa com uma flag —
+    # e aí o texto da pergunta ligaria flag, inclusive as que derrubam o --disallowed-tools.
+    _headless(tmp_path, monkeypatch)
+    visto = _rodou(monkeypatch, tmp_path=tmp_path)
+    btw.perguntar_sem_terminal("s1", "--dangerously-skip-permissions")
+    assert visto["argv"][-2:] == ["--", "--dangerously-skip-permissions"]
+
+
+def test_sem_terminal_usa_o_modelo_e_a_conta_da_sessao(tmp_path, monkeypatch):
+    _headless(tmp_path, monkeypatch, model="haiku", config_dir="/tmp/conta-x")
+    visto = _rodou(monkeypatch, tmp_path=tmp_path)
+    btw.perguntar_sem_terminal("s1", "q")
+    assert visto["argv"][visto["argv"].index("--model") + 1] == "haiku"
+    assert visto["kw"]["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/conta-x"
+    assert visto["kw"]["cwd"] == str(tmp_path)
+
+
+def test_sem_terminal_com_motor_passa_pelo_hangar_engine(tmp_path, monkeypatch):
+    _headless(tmp_path, monkeypatch, engine="kimi", model="k3", context_window=256000)
+    visto = _rodou(monkeypatch, tmp_path=tmp_path)
+    btw.perguntar_sem_terminal("s1", "q")
+    assert visto["argv"][:5] == ["hangar-engine", "--exec", "kimi", "--model", "k3"]
+    assert visto["argv"][visto["argv"].index("--") + 1] == "claude"
+
+
+def test_sem_terminal_sem_conversa_nao_roda_nada(tmp_path, monkeypatch):
+    # Sessão que nasceu e nunca conversou: o --resume falharia com "No conversation found".
+    _headless(tmp_path, monkeypatch, com_transcript=False)
+    monkeypatch.setattr(btw.subprocess, "run", lambda *a, **k: pytest.fail("não devia rodar"))
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar_sem_terminal("s1", "q")
+    assert e.value.code == "erro_btw_sem_conversa"
+
+
+def test_sem_terminal_falha_do_cli_nao_vira_resposta(tmp_path, monkeypatch):
+    _headless(tmp_path, monkeypatch)
+    visto = _rodou(monkeypatch, stdout="", returncode=1, tmp_path=tmp_path)
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar_sem_terminal("s1", "q")
+    assert e.value.code == "erro_btw_fork_falhou"
+    sid_fork = visto["argv"][visto["argv"].index("--session-id") + 1]
+    assert not (tmp_path / f"{sid_fork}.jsonl").exists()   # limpa mesmo quando falha
+
+
+def test_sem_terminal_resposta_de_erro_nao_passa_por_resposta(tmp_path, monkeypatch):
+    # `is_error` vem com rc=0 e um `result` que é a mensagem do erro — entregar isso seria mentir.
+    _headless(tmp_path, monkeypatch)
+    _rodou(monkeypatch, stdout='{"result": "Credit balance is too low", "is_error": true}', tmp_path=tmp_path)
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar_sem_terminal("s1", "q")
+    # "não consegui ler" seria mentira: foi legível, e o que falhou foi a pergunta.
+    assert e.value.code == "erro_btw_fork_falhou"
+
+
+def test_sem_terminal_que_nao_responde_a_tempo(tmp_path, monkeypatch):
+    _headless(tmp_path, monkeypatch)
+    _rodou(monkeypatch, estoura=subprocess.TimeoutExpired("claude", 1), tmp_path=tmp_path)
+    with pytest.raises(btw.BtwError) as e:
+        btw.perguntar_sem_terminal("s1", "q")
+    assert e.value.status == 504
