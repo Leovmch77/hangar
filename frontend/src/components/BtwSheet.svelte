@@ -5,7 +5,7 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import * as m from '../paraglide/messages';
-  import { formataErro, historicoLateral, perguntaLateral } from '@hangar/core';
+  import { fmtWhen, formataErro, historicoLateral, perguntaLateral } from '@hangar/core';
   import type { PerguntaLateral } from '@hangar/core';
 
   interface Props {
@@ -81,7 +81,7 @@
   }
 </script>
 
-<BottomSheet {open} {onClose} ariaLabel={m.btw_titulo()} centered={desktop.atual}>
+<BottomSheet {open} {onClose} ariaLabel={m.btw_titulo()} centered={desktop.atual} largura={760}>
   <div class="btw">
     <h2 class="title">{m.btw_titulo()}</h2>
     <p class="dica">{m.btw_dica()}</p>
@@ -90,13 +90,20 @@
       {#if itens.length === 0 && !emVoo}
         <p class="vazio">{m.btw_vazio()}</p>
       {/if}
-      {#each itens as it (it.ts)}
-        <div class="item">
-          <p class="pergunta">{it.question}</p>
+      <!-- Trocas antigas nascem fechadas (só a pergunta e a hora): com todas abertas, uma resposta
+           longa empurrava as anteriores e o campo pra fora da vista. `open` é valor INICIAL — depois
+           de montado, quem manda é o clique do usuário, e o Svelte não reabre o que ele fechou. -->
+      {#each itens as it, i (it.ts)}
+        <details class="item" open={i === itens.length - 1}>
+          <summary class="pergunta">
+            <span class="seta" aria-hidden="true">›</span>
+            <span class="q">{it.question}</span>
+            <span class="hora">{fmtWhen(it.ts)}</span>
+          </summary>
           <div class="resposta md">{@html renderMarkdown(it.answer)}</div>
           {#if it.fonte === 'pane'}<p class="aviso">{m.btw_talvez_cortada()}</p>{/if}
           {#if it.salvo === false}<p class="aviso">{m.btw_nao_guardada()}</p>{/if}
-        </div>
+        </details>
       {/each}
       {#if emVoo}
         <div class="item">
@@ -121,7 +128,7 @@
 </BottomSheet>
 
 <style>
-  .btw { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); min-height: 40vh; max-height: 80vh; }
+  .btw { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); min-height: 56vh; max-height: 84vh; }
   .title { font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
   .dica { font-size: var(--text-xs); color: var(--text-muted); }
 
@@ -133,7 +140,19 @@
     font-size: var(--text-sm); color: var(--text-secondary);
     border-left: 3px solid var(--accent); padding-left: var(--space-3); word-break: break-word;
   }
+  summary.pergunta {
+    display: flex; align-items: baseline; gap: var(--space-3); cursor: pointer; list-style: none;
+  }
+  summary.pergunta::-webkit-details-marker { display: none; }
+  summary.pergunta:hover { color: var(--text-primary); }
+  .seta { flex: none; color: var(--text-muted); transition: transform 150ms var(--ease-out); }
+  details[open] .seta { transform: rotate(90deg); }
+  .q { flex: 1; min-width: 0; }
+  /* Fechada, a pergunta é a linha do índice: uma linha só, pra a lista de trocas caber na vista. */
+  details:not([open]) .q { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hora { flex: none; font-size: var(--text-xs); color: var(--text-muted); }
   .resposta { font-size: var(--text-sm); color: var(--text-primary); line-height: 1.5; word-break: break-word; }
+  details .resposta { margin-top: var(--space-2); }
   .resposta :global(p) { margin: 0 0 var(--space-2); }
   .resposta :global(ul), .resposta :global(ol) { margin: 0 0 var(--space-2); padding-left: 1.2em; }
   .resposta :global(li) { margin: 2px 0; }

@@ -16,6 +16,9 @@
     widthKey?: string;
     defaultWidth?: number;
     wide?: boolean;        // opt-in: dock desktop usa largura fixa min(1100px, 92vw) em vez de --sheet-w.
+    // Largura fixa no desktop, em px, pra folha que não é redimensionável — sem ela o padrão de
+    // 420px aperta conteúdo que é texto corrido (a pergunta lateral). Ignorada no celular.
+    largura?: number;
     centered?: boolean;    // opt-in: no desktop vira MODAL centrado em vez de painel docado a direita.
     // Alvo concreto pro foco voltar quando o gatilho original sumiu/ficou oculto/inerte (ex: drawer
     // que fechou antes da folha). Quem abre o sheet sabe qual controle do app continua acessível.
@@ -29,7 +32,7 @@
     split?: boolean;
     children: Snippet;
   }
-  let { open, onClose, ariaLabel = m.shell_painel(), resizable = false, widthKey = 'cp_gitsheet_w', defaultWidth = 460, wide = false, centered = false, fallbackFocus = null, persistent = false, split = false, children }: Props = $props();
+  let { open, onClose, ariaLabel = m.shell_painel(), resizable = false, widthKey = 'cp_gitsheet_w', defaultWidth = 460, wide = false, largura = 0, centered = false, fallbackFocus = null, persistent = false, split = false, children }: Props = $props();
 
   // `persistent` só vale no dock desktop: abaixo de 820px a sheet volta a ser modal.
   // `centered` GANHA de `persistent`: quem pede centrado está pedindo MODAL, e o dock é o oposto
@@ -88,7 +91,7 @@
   // Style combinado do painel: transform do swipe (mobile) + --sheet-w (desktop resizable).
   const sheetStyle = $derived(
     (dragY || snapping ? `transform: translateY(${dragY}px);` : '') +
-    (resizable ? `--sheet-w: ${width}px;` : ''),
+    (resizable ? `--sheet-w: ${width}px;` : largura ? `--sheet-w: min(${largura}px, 92vw);` : ''),
   );
 
   function onTouchStart(e: TouchEvent) {
