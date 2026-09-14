@@ -357,6 +357,24 @@ def test_sessao_que_nao_sobe_tenta_poucas_vezes_e_marca_a_fila(sidecar, monkeypa
     _run(fluxo())
 
 
+def test_acordar_durante_a_espera_entre_subidas_nao_perde_o_zero(sidecar, monkeypatch):
+    ad = ClaudeHeadlessAdapter()
+    monkeypatch.setattr(A, "_ESPERA_SUBIDA_S", 0.05)
+
+    async def subir(sess):
+        pass
+    monkeypatch.setattr(ad, "_subir_cano", subir)
+
+    async def fluxo():
+        ad._subidas["s1"] = 2
+        tarefa = asyncio.create_task(ad._spawn(_Sessao("s1", sidecar)))
+        await asyncio.sleep(0.01)          # dormindo sob a trava
+        ad._subidas.pop("s1")              # o que o `acordar` faz
+        await tarefa
+        assert ad._subidas["s1"] == 1
+    _run(fluxo())
+
+
 def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapter, monkeypatch):
     sess = adapter._sessions["s1"]
     monkeypatch.setattr(A, "_AVISO_INIT_S", 0.01)

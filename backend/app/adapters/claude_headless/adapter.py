@@ -741,7 +741,8 @@ class ClaudeHeadlessAdapter:
         if falhas:
             # Sob a trava de spawn: todo gatilho (drain do fim da subida, SSE, conferência da fila) espera igual.
             await asyncio.sleep(_ESPERA_SUBIDA_S * 2 ** (falhas - 1))
-        self._subidas[sess.name] = falhas + 1
+        # Relido depois da espera: um `acordar` do usuário no meio zerou a contagem.
+        self._subidas[sess.name] = self._subidas.get(sess.name, 0) + 1
         await self._subir_cano(sess)
         return True
 
