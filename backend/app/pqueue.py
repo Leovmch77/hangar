@@ -655,6 +655,19 @@ class PromptQueue:
                 return
             self._write_atomic(rows)
 
+    def desistir(self, entry_id: str) -> None:
+        """Marca UMA entrada reivindicada como perdida sem passar pelo reconcile: o envio nem
+        pôde ser tentado (sessão que não sobe). Mesmos campos do desfecho `desistiu` de lá."""
+        with _append_lock:
+            rows = self.load()
+            for r in rows:
+                if str(r.get("id")) == entry_id:
+                    r["delivered"] = True
+                    r["desistiu"] = True
+                    r["desistiu_ts"] = time.time()
+                    self._write_atomic(rows)
+                    return
+
     def bump_attempts(self, entry_id: str) -> int:
         """Incrementa `attempts` de UMA entrada e devolve o novo total (0 = entrada nao existe).
 

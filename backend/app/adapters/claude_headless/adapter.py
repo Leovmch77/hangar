@@ -66,6 +66,10 @@ _TETO_CANO_S = 10.0        # do spawn do cano até ele escutar
 # turno relê o contexto de qualquer jeito, e religar não custa cota a mais.
 _OCIOSA_S = 65 * 60
 _VIGIA_S = 60.0
+# Subidas seguidas sem `initialize` bom: o drain do fim da subida chama a próxima, então sem teto
+# um processo que morre ao nascer vira laço. A espera dobra a cada tentativa.
+_TETO_SUBIDAS = 3
+_ESPERA_SUBIDA_S = 5.0
 _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
 # Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
 # distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
@@ -82,6 +86,10 @@ OPCAO_SEMPRE = "Sempre permitir"
 
 class _CanoOcupado(RuntimeError):
     """Cano vivo que não respondeu: há outro cliente nele. Não se mata nem se substitui."""
+
+
+class _SubidaEsgotada(RuntimeError):
+    """A sessão já falhou ao subir `_TETO_SUBIDAS` vezes seguidas; só ação do usuário tenta de novo."""
 
 
 class _Ligacao:
@@ -218,6 +226,7 @@ class ClaudeHeadlessAdapter:
         self._tarefas: set[asyncio.Task] = set()
         self._religadas: dict[str, float] = {}
         self._vigia: asyncio.Task | None = None
+        self._subidas: dict[str, int] = {}   # subidas seguidas sem initialize bom, por nome
         self.apos_entrega: Callable[[str], None] | None = None   # api agenda a confirmação da fila
 
     # ── contrato Adapter ────────────────────────────────────────────────────────────────────
@@ -248,12 +257,13 @@ class ClaudeHeadlessAdapter:
         # Parada ou subindo: o prompt vai pra fila e a resposta HTTP sai na hora. Quem sobe é o
         # `acordar`, e quem entrega é o fim do `initialize` — nunca o POST esperando os hooks.
         sess = self._sessions.get(name)
-        if sess is None:
+        if sess is None or not sess.vivo:
             return False
         return not (sess.iniciando or sess.in_progress or sess.pending or sess.question)
 
     def acordar(self, name: str) -> None:
         """Sobe (ou religa) a sessão em segundo plano e entrega a fila quando ela estiver pronta."""
+        self._subidas.pop(name, None)   # ação do usuário: nova rodada de tentativas
         sess = self._sessions.get(name)
         if sess is not None and sess.vivo:
             return
@@ -311,6 +321,10 @@ class ClaudeHeadlessAdapter:
                 entry = claimed[0]
                 try:
                     result = await self.send_prompt(name, entry["text"])
+                except _SubidaEsgotada:
+                    # Fica entregue-e-desistida: a bolha avisa que não chegou e o drain não a pega mais.
+                    await asyncio.to_thread(q.desistir, entry["id"])
+                    return sent
                 except Exception:
                     _log.exception("claude headless drain: falha entry=%s name=%s", entry.get("id"), name)
                     result = "deferred"
@@ -567,9 +581,13 @@ class ClaudeHeadlessAdapter:
                     self._sessions.pop(name, None)
                     return None
             except Exception as e:
-                _log.exception("claude headless: não subiu name=%s", name)
                 if self._sessions.get(name) is sess:
                     self._sessions.pop(name, None)
+                if isinstance(e, _SubidaEsgotada):
+                    # O problema da última queda (com o stderr) segue na tela; não trocar por este.
+                    _log.warning("claude headless: %s name=%s", e, name)
+                    raise
+                _log.exception("claude headless: não subiu name=%s", name)
                 if not isinstance(e, _CanoOcupado):
                     # Ocupado é passageiro (a religada resolve): gravar o problema o deixaria na
                     # lista depois de a sessão voltar.
@@ -710,6 +728,13 @@ class ClaudeHeadlessAdapter:
             meta = sess.meta = hl_sessions.load(sess.name) or {**meta, "cano": None}
         if so_reconectar:
             return False
+        falhas = self._subidas.get(sess.name, 0)
+        if falhas >= _TETO_SUBIDAS:
+            raise _SubidaEsgotada(f"desistiu de subir após {falhas} tentativas seguidas")
+        if falhas:
+            # Sob a trava de spawn: todo gatilho (drain do fim da subida, SSE, conferência da fila) espera igual.
+            await asyncio.sleep(_ESPERA_SUBIDA_S * 2 ** (falhas - 1))
+        self._subidas[sess.name] = falhas + 1
         await self._subir_cano(sess)
         return True
 
@@ -817,6 +842,7 @@ class ClaudeHeadlessAdapter:
             _log.exception("claude headless: initialize quebrou name=%s", sess.name)
             self._registrar_problema(sess, "headless_nao_subiu", "falha interna ao iniciar a sessão")
         else:
+            self._subidas.pop(sess.name, None)
             if sess.problema == "headless_sem_resposta":
                 self._limpar_problema(sess)
         finally:
@@ -964,8 +990,9 @@ class ClaudeHeadlessAdapter:
             # marca `encerrando`; qualquer outra saída não-zero é queda (-1 = o cano sumiu).
             caiu = not sess.encerrando and not sess.desligando and rc not in (0, None, -signal.SIGTERM, -getattr(signal, "SIGKILL", signal.SIGTERM))
             if caiu:
+                # A faixa do chat mostra só a 1ª linha: ela tem que ser o motivo, não o rc.
                 self._registrar_problema(sess, "headless_processo_caiu",
-                                         f"rc={rc}\n" + "\n".join(sess.stderr_tail))
+                                         "\n".join([*sess.stderr_tail, f"rc={rc}"]))
             for fut in sess.waiters.values():
                 if not fut.done():
                     fut.set_exception(RuntimeError("processo encerrou"))

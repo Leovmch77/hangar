@@ -992,9 +992,13 @@ def _do_notify_awaiting(session_id: str) -> None:
         return
     def _real() -> bool:
         if getattr(info, "headless", False):
-            # Sem pane e sem Notification de "idle 60s": o marcador só existe porque o adapter
-            # tem permissão ou pergunta em aberto — e a lista já traz esse estado.
-            return info.state == "awaiting_input"
+            # Sem pane: quem sabe da permissão/pergunta em aberto é o adapter. `registry.list`
+            # não calcula estado (sai sempre idle), então ler dali nunca mandava o push.
+            snap = get_adapter(CLAUDE_HEADLESS).snapshot(info.name)
+            if snap is None:
+                return False
+            info.state, info.question = snap.state, snap.question
+            return snap.state == "awaiting_input"
         askq = read_pending_askq(info.jsonl) if info.jsonl else None
         return bool(askq and askq.questions) or _pane_wants_input(info.name)
 

@@ -1165,6 +1165,37 @@ seguinte encontrava a sessão morta, `deliverable` dava falso e nada subia. `_en
 `_reabrir` já fazia) mata e tira da memória. Com isso: estacionou aos 21s, sidecar sem `cano`, o
 prompt seguinte subiu com `resume=True` e respondeu a palavra combinada no primeiro turno.
 
+## Claude sem terminal que não sobe: teto de subidas (13/09/2026, Windows)
+
+Sessão com `engine` inexistente e prompt na fila gerou 179 quedas `rc=1` em cerca de 1 minuto. O
+`_esperar_initialize` falhava, o `finally` drenava a fila, o `drain` chamava `send_prompt`, e ele
+subia outro cano na hora. Agora `_spawn` conta subidas seguidas sem `initialize` bom: espera 5s e
+depois 10s entre elas, e na terceira falha levanta `_SubidaEsgotada`. O `drain` marca a entrada
+como `desistiu` ("não chegou — reenvie"), e o problema da última queda continua na faixa. A
+contagem zera no `initialize` bom e no `acordar`, que só é chamado por ação do usuário.
+
+A espera fica sob a trava de spawn, não no fim da subida. A primeira versão esperava só no
+`_esperar_initialize`, e a prova real mostrou a segunda subida 0,7s depois da primeira: o drain do
+SSE do chat aberto subia sem passar por lá. Outro furo da prova: `deliverable` dava verdadeiro pra
+sessão com processo morto, então o `POST /input` chamava `send_prompt` direto, subia com a contagem
+da subida anterior e segurava o request pela espera. Sessão morta agora não é entregável: o prompt
+vai pra fila e o `acordar` sobe. Resultado medido: 3 subidas (0s, +6s, +17s), nenhuma nos 70s seguintes.
+
+A faixa do chat mostra só a primeira linha do detalhe, e o detalhe começava com `rc=1`: a mensagem
+`hangar-engine: motor 'motor-inexistente' não existe` nunca aparecia. O stderr vem antes, e o `rc`
+no fim. O acento chegou íntegro (cano com fallback pra codepage do console).
+
+## Push de "aguardando" do Claude sem terminal (13/09/2026, Windows)
+
+O marcador `awaiting_input` era gravado e o loop pausava na hora, mas o push nunca saía.
+`_do_notify_awaiting` lia o estado de `registry.list()`, que não calcula estado (sai sempre
+`idle`); o teste de unidade forjava a lista já com `state`. Agora pergunta ao `snapshot` do
+adapter. Prova real com VAPID temporário e um receptor local inscrito: o push chegou 4s depois da
+permissão (1,5s de nova checagem + 2s de agrupamento).
+
+Achado sem conserto: o `vapid_subject` padrão (`mailto:hangar@local`) é recusado pelo `py_vapid`
+("Missing 'sub' from claims"). Servidor com VAPID e sem `CP_VAPID_SUBJECT` não manda push nenhum.
+
 ## Pensamento em voo no Claude sem terminal (13/09/2026, CLI 2.1.270)
 
 Medido com `claude -p --output-format stream-json --verbose --include-partial-messages` (sonnet,

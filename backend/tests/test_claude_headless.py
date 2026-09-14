@@ -290,6 +290,56 @@ def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, mo
     _run(fluxo())
 
 
+def test_sessao_que_nao_sobe_tenta_poucas_vezes_e_marca_a_fila(sidecar, monkeypatch):
+    # Processo que morre antes do initialize, com prompt na fila: o drain do fim da subida
+    # religava na hora e virava laço (179 quedas por minuto com motor inexistente).
+    from app import pqueue
+    q = pqueue.PromptQueue("s1"); q.clear()
+    entrada = q.append("oi", delivered=False)
+    ad = ClaudeHeadlessAdapter()
+    monkeypatch.setattr(A, "_ESPERA_SUBIDA_S", 0.001)
+    monkeypatch.setattr(ad, "_agendar_cota", lambda s: None)
+    subidas = []
+
+    class _Morto:
+        returncode = 1
+        pid = None
+
+    async def subir_e_morrer(sess):
+        subidas.append(sess.name)
+        sess.proc = _Morto()
+        sess.iniciando = True
+        t = asyncio.create_task(ad._esperar_initialize(sess))
+        ad._tarefas.add(t)
+        t.add_done_callback(ad._tarefas.discard)
+    monkeypatch.setattr(ad, "_subir_cano", subir_e_morrer)
+
+    async def esperar_quieto():
+        while ad._tarefas:
+            await asyncio.gather(*list(ad._tarefas))
+
+    async def fluxo():
+        # Subida da criação que já morreu: o envio não pode tentar o stdin nem herdar a contagem.
+        morta = _Sessao("s1", sidecar)
+        morta.proc = _Morto()
+        ad._sessions["s1"] = morta
+        ad._subidas["s1"] = 1
+        assert await ad.deliverable("s1") is False
+        ad.acordar("s1")
+        await esperar_quieto()
+        assert len(subidas) == A._TETO_SUBIDAS
+        [linha] = [r for r in q.load() if r["id"] == entrada["id"]]
+        assert linha["delivered"] is True and linha["desistiu"] is True
+        # Nada mais sobe sozinho; um envio novo do usuário abre outra rodada.
+        await ad.drain("s1", "")
+        assert len(subidas) == A._TETO_SUBIDAS
+        q.append("de novo", delivered=False)
+        ad.acordar("s1")
+        await esperar_quieto()
+        assert len(subidas) == 2 * A._TETO_SUBIDAS
+    _run(fluxo())
+
+
 def test_initialize_lento_mostra_iniciando_e_limpa_o_aviso_quando_responde(adapter, monkeypatch):
     sess = adapter._sessions["s1"]
     monkeypatch.setattr(A, "_AVISO_INIT_S", 0.01)
@@ -597,7 +647,8 @@ def test_processo_caindo_registra_problema_com_stderr(adapter, sidecar):
         await adapter._ler(sess)
         assert sess.state == "dead"
         assert adapter.problema_de("s1")[0] == "headless_processo_caiu"
-        assert "not logged in" in adapter.problema_de("s1")[1]
+        # A faixa do chat só mostra a 1ª linha: o motivo vem antes do rc.
+        assert adapter.problema_de("s1")[1] == "Error: not logged in\nrc=3"
         # Parada, a sessão publica o problema da última vida.
         adapter._sessions.pop("s1")
         gen = adapter.state_monitor("s1", lambda: None)

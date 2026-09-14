@@ -1363,18 +1363,22 @@ def test_do_notify_awaiting_resolves_name_and_body(monkeypatch):
 
 
 def test_do_notify_awaiting_sem_terminal_usa_o_estado_da_lista(monkeypatch):
-    # Claude sem terminal: não há pane pra raspar nem askq no sidecar — o marcador só existe
-    # porque o adapter tem permissão/pergunta em aberto, e a lista já traz pergunta e estado.
+    # Claude sem terminal: não há pane pra raspar nem askq no sidecar. A lista vem como o
+    # `registry.list` real devolve (estado padrão idle, sem pergunta): quem sabe é o adapter.
+    from app.adapters import CLAUDE_HEADLESS, get_adapter
     calls = []
     info = SimpleNamespace(name="hl", jsonl="/x/uuid1.jsonl", cwd="/x", headless=True,
-                           state="awaiting_input", question="Permitir Bash? ls")
+                           state="idle", question=None)
+    snap = SimpleNamespace(state="awaiting_input", question="Permitir Bash? ls")
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
+    monkeypatch.setattr(get_adapter(CLAUDE_HEADLESS), "snapshot", lambda name: snap if name == "hl" else None)
     monkeypatch.setattr(api_mod, "read_pending_askq", lambda jsonl: None)
     monkeypatch.setattr(api_mod, "_pane_wants_input", lambda name: pytest.fail("raspou pane inexistente"))
+    monkeypatch.setattr(api_mod, "_AWAITING_PUSH_RETRY_S", 0)
     monkeypatch.setattr(api_mod.push, "notify_awaiting", lambda name, body: calls.append((name, body)))
     api_mod._do_notify_awaiting("uuid1")
     assert calls == [("hl", "Permitir Bash? ls")]
-    info.state = "working"
+    snap.state = "working"
     api_mod._do_notify_awaiting("uuid1")
     assert len(calls) == 1
 
