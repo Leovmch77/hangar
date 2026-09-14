@@ -282,6 +282,9 @@ class ClaudeHeadlessAdapter:
 
     async def send_prompt(self, name: str, text: str) -> str:
         sess = await self.ensure_running(name, esperar_pronta=False)
+        if sess is not None:
+            # Antes de qualquer outra espera: a vigia confere isto logo antes de encerrar.
+            sess.ativa_em = time.monotonic()
         if sess is None or not await self.deliverable(name):
             return "deferred"
         try:
@@ -629,7 +632,11 @@ class ClaudeHeadlessAdapter:
         if lock is not None and lock.locked():
             return False
         fila = await asyncio.to_thread(PromptQueue(sess.name).load)
-        return not any(not r.get("delivered") for r in fila)
+        if any(not r.get("delivered") for r in fila):
+            return False
+        # Um prompt pode ter chegado durante a leitura da fila; daqui ao encerrar não há await.
+        return (not sess.in_progress and sess.state == "idle"
+                and time.monotonic() - sess.ativa_em >= _OCIOSA_S)
 
     async def reconectar_todas(self) -> int:
         """Na subida do backend: religa em todo cano que ficou vivo (sidecar com `cano`). Sem

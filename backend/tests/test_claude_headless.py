@@ -229,6 +229,23 @@ def test_estaciona_so_sessao_parada_sem_nada_em_aberto(adapter, monkeypatch):
     assert not pode()
 
 
+def test_prompt_que_chega_durante_a_leitura_da_fila_segura_o_estacionar(adapter, monkeypatch):
+    relogio = [5000.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
+    sess = adapter._sessions["s1"]
+    sess.ativa_em = relogio[0] - A._OCIOSA_S - 1
+
+    class _Fila:
+        def __init__(self, name):
+            pass
+
+        def load(self):
+            sess.ativa_em = relogio[0]   # send_prompt marcou atividade no meio da leitura
+            return []
+    monkeypatch.setattr(A, "PromptQueue", _Fila)
+    assert _run(adapter._pode_estacionar(sess)) is False
+
+
 def test_vigia_encerra_o_cano_da_ociosa(adapter, monkeypatch):
     sess = adapter._sessions["s1"]
     mortos = []
