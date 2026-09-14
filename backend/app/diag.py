@@ -211,7 +211,9 @@ def versao_legivel(ref: str = "HEAD") -> str | None:
             return None
         v = subprocess.run(["git", "show", f"{ref}:VERSION"], cwd=raiz, capture_output=True,
                            text=True, timeout=5, encoding="utf-8", errors="replace").stdout.strip()
-        if not v:
+        if not v and ref == "HEAD":
+            # Só o checkout local pode cair no disco. Num ref remoto sem o arquivo, juntar o
+            # VERSION daqui com a contagem de lá fabricaria uma versão plausível e falsa.
             v = (raiz / "VERSION").read_text(encoding="utf-8").strip()
         return f"{v}.{n}" if v else None
     except Exception:                                # noqa: BLE001 — versão nunca derruba nada

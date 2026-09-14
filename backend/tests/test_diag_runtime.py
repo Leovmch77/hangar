@@ -130,6 +130,31 @@ def test_export_identifies_current_environment():
     assert header["inicio_backend"] and header["pid_backend"] > 0
 
 
+def _git_falso(respostas):
+    """`respostas` mapeia o 1º argumento depois de `git` (`rev-list`, `show`) pra stdout."""
+    def run(args, **kw):
+        return subprocess.CompletedProcess(args, 0, respostas.get(args[1], ""), "")
+    return run
+
+
+def test_versao_legivel_e_version_mais_contagem(monkeypatch):
+    monkeypatch.setattr(diag.subprocess, "run", _git_falso({"rev-list": "2533\n", "show": "0.1.0\n"}))
+    assert diag.versao_legivel() == "0.1.0.2533"
+
+
+def test_versao_legivel_ref_inexistente_e_none(monkeypatch):
+    monkeypatch.setattr(diag.subprocess, "run", _git_falso({}))
+    assert diag.versao_legivel("nao-existe") is None
+
+
+def test_versao_legivel_remoto_sem_version_nao_inventa(monkeypatch):
+    """origin/main sem o arquivo: juntar o VERSION daqui com a contagem de lá seria uma versão
+    plausível e falsa. Só o HEAD pode cair no disco."""
+    monkeypatch.setattr(diag.subprocess, "run", _git_falso({"rev-list": "2521\n"}))
+    assert diag.versao_legivel("origin/main") is None
+    assert diag.versao_legivel("HEAD") is not None      # o disco tem VERSION
+
+
 def test_missing_git_version_is_explicit(monkeypatch):
     monkeypatch.setattr(diag.subprocess, "run", lambda *args, **kw: subprocess.CompletedProcess(args, 1, "", ""))
     assert diag._git_describe() == "indisponivel"
