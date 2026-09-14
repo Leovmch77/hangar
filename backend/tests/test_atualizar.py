@@ -890,8 +890,48 @@ def test_reiniciar_agora_lanca_destacado_e_no_escopo(repo, monkeypatch):
     r = atualizar.reiniciar_agora()
     assert r == {"ok": True, "pid": 3}
     assert args_vistos[:3] == ["systemd-run", "--user", "--scope"]
-    assert args_vistos[-1] == "--reiniciar"
+    assert args_vistos[-2:] == ["--reiniciar", "8765"]
     assert capturado.get("start_new_session") is True
+
+
+def test_reinicio_avulso_mostra_progresso_e_termina_pronto(repo, monkeypatch):
+    """O botão "Reiniciar" dizia só "Reiniciando…": o reinício avulso passa a gravar as mesmas
+    etapas que a atualização (barra, texto, log) e fecha em `pronto`."""
+    monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    vistos = []
+    monkeypatch.setattr(atualizar, "_reiniciar",
+                        lambda topo, *a, **k: vistos.append(atualizar.estado()["etapa"]))
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    atualizar.executar_reinicio()
+    final = atualizar.estado()
+    assert vistos == ["reiniciar"] and final["fase"] == "pronto" and final["ok"] is True
+    assert final["total"] == len(atualizar.ETAPAS_REINICIO)
+    assert not (atualizar._base() / "rodando.lock").exists()     # soltou a vez
+
+
+def test_reinicio_avulso_sem_servidor_de_volta_nao_diz_ok(repo, monkeypatch):
+    """A tela recarrega ao ver `ok`; sem a prova de vida recarregava antes do servidor novo subir."""
+    monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda topo, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: False)
+    atualizar.executar_reinicio()
+    final = atualizar.estado()
+    assert final["ok"] is False and "nao respondeu" in final["erro"]
+
+
+def test_reiniciar_agora_recusa_com_atualizacao_rodando(repo, monkeypatch):
+    """Os dois escrevem no mesmo estado.json: um reinício por cima de uma atualização em curso
+    sobrescrevia o pid dela e, morrendo, soltava a trava dela."""
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    assert atualizar._tomar_a_vez()
+    try:
+        assert atualizar.reiniciar_agora() == {"ok": False, "erro": "ja_rodando"}
+    finally:
+        atualizar._soltar_a_vez()
 
 
 def test_reinicio_que_falha_deixa_rastro_no_estado(repo, monkeypatch):

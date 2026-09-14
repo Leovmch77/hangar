@@ -79,6 +79,12 @@ ETAPAS = (
     ("instalar",   "Instalando dependências"),
     ("reiniciar",  "Reiniciando o servidor"),
 )
+# O reinício avulso (código já no disco) tem duas etapas próprias: numerar com a lista de cima
+# mostraria "4 de 5" numa operação que só tem duas.
+ETAPAS_REINICIO = (
+    ("tela",      "Trocando a tela pelo build publicado"),
+    ("reiniciar", "Reiniciando o servidor"),
+)
 
 _TIMEOUT_PADRAO = 600.0      # npm ci num repo frio passa de 3min; 10 é folga, não expectativa.
 _TIMEOUT_SUBIR = 30.0        # quanto esperamos o backend responder depois do restart.
@@ -189,7 +195,7 @@ def _escrever(**campos) -> None:
             pass
 
 
-def _etapa(chave: str, **extra) -> None:
+def _etapa(chave: str, *, lista: tuple = ETAPAS, **extra) -> None:
     """Marca a etapa atual. `passo`/`total` alimentam a barra da tela.
 
     `etapa_inicio` existe pra tela poder mostrar um relógio correndo. Sem ele, uma etapa longa e
@@ -197,9 +203,9 @@ def _etapa(chave: str, **extra) -> None:
     barra anda, nem o log ganha linha. O relógio é o único sinal de vida que não depende do comando
     resolver falar.
     """
-    idx = next((i for i, (k, _) in enumerate(ETAPAS) if k == chave), 0)
-    _escrever(fase="rodando", etapa=chave, passo=idx + 1, total=len(ETAPAS),
-              texto=ETAPAS[idx][1],
+    idx = next((i for i, (k, _) in enumerate(lista) if k == chave), 0)
+    _escrever(fase="rodando", etapa=chave, passo=idx + 1, total=len(lista),
+              texto=lista[idx][1],
               etapa_inicio=datetime.now().astimezone().isoformat(timespec="seconds"), **extra)
 
 
@@ -986,7 +992,7 @@ def iniciar(porta: int = 8765) -> dict:
     return {"ok": True, "pid": proc.pid}
 
 
-def reiniciar_agora() -> dict:
+def reiniciar_agora(porta: int = 8765) -> dict:
     """Reinicia o servidor SEM atualizar nada. Devolve na hora; o restart roda destacado.
 
     Existe pro caso em que o disco já está à frente do processo — um `git pull` feito à mão, ou uma
@@ -1003,15 +1009,31 @@ def reiniciar_agora() -> dict:
     topologia = _topologia()
     if topologia != "systemd":
         return {"ok": False, "erro": "topologia", "topologia": topologia}
+    # A mesma vez da atualização: os dois escrevem no mesmo estado.json, e um reinício por cima
+    # de uma atualização em curso sobrescrevia pid/etapa dela — e, morrendo, soltava a trava dela.
+    if not _tomar_a_vez():
+        return {"ok": False, "erro": "ja_rodando"}
     # Limpa a falha e os avisos do reinício ANTERIOR: sem isso a tela mostraria pra sempre o erro
     # de uma tentativa que já passou, inclusive depois de um reinício que deu certo.
     _escrever(reinicio_erro=None, avisos=[])
-    proc = subprocess.Popen(
-        tmux._scope_prefix() + [sys.executable, "-m", "app.atualizar", "--reiniciar"],
-        cwd=str(REPO / "backend"),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            tmux._scope_prefix() + [sys.executable, "-m", "app.atualizar", "--reiniciar", str(porta)],
+            cwd=str(REPO / "backend"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        _soltar_a_vez()
+        raise
+    try:
+        trava = _base() / "rodando.lock"
+        tmp = trava.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(str(proc.pid), encoding="utf-8")
+        atomico.substituir(tmp, trava)
+    except OSError as e:
+        _log.warning("nao consegui marcar o dono do lock (%s); soltando pra nao travar a maquina", e)
+        _soltar_a_vez()
     return {"ok": True, "pid": proc.pid}
 
 
@@ -1085,7 +1107,7 @@ def _atualizar_dist() -> str | None:
     return None
 
 
-def executar_reinicio() -> None:
+def executar_reinicio(porta: int = 8765) -> None:
     """O reinício em si, já dentro do processo destacado.
 
     O `except` NÃO é zelo: o `stderr` deste processo vai pro `/dev/null` (o `Popen` de
@@ -1094,14 +1116,31 @@ def executar_reinicio() -> None:
     esperando um servidor que nunca cai, sem saber por quê. O estado é o único canal que sobrevive
     a este processo, e é dele que a tela lê.
     """
+    global _SOU_O_MOTOR
+    _SOU_O_MOTOR = True
+    # Mesma tela de progresso da atualização (etapa, barra, log): o botão dizia só "Reiniciando…"
+    # e a pessoa não via nem o dist descendo nem o servidor caindo.
+    _escrever(fase="rodando", ok=None, erro=None, voltou=None, no_ar=None, resgate=None,
+              pid=os.getpid(), reinicio_erro=None, avisos=[], log=[],
+              commit_de="", commit_para=None, reiniciar_manual=False, shell_mudou=False)
     try:
+        _etapa("tela", lista=ETAPAS_REINICIO)
         aviso = _atualizar_dist()
         _escrever(avisos=[aviso] if aviso else [])
         _avisar_sessoes()
+        _etapa("reiniciar", lista=ETAPAS_REINICIO)
         _reiniciar(_topologia())
+        # `ok=True` só com o servidor respondendo: a tela recarrega ao ver `ok`, e sem a prova
+        # recarregava antes do novo subir.
+        if not _subiu(porta):
+            raise RuntimeError("o servidor nao respondeu depois de reiniciar")
         _dist_velho_apagar()
+        _escrever(fase="pronto", ok=True, texto="Reiniciado")
     except Exception as e:                           # noqa: BLE001 — ver docstring
-        _escrever(reinicio_erro=f"{type(e).__name__}: {e}")
+        erro = f"{type(e).__name__}: {e}"
+        _escrever(fase="pronto", ok=False, erro=erro, reinicio_erro=erro, voltou=False)
+    finally:
+        _soltar_a_vez()
 
 
 if __name__ == "__main__":
@@ -1109,6 +1148,6 @@ if __name__ == "__main__":
     from app import diag_logging
     diag_logging.instalar("atualizacao.log")
     if len(sys.argv) > 1 and sys.argv[1] == "--reiniciar":
-        executar_reinicio()
+        executar_reinicio(int(sys.argv[2]) if len(sys.argv) > 2 else 8765)
     else:
         executar(int(sys.argv[1]) if len(sys.argv) > 1 else 8765)

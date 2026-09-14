@@ -4616,7 +4616,9 @@ async def post_atualizacao_iniciar():
 @app.post("/api/atualizacao/reiniciar", dependencies=[Depends(require_auth)])
 async def post_atualizacao_reiniciar():
     """Reinicia o servidor sem atualizar nada — o caso do disco já estar à frente do processo."""
-    r = await asyncio.to_thread(atualizar.reiniciar_agora)
+    r = await asyncio.to_thread(atualizar.reiniciar_agora, settings.port)
+    if r.get("erro") == "ja_rodando":
+        raise HTTPException(409, detail=erro("erro_atualizacao_ja_rodando", "ja existe uma atualizacao rodando"))
     if not r.get("ok"):
         raise HTTPException(409, detail=erro(
             "erro_reinicio_indisponivel",
