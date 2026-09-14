@@ -2023,6 +2023,14 @@ if (-not $bash) {
     if (Escrever-Lancador $lancadorPreview $conteudoPreview 'cmd') { Ok "lancador hangar-preview.cmd criado em $binUsuario" }
     else { Ok 'lancador hangar-preview.cmd ja atualizado' }
 
+    # `folha` (grade de prints) tambem e node sem extensao: mesmo motivo do hangar-preview.
+    $lancadorFolha = Join-Path $binUsuario 'folha.cmd'
+    $conteudoFolha = "@echo off`r`n" +
+                     "set `"PATH=%USERPROFILE%\.local\bin;%PATH%`"`r`n" +
+                     "node `"$raiz\scripts\folha`" %*`r`n"
+    if (Escrever-Lancador $lancadorFolha $conteudoFolha 'cmd') { Ok "lancador folha.cmd criado em $binUsuario" }
+    else { Ok 'lancador folha.cmd ja atualizado' }
+
     # (2e) lancadores do Codex. O `hangar-codex-tui` e o COMANDO do pane de toda sessao Codex, e o
     # backend o procura com `shutil.which` (registry._exigir_lancador_codex). No Windows o `which`
     # so acha o que casa PATHEXT (.COM;.EXE;.BAT;.CMD;...), entao arquivo SEM extensao nunca e

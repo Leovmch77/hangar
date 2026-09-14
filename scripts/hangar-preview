@@ -18,7 +18,8 @@
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
 //   hangar-preview url                     URL atual do navegador desta sessão
-//   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>.png)
+//   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<hora>.png)
+//   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
 //
 // A sessão é resolvida pelo nome da sessão tmux atual (dentro do tmux); fora dele, ou pra operar
@@ -32,10 +33,11 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
+import folha from '../shell/folha.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
@@ -77,7 +79,8 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
-  shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>.png)
+  shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<hora>.png)
+  folha                   junta numa grade (6 por folha) os shots sem nome desde a última folha
   close                   fecha o navegador desta sessão (o painel some; terminou de usar, feche)
   batch                   lê várias linhas do stdin, uma por comando
 
@@ -125,6 +128,10 @@ function nomeSessao() {
     } catch { /* tmux indisponível */ }
   }
   return null;
+}
+
+function pastaShots() {
+  return join(tmpdir(), `hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}`);
 }
 
 function lerSidecars() {
@@ -239,10 +246,31 @@ if (VERBOS_SERVIDOR.has(cmd)) {
   // relativo mandado cru pro shell grava no cwd de onde o ELECTRON subiu, não no do agente, e a
   // resposta citava um caminho que não existia onde o agente (e o app do celular) foram procurar.
   if (cmd === 'shot') {
-    cmdArgs[0] = resolve(cmdArgs[0]
-      || join(tmpdir(), `hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}.png`));
+    if (!cmdArgs[0]) mkdirSync(pastaShots(), { recursive: true });
+    // Um arquivo por shot: a `folha` precisa da sequência, e sobrescrever perderia o antes/depois.
+    cmdArgs[0] = resolve(cmdArgs[0] || join(pastaShots(), `${Date.now()}.png`));
   }
   process.exit(await comando(chave, cmd, cmdArgs));
+}
+
+if (cmd === 'folha') {
+  const pasta = pastaShots();
+  const marca = join(pasta, '.ultima-folha');
+  const desde = existsSync(marca) ? statSync(marca).mtimeMs : 0;
+  const shots = existsSync(pasta)
+    ? readdirSync(pasta)
+      .filter((a) => /^\d+\.png$/.test(a) && statSync(join(pasta, a)).mtimeMs > desde)
+      .sort()
+      .map((a) => join(pasta, a))
+    : [];
+  if (!shots.length) erro('nenhum shot novo desde a última folha (tire com: hangar-preview shot)');
+  try {
+    for (const saida of folha.montar(shots, { dir: pasta })) console.log(`ok: ${saida}`);
+  } catch (err) {
+    erro(err.message);
+  }
+  writeFileSync(marca, '');
+  process.exit(0);
 }
 
 if (cmd === 'batch') {
@@ -262,4 +290,4 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|close|batch)`);

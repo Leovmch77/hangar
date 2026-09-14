@@ -120,8 +120,13 @@ tire `snapshot` de novo antes de agir.
 - `hangar-preview url` — URL atual.
 - `hangar-preview shot [arq.png]` — screenshot da **viewport** (o que está na tela, não a página
   inteira; role com `eval 'scrollTo(0, 9999)'` pra ver o fim); default
-  `/tmp/hangar-preview-<sessao>.png`. Leia o PNG com a ferramenta de leitura de imagem e cite o
-  caminho na resposta.
+  `/tmp/hangar-preview-<sessao>/<hora>.png`, um arquivo por shot. Leia o PNG com a ferramenta de
+  leitura de imagem e cite o caminho na resposta.
+- `hangar-preview folha` — junta numa grade (até 6 telas por folha, numeradas na ordem) os `shot`
+  sem nome tirados desde a última folha e imprime o caminho de cada folha. **Vai conferir 3 telas
+  ou mais? Tire os shots e leia a folha, não cada PNG**: uma folha custa o contexto de uma imagem.
+  Serve pra layout e visão geral; texto miúdo, cor exata ou habilitado/desabilitado → leia só
+  aquele shot em tamanho cheio. Precisa do ImageMagick (`magick`).
 - `hangar-preview close` — fecha o navegador desta sessão de verdade (o painel some da tela do
   usuário, o view morre). **Terminou de usar, feche.** Deixe aberto só se você ainda vai dirigir
   ele ou se o usuário vai testar a página — e nesse caso diga isso na resposta. Navegador aberto

@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// folha <img>... [-o <pasta>] — junta prints numa grade (até 6 por folha) e imprime o caminho de
+// cada folha. Uma folha custa o contexto de UMA imagem; serve pra visão geral e layout, não pra
+// texto miúdo ou cor exata (aí leia a tela sozinha).
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import folha from '../shell/folha.cjs';
+
+const args = process.argv.slice(2);
+let dir = join(tmpdir(), 'folha');
+const arqs = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '-o') dir = args[++i];
+  else if (args[i] === '-h' || args[i] === '--help') {
+    console.log('uso: folha <img>... [-o <pasta>]   (padrão: <tmp>/folha; imprime o caminho de cada folha)');
+    process.exit(0);
+  } else arqs.push(args[i]);
+}
+if (!arqs.length) {
+  console.error('uso: folha <img>... [-o <pasta>]');
+  process.exit(2);
+}
+try {
+  for (const saida of folha.montar(arqs, { dir })) console.log(saida);
+} catch (err) {
+  console.error(`folha: ${err.message}`);
+  process.exit(1);
+}

@@ -42,6 +42,7 @@ linkar_bin() {
 linkar_bin "$REPO/scripts/hangar-send"    "$HOME/.local/bin/hangar-send"    "'$REPO/scripts/hangar-send'"
 linkar_bin "$REPO/scripts/hangar-preview" "$HOME/.local/bin/hangar-preview" "node '$REPO/scripts/hangar-preview'"
 linkar_bin "$REPO/scripts/hangar-doctor"  "$HOME/.local/bin/hangar-doctor"  "'$REPO/scripts/hangar-doctor'"
+linkar_bin "$REPO/scripts/folha"          "$HOME/.local/bin/folha"          "node '$REPO/scripts/folha'"
 
 mkdir -p "$HOME/.claude/skills"
 for skill in "$REPO"/skills/*/; do
