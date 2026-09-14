@@ -525,6 +525,16 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
                     if isinstance(c, str):
                         add(c)
                     continue
+                # Claude sem terminal: msg orientada no meio do turno aterrissa como
+                # `attachment/queued_command`, nunca como `user`. Sem isto a entrega orientada
+                # ficava pra sempre sem confirmação e a bolha da fila duplicava a real.
+                if etype == "attachment":
+                    att = obj.get("attachment")
+                    if isinstance(att, dict) and att.get("type") == "queued_command":
+                        for b in att.get("prompt") or []:
+                            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                                add(b["text"])
+                    continue
                 if etype != "user":
                     continue
                 content = (obj.get("message") or {}).get("content")

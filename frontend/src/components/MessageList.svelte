@@ -228,6 +228,10 @@
       // e os dois ficam se revezando (revela, descarta, revela).
       piso = extra;
     }
+    // Memória esgotada e a tela AINDA não rola (rajada de tools colapsada em linhas de grupo):
+    // o `onscroll` nunca vai disparar, então o pedido ao servidor sai daqui. O Chat ignora
+    // quando já trouxe tudo.
+    if (listEl && !hasOlder && listEl.scrollHeight - listEl.clientHeight <= 64) onFimDoLocal?.();
   }
 
   // Reveal em voo: o chamador novo ESPERA o que ja esta rodando, em vez de virar no-op. Com no-op,

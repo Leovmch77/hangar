@@ -323,6 +323,23 @@ def test_committed_lines_include_queue_ops_and_raw_meta(tmp_path):
     assert "na fila interna" in lines
 
 
+def test_committed_lines_contam_orientada_no_claude_sem_terminal(tmp_path):
+    # Msg mandada no meio do turno pelo stdin: o CLI grava `attachment/queued_command`, sem entrada
+    # `user`. Conta como aterrissada, senão a entrega orientada nunca confirmava.
+    import json
+    j = tmp_path / "t.jsonl"
+    j.write_text(
+        json.dumps({"type": "attachment", "uuid": "a1", "attachment": {
+            "type": "queued_command", "commandMode": "prompt",
+            "prompt": [{"type": "text", "text": "pare os sleeps — 📎 imagem: /tmp/x.png"},
+                       {"type": "image", "source": {}}]}}) + "\n" +
+        json.dumps({"type": "attachment", "uuid": "a2", "attachment": {"type": "hook_success"}}) + "\n",
+        encoding="utf-8")
+    lines = pqueue.committed_user_lines(str(j))
+    assert "pare os sleeps — 📎 imagem: /tmp/x.png" in lines
+    assert "pare os sleeps" in lines
+
+
 def test_enfileirada_na_tui_fica_visivel_ate_ser_consumida(tmp_path):
     # Entre o enqueue e o consumo a msg so existe na fila interna do Claude Code: o oraculo a conta
     # como aterrissada (nao redigita) e o parser nao a renderiza (nao duplica com o dequeue). Sem
