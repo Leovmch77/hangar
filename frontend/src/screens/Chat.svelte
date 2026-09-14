@@ -326,6 +326,20 @@
   // o dedup fazia findIndex O(n) por evento = O(n²) por reconexão -> em conversa longa (n grande), no
   // celular (reconecta a cada background/foreground), congelava a main thread. Map = lookup O(1).
   const idIndex = new Map<string, number>();
+  // Índice onde um evento com este relógio entra: antes do primeiro evento (do fim pro início)
+  // com `ts` maior. `tool_result` e afins não têm `ts` e seguem o evento anterior — por isso não
+  // decidem nada e não param a varredura; um `?? 0` neles mandava tudo pro fim.
+  function posicaoPeloRelogio(quando: number): number {
+    let pos = events.length;
+    for (let k = events.length - 1; k >= 0; k--) {
+      const t = events[k].ts;
+      if (typeof t !== 'number') continue;
+      if (t > quando + 1) pos = k;
+      else break;
+    }
+    return pos;
+  }
+
   function rebuildIndex() {
     idIndex.clear();
     for (let i = 0; i < events.length; i++) idIndex.set(events[i].id, i);
@@ -1820,16 +1834,14 @@
           const next = events.slice();
           next[i] = ev;
           events = next;
-        } else if (ev.id.startsWith('queued-') && typeof ev.queued_ts === 'number' && events.length
-                   && (events[events.length - 1].ts ?? 0) > ev.queued_ts + 1) {
+        } else if (ev.id.startsWith('queued-') && typeof ev.queued_ts === 'number'
+                   && posicaoPeloRelogio(ev.queued_ts) < events.length) {
           // Reconexão do SSE reemite a fila inteira (o `seen` do follow zera), inclusive uma
           // entrada desistida de horas atrás. Anexada no fim, ela "aparecia agora" entre mensagens
           // recentes — parecia mensagem nova que ninguém mandou. Entra no lugar do relógio dela
           // (`queued_ts`; o `ts` de exibição da bolha da fila é null de propósito), como o
           // histórico já faz no reload.
-          const quando = ev.queued_ts;
-          let pos = events.length;
-          while (pos > 0 && (events[pos - 1].ts ?? 0) > quando) pos--;
+          const pos = posicaoPeloRelogio(ev.queued_ts);
           events = [...events.slice(0, pos), ev, ...events.slice(pos)];
           rebuildIndex();
         } else {
