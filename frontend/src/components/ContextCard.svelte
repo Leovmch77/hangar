@@ -46,9 +46,16 @@
     if (r === '7d') return m.ctx_limite_7d();
     return r;
   }
+  // Tique de 1 min: o cartão fica aberto por horas e o "renova em" não pode congelar.
+  let agora = $state(Date.now());
+  $effect(() => {
+    const t = setInterval(() => { agora = Date.now(); }, 60_000);
+    return () => clearInterval(t);
+  });
+
   function quandoRenova(ts: number | null) {
     if (!ts) return '';
-    const falta = ts * 1000 - Date.now();
+    const falta = ts * 1000 - agora;
     if (falta <= 0) return '';
     if (falta < 24 * 3600e3) {
       const h = Math.floor(falta / 3600e3);
