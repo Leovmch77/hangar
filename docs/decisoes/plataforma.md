@@ -289,6 +289,17 @@ Este
   show someone else's plan ("no bar" is a limitation, "wrong bar" is a bug). Executing a superpowers
   plan: mark `- [ ]` → `- [x]` at the end of each Step — that's what feeds this feature.
 
+## Cota: cache em disco e espera após 429
+
+(`app/cotas.py`, 14/09/2026.) O cache das cotas era só memória: cada restart do backend relia
+todas as credenciais de uma vez. Três restarts em 3 min (14:04–14:07) fizeram a API de uso da
+Anthropic responder 429 pras 5 contas Claude, e a aba Contas mostrou "não informa cota" com tudo
+conectado. Duas regras: o cache vai pra `~/.hangar/cotas-cache.json` (pasta do Hangar, não da
+conta) e o que está dentro do TTL volta do disco na subida; e fonte que levou 429 só vence de novo
+depois de `_ESPERA_429_S` (10 min) — insistir no próximo poll só renova o 429. Sob pytest o disco
+fica fora, pelo mesmo motivo do `_avisar_sessoes`: a suíte gravaria fontes de mentira no arquivo
+real da máquina.
+
 ## Compartilhado por sessão, não por conexão
 
 (`app/difusor.py`, `stats.Accumulator.
