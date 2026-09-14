@@ -368,6 +368,36 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
         "a janela nativa (Electron) ficou com dependencias desatualizadas"]
 
 
+def test_falha_do_instalador_mostra_o_motivo_marcado_nao_a_cauda(repo, monkeypatch):
+    """As 12 últimas linhas do `install.ps1` são o portão do fim — a lista de pendências sem o
+    porquê. O motivo é impresso no passo que falhou, com a marca; é ele que vai pra tela."""
+    class P:
+        returncode = 1
+        stdout = ("7/8 Subir junto com o Windows\n"
+                  "  --  tarefas agendadas: A tarefa hangar-backend nao manteve a protecao\n"
+                  "##HANGAR-FALHA## tarefas agendadas: A tarefa hangar-backend nao manteve a protecao\n"
+                  "##HANGAR-FALHA## backend no ar: nenhuma tarefa chegou a ser reiniciada\n"
+                  + "\n".join(f"linha {i}" for i in range(20)) + "\n"
+                  "NAO terminou: tarefas agendadas, backend no ar\n")
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda *a, **kw: P())
+    with pytest.raises(RuntimeError) as e:
+        atualizar._reaplicar("windows")
+    msg = str(e.value)
+    assert "nao manteve a protecao" in msg and "nenhuma tarefa chegou" in msg
+    assert "linha 19" not in msg          # não é a cauda
+
+
+def test_falha_do_instalador_sem_marca_cai_na_cauda(repo, monkeypatch):
+    class P:
+        returncode = 1
+        stdout = "x\n" * 30 + "ultima linha\n"
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda *a, **kw: P())
+    with pytest.raises(RuntimeError, match="ultima linha"):
+        atualizar._reaplicar("systemd")
+
+
 def test_sem_marca_nao_inventa_aviso(repo, monkeypatch):
     class P:
         returncode = 0

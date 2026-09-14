@@ -64,11 +64,23 @@ function Nota($m)   { Write-Host "      $m" -ForegroundColor DarkGray }
 function Falta($m)  { Write-Host "  --  $m" -ForegroundColor Yellow }
 function Erro($m)   { Write-Host "  X   $m" -ForegroundColor Red }
 
+# Pendencia COM motivo, marcada pra tela do Atualizar. O app le a saida crua deste script e so
+# mostra as ultimas linhas — que sao o portao do fim, sem o motivo. A marca `##HANGAR-FALHA##`
+# (irma da `##HANGAR-AVISO##`) e o que o atualizar.py filtra; o `--` amarelo e enfeite.
+$script:falhasMarcadas = @()
+function Falha($rotulo, $motivo) {
+    Falta "${rotulo}: $motivo"
+    $script:pendencias += $rotulo
+    $script:falhasMarcadas += $rotulo
+    Write-Host "##HANGAR-FALHA## ${rotulo}: $motivo"
+}
+
 function Pare($mensagem, $dicas) {
     # Parada de passo ESSENCIAL: os passos seguintes dependem deste, e seguir adiante só
     # enterrava a causa. Extra opcional que falhou NÃO passa por aqui — vai pro `$pendencias`
     # e o portão do fim diz "NAO terminou".
     Erro $mensagem
+    Write-Host "##HANGAR-FALHA## $mensagem"
     foreach ($d in $dicas) { Nota $d }
     Nota 'instalacao interrompida neste passo. Re-rodar continua de onde parou.'
     # Sem a pausa, a janela aberta por duplo clique FECHA e ninguém lê o motivo — o mesmo
@@ -1706,11 +1718,21 @@ if ($registrou) {
                 }
             }
             $registered = Get-ScheduledTask -TaskName $t.Nome
-            if ($registered.Principal.RunLevel -ne $script:installRunLevel -or $registered.Principal.LogonType -ne 'Interactive') {
-                throw "A tarefa $($t.Nome) nao manteve a permissao $script:installRunLevel e o logon interativo"
-            }
-            if ($registered.Settings.MultipleInstances -ne 'IgnoreNew' -or $registered.Settings.RestartCount -ne 3) {
-                throw "A tarefa $($t.Nome) nao manteve a protecao contra duplicacao e os reinicios automaticos"
+            # As conferencias valem pro registro NOVO. A reaproveitada e a que sobrou de outra
+            # execucao: a recuperacao dela foi pausada no passo 0 (RestartCount 0 ate o finally
+            # repor), e um throw aqui pulava o Restart-HangarTask — codigo novo no disco, processo
+            # velho na porta, e duas pendencias sem motivo na tela.
+            if ($reaproveitou) {
+                if ($registered.Principal.RunLevel -ne $script:installRunLevel -or $registered.Principal.LogonType -ne 'Interactive') {
+                    Falta "a tarefa $($t.Nome) reaproveitada roda com permissao $($registered.Principal.RunLevel)/$($registered.Principal.LogonType), nao $script:installRunLevel/Interactive"
+                }
+            } else {
+                if ($registered.Principal.RunLevel -ne $script:installRunLevel -or $registered.Principal.LogonType -ne 'Interactive') {
+                    throw "A tarefa $($t.Nome) nao manteve a permissao $script:installRunLevel e o logon interativo"
+                }
+                if ($registered.Settings.MultipleInstances -ne 'IgnoreNew' -or $registered.Settings.RestartCount -ne 3) {
+                    throw "A tarefa $($t.Nome) nao manteve a protecao contra duplicacao e os reinicios automaticos"
+                }
             }
             # Registrar NAO inicia: o gatilho e "no logon", entao sem isto nada sobe ate o
             # proximo login e a pessoa abre o navegador numa porta morta logo apos instalar.
@@ -1721,8 +1743,7 @@ if ($registrou) {
             if ($reaproveitou) { Ok "tarefa $($t.Nome) reaproveitada e reiniciada" } else { Ok "tarefa $($t.Nome) registrada e iniciada" }
         }
     } catch {
-        Falta "nao deu pra registrar as tarefas: $_"
-        $script:pendencias += 'tarefas agendadas'
+        Falha 'tarefas agendadas' "$_"
     }
 
     # Iniciar nao e subir: a tarefa ja morreu na largada por bug de codificacao, e o instalador
@@ -2278,7 +2299,10 @@ if ($morreu) {
 $vivo = $false
 if ($jaAgendado -or $registrou) {
     $vivo = $subiu
-    if (-not $vivo) { $script:pendencias += 'backend no ar' }
+    if (-not $vivo) {
+        if ($iniciou) { Falha 'backend no ar' "a porta $portaBack nao abriu depois do reinicio (veja $env:LOCALAPPDATA\hangar\logs\privado\hangar-backend.log)" }
+        else { Falha 'backend no ar' 'nenhuma tarefa chegou a ser reiniciada; o processo na porta e o ANTERIOR' }
+    }
 }
 
 # O QR saiu daqui: hoje ele e desenhado UMA vez, na tela final, junto do "o que fazer agora".
@@ -2331,6 +2355,10 @@ if ($vivo -and -not $Update) {
 # lugar, inclusive num instalador.
 if ($pendencias.Count -gt 0) {
     Titulo "NAO terminou: $(($pendencias | Select-Object -Unique) -join ', ')"
+    # Pendencia que entrou sem motivo ainda precisa chegar a tela do Atualizar.
+    foreach ($p in ($pendencias | Select-Object -Unique)) {
+        if ($p -notin $script:falhasMarcadas) { Write-Host "##HANGAR-FALHA## $p" }
+    }
     Write-Host @"
   Um ou mais passos falharam e estao listados acima com X. O que ja estava no ar continua no ar —
   e e por isso que isto precisa ser dito alto: a tela pode seguir funcionando servindo o build

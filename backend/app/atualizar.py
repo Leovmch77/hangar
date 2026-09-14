@@ -349,6 +349,24 @@ def _cauda(p: subprocess.CompletedProcess, linhas: int = 12) -> str:
     return "\n".join(txt.splitlines()[-linhas:])
 
 
+# O instalador marca cada pendência e cada parada com o motivo. A marca é irmã da de aviso: texto
+# puro, sem cor, pra sobreviver a idioma e a `_ANSI`.
+_MARCA_FALHA = "##HANGAR-FALHA##"
+
+
+def _motivo_da_falha(p: subprocess.CompletedProcess) -> str:
+    """As linhas marcadas do instalador; sem marca, a cauda de antes.
+
+    A cauda eram as 12 últimas linhas, e no `install.ps1` essas são o portão do fim ("NAO
+    terminou: tarefas agendadas, backend no ar") — o motivo de verdade, impresso no passo que
+    falhou, ficava acima do corte, e o usuário via a lista sem saber o porquê.
+    """
+    txt = _ANSI.sub("", (p.stdout or "") + (p.stderr or ""))
+    motivos = [linha.split(_MARCA_FALHA, 1)[1].strip()
+               for linha in txt.splitlines() if _MARCA_FALHA in linha]
+    return "\n".join(motivos) if motivos else _cauda(p)
+
+
 # ─── Pré-voo ───────────────────────────────────────────────────────────────────────────────────
 
 def _topologia() -> str:
@@ -516,7 +534,7 @@ def _reaplicar(topologia: str) -> None:
     else:
         p = _rodar(["bash", str(REPO / "install.sh"), "--update"])
     if p.returncode != 0:
-        raise RuntimeError(f"a instalacao nao terminou: {_cauda(p)}")
+        raise RuntimeError(f"a instalacao nao terminou: {_motivo_da_falha(p)}")
     # Avisos: o instalador pode terminar bem e mesmo assim ter deixado algo pra trás (o `npm ci` da
     # janela nativa é o caso). Sem isto a tela dizia "Atualizado" e pronto — o que ficou quebrado
     # só aparecia como uma linha no meio do log, que ainda por cima pode ter rolado pra fora.

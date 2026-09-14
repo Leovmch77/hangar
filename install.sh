@@ -52,7 +52,8 @@ ok()   { printf '  \033[32mok\033[0m  %s\n' "$*"; }
 nota() { printf '      \033[2m%s\033[0m\n' "$*"; }
 falta(){ printf '  \033[33m--\033[0m  %s\n' "$*"; }
 erro() { printf '  \033[31mX\033[0m   %s\n' "$*"; }
-fail() { erro "$*"; exit 1; }
+# A marca é o que a tela do Atualizar mostra como motivo (o app só vê as últimas linhas).
+fail() { erro "$*"; echo "##HANGAR-FALHA## $*"; exit 1; }
 
 # Duas gravidades, e a diferença é o que acontece com os passos seguintes:
 #  - ESSENCIAL falhou -> para na hora (fail): backend, token e frontend sustentam todos os
