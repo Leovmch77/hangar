@@ -307,10 +307,14 @@ def _texto_do_stderr(bruto: bytes) -> str:
     try:
         return bruto.decode("utf-8")
     except UnicodeDecodeError:
+        import codecs
         import locale
-        enc = locale.getpreferredencoding(False) or ""
-        if enc.lower().replace("-", "") in ("", "utf8"):
-            # Locale já é UTF-8 (Linux): repetir o UTF-8 só trocaria os acentos por U+FFFD.
+        try:
+            enc = codecs.lookup(locale.getpreferredencoding(False) or "cp1252").name
+        except LookupError:
+            enc = "cp1252"
+        if enc == "utf-8":
+            # Locale já é UTF-8 (Linux, cp65001): repetir o UTF-8 só trocaria os acentos por U+FFFD.
             enc = "cp1252"
         return bruto.decode(enc, "replace")
 
