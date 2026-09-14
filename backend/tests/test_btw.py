@@ -149,6 +149,35 @@ def test_buffer_vazio_cai_no_pane(falso):
     assert r["fonte"] == "pane"
 
 
+def test_sessao_que_sumiu_nao_desliga_o_alvo_pra_sempre(falso, monkeypatch):
+    """rc≠0 sem "unknown flag" (sessão caiu no meio) é falha desta chamada, não "psmux não aceita
+    -t": gravar False aí mandava todo buffer seguinte pra sessão padrão de outra pessoa."""
+    f = falso([_tela("❯ ")], modo="psmux")
+    original = f._run
+
+    def _run(args, input=None):
+        if "-t" in args:
+            return subprocess.CompletedProcess(args, 1, "", "can't find session: =s\n")
+        return original(args, input)
+    monkeypatch.setattr(btw.tmux, "_run", _run)
+    assert btw._buffers("s") == []
+    assert btw._BUFFER_COM_ALVO is None          # não decidiu; a próxima tenta com -t de novo
+
+
+def test_tmux_nao_apaga_por_contagem(falso):
+    """No tmux os buffers são do servidor: apagar "o mais recente" até bater a contagem levaria
+    uma cópia manual feita por outra pessoa na mesma janela."""
+    f = falso([
+        _tela("❯ "),
+        _tela("    /btw q", "      x", RODAPE_PRONTO),
+        _tela("    /btw q", "      x", RODAPE_COPIADO),
+    ], modo="tmux")
+    f.buffers.append(("alheio", "copia de outra pessoa"))
+    r = btw.perguntar("s", "q")
+    assert r["fonte"] == "buffer"
+    assert f.buffers == [("alheio", "copia de outra pessoa")]
+
+
 def test_sem_buffer_cai_no_pane(falso):
     f = falso([
         _tela("❯ "),

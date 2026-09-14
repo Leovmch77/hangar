@@ -77,7 +77,11 @@ def _buffer_cmd(name: str, sub: str, *args: str):
         if _BUFFER_COM_ALVO or cp.returncode == 0:
             _BUFFER_COM_ALVO = True
             return cp
-        if cp.returncode == tmux.RC_INDISPONIVEL:
+        # Só a recusa da FLAG desliga o `-t`, e pra sempre no processo. Qualquer outro rc≠0 (sessão
+        # que caiu no meio, multiplexador fora) é falha desta chamada: gravar False aqui faria todo
+        # buffer seguinte falar com a sessão padrão do psmux — lendo e apagando o clipboard de outra.
+        stderr = cp.stderr if isinstance(cp.stderr, str) else ""
+        if "unknown flag" not in stderr and "unknown option" not in stderr:
             return cp
         _BUFFER_COM_ALVO = False
     return tmux._run(["tmux", sub, *args])
@@ -91,14 +95,25 @@ def _buffers(name: str) -> list[str]:
 def _ler_buffer(name: str, nome: str) -> str:
     # O psmux ignora o `-b` (vazio com rc 0) e nem devolve o nome real no `-F`. Sem `-b` vem o mais
     # recente, que é o do `c` — o `_COPIA_LOCK` garante que ninguém copiou no meio.
-    texto = _buffer_cmd(name, "show-buffer", "-b", nome).stdout or ""
-    return texto if texto.strip() else (_buffer_cmd(name, "show-buffer").stdout or "")
+    cp = _buffer_cmd(name, "show-buffer", "-b", nome)
+    texto = cp.stdout or ""
+    if texto.strip():
+        return texto
+    # Vazio com rc 0 é o psmux ignorando o `-b`. rc≠0 é falha de verdade (buffer sumiu): cair no
+    # "mais recente" aqui, no tmux, devolveria o buffer de outra cópia como se fosse a resposta.
+    if cp.returncode != 0:
+        return ""
+    return _buffer_cmd(name, "show-buffer").stdout or ""
 
 
 def _apagar_buffers(name: str, novos: list[str], quantos_antes: int) -> None:
     for b in novos:
         _buffer_cmd(name, "delete-buffer", "-b", b)
-    # psmux: o `-b` não apagou nada e o OSC 52 vira duas cópias; sem `-b` sai o mais recente.
+    # psmux (aceitou o `-t`): o `-b` não apagou nada e o OSC 52 vira duas cópias; sem `-b` sai o
+    # mais recente. No tmux o `-b` já apagou, e apagar por contagem levaria o buffer de uma cópia
+    # manual feita na mesma janela — os buffers lá são do servidor inteiro.
+    if _BUFFER_COM_ALVO is not True:
+        return
     for _ in range(4):
         if len(_buffers(name)) <= quantos_antes:
             break
