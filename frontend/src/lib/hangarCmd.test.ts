@@ -65,6 +65,22 @@ describe('lerComandoHangar', () => {
     expect(a?.sessoes?.[0]).toEqual({ nome: 'sessao-b', estado: 'working', cwd: '/home/u/app-web' });
   });
 
+  it('--list com peer fora do ar não é erro: a lista local veio', () => {
+    // A varredura de servidores remotos escrevia "erro: backend inacessível" no stderr e o cartão
+    // dizia "o backend do hangar não respondeu" com as sessões todas na tela.
+    const saida = [
+      'sessao-a                 idle            /home/j/app',
+      'erro: backend inacessível em http://100.1.2.3:8766 (hangar rodando?)',
+      "⚠ servidor 'srv' fora do ar (http://100.1.2.3:8766)",
+    ].join('\n');
+    const a = lerComandoHangar('hangar-send --list', saida, false);
+    expect(a?.sessoes).toHaveLength(1);
+    expect(a?.erro).toBeUndefined();
+    // Sem lista nenhuma, o erro continua valendo.
+    const b = lerComandoHangar('hangar-send --list', 'erro: backend inacessível em http://127.0.0.1:8765 (hangar rodando?)', false);
+    expect(b?.erro).toBeDefined();
+  });
+
   it('--pair traz par e tarefa', () => {
     const a = lerComandoHangar('hangar-send --pair sessao-b "unificar os logs"', 'pareado: sessao-a <-> sessao-b (registrado no app)', false);
     expect(a).toMatchObject({ verbo: 'parear', alvo: 'sessao-b', texto: 'unificar os logs' });

@@ -141,7 +141,10 @@ export function lerComandoHangar(comando: string, saida: string, falhou: boolean
       .map((l) => l.match(/^(\S+)\s{2,}(\S+)\s{2,}(.+)$/))
       .filter(Boolean)
       .map((m) => ({ nome: m![1], estado: m![2], cwd: m![3].trim() }));
-    return { verbo: 'listar', sessoes: sessoes.length ? sessoes : undefined, erro };
+    // Lista lida = o comando funcionou. Peer fora do ar na varredura vira linha `⚠`/`erro:` no
+    // stderr, e isso pintava o cartão de "o backend não respondeu" com as sessões todas na tela.
+    return { verbo: 'listar', sessoes: sessoes.length ? sessoes : undefined,
+             erro: sessoes.length && !falhou ? undefined : erro };
   }
 
   // Recado 1:1 — o que sobra: `hangar-send <sessao> "msg"`.
