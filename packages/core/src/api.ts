@@ -1288,13 +1288,16 @@ export function getConfigForServer(s: Server): Promise<ConfigServidor> {
   return apiFetchForServer(s, '/api/config');
 }
 
-export function patchConfig(mudancas: Record<string, unknown>): Promise<{ campos: Record<string, CampoConfig> }> {
+// `somente_leitura` é opcional: backend mais antigo responde só com `campos`.
+export type RespostaPatchConfig = Pick<ConfigServidor, 'campos'> & Partial<Pick<ConfigServidor, 'somente_leitura'>>;
+
+export function patchConfig(mudancas: Record<string, unknown>): Promise<RespostaPatchConfig> {
   // POST, nao PATCH: o proxy na frente do backend barra PATCH (era o unico do app).
   // Mesmo teto do GET: servidor vivo demora demais pra rejeitar; sem isso o Salvar travava.
   return apiFetch('/api/config', { method: 'POST', body: JSON.stringify(mudancas), signal: AbortSignal.timeout(8000) });
 }
 
-export function patchConfigForServer(s: Server, mudancas: Record<string, unknown>): Promise<{ campos: Record<string, CampoConfig> }> {
+export function patchConfigForServer(s: Server, mudancas: Record<string, unknown>): Promise<RespostaPatchConfig> {
   return apiFetchForServer(s, '/api/config', { method: 'POST', body: JSON.stringify(mudancas) });
 }
 

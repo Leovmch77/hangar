@@ -74,7 +74,7 @@ done
 # Segunda trava, de outro assunto: mudança em instalador/script sem o passo declarado que a leva
 # até a máquina de quem já usa. Motivo e escape estão no próprio script.
 _raiz="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [[ -x "$_raiz/scripts/check-passo-de-atualizacao.sh" ]]; then
+if [[ -f "$_raiz/scripts/check-passo-de-atualizacao.sh" ]]; then
     bash "$_raiz/scripts/check-passo-de-atualizacao.sh" --staged || exit 1
 fi
 

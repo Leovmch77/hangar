@@ -682,7 +682,10 @@ def _carregar_cache() -> None:
         return
     try:
         bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return                                   # primeira subida: normal
     except (OSError, ValueError):
+        _log.warning("cache de cotas ilegivel em %s; relendo todas as contas", arquivo, exc_info=True)
         return
     if not isinstance(bruto, dict):
         return
@@ -690,7 +693,10 @@ def _carregar_cache() -> None:
     for chave, item in bruto.items():
         try:
             idade = agora - float(item["gravado_em"])
-            if idade < 0 or idade >= _TTL_S:
+            # Idade NEGATIVA é o carimbo adiado do 429 (gravado no futuro de propósito): tem que
+            # voltar, senão a fonte em espera é justamente a que o restart relê. O teto abaixo
+            # descarta relógio torto.
+            if idade < -_ESPERA_429_S or idade >= _TTL_S:
                 continue
             _cache[chave] = (mono - idade, CotaConta.model_validate(item["cota"]))
         except (KeyError, TypeError, ValueError):
@@ -711,7 +717,7 @@ def _gravar_cache() -> None:
         tmp.write_text(json.dumps(dados), encoding="utf-8")
         atomico.substituir(tmp, alvo)
     except OSError:
-        _log.debug("cache de cotas nao gravado", exc_info=True)
+        _log.warning("cache de cotas nao gravado em %s", alvo, exc_info=True)
 
 
 def _fontes() -> list[_Fonte]:

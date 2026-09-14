@@ -4738,7 +4738,18 @@ def get_config(request: Request):
     chave esta la sem conseguir copia-la de volta."""
     return {
         "campos": runtime_config.estado(),
-        "somente_leitura": {
+        "somente_leitura": _somente_leitura(request),
+        # IRMÃ do `somente_leitura`, nunca dentro dele: aquele bloco é um mapa chave -> valor
+        # simples, tipado assim no core e desenhado linha a linha pela tela. Uma lista lá dentro
+        # quebraria o tipo e desenharia "[object Object]".
+        "variaveis_env": variaveis_env(),
+    }
+
+
+def _somente_leitura(request: Request) -> dict:
+    """O que a tela mostra sem poder editar. Volta também no PATCH: parte dela (a capacidade de
+    traduzir o pensamento) muda com um campo editável, e a linha ficava velha até reabrir o modal."""
+    return {
             "port": settings.port,
             "lan_bind_ip": settings.lan_bind_ip,
             "server_id": settings.server_id,
@@ -4763,11 +4774,6 @@ def get_config(request: Request):
             # disco aqui seria afirmar estar rodando codigo que ninguem carregou (o defeito que
             # `diag.VERSAO_EM_EXECUCAO` corrigiu em f4013343).
             "versao": diag.VERSAO_EM_EXECUCAO,
-        },
-        # IRMÃ do `somente_leitura`, nunca dentro dele: aquele bloco é um mapa chave -> valor
-        # simples, tipado assim no core e desenhado linha a linha pela tela. Uma lista lá dentro
-        # quebraria o tipo e desenharia "[object Object]".
-        "variaveis_env": variaveis_env(),
     }
 
 
@@ -4789,7 +4795,7 @@ async def patch_config(request: Request):
         await asyncio.to_thread(runtime_config.aplicar, body)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"campos": runtime_config.estado()}
+    return {"campos": runtime_config.estado(), "somente_leitura": _somente_leitura(request)}
 
 
 def _motores_para_cliente() -> dict[str, dict]:

@@ -195,8 +195,10 @@ def _git_describe() -> str:
 VERSAO_EM_EXECUCAO = _git_describe()
 
 
-def versao_legivel(ref: str = "HEAD") -> str:
+def versao_legivel(ref: str = "HEAD") -> str | None:
     """`2026.09.14-ae8a7bf`: a data do commit e o hash curto. É o que a tela chama de versão.
+    `None` quando o git não responde — a tela trata ausência; uma palavra fixa viraria texto cru
+    (`vindisponivel`) nos dois idiomas.
 
     Não há tag de release nem número mantido à mão (o `pyproject` ficou em 0.1.0 pra sempre): o
     que se compara entre duas máquinas é "de quando é o código", e a data responde isso sem
@@ -207,9 +209,9 @@ def versao_legivel(ref: str = "HEAD") -> str:
             ["git", "log", "-1", "--format=%cd-%h", "--date=format:%Y.%m.%d", ref],
             cwd=Path(__file__).resolve().parents[2], capture_output=True,
             text=True, timeout=5, encoding="utf-8", errors="replace")
-        return p.stdout.strip() or "indisponivel"
+        return p.stdout.strip() or None
     except Exception:                                # noqa: BLE001 — versão nunca derruba nada
-        return "indisponivel"
+        return None
 
 
 VERSAO_LEGIVEL_EM_EXECUCAO = versao_legivel()

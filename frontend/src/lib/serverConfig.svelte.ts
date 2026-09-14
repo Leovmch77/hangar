@@ -89,6 +89,9 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
       const r = s ? await patchConfigForServer(s, enviado) : await patchConfig(enviado);
       if (mine !== geracao || donoDe() !== dono) return;   // operacao atual tomou a frente: nao pinta nada
       campos = r.campos;
+      // A capacidade de traduzir o pensamento muda com um campo editável: sem isto a linha
+      // somente-leitura dizia "disponível" até reabrir o modal.
+      if (r.somente_leitura) leitura = r.somente_leitura;
       // Apaga SÓ as chaves cujo valor ATUAL ainda é o enviado. Edição feita DURANTE o POST (mesma
       // chave, valor novo) continua no rascunho e vai no PRÓXIMO Save — a resposta não a clobbera.
       for (const k of Object.keys(enviado)) {

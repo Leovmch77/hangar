@@ -276,6 +276,23 @@ def test_429_espera_mais_que_o_ttl_antes_de_insistir(monkeypatch, tmp_path):
     assert len(chamadas) == 1
 
 
+def test_espera_do_429_sobrevive_ao_restart(monkeypatch, tmp_path):
+    """O carimbo adiado do 429 é gravado no futuro; descartá-lo na carga relia justamente a
+    fonte em espera — a leva a menos do mesmo incidente."""
+    arq = tmp_path / "c.json"
+    monkeypatch.setattr(cotas, "_arquivo_cache", lambda: arq)
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_cache_carregado", False)
+    cotas._atualizar([_fonte("claude:/x", ("indisponivel", [], "http-429"))])
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_cache_carregado", False)
+    chamadas = []
+    f = cotas._Fonte("claude:/x", "x", "claude", lambda: (chamadas.append(1), ("lida", [], None))[1])
+    cotas._atualizar([f])
+    assert not chamadas
+    assert cotas._cache["claude:/x"][0] > time.monotonic() + 100
+
+
 def test_cache_volta_do_disco_dentro_do_ttl(monkeypatch, tmp_path):
     """Restart do backend não relê todas as contas: o que está no TTL volta do arquivo."""
     arq = tmp_path / "c.json"

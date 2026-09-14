@@ -530,7 +530,11 @@ def _hash_arquivo(caminho: Path) -> str:
     import hashlib
     try:
         return hashlib.sha256(caminho.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return ""
     except OSError:
+        # Sem hash o `npm ci` é pulado; isso tem que aparecer, senão "Atualizado" com front velho.
+        _log.warning("nao consegui ler %s; o npm ci nao vai rodar nesta atualizacao", caminho, exc_info=True)
         return ""
 
 
@@ -793,7 +797,7 @@ def _pid_do_servidor(topologia: str, porta: int) -> int | None:
                 if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == porta:
                     return c.pid or None
     except Exception:                                # noqa: BLE001 — prova opcional, nunca derruba
-        _log.debug("pid do servidor indisponivel", exc_info=True)
+        _log.warning("pid do servidor indisponivel: a prova por pid fica desligada nesta rodada", exc_info=True)
     return None
 
 

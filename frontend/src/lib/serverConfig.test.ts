@@ -142,6 +142,23 @@ describe('criarConfigServidor — ownership do salvar (round 2)', () => {
     expect(apiMock.patchConfigForServer).toHaveBeenCalledTimes(1);
   });
 
+  it('salvar repinta a leitura quando a resposta traz somente_leitura', async () => {
+    let alvo: Server | null = A;
+    const store = criarConfigServidor(() => alvo);
+    apiMock.getConfigForServer.mockResolvedValue({ campos: {} as never, somente_leitura: { traducao_pensamento: true } } as never);
+    await store.carregar();
+    expect(store.leitura.traducao_pensamento).toBe(true);
+    store.setRascunho('traduzir_pensamento', false);
+    apiMock.patchConfigForServer.mockResolvedValueOnce({ campos: {} as never, somente_leitura: { traducao_pensamento: false } } as never);
+    await store.salvar();
+    expect(store.leitura.traducao_pensamento).toBe(false);
+    // Backend antigo responde só `campos`: a leitura que já estava fica.
+    store.setRascunho('traduzir_pensamento', true);
+    apiMock.patchConfigForServer.mockResolvedValueOnce({ campos: {} as never } as never);
+    await store.salvar();
+    expect(store.leitura.traducao_pensamento).toBe(false);
+  });
+
   it('invalidar() descarta resposta pendente sem nova chamada e zera flags', async () => {
     let alvo: Server | null = A;
     const store = criarConfigServidor(() => alvo);

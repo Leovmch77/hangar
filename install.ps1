@@ -1725,6 +1725,9 @@ if ($registrou) {
             if ($reaproveitou) {
                 if ($registered.Principal.RunLevel -ne $script:installRunLevel -or $registered.Principal.LogonType -ne 'Interactive') {
                     Falta "a tarefa $($t.Nome) reaproveitada roda com permissao $($registered.Principal.RunLevel)/$($registered.Principal.LogonType), nao $script:installRunLevel/Interactive"
+                    # Aviso, nao pendencia: nao da pra consertar sem UAC, e barrar a atualizacao
+                    # por isso deixaria a maquina com codigo velho. Mas tem que chegar a tela.
+                    Write-Host "##HANGAR-AVISO## a tarefa $($t.Nome) segue com permissao $($registered.Principal.RunLevel)/$($registered.Principal.LogonType); re-registre numa janela elevada"
                 }
             } else {
                 if ($registered.Principal.RunLevel -ne $script:installRunLevel -or $registered.Principal.LogonType -ne 'Interactive') {

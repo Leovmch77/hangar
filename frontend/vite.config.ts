@@ -14,7 +14,8 @@ const hangarVersion = (() => {
   try {
     const v = execSync('git log -1 --format=%cd-%h --date=format:%Y.%m.%d').toString().trim()
     let sujo = false
-    try { execSync('git diff --quiet HEAD -- . ":(exclude)frontend/dist"') } catch { sujo = true }
+    // `top`: o build roda com cwd em frontend/, e pathspec sem âncora seria frontend/frontend/dist.
+    try { execSync('git diff --quiet HEAD -- . ":(exclude,top)frontend/dist"') } catch { sujo = true }
     return sujo ? `${v}-dirty` : v
   } catch { return 'dev' }
 })()

@@ -547,8 +547,10 @@ import * as m from '../paraglide/messages';
         {m.sessao_nova()}
       </button>
       {#if versaoMaquina}
-        <span class="sl-versao" class:atras={commitsAtras > 0} title={versaoTitulo}>
-          {m.versao_chip({ versao: versaoMaquina.split('-')[0] })}{#if commitsAtras > 0}<span class="sl-versao-dot" aria-hidden="true"></span>{/if}
+        <!-- O ponto é o único sinal que existe no toque (title não abre no celular): aparece
+             tanto com commits faltando quanto com código novo esperando reinício. -->
+        <span class="sl-versao" title={versaoTitulo} aria-label={versaoTitulo}>
+          {m.versao_chip({ versao: versaoMaquina.split('-')[0] })}{#if commitsAtras > 0 || faltaReiniciar}<span class="sl-versao-dot" aria-hidden="true"></span>{/if}
         </span>
       {/if}
     </footer>
