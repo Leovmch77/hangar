@@ -1,238 +1,241 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest';
-import { mount, unmount } from 'svelte';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mount, unmount, flushSync } from 'svelte';
 import ListaMaquinas from './ListaMaquinas.svelte';
+import { criarProps } from './props-reativas.svelte';
 import * as m from '../../paraglide/messages';
 import type { LinhaMaquina } from '../../lib/maquinas';
 
-const A: LinhaMaquina = { chave: 'srv:srv-a', nome: 'Casa', identificador: 'casa', navegador: { id: 'srv-a', label: 'Casa', baseUrl: 'http://a', token: 'ta' }, peer: null, estaMaquina: true };
 const B: LinhaMaquina = { chave: 'srv:srv-b', nome: 'Notebook', identificador: 'notebook', navegador: { id: 'srv-b', label: 'Notebook', baseUrl: 'http://b', token: 'tb' }, peer: { id: 'notebook', base_url: 'https://nb.ts.net', token: '••' }, estaMaquina: false };
 const C: LinhaMaquina = { chave: 'peer:vps', nome: 'vps', identificador: 'vps', navegador: null, peer: { id: 'vps', base_url: 'https://vps', token: '••' }, estaMaquina: false };
 const D: LinhaMaquina = { chave: 'srv:srv-d', nome: 'Fora', identificador: null, navegador: { id: 'srv-d', label: 'Fora', baseUrl: 'http://d', token: 'td' }, peer: null, estaMaquina: false };
 const E: LinhaMaquina = { chave: 'srv:srv-e', nome: 'Mac', identificador: 'mac', navegador: { id: 'srv-e', label: 'Mac', baseUrl: 'http://e', token: 'te' }, peer: { id: 'mac', base_url: 'https://mac.ts.net', token: '••' }, estaMaquina: false };
 
+let aberto: { comp: object } | null = null;
+afterEach(() => { if (aberto) unmount(aberto.comp); aberto = null; });
+
 function montar(linhas: LinhaMaquina[], over: Record<string, unknown> = {}) {
   const el = document.createElement('div');
   document.body.appendChild(el);
-  const cbs = { onAcompanhar: vi.fn(), onFalar: vi.fn(), onEditar: vi.fn(), onCorrige: vi.fn(), onTestarDeNovo: vi.fn(), onRemover: vi.fn(), onAdicionar: vi.fn() };
+  const cbs = { onAcompanhar: vi.fn(), onFalar: vi.fn(), onEditar: vi.fn(), onCorrige: vi.fn(), onTestarDeNovo: vi.fn(), onRemover: vi.fn() };
   const comp = mount(ListaMaquinas, { target: el, props: { linhas, estados: {}, meuIdentificador: 'casa', carregando: false, corrige: null, ...cbs, ...over } });
-  const linha = (chave: string) => el.querySelector<HTMLElement>(`.mq-linha[data-chave="${chave}"]`)!;
-  return { el, comp, cbs, linha };
+  aberto = { comp };
+  const linhaCurta = (chave: string) => el.querySelector<HTMLElement>(`.sv-linha[data-chave="${chave}"]`)!;
+  // O detalhe vive num portal no <body>: abre pela linha curta e se busca no document.
+  const detalhe = (chave: string) => {
+    linhaCurta(chave).click();
+    flushSync();
+    return document.querySelector<HTMLElement>(`.mq-linha[data-chave="${chave}"]`)!;
+  };
+  return { el, comp, cbs, linhaCurta, detalhe };
 }
 
-describe('ListaMaquinas', () => {
-  it('uma linha por máquina, com as duas caixas refletindo as duas listas', () => {
-    const t = montar([A, B, C, D]);
-    expect(t.el.querySelectorAll('.mq-linha').length).toBe(4);
-    const b = t.linha('srv:srv-b');
+describe('ListaMaquinas — linha curta', () => {
+  it('uma linha por servidor, com nome e uma frase de estado, sem controles', () => {
+    const t = montar([B, C, D]);
+    expect(t.el.querySelectorAll('.sv-linha').length).toBe(3);
+    expect(t.el.querySelector('.mq-acompanhar, .mq-falar, .mq-remover')).toBeNull();
+    expect(t.linhaCurta('peer:vps').textContent).toContain(m.servidores_curto_falta_token());
+    expect(t.linhaCurta('srv:srv-d').textContent).toContain(m.servidores_curto_nao_responde());
+  });
+
+  it('a frase curta acompanha o estado medido', () => {
+    const t = montar([B, E], { estados: {
+      notebook: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'recusou', motivo: 'credencial' }] },
+      mac: { ok: true, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'ok' }] },
+    } });
+    expect(t.linhaCurta('srv:srv-b').textContent).toContain(m.servidores_curto_token_recusado());
+    expect(t.linhaCurta('srv:srv-e').textContent).toContain(m.servidores_curto_ok());
+  });
+
+  it('volta falhando vira "só de ida"; ida falhando diz que não responde daqui', () => {
+    const t = montar([B, E], { estados: {
+      notebook: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'falhou' }] },
+      mac: { ok: false, lados: [{ lado: 'ida', estado: 'falhou' }, { lado: 'volta', estado: 'ok' }] },
+    } });
+    expect(t.linhaCurta('srv:srv-b').textContent).toContain(m.servidores_curto_so_ida());
+    expect(t.linhaCurta('srv:srv-e').textContent).toContain(m.servidores_curto_ida_falhou());
+  });
+
+  it('lista vazia: carregando não afirma "nenhum"; sem carregar, diz', () => {
+    const a = montar([], { carregando: true });
+    expect(a.el.textContent).not.toContain(m.maquinas_vazio());
+    unmount(a.comp); aberto = null;
+    const b = montar([]);
+    expect(b.el.textContent).toContain(m.maquinas_vazio());
+  });
+
+  it('linha removida fecha o detalhe aberto', () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const props = criarProps({ linhas: [B, C], estados: {}, meuIdentificador: 'casa', carregando: false, corrige: null,
+      onAcompanhar: vi.fn(), onFalar: vi.fn(), onEditar: vi.fn(), onCorrige: vi.fn(), onTestarDeNovo: vi.fn(), onRemover: vi.fn() });
+    const comp = mount(ListaMaquinas, { target: el, props });
+    aberto = { comp };
+    el.querySelector<HTMLElement>('.sv-linha[data-chave="peer:vps"]')!.click();
+    flushSync();
+    expect(document.querySelector('.mq-linha[data-chave="peer:vps"]')).not.toBeNull();
+    props.linhas = [B];
+    flushSync();
+    expect(document.querySelector('.mq-linha[data-chave="peer:vps"]')).toBeNull();
+  });
+});
+
+describe('ListaMaquinas — detalhe do servidor', () => {
+  it('as duas caixas refletem as duas listas', () => {
+    const t = montar([B, C]);
+    const b = t.detalhe('srv:srv-b');
     expect(b.querySelector<HTMLInputElement>('.mq-acompanhar')!.checked).toBe(true);
     expect(b.querySelector<HTMLInputElement>('.mq-falar')!.checked).toBe(true);
-    const c = t.linha('peer:vps');
+    const c = t.detalhe('peer:vps');
     expect(c.querySelector<HTMLInputElement>('.mq-acompanhar')!.checked).toBe(false);
     expect(c.querySelector<HTMLInputElement>('.mq-falar')!.checked).toBe(true);
     expect(c.textContent).toContain(m.maquinas_so_no_servidor());
-    unmount(t.comp);
   });
 
-  it('esta máquina mostra a etiqueta no lugar de "servidores se falam"', () => {
-    const t = montar([A]);
-    expect(t.linha('srv:srv-a').querySelector('.mq-falar')).toBeNull();
-    expect(t.linha('srv:srv-a').textContent).toContain(m.maquinas_esta());
-    unmount(t.comp);
-  });
-
-  it('máquina sem identificador não pode "falar", e diz por quê', () => {
+  it('servidor sem identificador não pode "falar", e diz por quê', () => {
     const t = montar([D]);
-    expect(t.linha('srv:srv-d').querySelector<HTMLInputElement>('.mq-falar')!.disabled).toBe(true);
-    expect(t.linha('srv:srv-d').textContent).toContain(m.maquinas_sem_identificador());
-    unmount(t.comp);
+    const d = t.detalhe('srv:srv-d');
+    expect(d.querySelector<HTMLInputElement>('.mq-falar')!.disabled).toBe(true);
+    expect(d.textContent).toContain(m.maquinas_sem_identificador());
   });
 
-  it('sem identificador próprio, nenhuma máquina pode "falar"', () => {
+  it('sem identificador próprio, nenhum servidor pode "falar"', () => {
     const t = montar([B], { meuIdentificador: '' });
-    expect(t.linha('srv:srv-b').querySelector<HTMLInputElement>('.mq-falar')!.disabled).toBe(true);
-    unmount(t.comp);
+    const b = t.detalhe('srv:srv-b');
+    expect(b.querySelector<HTMLInputElement>('.mq-falar')!.disabled).toBe(true);
+    expect(b.textContent).toContain(m.peers_aviso_nao_definido());
   });
 
   it('a caixa não muda sozinha: volta ao dado e avisa o dono', () => {
     const t = montar([B]);
-    const cb = t.linha('srv:srv-b').querySelector<HTMLInputElement>('.mq-falar')!;
+    const b = t.detalhe('srv:srv-b');
+    const cb = b.querySelector<HTMLInputElement>('.mq-falar')!;
     cb.click();
-    expect(cb.checked).toBe(true);   // o dado (peer existe) continua valendo
+    expect(cb.checked).toBe(true);
     expect(t.cbs.onFalar).toHaveBeenCalledWith(B, false);
-    const ac = t.linha('srv:srv-b').querySelector<HTMLInputElement>('.mq-acompanhar')!;
+    const ac = b.querySelector<HTMLInputElement>('.mq-acompanhar')!;
     ac.click();
     expect(ac.checked).toBe(true);
     expect(t.cbs.onAcompanhar).toHaveBeenCalledWith(B, false);
-    unmount(t.comp);
   });
 
-  it('peer com falha na volta mostra o estado e as pílulas; sem token ou sem registro de lá, diz isso', () => {
+  it('falha na volta mostra o estado e as pílulas; sem token ou sem registro de lá, diz isso', () => {
     const t = montar([B, C, E], { estados: {
       notebook: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'falhou' }] },
       vps: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'nao_configurado', motivo: 'token' }] },
       mac: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'nao_configurado', motivo: 'registro' }] },
     } });
-    expect(t.linha('srv:srv-b').textContent).toContain(m.peers_estado_parcial());
-    expect(t.linha('srv:srv-b').querySelectorAll('.pr-lado').length).toBe(2);
-    expect(t.linha('peer:vps').textContent).toContain(m.maquinas_volta_sem_medir());
-    expect(t.linha('peer:vps').textContent).toContain(m.maquinas_so_no_servidor());
-    expect(t.linha('peer:vps').textContent).not.toContain(m.peers_estado_parcial());
-    expect(t.linha('srv:srv-e').textContent).toContain(m.maquinas_volta_sem_registro());
-    unmount(t.comp);
+    const b = t.detalhe('srv:srv-b');
+    expect(b.textContent).toContain(m.peers_estado_parcial());
+    expect(b.querySelectorAll('.pr-lado').length).toBe(2);
+    const c = t.detalhe('peer:vps');
+    expect(c.textContent).toContain(m.maquinas_volta_sem_medir());
+    expect(c.textContent).toContain(m.maquinas_so_no_servidor());
+    expect(c.textContent).not.toContain(m.peers_estado_parcial());
+    expect(t.detalhe('srv:srv-e').textContent).toContain(m.maquinas_volta_sem_registro());
   });
 
-  it('bloco de correção aparece só na linha certa, devolve a URL digitada e null ao deixar só de ida', () => {
+  it('bloco de correção aparece só no servidor certo, devolve a URL digitada e null ao deixar só de ida', () => {
     const t = montar([B, C], { corrige: { id: 'notebook', url: 'http://x' } });
-    expect(t.linha('srv:srv-b').querySelector('.corrige')).not.toBeNull();
-    expect(t.linha('peer:vps').querySelector('.corrige')).toBeNull();
-    const inp = t.linha('srv:srv-b').querySelector<HTMLInputElement>('.corrige-input')!;
+    expect(t.detalhe('peer:vps').querySelector('.corrige')).toBeNull();
+    const b = t.detalhe('srv:srv-b');
+    expect(b.querySelector('.corrige')).not.toBeNull();
+    const inp = b.querySelector<HTMLInputElement>('.corrige-input')!;
     inp.value = 'https://casa.ts.net'; inp.dispatchEvent(new Event('input', { bubbles: true }));
     expect(t.cbs.onCorrige).toHaveBeenCalledWith('https://casa.ts.net');
-    t.linha('srv:srv-b').querySelector<HTMLButtonElement>('.corrige .btn.primaria')!.click();
+    b.querySelector<HTMLButtonElement>('.corrige .btn.primaria')!.click();
     expect(t.cbs.onTestarDeNovo).toHaveBeenCalledWith(B);
-    [...t.linha('srv:srv-b').querySelectorAll<HTMLButtonElement>('.corrige .btn')].find((b) => b.textContent?.trim() === m.peers_so_ida())!.click();
+    [...b.querySelectorAll<HTMLButtonElement>('.corrige .btn')].find((x) => x.textContent?.trim() === m.peers_so_ida())!.click();
     expect(t.cbs.onCorrige).toHaveBeenCalledWith(null);
-    unmount(t.comp);
   });
 
-  it('volta recusada por token (401) ganha dica própria, não a de parcial', () => {
+  it('volta recusada por token ganha dica própria e o atalho de trocar o token', () => {
     const t = montar([B], { estados: {
       notebook: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'recusou', motivo: 'credencial' }] },
     } });
-    expect(t.linha('srv:srv-b').textContent).toContain(m.maquinas_volta_token_recusado());
-    expect(t.linha('srv:srv-b').textContent).not.toContain(m.peers_estado_parcial());
-    unmount(t.comp);
+    const b = t.detalhe('srv:srv-b');
+    expect(b.textContent).toContain(m.maquinas_volta_token_recusado());
+    expect(b.textContent).not.toContain(m.peers_estado_parcial());
+    [...b.querySelectorAll<HTMLButtonElement>('.sd-acao')].find((x) => x.textContent?.trim() === m.servidores_trocar_token())!.click();
+    expect(t.cbs.onEditar).toHaveBeenCalledWith(B);
   });
 
-  it('linha só do navegador (sem peer) mostra farol neutro, não "testando"', () => {
-    const t = montar([A]);
-    const farol = t.linha('srv:srv-a').querySelector('.mq-farol')!;
+  it('só o servidor conhece: "Informar token" pede para acompanhar neste aparelho', () => {
+    const t = montar([C]);
+    const c = t.detalhe('peer:vps');
+    [...c.querySelectorAll<HTMLButtonElement>('.sd-acao')].find((x) => x.textContent?.trim() === m.servidores_informar_token())!.click();
+    expect(t.cbs.onAcompanhar).toHaveBeenCalledWith(C, true);
+  });
+
+  it('farol: só navegador é neutro; testando e falha real aparecem mesmo sem peer', () => {
+    const t = montar([D]);
+    const farol = t.linhaCurta('srv:srv-d').querySelector('.mq-farol')!;
     expect(farol.textContent?.trim()).toBe('·');
     expect(farol.classList.contains('neutro')).toBe(true);
-    unmount(t.comp);
-  });
-
-  it('farol mostra "testando" mesmo sem peer, e falha real mesmo sem peer', () => {
+    unmount(t.comp); aberto = null;
     const semPeer: LinhaMaquina = { ...D, identificador: 'd' };
-    const t = montar([semPeer], { estados: { d: { lados: [], ok: false, testando: true } } });
-    const farolT = t.linha('srv:srv-d').querySelector('.mq-farol')!;
-    expect(farolT.textContent?.trim()).toBe('◌');
-    unmount(t.comp);
+    const t1 = montar([semPeer], { estados: { d: { lados: [], ok: false, testando: true } } });
+    expect(t1.linhaCurta('srv:srv-d').querySelector('.mq-farol')!.textContent?.trim()).toBe('◌');
+    unmount(t1.comp); aberto = null;
     const t2 = montar([semPeer], { estados: { d: { ok: false, lados: [{ lado: 'ida', estado: 'falhou' }] } } });
-    const farolN = t2.linha('srv:srv-d').querySelector('.mq-farol')!;
+    const farolN = t2.linhaCurta('srv:srv-d').querySelector('.mq-farol')!;
     expect(farolN.textContent?.trim()).toBe('●');
     expect(farolN.classList.contains('nao')).toBe(true);
-    unmount(t2.comp);
   });
 
   it('motivo da falha vai no title da pílula', () => {
     const t = montar([B], { estados: {
       notebook: { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'falhou', motivo: 'fetch failed' }] },
     } });
-    const pilulas = t.linha('srv:srv-b').querySelectorAll<HTMLElement>('.pr-lado');
-    expect(pilulas[1].title).toBe('fetch failed');
-    unmount(t.comp);
+    expect(t.detalhe('srv:srv-b').querySelectorAll<HTMLElement>('.pr-lado')[1].title).toBe('fetch failed');
   });
 
-  it('lista vazia: carregando não afirma "nenhuma"; sem carregar, diz e oferece adicionar', () => {
-    const a = montar([], { carregando: true });
-    expect(a.el.textContent).not.toContain(m.maquinas_vazio());
-    unmount(a.comp);
-    const b = montar([]);
-    expect(b.el.textContent).toContain(m.maquinas_vazio());
-    b.el.querySelector<HTMLButtonElement>('.mq-add')!.click();
-    expect(b.cbs.onAdicionar).toHaveBeenCalled();
-    unmount(b.comp);
-  });
-
-  it('Remover em toda linha menos "esta máquina", e devolve a linha inteira', () => {
-    const t = montar([A, B, C]);
-    expect(t.linha('srv:srv-a').querySelector('.mq-remover')).toBeNull();
-    t.linha('peer:vps').querySelector<HTMLButtonElement>('.mq-remover')!.click();
+  it('Remover devolve a linha inteira; Editar só existe com entrada neste aparelho, e fecha o detalhe', () => {
+    const t = montar([B, C]);
+    const c = t.detalhe('peer:vps');
+    expect(c.querySelector('.mq-editar')).toBeNull();
+    expect(c.querySelector('.mq-remover')!.textContent).toContain(m.lista_remover());
+    c.querySelector<HTMLButtonElement>('.mq-remover')!.click();
     expect(t.cbs.onRemover).toHaveBeenCalledWith(C);
-    unmount(t.comp);
-  });
-
-  it('Editar e Remover trazem o rótulo ao lado do ícone (o title não existe no toque)', () => {
-    const t = montar([A, B, C]);
-    const linha = t.linha('peer:vps');
-    expect(linha.querySelector('.mq-remover')!.textContent).toContain(m.lista_remover());
-    // A linha com navegador é a que tem o ✎.
-    const comEditar = [...t.el.querySelectorAll<HTMLElement>('.mq-linha')]
-      .find((l) => l.querySelector('.mq-editar:not(.mq-remover)'))!;
-    expect(comEditar.querySelector('.mq-editar:not(.mq-remover)')!.textContent)
-      .toContain(m.config_motores_editar());
-    unmount(t.comp);
+    const b = t.detalhe('srv:srv-b');
+    b.querySelector<HTMLButtonElement>('.mq-editar')!.click();
+    flushSync();
+    expect(t.cbs.onEditar).toHaveBeenCalledWith(B);
+    expect(document.querySelector('.mq-linha[data-chave="srv:srv-b"]')).toBeNull();
   });
 
   it('a etiqueta "Este servidor" fica no lado do servidor, e só nele', () => {
     const t = montar([B]);
-    const linha = t.linha('srv:srv-b');
-    const caixas = [...linha.querySelectorAll<HTMLElement>('.mq-caixa')];
-
-    // A caixa do navegador grava no localStorage deste aparelho: sem etiqueta, é o que a legenda
-    // do topo do modal descreve.
-    const doNavegador = caixas.find((c) => c.querySelector('.mq-acompanhar'))!;
-    expect(doNavegador.querySelector('.escopo')).toBeNull();
-
-    // A caixa de "os servidores se falam" grava no peers.json DO SERVIDOR.
-    const doServidor = caixas.find((c) => c.querySelector('.mq-falar'))!;
-    expect(doServidor.querySelector('.escopo')!.textContent).toBe(m.config_escopo_servidor());
-
-    // Remover apaga o peer no servidor antes de mexer no navegador — é a ação remota e destrutiva
-    // que a legenda cobria como se fosse deste aparelho.
-    expect(linha.querySelector('.mq-remover .escopo')!.textContent).toBe(m.config_escopo_servidor());
-
-    // Editar abre a entrada do NAVEGADOR (`emEdicao = l.navegador`): etiqueta ali seria falso.
-    expect(linha.querySelector('.mq-editar:not(.mq-remover) .escopo')).toBeNull();
-    unmount(t.comp);
+    const b = t.detalhe('srv:srv-b');
+    const campos = [...b.querySelectorAll<HTMLElement>('.sd-campo')];
+    // A caixa do navegador grava no localStorage deste aparelho: sem etiqueta.
+    expect(campos.find((c) => c.querySelector('.mq-acompanhar'))!.querySelector('.escopo')).toBeNull();
+    // Recados grava no peers.json DO SERVIDOR.
+    expect(campos.find((c) => c.querySelector('.mq-falar'))!.querySelector('.escopo')!.textContent).toBe(m.config_escopo_servidor());
+    // Remover apaga o peer no servidor antes de mexer no navegador.
+    expect(b.querySelector('.mq-remover .escopo')!.textContent).toBe(m.config_escopo_servidor());
+    // Editar abre a entrada do NAVEGADOR: etiqueta ali seria falso.
+    expect(b.querySelector('.mq-editar .escopo')).toBeNull();
   });
 
-  it('linha só do navegador: o ✕ existe e NÃO diz "Este servidor" — ali ele não alcança o servidor', () => {
-    // `D` é navegador sem peer. `removerLinhaConfirmado` só chama `removerPeer` sob `if (linha.peer)`;
-    // sem peer a remoção é `removeServer(...)`, localStorage deste navegador. A etiqueta segue o
-    // MESMO dado que a ação usa para decidir, senão as duas voltam a divergir.
-    const t = montar([D, B]);
-    const soNavegador = t.linha('srv:srv-d');
-    expect(soNavegador.querySelector('.mq-remover')).not.toBeNull();
-    expect(soNavegador.querySelector('.mq-remover .escopo')).toBeNull();
-    // E a linha que TEM peer continua dizendo.
-    expect(t.linha('srv:srv-b').querySelector('.mq-remover .escopo')!.textContent)
-      .toBe(m.config_escopo_servidor());
-
-    // O `aria-label` SUBSTITUI o nome acessível, então o chip acima nunca é anunciado: quem ouve
-    // só tem este rótulo, e ele tem de seguir a mesma condição.
-    expect(soNavegador.querySelector('.mq-remover')!.getAttribute('aria-label'))
-      .toBe(m.maquinas_remover_aria_local({ nome: D.nome }));
-    expect(t.linha('srv:srv-b').querySelector('.mq-remover')!.getAttribute('aria-label'))
-      .toBe(m.maquinas_remover_aria({ nome: B.nome }));
-    unmount(t.comp);
-  });
-
-  it('linha só do servidor: o ✕ diz que sai do registro DESTE servidor, e não do aparelho', () => {
-    // `C` é peer sem navegador (`unirMaquinas` cria a chave `peer:<id>` com `navegador: null`).
-    // Aí `removerLinhaConfirmado` não tem o que apagar neste aparelho, e `removerPeerDoisLados`
-    // para no `if (!remoto)` sem tocar o outro servidor: prometer "deste aparelho" ou "de lá"
-    // seriam duas promessas que a ação não cumpre.
-    const t = montar([C, B, D]);
-    expect(t.linha('peer:vps').querySelector('.mq-remover')!.getAttribute('aria-label'))
-      .toBe(m.maquinas_remover_aria_servidor({ nome: C.nome }));
-    // As outras duas formas continuam cada uma com a sua.
-    expect(t.linha('srv:srv-b').querySelector('.mq-remover')!.getAttribute('aria-label'))
-      .toBe(m.maquinas_remover_aria({ nome: B.nome }));
-    expect(t.linha('srv:srv-d').querySelector('.mq-remover')!.getAttribute('aria-label'))
-      .toBe(m.maquinas_remover_aria_local({ nome: D.nome }));
-    unmount(t.comp);
+  it('o ✕ segue os lados que a linha tem, no chip e no nome acessível', () => {
+    // Sem peer a remoção é só deste navegador; só do servidor, só do registro dele; com os dois, os dois.
+    const t = montar([D, B, C]);
+    const d = t.detalhe('srv:srv-d');
+    expect(d.querySelector('.mq-remover .escopo')).toBeNull();
+    expect(d.querySelector('.mq-remover')!.getAttribute('aria-label')).toBe(m.maquinas_remover_aria_local({ nome: D.nome }));
+    expect(t.detalhe('srv:srv-b').querySelector('.mq-remover')!.getAttribute('aria-label')).toBe(m.maquinas_remover_aria({ nome: B.nome }));
+    expect(t.detalhe('peer:vps').querySelector('.mq-remover')!.getAttribute('aria-label')).toBe(m.maquinas_remover_aria_servidor({ nome: C.nome }));
   });
 
   it('peer desligado no servidor: farol cinza e dica própria, mesmo com estado de falha', () => {
     const G: LinhaMaquina = { ...C, chave: 'peer:mac', identificador: 'mac', peer: { id: 'mac', base_url: 'https://mac', token: '••', enabled: false } };
     const t = montar([G], { estados: { mac: { ok: false, lados: [{ lado: 'ida', estado: 'falhou', motivo: 'timeout' }] } } });
-    const g = t.linha('peer:mac');
-    expect(g.querySelector('.mq-farol')!.classList.contains('neutro')).toBe(true);
+    expect(t.linhaCurta('peer:mac').querySelector('.mq-farol')!.classList.contains('neutro')).toBe(true);
+    expect(t.linhaCurta('peer:mac').textContent).toContain(m.servidores_curto_desligado());
+    const g = t.detalhe('peer:mac');
     expect(g.textContent).toContain(m.maquinas_peer_desligado());
     expect(g.textContent).not.toContain(m.peers_estado_parcial());
-    unmount(t.comp);
   });
 });

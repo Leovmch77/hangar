@@ -4,6 +4,7 @@
 // conhece a máquina pelo IP da rede local e o servidor pelo Tailscale.
 import type { Server } from './auth';
 import type { PeerView } from './peers';
+import type { LadoState } from './registrarPeerDoisLados';
 
 export interface LinhaMaquina {
   chave: string;
@@ -50,6 +51,48 @@ export function unirMaquinas(
     linhas.push({ chave: `peer:${p.id}`, nome: p.id, identificador: p.id, navegador: null, peer: p, estaMaquina: false });
   }
   return linhas.sort((a, b) => Number(b.estaMaquina) - Number(a.estaMaquina) || a.nome.localeCompare(b.nome));
+}
+
+export interface EstadoPeer { lados: LadoState[]; ok: boolean; testando?: boolean }
+
+export type TipoEstado =
+  | 'desligada' | 'sem_identificador' | 'testando' | 'token_recusado' | 'parcial'
+  | 'volta_sem_medir' | 'volta_sem_registro' | 'ok' | 'neutro';
+
+export interface EstadoDaLinha {
+  farol: 'ok' | 'nao' | 'test' | 'neutro';
+  tipo: TipoEstado;
+  ida?: LadoState;
+  volta?: LadoState;
+}
+
+const FALHA: LadoState['estado'][] = ['falhou', 'recusou', 'estranho'];
+
+// Uma decisão só para a linha curta da lista e para o detalhe: se cada um derivasse o estado,
+// a lista podia dizer "Tudo certo" com o detalhe mostrando a volta falhando.
+export function estadoDaLinha(linha: LinhaMaquina, st: EstadoPeer | undefined): EstadoDaLinha {
+  const ida = st?.lados.find((l) => l.lado === 'ida');
+  const volta = st?.lados.find((l) => l.lado === 'volta');
+  const falhaReal = !!st && !st.ok && [ida, volta].some((l) => !!l && FALHA.includes(l.estado));
+  const desligada = linha.peer?.enabled === false;
+  let farol: EstadoDaLinha['farol'];
+  if (desligada) farol = 'neutro';
+  else if (st?.testando) farol = 'test';
+  else if (!linha.peer && !st) farol = 'neutro';   // só navegador: nada para testar
+  else if (!st) farol = 'test';
+  else if (st.ok) farol = 'ok';
+  else farol = falhaReal ? 'nao' : 'test';       // nao_configurado não é falha
+  let tipo: TipoEstado;
+  if (desligada) tipo = 'desligada';
+  else if (linha.navegador && !linha.identificador) tipo = 'sem_identificador';
+  else if (st?.testando) tipo = 'testando';
+  else if (volta?.estado === 'recusou' && volta.motivo === 'credencial') tipo = 'token_recusado';
+  else if (falhaReal) tipo = 'parcial';
+  else if (volta?.estado === 'nao_configurado' && volta.motivo === 'token') tipo = 'volta_sem_medir';
+  else if (volta?.estado === 'nao_configurado' && volta.motivo === 'registro') tipo = 'volta_sem_registro';
+  else if (st?.ok) tipo = 'ok';
+  else tipo = 'neutro';
+  return { farol, tipo, ida, volta };
 }
 
 function hostDe(url: string): string {

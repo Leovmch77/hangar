@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { unirMaquinas } from './maquinas';
+import { unirMaquinas, estadoDaLinha, type LinhaMaquina } from './maquinas';
 import type { Server } from './auth';
 import type { PeerView } from './peers';
 
@@ -80,5 +80,30 @@ describe('unirMaquinas', () => {
     const linhas = unirMaquinas([B], { 'srv-b': null }, [pB], null);
     expect(linhas.find((l) => l.navegador === B)!.peer).toBeNull();
     expect(linhas.find((l) => l.peer === pB)!.navegador).toBeNull();
+  });
+});
+
+describe('estadoDaLinha', () => {
+  const linha: LinhaMaquina = { chave: 'srv:srv-b', nome: 'Notebook', identificador: 'notebook', navegador: B, peer: pB, estaMaquina: false };
+
+  it('desligado vence qualquer falha medida', () => {
+    const e = estadoDaLinha({ ...linha, peer: { ...pB, enabled: false } }, { ok: false, lados: [{ lado: 'ida', estado: 'falhou' }] });
+    expect(e).toMatchObject({ farol: 'neutro', tipo: 'desligada' });
+  });
+
+  it('token recusado na volta não é falha parcial', () => {
+    const e = estadoDaLinha(linha, { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'recusou', motivo: 'credencial' }] });
+    expect(e).toMatchObject({ farol: 'nao', tipo: 'token_recusado' });
+  });
+
+  it('volta sem registro é cinza, não vermelho', () => {
+    const e = estadoDaLinha(linha, { ok: false, lados: [{ lado: 'ida', estado: 'ok' }, { lado: 'volta', estado: 'nao_configurado', motivo: 'registro' }] });
+    expect(e).toMatchObject({ farol: 'test', tipo: 'volta_sem_registro' });
+  });
+
+  it('os dois lados ok é verde; sem medição ainda, com peer, está testando', () => {
+    expect(estadoDaLinha(linha, { ok: true, lados: [] })).toMatchObject({ farol: 'ok', tipo: 'ok' });
+    expect(estadoDaLinha(linha, undefined)).toMatchObject({ farol: 'test', tipo: 'neutro' });
+    expect(estadoDaLinha({ ...linha, peer: null }, undefined)).toMatchObject({ farol: 'neutro', tipo: 'neutro' });
   });
 });

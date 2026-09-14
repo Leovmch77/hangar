@@ -61,6 +61,42 @@ beforeEach(() => {
   });
 });
 
+describe('AcessoSettings — detalhe do servidor', () => {
+  it('endereço público igual ao Tailscale não vira segunda linha; "nesta máquina" fica no Avançado', async () => {
+    alcanceMock.alcanceDoServidor.mockResolvedValue({
+      loopback: false,
+      bind: '127.0.0.1',
+      enderecos: [
+        { tipo: 'nesta_maquina', url: 'http://127.0.0.1:8765', estado: 'ok', tempo_ms: 1 },
+        { tipo: 'rede_local', url: 'http://192.168.0.42:8765', estado: 'falhou', tempo_ms: null },
+        { tipo: 'tailscale', url: 'https://casa.ts.net', estado: 'ok', tempo_ms: 17 },
+        { tipo: 'publico', url: 'https://casa.ts.net', estado: 'ok', tempo_ms: 17 },
+      ] as never,
+    });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(AcessoSettings, { target: el, props: { alvo: SRV, parte: 'detalhe' } });
+    await tick(); await tick(); await tick();   // carregando só cai no .finally()
+    const texto = el.textContent ?? '';
+    expect(texto.split('https://casa.ts.net').length - 1).toBe(1);
+    expect(texto).toContain(m.acesso_publico_igual());
+    const avancado = el.querySelector('details.ac-avancado')!;
+    expect(avancado.textContent).toContain('http://127.0.0.1:8765');
+    expect([...el.querySelectorAll('.ac-cartao')][0].textContent).not.toContain('127.0.0.1');
+    unmount(comp as never);
+  });
+
+  it('a janela de parear só traz o pareamento, sem a lista de endereços', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(AcessoSettings, { target: el, props: { alvo: SRV, parte: 'parear' } });
+    await Promise.resolve(); await tick();
+    expect(el.textContent).toContain(m.acesso_legenda_qr());
+    expect(el.textContent).not.toContain(m.acesso_secao_enderecos());
+    unmount(comp as never);
+  });
+});
+
 describe('AcessoSettings — pareamento', () => {
   it('QR e código NÃO estão no DOM antes do toque; o aviso e o botão sim', async () => {
     const t = montar();

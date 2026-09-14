@@ -85,7 +85,23 @@ function montar(over: { onLogout?: () => Promise<void>; servers?: Server[] } = {
   return { el, comp: comp as never };
 }
 
-beforeEach(() => { vi.clearAllMocks(); onLogoutResolve = null; mudouCb = null; });
+// Janela de um teste que falhou antes do unmount fica no <body> e seria achada pelo seguinte.
+beforeEach(() => { vi.clearAllMocks(); onLogoutResolve = null; mudouCb = null; document.body.innerHTML = ''; });
+
+// Os detalhes vivem em portais no <body>: abrem pelo cartão ou pela linha e se buscam no document.
+// O tick antes do clique deixa o $effect da montagem rodar: ele fecha as janelas do alvo anterior.
+async function abrir(el: HTMLElement, chave: string) {
+  await tick();
+  el.querySelector<HTMLElement>(`.sv-linha[data-chave="${chave}"]`)!.click();
+  await tick();
+  return document.querySelector<HTMLElement>(`.mq-linha[data-chave="${chave}"]`)!;
+}
+async function abrirEste(el: HTMLElement) {
+  await tick();
+  el.querySelector<HTMLElement>('.sv-este')!.click();
+  await tick();
+  return document.querySelector<HTMLElement>('.sd-dialogo')!;
+}
 
 describe('MaquinasSettings — logout idempotente', () => {
   it('Sair + remover-último durante a Promise chamam onLogout UMA vez', async () => {
@@ -97,9 +113,9 @@ describe('MaquinasSettings — logout idempotente', () => {
     document.querySelector<HTMLElement>('.confirm-card')!.querySelector<HTMLButtonElement>('.c-danger')!.click();
     await tick();
     expect(onLogoutCalls).toHaveBeenCalledTimes(1);
-    // 2) Durante a Promise: desmarcar "Acompanhar" (a linha do próprio servidor) fica bloqueado —
+    // 2) Durante a Promise: remover o próprio servidor deste aparelho fica bloqueado —
     // diálogo nem abre (mesmo guard de logoutInFlight que abrirRemocao já tinha).
-    const del = t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar');
+    const del = (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este');
     expect(del).not.toBeNull();
     del!.click();
     await tick();
@@ -118,11 +134,11 @@ describe('MaquinasSettings — logout idempotente', () => {
     document.querySelector<HTMLElement>('.confirm-card')!.querySelector<HTMLButtonElement>('.c-danger')!.click();
     await tick();
     expect(onLogoutCalls).toHaveBeenCalledTimes(1);
-    // Durante a Promise: Sair principal disabled (clique é no-op) e desmarcar Acompanhar nem abre diálogo
+    // Durante a Promise: Sair principal disabled (clique é no-op) e remover deste aparelho nem abre diálogo
     const sairDeNovo = t.el.querySelector<HTMLButtonElement>('.ss-danger')!;
     expect(sairDeNovo.disabled).toBe(true);
     sairDeNovo.click();
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar')!.click();
+    (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este')!.click();
     await tick();
     expect(document.querySelector('.confirm-card')).toBeNull();
     // Resolve: segue 1 chamada só
@@ -134,7 +150,7 @@ describe('MaquinasSettings — logout idempotente', () => {
 
   it('remoção revalida fingerprint: servidor mudou no sync → aviso, sem remover', async () => {
     const t = montar();
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar')!.click();
+    (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este')!.click();
     await tick();
     // o sync alterou o servidor entre o diálogo e o clique (onServersChanged sobe a versão local)
     authMock.listServers.mockReturnValue([{ ...SRV, token: 'novo-token' }]);
@@ -173,7 +189,7 @@ describe('MaquinasSettings — logout idempotente', () => {
 
 describe('MaquinasSettings — remoção com fingerprint + revision (round 4)', () => {
   async function confirmarRemocao(t: { el: HTMLElement }) {
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar')!.click();
+    (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este')!.click();
     await tick();
     // servers.length === 1 aqui: o diálogo acrescenta o aviso de que é a única saída (Sair).
     expect(document.querySelector('.confirm-card')!.textContent).toContain(m.config_servidores_voltar());
@@ -192,7 +208,7 @@ describe('MaquinasSettings — remoção com fingerprint + revision (round 4)', 
 
   it('servidor ausente entre diálogo e clique: não remove, aviso role=status', async () => {
     const t = montar();
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar')!.click();
+    (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este')!.click();
     await tick();
     authMock.listServers.mockReturnValue([]);   // apagado noutro aparelho ANTES do clique
     await tick();                                // revision inalterada (sem mudouCb)
@@ -217,10 +233,10 @@ describe('MaquinasSettings — remoção com fingerprint + revision (round 4)', 
     unmount(t.comp);
   });
 
-  it('cancelar a confirmação devolve o foco à caixa Acompanhar (restauração segura)', async () => {
+  it('cancelar a confirmação devolve o foco ao botão de remover (restauração segura)', async () => {
     const t = montar();
     authMock.getActiveId.mockReturnValue('outro-id');   // remover não é remover o ativo -> sem reload
-    const del = t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-a"] .mq-acompanhar')!;
+    const del = (await abrirEste(t.el)).querySelector<HTMLButtonElement>('.sv-remover-este')!;
     del.focus();   // happy-dom não move foco no click() — o gatilho precisa de focus explícito
     del.click();
     await tick(); await tick();
@@ -252,19 +268,19 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     const t = montar();
     await esperarCarga();
     expect(peersMock.getIdentificador).toHaveBeenCalledWith(null);  // alvo null = servidor ativo
-    // Esta máquina: rótulo + legenda + aviso, campo com borda de aviso e placeholder
+    // O cartão já avisa; o detalhe traz legenda, aviso e o campo com borda de aviso e placeholder
     expect(t.el.textContent).toContain(m.peers_esta_maquina());
-    expect(t.el.textContent).toContain(m.peers_legenda_identificador());
-    const aviso = t.el.querySelector('.id-aviso');
+    expect(t.el.textContent).toContain(m.servidores_sem_identificador_curto());
+    const este = await abrirEste(t.el);
+    expect(este.textContent).toContain(m.peers_legenda_identificador());
+    const aviso = este.querySelector('.id-aviso');
     expect(aviso?.textContent).toContain(m.peers_aviso_nao_definido());
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo');
+    const campo = este.querySelector<HTMLInputElement>('.id-campo');
     expect(campo?.classList.contains('vazio')).toBe(true);
     expect(campo?.value).toBe('');
     expect(campo?.getAttribute('placeholder')).toContain('casa');
-    // lista unificada: só a linha desta máquina (etiqueta, sem "servidores se falam" pra registrar)
-    expect(t.el.querySelectorAll('.mq-linha').length).toBe(1);
-    expect(t.el.querySelector('.mq-linha[data-chave="srv:srv-a"] .mq-falar')).toBeNull();
-    expect(t.el.querySelector('.pr-btn.primaria')).toBeNull();
+    // o próprio servidor não se repete na lista de baixo
+    expect(t.el.querySelectorAll('.sv-linha').length).toBe(0);
     unmount(t.comp);
   });
 
@@ -275,13 +291,18 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     ]);
     const t = montar();
     await esperarCarga();
-    expect(t.el.textContent).toContain(m.peers_identificador_definido({ nome: 'casa' }));
-    expect(t.el.querySelector('.id-aviso')).toBeNull();          // definido: sem aviso
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo');
+    expect(t.el.querySelector('.sv-id')?.textContent).toBe('casa');
+    expect(t.el.textContent).not.toContain(m.servidores_sem_identificador_curto());
+    const este = await abrirEste(t.el);
+    expect(este.textContent).toContain(m.peers_identificador_definido({ nome: 'casa' }));
+    expect(este.querySelector('.id-aviso')).toBeNull();          // definido: sem aviso
+    const campo = este.querySelector<HTMLInputElement>('.id-campo');
     expect(campo?.classList.contains('vazio')).toBe(false);
     expect(campo?.value).toBe('casa');
+    este.querySelector<HTMLButtonElement>('.sv-fechar')!.click();
+    await tick();
     // notebook não casa com nenhum servidor conhecido do navegador: linha só-do-servidor
-    const linha = t.el.querySelector<HTMLElement>('.mq-linha[data-chave="peer:notebook"]')!;
+    const linha = await abrir(t.el, 'peer:notebook');
     expect(linha).not.toBeNull();
     expect(linha.querySelector('.mq-url')?.textContent).toContain('192.168.0.77');
     expect(linha.querySelector<HTMLInputElement>('.mq-falar')!.checked).toBe(true);
@@ -293,21 +314,22 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.setIdentificador.mockResolvedValue({ identificador: 'casa' });
     const t = montar();
     await esperarCarga();
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo')!;
+    const este = await abrirEste(t.el);
+    const campo = este.querySelector<HTMLInputElement>('.id-campo')!;
     campo.value = 'casa';
     campo.dispatchEvent(new Event('input'));
     await tick();
     campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await tick();
     expect(peersMock.setIdentificador).toHaveBeenCalledWith(null, 'casa');
-    expect(t.el.querySelector('.id-aviso')).toBeNull();          // virou definido
+    expect(este.querySelector('.id-aviso')).toBeNull();          // virou definido
     // inválido (maiúscula): a dica É a regra, e nada vai pro backend
     campo.value = 'Casa';
     campo.dispatchEvent(new Event('input'));
     await tick();
     campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await tick();
-    expect(t.el.querySelector('.id-erro')?.textContent).toContain(m.peers_identificador_dica({ exemplos: 'casa, notebook' }));
+    expect(este.querySelector('.id-erro')?.textContent).toContain(m.peers_identificador_dica({ exemplos: 'casa, notebook' }));
     expect(peersMock.setIdentificador).toHaveBeenCalledTimes(1);
     unmount(t.comp);
   });
@@ -322,13 +344,13 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.checkPeer.mockResolvedValue({ estado: 'ok' });
     const { el, comp } = montar({ servers: [SRV, B] });
     await esperarCarga();
-    const cb = el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!;
+    const cb = (await abrir(el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!;
     expect(cb.disabled).toBe(false);
     cb.click();
     await esperarCarga();
     expect(peersMock.gravarPeer).toHaveBeenCalledWith(null, { id: 'nb', base_url: 'http://b', token: 'tb' });
     expect(peersMock.gravarPeer).toHaveBeenCalledWith(expect.objectContaining({ baseUrl: 'http://b' }), expect.objectContaining({ id: 'casa' }));
-    expect(el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!.checked).toBe(true);
+    expect((await abrir(el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!.checked).toBe(true);
     unmount(comp);
   });
 
@@ -339,12 +361,12 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.gravarPeer.mockReturnValue(new Promise(() => {}) as never);   // fica pendurado: gesto em voo
     const { el, comp } = montar({ servers: [SRV, B] });
     await esperarCarga();
-    const cb = el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!;
+    const cb = (await abrir(el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!;
     cb.click();
     cb.click();   // segundo clique com o primeiro ainda em voo
     await tick();
     expect(peersMock.gravarPeer).toHaveBeenCalledTimes(1);
-    expect(el.querySelector('.mq-linha[data-chave="srv:srv-b"]')!.textContent).toContain(m.peers_estado_testando());
+    expect(document.querySelector('.mq-linha[data-chave="srv:srv-b"]')!.textContent).toContain(m.peers_estado_testando());
     unmount(comp);
   });
 
@@ -353,7 +375,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockResolvedValue([{ id: 'vps', base_url: 'https://vps', token: '••' }]);
     const { el, comp } = montar();
     await tick(); await tick(); await tick();
-    el.querySelector<HTMLInputElement>('.mq-linha[data-chave="peer:vps"] .mq-falar')!.click();
+    (await abrir(el, 'peer:vps')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await tick();
     expect(document.body.textContent).toContain(m.maquinas_remover_peer_so_aqui());
     [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === m.peers_remover())!.click();
@@ -368,7 +390,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockResolvedValue([{ id: 'nb', base_url: 'http://b', token: '••' }]);
     const { el, comp } = montar({ servers: [SRV, B] });
     await esperarCarga();
-    el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!.click();
+    (await abrir(el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await tick();
     expect(document.body.textContent).toContain(m.maquinas_remover_peer_lados());
     [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === m.peers_remover())!.click();
@@ -386,7 +408,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockResolvedValue([]);
     const { el, comp } = montar({ servers: [SRV, B] });
     await esperarCarga();
-    el.querySelector<HTMLButtonElement>('.mq-linha[data-chave="srv:srv-b"] .mq-remover')!.click();
+    (await abrir(el, 'srv:srv-b')).querySelector<HTMLButtonElement>('.mq-remover')!.click();
     await tick();
     expect(document.body.textContent).toContain(m.maquinas_remover_linha_local());
     expect(document.body.textContent).not.toContain(m.maquinas_remover_linha());
@@ -401,7 +423,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockResolvedValue([{ id: 'vps', base_url: 'https://vps', token: '••' }]);
     const { el, comp } = montar();
     await esperarCarga();
-    el.querySelector<HTMLButtonElement>('.mq-linha[data-chave="peer:vps"] .mq-remover')!.click();
+    (await abrir(el, 'peer:vps')).querySelector<HTMLButtonElement>('.mq-remover')!.click();
     await tick();
     expect(document.body.textContent).toContain(m.maquinas_remover_peer_so_aqui());
     expect(document.body.textContent).not.toContain(m.maquinas_remover_linha());
@@ -415,7 +437,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockResolvedValue([{ id: 'nb', base_url: 'http://b', token: '••' }]);
     const { el, comp } = montar({ servers: [SRV, B] });
     await esperarCarga();
-    el.querySelector<HTMLButtonElement>('.mq-linha[data-chave="srv:srv-b"] .mq-remover')!.click();
+    (await abrir(el, 'srv:srv-b')).querySelector<HTMLButtonElement>('.mq-remover')!.click();
     await tick();
     expect(document.body.textContent).toContain(m.maquinas_remover_linha());
     unmount(comp);
@@ -427,7 +449,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.removerPeerDoisLados.mockResolvedValueOnce(false);
     const { el, comp } = montar();
     await esperarCarga();
-    el.querySelector<HTMLInputElement>('.mq-linha[data-chave="peer:vps"] .mq-falar')!.click();
+    (await abrir(el, 'peer:vps')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await tick();
     [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === m.peers_remover())!.click();
     await esperarCarga();
@@ -488,7 +510,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     ]);
     const t = montar();
     await esperarCarga();
-    const linha = t.el.querySelector<HTMLElement>('.mq-linha[data-chave="peer:notebook"]')!;
+    const linha = (await abrir(t.el, 'peer:notebook'));
     expect(linha).not.toBeNull();
     expect(t.el.textContent).not.toContain(m.maquinas_vazio());
     expect(linha.querySelector<HTMLInputElement>('.mq-falar')!.disabled).toBe(true);   // sem identificador, sem falar
@@ -520,7 +542,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.setIdentificador.mockReturnValueOnce(new Promise((r) => { resolver = r; }));
     const t = montar();
     await esperarCarga();
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo')!;
+    const campo = (await abrirEste(t.el)).querySelector<HTMLInputElement>('.id-campo')!;
     campo.value = 'casa';
     campo.dispatchEvent(new Event('input'));
     await tick();
@@ -541,7 +563,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.setIdentificador.mockReturnValueOnce(new Promise((r) => { resolver = r; }));
     const t = montar();
     await esperarCarga();
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo')!;
+    const campo = (await abrirEste(t.el)).querySelector<HTMLInputElement>('.id-campo')!;
     campo.value = 'casa';
     campo.dispatchEvent(new Event('input'));
     await tick();
@@ -588,7 +610,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersA.r([{ id: 'peer-de-A', base_url: 'http://a-peer', token: '***' }]);
     await passos();
 
-    expect(el.querySelector<HTMLInputElement>('.id-campo')!.value).toBe('bbb');
+    expect((await abrirEste(el)).querySelector<HTMLInputElement>('.id-campo')!.value).toBe('bbb');
     expect(el.textContent).toContain('peer-de-B');
     expect(el.textContent).not.toContain('peer-de-A');
     unmount(comp as never);
@@ -608,11 +630,11 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.setIdentificador.mockRejectedValueOnce(new Error('Failed to fetch'));
     const t = montar();
     await esperarCarga();
-    const campo = t.el.querySelector<HTMLInputElement>('.id-campo')!;
+    const campo = (await abrirEste(t.el)).querySelector<HTMLInputElement>('.id-campo')!;
     campo.value = 'casa'; campo.dispatchEvent(new Event('input')); await tick();
     campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await esperarCarga();
-    expect(t.el.querySelector('.id-erro[role="alert"]')?.textContent).toContain(m.falha_conexao());
+    expect(document.querySelector('.sd-dialogo .id-erro[role="alert"]')?.textContent).toContain(m.falha_conexao());
     unmount(t.comp);
   });
 
@@ -628,7 +650,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.listarPeers.mockRejectedValueOnce(new Error('Failed to fetch'));
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!.click();
+    (await abrir(t.el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await esperarCarga();
     expect(t.el.querySelector('.id-erro')?.textContent).toContain(m.falha_conexao());
     unmount(t.comp);
@@ -657,7 +679,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     await passos();
 
     // marca "servidores se falam" na máquina B, com A como alvo: o POST fica pendurado
-    el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!.click();
+    (await abrir(el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await passos();
 
     props.resolvedServer = B; props.apiTarget = B;   // desiste e troca de alvo
@@ -665,7 +687,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     await passos();
 
     // marca "servidores se falam" na máquina C, no alvo NOVO — não fica preso à chamada anterior
-    el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-c"] .mq-falar')!.click();
+    (await abrir(el, 'srv:srv-c')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await passos();
 
     expect(peersMock.gravarPeer.mock.calls.length).toBe(2);
@@ -676,7 +698,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
   // mostrar ✗ (o glifo não é mais texto chumbado); a montagem checa a ida da lista; e o bloco
   // de correção de endereço ganha vida (testa no endereço digitado).
   async function marcarFalar(chave: string, t: { el: HTMLElement }) {
-    t.el.querySelector<HTMLInputElement>(`.mq-linha[data-chave="${chave}"] .mq-falar`)!.click();
+    (await abrir(t.el, chave)).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await esperarCarga();
   }
 
@@ -692,7 +714,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
     await marcarFalar('srv:srv-b', t);
-    expect(t.el.querySelectorAll('.pr-lado')).toHaveLength(0);
+    expect(document.querySelectorAll('.pr-lado')).toHaveLength(0);
     unmount(t.comp);
 
     // falha real (não é recusa de token): ✗ só no selo da volta, ✓ no da ida. Montagem com lista
@@ -706,7 +728,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     const t2 = montar({ servers: [SRV, B] });
     await esperarCarga();
     await marcarFalar('srv:srv-b', t2);
-    const l2 = [...t2.el.querySelectorAll<HTMLElement>('.pr-lado')];
+    const l2 = [...document.querySelectorAll<HTMLElement>('.pr-lado')];
     expect(l2).toHaveLength(2);
     expect(l2[0].textContent).toContain('✓');
     expect(l2[0].textContent).not.toContain('✗');
@@ -730,9 +752,10 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
     await marcarFalar('srv:srv-b', t);
-    expect(t.el.querySelectorAll('.pr-lado')).toHaveLength(0);
-    expect(t.el.textContent).toContain(m.maquinas_volta_token_recusado());
-    expect(t.el.textContent).not.toContain(m.peers_estado_parcial());
+    expect(document.querySelectorAll('.pr-lado')).toHaveLength(0);
+    const linha = document.querySelector('.mq-linha[data-chave="srv:srv-b"]')!;
+    expect(linha.textContent).toContain(m.maquinas_volta_token_recusado());
+    expect(linha.textContent).not.toContain(m.peers_estado_parcial());
     unmount(t.comp);
   });
 
@@ -757,7 +780,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     expect(peersMock.checkPeer).toHaveBeenCalledTimes(3);
     // nenhuma linha presa em "Testando as duas pontas…"
     expect(t.el.textContent).not.toContain(m.peers_estado_testando());
-    expect(t.el.querySelectorAll('.mq-linha')).toHaveLength(3);   // SRV, srv-b/nuvem, peer:notebook
+    expect(t.el.querySelectorAll('.sv-linha')).toHaveLength(2);   // srv-b/nuvem, peer:notebook (SRV é o cartão)
     unmount(t.comp);
   });
 
@@ -779,13 +802,13 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.checkPeer.mockResolvedValueOnce({ estado: 'ok' });
     peersMock.checkPeer.mockResolvedValueOnce({ estado: 'recusou', motivo: 'credencial' });
     await marcarFalar('srv:srv-b', t);
-    const campo = t.el.querySelector<HTMLInputElement>('.corrige-input');
+    const campo = document.querySelector<HTMLInputElement>('.corrige-input');
     expect(campo).not.toBeNull();   // bloco aberto
     // o usuário digita o endereço CERTO e clica em "Testar de novo"
     campo!.value = 'http://novo:9999';
     campo!.dispatchEvent(new Event('input', { bubbles: true }));
     await tick();
-    t.el.querySelector<HTMLButtonElement>('.corrige .btn.primaria')!.click();
+    document.querySelector<HTMLButtonElement>('.corrige .btn.primaria')!.click();
     // o gesto de correção roda contra o NOVO endereço, com o token do NAVEGADOR (hoje não rodava contra nada)
     await esperarCarga();
     expect(peersMock.gravarPeer).toHaveBeenCalledWith(
@@ -793,7 +816,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
       expect.objectContaining({ id: 'notebook', base_url: 'http://novo:9999', token: 'segredo' }),
     );
     // o bloco só fecha quando o par fecha (o r.ok do segundo giro, com o mock default ok)
-    expect(t.el.querySelector('.corrige')).toBeNull();
+    expect(document.querySelector('.corrige')).toBeNull();
     unmount(t.comp);
   });
 
@@ -806,7 +829,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     });
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
-    const linha = t.el.querySelector<HTMLElement>('.mq-linha[data-chave="srv:srv-b"]')!;
+    const linha = (await abrir(t.el, 'srv:srv-b'));
     expect(linha.textContent).toContain(m.maquinas_volta_sem_registro());
     unmount(t.comp);
   });
@@ -821,7 +844,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.checkPeer.mockImplementation(async (alvo: Server | null) => (alvo === B ? { estado: 'falhou' } : { estado: 'ok' }));
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
-    const campo = t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .corrige-input');
+    const campo = (await abrir(t.el, 'srv:srv-b')).querySelector<HTMLInputElement>('.corrige-input');
     expect(campo).not.toBeNull();
     expect(campo!.value).toBe('https://casa.ts.net');
     unmount(t.comp);
@@ -834,8 +857,9 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     peersMock.checkPeer.mockRejectedValueOnce(new Error('fetch failed'));
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
-    expect(t.el.textContent).not.toContain(m.peers_estado_testando());
-    expect(t.el.textContent).toContain(m.peers_estado_parcial());
+    const linha = await abrir(t.el, 'srv:srv-b');
+    expect(linha.textContent).not.toContain(m.peers_estado_testando());
+    expect(linha.textContent).toContain(m.peers_estado_parcial());
     unmount(t.comp);
   });
 
@@ -850,13 +874,13 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     const t = montar({ servers: [SRV, B] });
     await esperarCarga();
     // corrige abriu na montagem (volta falhou de verdade); estados['nb'] tem farol vermelho
-    expect(t.el.querySelector('.mq-linha[data-chave="srv:srv-b"] .corrige')).not.toBeNull();
+    expect((await abrir(t.el, 'srv:srv-b')).querySelector('.corrige')).not.toBeNull();
     peersMock.listarPeers.mockResolvedValue([]);   // depois de remover, o servidor não conhece mais o peer
-    t.el.querySelector<HTMLInputElement>('.mq-linha[data-chave="srv:srv-b"] .mq-falar')!.click();
+    (await abrir(t.el, 'srv:srv-b')).querySelector<HTMLInputElement>('.mq-falar')!.click();
     await tick();
     [...document.body.querySelectorAll('button')].find((b) => b.textContent?.trim() === m.peers_remover())!.click();
     await esperarCarga();
-    const linha = t.el.querySelector('.mq-linha[data-chave="srv:srv-b"]')!;
+    const linha = document.querySelector('.mq-linha[data-chave="srv:srv-b"]')!;
     expect(linha.querySelector('.pr-lado')).toBeNull();
     expect(linha.querySelector('.corrige')).toBeNull();
     unmount(t.comp);
@@ -893,10 +917,10 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
     await passos();
 
     // volta falhou na montagem: correção já aberta para o peer de B
-    expect(el.querySelector('.mq-linha[data-chave="srv:srv-b"] .corrige-input')).not.toBeNull();
+    expect((await abrir(el, 'srv:srv-b')).querySelector('.corrige-input')).not.toBeNull();
     let resolverGravar!: (v: unknown) => void;
     peersMock.gravarPeer.mockImplementation(() => new Promise((r) => { resolverGravar = r; }) as never);
-    el.querySelector<HTMLButtonElement>('.mq-linha[data-chave="srv:srv-b"] .corrige .btn.primaria')!.click();
+    document.querySelector<HTMLButtonElement>('.mq-linha[data-chave="srv:srv-b"] .corrige .btn.primaria')!.click();
     await passos();
 
     props.resolvedServer = C; props.apiTarget = C;   // troca de alvo com o testarDeNovo em voo
@@ -913,7 +937,7 @@ describe('MaquinasSettings — identificador e peers (Task 5)', () => {
 });
 
 describe('MaquinasSettings — ordem dos blocos', () => {
-  it('esta máquina vem antes da lista de máquinas', async () => {
+  it('o cartão deste servidor vem antes da lista dos outros', async () => {
     const { el, comp } = montar();
     await tick();
     const texto = el.textContent ?? '';
@@ -921,7 +945,22 @@ describe('MaquinasSettings — ordem dos blocos', () => {
     const secao = texto.indexOf(m.maquinas_secao());
     expect(esta).toBeGreaterThanOrEqual(0);
     expect(esta).toBeLessThan(secao);
-    expect(texto).toContain(m.maquinas_secao_legenda());
+    unmount(comp);
+  });
+
+  it('Parear abre o QR deste servidor numa janela, e Adicionar traz a busca no Tailscale', async () => {
+    const { el, comp } = montar();
+    await tick();
+    const [adicionar, parear] = [...el.querySelectorAll<HTMLButtonElement>('.sv-topo .sv-btn')];
+    parear.click();
+    await tick();
+    expect(document.querySelector('.sd-dialogo')!.textContent).toContain(m.acesso_legenda_qr());
+    document.querySelector<HTMLButtonElement>('.sd-dialogo .sv-fechar')!.click();
+    await tick();
+    expect(document.querySelector('.sd-dialogo')).toBeNull();
+    adicionar.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.maquinas_buscar_tailscale());
     unmount(comp);
   });
 

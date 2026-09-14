@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as m from '../../paraglide/messages';
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import { getActiveId, listServers, type Server } from '../../lib/auth';
   import { parseConfig } from '../../lib/configRoute';
   import { isTimeoutError } from '@hangar/core';
@@ -14,8 +14,11 @@
   // (os testes).
   interface Props {
     alvo?: Server | null;
+    // 'detalhe' = janela do servidor (endereços úteis + Avançado); 'parear' = janela do QR.
+    parte?: 'tudo' | 'detalhe' | 'parear';
+    avancado?: Snippet;
   }
-  let { alvo = undefined }: Props = $props();
+  let { alvo = undefined, parte = 'tudo', avancado }: Props = $props();
 
   function servidorAlvo(): Server | null {
     const r = parseConfig(location.hash);
@@ -205,6 +208,15 @@
   function mostraCopiar(e: EnderecoAlcance): boolean {
     return e.estado === 'ok' && e.tipo !== 'nesta_maquina';
   }
+
+  // No detalhe, a mesma URL não aparece em duas linhas: com CP_PUBLIC_URL apontando para o nome
+  // do Tailscale, "Tailscale" e "Endereço público" eram o mesmo endereço repetido.
+  const urlTailscale = $derived(enderecos.find((e) => e.tipo === 'tailscale')?.url ?? '');
+  const publicoIgual = $derived(!!urlTailscale && enderecos.some((e) => e.tipo === 'publico' && e.url === urlTailscale));
+  const principal = (e: EnderecoAlcance) =>
+    e.tipo === 'rede_local' || e.tipo === 'tailscale' || (e.tipo === 'publico' && !publicoIgual && e.estado !== 'nao_configurado');
+  const principais = $derived(enderecos.filter(principal));
+  const extras = $derived(enderecos.filter((e) => !principal(e) && !(e.tipo === 'publico' && publicoIgual)));
 </script>
 
 {#snippet linha(e: EnderecoAlcance)}
@@ -214,6 +226,9 @@
       <span class="ac-nome">{nomeDoTipo(e.tipo)}</span>
       <span class="ac-url">{e.estado === 'nao_configurado' ? m.acesso_nao_configurado() : e.url}</span>
       <span class="ac-estado {textoPorEstado[e.estado]}">{fraseDeEstado(e)}</span>
+      {#if parte === 'detalhe' && e.tipo === 'tailscale' && publicoIgual}
+        <span class="ac-estado neutro">{m.acesso_publico_igual()}</span>
+      {/if}
     </span>
     {#if mostraCopiar(e)}
       <button class="ac-copiar" onclick={() => copyText(e.url)}>{m.acesso_copiar()}</button>
@@ -295,6 +310,48 @@
 {/snippet}
 
 <div class="ac">
+  {#if parte === 'parear'}
+    <p class="ac-legenda">{m.acesso_legenda_qr()}</p>
+    {@render blocoPar()}
+  {:else if parte === 'detalhe'}
+    {#if loopback}
+      <div class="ac-alerta">
+        <span class="ac-farol nao" aria-hidden="true">▲</span>
+        <span class="ac-alerta-txt">
+          <b>{m.acesso_alerta_loopback_1({ endereco: bind })}</b><br>
+          {m.acesso_alerta_loopback_2({ variavel: 'CP_LAN_BIND_IP', valor: 'auto' })}
+        </span>
+      </div>
+    {/if}
+    <p class="ac-secao">{m.acesso_secao_enderecos()}</p>
+    <ul class="ac-cartao">
+      {#if carregando}
+        {#each LINHAS_EM_VOO as e (e.tipo)}
+          {@render linha(e)}
+        {/each}
+      {:else if erro}
+        <li class="ac-linha aviso-erro" role="alert">{erro}</li>
+      {:else}
+        {#each principais as e (e.tipo)}
+          {@render linha(e)}
+        {/each}
+      {/if}
+    </ul>
+    <details class="ac-avancado">
+      <summary>{m.servidores_avancado()}</summary>
+      {#if !carregando && !erro && extras.length}
+        <ul class="ac-cartao">
+          {#each extras as e (e.tipo)}
+            {@render linha(e)}
+          {/each}
+        </ul>
+      {/if}
+      {#if !carregando && !erro && bind}
+        <p class="ac-legenda">{m.acesso_escuta_em({ ip: bind })}</p>
+      {/if}
+      {@render avancado?.()}
+    </details>
+  {:else}
   {#if loopback}
     <div class="ac-alerta">
       <span class="ac-farol nao" aria-hidden="true">▲</span>
@@ -332,6 +389,7 @@
   <p class="ac-legenda">{m.acesso_legenda_qr()}</p>
 
   {@render blocoPar()}
+  {/if}
 </div>
 
 <style>
@@ -349,6 +407,16 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
+  .ac-avancado { margin-top: var(--space-3); }
+  .ac-avancado summary {
+    cursor: pointer; min-height: 44px; display: flex; align-items: center;
+    padding: 0 var(--space-2); color: var(--text-secondary); font-size: var(--text-sm);
+  }
+  .ac-avancado summary::-webkit-details-marker { display: none; }
+  .ac-avancado summary::before { content: '›'; width: 1.2em; color: var(--text-muted); }
+  .ac-avancado[open] summary::before { content: '⌄'; }
+  .ac-avancado[open] summary { margin-bottom: var(--space-2); }
+  .ac-avancado .ac-legenda { margin-top: var(--space-2); }
   .ac-legenda {
     margin: 0 var(--space-2) var(--space-3);
     color: var(--text-muted);

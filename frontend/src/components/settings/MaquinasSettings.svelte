@@ -7,6 +7,8 @@
   import { unirMaquinas, type LinhaMaquina } from '../../lib/maquinas';
   import { sessionsStore } from '../../lib/sessionsStore.svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
+  import ModalDialog from '../ModalDialog.svelte';
+  import { alcanceDoServidor, type AlcanceDoServidor, type TipoEndereco } from '../../lib/alcance';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
@@ -99,6 +101,7 @@
     const motivo = removalStillMatches(snap, listServers(), serverVersion);
     if (motivo) { avisoRemocao = motivo; return; }
     avisoRemocao = '';
+    esteAberto = false;
     const wasActive = snap.id === getActiveId();
     removeServer(snap.id);   // auth notifica onServersChanged -> contador local e store reagem
     if (listServers().length === 0) { void logout(); return; }
@@ -181,6 +184,8 @@
     // Estados de checagem pertencem ao alvo que saiu da tela (Task 8).
     estados = {};
     descobertas = null; descobrindo = false; descobertasErro = '';
+    esteAberto = false; parearAberto = false;
+    resumo = null; resumoErro = '';
     if (!resolvedServer) {
       // Servidor indisponível (resolvedServer null): não há o que ler — sem este gate a seção
       // lia o servidor ATIVO com a aba dizendo que o escolhido não existe.
@@ -188,6 +193,10 @@
       peersCarregando = false; idsCarregando = false; idCarregado = true;
       return;
     }
+    const alvoResumo = resolvedServer;
+    alcanceDoServidor(alvoResumo)
+      .then((r) => { if (meu === geracao) resumo = r; })
+      .catch((e) => { if (meu === geracao) resumoErro = msgErro(e); });
     void (async () => {
       // Ordem de carga: espera os identificadores do navegador ANTES de medir. Sem
       // isso `checarLista` lê `linhas` com `idsNavegador` vazio, nenhuma linha casa navegador
@@ -396,6 +405,27 @@
     }
   }
 
+  // Cartão deste servidor: o endereço que responde mais rápido resume a medição inteira, que
+  // aparece completa no detalhe.
+  let esteAberto = $state(false);
+  let parearAberto = $state(false);
+  let resumo = $state<AlcanceDoServidor | null>(null);
+  let resumoErro = $state('');
+  const NOME_TIPO: Record<TipoEndereco, () => string> = {
+    nesta_maquina: m.acesso_nesta_maquina, rede_local: m.acesso_rede_local,
+    tailscale: m.acesso_tailscale, publico: m.acesso_publico,
+  };
+  const resumoTexto = $derived.by(() => {
+    if (resumoErro) return { texto: resumoErro, farol: 'nao' as const };
+    if (!resumo) return { texto: m.acesso_testando(), farol: 'test' as const };
+    const melhor = resumo.enderecos
+      .filter((e) => e.estado === 'ok' && e.tipo !== 'nesta_maquina')
+      .sort((a, b) => (a.tempo_ms ?? 0) - (b.tempo_ms ?? 0))[0];
+    if (!melhor) return { texto: m.servidores_loopback_curto(), farol: 'nao' as const };
+    return { texto: `${NOME_TIPO[melhor.tipo]()} · ${melhor.tempo_ms ?? 0} ms`, farol: 'ok' as const };
+  });
+  const esteNoAparelho = $derived(!!resolvedServer && servers.some((s) => s.id === resolvedServer.id));
+
   let removerPeerId = $state<string | null>(null);
   function removerPeerConfirmado() { const id = removerPeerId; removerPeerId = null; if (id) void removerPeer(id); }
 
@@ -444,22 +474,45 @@
   }
 </script>
 
-<p class="ss-legenda">{m.maquinas_intro()}</p>
-{#if resolvedServer}
-  <p class="ss-editando">
-    {m.config_servidores_editando_1()} <strong>{resolvedServer.label}</strong>{m.config_servidores_editando_2()}
-  </p>
-{:else}
-  <p class="ss-editando ss-muted">{m.config_servidores_escolha()}</p>
-{/if}
+<div class="sv-topo">
+  <button type="button" class="sv-btn" onclick={() => { addEndereco = ''; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
+  <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
+</div>
 {#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
 {#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
 
 {#if resolvedServer}
-  <!-- Bloco 1: esta máquina — como ela se chama para as outras, por onde responde, QR.
-       Identificador (Task 5): é o CP_SERVER_ID, gravado no .env — o mesmo que o hangar-send usa
+  <!-- O servidor escolhido no seletor vira um cartão só; o detalhe dele traz identificador,
+       endereços e o avançado. Ele não se repete na lista de baixo. -->
+  <button type="button" class="sv-este" onclick={() => (esteAberto = true)}
+          aria-label={m.servidores_abrir_aria({ nome: resolvedServer.label })}>
+    <span class="sv-farol" class:ok={resumoTexto.farol === 'ok'} class:nao={resumoTexto.farol === 'nao'} aria-hidden="true">
+      {resumoTexto.farol === 'test' ? '◌' : '●'}
+    </span>
+    <span class="sv-txt">
+      <span class="sv-nome">{resolvedServer.label}{#if identificador}<span class="sv-id">{identificador}</span>{/if}</span>
+      <span class="sv-estado">{m.peers_esta_maquina()} · {resumoTexto.texto}</span>
+      {#if idCarregado && !identificador && !idErro}<span class="sv-estado aviso">{m.servidores_sem_identificador_curto()}</span>{/if}
+      {#if resumo?.loopback && resumoTexto.farol === 'ok'}<span class="sv-estado aviso">{m.acesso_alerta_loopback_1({ endereco: resumo.bind })}</span>{/if}
+      {#if origemRecusada}<span class="sv-estado aviso">{m.servidores_origem_recusada_curto()}</span>{/if}
+    </span>
+    <span class="sv-chev" aria-hidden="true">›</span>
+  </button>
+  {#if idErro && !esteAberto}<p class="id-erro" role="alert">{idErro}</p>{/if}
+{/if}
+
+{#if resolvedServer && esteAberto}
+  <ModalDialog open={true} ariaLabel={resolvedServer.label} onClose={() => (esteAberto = false)} className="sd-dialogo">
+  <div class="sd-rolagem">
+  <div class="sv-cab">
+    <div class="sv-cab-txt">
+      <h2 class="sv-cab-nome">{resolvedServer.label}</h2>
+      <span class="sv-cab-sub">{m.peers_esta_maquina()}</span>
+    </div>
+    <button type="button" class="sv-fechar" onclick={() => (esteAberto = false)} aria-label={m.sessao_fechar()}>✕</button>
+  </div>
+  <!-- Identificador (Task 5): é o CP_SERVER_ID, gravado no .env — o mesmo que o hangar-send usa
        no endereço de resposta srv::sessao. Vazio = pareamento entre servidores recusado. -->
-  <p class="ss-secao">{m.peers_esta_maquina()}</p>
   {#if !identificador}
     <p class="ss-legenda">{m.peers_legenda_identificador()}</p>
     <p class="id-aviso">{m.peers_aviso_nao_definido()}</p>
@@ -483,75 +536,68 @@
   </div>
   {#if idErro}<p class="id-erro" role="alert">{idErro}</p>{/if}
 
-  <AcessoSettings alvo={resolvedServer} />
-
-  <!-- Origens do terminal: mora AQUI, e não em Avançado, porque a pergunta é "de qual máquina o
-       app pode abrir um terminal nesta" — o mesmo assunto do resto do bloco. Quem tem um servidor
-       só nunca precisa disso (mesma-origem já passa); quem tem dois descobria a recusa como uma
-       tela preta escrita "desconectado". -->
-  {#if store}
-    <LinhaConfig campo={CAMPO_TERM_ORIGINS} store={store} />
-    {#if origemRecusada}
-      <p class="id-aviso" role="status">{m.config_term_origins_recusada({ origem: origemRecusada })}</p>
-    {/if}
-    <!-- O campo escreve num rascunho; sem este botão a tela pedia pra somar a origem e não tinha
-         como gravar (o Salvar do rascunho só existia em Configurações do servidor). -->
-    {#if store.erro}<p class="id-erro" role="alert">{store.erro}</p>{/if}
-    {#if store.temMudanca || store.salvando || store.salvo}
-      <div class="id-linha">
-        {#if store.salvo}<span class="id-ok">{m.config_server_salvo()}</span>{/if}
-        {#if store.temMudanca || store.salvando}
-          <button type="button" class="btn primario" onclick={store.salvar} disabled={store.salvando}>
-            {store.salvando ? m.config_motores_salvando() : m.ctx_salvar()}
-          </button>
+  <AcessoSettings alvo={resolvedServer} parte="detalhe">
+    {#snippet avancado()}
+      <!-- Origens do terminal: mora junto dos endereços porque a pergunta é "de qual endereço o
+           app pode abrir um terminal neste servidor". Quem tem um servidor só nunca precisa disso
+           (mesma-origem já passa); quem tem dois descobria a recusa como uma tela preta. -->
+      {#if store}
+        <LinhaConfig campo={CAMPO_TERM_ORIGINS} store={store} />
+        {#if origemRecusada}
+          <p class="id-aviso" role="status">{m.config_term_origins_recusada({ origem: origemRecusada })}</p>
         {/if}
-      </div>
-    {/if}
-  {/if}
+        <!-- O campo escreve num rascunho; sem este botão não havia como gravar a origem aqui. -->
+        {#if store.erro}<p class="id-erro" role="alert">{store.erro}</p>{/if}
+        {#if store.temMudanca || store.salvando || store.salvo}
+          <div class="id-linha">
+            {#if store.salvo}<span class="id-ok">{m.config_server_salvo()}</span>{/if}
+            {#if store.temMudanca || store.salvando}
+              <button type="button" class="btn primario" onclick={store.salvar} disabled={store.salvando}>
+                {store.salvando ? m.config_motores_salvando() : m.ctx_salvar()}
+              </button>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+    {/snippet}
+  </AcessoSettings>
 
-  <div class="ss-sep"></div>
+  <!-- Tirar o servidor escolhido deste aparelho é a mesma remoção de sempre; sendo o último, o
+       diálogo avisa que isso desloga. -->
+  {#if esteNoAparelho}
+    <div class="sv-rodape">
+      <button type="button" class="sv-remover-este" onclick={() => abrirRemocao(resolvedServer?.id ?? '')} disabled={logoutInFlight}>{m.servidores_remover_deste_aparelho()}</button>
+    </div>
+  {/if}
+  </div>
+  </ModalDialog>
+{/if}
+
+{#if resolvedServer && parearAberto}
+  <ModalDialog open={true} ariaLabel={m.servidores_parear()} onClose={() => (parearAberto = false)} className="sd-dialogo">
+    <div class="sd-rolagem">
+    <div class="sv-cab">
+      <div class="sv-cab-txt">
+        <h2 class="sv-cab-nome">{m.servidores_parear()}</h2>
+        <span class="sv-cab-sub">{resolvedServer.label}</span>
+      </div>
+      <button type="button" class="sv-fechar" onclick={() => (parearAberto = false)} aria-label={m.sessao_fechar()}>✕</button>
+    </div>
+    <AcessoSettings alvo={resolvedServer} parte="parear" />
+    </div>
+  </ModalDialog>
 {/if}
 
 <p class="ss-secao">{m.maquinas_secao()}</p>
-<p class="ss-legenda">{m.maquinas_secao_legenda()}</p>
 <ListaMaquinas
-  {linhas} {estados} meuIdentificador={identificador}
+  linhas={linhas.filter((l) => !l.estaMaquina)} {estados} meuIdentificador={identificador}
   carregando={idsCarregando || peersCarregando}
   corrige={corrigeId ? { id: corrigeId, url: corrigeUrl } : null}
   {onAcompanhar} {onFalar}
   onEditar={(l) => (emEdicao = l.navegador)}
   onCorrige={(u) => { if (u === null) fecharCorrige(); else corrigeUrl = u; }}
   onTestarDeNovo={testarDeNovo}
-  onRemover={(l) => (removerLinha = l)}
-  onAdicionar={() => { addEndereco = ''; showAdd = true; }} />
-<!-- O botão existe sempre: sem máquina escolhida ele fica apagado com o motivo, como o seletor
-     do topo — sumir esconderia que a busca existe. Só lê a rede; não cadastra nada sozinho. -->
-<button class="ss-btn mq-buscar" onclick={buscarNoTailscale} disabled={descobrindo || !resolvedServer}
-  aria-describedby="mq-buscar-ajuda">
-  {descobrindo ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
-</button>
-<p class="ss-legenda" id="mq-buscar-ajuda">{resolvedServer ? m.maquinas_buscar_ajuda() : m.maquinas_buscar_sem_maquina()}</p>
-{#if resolvedServer}
-  {#if descobertasErro}<p class="id-erro" role="status">{descobertasErro}</p>{/if}
-  {#if descobertas !== null && !descobrindo}
-    {#if novasDescobertas.length === 0}
-      <p class="ss-legenda" role="status">{m.maquinas_buscar_nada()}</p>
-    {:else}
-      <p class="ss-legenda">{m.maquinas_buscar_achou()}</p>
-      <ul class="mq-achadas">
-        {#each novasDescobertas as d (d.base_url)}
-          <li class="mq-achada">
-            <span class="mq-achada-txt">
-              <span class="mq-achada-nome">{d.nome}</span>
-              <span class="mq-achada-url">{d.base_url}</span>
-            </span>
-            <button class="ss-btn" onclick={() => { addEndereco = d.base_url; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  {/if}
-{/if}
+  onRemover={(l) => (removerLinha = l)} />
 {#if peersErro}<p class="id-erro" role="status">{peersErro}</p>{/if}
 {#if removerLadoDeLaFalhou}<p class="ss-aviso" role="status">{m.maquinas_remover_peer_lado_de_la_falhou()}</p>{/if}
 <div class="ss-acoes">
@@ -562,7 +608,9 @@
 <ServerEditSheet open={!!emEdicao} server={emEdicao} onClose={() => (emEdicao = null)} onRename={rename} onUpdateToken={updateToken} />
 {#if showAdd}
   <AdicionarMaquina {fallbackFocus} onFechar={() => (showAdd = false)}
-    {apiTarget} podeFalar={!!resolvedServer && !!identificador} enderecoInicial={addEndereco} />
+    {apiTarget} podeFalar={!!resolvedServer && !!identificador} enderecoInicial={addEndereco}
+    busca={{ itens: descobertas === null ? null : novasDescobertas, buscando: descobrindo, erro: descobertasErro,
+             podeBuscar: !!resolvedServer, onBuscar: buscarNoTailscale }} />
 {/if}
 
 {#if removerPeerId}
@@ -620,14 +668,10 @@
 {/if}
 
 <style>
-  .ss-editando { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
-  .ss-editando strong { color: var(--text-primary); font-weight: 600; }
-  .ss-muted { color: var(--text-muted); }
   .ss-aviso { margin: 0 0 var(--space-2); font-size: var(--text-xs); color: var(--warning); }
 
-  .ss-sep { height: 1px; background: var(--border-subtle); margin: var(--space-3) 0; }
   .ss-secao {
-    margin: 0 0 var(--space-1) var(--space-2);
+    margin: var(--space-4) 0 var(--space-2) var(--space-2);
     color: var(--text-muted); font-size: var(--text-xs);
     text-transform: uppercase; letter-spacing: 0.05em;
   }
@@ -636,23 +680,45 @@
     color: var(--text-muted); font-size: var(--text-xs); line-height: 1.4;
   }
 
-  .ss-acoes { display: flex; flex-direction: column; gap: var(--space-1); }
+  .sv-topo { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-bottom: var(--space-3); }
+  .sv-btn { min-height: 40px; padding: 0 var(--space-4); border-radius: var(--radius-md); border: 1px solid var(--border-default);
+            color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; }
+  .sv-btn:hover { background: var(--bg-hover); }
+  .sv-btn.primario { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .sv-btn:disabled { opacity: 0.45; }
+
+  .sv-este { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 60px; padding: var(--space-3);
+             text-align: left; color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-md); }
+  .sv-este:hover { background: var(--bg-hover); }
+  .sv-farol { flex-shrink: 0; width: 1.2em; text-align: center; font-size: 14px; color: var(--text-muted); }
+  .sv-farol.ok { color: var(--success); }
+  .sv-farol.nao { color: var(--error); }
+  .sv-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .sv-nome { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-base); font-weight: 600; }
+  .sv-id { font-family: var(--font-mono); font-size: 11px; font-weight: 400; color: var(--text-muted);
+           padding: 1px var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-full); }
+  .sv-estado { font-size: var(--text-xs); color: var(--text-secondary); }
+  .sv-estado.aviso { color: var(--warning); }
+  .sv-chev { flex-shrink: 0; color: var(--text-muted); font-size: 18px; }
+
+  .sv-cab { display: flex; align-items: flex-start; gap: var(--space-3); margin-bottom: var(--space-3); }
+  .sv-cab-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .sv-cab-nome { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
+  .sv-cab-sub { font-size: var(--text-xs); color: var(--text-muted); }
+  .sv-fechar { width: 36px; height: 36px; min-height: 0; flex-shrink: 0; border-radius: var(--radius-sm); color: var(--text-muted); }
+  .sv-fechar:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .sv-rodape { display: flex; justify-content: flex-end; margin-top: var(--space-4); }
+  .sv-remover-este { min-height: 40px; padding: 0 var(--space-3); border-radius: var(--radius-sm); color: var(--error); font-size: var(--text-sm); }
+  .sv-remover-este:hover { background: rgba(255, 69, 58, 0.1); }
+
+  .ss-acoes { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
   .ss-btn {
-    display: flex; align-items: center; justify-content: flex-start;
-    width: 100%; min-height: 44px; padding: var(--space-2) var(--space-4);
-    text-align: left;
-    color: var(--text-primary); font-size: var(--text-sm); border-radius: 0;
+    display: flex; align-items: center;
+    min-height: 44px; padding: var(--space-2) var(--space-3);
+    color: var(--accent); font-size: var(--text-sm); border-radius: var(--radius-sm);
     transition: background 150ms var(--ease-out), color 150ms var(--ease-out);
   }
   .ss-btn:hover { background: var(--bg-hover); }
-  .mq-buscar { margin-top: var(--space-1); }
-  .mq-achadas { list-style: none; margin: 0 0 var(--space-2); padding: 0; background: var(--surface-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
-  .mq-achada { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); }
-  .mq-achada + .mq-achada { border-top: 1px solid var(--border-subtle); }
-  .mq-achada-txt { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .mq-achada-nome { font-size: var(--text-sm); color: var(--text-primary); }
-  .mq-achada-url { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); word-break: break-all; }
-  .mq-achada .ss-btn { width: auto; min-height: 36px; border-radius: var(--radius-sm); }
   .ss-danger { color: var(--error); }
   .ss-danger:hover { background: rgba(255, 69, 58, 0.1); }
 

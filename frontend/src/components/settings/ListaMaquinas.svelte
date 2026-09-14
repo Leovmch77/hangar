@@ -1,12 +1,9 @@
 <script lang="ts">
-  // Só desenha: recebe linhas + estado, devolve ações por callback. Quem grava é MaquinasSettings
-  // (Task 4) — é o que permite testar a lista sem rede.
+  // Lista curta: uma linha por servidor com uma frase de estado. Tocar abre o detalhe, onde moram
+  // interruptores, token, correção e remoção. Só desenha — quem grava é MaquinasSettings.
   import * as m from '../../paraglide/messages';
-  import EscopoChip from './EscopoChip.svelte';
-  import type { LinhaMaquina } from '../../lib/maquinas';
-  import type { LadoState } from '../../lib/registrarPeerDoisLados';
-
-  interface EstadoPeer { lados: LadoState[]; ok: boolean; testando?: boolean }
+  import DetalheServidor from './DetalheServidor.svelte';
+  import { estadoDaLinha, type EstadoPeer, type EstadoDaLinha, type LinhaMaquina } from '../../lib/maquinas';
 
   interface Props {
     linhas: LinhaMaquina[];
@@ -20,189 +17,83 @@
     onCorrige: (url: string | null) => void;
     onTestarDeNovo: (linha: LinhaMaquina) => void;
     onRemover: (linha: LinhaMaquina) => void;
-    onAdicionar: () => void;
   }
 
-  let { linhas, estados, meuIdentificador, carregando, corrige, onAcompanhar, onFalar, onEditar, onCorrige, onTestarDeNovo, onRemover, onAdicionar }: Props = $props();
+  let { linhas, estados, meuIdentificador, carregando, corrige, onAcompanhar, onFalar, onEditar, onCorrige, onTestarDeNovo, onRemover }: Props = $props();
 
-  function estadoDe(linha: LinhaMaquina): EstadoPeer | undefined {
-    return linha.identificador ? estados[linha.identificador] : undefined;
+  // Pela chave, não pelo objeto: a linha é recriada a cada carga, e o detalhe tem de acompanhar o
+  // dado novo. Linha que sumiu (removida) fecha o detalhe sozinha. Editar fecha antes de abrir a
+  // folha de edição, que é uma camada abaixo dos diálogos e ficaria escondida atrás dele.
+  let aberta = $state<string | null>(null);
+  const linhaAberta = $derived(aberta ? linhas.find((l) => l.chave === aberta) ?? null : null);
+
+  const estadoDe = (l: LinhaMaquina) => (l.identificador ? estados[l.identificador] : undefined);
+
+  function curto(l: LinhaMaquina, e: EstadoDaLinha): string {
+    switch (e.tipo) {
+      case 'desligada': return m.servidores_curto_desligado();
+      case 'sem_identificador': return m.servidores_curto_nao_responde();
+      case 'testando': return m.acesso_testando();
+      case 'token_recusado': return m.servidores_curto_token_recusado();
+      case 'parcial': return e.ida?.estado === 'ok' ? m.servidores_curto_so_ida() : m.servidores_curto_ida_falhou();
+      case 'volta_sem_medir': return m.servidores_curto_falta_token();
+      case 'volta_sem_registro': return m.servidores_curto_so_ida();
+      case 'ok': return l.navegador ? m.servidores_curto_ok() : m.servidores_curto_falta_token();
+      case 'neutro':
+        if (!l.navegador && l.peer) return m.servidores_curto_falta_token();
+        return l.peer ? m.acesso_testando() : m.servidores_curto_sem_recados();
+      default: {
+        const semFrase: never = e.tipo;
+        return semFrase;
+      }
+    }
   }
-  function ladoDe(st: EstadoPeer | undefined, lado: 'ida' | 'volta'): LadoState | undefined {
-    return st?.lados.find((l) => l.lado === lado);
-  }
-  function farol(temPeer: boolean, st: EstadoPeer | undefined, falhaReal: boolean): 'ok' | 'nao' | 'test' | 'neutro' {
-    // testando pode chegar antes do peer existir (registro em curso) — checa primeiro
-    if (st?.testando) return 'test';
-    if (!temPeer && !st) return 'neutro'; // só navegador, nada pra testar — não é "testando"
-    if (!st) return 'test';
-    if (st.ok) return 'ok';
-    return falhaReal ? 'nao' : 'test'; // nao_configurado (sem token/registro) não é falha, é cinza
-  }
-  function selo(l: LadoState | undefined): string {
-    if (!l) return '·';
-    if (l.estado === 'ok') return '✓';
-    if (l.estado === 'nao_configurado') return '·';
-    return '✗';
-  }
+  const aviso = (e: EstadoDaLinha) => ['token_recusado', 'parcial', 'sem_identificador', 'volta_sem_registro', 'volta_sem_medir'].includes(e.tipo);
 </script>
 
 <ul class="mq-lista">
   {#each linhas as linha (linha.chave)}
-    {@const st = estadoDe(linha)}
-    {@const ida = ladoDe(st, 'ida')}
-    {@const volta = ladoDe(st, 'volta')}
-    {@const falhaReal = !!st && !st.ok && (ida?.estado === 'falhou' || ida?.estado === 'recusou' || ida?.estado === 'estranho' || volta?.estado === 'falhou' || volta?.estado === 'recusou' || volta?.estado === 'estranho')}
-    {@const desligada = linha.peer?.enabled === false}
-    {@const farolEstado = desligada ? 'neutro' : farol(!!linha.peer, st, falhaReal)}
-    <li class="mq-linha" data-chave={linha.chave}>
-      <span class="mq-farol" class:ok={farolEstado === 'ok'} class:nao={farolEstado === 'nao'} class:neutro={farolEstado === 'neutro'}>
-        {farolEstado === 'test' ? '◌' : farolEstado === 'neutro' ? '·' : '●'}
-      </span>
-      <span class="mq-txt">
-        <span class="mq-nome">{linha.nome}</span>
-        <span class="mq-url">{linha.navegador?.baseUrl ?? linha.peer?.base_url}</span>
-        {#if desligada}
-          <span class="mq-hint">{m.maquinas_peer_desligado()}</span>
-        {:else if linha.navegador && !linha.identificador}
-          <span class="mq-hint">{m.maquinas_sem_identificador()}</span>
-        {:else if st?.testando}
-          <span class="mq-hint">{m.peers_estado_testando()}</span>
-        {:else if volta?.estado === 'recusou' && volta.motivo === 'credencial'}
-          <span class="mq-hint">{m.maquinas_volta_token_recusado()}</span>
-        {:else if falhaReal}
-          <span class="mq-hint">
-            {m.peers_estado_parcial()}
-            <span class="pr-lados">
-              <span class="pr-lado" class:ok={ida?.estado === 'ok'} class:nao={ida && ida.estado !== 'ok' && ida.estado !== 'nao_configurado'} title={ida && ida.estado !== 'ok' ? ida.motivo : undefined}>{selo(ida)} {m.peers_lado_ida()}</span>
-              <span class="pr-lado" class:ok={volta?.estado === 'ok'} class:nao={volta && volta.estado !== 'ok' && volta.estado !== 'nao_configurado'} title={volta && volta.estado !== 'ok' ? volta.motivo : undefined}>{selo(volta)} {m.peers_lado_volta()}</span>
-            </span>
-          </span>
-        {:else if volta?.estado === 'nao_configurado' && volta.motivo === 'token'}
-          <span class="mq-hint">{m.maquinas_volta_sem_medir()}</span>
-        {:else if volta?.estado === 'nao_configurado' && volta.motivo === 'registro'}
-          <span class="mq-hint">{m.maquinas_volta_sem_registro()}</span>
-        {/if}
-        <!-- Independente do estado acima: "só o servidor conhece" é sempre a instrução acionável
-             quando não há navegador, mesmo com um estado de teste já rodado. -->
-        {#if !linha.navegador && linha.peer}
-          <span class="mq-hint">{m.maquinas_so_no_servidor()}</span>
-        {/if}
-      </span>
-      <span class="mq-caixas">
-        <label class="mq-caixa">
-          <input type="checkbox" class="switch mq-acompanhar" checked={!!linha.navegador}
-                 onchange={(e) => { const alvo = e.currentTarget; const ligar = alvo.checked; alvo.checked = !ligar; onAcompanhar(linha, ligar); }} />
-          {m.maquinas_acompanhar()}
-        </label>
-        <!-- A caixa de cima é do navegador (localStorage), esta é do `peers.json` DO SERVIDOR — daí
-             a etiqueta só neste lado. É o que torna verdadeira a legenda do topo do modal: a linha
-             tem as duas metades, e sem a etiqueta as duas pareceriam do aparelho. -->
-        <label class="mq-caixa">
-          {#if linha.estaMaquina}
-            <span class="mq-tag">{m.maquinas_esta()}</span>
-          {:else}
-            <input type="checkbox" class="switch mq-falar" checked={!!linha.peer}
-                   disabled={!meuIdentificador || !linha.identificador}
-                   onchange={(e) => { const alvo = e.currentTarget; const ligar = alvo.checked; alvo.checked = !ligar; onFalar(linha, ligar); }} />
-            {m.maquinas_falar()} <EscopoChip escopo="servidor" />
-          {/if}
-        </label>
-      </span>
-      <!-- Ícone com o rótulo ao lado, nas duas larguras: o ✎ e o ✕ só se explicavam pelo
-           aria-label e por um `title`, e no toque não existe hover pra ler o `title`. -->
-      <!-- Editar fica SEM etiqueta de propósito: ele abre `linha.navegador`, a entrada deste
-           navegador. O ✕ alcança os lados que AQUELA linha tem, e são os DOIS campos que decidem:
-           `peer` diz se o registro deste servidor sai, `navegador` diz se há entrada aqui para
-           sair E se o lado de lá é alcançável (sem ela, `removerPeerDoisLados` para no
-           `if (!remoto)` sem tocar o outro servidor). São os mesmos campos que
-           `removerLinhaConfirmado` lê para decidir.
-           O `aria-label` segue as mesmas condições porque ele SUBSTITUI o nome acessível: o chip
-           dentro do botão nunca é anunciado, então a verdade tem de estar no rótulo. -->
-      {#if linha.navegador}
-        <button class="mq-editar" aria-label={m.servidor_editar_aria({ nome: linha.nome })} onclick={() => onEditar(linha)}><span aria-hidden="true">✎</span> <span class="mq-btn-txt">{m.config_motores_editar()}</span></button>
-      {/if}
-      <!-- Esta máquina sai só pelo Sair: removê-la daqui é deslogar o aparelho. -->
-      {#if !linha.estaMaquina}
-        <button class="mq-editar mq-remover" aria-label={!linha.peer ? m.maquinas_remover_aria_local({ nome: linha.nome }) : linha.navegador ? m.maquinas_remover_aria({ nome: linha.nome }) : m.maquinas_remover_aria_servidor({ nome: linha.nome })} onclick={() => onRemover(linha)}><span aria-hidden="true">✕</span> <span class="mq-btn-txt">{m.lista_remover()}</span>{#if linha.peer}<EscopoChip escopo="servidor" />{/if}</button>
-      {/if}
-      {#if corrige?.id === linha.identificador}
-        <div class="corrige">
-          <p>{m.peers_corrige_1({ nome: linha.nome, endereco: linha.peer?.base_url ?? '' })}</p>
-          <p><b>{m.peers_corrige_pergunta({ nome: linha.nome })}</b></p>
-          <input class="corrige-input" value={corrige.url}
-                 aria-label={m.peers_corrige_pergunta({ nome: linha.nome })}
-                 oninput={(e) => onCorrige(e.currentTarget.value)} />
-          <div class="acoes">
-            <button class="btn primaria" onclick={() => onTestarDeNovo(linha)}>{m.peers_testar_novamente()}</button>
-            <button class="btn" onclick={() => onCorrige(null)}>{m.peers_so_ida()}</button>
-          </div>
-        </div>
-      {/if}
+    {@const e = estadoDaLinha(linha, estadoDe(linha))}
+    <li>
+      <button type="button" class="sv-linha" data-chave={linha.chave}
+              aria-label={m.servidores_abrir_aria({ nome: linha.nome })}
+              onclick={() => (aberta = linha.chave)}>
+        <span class="mq-farol" class:ok={e.farol === 'ok'} class:nao={e.farol === 'nao'} class:neutro={e.farol === 'neutro'} aria-hidden="true">
+          {e.farol === 'test' ? '◌' : e.farol === 'neutro' ? '·' : '●'}
+        </span>
+        <span class="sv-txt">
+          <span class="sv-nome">{linha.nome}</span>
+          <span class="sv-estado" class:nao={e.farol === 'nao'} class:aviso={e.farol !== 'nao' && aviso(e)}>{curto(linha, e)}</span>
+        </span>
+        <span class="sv-chev" aria-hidden="true">›</span>
+      </button>
     </li>
   {:else}
-    {#if carregando}
-      <li class="mq-vazio">{m.comum_carregando()}</li>
-    {:else}
-      <li class="mq-vazio">{m.maquinas_vazio()}</li>
-    {/if}
+    <li class="mq-vazio">{carregando ? m.comum_carregando() : m.maquinas_vazio()}</li>
   {/each}
 </ul>
-<button class="ss-btn mq-add" onclick={onAdicionar}>+ {m.maquinas_adicionar()}</button>
+
+{#if linhaAberta}
+  <DetalheServidor linha={linhaAberta} estado={estadoDe(linhaAberta)} {meuIdentificador} {corrige}
+    {onAcompanhar} {onFalar} {onCorrige} {onTestarDeNovo} {onRemover}
+    onEditar={(l) => { aberta = null; onEditar(l); }}
+    onFechar={() => (aberta = null)} />
+{/if}
 
 <style>
-  .mq-lista { list-style: none; margin: 0; padding: 0; background: var(--surface-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; container-type: inline-size; }
-  .mq-linha { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3); }
-  .mq-linha + .mq-linha { border-top: 1px solid var(--border-subtle); }
+  .mq-lista { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
+  .mq-lista > li + li { border-top: 1px solid var(--border-subtle); }
+  .sv-linha { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 56px; padding: var(--space-2) var(--space-3);
+              text-align: left; border-radius: 0; color: var(--text-primary); }
+  .sv-linha:hover { background: var(--bg-hover); }
   .mq-farol { flex-shrink: 0; width: 1.2em; text-align: center; font-size: 14px; color: var(--text-muted); }
   .mq-farol.ok { color: var(--success); }
   .mq-farol.nao { color: var(--error); }
-  .mq-farol.neutro { color: var(--text-muted); }
-  .mq-txt { flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .mq-nome { font-size: var(--text-sm); color: var(--text-primary); }
-  .mq-url { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); word-break: break-all; }
-  .mq-hint { font-size: var(--text-xs); line-height: 1.35; color: var(--text-muted); }
-  .mq-caixas { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
-  .mq-caixa { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--text-muted); }
-  /* Celular estreito: caixas com max-content estouravam a largura e empurravam o ✎ pra baixo do
-     painel — container query porque quem aperta é a largura do PAINEL, não a da janela. */
-  @container (max-width: 420px) {
-    .mq-caixas { flex-basis: 100%; }
-  }
-  .mq-tag { flex-shrink: 0; font-size: 10px; font-weight: 600; color: var(--accent); }
-  /* Largura vem do rótulo: o botão deixou de ser um quadrado de 32px quando ganhou texto. */
-  .mq-editar { height: 32px; min-height: 0; flex-shrink: 0; display: inline-flex; align-items: center;
-               gap: 4px; padding: 0 var(--space-2); color: var(--text-muted); font-size: var(--text-sm);
-               border-radius: var(--radius-sm); }
-  .mq-btn-txt { font-size: var(--text-xs); white-space: nowrap; }
-  .mq-editar:hover { color: var(--accent); background: var(--bg-hover); }
-  .mq-remover:hover { color: var(--error); }
+  .sv-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .sv-nome { font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sv-estado { font-size: var(--text-xs); color: var(--text-secondary); }
+  .sv-estado.nao { color: var(--error); }
+  .sv-estado.aviso { color: var(--warning); }
+  .sv-chev { flex-shrink: 0; color: var(--text-muted); font-size: 18px; }
   .mq-vazio { padding: var(--space-3); font-size: var(--text-xs); color: var(--text-muted); }
-
-  .pr-lados { display: flex; gap: var(--space-2); flex-shrink: 0; margin-top: 2px; }
-  .pr-lado { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted);
-             padding: 2px var(--space-2); border-radius: var(--radius-full);
-             background: var(--surface-raised); border: 1px solid var(--border-subtle); }
-  .pr-lado.ok { color: var(--success); }
-  .pr-lado.nao { color: var(--error); }
-
-  .corrige { flex-basis: 100%; margin-top: var(--space-2); padding: var(--space-3); background: var(--surface-card);
-             border: 1px solid var(--border-default); border-left: 3px solid var(--warning);
-             border-radius: var(--radius-md); }
-  .corrige p { margin: 0 0 var(--space-2); font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.45; }
-  .corrige b { color: var(--text-primary); font-weight: 600; }
-  .corrige-input { width: 100%; height: 34px; padding: 0 var(--space-3);
-                   background: var(--surface-inset); border: 1px solid var(--border-default);
-                   border-radius: var(--radius-sm); color: var(--text-primary);
-                   font-family: var(--font-mono); font-size: var(--text-sm); box-sizing: border-box; }
-  .acoes { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
-  .btn { height: 36px; min-height: 0; padding: 0 var(--space-4); border-radius: var(--radius-sm);
-         border: 1px solid var(--border-subtle); background: var(--surface-raised);
-         color: var(--text-primary); font-size: var(--text-sm); font-family: inherit; }
-  .btn.primaria { background: var(--accent); border-color: var(--accent); color: #fff; }
-
-  .mq-add { display: flex; align-items: center; justify-content: flex-start; gap: var(--space-2);
-            width: 100%; min-height: 44px; margin-top: var(--space-2); padding: var(--space-2) var(--space-4);
-            text-align: left; color: var(--text-primary); font-size: var(--text-sm); border-radius: 0; }
-  .mq-add:hover { background: var(--bg-hover); }
 </style>

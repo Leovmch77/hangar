@@ -9,18 +9,34 @@
   import { normalizarEndereco } from '../../lib/url';
   import { getConfigForServer } from '@hangar/core';
   import { addServer } from '../../lib/auth';
-  import { getIdentificador } from '../../lib/peers';
+  import { getIdentificador, type MaquinaDescoberta } from '../../lib/peers';
   import { registrarPeerDoisLados } from '../../lib/registrarPeerDoisLados';
   import type { Server } from '../../lib/auth';
 
+  interface Busca {
+    itens: MaquinaDescoberta[] | null;   // null = ainda não buscou
+    buscando: boolean;
+    erro: string;
+    podeBuscar: boolean;
+    onBuscar: () => void;
+  }
   interface Props {
     fallbackFocus?: HTMLElement | null;
     onFechar: () => void;
     apiTarget?: Server | null;
     podeFalar?: boolean;
     enderecoInicial?: string;
+    busca?: Busca;
   }
-  let { fallbackFocus = null, onFechar, apiTarget = null, podeFalar = false, enderecoInicial = '' }: Props = $props();
+  let { fallbackFocus = null, onFechar, apiTarget = null, podeFalar = false, enderecoInicial = '', busca }: Props = $props();
+  let tokenEl = $state<HTMLInputElement | null>(null);
+
+  function usarAchado(d: MaquinaDescoberta) {
+    endereco = d.base_url;
+    token = '';   // o token digitado era de outro servidor
+    erro = '';
+    tokenEl?.focus();
+  }
 
   let endereco = $state(enderecoInicial);
   let token = $state('');
@@ -116,6 +132,33 @@
       { label: m.sessao_escanear_qr(), disabled: ocupado, onClick: () => (scanning = true) },
       { label: m.maquinas_add_testar(), kind: 'primary', disabled: !podeTestar, onClick: testarEAdicionar },
     ]}>
+    {#if busca}
+      <!-- Sob demanda: cada busca bate em todos os peers online, então não roda ao abrir. -->
+      <div class="am-busca">
+        <div class="am-busca-cab">
+          <span class="am-busca-txt">{busca.podeBuscar ? m.maquinas_buscar_ajuda() : m.maquinas_buscar_sem_maquina()}</span>
+          <button type="button" class="am-btn" onclick={busca.onBuscar} disabled={busca.buscando || !busca.podeBuscar || ocupado}>
+            {busca.buscando ? m.maquinas_buscando() : m.maquinas_buscar_tailscale()}
+          </button>
+        </div>
+        {#if busca.erro}<p class="am-erro" role="status">{busca.erro}</p>{/if}
+        {#if busca.itens !== null && !busca.buscando}
+          {#if busca.itens.length === 0}
+            <p class="am-ajuda" role="status">{m.maquinas_buscar_nada()}</p>
+          {:else}
+            <p class="am-ajuda">{m.maquinas_buscar_achou()}</p>
+            <ul class="am-achados">
+              {#each busca.itens as d (d.base_url)}
+                <li class="am-achado">
+                  <span class="am-achado-txt"><span>{d.nome}</span><span class="am-achado-url">{d.base_url}</span></span>
+                  <button type="button" class="am-btn" onclick={() => usarAchado(d)} disabled={ocupado}>{m.maquinas_adicionar()}</button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      </div>
+    {/if}
     <label class="am-campo">
       <span class="am-rot">{m.maquinas_add_endereco()}</span>
       <input class="am-input" bind:this={enderecoEl} bind:value={endereco}
@@ -130,7 +173,7 @@
     </label>
     <label class="am-campo">
       <span class="am-rot">{m.sessao_token()}</span>
-      <input class="am-input" bind:value={token}
+      <input class="am-input" bind:this={tokenEl} bind:value={token}
              aria-label={m.sessao_token()}
              aria-invalid={!!erro} aria-describedby={erro ? 'am-erro' : undefined}
              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck={false}
@@ -154,6 +197,16 @@
 {/if}
 
 <style>
+  .am-busca { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-4); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+  .am-busca-cab { display: flex; align-items: center; gap: var(--space-3); }
+  .am-busca-txt { flex: 1; font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; }
+  .am-btn { flex-shrink: 0; min-height: 36px; padding: 0 var(--space-3); border-radius: var(--radius-sm); border: 1px solid var(--border-default); color: var(--text-primary); font-size: 0.85rem; }
+  .am-btn:disabled { opacity: 0.5; }
+  .am-achados { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
+  .am-achado { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); }
+  .am-achado + .am-achado { border-top: 1px solid var(--border-subtle); }
+  .am-achado-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 0.9rem; }
+  .am-achado-url { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); word-break: break-all; }
   .am-campo { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-3); }
   .am-rot { font-size: 0.85rem; color: var(--text-muted); }
   .am-input {

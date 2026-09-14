@@ -262,3 +262,30 @@ describe('AdicionarMaquina — servidores se falam', () => {
     unmount(t.comp);
   });
 });
+
+describe('AdicionarMaquina — busca no Tailscale', () => {
+  const busca = (over: Record<string, unknown> = {}) => ({ itens: null, buscando: false, erro: '', podeBuscar: true, onBuscar: vi.fn(), ...over });
+
+  it('só busca quando pedem, e nunca sem servidor escolhido', () => {
+    const b = busca();
+    const t = montar({ busca: b });
+    t.botao(m.maquinas_buscar_tailscale()).click();
+    expect(b.onBuscar).toHaveBeenCalledTimes(1);
+    unmount(t.comp);
+    const t2 = montar({ busca: busca({ podeBuscar: false }) });
+    expect(t2.botao(m.maquinas_buscar_tailscale()).disabled).toBe(true);
+    expect(document.body.textContent).toContain(m.maquinas_buscar_sem_maquina());
+    unmount(t2.comp);
+  });
+
+  it('achado preenche o endereço e deixa só o token; busca vazia diz que não achou', async () => {
+    const t = montar({ busca: busca({ itens: [{ nome: 'mac', base_url: 'https://mac.ts.net', hosts: [] }] }) });
+    t.botao(m.maquinas_adicionar()).click();
+    await tick();
+    expect(t.campo(m.maquinas_add_endereco()).value).toBe('https://mac.ts.net');
+    unmount(t.comp);
+    const t2 = montar({ busca: busca({ itens: [] }) });
+    expect(document.body.textContent).toContain(m.maquinas_buscar_nada());
+    unmount(t2.comp);
+  });
+});

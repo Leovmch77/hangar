@@ -175,11 +175,13 @@ describe('SettingsModal — GET config por tela', () => {
     unmount(t.comp);
   });
 
-  it('acesso mora dentro de Máquinas: a seção de endereços aparece quando há alvo', async () => {
+  it('acesso mora dentro de Servidores: os endereços aparecem no detalhe deste servidor', async () => {
     stubDesktop();
     const t = montar('maquinas', SRV, undefined, { resolvedServer: SRV as Server });
     await tick();
-    expect(document.body.textContent).toContain(m.acesso_secao_enderecos());
+    document.querySelector<HTMLButtonElement>('.sv-este')!.click();
+    await tick();
+    expect(document.querySelector('.sd-dialogo')!.textContent).toContain(m.acesso_secao_enderecos());
     unmount(t.comp);
     // Contas também virou tela real — a Task 4 mergeou e a prova dela é o teste
     // 'aba Contas mostra a lista da fonte única' logo abaixo.
