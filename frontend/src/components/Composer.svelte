@@ -31,6 +31,7 @@
   import IconCamera from './icons/IconCamera.svelte';
   import IconImagem from './icons/IconImagem.svelte';
   import { tipoDoArquivo, quadroDeVideo, type TipoAnexo } from '../lib/tipoAnexo';
+  import { abrirVisor } from '../lib/visor';
   import FileIcon from './files/FileIcon.svelte';
   import { scale } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
@@ -1107,6 +1108,16 @@
   }
 
   // ── Anexos: escolher / remover (multiplas imagens) ─────────────────────────
+  // Mesmo visor das bolhas, com todas as imagens anexadas: as setas passam entre elas antes do envio.
+  const tileBotoes: (HTMLElement | undefined)[] = [];
+  function verAnexo(idx: number) {
+    const imagens = attachments.map((a, i) => ({ a, i })).filter(({ a }) => a.isImage && a.url);
+    void abrirVisor(
+      imagens.map(({ a, i }) => ({ url: a.url, nome: a.file.name, tipo: 'image' as const, element: tileBotoes[i] })),
+      Math.max(0, imagens.findIndex(({ i }) => i === idx)),
+    );
+  }
+
   // Adiciona arquivos de imagem a lista (do picker ou do paste), cada um com preview local.
   // ditado=true so na gravacao pelo mic (toggleRecord) -> so ela pede limpeza do texto; arquivo de
   // audio anexado (picker/paste) nunca passa por limpeza.
@@ -1970,7 +1981,14 @@
               {#if a.url}
                 <!-- Imagem e vídeo mostram o conteúdo; o vídeo ganha o play por cima pra não virar
                      uma foto qualquer. -->
-                <img class="tile-thumb" src={a.url} alt="" />
+                {#if a.isImage}
+                  <button type="button" class="tile-ver" bind:this={tileBotoes[idx]}
+                    onclick={() => verAnexo(idx)} aria-label={m.anexos_ver_original()}>
+                    <img class="tile-thumb" src={a.url} alt="" />
+                  </button>
+                {:else}
+                  <img class="tile-thumb" src={a.url} alt="" />
+                {/if}
                 {#if a.tipo === 'video'}
                   <span class="tile-play" aria-hidden="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -3100,6 +3118,7 @@
   .attach-tile.esperando .tile-box { opacity: 0.45; }
   .tile-box { position: relative; }
   .tile-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile-ver { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
   /* Play sobre o quadro do vídeo: fundo escuro por baixo porque o quadro pode ser claro. */
   .tile-play {
     position: absolute;

@@ -586,6 +586,7 @@
       retSeq++;
       retomando = null;
       retomaveis = []; conversaEscolhida = ''; querRetomar = false;
+      diferencaAberta = false; maisAberto = false;
       previa = []; previaCarregando = false;
       // Feedback da criação de conta não pode vazar entre aberturas: o botão liberado, o aviso
       // limpo e a conta criada esquecida — o cfgSeq do loadConfigs abaixo invalida qualquer
@@ -664,6 +665,15 @@
   let querRetomar = $state(false);
   const conversaAlvo = $derived(
     querRetomar ? retomaveis.find((c) => c.session_id === conversaEscolhida) ?? null : null);
+
+  let diferencaAberta = $state(false);
+  let maisAberto = $state(false);
+  const temMotor = $derived(provider === 'claude' && Object.keys(motores).length > 0);
+  const temSubagente = $derived(!conversaAlvo && !bastao && provider === 'claude' && !engine && modelos.length > 0);
+  const rotuloMotor = $derived(engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta());
+  const rotuloSubagente = $derived(subagente
+    ? (modelos.find((mod) => valorModelo(mod) === subagente)?.name ?? subagente)
+    : m.criar_subagente_padrao());
 
   $effect(() => {
     const cwd = picked, cfg = selectedConfig, prov = provider, account = codexAccount, server = codexServer;
@@ -1122,58 +1132,35 @@
         </div>
       {/if}
 
-      {#if retomaveis.length}
-        <!-- Comecar do zero e o caminho normal; continuar uma conversa da pasta e a excecao, entao
-             ela fica atras de um check e so entao mostra o seletor. Uma lista sempre aberta
-             empurrava o formulario inteiro pra fora da tela.
-             O rotulo de cada conversa e a ULTIMA msg — a 1a nao identifica nada meses depois. -->
+      {#if !conversaAlvo && (provider === 'claude' || provider === 'codex') && !bastao}
+        <!-- Onde a sessão roda, logo abaixo da conta: decide se vai existir painel de terminal, e
+             "Sem terminal" é novo — num select no fim do formulário ninguém o encontrava. -->
         <div class="field">
-          <label class="retomar-check">
-            <input type="checkbox" bind:checked={querRetomar} />
-            <span>{m.criar_retomar()}</span>
-          </label>
-          {#if querRetomar}
-            <Select id="conversa-pick" ariaLabel={m.criar_retomar()} value={conversaEscolhida}
-              disabled={retomando !== null}
-              opcoes={[{ value: '', label: m.criar_retomar_escolha() },
-                       ...retomaveis.map((c) => ({
-                         value: c.session_id,
-                         label: c.ultima || c.preview || m.arquivo_sem_mensagens(),
-                         hint: relativeTime(c.mtime),
-                       }))]}
-              onchange={(v) => (conversaEscolhida = v)} />
+          <span class="field-label" id="modo-exec-rotulo">{m.criar_modo_exec()}</span>
+          <div class="modos" role="group" aria-labelledby="modo-exec-rotulo">
+            <button type="button" class="modo" class:on={!semTerminal} aria-pressed={!semTerminal}
+              onclick={() => (semTerminal = false)}>
+              <span class="modo-radio" aria-hidden="true"></span>
+              <span class="modo-nome">{m.criar_modo_exec_tmux()}</span>
+              <span class="modo-resumo">{provider === 'codex' ? m.criar_modo_exec_tmux_resumo_codex() : m.criar_modo_exec_tmux_resumo()}</span>
+            </button>
+            <button type="button" class="modo" class:on={semTerminal} aria-pressed={semTerminal}
+              onclick={() => (semTerminal = true)}>
+              <span class="modo-radio" aria-hidden="true"></span>
+              <span class="modo-nome">{m.criar_modo_exec_headless()} <span class="modo-beta">{m.comum_beta()}</span></span>
+              <span class="modo-resumo">{provider === 'codex' ? m.criar_modo_exec_headless_resumo_codex() : m.criar_modo_exec_headless_resumo()}</span>
+            </button>
+          </div>
+          <button type="button" class="modo-diferenca" aria-expanded={diferencaAberta}
+            onclick={() => (diferencaAberta = !diferencaAberta)}>
+            {m.criar_modo_exec_diferenca()}
+            <span class="chevron" class:chevron--open={diferencaAberta} aria-hidden="true">›</span>
+          </button>
+          {#if diferencaAberta}
+            <p class="hint">{provider === 'codex'
+              ? (semTerminal ? m.criar_modo_exec_headless_ajuda_codex() : m.criar_modo_exec_tmux_ajuda_codex())
+              : (semTerminal ? m.criar_modo_exec_headless_ajuda() : m.criar_modo_exec_tmux_ajuda())}</p>
           {/if}
-          {#if conversaAlvo}
-            <!-- Previa: as ultimas msgs da conversa. Markdown RENDERIZADO — `**assim**` cru numa
-                 caixa de leitura e sempre bug, nao estilo. Rola pro fim ao carregar, que e onde a
-                 conversa parou. -->
-            <div class="previa" bind:this={previaEl}>
-              {#if previaCarregando}
-                <p class="previa-vazia">{m.comum_carregando()}</p>
-              {:else if previaErro}
-                <p class="previa-erro" role="alert">{m.criar_previa_erro()}</p>
-              {:else if !previa.length}
-                <p class="previa-vazia">{m.arquivo_sem_mensagens()}</p>
-              {:else}
-                {#each previa as ev (ev.id)}
-                  <div class="previa-msg" class:eu={ev.kind === 'user_msg'}>
-                    {@html renderMarkdown(ev.text ?? '')}
-                  </div>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-        </div>
-      {/if}
-
-      {#if provider === 'claude' && Object.keys(motores).length}
-        <div class="field">
-          <label class="field-label" for="engine-pick">{m.comum_motor()}</label>
-          <Select id="engine-pick" ariaLabel={m.comum_motor()} value={engine}
-            opcoes={[{ value: '', label: m.criar_claude_sua_conta() },
-                     ...Object.entries(motores).map(([nome, motor]) => ({
-                       value: nome, label: motor.label ?? nome, hint: motor.model }))]}
-            onchange={(v) => { engine = v; carregarModelos(); }} />
         </div>
       {/if}
 
@@ -1254,33 +1241,90 @@
         </div>
       {/if}
 
-      {#if !conversaAlvo && !bastao && provider === 'claude' && !engine && modelos.length > 0}
-        <div class="field">
-          <label class="field-label" for="subagent-pick">{m.criar_subagente()}</label>
-          <Select id="subagent-pick" class="field-input" ariaLabel={m.criar_subagente()} value={subagente}
-            opcoes={[{ value: '', label: m.criar_subagente_padrao() },
-                     ...modelos.filter((mod) => mod.id !== 'default').map((mod) => ({
-                       value: valorModelo(mod), label: mod.name ?? mod.id }))]}
-            onchange={(v) => (subagente = v)} />
-          <p class="hint">{m.criar_subagente_ajuda()}</p>
-        </div>
-      {/if}
       </div>
 
-      {#if !conversaAlvo && (provider === 'claude' || provider === 'codex') && !bastao}
-        <!-- Onde a sessão roda. Fora da grade de duas colunas, porque a explicação da opção
-             escolhida fica SEMPRE à vista: a diferença (pane no tmux × processo do Hangar) é o que
-             decide se vai existir painel de terminal, e ninguém adivinha isso por um nome. -->
-        <div class="field">
-          <label class="field-label" for="modo-exec-pick">{m.criar_modo_exec()}</label>
-          <Select id="modo-exec-pick" class="field-input" ariaLabel={m.criar_modo_exec()}
-            value={semTerminal ? 'headless' : 'tmux'}
-            opcoes={[{ value: 'tmux', label: m.criar_modo_exec_tmux() },
-                     { value: 'headless', label: m.criar_modo_exec_headless() }]}
-            onchange={(v) => (semTerminal = v === 'headless')} />
-          <p class="hint">{provider === 'codex'
-            ? (semTerminal ? m.criar_modo_exec_headless_ajuda_codex() : m.criar_modo_exec_tmux_ajuda_codex())
-            : (semTerminal ? m.criar_modo_exec_headless_ajuda() : m.criar_modo_exec_tmux_ajuda())}</p>
+      {#if temMotor || temSubagente || retomaveis.length}
+        <!-- O que quase ninguém muda fica recolhido, mas o resumo mostra o valor de cada um: a
+             escolha nunca fica escondida, só a edição dela. -->
+        <div class="mais" class:aberto={maisAberto}>
+          <button type="button" class="mais-cab" aria-expanded={maisAberto}
+            onclick={() => (maisAberto = !maisAberto)}>
+            <span class="mais-nome">{m.criar_mais_opcoes()}</span>
+            {#if !maisAberto}
+              <span class="mais-resumo">
+                {#if temMotor}<span class="mais-pill">{m.comum_motor()} <em>{rotuloMotor}</em></span>{/if}
+                {#if temSubagente}<span class="mais-pill">{m.criar_mais_subagentes()} <em>{rotuloSubagente}</em></span>{/if}
+                {#if retomaveis.length}<span class="mais-pill">{m.criar_mais_conversa()} <em>{querRetomar ? m.criar_mais_conversa_continuar() : m.criar_mais_conversa_nova()}</em></span>{/if}
+              </span>
+            {/if}
+            <span class="chevron" class:chevron--open={maisAberto} aria-hidden="true">›</span>
+          </button>
+          {#if maisAberto}
+            <div class="mais-corpo">
+              {#if temMotor}
+                <div class="field">
+                  <label class="field-label" for="engine-pick">{m.comum_motor()}</label>
+                  <Select id="engine-pick" ariaLabel={m.comum_motor()} value={engine}
+                    opcoes={[{ value: '', label: m.criar_claude_sua_conta() },
+                             ...Object.entries(motores).map(([nome, motor]) => ({
+                               value: nome, label: motor.label ?? nome, hint: motor.model }))]}
+                    onchange={(v) => { engine = v; carregarModelos(); }} />
+                </div>
+              {/if}
+              {#if temSubagente}
+                <div class="field">
+                  <label class="field-label" for="subagent-pick">{m.criar_subagente()}</label>
+                  <Select id="subagent-pick" class="field-input" ariaLabel={m.criar_subagente()} value={subagente}
+                    opcoes={[{ value: '', label: m.criar_subagente_padrao() },
+                             ...modelos.filter((mod) => mod.id !== 'default').map((mod) => ({
+                               value: valorModelo(mod), label: mod.name ?? mod.id }))]}
+                    onchange={(v) => (subagente = v)} />
+                  <p class="hint">{m.criar_subagente_ajuda()}</p>
+                </div>
+              {/if}
+              {#if retomaveis.length}
+                <!-- Comecar do zero e o caminho normal; continuar uma conversa da pasta e a excecao,
+                     entao ela fica atras de um check e so entao mostra o seletor.
+                     O rotulo de cada conversa e a ULTIMA msg — a 1a nao identifica nada meses depois. -->
+                <div class="field mais-largo">
+                  <label class="retomar-check">
+                    <input type="checkbox" bind:checked={querRetomar} />
+                    <span>{m.criar_retomar()}</span>
+                  </label>
+                  {#if querRetomar}
+                    <Select id="conversa-pick" ariaLabel={m.criar_retomar()} value={conversaEscolhida}
+                      disabled={retomando !== null}
+                      opcoes={[{ value: '', label: m.criar_retomar_escolha() },
+                               ...retomaveis.map((c) => ({
+                                 value: c.session_id,
+                                 label: c.ultima || c.preview || m.arquivo_sem_mensagens(),
+                                 hint: relativeTime(c.mtime),
+                               }))]}
+                      onchange={(v) => (conversaEscolhida = v)} />
+                  {/if}
+                  {#if conversaAlvo}
+                    <!-- Previa: as ultimas msgs da conversa. Markdown RENDERIZADO — `**assim**` cru
+                         numa caixa de leitura e sempre bug. Rola pro fim ao carregar. -->
+                    <div class="previa" bind:this={previaEl}>
+                      {#if previaCarregando}
+                        <p class="previa-vazia">{m.comum_carregando()}</p>
+                      {:else if previaErro}
+                        <p class="previa-erro" role="alert">{m.criar_previa_erro()}</p>
+                      {:else if !previa.length}
+                        <p class="previa-vazia">{m.arquivo_sem_mensagens()}</p>
+                      {:else}
+                        {#each previa as ev (ev.id)}
+                          <div class="previa-msg" class:eu={ev.kind === 'user_msg'}>
+                            {@html renderMarkdown(ev.text ?? '')}
+                          </div>
+                        {/each}
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
       {/if}
 
@@ -1666,6 +1710,126 @@
   .trio > .field { margin-bottom: var(--space-4); }
   .trio:empty { display: none; }
 
+  /* ── Onde roda: dois cartões com resumo; a explicação longa fica atrás de "Qual a diferença?" ── */
+  .modos {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--space-3);
+  }
+  .modo {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 4px;
+    padding: var(--space-3) calc(var(--space-3) + 24px) var(--space-3) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    background: var(--surface-raised, var(--bg-surface));
+    color: var(--text-secondary);
+    text-align: left;
+    transition: border-color 160ms ease-out, background 160ms ease-out, transform 160ms ease-out;
+  }
+  .modo:active { transform: scale(0.98); }
+  .modo.on {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+    color: var(--text-primary);
+  }
+  .modo-nome {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .modo-resumo {
+    font-size: var(--text-xs);
+    line-height: 1.45;
+    color: var(--text-muted);
+  }
+  .modo-radio {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-muted);
+  }
+  .modo.on .modo-radio {
+    border-color: var(--accent);
+    background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px);
+  }
+  .modo-beta {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--warning, #f2b64d);
+    color: #1c1406;
+  }
+  .modo-diferenca {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 0;
+    font-size: var(--text-xs);
+    color: var(--accent);
+  }
+
+  /* ── Mais opções: recolhido mostra o valor de cada escolha ─────────────── */
+  .mais {
+    margin-bottom: var(--space-4);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+  }
+  .mais-cab {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-3);
+    text-align: left;
+  }
+  .mais-nome {
+    flex-shrink: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .mais-resumo {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+  .mais-pill {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    background: var(--surface-inset, var(--bg-surface));
+    border-radius: 999px;
+    padding: 2px var(--space-2);
+    white-space: nowrap;
+  }
+  .mais-pill em { font-style: normal; color: var(--text-secondary); }
+  .mais-cab .chevron { margin-left: auto; }
+  .mais-corpo {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    column-gap: var(--space-3);
+    padding: var(--space-3) var(--space-3) 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .mais-largo { grid-column: 1 / -1; }
+
   /* O combo de config é o <button> dentro do Select.svelte: CSS escopado não o alcança (o atributo
      de escopo só cai nos elementos deste template), então a regra acima nunca casava e ele saía com
      o visual padrão do componente — mono e 40px, quebrando o alinhamento com os campos irmãos. */
@@ -1752,6 +1916,15 @@
   /* ── Desktop: dois painéis (escolher · configurar) ─────────────────────── */
   /* O BottomSheet em `split` dá altura DEFINIDA (min(680px, …)) — o grid herda dela e cada
      pane rola sozinho. Divisor por borda, como o .st-nav do SettingsModal. */
+  /* Mais largo e mais alto que o modal padrão: com "Onde roda" em cartões e o trio numa linha,
+     a coluna da direita cabe sem rolar. */
+  @media (min-width: 820px) {
+    :global(.sheet.wide.split:has(.cs-split)) {
+      width: min(1320px, 94vw);
+      max-width: 94vw;
+      height: min(760px, calc(100dvh - var(--space-8)));
+    }
+  }
   .cs-split {
     display: grid;
     grid-template-columns: minmax(360px, 5fr) 6fr;

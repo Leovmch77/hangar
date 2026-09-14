@@ -225,10 +225,30 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     const { comp } = montar();
     await flush();
     await escolherPasta();
+    const cab = document.querySelector('.mais-cab') as HTMLElement;
+    expect(cab.textContent).toContain(m.criar_subagente_padrao());
+    cab.click();
+    await flush();
     await escolherNoCombo('#subagent-pick', 'sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet');
+    unmount(comp);
+  });
+
+  it('cartão "Sem terminal" cria a sessão sem terminal', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    const cartoes = [...document.querySelectorAll('.modo')] as HTMLElement[];
+    expect(cartoes.map((c) => c.getAttribute('aria-pressed'))).toEqual(['true', 'false']);
+    cartoes[1].click();
+    await flush();
+    expect(cartoes[1].getAttribute('aria-pressed')).toBe('true');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls.at(-1)?.[9]).toBe(true);
     unmount(comp);
   });
 
@@ -648,6 +668,8 @@ describe('CreateSessionSheet — retomar conversa da pasta', () => {
     await escolherPasta();
     expect(api.getArchivePorCwd).toHaveBeenCalledWith('/tmp/x', null, 'claude');
 
+    (document.querySelector('.mais-cab') as HTMLElement).click();
+    await flush();
     (document.querySelector('.retomar-check input') as HTMLInputElement).click();
     await flush();
     await (document.querySelector('#conversa-pick') as HTMLElement).click();
