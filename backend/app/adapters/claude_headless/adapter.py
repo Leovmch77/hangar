@@ -547,8 +547,10 @@ class ClaudeHeadlessAdapter:
         if sess.leitor is not None:
             try:
                 await asyncio.wait_for(sess.leitor, 5)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
+            except Exception:
+                _log.exception("claude headless: leitor falhou ao encerrar name=%s", sess.name)
 
     # ── processo ────────────────────────────────────────────────────────────────────────────
     # O `claude` não é filho do backend: é filho do CANO (cano.py), um processo por sessão que
