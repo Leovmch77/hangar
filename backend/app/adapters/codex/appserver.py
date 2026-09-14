@@ -5,6 +5,7 @@ visiveis no tmux, ``start_shared()`` abre um listener WebSocket somente em 127.0
 TUI ``codex --remote`` conectam ao MESMO app-server, portanto a TUI fica anexavel sem trocar os
 eventos estruturados por scraping de terminal."""
 import asyncio
+import collections
 import contextlib
 import json
 import logging
@@ -42,6 +43,10 @@ class AppServerClient:
         # True quando o read loop encerrou (EOF do processo / close()). Deixa o adapter distinguir
         # "app-server morreu" de "sem mais notifications no momento" -> emite estado dead (Task 5).
         self._closed = False
+        # Só quando o app-server roda atrás de um cano (sessão sem terminal): cauda do stderr e o
+        # código de saída dele, pra dizer na tela por que a sessão morreu.
+        self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
+        self.rc_cano: int | None = None
 
     @property
     def closed(self) -> bool:
@@ -174,6 +179,13 @@ class AppServerClient:
                     msg = json.loads(raw)
                     if not isinstance(msg, dict):
                         continue  # JSON valido mas nao-objeto (ex: "42", "[]") - ignora
+                    tipo_cano = msg.get("type")
+                    if tipo_cano == "cano_stderr":
+                        self.stderr_tail.append(str(msg.get("linha", "")))
+                        continue
+                    if tipo_cano == "cano_saiu":
+                        self.rc_cano = msg.get("rc")
+                        break  # o app-server atrás do cano saiu: mesmo fim que o EOF
                     msg_id = msg.get("id")
                     if "method" in msg:
                         # Os dois lados numeram pedidos independentemente: o método distingue

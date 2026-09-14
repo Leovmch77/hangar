@@ -778,35 +778,9 @@ class ClaudeHeadlessAdapter:
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
         if meta.get("subagent_model"):
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = meta["subagent_model"]
-        exe = shutil.which(argv[0])
-        if exe is None:
-            raise RuntimeError(f"binário não encontrado: {argv[0]}")
-        # Caminho resolvido: no Windows o `hangar-engine` é `.CMD`, e o CreateProcess do cano não
-        # acha o nome sem extensão (WinError 2) — sessão com motor não subia.
-        argv = [exe, *argv[1:]]
-        escuta, token = _escuta_nova(meta["key"])
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
-        cmd = [sys.executable, str(_CANO_PY), "--escuta", escuta, "--log", str(log), "--cwd", meta["cwd"]]
-        if token:
-            cmd += ["--token", token]
-        cmd += ["--", *argv]
-        extra: dict = {}
-        if os.name == "nt":
-            extra["creationflags"] = _FLAGS_WINDOWS
-        else:
-            extra["start_new_session"] = True
-            # Escopo transiente do systemd: fora do cgroup do serviço, senão o `systemctl restart`
-            # mata o cano junto (mesmo motivo do tmux._scope_prefix).
-            from app import tmux
-            cmd = tmux._scope_prefix() + cmd
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=meta["cwd"], env=env,
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            **extra)
-        ceifador = asyncio.create_task(proc.wait())      # só pra não deixar zumbi
-        self._tarefas.add(ceifador)
-        ceifador.add_done_callback(self._tarefas.discard)
-        cano = {"pid": proc.pid, "escuta": escuta, "token": token}
+        cano, proc = await subir_cano_processo(argv, cwd=meta["cwd"], env=env, key=meta["key"], log=log,
+                                               tarefas=self._tarefas)
         sess.meta = hl_sessions.update(sess.name, cano=cano) or {**meta, "cano": cano}
         ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
         if ligado is None:
@@ -1851,13 +1825,48 @@ def _esquecer_cano(name: str, pid: int | None) -> None:
         hl_sessions.update(name, cano=None)
 
 
-def _escuta_nova(key: str) -> tuple[str, str | None]:
+async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str, log: Path,
+                              tarefas: set | None = None) -> tuple[dict, asyncio.subprocess.Process]:
+    """Sobe um cano com `argv` como filho, fora do cgroup do backend. Devolve o dict `cano` do
+    sidecar (pid, escuta, token) e o processo. Serve a qualquer sessão sem terminal (Claude, Codex)."""
+    exe = shutil.which(argv[0])
+    if exe is None:
+        raise RuntimeError(f"binário não encontrado: {argv[0]}")
+    # Caminho resolvido: no Windows o `hangar-engine` é `.CMD`, e o CreateProcess do cano não
+    # acha o nome sem extensão (WinError 2) — sessão com motor não subia.
+    argv = [exe, *argv[1:]]
+    escuta, token = _escuta_nova(key, log.parent)
+    cmd = [sys.executable, str(_CANO_PY), "--escuta", escuta, "--log", str(log), "--cwd", cwd]
+    if token:
+        cmd += ["--token", token]
+    cmd += ["--", *argv]
+    extra: dict = {}
+    if os.name == "nt":
+        extra["creationflags"] = _FLAGS_WINDOWS
+    else:
+        extra["start_new_session"] = True
+        # Escopo transiente do systemd: fora do cgroup do serviço, senão o `systemctl restart`
+        # mata o cano junto (mesmo motivo do tmux._scope_prefix).
+        from app import tmux
+        cmd = tmux._scope_prefix() + cmd
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=cwd, env=env,
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        **extra)
+    ceifador = asyncio.create_task(proc.wait())      # só pra não deixar zumbi
+    if tarefas is not None:
+        tarefas.add(ceifador)
+        ceifador.add_done_callback(tarefas.discard)
+    return {"pid": proc.pid, "escuta": escuta, "token": token}, proc
+
+
+def _escuta_nova(key: str, pasta: Path | None = None) -> tuple[str, str | None]:
     """Endereço do cano de uma sessão nova: socket unix na pasta dos sidecars (Linux/mac), TCP em
     loopback com token onde não há socket unix ou o caminho passa do limite do kernel."""
     if os.name != "nt":
         # Sufixo por subida: o cano anterior (mesma chave) pode ainda estar morrendo, e um path
         # igual faria o novo roubar o socket dele. A limpeza vai por `cano-<chave>*`.
-        caminho = hl_sessions._dir() / f"cano-{key[:16]}-{uuid.uuid4().hex[:4]}.sock"
+        caminho = (pasta or hl_sessions._dir()) / f"cano-{key[:16]}-{uuid.uuid4().hex[:4]}.sock"
         if len(str(caminho).encode()) < 100:
             return f"unix:{caminho}", None
     import socket

@@ -120,6 +120,13 @@ class Cano:
             self.pendentes.clear()
         elif t == "rate_limit_event":
             self.rate_limit = linha
+        elif "method" in ev:
+            # JSON-RPC (app-server do Codex): pedido do servidor tem method + id; a resolução vem
+            # como notificação própria quando outro cliente responde.
+            if ev.get("id") is not None:
+                self.pendentes[str(ev["id"])] = linha
+            elif ev["method"] == "serverRequest/resolved":
+                self.pendentes.pop(str((ev.get("params") or {}).get("requestId")), None)
 
     def _observar_cliente(self, linha: str) -> None:
         try:
@@ -134,6 +141,8 @@ class Cano:
         elif t == "control_response":
             rid = (ev.get("response") or {}).get("request_id")
             self.pendentes.pop(str(rid), None)
+        elif t is None and "method" not in ev and ev.get("id") is not None:
+            self.pendentes.pop(str(ev["id"]), None)      # resposta JSON-RPC a um pedido do servidor
 
     # ── cliente ────────────────────────────────────────────────────────────────────────────
 

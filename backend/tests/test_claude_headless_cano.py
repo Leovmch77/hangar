@@ -146,6 +146,65 @@ def test_saida_do_claude_sem_cliente_fica_no_snapshot(cano):
     proc.wait(timeout=5)
 
 
+_APP_SERVER_FALSO = r'''
+import json, sys
+def out(o):
+    sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
+for linha in sys.stdin:
+    ev = json.loads(linha)
+    if ev.get("method") == "turn/start":
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"turn": {"id": "t1"}}})
+        out({"jsonrpc": "2.0", "id": 0, "method": "item/commandExecution/requestApproval",
+             "params": {"threadId": "th", "itemId": "i1", "command": "touch x"}})
+        out({"jsonrpc": "2.0", "id": 1, "method": "item/fileChange/requestApproval",
+             "params": {"threadId": "th", "itemId": "i2"}})
+    elif "method" not in ev and ev.get("id") is not None:
+        out({"jsonrpc": "2.0", "method": "serverRequest/resolved", "params": {"threadId": "th", "requestId": ev["id"]}})
+        if ev["id"] == 1:
+            out({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "th"}})
+'''
+
+
+def test_pedido_jsonrpc_do_servidor_fica_pendente_no_snapshot(tmp_path):
+    if os.name == "nt":
+        pytest.skip("socket unix")
+    falso = tmp_path / "app_server_falso.py"
+    falso.write_text(_APP_SERVER_FALSO, encoding="utf-8")
+    sock = tmp_path / "c.sock"
+    p = subprocess.Popen([sys.executable, str(CANO), "--escuta", f"unix:{sock}", "--log", str(tmp_path / "cano.log"),
+                          "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if sock.exists():
+                break
+            time.sleep(0.05)
+        a = _Cliente(sock)
+        a.le()
+        a.manda({"jsonrpc": "2.0", "id": 7, "method": "turn/start", "params": {}})
+        assert a.le()["id"] == 7
+        assert a.le()["method"] == "item/commandExecution/requestApproval"
+        assert a.le()["method"] == "item/fileChange/requestApproval"
+        a.manda({"jsonrpc": "2.0", "id": 0, "result": {"decision": "accept"}})    # respondeu um só
+        assert a.le()["method"] == "serverRequest/resolved"
+        a.fecha()
+        time.sleep(0.2)
+        b = _Cliente(sock)
+        snap = b.le()
+        assert [json.loads(x)["id"] for x in snap["pendentes"]] == [1]
+        b.manda({"jsonrpc": "2.0", "id": 1, "result": {"decision": "decline"}})
+        b.le(); b.le()
+        b.fecha()
+        time.sleep(0.2)
+        c = _Cliente(sock)
+        assert c.le()["pendentes"] == []
+        c.fecha()
+    finally:
+        if p.poll() is None:
+            p.kill()
+        p.wait()
+
+
 def test_token_errado_e_recusado(tmp_path):
     if os.name == "nt":
         pytest.skip("socket unix")
