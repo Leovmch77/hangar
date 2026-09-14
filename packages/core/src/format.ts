@@ -754,6 +754,52 @@ export function toolGroupLabel(names: (string | null | undefined)[]): string {
   return names.every((n) => (n ?? m.formato_tool_generico()) === first) ? first : m.lista_ferramentas();
 }
 
+type FamiliaTool = 'leu' | 'buscou' | 'editou' | 'criou' | 'rodou' | 'outra';
+
+function familiaTool(nome: string | null | undefined): FamiliaTool {
+  switch (nome) {
+    case 'Read': case 'NotebookRead': return 'leu';
+    case 'Grep': case 'Glob': case 'WebSearch': case 'WebFetch': return 'buscou';
+    case 'Edit': case 'MultiEdit': case 'NotebookEdit': return 'editou';
+    case 'Write': return 'criou';
+    case 'Bash': case 'exec': case 'exec_command': return 'rodou';
+    default: return 'outra';
+  }
+}
+
+// Verbo da linha de uma chamada ("Leu adapter.py", "Rodou uv run…"); ferramenta sem família conhecida
+// mostra o próprio nome, que é o que identifica um MCP ou um Agent.
+export function toolVerbo(nome: string | null | undefined): string {
+  switch (familiaTool(nome)) {
+    case 'leu': return m.tool_verbo_leu();
+    case 'buscou': return m.tool_verbo_buscou();
+    case 'editou': return m.tool_verbo_editou();
+    case 'criou': return m.tool_verbo_criou();
+    case 'rodou': return m.tool_verbo_rodou();
+    default: return nome ?? m.formato_tool_generico();
+  }
+}
+
+// Título de um grupo de chamadas. O transcript não tem título de grupo: o `description` que o modelo
+// escreve no Bash é a única frase dele sobre a intenção, então vence; sem ele, a contagem por família.
+export function toolGroupTitulo(tools: { tool_name?: string | null; tool_input?: Record<string, unknown> | null }[]): string {
+  for (let i = tools.length - 1; i >= 0; i--) {
+    const d = tools[i].tool_input?.['description'];
+    if (tools[i].tool_name === 'Bash' && typeof d === 'string' && d.trim()) return d.trim();
+  }
+  const n: Record<FamiliaTool, number> = { leu: 0, buscou: 0, editou: 0, criou: 0, rodou: 0, outra: 0 };
+  for (const t of tools) n[familiaTool(t.tool_name)]++;
+  const partes: string[] = [];
+  if (n.leu) partes.push(n.leu === 1 ? m.tool_titulo_leu_1() : m.tool_titulo_leu({ n: n.leu }));
+  if (n.buscou) partes.push(n.buscou === 1 ? m.tool_titulo_buscou_1() : m.tool_titulo_buscou({ n: n.buscou }));
+  if (n.editou) partes.push(n.editou === 1 ? m.tool_titulo_editou_1() : m.tool_titulo_editou({ n: n.editou }));
+  if (n.criou) partes.push(n.criou === 1 ? m.tool_titulo_criou_1() : m.tool_titulo_criou({ n: n.criou }));
+  if (n.rodou) partes.push(n.rodou === 1 ? m.tool_titulo_rodou_1() : m.tool_titulo_rodou({ n: n.rodou }));
+  if (n.outra) partes.push(n.outra === 1 ? m.tool_titulo_outra_1() : m.tool_titulo_outras({ n: n.outra }));
+  const texto = partes.join(' · ');
+  return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
+
 // Contagem por fase no cabeçalho do grupo ("2 rodando • 3 concluídos"), na ordem rodando → ok → erro.
 export function toolGroupCounts(phases: ToolPhase[]): string {
   const n = { pending: 0, done: 0, error: 0 };

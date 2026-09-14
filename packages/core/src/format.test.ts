@@ -5,7 +5,7 @@ import {
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag,
   untrackedReason,
-  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts,
+  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
   parseFilePaths,
@@ -857,6 +857,24 @@ describe('toolGroupLabel', () => {
   it('sem nome -> nao quebra', () => {
     expect(toolGroupLabel([null, null])).toBe('Tool');
     expect(toolGroupLabel([null, 'Read'])).toBe('Ferramentas');
+  });
+});
+
+describe('toolGroupTitulo', () => {
+  it('description do Bash vence a contagem', () => {
+    expect(toolGroupTitulo([
+      { tool_name: 'Read', tool_input: { file_path: 'a.py' } },
+      { tool_name: 'Bash', tool_input: { command: 'uv run pytest', description: 'Roda a suíte' } },
+    ])).toBe('Roda a suíte');
+  });
+  it('sem description -> contagem por família, primeira letra maiúscula', () => {
+    expect(toolGroupTitulo([
+      { tool_name: 'Read' }, { tool_name: 'Read' }, { tool_name: 'Grep' }, { tool_name: 'mcp__x' },
+    ])).toBe('Leu 2 arquivos · fez 1 busca · 1 outra');
+  });
+  it('verbo por família e nome cru pro resto', () => {
+    expect(toolVerbo('Bash')).toBe('Rodou');
+    expect(toolVerbo('mcp__x')).toBe('mcp__x');
   });
 });
 

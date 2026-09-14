@@ -415,6 +415,15 @@
     pensamentoTimer = undefined;
     pensamentoVivo = '';
   }
+  // Chamada de ferramenta cujo pedido ainda está sendo escrito (SSE 'ferramenta'). Mesmo trato do
+  // pensamento: quem a tira de cena é o `tool_use` real do transcript.
+  let ferramentaViva = $state<{ nome: string; input: Record<string, unknown> } | null>(null);
+  let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
+  function limparFerramenta() {
+    clearTimeout(ferramentaTimer);
+    ferramentaTimer = undefined;
+    ferramentaViva = null;
+  }
   function dropPreviewSoon() {
     if (previewDropTimer !== undefined || !previewText) return;
     previewDropTimer = setTimeout(() => { previewDropTimer = undefined; previewText = ''; }, 5000);
@@ -1817,6 +1826,7 @@
           // Folds incrementais: evento NOVO alimenta o painel de atividade e o contador de
           // assistant_msg (replaces do replay não passam aqui -> não contam dobrado).
           if (ev.kind === 'thinking' && pensamentoVivo) limparPensamento();
+          if (ev.kind === 'tool_use' && ferramentaViva) limparFerramenta();
           if (ev.kind === 'tool_use' || ev.kind === 'tool_result') {
             actFolder.push(ev);
             activity = actFolder.snapshot();
@@ -1965,6 +1975,23 @@
       }
     });
 
+    es.addEventListener('ferramenta', (e) => {
+      noteAlive();
+      try {
+        const t = (JSON.parse(e.data) as { text?: string }).text ?? '';
+        if (t) {
+          clearTimeout(ferramentaTimer);
+          ferramentaTimer = undefined;
+          const v = JSON.parse(t) as { nome?: string; input?: Record<string, unknown> };
+          ferramentaViva = { nome: v.nome ?? 'tool', input: v.input ?? {} };
+        } else if (ferramentaViva && ferramentaTimer === undefined) {
+          ferramentaTimer = setTimeout(limparFerramenta, 3000);
+        }
+      } catch {
+        quadroFalhou('ferramenta');
+      }
+    });
+
     // Reset de sessao (ex: /clear): o backend trocou de transcript. O dedup-por-id NAO limparia as
     // bolhas antigas (ids diferentes) -> zera tudo e recarrega o history do jsonl novo (vem limpo).
     es.addEventListener('reset', () => {
@@ -1984,6 +2011,7 @@
       cancelPreviewDrop();
       previewText = '';
       limparPensamento();
+      limparFerramenta();
       stateEvent = null;
       statsEvent = null;      // transcript novo -> a faixa zera junto (o backend recomeça o fold)
       loadHistory(false);
@@ -2761,6 +2789,7 @@
       previewFull={previewFull}
       previewVivo={previewVivo}
       pensamento={pensamentoVivo}
+      ferramenta={ferramentaViva}
       onSelectOption={handleSelect}
       onSubmitSelected={handleSubmitSelected}
       onCancel={handleInterrupt}

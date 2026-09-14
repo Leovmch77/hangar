@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { extractEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
+  import { computeEditDiff, extractEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
-  import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase } from '@hangar/core';
+  import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
+  import FileIcon from './files/FileIcon.svelte';
   import { toolLook } from '../lib/toolLook.svelte';
   import { caminhoDeCodigoNoComando } from '../lib/codeFromBash';
   import { rolagemSoAoClicar } from '../lib/rolagemSoAoClicar';
@@ -21,8 +22,14 @@
     animate?: boolean;   // false = card de HISTORICO remontado (paginacao/janela): sem fade
     /** true = desenha SÓ o detalhe (diff/saída/imagem); quem chama já mostrou a chamada. */
     soDetalhe?: boolean;
+    /** Linha de um grupo (pele 'chips'): desenha o conector em L; `ultimo` encerra o tronco. */
+    emGrupo?: boolean;
+    ultimo?: boolean;
+    /** Chamada cujo pedido o modelo ainda escreve (Claude sem terminal). */
+    escrevendo?: boolean;
   }
-  let { event, result = null, sessionName, animate = true, soDetalhe = false }: Props = $props();
+  let { event, result = null, sessionName, animate = true, soDetalhe = false, emGrupo = false, ultimo = false,
+        escrevendo = false }: Props = $props();
 
   // Edit/MultiEdit/Write: o tool_input ja traz o texto antigo e o novo (no Write, o antigo e vazio
   // e sai tudo como adicao) -> da pra mostrar o DIFF (estilo Pi, lado a lado) no lugar do resultado
@@ -118,6 +125,24 @@
 
   const summary = $derived(summarizeToolInput(event.tool_name, event.tool_input));
 
+  // Ferramenta de arquivo mostra só o nome com o ícone do tipo; o caminho inteiro está no detalhe.
+  const arquivo = $derived.by(() => {
+    const t = event.tool_name ?? '';
+    if (!['Read', 'NotebookRead', 'Edit', 'MultiEdit', 'NotebookEdit', 'Write'].includes(t)) return '';
+    const p = editPath || String((event.tool_input as Record<string, unknown> | null)?.['notebook_path'] ?? '');
+    return p.split(/[\\/]/).filter(Boolean).pop() ?? '';
+  });
+  const totaisEdicao = $derived.by(() => {
+    if (!editEdits) return null;
+    let add = 0, del = 0;
+    for (const e of editEdits) {
+      const d = computeEditDiff(e.oldText, e.newText);
+      add += d.add;
+      del += d.del;
+    }
+    return { add, del };
+  });
+
   // Desfecho na 2a linha ("Pronto (38 linhas)" / "320 linhas carregadas" / 1a linha do erro).
   // Enquanto roda nao ha resultado -> a linha mostra o proprio estado.
   const outcome = $derived(summarizeToolResult(result, event.tool_name) || 'Executando…');
@@ -167,43 +192,46 @@
     {@render detalhe()}
   </div>
 {:else if toolLook.look === 'chips'}
-  <!-- Pele 'chips' (portada do beautiful-ui): UMA linha — glifo + nome + o argumento num chip +
-       o desfecho em texto apagado. O glifo vira chevron no hover (a linha fica limpa em repouso).
-       O desfecho NAO saiu: e ele que diz "Pronto (38 linhas)" e a mensagem de erro. -->
-  <div class="tc" class:noanim={!animate} class:tc--error={phase === 'error'}>
+  <!-- Pele 'chips' no desenho de lista de trabalho: verbo + alvo numa caixinha + desfecho, tudo numa
+       linha. Dentro de um grupo o conector em L faz o papel do glifo, que só volta enquanto a
+       chamada roda ou quando falha — é o que precisa chamar o olho. -->
+  <div class="tc" class:noanim={!animate} class:tc--error={phase === 'error'} class:tc--grupo={emGrupo}
+       class:tc--ultimo={ultimo}>
     <button
       type="button"
       class="tc-row"
       aria-expanded={expanded}
       onclick={() => (expanded = !expanded)}
     >
-      <span class="tc-glyph" data-phase={phase} class:pending={phase === 'pending'}>
-        <ToolGlyph tool={event.tool_name} />
-        <svg class="tc-chevron" class:open={expanded} width="12" height="12" viewBox="0 0 24 24"
-             fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"
-             stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-      </span>
-      <span class="tc-label">{event.tool_name ?? m.formato_tool_generico()}</span>
-      {#if isBackground}<span class="tr-badge">{m.tool_background()}</span>{/if}
-      <!-- O chip TOMA o resto da linha (flex:1), como no original — é o que dá o desenho; pílula do
-           tamanho do texto deixa a linha frouxa e desalinhada entre chamadas. Sem argumento ele
-           some e o desfecho ocupa o lugar, senão sobra um retângulo vazio. -->
-      {#if summary}
-        <span class="tc-chip">{summary}</span>
-      {:else}
-        <span class="tc-chip tc-chip--vazio">{outcome}</span>
+      {#if !emGrupo || phase !== 'done' || escrevendo}
+        <span class="tc-glyph" data-phase={phase} class:vivo={phase === 'pending'}>
+          <ToolGlyph tool={event.tool_name} />
+        </span>
       {/if}
-      <!-- Erro é a ÚNICA coisa que fica na linha além do chip: precisa aparecer sem abrir. -->
-      {#if phase === 'error'}<span class="tc-erro">{outcome}</span>{/if}
+      <span class="tc-label">{toolVerbo(event.tool_name)}</span>
+      {#if isBackground}<span class="tr-badge">{m.tool_background()}</span>{/if}
+      {#if arquivo}
+        <span class="tc-chip"><FileIcon nome={arquivo} /><span class="tc-chip-txt">{arquivo}</span></span>
+      {:else if summary}
+        <span class="tc-chip tc-chip--cmd"><span class="tc-chip-txt">{summary}</span>{#if escrevendo}<i class="tc-caret"></i>{/if}</span>
+      {/if}
+      {#if escrevendo}
+        <span class="tc-fim">{m.tool_fase_escrevendo()}</span>
+      {:else if phase === 'pending'}
+        <span class="tc-fim tc-brilho">{m.tool_fase_rodando()}</span>
+      {:else if phase === 'error'}
+        <span class="tc-erro">{outcome}</span>
+      {:else if totaisEdicao}
+        <span class="tc-fim"><span class="tc-add">+{totaisEdicao.add}</span>{#if totaisEdicao.del} <span class="tc-del">−{totaisEdicao.del}</span>{/if}</span>
+      {:else}
+        <span class="tc-fim">{outcome}</span>
+      {/if}
     </button>
 
-    <!-- grid 0fr -> 1fr: a altura anima sozinha, sem medir nada no JS (o truque do original). -->
+    <!-- grid 0fr -> 1fr: a altura anima sozinha, sem medir nada no JS. -->
     <div class="tc-wrap" style:grid-template-rows={expanded ? '1fr' : '0fr'} style:opacity={expanded ? 1 : 0}>
       <div class="tc-clip">
         <div class="tc-detail">
-          <!-- O desfecho saiu da linha e virou a 1a linha do detalhe: no original a linha é só
-               glifo + rótulo + chip, e é isso que a deixa limpa. A informação não se perdeu. -->
-          {#if phase !== 'error'}<div class="tc-desfecho">{outcome}</div>{/if}
           {@render detalhe()}
         </div>
       </div>
@@ -283,9 +311,7 @@
   /* Sem faixa opaca no hover: com papel de parede ela virava um bloco escuro atravessando a linha,
      que é justamente o que destoava do tema. Quem sinaliza o hover é o chip perdendo a caixa. */
 
-  /* Glifo e chevron ocupam a MESMA caixa: um troca pelo outro sem a linha pular. */
   .tc-glyph {
-    position: relative;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -296,44 +322,30 @@
   }
   .tc-glyph[data-phase='pending'] { color: var(--accent); }
   .tc-glyph[data-phase='error']   { color: var(--error); }
-  .tc-glyph.pending { animation: pulse-scale 1.2s ease-in-out infinite; }
-
-  .tc-glyph :global(svg:first-child) { transition: opacity 100ms var(--ease-out); }
-  .tc-chevron {
-    position: absolute;
-    opacity: 0;
-    transition: opacity 150ms var(--ease-out), transform 150ms var(--ease-out);
-    transform: rotate(-90deg);
+  .tc-glyph.vivo { animation: tc-respira 1.8s ease-in-out infinite; }
+  @keyframes tc-respira {
+    0%, 100% { opacity: 0.45; }
+    50%      { opacity: 1; }
   }
-  .tc-chevron.open { opacity: 1; transform: rotate(0deg); }
-  .tc-row:hover .tc-chevron { opacity: 1; }
-  .tc-row:hover .tc-glyph :global(svg:first-child) { opacity: 0; }
-  .tc-glyph:has(.tc-chevron.open) :global(svg:first-child) { opacity: 0; }
 
-  /* Medidas lidas do computed style do original: 12.5px / peso 500 / cor de texto PRIMÁRIA (não a
-     secundária — é o rótulo que ancora a linha; apagado ele some ao lado do chip). */
   .tc-label {
     flex-shrink: 0;
     font-size: 12.5px;
-    font-weight: 500;
-    color: var(--text);
+    color: var(--text-muted);
   }
+  .tc-row:hover .tc-label { color: var(--text-secondary); }
+  .tc:has(.tc-glyph.vivo) .tc-label { color: var(--text-primary); }
 
-  /* O chip é RETÂNGULO arredondado que TOMA o resto da linha (flex:1), não pílula do tamanho do
-     texto: é o que alinha uma chamada embaixo da outra e dá o desenho do original. 22px de altura,
-     fio de contorno em vez de sombra (o app não tem token de sombra de chip). */
+  /* Caixinha do tamanho do alvo, com teto: comprida demais ela atravessava a conversa. */
   .tc-chip {
     display: inline-flex;
     align-items: center;
-    /* Cresce, mas PARA. O flex:1 do original vive num cartão de ~370px; num chat largo ele virava
-       barra de 590px atravessando a tela. O teto mantém a proporção do desenho deles em qualquer
-       largura de coluna. */
-    flex: 1 1 0%;
-    max-width: 380px;
+    gap: 5px;
     min-width: 0;
-    height: 22px;
-    padding: 0 6px;
-    border-radius: 6px;
+    max-width: 360px;
+    height: 20px;
+    padding: 0 6px 0 4px;
+    border-radius: 5px;
     background: var(--fill-subtle);
     box-shadow: 0 0 0 1px var(--border-subtle);
     font-family: var(--font-mono);
@@ -341,37 +353,82 @@
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
-    transition: background-color 120ms var(--ease-out), box-shadow 120ms var(--ease-out),
-                max-width 160ms var(--ease-out);
   }
+  .tc-chip :global(.fi) { width: 14px; height: 14px; }
+  .tc-chip--cmd { padding-left: 6px; }
+  .tc-chip-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .tc-row:hover .tc-chip { color: var(--text-primary); }
 
-  /* No hover a caixa FICA (é ela que dá o desenho) e o chip solta o teto de 380px pra mostrar a
-     linha inteira. Sem quebra em várias linhas de propósito: embrulhar aumentaria a altura e
-     empurraria a conversa pra baixo do ponteiro. */
-  .tc-row:hover .tc-chip,
-  .tc-row:focus-visible .tc-chip {
-    max-width: none;
-    color: var(--text);
+  .tc-caret {
+    flex-shrink: 0;
+    width: 6px;
+    height: 11px;
+    margin-left: 1px;
+    background: var(--accent);
+    animation: tc-pisca 1s steps(1) infinite;
   }
-  /* Sem argumento (TodoWrite e afins): o chip carrega o desfecho, em texto normal, pra a linha não
-     ficar com um retângulo vazio. */
-  .tc-chip--vazio { font-family: inherit; color: var(--text-muted); }
+  @keyframes tc-pisca { 50% { opacity: 0; } }
+
+  .tc-fim {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .tc-add { color: var(--success); }
+  .tc-del { color: var(--error); margin-left: 4px; }
+  .tc-brilho {
+    background-image:
+      linear-gradient(90deg, transparent calc(50% - 22px), var(--text-primary) 50%, transparent calc(50% + 22px)),
+      linear-gradient(var(--accent), var(--accent));
+    background-size: 250% 100%, auto;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: tc-varre 1.6s linear infinite;
+  }
+  @keyframes tc-varre {
+    from { background-position: 100% center; }
+    to   { background-position: 0% center; }
+  }
 
   .tc-erro {
-    flex-shrink: 0;
+    min-width: 0;
     max-width: 45%;
+    font-size: 11.5px;
     color: var(--error);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  /* Desfecho, agora dentro do detalhe. */
-  .tc-desfecho {
-    margin-bottom: var(--space-1);
-    font-size: 11.5px;
-    color: var(--text-muted);
+  /* Linha de grupo: conector em L até a linha, e o tronco segue até a próxima (menos na última). */
+  .tc--grupo { position: relative; padding-left: 22px; }
+  .tc--grupo::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 0;
+    height: 14px;
+    width: 10px;
+    border-left: 1px solid var(--border-default);
+    border-bottom: 1px solid var(--border-default);
+    border-bottom-left-radius: 5px;
+  }
+  .tc--grupo:not(.tc--ultimo)::after {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 14px;
+    bottom: 0;
+    border-left: 1px solid var(--border-default);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tc-glyph.vivo, .tc-caret, .tc-brilho { animation: none; }
+    .tc-brilho { background: none; color: var(--accent); }
   }
 
   .tc-wrap {
