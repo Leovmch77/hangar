@@ -936,10 +936,54 @@ class CodexAdapter:
         blocking = pending(sess["client"], sess["thread_id"])
         question = blocking or sess["async_questions"].pending()
         state = "awaiting_input" if blocking or (question and sess["state"] == "idle") else sess["state"]
+        aprovacao = self._aprovacao_pendente(sess)
+        if aprovacao is not None:
+            state = "awaiting_input"
         return StateEvent(session=name, state=state,
                           status_line=self._status_line(sess), codex_mode=sess.get("mode"),
                           codex_buffering=sess.get("codex_buffering", False),
-                          codex_question=question, headless=bool(sess.get("headless")))
+                          codex_question=question, headless=bool(sess.get("headless")),
+                          question=sem_terminal.texto_da_aprovacao(aprovacao) if aprovacao else None,
+                          options=list(sem_terminal.OPCOES_APROVACAO) if aprovacao else None)
+
+    @staticmethod
+    def _aprovacao_pendente(sess: dict) -> Optional[dict]:
+        if not sess.get("headless"):
+            return None
+        for req in sess["client"].server_requests.values():
+            if req.get("method") in sem_terminal.APROVACOES:
+                return req
+        return None
+
+    def aprovacao_pendente(self, name: str) -> tuple[str | None, list[str] | None]:
+        """(pergunta, opções) do cartão de aprovação em aberto da sessão sem terminal, pra lista."""
+        sess = self._sessions.get(name)
+        req = self._aprovacao_pendente(sess) if sess else None
+        if req is None:
+            return None, None
+        return sem_terminal.texto_da_aprovacao(req), list(sem_terminal.OPCOES_APROVACAO)
+
+    async def select(self, name: str, option: int) -> bool:
+        """Resposta ao pedido de aprovação em aberto (sem terminal). False = nada pendente."""
+        sess = self._sessions.get(name)
+        req = self._aprovacao_pendente(sess) if sess else None
+        if req is None:
+            return False
+        await sess["client"].respond(req["id"], {"decision": sem_terminal.decisao(option)})
+        return True
+
+    async def _recusar_pedido(self, name: str, client: AppServerClient, req: dict) -> None:
+        metodo = req.get("method")
+        try:
+            await client.respond(req["id"], None, erro={"code": -32601,
+                                                         "message": f"{metodo} não é atendido pelo Hangar sem terminal"})
+        except Exception:
+            _log.warning("codex sem terminal: não consegui recusar %s name=%s", metodo, name, exc_info=True)
+        texto = f"O Codex pediu `{metodo}`, que a sessão sem terminal não atende; o pedido foi recusado."
+        try:
+            await asyncio.to_thread(PromptQueue(name).append_saida_local, texto)
+        except Exception:
+            _log.exception("codex sem terminal: nota local não gravada name=%s", name)
 
     def async_question_status(self, name: str) -> tuple[int, str | None]:
         sess = self._sessions.get(name)
@@ -1077,6 +1121,14 @@ class CodexAdapter:
             if sess.get("voice_events") is not None:
                 from app.codex_voice import forward
                 forward(sess, notif)
+            if sess.get("headless") and notif.get("id") is not None:
+                # Pedido do servidor: na TUI quem responde é ela; aqui é o cartão do app.
+                if notif["method"] in sem_terminal.APROVACOES:
+                    espalhar(self._question_state(name, sess))
+                    continue
+                if notif["method"] != "item/tool/requestUserInput":
+                    await self._recusar_pedido(name, client, notif)
+                    continue
             mapped = map_state(notif)
             method = notif.get("method")
             current_turn = not sess.get("turn_id") or params.get("turnId") in (None, sess["turn_id"])

@@ -46,7 +46,14 @@ for linha in sys.stdin:
              "params": {"threadId": "th-1", "turnId": "t-1", "itemId": "exec-1", "command": "touch x",
                         "cwd": "/tmp", "reason": "fora do sandbox"}})
     elif m is None and ev.get("id") == 0:
+        with open("decisao.txt", "w") as f:
+            f.write(json.dumps(ev))
         out({"jsonrpc": "2.0", "method": "serverRequest/resolved", "params": {"threadId": "th-1", "requestId": 0}})
+        out({"jsonrpc": "2.0", "id": 9, "method": "mcpServer/elicitation/request",
+             "params": {"threadId": "th-1", "serverName": "x", "message": "?"}})
+    elif m is None and ev.get("id") == 9:
+        with open("elicitacao.txt", "w") as f:
+            f.write(json.dumps(ev))
         out({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "th-1", "turn": {"id": "t-1", "status": "completed"}}})
     else:
         out({"jsonrpc": "2.0", "id": ev.get("id"), "result": {}})
@@ -62,7 +69,11 @@ def ambiente(tmp_path, monkeypatch):
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{binario}{os.pathsep}{os.environ['PATH']}")
     pasta = tmp_path / "codex-sessions"
+    fila = tmp_path / "fila"
+    fila.mkdir()
+    from app import pqueue
     with patch.object(codex_sessions, "_dir", lambda: pasta), \
+         patch.object(pqueue, "_queue_dir", lambda: fila), \
          patch.object(tmux, "_scope_prefix", lambda: []):
         yield tmp_path
 
@@ -100,14 +111,26 @@ def test_sobe_no_cano_abre_thread_e_religa_com_aprovacao_pendente(ambiente):
         assert client2 is not None and client2 is not client
         assert client2.server_requests[0]["params"]["itemId"] == "exec-1"   # veio do snapshot
         assert codex_sessions.load("cx-sem-terminal")["cano"]["pid"] == pid_cano   # mesmo cano
-        # Responder fecha o turno.
-        await client2.respond(0, {"decision": "accept"})
+        # O pedido é o cartão do app; responder pelo /select fecha o turno.
         sess = ad._sessions["cx-sem-terminal"]
-        for _ in range(50):
-            if not sess.get("in_progress"):
+        ev = ad._question_state("cx-sem-terminal", sess)
+        assert ev.state == "awaiting_input" and ev.headless is True
+        assert ev.question.startswith("Rodar `touch x` em /tmp?") and ev.options == ["Permitir", "Negar", "Sempre permitir"]
+        assert ad.aprovacao_pendente("cx-sem-terminal")[0] == ev.question
+        assert await ad.select("cx-sem-terminal", 1) is True
+        for _ in range(100):
+            if (ambiente / "elicitacao.txt").exists() and not sess.get("in_progress"):
                 break
             await asyncio.sleep(0.05)
         assert not sess.get("in_progress")
+        assert json.loads((ambiente / "decisao.txt").read_text())["result"] == {"decision": "accept"}
+        # O pedido que a sessão sem terminal não atende foi recusado com -32601 e virou nota no chat.
+        recusa = json.loads((ambiente / "elicitacao.txt").read_text())
+        assert recusa["error"]["code"] == -32601
+        from app.pqueue import PromptQueue
+        notas = [e for e in PromptQueue("cx-sem-terminal").load() if e.get("papel") == "assistant"]
+        assert notas and "mcpServer/elicitation/request" in notas[-1]["text"]
+        assert await ad.select("cx-sem-terminal", 1) is False    # nada mais pendente
         ad.close_sync("cx-sem-terminal")
         for _ in range(50):
             if not Path(f"/proc/{pid_cano}").exists():

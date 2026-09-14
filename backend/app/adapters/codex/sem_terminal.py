@@ -38,6 +38,32 @@ MODOS: list[tuple[str, str, str, str]] = [
 MODO_PADRAO = "Approve for me"
 
 
+# Pedidos do servidor que viram o cartão Permitir/Negar do app. Os demais com `id`
+# (`item/permissions/requestApproval`, `mcpServer/elicitation/request`, `item/tool/call`…) não têm
+# tela aqui e recebem -32601, nunca um sucesso vazio calado.
+APROVACOES = ("item/commandExecution/requestApproval", "item/fileChange/requestApproval")
+OPCOES_APROVACAO = ["Permitir", "Negar", "Sempre permitir"]
+
+
+def texto_da_aprovacao(req: dict) -> str:
+    p = req.get("params") or {}
+    if req.get("method") == "item/fileChange/requestApproval":
+        alvo = "Editar arquivos"
+        if p.get("grantRoot"):
+            alvo += f" em {p['grantRoot']}"
+    else:
+        alvo = f"Rodar `{p.get('command') or '?'}`"
+        if p.get("cwd"):
+            alvo += f" em {p['cwd']}"
+    motivo = p.get("reason")
+    return f"{alvo}?" + (f" {motivo}" if motivo else "")
+
+
+def decisao(option: int) -> str:
+    """1 = permitir, 2 = negar, 3 = permitir e não perguntar de novo nesta sessão."""
+    return {1: "accept", 3: "acceptForSession"}.get(option, "decline")
+
+
 def politica(modo: str | None) -> tuple[str, str]:
     """(approval_policy, sandbox_mode) do modo do app; modo desconhecido cai no padrão."""
     for nome, approval, sandbox, _ in MODOS:

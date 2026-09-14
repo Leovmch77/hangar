@@ -4143,11 +4143,13 @@ def select(name: str, body: SelectBody):
     info = _cached_info_sync(name)
     if getattr(info, "provider", "claude") == "kimi":
         return _select_aprovacao_kimi(name, info, body.option)
-    if _headless(name):
+    codex_sem_terminal = getattr(info, "provider", "claude") == "codex" and getattr(info, "headless", False)
+    if _headless(name) or codex_sem_terminal:
         # Opção = resposta ao pedido de permissão em aberto (1 permite, 2 nega), pelo stdin.
         if _loop_servidor is None or not _loop_servidor.is_running():
             raise HTTPException(503, detail=erro("erro_opcao_nao_convergiu", "servidor sem loop pra responder"))
-        fut = asyncio.run_coroutine_threadsafe(get_adapter(CLAUDE_HEADLESS).select(name, body.option), _loop_servidor)
+        adapter = get_adapter("codex" if codex_sem_terminal else CLAUDE_HEADLESS)
+        fut = asyncio.run_coroutine_threadsafe(adapter.select(name, body.option), _loop_servidor)
         try:
             ok = fut.result(timeout=15)
         except Exception as e:

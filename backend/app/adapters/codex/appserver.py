@@ -237,14 +237,16 @@ class AppServerClient:
             self._respondendo.clear()
             self._notifications.put_nowait(None)
 
-    async def respond(self, request_id: int | str, result: dict) -> None:
-        """Responde uma vez ao pedido nativo; o servidor publica a resolução para todos."""
+    async def respond(self, request_id: int | str, result: dict | None, *, erro: dict | None = None) -> None:
+        """Responde uma vez ao pedido nativo; o servidor publica a resolução para todos.
+        `erro` responde com erro JSON-RPC (método que este cliente não atende) em vez de result."""
         if self.closed or request_id not in self.server_requests:
             raise ValueError("A pergunta já foi respondida ou cancelada.")
         if request_id in self._respondendo:
             raise ValueError("A resposta desta pergunta já está sendo enviada.")
         self._respondendo.add(request_id)
-        line = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})
+        corpo = {"error": erro} if erro is not None else {"result": result}
+        line = json.dumps({"jsonrpc": "2.0", "id": request_id, **corpo})
         try:
             if self._ws is not None:
                 await self._ws.send(line)

@@ -1372,6 +1372,10 @@ class SessionRegistry:
                 info.pending_questions, info.question = get_adapter("codex").async_question_status(info.name)
                 if info.pending_questions and info.state == "idle":
                     info.state = "awaiting_input"
+                if info.headless:
+                    pergunta, opcoes = get_adapter("codex").aprovacao_pendente(info.name)
+                    if pergunta:
+                        info.state, info.question, info.options = "awaiting_input", pergunta, opcoes
                 continue
             if getattr(info, "headless", False):
                 # Claude sem terminal: NUNCA raspa pane (não há). Processo vivo responde pelo
