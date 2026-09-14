@@ -18,6 +18,10 @@
 
   // Só a cauda: o CSS mostra três linhas, e o resumo inteiro no DOM a cada pedaço é trabalho à toa.
   const cauda = $derived(texto.length > 600 ? '…' + texto.slice(-600) : texto);
+  // O degradê de cima só quando o texto passa de três linhas — com uma ou duas ele apagava a
+  // primeira. 12.5px × 1.6 × 3, os mesmos valores do CSS abaixo.
+  const ALTURA_MAX = 12.5 * 1.6 * 3;
+  let alturaTexto = $state(0);
 </script>
 
 <div class="pv" role="status" aria-live="off">
@@ -26,7 +30,9 @@
     <span class="pv-rotulo">{m.pensamento_vivo()}</span>
     <span class="pv-tempo">· {segundos}s</span>
   </div>
-  <div class="pv-texto">{cauda}</div>
+  <div class="pv-texto" class:transborda={alturaTexto > ALTURA_MAX}>
+    <div bind:clientHeight={alturaTexto}>{cauda}</div>
+  </div>
 </div>
 
 <style>
@@ -84,8 +90,10 @@
     color: var(--text-muted);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 65%);
-    mask-image: linear-gradient(to bottom, transparent 0, #000 65%);
+  }
+  .pv-texto.transborda {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
   }
 
   @media (prefers-reduced-motion: reduce) {
