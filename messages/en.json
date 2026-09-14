@@ -526,6 +526,7 @@
   "sessao_travada": "May be stuck — no activity for a while",
   "problema_codex_hooks": "Working, but its state never arrives: open codex in the terminal and approve the hooks",
   "problema_headless_nao_subiu": "The Claude process did not start — check that `claude` is installed and the folder exists",
+  "problema_codex_headless_nao_subiu": "The Codex app-server did not start — check that `codex` is installed and logged in; close the session and create it again",
   "problema_headless_sem_resposta": "Claude started but never answered — usually a pending login or folder-trust prompt; open `claude` in a terminal in that folder once",
   "problema_headless_processo_caiu": "The Claude process died; the next prompt retries",
   "problema_headless_turno_erro": "The last turn ended with an error",

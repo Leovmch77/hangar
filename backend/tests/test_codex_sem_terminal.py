@@ -192,6 +192,13 @@ def test_binario_ausente_para_no_teto_de_subidas(ambiente, monkeypatch):
             with pytest.raises(RuntimeError):
                 await ad.ensure_running("cx-sem-codex")
         assert await ad.ensure_running("cx-sem-codex") is None   # desistiu, sem levantar de novo
+        # O motivo não some: a lista e o chat mostram por que a sessão está morta.
+        assert ad.problema_de("cx-sem-codex") == "codex_headless_nao_subiu"
+        ev = [e async for e in ad._state_stream("cx-sem-codex")]
+        assert ev[-1].state == "dead" and ev[-1].problema == "codex_headless_nao_subiu"
+        assert "codex" in (ev[-1].problema_detalhe or "")
+        ad.close_sync("cx-sem-codex")
+        assert ad.problema_de("cx-sem-codex") is None
     asyncio.run(corpo())
 
 

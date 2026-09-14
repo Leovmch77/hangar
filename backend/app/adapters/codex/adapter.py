@@ -396,6 +396,9 @@ class CodexAdapter:
         # Task de assinatura da thread (thread/resume com retry) — ver _subscribe_when_ready.
         self._subscribers: dict[str, asyncio.Task] = {}
         self._falhas_subida: dict[str, int] = {}
+        # Sessão sem terminal que não sobe: (código, detalhe) que a lista e o StateEvent mostram —
+        # senão o card só vira "dead" sem pista.
+        self._problemas: dict[str, tuple[str, str | None]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _start_tmux_watcher(self, name: str) -> None:
@@ -768,6 +771,8 @@ class CodexAdapter:
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
         falhas = self._falhas_subida.get(name, 0)
         if falhas >= self.TETO_SUBIDAS:
+            # Desistiu: o motivo da última queda fica em _problemas; o watch_sessions continua
+            # passando, mas sem spawn nem log a cada 2s. Só ação do usuário (encerrar) reabre.
             return None
         sem_terminal.matar(meta)
         try:
@@ -804,10 +809,16 @@ class CodexAdapter:
             self._falhas_subida[name] = falhas + 1
             sem_terminal.matar(codex_sessions.load(name))
             codex_sessions.update(name, cano=None)
-            _log.warning("codex sem terminal: subida %d/%d falhou name=%s: %s",
-                         falhas + 1, self.TETO_SUBIDAS, name, exc)
+            self._problemas[name] = ("codex_headless_nao_subiu", str(exc)[:300])
+            if falhas + 1 >= self.TETO_SUBIDAS:
+                _log.warning("codex sem terminal: desistiu de subir após %d tentativas name=%s: %s",
+                             falhas + 1, name, exc)
+            else:
+                _log.warning("codex sem terminal: subida %d/%d falhou name=%s: %s",
+                             falhas + 1, self.TETO_SUBIDAS, name, exc)
             raise
         self._falhas_subida.pop(name, None)
+        self._problemas.pop(name, None)
         thread = result.get("thread") or {}
         thread_id = thread.get("id") or meta.get("thread_id")
         rollout = thread.get("path") or sem_terminal.rollout_de(thread_id, meta.get("codex_home"))
@@ -856,6 +867,7 @@ class CodexAdapter:
         matar_app_server(name)
         sem_terminal.matar(codex_sessions.load(name))
         self._falhas_subida.pop(name, None)
+        self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)
         watcher = self._tmux_watchers.pop(name, None)
         if watcher is not None:
@@ -888,6 +900,8 @@ class CodexAdapter:
                 self._locks[new] = lock
             if old in self._falhas_subida:
                 self._falhas_subida[new] = self._falhas_subida.pop(old)
+            if old in self._problemas:
+                self._problemas[new] = self._problemas.pop(old)
             if sess is None:
                 return
             bomba = sess.pop("bomba", None)
@@ -965,6 +979,11 @@ class CodexAdapter:
             if req.get("method") in sem_terminal.APROVACOES:
                 return req
         return None
+
+    def problema_de(self, name: str) -> str | None:
+        """Código do problema da sessão sem terminal que não sobe (pra lista)."""
+        p = self._problemas.get(name)
+        return p[0] if p else None
 
     def aprovacao_pendente(self, name: str) -> tuple[str | None, list[str] | None]:
         """(pergunta, opções) do cartão de aprovação em aberto da sessão sem terminal, pra lista."""
@@ -1081,7 +1100,10 @@ class CodexAdapter:
             # enquanto nao ha thread, e nao presta: este monitor nunca acabaria sozinho quando a
             # thread abrisse (o chat ficaria no fallback ate reconectar), e no teste ele roda pra
             # sempre, porque `has_session` ali e um mock que responde sempre "sim".
-            yield StateEvent(session=name, state="dead")
+            problema = self._problemas.get(name)
+            yield StateEvent(session=name, state="dead",
+                             problema=problema[0] if problema else None,
+                             problema_detalhe=problema[1] if problema else None)
             return
         sess = self._sessions[name]
         # A fila do app-server tem UM consumidor por sessao (a bomba); cada SSE e um ouvinte que

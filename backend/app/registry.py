@@ -1386,6 +1386,7 @@ class SessionRegistry:
                     pergunta, opcoes = get_adapter("codex").aprovacao_pendente(info.name)
                     if pergunta:
                         info.state, info.question, info.options = "awaiting_input", pergunta, opcoes
+                    info.problema = get_adapter("codex").problema_de(info.name) or info.problema
                 continue
             if getattr(info, "headless", False):
                 # Claude sem terminal: NUNCA raspa pane (não há). Processo vivo responde pelo
