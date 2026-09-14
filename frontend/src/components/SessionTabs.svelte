@@ -41,9 +41,8 @@ import * as m from '../paraglide/messages';
   let { currentKey, onSelect, onOpenConfig, onIrParaContas, ctxDisponivel = true,
         temAtualizacao = false, onAbrirAtualizar = () => {}, versao = null, atras = 0 }: Props = $props();
 
-  // A data já é a versão; o hash fica pro tooltip. "commits atrás" responde "está atualizado?"
-  // sem abrir nada — era a pergunta que ninguém conseguia responder.
-  const versaoCurta = $derived(versao ? versao.split('-')[0] : null);
+  // A versão fica só no tooltip (e no Sobre): na cara da barra era ruído, decisão do usuário.
+  // "commits atrás" responde "está atualizado?" sem abrir nada.
   const versaoTitulo = $derived(!versao ? m.atualizar_procurar_curto()
     : atras > 0 ? m.versao_atras({ versao, n: atras })
     : temAtualizacao ? m.versao_reiniciar({ versao })
@@ -224,14 +223,13 @@ import * as m from '../paraglide/messages';
        quisesse perguntar "tem atualização?" sem lugar nenhum pra clicar — e era justamente quando
        a pessoa queria olhar. O ponto no canto é que aparece e some: ele é o aviso, o botão é a
        porta. Nasceu como faixa de largura inteira e ficou pesado demais pro que é. -->
-  <button class="tab-action tab-atualizar" class:com-versao={!!versaoCurta} onclick={onAbrirAtualizar}
+  <button class="tab-action tab-atualizar" onclick={onAbrirAtualizar}
     aria-label={temAtualizacao ? m.atualizar_aviso_barra() : versaoTitulo}
     title={versaoTitulo}>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
          stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M12 5v9"/><path d="m8 10 4 4 4-4"/><path d="M5 19h14"/>
     </svg>
-    {#if versaoCurta}<span class="tab-versao">{m.versao_chip({ versao: versaoCurta })}</span>{/if}
     {#if temAtualizacao}<span class="tab-atualizar-dot" aria-hidden="true"></span>{/if}
   </button>
   <button class="tab-action" onclick={(e) => sidebarBridge.openKebab(e)} aria-haspopup="menu" aria-label={m.tabs_mais_opcoes()} title={m.tabs_buscar_arquivo_custos()}>⋯</button>
@@ -316,14 +314,6 @@ import * as m from '../paraglide/messages';
      canto — a mesma linguagem do ponto de servidor sobre a engrenagem. É recado, não alerta:
      nada de cor de fundo nem faixa própria. */
   .tab-atualizar { position: relative; }
-  /* Com a versão ao lado do ícone o botão deixa de ser quadrado: vira pílula curta, mesmo peso. */
-  .tab-atualizar.com-versao { width: auto; padding: 0 8px 0 6px; gap: 4px; }
-  .tab-versao {
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-secondary);
-    white-space: nowrap;
-  }
   .tab-atualizar-dot {
     position: absolute;
     right: 3px;

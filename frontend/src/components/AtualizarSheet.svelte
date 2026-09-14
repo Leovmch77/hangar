@@ -433,6 +433,16 @@
     {:else if temNovidade}
       <h2 class="titulo">{m.atualizar_disponivel_titulo()}</h2>
       <p class="sub">{resumo_mudancas}</p>
+      {#if dados?.versao_legivel?.backend || dados?.versao_legivel?.remoto}
+        <div class="linha">
+          <span class="rot">{m.atualizar_versao_atual()}</span>
+          <span class="val">{dados.versao_legivel.backend ?? '—'}</span>
+        </div>
+        <div class="linha">
+          <span class="rot">{m.atualizar_versao_nova()}</span>
+          <span class="val">{dados.versao_legivel.remoto ?? '—'}</span>
+        </div>
+      {/if}
 
       <p class="rotulo">{m.atualizar_o_que_vem()}</p>
       <div class="novidades">
@@ -475,14 +485,14 @@
       <p class="sub">{m.atualizar_em_dia_sub()}</p>
       <div class="linha">
         <span class="rot">{m.atualizar_versao()}</span>
-        <span class="val">{dados?.versoes.repo ?? '—'}</span>
+        <span class="val">{dados?.versao_legivel?.repo ?? dados?.versoes.repo ?? '—'}</span>
       </div>
       {#if versoesDivergem}
         <!-- Divergiu: o disco tem uma versão e o processo tem outra. Acontece entre um `git pull`
              feito na mão e o restart, e é a única hora em que este detalhe importa pra alguém. -->
         <div class="linha">
           <span class="rot">{m.atualizar_versao_servidor()}</span>
-          <span class="val">{dados?.versoes.backend ?? '—'}</span>
+          <span class="val">{dados?.versao_legivel?.backend ?? dados?.versoes.backend ?? '—'}</span>
         </div>
         <p class="aviso">{m.atualizar_precisa_reiniciar()}</p>
         {#if estado.reinicio_erro}

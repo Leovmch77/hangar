@@ -18,7 +18,7 @@ import * as m from '../paraglide/messages';
   import AttentionFeed from '../components/AttentionFeed.svelte';
   import AccountMenu from '../components/AccountMenu.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
-  import { createSession, getAtualizacao } from '@hangar/core';
+  import { createSession } from '@hangar/core';
   import { listServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
   import type { AggSession, Provider } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
@@ -83,23 +83,8 @@ import * as m from '../paraglide/messages';
   );
 
   // 1 SSE por servidor via store, refcount pareado EXATAMENTE 1x (retain no mount, release no cleanup).
-  // Versão da máquina, uma vez por montagem: o backend já faz o fetch do origin/main no laço
-  // dele; aqui é só ler. Servidor antigo (sem o campo) ou fora do ar: sem chip, sem erro.
-  let versaoMaquina = $state<string | null>(null);
-  let commitsAtras = $state(0);
-  let faltaReiniciar = $state(false);
-  const versaoTitulo = $derived(!versaoMaquina ? ''
-    : commitsAtras > 0 ? m.versao_atras({ versao: versaoMaquina, n: commitsAtras })
-    : faltaReiniciar ? m.versao_reiniciar({ versao: versaoMaquina })
-    : m.versao_em_dia({ versao: versaoMaquina }));
-
   onMount(() => {
     const off = model.mount();
-    getAtualizacao().then((d) => {
-      versaoMaquina = d.versao_legivel?.backend ?? null;
-      commitsAtras = d.atras ?? 0;
-      faltaReiniciar = d.versoes.repo !== d.versoes.backend;
-    }).catch(() => { /* sem versão, sem chip */ });
     return () => {
       // Captura a posição na SAÍDA (cinto-e-suspensório do onscroll; cleanup roda antes do DOM
       // sair). Saindo no MEIO da fase de restore, o scrollTop está parcial — mantém o alvo original.
@@ -538,21 +523,13 @@ import * as m from '../paraglide/messages';
       {/if}
     </div>
   {:else}
-    <!-- Rodapé: o CTA "Nova sessão" (a conta migrou pro drawer do hamburger) e a versão da
-         máquina — só leitura no celular: atualizar é no desktop, mas "está atualizado?" tem que
-         dar pra responder de qualquer lugar. -->
+    <!-- Rodapé: só o CTA "Nova sessão" (a conta migrou pro drawer do hamburger). A versão fica
+         em Configurações › Sobre, decisão do usuário. -->
     <footer class="sl-foot">
       <button class="cta-new" onclick={() => (showCreateSheet = true)} aria-label={m.sessao_nova()}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         {m.sessao_nova()}
       </button>
-      {#if versaoMaquina}
-        <!-- O ponto é o único sinal que existe no toque (title não abre no celular): aparece
-             tanto com commits faltando quanto com código novo esperando reinício. -->
-        <span class="sl-versao" title={versaoTitulo} aria-label={versaoTitulo}>
-          {m.versao_chip({ versao: versaoMaquina.split('-')[0] })}{#if commitsAtras > 0 || faltaReiniciar}<span class="sl-versao-dot" aria-hidden="true"></span>{/if}
-        </span>
-      {/if}
     </footer>
   {/if}
 
@@ -820,29 +797,10 @@ import * as m from '../paraglide/messages';
   /* ── Rodapé: só o CTA "Nova sessão" (a conta migrou pro drawer do hamburger). ── */
   .sl-foot {
     display: flex;
-    align-items: center;
-    gap: var(--space-3);
     flex-shrink: 0;
     padding: var(--space-3) var(--space-4) calc(env(safe-area-inset-bottom) + var(--space-3));
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-base);
-  }
-  .sl-versao {
-    position: relative;
-    margin-left: auto;
-    font-size: 11px;
-    font-variant-numeric: tabular-nums;
-    color: var(--text-tertiary, var(--text-secondary));
-    white-space: nowrap;
-  }
-  .sl-versao-dot {
-    position: absolute;
-    right: -8px;
-    top: 1px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
   }
   .cta-new {
     display: flex;

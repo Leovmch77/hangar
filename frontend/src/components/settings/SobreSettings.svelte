@@ -30,7 +30,7 @@
     estado = 'procurando';
     try {
       const d = await getAtualizacao(true);   // clique = vai à rede antes de comparar
-      versaoServidor = d.versoes.backend;
+      versaoServidor = d.versao_legivel?.backend ?? d.versoes.backend;
       // Duas razões pra oferecer a atualização, como na barra: commit novo lá fora, ou o servidor
       // rodando código diferente do que já está no disco (quem puxou na mão e não reiniciou).
       estado = d.atualizacao_disponivel || d.versoes.repo !== d.versoes.backend ? 'tem' : 'em-dia';
