@@ -71,6 +71,13 @@ done
 # IP da tailnet: 100.64.0.0/10 é o CGNAT que a Tailscale usa. O bloco 100.64.0.x fica de FORA
 # porque é o que a documentação e o peers.json.example usam como exemplo — bloquear o exemplo
 # do próprio repo seria a trava mentindo.
+# Segunda trava, de outro assunto: mudança em instalador/script sem o passo declarado que a leva
+# até a máquina de quem já usa. Motivo e escape estão no próprio script.
+_raiz="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -x "$_raiz/scripts/check-passo-de-atualizacao.sh" ]]; then
+    bash "$_raiz/scripts/check-passo-de-atualizacao.sh" --staged || exit 1
+fi
+
 PADRAO_TAILNET='100\.(6[5-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'
 
 # Só as linhas ADICIONADAS (o `+` do diff), sem o cabeçalho `+++` do arquivo.

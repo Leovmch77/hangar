@@ -7,6 +7,23 @@ on:
   pull_request:
 
 jobs:
+  # Mudança em instalador/script sem passo declarado em docs/atualizacoes/. O pre-commit faz o
+  # mesmo por commit, mas é pulável e some no clone; aqui é o intervalo inteiro do push.
+  passos:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          de="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$de" ] || ! git cat-file -e "$de" 2>/dev/null; then
+            echo "sem base comparável (primeiro push da branch); nada a conferir"; exit 0
+          fi
+          bash scripts/check-passo-de-atualizacao.sh "$de..HEAD"
+
   statusline:
     strategy:
       matrix:

@@ -13,7 +13,7 @@ pede nada a quem está usando. Quem lê o formato é `backend/app/atualizacoes.p
 ---
 id: 2026-08-25-exemplo
 titulo: Uma frase dizendo o que muda
-comando: ./install.sh --update
+comando: ./scripts/install-hangar-send.sh
 prova: ~/.local/bin/hangar-send
 destrutivo: false
 ---
@@ -38,3 +38,26 @@ repo. Comando que só funciona uma vez nasce com guarda — o modelo é
 
 **O passo entra no registro só depois da prova passar.** Se a prova falhar, ele fica pendente e
 tenta de novo na próxima — é o contrário de marcar como feito e deixar a máquina sem o efeito.
+
+## O que o botão faz sozinho, e o que só um passo faz
+
+O botão Atualizar **não roda mais o instalador inteiro**. Sozinho ele faz: `git fetch` +
+fast-forward, troca o `frontend/dist` pelo build do CI, `uv sync` no backend, `npm ci` quando o
+`package-lock.json` mudou (e só onde já existe `node_modules`), reinício do serviço/tarefa e prova
+de vida por pid. Todo o resto só acontece quando um commit declara o passo aqui — e o pre-commit e
+o CI recusam commit que mexa nesses arquivos sem o passo (`scripts/check-passo-de-atualizacao.sh`).
+
+| O que mudou | `comando` no Linux | `comando` no Windows |
+|---|---|---|
+| Wrapper do `claude`/`codex` (`scripts/install-claude-wrapper.sh`, `windows-wrappers.ps1`) | `./scripts/install-claude-wrapper.sh` | `powershell -ExecutionPolicy Bypass -File scripts/setup-windows-wrappers.ps1` |
+| `hangar-send`, skills, bloco no CLAUDE.md | `./scripts/install-hangar-send.sh` | `powershell -ExecutionPolicy Bypass -File install.ps1 -Update` |
+| Painel (`install-hangar-panel.sh`) | `./scripts/install-hangar-panel.sh` | idem |
+| Hooks do Claude (`install-hooks.sh`) | `./scripts/install-hooks.sh` | idem |
+| Units do systemd / tarefas agendadas / vigia | `./install.sh --update` | `powershell -ExecutionPolicy Bypass -File install.ps1 -Update` |
+| Statusline | `./install.sh --update` | idem |
+| Chave nova no `backend/.env` | `./install.sh --update` | idem |
+| Dependência nova do Electron (`shell/`) | `npm ci --prefix shell` | `npm ci --prefix shell` |
+
+Escreva o comando mais estreito da linha. Quando só o instalador inteiro cobre (Windows sem
+script por área), é ele mesmo — e a `prova` continua obrigatória, porque "saiu com 0" não é
+"fez".
