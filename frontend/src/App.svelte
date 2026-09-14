@@ -266,8 +266,15 @@
     syncRestoring = true;
     try {
       const s = await syncStatus();
-      // Sonda falhou (rede oscilando): o sync é feature; o app abre sem ele e a lista reconecta sozinha.
-      if (!s || !s.enabled) { syncEnabled = false; return; }
+      if (!s) {
+        // Sonda falhou (rede oscilando, backend fora): não é "sync desligado por config", mas o
+        // sync é feature e o app abre sem ele — a lista reconecta sozinha. Quem já tinha o sync
+        // ligado não cai aqui: syncStatus() devolve o status em cache nesse caso.
+        console.warn('sync: sonda de /api/sync/status falhou; abrindo sem sync');
+        syncEnabled = false;
+        return;
+      }
+      if (!s.enabled) { syncEnabled = false; return; }
       syncEnabled = true;
       const key = await loadKey();
       if (key) {
