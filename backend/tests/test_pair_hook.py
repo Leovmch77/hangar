@@ -10,7 +10,9 @@ HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "pair_hook.py")
 
 
 def _run(pair_dir: Path, env_extra: dict) -> str:
-    env = {k: v for k, v in os.environ.items() if k not in ("TMUX_PANE", "CP_SESSION_NAME")}
+    # CP_SESSION_KEY: suíte rodada de dentro de uma sessão sem terminal a herdaria, e o hook
+    # a honra antes do TMUX_PANE do tmux falso.
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX_PANE", "CP_SESSION_NAME", "CP_SESSION_KEY")}
     env.update(env_extra)
     return subprocess.run([sys.executable, HOOK, str(pair_dir)],
                           input=json.dumps({"hook_event_name": "SessionStart", "source": "clear"}).encode(),
