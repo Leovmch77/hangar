@@ -2206,7 +2206,7 @@
   "erro_btw_nao_abriu": "o /btw não abriu no terminal da sessão",
   "erro_btw_sem_resposta": "o /btw não respondeu a tempo",
   "erro_btw_ilegivel": "o /btw respondeu, mas não consegui ler a resposta",
-  "erro_btw_composer_ocupado": "há texto parado no terminal da sessão; envie ou apague antes",
+  "erro_btw_composer_ocupado": "sobrou texto no composer do terminal que não sai com Ctrl-U; apague no terminal antes de perguntar",
   "erro_btw_fechado": "o /btw foi fechado no terminal antes de eu ler a resposta",
   "erro_btw_nao_digitou": "não consegui digitar o /btw no terminal da sessão",
   "erro_btw_barra_perdida": "o terminal perdeu a / do /btw; nada foi enviado pra conversa, tente de novo",

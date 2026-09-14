@@ -96,12 +96,11 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
                 raise BtwError(409, "erro_btw_overlay_aberto",
                                "há um /btw aberto no terminal da sessão; feche antes de perguntar")
             time.sleep(_POLL)
+        # O rascunho é APAGADO, como no envio normal — e o que sobra depois do C-u não é texto
+        # digitado, então não é motivo pra recusar: recusar aqui perdia o rascunho E a pergunta.
+        # Quem protege a conversa de um "<resíduo>/btw …" submetido como mensagem é a conferência
+        # do composer antes do Enter, abaixo.
         _esvaziar_composer_claude(name)
-        # Texto que sobrou no composer viraria "<rascunho>/btw …" submetido como MENSAGEM real
-        # pelo Enter abaixo. Ilegível (None) segue, como o envio normal.
-        if _texto_composer_claude(name):
-            raise BtwError(409, "erro_btw_composer_ocupado",
-                           "há texto parado no terminal da sessão; envie ou apague antes")
         # Confere o composer ANTES do Enter: no Windows a `/` inicial sumiu e o Enter submeteu
         # "btw <pergunta>" como mensagem da conversa (o overlay nunca abriu). Uma segunda tentativa;
         # errado de novo, apaga e para sem Enter. Vazio ou ilegível seguem, como antes.
@@ -125,6 +124,12 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
             _esvaziar_composer_claude(name)
         else:
             _limpar_composer_as_cegas(name)
+            if "/btw" in digitado:
+                # A barra chegou: o que estragou a linha foi o que já estava no composer e não sai
+                # com C-u. Dizer "perdeu a /" aqui mandaria o usuário caçar o bug errado.
+                raise BtwError(409, "erro_btw_composer_ocupado",
+                               "sobrou texto no composer do terminal que não sai com Ctrl-U; "
+                               "apague no terminal antes de perguntar")
             raise BtwError(502, "erro_btw_barra_perdida",
                            "o terminal perdeu a / do /btw; nada foi enviado pra conversa")
         if not tmux.send_keys(name, "Enter"):

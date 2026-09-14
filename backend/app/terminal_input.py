@@ -1453,6 +1453,9 @@ def _esvaziar_composer_claude(name: str) -> bool:
         return atual is not None
     for _ in range(_LIMPEZA_MAX_TECLAS):
         send_keys(name, "C-u")
+        # A tela só reflete o C-u no redraw seguinte: relendo na hora, o composer LIMPO aparece com
+        # o texto velho e vira "resistiu ao C-u" — era o que recusava toda pergunta lateral.
+        time.sleep(_SETTLE)
         depois = _texto_composer_claude(name)
         if depois is None:
             return False

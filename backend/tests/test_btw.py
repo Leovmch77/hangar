@@ -127,13 +127,29 @@ def test_pergunta_vazia_nao_digita(falso):
     assert f.teclas == []
 
 
-def test_composer_com_texto_parado_nao_digita(falso, monkeypatch):
-    f = falso([_tela("❯ rascunho")])
-    monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: "rascunho")
+def test_rascunho_que_sai_com_c_u_nao_impede_a_pergunta(falso):
+    # O rascunho é apagado e a pergunta segue (mesma política do envio normal). Recusar aqui era o
+    # pior dos dois mundos: o C-u já tinha levado o rascunho e a pergunta não ia.
+    f = falso([
+        _tela("❯ rascunho"),
+        _tela("    /btw q", "      4", RODAPE_PRONTO),
+        _tela("    /btw q", "      4", RODAPE_COPIADO),
+    ], buffer_apos_c=False)
+    f.digitado = "rascunho"
+    assert btw.perguntar("s", "q")["answer"] == "4"
+    assert "Enter" in f.teclas
+
+
+def test_residuo_que_resiste_ao_c_u_para_sem_enter(falso, monkeypatch):
+    # Texto que não sai com C-u estraga a linha ("<resíduo>/btw q") e o Enter mandaria isso como
+    # MENSAGEM da conversa. Para antes do Enter, e o erro diz que o composer é que está sujo.
+    f = falso([_tela("❯ lixo")])
+    monkeypatch.setattr(btw, "_esvaziar_composer_claude", lambda name: False)
+    monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: "lixo/btwq")
     with pytest.raises(btw.BtwError) as e:
         btw.perguntar("s", "q")
     assert e.value.code == "erro_btw_composer_ocupado"
-    assert f.teclas == ["C-u"]              # tentou esvaziar; nada digitado, nenhum Enter
+    assert "Enter" not in f.teclas
 
 
 def test_overlay_fechado_por_fora_aborta_sem_escape(falso):
@@ -214,7 +230,7 @@ def test_composer_ilegivel_depois_de_digitar_para_sem_enter(falso, monkeypatch):
     # Ilegível NÃO é "confirmado": com Enter às cegas a pergunta podia cair na conversa (revisão
     # de falhas silenciosas, 13/09/2026).
     f = falso([_tela("❯ ")])
-    leituras = iter(["", None, None])
+    leituras = iter([None, None])
     monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: next(leituras))
     with pytest.raises(btw.BtwError) as e:
         btw.perguntar("s", "q")
@@ -240,7 +256,7 @@ def test_composer_ilegivel_uma_vez_relê_e_segue(falso, monkeypatch):
         _tela("    /btw q", "      4", RODAPE_PRONTO),
         _tela("    /btw q", "      4", RODAPE_COPIADO),
     ], buffer_apos_c=False)
-    leituras = iter(["", None, "/btwq"])
+    leituras = iter([None, "/btwq"])
     monkeypatch.setattr(btw, "_texto_composer_claude", lambda name: next(leituras))
     assert btw.perguntar("s", "q")["answer"] == "4"
 
