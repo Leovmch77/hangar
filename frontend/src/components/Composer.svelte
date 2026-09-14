@@ -960,9 +960,12 @@
   const semEsforcoClaude = $derived((pillModel ?? '').toLowerCase().includes('haiku'));
   // Reconciliacao do modelo: quando o statusline confirma a escolha (substring match),
   // solta a escolha otimista pra que mudancas feitas direto no terminal reaparecam.
+  // Casa pela primeira palavra ("Opus·1M" × "Opus5·1M", "Fable" × "Fable 5.1"): a grafia da
+  // statusline carrega versão que o rótulo do popover não tem.
   $effect(() => {
     const modelo = status?.model?.toLowerCase();
-    if (chosenModel && modelo && modelo.includes(chosenModel.toLowerCase())) {
+    const palavra = chosenModel?.toLowerCase().split(/[\s·[(]/)[0];
+    if (palavra && modelo && modelo.includes(palavra)) {
       chosenModel = null;
     }
   });
@@ -972,16 +975,18 @@
   // aguardar/tratar erro. O display otimista so muda APOS sucesso (uma aplicacao que falha
   // nao deixa o pill mostrando uma escolha que nao pegou). 'default' resolve pra um modelo
   // concreto -> deixa o statusline ditar o rotulo; os demais aparecem capitalizados.
-  function handleApply(body: ModelEffortBody): Promise<void> {
+  function handleApply(body: ModelEffortBody, label?: string): Promise<void> {
     return setModelEffort(sessionName, body).then((res) => {
       // `pending_confirm` = o Claude abriu "Change effort level?" no terminal e ESPERA o usuario.
       // Adiantar o pill aqui mostraria um nivel que so vale se ele tocar "Yes" — e se tocar "No",
       // o pill ficaria mentindo ate a proxima statusline. Deixa a conversa contar o desfecho.
       if (res?.pending_confirm) return;
       if (body.model) {
+        // O rótulo é o nome da lista, nunca o id: no sem-terminal o id é `claude-fable-5-1[1m]`.
+        const nome = label?.replace(/\s*\(1M context\)/i, '·1M').trim();
         chosenModel = body.model === 'default'
           ? null
-          : body.model.charAt(0).toUpperCase() + body.model.slice(1);
+          : nome || body.model.charAt(0).toUpperCase() + body.model.slice(1);
       }
       if (body.effort) chosenEffort = body.effort;
     });

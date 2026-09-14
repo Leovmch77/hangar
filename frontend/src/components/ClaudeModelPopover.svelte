@@ -24,7 +24,9 @@
     sessionName: string;
     currentModel?: string | null;
     currentEffort?: string | null;
-    onApply: (body: ModelEffortBody) => Promise<void> | void;
+    /** `label` é o nome que a lista mostra ("Fable"); o `body.model` é o id que o backend aplica
+     *  (no sem-terminal é o id inteiro, `claude-fable-5-1[1m]`, que não serve de rótulo). */
+    onApply: (body: ModelEffortBody, label?: string) => Promise<void> | void;
     onApplied?: (model: string, effort: string | null) => void;
     /** Falha que chegou DEPOIS da caixa fechar — quem mostra e o composer, na linha de erro dele. */
     onFail?: (msg: string) => void;
@@ -169,7 +171,7 @@
         // a falha vai pra fora (`onFail`), nao pro console: o backend recusa a troca de verdade
         // (PickerError 409/422 quando o Claude nega ou o picker nao fecha), e engolir isso deixa
         // o pill mostrando um modelo que nunca entrou.
-        Promise.resolve(onApply({ model: alvo.id, scope })).catch((e) =>
+        Promise.resolve(onApply({ model: alvo.id, scope }, alvo.name)).catch((e) =>
           onFail?.(e instanceof Error ? e.message : m.modelo_trocar_erro()),
         );
         atual = alvo.id;
