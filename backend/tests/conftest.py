@@ -75,14 +75,20 @@ def _sem_sessoes_sem_terminal_reais(tmp_path_factory):
     # a suíte virava um segundo cliente dos canos das sessões vivas desta máquina e o backend de
     # verdade perdia a conexão. Session-scoped: os testes que trocam `_dir` pelo monkeypatch
     # voltam pra este diretório, nunca pro real.
-    from app.adapters.claude_headless import sessions
+    # A varredura de órfãos lê os processos REAIS em /proc: com os sidecars apontando pra pasta
+    # vazia, todo cano vivo da máquina parecia órfão e levava SIGTERM — derrubava as sessões sem
+    # terminal, inclusive a que roda a suíte.
+    from app.adapters.claude_headless import adapter, sessions
     original = sessions._dir
+    varredura = adapter.matar_orfaos
     pasta = tmp_path_factory.mktemp("claude-headless")
     sessions._dir = lambda: pasta
+    adapter.matar_orfaos = lambda: 0
     try:
         yield
     finally:
         sessions._dir = original
+        adapter.matar_orfaos = varredura
 
 
 @pytest.fixture(scope="session", autouse=True)
