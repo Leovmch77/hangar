@@ -6,7 +6,7 @@
   import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
   import * as m from '../paraglide/messages';
-  import type { ChatEvent, StateEvent, AskQuestionPayload, AnswerItem } from '@hangar/core';
+  import type { ChatEvent, StateEvent, AskQuestionPayload, AnswerItem, AgentRun } from '@hangar/core';
   import UserBubble from './UserBubble.svelte';
   import AssistantBubble from './AssistantBubble.svelte';
   import ToolCard from './ToolCard.svelte';
@@ -38,6 +38,11 @@
     stateEvent: StateEvent | null;
     pending: { id: string; text: string; solid?: boolean }[];
     sessionName: string;
+    /** Subagentes (`Agent`) rodando de verdade, pelo fold de atividade — a MESMA fonte do painel
+     *  Atividade. Um Agent em background devolve `tool_result` na hora ("Async agent launched"), e
+     *  pelo tool_result o cartão dizia "concluído" com o agente ainda trabalhando; a conversa
+     *  seguia, o cartão subia e a sessão parecia parada. */
+    agentesRodando?: AgentRun[];
     dockH: number;
     codex?: boolean;
     plan?: {
@@ -96,7 +101,7 @@
   }
 
   let {
-    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel,
+    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [],
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0
@@ -400,6 +405,16 @@
 
   // Claude trabalhando? -> msgs da fila durável (id "queued-") ficam atenuadas (= na fila).
   const working = $derived(stateEvent?.state === 'working');
+  // ids dos tool_use de Agent ainda rodando: o cartão deles fica "Executando…" mesmo com o
+  // tool_result do lançamento em background já gravado.
+  const agentesRodandoIds = $derived(new Set(agentesRodando.map((a) => a.id)));
+  const resultadoDe = (id: string) => (agentesRodandoIds.has(id) ? undefined : toolResults.get(id));
+  // O tool_use de cada Agent rodando: o cartão dele fica GRUDADO no fim da conversa até terminar,
+  // em vez de subir com as mensagens seguintes (decisão do usuário).
+  const cartoesRodando = $derived.by(() => {
+    if (!agentesRodandoIds.size) return [] as ChatEvent[];
+    return events.filter((e) => e.kind === 'tool_use' && !!e.tool_use_id && agentesRodandoIds.has(e.tool_use_id));
+  });
 
   // Auto-scroll APENAS quando ja estamos no fim. NAO depende de stateEvent (o tick do cronometro/status
   // atualiza stateEvent toda hora e arrastaria o scroll-up do usuario).
@@ -451,7 +466,7 @@
       {#if item.type === 'tasks'}
         <TaskRows tasks={tarefas} />
       {:else if item.type === 'group'}
-        <ToolGroup tools={item.tools} {toolResults} {sessionName} animate={!histIds.has(item.tools[0].id)} />
+        <ToolGroup tools={item.tools} toolResults={{ get: resultadoDe }} {sessionName} animate={!histIds.has(item.tools[0].id)} />
         {#if plan?.eventId && item.tools.some((tool) => tool.id === plan?.eventId)}
           <SessionPlanPreview {...planoProps()} />
         {/if}
@@ -556,7 +571,7 @@
           <SessionPlanPreview {...planoProps()} />
         {/if}
         {:else if ev.kind === 'tool_use'}
-          <ToolCard event={ev} result={toolResults.get(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} />
+          <ToolCard event={ev} result={resultadoDe(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} />
           {#if plan?.eventId === ev.id}
             <SessionPlanPreview {...planoProps()} />
           {/if}
@@ -584,6 +599,17 @@
 
     {#if stateEvent?.state === 'working' && !pensamento && !ferramenta}
       <Spinner label={stateEvent.label} />
+    {/if}
+
+    {#if cartoesRodando.length}
+      <!-- Subagente em background trabalhando com a sessão "parada": o cartão dele fica grudado
+           aqui no fim, em "Executando…", até o fim de verdade (task-notification) — o de cima já
+           subiu com a conversa e a sessão parecia ociosa. -->
+      <div class="agentes-rodando" aria-live="polite">
+        {#each cartoesRodando as ev (ev.id)}
+          <ToolCard event={ev} result={null} {sessionName} animate={false} />
+        {/each}
+      </div>
     {/if}
 
     {#each pending as p (p.id)}
@@ -780,6 +806,7 @@
   /* Bubble enfileirado: ainda nao processado pelo Claude — atenuado ate solidificar. Precisa ser
      flex-column pra que UserBubble/ImageBubble (que alinham pelo pai flex) fiquem na mesma margem
      esquerda da resposta — senao o wrapper block muda o comportamento do align-self da imagem. */
+  .agentes-rodando { margin-top: var(--space-2); }
   .pending-bubble {
     display: flex;
     flex-direction: column;

@@ -2780,6 +2780,7 @@
       {stateEvent}
       {pending}
       {sessionName}
+      agentesRodando={activity.agents.filter((a) => a.running)}
       onFimDoLocal={pedirMaisAntigos}
       {ancora}
       {dockH}
