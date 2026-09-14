@@ -806,6 +806,13 @@ def test_config_diz_se_a_traducao_do_pensamento_tem_provedor(monkeypatch):
     monkeypatch.setattr(narrar, "_provedor", lambda perfil="padrao": ("https://x", "k", "m"))
     r = c.get("/api/config", headers={"Authorization": "Bearer secret"})
     assert r.json()["somente_leitura"]["traducao_pensamento"] is True
+    # Desligado na config: com provedor e tudo, o front não pede e a rota devolve o original.
+    from app import runtime_config
+    monkeypatch.setattr(runtime_config, "get", lambda campo: False if campo == "traduzir_pensamento" else runtime_config.settings.__dict__.get(campo))
+    r = c.get("/api/config", headers={"Authorization": "Bearer secret"})
+    assert r.json()["somente_leitura"]["traducao_pensamento"] is False
+    r = c.post("/api/pensamento/pt", json={"textos": ["thinking hard"]}, headers={"Authorization": "Bearer secret"})
+    assert r.json() == {"textos": ["thinking hard"]}
 
 
 def test_origem_mesma_do_host_e_aceita_mesmo_com_public_url_diferente(monkeypatch):

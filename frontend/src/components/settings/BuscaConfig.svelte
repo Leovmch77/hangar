@@ -122,6 +122,7 @@
 
     { tela: 'avancado', rotulo: m.config_server_automacoes, descricao: m.config_server_automacoes_ajuda },
     { tela: 'avancado', rotulo: m.config_server_pensamento, descricao: m.config_server_pensamento_ajuda },
+    { tela: 'avancado', rotulo: m.config_server_traduzir_pensamento, descricao: m.config_server_traduzir_pensamento_ajuda },
     { tela: 'avancado', rotulo: m.config_server_editor, descricao: m.config_server_editor_ajuda },
     { tela: 'avancado', rotulo: m.config_server_raizes, descricao: m.config_server_raizes_ajuda },
     { tela: 'avancado', rotulo: m.config_server_so_servidor, descricao: m.config_server_so_servidor_ajuda },

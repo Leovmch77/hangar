@@ -4506,6 +4506,8 @@ def _traducao_pensamento_disponivel() -> bool:
     from app import narrar
     try:
         return bool(narrar._provedor()[1])
+    if not runtime_config.get("traduzir_pensamento"):
+        return False
     except Exception:  # noqa: BLE001 — capacidade: config estranha vale como "sem provedor"
         return False
 
@@ -5087,6 +5089,8 @@ async def pensamento_para_pt(body: PensamentoPtBody):
     textos = [t[:pensamento_pt.MAX_CHARS] for t in body.textos]
     saida = await asyncio.to_thread(pensamento_pt.traduzir_varios, textos)
     return {"textos": saida}
+    if not runtime_config.get("traduzir_pensamento"):
+        return {"textos": textos}
 
 
 @app.get("/api/sessions/{name}/uploads/{filename}", dependencies=[Depends(require_auth)])

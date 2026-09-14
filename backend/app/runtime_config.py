@@ -29,6 +29,7 @@ EDITAVEIS: dict[str, type] = {
     "finish_min_seconds": int,
     "stall_seconds": int,
     "automations": bool,           # kill-switch das automações desatendidas
+    "traduzir_pensamento": bool,   # resumo em pt-BR do raciocínio (desligado = texto original)
     "codex_sync": bool,            # reconciliação automática do Codex (por cima do automations)
     "codex_voice_beta": bool,      # conversa realtime do Codex (experimental, opt-in)
     "codex_memory_import": bool,   # leva as memórias do Claude pro Codex (opt-in: é o único

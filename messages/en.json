@@ -1233,6 +1233,8 @@
   "config_server_automacoes_porque": "What the machine does on its own: chain the next task, resume a stalled session and sync Codex. Turn it off here to stop all of it at once.",
   "config_server_pensamento": "Show agent thinking",
   "config_server_pensamento_ajuda": "Asks the API for a summary of the reasoning and shows it collapsed above the answer. New sessions only.",
+  "config_server_traduzir_pensamento": "Translate reasoning to Portuguese",
+  "config_server_traduzir_pensamento_ajuda": "Every reasoning block shown on screen becomes a provider call. Off, the text stays as it came.",
   "pensamento_rotulo": "thought",
   "pensamento_uma_busca": "thought · 1 search",
   "pensamento_buscas": "thought · {n} searches",

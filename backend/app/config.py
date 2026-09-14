@@ -254,6 +254,9 @@ class Settings(BaseSettings):
     # seu proprio opt-in/config — isto e um portao ADICIONAL, nao substitui CP_AUTO_RESUME). CP_AUTOMATIONS=0
     # desliga tudo de uma vez (ex: antes de um teste manual, ou se uma automacao ficar barulhenta).
     automations: bool = True
+    # Resumo em pt-BR dos blocos de raciocínio (pensamento_pt). Desligado, o front nem pede e a
+    # rota devolve o texto original: em link fraco cada abertura de chat custava 3-5 chamadas.
+    traduzir_pensamento: bool = True
     # Reconciliacao automatica do Codex (codex_integracao.acompanhar + abertura de TUI). Portao
     # PROPRIO por cima do `automations`, editavel pela tela (card do Codex em Harnesses).
     codex_sync: bool = True
