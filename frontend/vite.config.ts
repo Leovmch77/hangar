@@ -7,11 +7,16 @@ import { fileURLToPath } from 'url'
 import { execSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'http'
 
-// Versão e data do build, injetadas no bundle (tela Sobre). git describe falhou (ex: fora de um
-// repo ou sem tag) -> 'dev'; o build não pode morrer por causa de metadata.
+// Versão e data do build, injetadas no bundle (tela Sobre): `2026.09.14-ae8a7bf` (data do
+// commit + hash), o mesmo formato do `diag.versao_legivel` do backend, pra as duas compararem
+// igual. git falhou (fora de um repo) -> 'dev'; o build não pode morrer por causa de metadata.
 const hangarVersion = (() => {
-  try { return execSync('git describe --tags --always --dirty').toString().trim() }
-  catch { return 'dev' }
+  try {
+    const v = execSync('git log -1 --format=%cd-%h --date=format:%Y.%m.%d').toString().trim()
+    let sujo = false
+    try { execSync('git diff --quiet HEAD -- . ":(exclude)frontend/dist"') } catch { sujo = true }
+    return sujo ? `${v}-dirty` : v
+  } catch { return 'dev' }
 })()
 const hangarBuildDate = new Date().toISOString().slice(0, 10)
 

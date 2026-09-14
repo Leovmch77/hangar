@@ -348,6 +348,12 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Atualizar pelo app faz tudo sozinho, mas nada é irreversível**: resgate antes de qualquer
   passo destrutivo, com a ref conferida. Passo só entra no registro depois da prova passar, e o
   registro é do que JÁ RODOU aqui — não do intervalo de commits.
+- **O botão Atualizar NÃO roda o instalador.** Sozinho ele faz dist do CI, `uv sync`, `npm ci` por
+  hash do lock, restart e prova de vida por **pid** (HTTP o processo velho também responde).
+  Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
+  recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
+  Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
+- **Versão é data do commit + hash** (`2026.09.14-360978f7`), calculada, nunca mantida à mão.
 - **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que

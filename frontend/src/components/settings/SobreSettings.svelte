@@ -6,13 +6,9 @@
   const REPO = 'https://github.com/jeffer1312/hangar';
 
   /**
-   * `git describe` legível pra quem usa.
-   *
-   * O formato cru é de desenvolvedor: `v0.1.2-130-g787a0cf8-dirty` quer dizer "130 commits depois
-   * da tag v0.1.2, no commit 787a0cf8, com arquivos modificados". Quem abre o Sobre quer saber
-   * qual versão está rodando, não a distância até a última tag — e o `-dirty` sem explicação lê
-   * como defeito. Vira `787a0cf8` (o que identifica de verdade) mais um aviso à parte quando há
-   * mudanças locais.
+   * Versão legível: `2026.09.14-ae8a7bf` (data do commit + hash), com o `-dirty` separado num
+   * aviso — sem explicação ele lê como defeito. Servidor antigo ainda manda o `git describe`
+   * (`v0.1.2-130-g787a0cf8`); dele fica só o hash.
    */
   function legivel(v: string): { versao: string; local: boolean } {
     const local = v.endsWith('-dirty');

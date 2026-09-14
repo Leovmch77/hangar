@@ -33,6 +33,21 @@ def test_as_duas_versoes_vem_de_fontes_diferentes():
     assert d["atualizacao_disponivel"] is False
 
 
+def test_versao_legivel_e_quantos_commits_atras():
+    """A versão que a pessoa lê é data+hash, nas três pontas; `atras` conta o que falta puxar."""
+    c = _client()
+    def _legivel(ref="HEAD"):
+        return "2026.09.14-bbbbbbb" if ref == "origin/main" else "2026.09.12-aaaaaaa"
+    with patch("app.api.diag.versao_legivel", _legivel), \
+         patch("app.api.diag.VERSAO_LEGIVEL_EM_EXECUCAO", "2026.09.10-ccccccc"), \
+         patch("app.api.atualizar.checar", return_value={"pode": True}), \
+         patch("app.api._mudancas_pendentes", return_value=[{"sha": "b", "titulo": "x"}] * 3):
+        d = c.get("/api/atualizacao", headers=_AUTH).json()
+    assert d["versao_legivel"] == {"repo": "2026.09.12-aaaaaaa", "backend": "2026.09.10-ccccccc",
+                                   "remoto": "2026.09.14-bbbbbbb"}
+    assert d["atras"] == 3
+
+
 def test_procurar_vai_a_rede_antes_de_comparar():
     """Sem o fetch, "Procurar de novo" respondia com a foto do último fetch automático (30min).
 

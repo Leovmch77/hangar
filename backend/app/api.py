@@ -4567,6 +4567,12 @@ async def get_atualizacao(procurar: bool = False):
         mudancas = _mudancas_pendentes()
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
+            # A versão que a pessoa lê: data do commit + hash. `remoto` é o que está em
+            # origin/main desde o último fetch; `atras` é quantos commits faltam.
+            "versao_legivel": {"repo": diag.versao_legivel(),
+                               "backend": diag.VERSAO_LEGIVEL_EM_EXECUCAO,
+                               "remoto": diag.versao_legivel("origin/main")},
+            "atras": len(mudancas),
             "atualizacao_disponivel": bool(mudancas),
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}

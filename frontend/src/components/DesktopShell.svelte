@@ -150,6 +150,8 @@ import * as m from '../paraglide/messages';
   // lá no App — passar callback de lá até aqui atravessaria três componentes que não têm nada a
   // ver com atualização.
   let temAtualizacao = $state(false);
+  let versaoBackend = $state<string | null>(null);
+  let commitsAtras = $state(0);
 
   /** Um estado de atualização "vivo" — mesmo teto que destrava o fechamento da caixa. */
   const TETO_ESTADO_MS = 10 * 60 * 1000;
@@ -186,6 +188,8 @@ import * as m from '../paraglide/messages';
         // nascia com commit novo no GitHub, e nesse caso não há nenhum.
         temAtualizacao = d.atualizacao_disponivel
           || d.versoes.repo !== d.versoes.backend;
+        versaoBackend = d.versao_legivel?.backend ?? null;
+        commitsAtras = d.atras ?? 0;
         // Atualização já em curso (outra aba a começou, ou esta página recarregou no meio): a
         // caixa volta a abrir sozinha, senão o progresso corre sem ninguém vendo.
         // "rodando" só reabre a caixa se for RECENTE. Um estado congelado (o processo morreu sem
@@ -440,7 +444,7 @@ import * as m from '../paraglide/messages';
     <SessionTabs {currentKey} onSelect={openSession}
                  onOpenConfig={() => abrirConfig('root', getActiveId())}
                  onIrParaContas={() => abrirConfig('contas', getActiveId())}
-                 {temAtualizacao}
+                 {temAtualizacao} versao={versaoBackend} atras={commitsAtras}
                  onAbrirAtualizar={() => atualizarUI.abrir()}
                  {ctxDisponivel} />
   {/if}

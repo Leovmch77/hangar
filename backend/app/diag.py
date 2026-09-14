@@ -193,6 +193,26 @@ def _git_describe() -> str:
 # qual versão veio isto?") sairia com a resposta errada, justamente na janela em que a máquina está
 # meio atualizada, que é quando o defeito estranho aparece.
 VERSAO_EM_EXECUCAO = _git_describe()
+
+
+def versao_legivel(ref: str = "HEAD") -> str:
+    """`2026.09.14-ae8a7bf`: a data do commit e o hash curto. É o que a tela chama de versão.
+
+    Não há tag de release nem número mantido à mão (o `pyproject` ficou em 0.1.0 pra sempre): o
+    que se compara entre duas máquinas é "de quando é o código", e a data responde isso sem
+    ninguém lembrar de bumpar nada. O hash desempata dois commits do mesmo dia.
+    """
+    try:
+        p = subprocess.run(
+            ["git", "log", "-1", "--format=%cd-%h", "--date=format:%Y.%m.%d", ref],
+            cwd=Path(__file__).resolve().parents[2], capture_output=True,
+            text=True, timeout=5, encoding="utf-8", errors="replace")
+        return p.stdout.strip() or "indisponivel"
+    except Exception:                                # noqa: BLE001 — versão nunca derruba nada
+        return "indisponivel"
+
+
+VERSAO_LEGIVEL_EM_EXECUCAO = versao_legivel()
 INICIO_EM_EXECUCAO = datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 _NIVEIS = ("ok", "aviso", "erro")

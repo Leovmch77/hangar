@@ -124,6 +124,47 @@ Creating a session wraps `tmux` in
     disco e servidor velho no ar. Hoje a subida da linhagem PARA no motor (cmdline casando
     `app.atualizar`): ele entra na linhagem, os pais dele não.
 
+## O botão Atualizar não roda o instalador; o instalador só roda por passo declarado
+
+(`atualizar._preparar`, `scripts/check-passo-de-atualizacao.sh`, job `passos` do CI, 14/09/2026.)
+O motor chamava `install.ps1 -Update` / `install.sh --update` em toda atualização — 8 etapas, 24
+ramos `if ($Update)` só no `.ps1`, cada um uma chance de falhar sem ninguém ter pedido nada dele.
+Foi assim que usuários Windows receberam "NAO terminou: tarefas agendadas, backend no ar" num
+`git pull` que não mudava tarefa nenhuma: o commit `41c1a0ff` ("Windows runtime remains
+unverified") pôs `throw` de RunLevel/RestartCount no passo 7/8 que estouravam numa tarefa
+reaproveitada com a recuperação pausada pelo passo 0 — ANTES do `Restart-HangarTask`, então o
+processo velho seguia na porta com o código novo no disco. E o modal mostrava as 12 últimas linhas
+(o portão do fim), com o motivo acima do corte.
+  - **O caminho padrão é o que o `git pull` não traz**: dist do CI, `uv sync` (sempre — idempotente
+    e rápido com o lock igual; comparar `de..para` seria o intervalo de commits, que mente em
+    máquina reclonada), `npm ci` só quando o hash do `package-lock.json` gravado no sidecar mudou
+    e já há `node_modules`, restart, prova de vida.
+  - **Wrapper, tarefa, statusline, hangar-send só chegam por passo em `docs/atualizacoes/`**, com
+    o comando cirúrgico da área (tabela no README de lá). O pre-commit e o CI recusam commit que
+    toque `install.*`, `scripts/` ou `hooks/` sem passo novo; `HANGAR_SEM_PASSO=1` é o escape.
+  - **O `-Update` continua existindo e tendo que funcionar**: é o hook post-merge de quem atualiza
+    por `git pull` na mão, e o que um passo chama quando não há script por área (Windows).
+  - **Prova de vida por pid**, não só HTTP: o processo velho responde `< 500` igual. No systemd é
+    o `MainPID` da unit; no Windows é `psutil.net_connections` na porta. Pid igual = rollback.
+  - **O dist anterior fica em `frontend/.dist-velho` até o fim** e volta no rollback junto com o
+    código — antes o rollback deixava o backend velho servindo a tela nova.
+  - **No Windows quem reinicia é `Restart-HangarTasks` do `windows-tasks.ps1`** (mesmo mutex
+    `Local\HangarInstall` do instalador e da vigia), chamado pelo motor. O `.ps1` é lido do disco
+    depois do pull, então o conserto chega pela própria atualização quebrada.
+  - **Falha do instalador chega à tela pela marca `##HANGAR-FALHA##`** (irmã da `##HANGAR-AVISO##`),
+    impressa por `Falha`/`Pare` no `.ps1` e por `fail` no `.sh`; a cauda de 12 linhas é só o
+    fallback sem marca.
+
+## Versão legível é data do commit + hash
+
+(`diag.versao_legivel`, `vite.config.ts`, 14/09/2026.) `pyproject` ficou em 0.1.0 e `package.json`
+em 0.0.0 para sempre: número mantido à mão apodrece, e tag de release exige lembrar de taguear.
+`git describe` contra a `dist-latest` (que o CI move a cada push) dava `dist-latest-28-g360978f7`,
+que ninguém lê. `2026.09.14-360978f7` responde "de quando é o código" sem ninguém fazer nada; o
+hash desempata o mesmo dia. `GET /api/atualizacao` traz as três (`repo`, `backend`, `remoto`) e
+`atras` (commits em `origin/main` que faltam), e a barra do desktop e o rodapé do celular mostram
+`v2026.09.14` com o tooltip dizendo atualizado / N atrás / falta reiniciar.
+
 ## Instalador com portão de prova por etapa
 
 (`install.sh` / `install.ps1`, 02/09/2026). Duas

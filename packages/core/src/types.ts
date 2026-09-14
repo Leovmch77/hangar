@@ -730,6 +730,11 @@ export interface AtualizacaoPreVoo {
 export interface Atualizacao {
   /** `repo` é o disco; `backend` é o processo vivo. Divergem durante a atualização — é o ponto. */
   versoes: { repo: string; backend: string };
+  /** `2026.09.14-ae8a7bf`: data do commit + hash. `remoto` é o origin/main do último fetch.
+   *  Ausente em servidor anterior a este campo. */
+  versao_legivel?: { repo: string; backend: string; remoto: string };
+  /** Commits em origin/main que ainda não estão aqui. */
+  atras?: number;
   atualizacao_disponivel: boolean;
   mudancas: AtualizacaoMudanca[];
   passos: AtualizacaoPasso[];
