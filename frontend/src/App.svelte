@@ -266,8 +266,8 @@
     syncRestoring = true;
     try {
       const s = await syncStatus();
-      if (!s) { syncBootError = true; return; }
-      if (!s.enabled) { syncEnabled = false; return; }
+      // Sonda falhou (rede oscilando): o sync é feature; o app abre sem ele e a lista reconecta sozinha.
+      if (!s || !s.enabled) { syncEnabled = false; return; }
       syncEnabled = true;
       const key = await loadKey();
       if (key) {
