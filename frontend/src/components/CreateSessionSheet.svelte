@@ -993,7 +993,7 @@
               class:on={provider === p}
               aria-pressed={provider === p}
               disabled={providers[p] ? !providers[p].disponivel : false}
-              onclick={() => { provider = p; carregarModelos(); }}
+              onclick={() => { if (p !== provider) semTerminal = false; provider = p; carregarModelos(); }}
             >
               <ProviderGlyph provider={p} size={18} />
               <span>{providerName(p)}</span>
