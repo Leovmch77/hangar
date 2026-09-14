@@ -1149,6 +1149,38 @@ Armadilhas que custaram tempo:
   Windows); o `makefile` é fechado pela thread que lê dele — fechá-lo de fora, no Windows, espera
   o `readline` em curso segurando a trava que o leitor precisa.
 
+## Claude sem terminal estaciona a sessão parada (13/09/2026, CLI 2.1.270)
+
+O processo subia no primeiro prompt e ficava vivo enquanto o backend vivesse. A vigia do adapter
+(`_vigiar_ociosas`, a cada 60s) encerra o de sessão parada há `_OCIOSA_S` sem turno, permissão,
+pergunta, subida, drain, `/effort` pendente, troca de cano ou fila por entregar. O prazo de 65 min
+fica acima da janela de 1h do cache do prompt: parada mais que isso, o próximo turno relê o
+contexto de qualquer jeito, então religar não custa cota a mais. Não há campo parecido na tela de
+Servidor, por isso é constante.
+
+A prova real (haiku, prazo encurtado pra 20s, sidecar em pasta temporária) achou o furo que o
+teste de unidade não pegava: a saída provocada por nós chama `saiu(None)`, o `returncode` fica
+`None` e a sessão continua "viva" em `_sessions`. Sem SSE aberto pra tirá-la de lá, o prompt
+seguinte encontrava a sessão morta, `deliverable` dava falso e nada subia. `_encerrar` (o que o
+`_reabrir` já fazia) mata e tira da memória. Com isso: estacionou aos 21s, sidecar sem `cano`, o
+prompt seguinte subiu com `resume=True` e respondeu a palavra combinada no primeiro turno.
+
+## Pensamento em voo no Claude sem terminal (13/09/2026, CLI 2.1.270)
+
+Medido com `claude -p --output-format stream-json --verbose --include-partial-messages` (sonnet,
+esforço máximo): com `--settings '{"showThinkingSummaries": true}'` e sem ela, o bloco `thinking`
+chega vazio — 15 `thinking_delta` sem texto e só a assinatura. No código da CLI, a exibição
+explícita (`--thinking-display`) vence; sem ela, sessão não interativa não lê a chave. Com
+`--thinking-display summarized` chegaram 127 pedaços, 1160 caracteres, e o bloco caiu com texto no
+`.jsonl`. Então até esta data a sessão sem terminal nunca mostrava pensamento, nem com a chave
+ligada. O adapter passa a flag quando `pensamento.ler()` é verdadeiro, na subida do processo.
+
+O texto em voo não usa a prévia: a prévia vira bolha de resposta e é deduplicada contra o texto
+do transcript. `fonte_pensamento` e `fonte_ferramenta` (a chamada cujo pedido o modelo ainda
+escreve, com o input parcial) são fontes `PushPreviewSource` à parte, com eventos SSE `pensamento`
+e `ferramenta`. O servidor limpa quando o bloco cai no `.jsonl`; o front espera o evento real do
+transcript pra tirar de cena, com 3s de carência, senão abria um buraco entre os dois.
+
 ## Voz Codex no web
 
 (`codex_voice.py`, `CodexVoice.svelte`, `lib/codexVoice.ts`, 10/09/2026):

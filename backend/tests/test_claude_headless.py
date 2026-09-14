@@ -198,6 +198,51 @@ def test_context_ganha_tabela_de_limites_da_conta(adapter):
     assert A._tabela_limites([]) == ""
 
 
+def test_estaciona_so_sessao_parada_sem_nada_em_aberto(adapter, monkeypatch):
+    relogio = [5000.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: relogio[0])
+    sess = adapter._sessions["s1"]
+    sess.ativa_em = relogio[0]
+    pode = lambda: _run(adapter._pode_estacionar(sess))   # noqa: E731
+
+    assert not pode()                       # acabou de trabalhar
+    relogio[0] += A._OCIOSA_S + 1
+    assert pode()
+    sess.pending["r1"] = {"tool_name": "Bash"}
+    sess.state = "awaiting_input"
+    assert not pode()                       # permissão em aberto
+    sess.pending.clear()
+    sess.state = "idle"
+    fila = [{"id": "q1", "delivered": False}]
+
+    class _Fila:
+        def __init__(self, name):
+            pass
+
+        def load(self):
+            return fila
+    monkeypatch.setattr(A, "PromptQueue", _Fila)
+    assert not pode()                       # fila por entregar
+    fila[0]["delivered"] = True
+    assert pode()
+    sess.in_progress = True
+    assert not pode()
+
+
+def test_vigia_encerra_o_cano_da_ociosa(adapter, monkeypatch):
+    sess = adapter._sessions["s1"]
+    mortos = []
+    monkeypatch.setattr(A, "_VIGIA_S", 0)
+    monkeypatch.setattr(ClaudeHeadlessAdapter, "_matar", staticmethod(lambda s, meta=None: mortos.append(s.name)))
+
+    async def sempre(s):
+        return True
+    adapter._pode_estacionar = sempre  # type: ignore[method-assign]
+    _run(asyncio.wait_for(adapter._vigiar_ociosas(), 2))
+    # Fora da memória: sem isto a sessão seguia "viva" e o próximo prompt não subia outro processo.
+    assert mortos == ["s1"] and "s1" not in adapter._sessions and sess.name == "s1"
+
+
 def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
     from app import pensamento
     monkeypatch.setattr(pensamento, "ler", lambda: True)

@@ -61,6 +61,11 @@ _AVISO_INIT_S = 60.0
 _TETO_INIT_S = 180.0
 _TETO_CTRL_S = 15.0
 _TETO_CANO_S = 10.0        # do spawn do cano até ele escutar
+# Sessão parada há mais que isto sem nada em aberto tem o processo encerrado; o próximo prompt
+# sobe outro com --resume. Fica acima da janela de 1h do cache do prompt: passado dela o próximo
+# turno relê o contexto de qualquer jeito, e religar não custa cota a mais.
+_OCIOSA_S = 65 * 60
+_VIGIA_S = 60.0
 _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
 # Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
 # distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
@@ -155,6 +160,7 @@ class _Sessao:
         self.tokens_msg_chars = 0     # caracteres da mensagem em voo, até o real chegar
         self.pensando_desde: float | None = None
         self.pensou_s = 0.0
+        self.ativa_em = time.monotonic()   # último evento da CLI ou prompt nosso (estacionar)
         # Input da tool em voo (partial_json acumulado): o rótulo mostra o alvo antes dela rodar.
         self.tool_nome: str | None = None
         self.tool_json = ""
@@ -211,6 +217,7 @@ class ClaudeHeadlessAdapter:
         self._spawn_locks: dict[str, asyncio.Lock] = {}
         self._tarefas: set[asyncio.Task] = set()
         self._religadas: dict[str, float] = {}
+        self._vigia: asyncio.Task | None = None
         self.apos_entrega: Callable[[str], None] | None = None   # api agenda a confirmação da fila
 
     # ── contrato Adapter ────────────────────────────────────────────────────────────────────
@@ -275,6 +282,7 @@ class ClaudeHeadlessAdapter:
         sess.in_progress = True
         sess.state = "working"
         sess.label = None
+        sess.ativa_em = time.monotonic()
         sess.iniciar_turno()
         await self._notify(sess)
         if self.apos_entrega is not None:
@@ -510,6 +518,12 @@ class ClaudeHeadlessAdapter:
 
     async def _reabrir(self, sess: _Sessao) -> None:
         """Mata o processo e sobe outro com `--resume` (mesma conversa, flags novas)."""
+        await self._encerrar(sess)
+        await self.ensure_running(sess.name)
+
+    async def _encerrar(self, sess: _Sessao) -> None:
+        """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
+        sem o pop ela seguiria "viva" e o próximo prompt não subiria outro processo."""
         self._matar(sess)
         if self._sessions.get(sess.name) is sess:
             self._sessions.pop(sess.name, None)
@@ -518,7 +532,6 @@ class ClaudeHeadlessAdapter:
                 await asyncio.wait_for(sess.leitor, 5)
             except (asyncio.TimeoutError, Exception):
                 pass
-        await self.ensure_running(sess.name)
 
     # ── processo ────────────────────────────────────────────────────────────────────────────
     # O `claude` não é filho do backend: é filho do CANO (cano.py), um processo por sessão que
@@ -563,7 +576,42 @@ class ClaudeHeadlessAdapter:
                     self._matar(sess)
                     self._problemas[name] = ("headless_nao_subiu", str(e)[:300])
                 raise
+            self._garantir_vigia()
             return sess
+
+    def _garantir_vigia(self) -> None:
+        if self._vigia is None or self._vigia.done():
+            self._vigia = asyncio.get_running_loop().create_task(self._vigiar_ociosas())
+
+    async def _vigiar_ociosas(self) -> None:
+        """Encerra o processo de sessão parada há `_OCIOSA_S`. Termina quando não há sessão ligada;
+        a próxima ligação a recria."""
+        while self._sessions:
+            await asyncio.sleep(_VIGIA_S)
+            for sess in list(self._sessions.values()):
+                try:
+                    if await self._pode_estacionar(sess):
+                        _log.info("claude headless: estacionando sessão ociosa name=%s parada=%ds",
+                                  sess.name, int(time.monotonic() - sess.ativa_em))
+                        await self._encerrar(sess)
+                except Exception:
+                    _log.exception("claude headless: vigia de ociosas falhou name=%s", sess.name)
+
+    async def _pode_estacionar(self, sess: _Sessao) -> bool:
+        # Nada em aberto: turno, permissão, pergunta, subida, drain, /effort pendente, troca de
+        # cano (lock de spawn) ou fila por entregar — encerrar qualquer um deles perderia trabalho.
+        if (not sess.vivo or sess.state != "idle" or sess.in_progress or sess.pending or sess.question
+                or sess.iniciando or sess.effort_pendente or sess.effort_aguardando):
+            return False
+        if time.monotonic() - sess.ativa_em < _OCIOSA_S:
+            return False
+        if sess.drenador is not None and not sess.drenador.done():
+            return False
+        lock = self._spawn_locks.get(sess.name)
+        if lock is not None and lock.locked():
+            return False
+        fila = await asyncio.to_thread(PromptQueue(sess.name).load)
+        return not any(not r.get("delivered") for r in fila)
 
     async def reconectar_todas(self) -> int:
         """Na subida do backend: religa em todo cano que ficou vivo (sidecar com `cano`). Sem
@@ -967,6 +1015,8 @@ class ClaudeHeadlessAdapter:
 
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
         t = ev.get("type")
+        if t != "keep_alive":
+            sess.ativa_em = time.monotonic()
         if ev.get("parent_tool_use_id") and not str(t).startswith("control_"):
             # Conversa de subagente: fica fora do rótulo e da prévia do principal (o transcript
             # dele mora em subagents/agent-*.jsonl; o que ele faz agora vem por task_progress).

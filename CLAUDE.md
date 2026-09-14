@@ -261,6 +261,12 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no
   backend. Leitura do socket com `limit=16 MB` e embrulhada — leitor pendurado é sessão presa.
   Órfão é cano sem sidecar, não cano de backend anterior.
+- **Claude sem terminal estaciona depois de `_OCIOSA_S` (65 min) parado** e sem nada em aberto: o
+  processo sai, o sidecar fica, o próximo prompt sobe com `--resume`. Quem encerra por dentro tira
+  a sessão da memória (`_encerrar`) — saída nossa não marca `returncode`.
+- **Pensamento no Claude sem terminal só com `--thinking-display summarized`**: com `-p` a CLI
+  ignora `showThinkingSummaries`. Pensamento e ferramenta em voo têm fonte e evento SSE próprios,
+  nunca a prévia da resposta.
 - **Runtime por conta não vira atalho** (`telemetry/`, `feedback/`, `image-cache/`, caches por
   config dir) — senão cada reconciliação acha "deriva" e gaveta de novo.
 - **O diálogo de confiança do Claude Code derruba três coisas**: a chave do pre-trust usa barra
