@@ -415,6 +415,11 @@ def provider_of_pane(pid, children: Optional[dict[int, list[int]]] = None) -> st
     return agente_do_pane(pid, children)[0]
 
 
+def _esforco_de_abertura(esforco):
+    """Esforço em uso que a flag `--effort` aceita; `ultracode` só existe no `/effort` em voo."""
+    return esforco if esforco in model_args.EFFORT_CLAUDE else None
+
+
 def _pid_do_agente(pane_pid):
     """Pid de onde ler conta, motor e modelo: o do agente dentro do pane, ou o próprio pane."""
     return (agente_do_pane(pane_pid)[1] or pane_pid) if pane_pid else None
@@ -1990,7 +1995,8 @@ class SessionRegistry:
         if not meta.get("engine"):
             # O processo sabe o modelo e o esforço em uso; o sidecar só guarda o que foi pedido.
             vivo_m, vivo_e = hl.escolhas(name)
-            escolha = {**meta, "model": vivo_m or meta.get("model"), "effort": vivo_e or meta.get("effort")}
+            escolha = {**meta, "model": vivo_m or meta.get("model"),
+                       "effort": _esforco_de_abertura(vivo_e) or meta.get("effort")}
         # Comando inteiro ANTES de matar: validação que estoura depois deixaria a sessão sem nada.
         cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists())
         headless_sessions.marcar_troca(name)
@@ -2060,7 +2066,7 @@ class SessionRegistry:
             # O cmdline só sabe o modelo do boot; `/model` na TUI, ou sessão aberta sem `--model`,
             # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
             vivo_m, vivo_e = _escolhas_status(sid)
-            modelo, esforco = vivo_m or modelo, vivo_e or esforco
+            modelo, esforco = vivo_m or modelo, _esforco_de_abertura(vivo_e) or esforco
         model_args.validar("claude", modelo, esforco, permission_mode)
         filhos = _descendant_pids(pid) if pid else []
         headless_sessions.marcar_troca(name)

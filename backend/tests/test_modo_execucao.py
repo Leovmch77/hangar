@@ -126,6 +126,15 @@ def test_pane_leva_o_modelo_em_uso_nao_o_do_boot(reg, tmp_path, monkeypatch):
     assert (meta["model"], meta["effort"]) == ("claude-opus-5[1m]", "high")
 
 
+def test_esforco_que_nao_existe_na_abertura_nao_trava_a_troca(reg, tmp_path, monkeypatch):
+    # `ultracode` só existe no /effort em voo; a flag --effort recusa e a troca dava 409.
+    from app import registry as R
+    _pane(reg, tmp_path, monkeypatch)
+    monkeypatch.setattr(R, "_escolhas_status", lambda sid: ("claude-opus-5[1m]", "ultracode"))
+    meta = reg.para_headless("t1", "plan")
+    assert (meta["model"], meta["effort"]) == ("claude-opus-5[1m]", "high")
+
+
 def test_sem_terminal_volta_com_o_modelo_em_uso(reg, tmp_path, monkeypatch):
     from app import registry as R
     from pathlib import Path
@@ -141,6 +150,10 @@ def test_sem_terminal_volta_com_o_modelo_em_uso(reg, tmp_path, monkeypatch):
     monkeypatch.setattr(R.tmux, "new_session", lambda name, cwd, cmd, *a, **k: cmds.append(cmd) or True)
     reg.para_terminal("hl")
     assert "--model 'claude-opus-5[1m]'" in cmds[0] and "--effort high" in cmds[0]
+    fake_hl.escolhas.return_value = ("claude-opus-5[1m]", "ultracode")
+    S.save("hl", str(tmp_path), SID)
+    reg.para_terminal("hl")
+    assert "--effort" not in cmds[1]
 
 
 def test_pane_que_nao_morre_nao_vira_sem_terminal(reg, tmp_path, monkeypatch):
