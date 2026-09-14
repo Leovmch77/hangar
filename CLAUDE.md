@@ -185,6 +185,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   commit. Dado do servidor não vira chave. A trava `i18nGuard.test.ts` só desce.
 - **Markdown NUNCA aparece cru.** Todo `.md` exibido passa por `renderMarkdown`. Um `<pre>` com
   `**` e `##` à mostra é bug, não estilo.
+- **Tela ou lista nova trata os quatro estados: carregando, vazio, erro e sucesso.**
 - **Config e opção moram em MODAL, não em painel docado.** Só o `DesktopSessionContext` fica
   docado. Tela de config usa **container query**, nunca media query — quem aperta a linha é a
   largura do painel.
