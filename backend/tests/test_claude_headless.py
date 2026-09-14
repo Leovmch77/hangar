@@ -27,6 +27,7 @@ def sidecar(tmp_path, monkeypatch):
     # REAL de uma sessão "s1", e o test_sse (mesmo nome) lia essas bolhas antes do `reset`.
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
+    monkeypatch.setattr(A.log_paths, "base", lambda: tmp_path / "logs")
     monkeypatch.setattr(PushPreviewSource, "_sources", {})
     monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
     # Sem config_dir o esforço padrão viria do ~/.claude/settings.json de quem roda os testes.
@@ -1163,4 +1164,30 @@ def test_buracos_calados_viram_nota_no_chat(adapter, tmp_path, monkeypatch):
     assert textos == ["⚙️ A CLI pediu `hook_callback`; respondi vazio",
                       "⚙️ Evento desconhecido da CLI: novo_tipo"]
     assert sess.pending == {} and sess.state == "idle"
+    # Cada ocorrência vai pro log privado com o payload inteiro, pra decidir depois o que fazer.
+    arq = tmp_path / "logs" / "privado" / "claude-headless-desconhecidos.jsonl"
+    linhas = [json.loads(l) for l in arq.read_text(encoding="utf-8").splitlines()]
+    assert [(l["sessao"], l["tipo"], l["evento"]) for l in linhas] == [
+        ("s1", "control_request/hook_callback", {"type": "control_request", "request_id": "c-1",
+                                                 "request": {"subtype": "hook_callback", "callback_id": "x"}}),
+        ("s1", "control_request/hook_callback", {"type": "control_request", "request_id": "c-2",
+                                                 "request": {"subtype": "hook_callback", "callback_id": "y"}}),
+        ("s1", "novo_tipo", {"type": "novo_tipo", "x": 1}),
+        ("s1", "novo_tipo", {"type": "novo_tipo", "x": 2})]
     q.clear()
+
+
+def test_evento_desconhecido_tem_teto_por_tipo(adapter, tmp_path, monkeypatch):
+    from app import pqueue
+    monkeypatch.setattr(A, "_TETO_DESCONHECIDOS", 2)
+    sess = adapter._sessions["s1"]
+
+    async def fluxo():
+        for i in range(5):
+            await adapter._on_event(sess, {"type": "ruidoso", "i": i})
+        await adapter._on_event(sess, {"type": "outro"})
+    _run(fluxo())
+    arq = tmp_path / "logs" / "privado" / "claude-headless-desconhecidos.jsonl"
+    assert [json.loads(l)["tipo"] for l in arq.read_text(encoding="utf-8").splitlines()] == \
+        ["ruidoso", "ruidoso", "outro"]
+    pqueue.PromptQueue("s1").clear()

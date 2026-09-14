@@ -34,7 +34,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, model_args, pensamento
+from app import atomico, cotas, log_paths, model_args, pensamento
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -70,6 +70,9 @@ _VIGIA_S = 60.0
 # um processo que morre ao nascer vira laço. A espera dobra a cada tentativa.
 _TETO_SUBIDAS = 3
 _ESPERA_SUBIDA_S = 5.0
+# Evento que o adapter não conhece vai pro log privado pra decidir depois o que fazer com ele. O
+# teto por tipo é pra ver todos os estados de um evento sem um tipo ruidoso encher o disco.
+_TETO_DESCONHECIDOS = 30
 _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
 # Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
 # distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
@@ -160,6 +163,7 @@ class _Sessao:
         self.effort_pendente: str | None = None     # `/effort` pedido com turno em voo: sai no result
         self.effort_aguardando: str | None = None   # `/effort` já no stdin, esperando a CLI confirmar
         self.tipos_desconhecidos: set[str] = set()  # eventos do stdout já avisados (uma nota por tipo)
+        self.desconhecidos_gravados: collections.Counter[str] = collections.Counter()
         self.iniciando = False     # processo novo esperando o `initialize` (hooks de SessionStart)
         # Contadores do turno em voo, pro rótulo "(7s · ↓ 334 tokens · thought for 2s)" da TUI.
         self.turno_inicio: float | None = None
@@ -1136,12 +1140,34 @@ class ClaudeHeadlessAdapter:
             sess.limit_reset = _hora_local(info.get("resetsAt")) if sess.limited else None
             await self._notify(sess)
             return
-        if t not in ("keep_alive", "conversation_reset", "tool_progress") and t not in sess.tipos_desconhecidos:
+        if t in ("keep_alive", "conversation_reset", "tool_progress"):
+            return
+        await self._gravar_desconhecido(sess, str(t), ev)
+        if t not in sess.tipos_desconhecidos:
             # Evento que este adapter não conhece: no terminal teria tela, aqui sumiria calado.
             # Uma nota por tipo por sessão, senão vira spam.
             sess.tipos_desconhecidos.add(str(t))
             _log.warning("claude headless: evento não tratado name=%s tipo=%s", sess.name, t)
             await self._nota_local(sess, f"⚙️ Evento desconhecido da CLI: {t}")
+
+    async def _gravar_desconhecido(self, sess: _Sessao, tipo: str, ev: dict) -> None:
+        """Payload bruto no log privado (pode carregar texto de conversa), nunca no diário."""
+        if sess.desconhecidos_gravados[tipo] >= _TETO_DESCONHECIDOS:
+            return
+        sess.desconhecidos_gravados[tipo] += 1
+        linha = json.dumps({"ts": time.time(), "sessao": sess.name, "tipo": tipo, "evento": ev},
+                           ensure_ascii=False, default=str)
+
+        def gravar() -> None:
+            pasta = log_paths.base() / "privado"
+            pasta.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with open(pasta / "claude-headless-desconhecidos.jsonl", "a", encoding="utf-8") as f:
+                f.write(linha + "\n")
+        try:
+            await asyncio.to_thread(gravar)
+        except Exception:
+            _log.exception("claude headless: evento desconhecido não gravado name=%s tipo=%s",
+                           sess.name, tipo)
 
     async def _on_system(self, sess: _Sessao, ev: dict) -> None:
         sub = ev.get("subtype")
@@ -1272,6 +1298,7 @@ class ClaudeHeadlessAdapter:
             # Subtype que não tratamos: responder vazio destrava a CLI (mesma escolha do MonoCode),
             # mas a pessoa precisa saber que algo foi pedido e decidido sem ela.
             await self._responder(sess, rid, {})
+            await self._gravar_desconhecido(sess, f"control_request/{sub}", ev)
             if sub not in sess.tipos_desconhecidos:
                 sess.tipos_desconhecidos.add(str(sub))
                 await self._nota_local(sess, f"⚙️ A CLI pediu `{sub}`; respondi vazio")
