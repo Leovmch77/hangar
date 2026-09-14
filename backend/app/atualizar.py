@@ -705,7 +705,7 @@ def _executar(porta: int) -> dict:
     # `systemctl list-unit-files` — todos passam pelo `_log_do_estado`, que lê, mescla e regrava o
     # estado. Zerando depois, todo esse trabalho ia pro lixo e a etapa de checagem nunca aparecia
     # no terminalzinho, mesmo tendo sido registrada.
-    _escrever(fase="rodando", ok=None, erro=None, resgate=None,
+    _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
               commit_de="", commit_para=None, pid=os.getpid(),
               reiniciar_manual=False, shell_mudou=False, log=[])
     pre = checar()
