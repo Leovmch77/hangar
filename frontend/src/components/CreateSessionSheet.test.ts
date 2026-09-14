@@ -17,7 +17,9 @@ import * as api from '@hangar/core';
 import * as contaEstado from '../lib/contaEstado';
 import { quotaFeed } from '../lib/quotaFeed.svelte';
 
-const onCreate = vi.hoisted(() => vi.fn(async () => {}));
+// Assinatura larga: o teste do "Sem terminal" lê `mock.calls[...][9]`, e um `vi.fn(async () => {})`
+// tipa as chamadas como tupla vazia — o svelte-check recusava e o CI ficou vermelho (dist parado).
+const onCreate = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => {}));
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
