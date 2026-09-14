@@ -997,6 +997,8 @@ class ClaudeHeadlessAdapter:
                                   if isinstance(b, dict) and b.get("type") == "text").strip()
                 if sess.effort_aguardando is not None:
                     self._confirmar_effort(sess, texto)
+                if texto.startswith("## Context Usage"):
+                    texto += _tabela_limites(sess.janelas)
                 if texto:
                     await self._nota_local(sess, texto)
                 return
@@ -1583,6 +1585,16 @@ def _alvo_da_permissao(req: dict) -> tuple[str, str]:
     if len(detalhe) > 200:
         detalhe = detalhe[:200] + "…"
     return str(tool), detalhe
+
+
+def _tabela_limites(janelas: list) -> str:
+    """Limites da conta no mesmo formato de tabela do `/context`, pra o cartão do app ler junto; o
+    reset vai em epoch pra cada aparelho mostrar no próprio fuso."""
+    linhas = [f"| {j.rotulo} | {round(j.pct)}% | {int(j.reset_ts) if j.reset_ts else ''} |"
+              for j in janelas if not j.por_modelo]
+    if not linhas:
+        return ""
+    return "\n\n### Plan limits\n\n| Limit | Used | Resets |\n|-------|------|--------|\n" + "\n".join(linhas)
 
 
 _CAMPOS_ALVO = ("command", "file_path", "notebook_path", "path", "pattern", "url", "query", "description", "prompt")

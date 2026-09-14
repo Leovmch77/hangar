@@ -181,6 +181,23 @@ def test_ferramenta_em_voo_publica_nome_e_input_parcial_ate_cair_no_jsonl(adapte
     _run(fluxo())
 
 
+def test_context_ganha_tabela_de_limites_da_conta(adapter):
+    from app.cotas import JanelaCota
+    sess = adapter._sessions["s1"]
+    sess.janelas = [JanelaCota(rotulo="5h", pct=37.6, reset_ts=1789400000.5),
+                    JanelaCota(rotulo="7d", pct=71, reset_ts=None),
+                    JanelaCota(rotulo="fable", pct=99, por_modelo=True)]
+    notas: list[str] = []
+
+    async def _nota(s, texto):
+        notas.append(texto)
+    adapter._nota_local = _nota  # type: ignore[method-assign]
+    _run(adapter._on_event(sess, {"type": "assistant", "local_command_source": "user", "message": {
+        "content": [{"type": "text", "text": "## Context Usage\n\n**Tokens:** 37.3k / 200k (19%)"}]}}))
+    assert notas[0].endswith("| 5h | 38% | 1789400000 |\n| 7d | 71% |  |")
+    assert A._tabela_limites([]) == ""
+
+
 def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
     from app import pensamento
     monkeypatch.setattr(pensamento, "ler", lambda: True)

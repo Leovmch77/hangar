@@ -2,7 +2,8 @@
   import { agruparConversa, type ItemConversa } from '@hangar/core';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { planDisplayText } from '@hangar/core';
+  import { planDisplayText, parseContextoUso } from '@hangar/core';
+  import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
   import * as m from '../paraglide/messages';
   import type { ChatEvent, StateEvent, AskQuestionPayload, AnswerItem } from '@hangar/core';
@@ -532,9 +533,14 @@
           {#if forwardText}{@const fr = parseFilePaths(forwardText)}{#if fr.length}<FileAttachment {sessionName} refs={fr} />{/if}{/if}
         {/if}
       {:else if ev.kind === 'assistant_msg' && ev.text}
+        {@const ctxUso = parseContextoUso(ev.text)}
+        {#if ctxUso}
+          <ContextCard dados={ctxUso} texto={ev.text} />
+        {:else}
         <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
                          onForward={onForward ? () => onForward(ev.text ?? '') : null} />
+        {/if}
         {#if plan?.eventId === ev.id}
           <SessionPlanPreview {...planoProps()} />
         {/if}

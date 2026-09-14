@@ -21,6 +21,7 @@ export * from './detectarLinguagem';
 export * from './peek';
 export * from './covers';
 export * from './format';
+export * from './contextoUso';
 export * from './agruparSessoes';
 export * from './plan';
 export * from './activity';
