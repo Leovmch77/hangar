@@ -73,6 +73,7 @@ _ESPERA_SUBIDA_S = 5.0
 # Evento que o adapter não conhece vai pro log privado pra decidir depois o que fazer com ele. O
 # teto por tipo é pra ver todos os estados de um evento sem um tipo ruidoso encher o disco.
 _TETO_DESCONHECIDOS = 30
+_MAX_DESCONHECIDOS_B = 10 << 20
 _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 KB)
 # Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
 # distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
@@ -1161,7 +1162,12 @@ class ClaudeHeadlessAdapter:
         def gravar() -> None:
             pasta = log_paths.base() / "privado"
             pasta.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with open(pasta / "claude-headless-desconhecidos.jsonl", "a", encoding="utf-8") as f:
+            arq = pasta / "claude-headless-desconhecidos.jsonl"
+            # O teto por tipo é da _Sessao, que renasce a cada religada: o arquivo precisa do
+            # próprio limite. Append de uma linha em FS local é atômico; sem lock de propósito.
+            if arq.exists() and arq.stat().st_size > _MAX_DESCONHECIDOS_B:
+                return
+            with open(arq, "a", encoding="utf-8") as f:
                 f.write(linha + "\n")
         try:
             await asyncio.to_thread(gravar)

@@ -1190,4 +1190,8 @@ def test_evento_desconhecido_tem_teto_por_tipo(adapter, tmp_path, monkeypatch):
     arq = tmp_path / "logs" / "privado" / "claude-headless-desconhecidos.jsonl"
     assert [json.loads(l)["tipo"] for l in arq.read_text(encoding="utf-8").splitlines()] == \
         ["ruidoso", "ruidoso", "outro"]
+    # O teto por tipo renasce com a _Sessao; o arquivo cheio para de crescer por conta própria.
+    monkeypatch.setattr(A, "_MAX_DESCONHECIDOS_B", arq.stat().st_size - 1)
+    _run(adapter._on_event(_Sessao("s2", sess.meta), {"type": "outro"}))
+    assert len(arq.read_text(encoding="utf-8").splitlines()) == 3
     pqueue.PromptQueue("s1").clear()
