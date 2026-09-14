@@ -41,6 +41,9 @@ def repo(tmp_path, monkeypatch):
     # `executar()`, pra o backend (que roda os mesmos `_git` no endpoint) não escrever no log e
     # sobrescrever o que o motor gravou.
     monkeypatch.setattr(atualizar, "_SOU_O_MOTOR", True)
+    # A prova por pid lê o systemd DESTA máquina (o backend real está no ar durante a suíte) e
+    # veria "mesmo pid" em todo teste de fluxo. Quem testa a prova liga ela de volta.
+    monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topologia, porta: None)
     return d
 
 
@@ -146,11 +149,11 @@ def test_falha_no_meio_nao_reinicia(repo, monkeypatch):
     chamou = []
     monkeypatch.setattr(atualizar, "_puxar", lambda pre: chamou.append("puxar"))
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: chamou.append("passos"))
-    def _instalar_quebra(topologia):
+    def _instalar_quebra(topologia, **kw):
         chamou.append("instalar")
         raise RuntimeError("build quebrou")
-    monkeypatch.setattr(atualizar, "_reaplicar", _instalar_quebra)
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: chamou.append("reiniciar"))
+    monkeypatch.setattr(atualizar, "_preparar", _instalar_quebra)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: chamou.append("reiniciar"))
 
     final = atualizar.executar()
     assert "reiniciar" not in chamou
@@ -220,8 +223,8 @@ def test_backend_que_nao_sobe_volta_pro_commit_anterior(repo, monkeypatch):
 
     monkeypatch.setattr(atualizar, "_puxar", _puxar_avanca)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
     monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: False)
 
     final = atualizar.executar()
@@ -244,16 +247,43 @@ def test_shell_mudou_so_quando_o_pull_toca_a_janela(repo, monkeypatch, arquivo, 
 
     monkeypatch.setattr(atualizar, "_puxar", _puxar_avanca)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
     monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
     final = atualizar.executar()
     assert final["ok"] is True
     assert final["shell_mudou"] is esperado
 
 
+def test_mesmo_pid_na_porta_depois_do_restart_vai_pro_rollback(repo, monkeypatch):
+    """HTTP < 500 o processo velho também responde. Se o pid não trocou, não houve restart —
+    foi assim que o `-Update` do Windows dizia ok com a instância anterior no ar."""
+    for nome in ("_puxar", "_preparar", "_reiniciar"):
+        monkeypatch.setattr(atualizar, nome, lambda *a, **k: None)
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topologia, porta: 4242)
+    voltou = []
+    monkeypatch.setattr(atualizar, "_voltar",
+                        lambda c, m, t, p: (voltou.append(m), {"ok": False})[1])
+    atualizar.executar()
+    assert voltou and "mesmo de antes" in voltou[0] and "4242" in voltou[0]
+
+
+def test_pid_diferente_depois_do_restart_e_pronto(repo, monkeypatch):
+    for nome in ("_puxar", "_preparar", "_reiniciar"):
+        monkeypatch.setattr(atualizar, nome, lambda *a, **k: None)
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    pids = iter([100, 200])
+    monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topologia, porta: next(pids))
+    assert atualizar.executar()["ok"] is True
+
+
 def test_pronto_marca_ok(repo, monkeypatch):
-    for nome in ("_puxar", "_aplicar_passos", "_reaplicar", "_reiniciar"):
+    for nome in ("_puxar", "_aplicar_passos", "_preparar", "_reiniciar"):
         monkeypatch.setattr(atualizar, nome,
                             (lambda *a, **k: None) if nome != "_aplicar_passos" else (lambda: None))
     monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
@@ -303,9 +333,9 @@ def test_avisa_as_sessoes_antes_de_reiniciar(repo, monkeypatch):
     ordem = []
     monkeypatch.setattr(atualizar, "_puxar", lambda pre: None)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
     monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: ordem.append("avisou"))
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: ordem.append("reiniciou"))
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: ordem.append("reiniciou"))
     monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
     atualizar.executar()
     assert ordem == ["avisou", "reiniciou"]
@@ -368,6 +398,50 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
         "a janela nativa (Electron) ficou com dependencias desatualizadas"]
 
 
+def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool):
+    chamadas = []
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    (repo / "backend").mkdir(exist_ok=True)
+    (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+    if node_modules:
+        (repo / "node_modules").mkdir()
+    marca = atualizar._base() / "package-lock.sha"
+    marca.parent.mkdir(parents=True, exist_ok=True)
+    marca.write_text(atualizar._hash_arquivo(repo / "package-lock.json") if lock_igual else "outro",
+                     encoding="utf-8")
+    atualizar._preparar("systemd")
+    return [" ".join(c) for c in chamadas]
+
+
+def test_preparar_sincroniza_o_uv_e_nao_chama_o_instalador(repo, monkeypatch):
+    """O caminho do botão: dist + `uv sync`. Nada de `install.sh --update`."""
+    cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True)
+    assert any(c.endswith("uv sync") for c in cmds)
+    assert not any("install." in c for c in cmds)
+    assert not any("npm ci" in c for c in cmds)
+
+
+def test_preparar_roda_npm_ci_so_quando_o_lock_mudou(repo, monkeypatch):
+    cmds = _preparo_gravado(repo, monkeypatch, lock_igual=False, node_modules=True)
+    assert any("npm ci" in c for c in cmds)
+    # E grava o hash: a próxima não repete.
+    assert (atualizar._base() / "package-lock.sha").read_text() == \
+        atualizar._hash_arquivo(repo / "package-lock.json")
+
+
+def test_preparar_sem_node_modules_nao_instala_front(repo, monkeypatch):
+    """Máquina que serve o dist do CI sem nunca ter rodado `npm ci` não ganha um `node_modules`
+    de 400 MB só porque o lock mudou."""
+    cmds = _preparo_gravado(repo, monkeypatch, lock_igual=False, node_modules=False)
+    assert not any("npm ci" in c for c in cmds)
+
+
 def test_falha_do_instalador_mostra_o_motivo_marcado_nao_a_cauda(repo, monkeypatch):
     """As 12 últimas linhas do `install.ps1` são o portão do fim — a lista de pendências sem o
     porquê. O motivo é impresso no passo que falhou, com a marca; é ele que vai pra tela."""
@@ -414,22 +488,39 @@ def test_avisa_as_sessoes_antes_do_instalador(repo, monkeypatch):
     monkeypatch.setattr(atualizar, "_puxar", lambda pre: None)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
     monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: ordem.append("avisou"))
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: ordem.append("instalou"))
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: ordem.append("reiniciou"))
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: ordem.append("instalou"))
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: ordem.append("reiniciou"))
     monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
     atualizar.executar()
     assert ordem == ["avisou", "instalou", "reiniciou"]
 
 
-def test_windows_nao_pede_reinicio_manual(repo):
-    """No Windows o restart já aconteceu na etapa anterior, dentro do `install.ps1 -Update`.
-
-    Ele derruba a instância velha e chama `Start-ScheduledTask` (bloco que o modo `-Update` NÃO
-    pula), e ainda há o `hangar-vigia` de rede. Marcar "falta reiniciar" aqui fazia a tela pedir um
-    passo que já tinha sido dado — medido na máquina Windows em 25/08/2026.
-    """
-    atualizar._reiniciar("windows")
+def test_windows_reinicia_as_tarefas_pelo_helper_sem_instalador(repo, monkeypatch):
+    """O restart do Windows é o `Restart-HangarTasks` do `windows-tasks.ps1` (o mesmo da vigia),
+    não o `install.ps1 -Update` inteiro. E não pede reinício manual."""
+    chamadas = []
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    (repo / "backend").mkdir(exist_ok=True)
+    (repo / "backend" / ".env").write_text("CP_FRONT_PORT=5173\n", encoding="utf-8")
+    atualizar._reiniciar("windows", 8765)
     assert not atualizar.estado().get("reiniciar_manual")
+    cmd = " ".join(chamadas[-1])
+    assert "windows-tasks.ps1" in cmd and "Restart-HangarTasks" in cmd and "8765 5173" in cmd
+    assert "install.ps1" not in cmd
+
+
+def test_windows_restart_que_falha_levanta(repo, monkeypatch):
+    class P:
+        returncode = 1
+        stdout = "Porta 8765 ocupada por outro processo"
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda *a, **kw: P())
+    with pytest.raises(RuntimeError, match="ocupada"):
+        atualizar._reiniciar("windows", 8765)
 
 
 def test_instalacao_na_mao_tambem_pede_reinicio(repo):
@@ -441,9 +532,9 @@ def test_sem_restart_nao_cobra_prova_de_vida(repo, monkeypatch):
     """O backend velho continua respondendo: um `_subiu` verde ali não provaria nada."""
     monkeypatch.setattr(atualizar, "_puxar", lambda pre: None)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
     monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: atualizar._escrever(reiniciar_manual=True))
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: atualizar._escrever(reiniciar_manual=True))
     def _nunca(*a, **kw):
         raise AssertionError("_subiu nao devia ser chamado sem restart")
     monkeypatch.setattr(atualizar, "_subiu", _nunca)
@@ -611,8 +702,8 @@ def test_reset_do_rollback_que_falha_nao_mente(repo, monkeypatch):
         return real(*args, **kw)
 
     monkeypatch.setattr(atualizar, "_git", _git_falso)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: pytest.fail("nao pode reinstalar"))
-    monkeypatch.setattr(atualizar, "_reiniciar", lambda t: pytest.fail("nao pode reiniciar"))
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: pytest.fail("nao pode reinstalar"))
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: pytest.fail("nao pode reiniciar"))
 
     final = atualizar._voltar("abc123", "o servidor caiu", "systemd", 1)
     assert final["ok"] is False and final["voltou"] is False
@@ -623,9 +714,9 @@ def test_restart_que_falha_vai_pro_rollback(repo, monkeypatch):
     """`systemctl restart` já derrubou o processo antigo: isto NÃO é "está tudo como estava"."""
     monkeypatch.setattr(atualizar, "_puxar", lambda pre: None)
     monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
     monkeypatch.setattr(atualizar, "_avisar_sessoes", lambda: None)
-    def _quebra(t):
+    def _quebra(t, *a, **k):
         raise RuntimeError("systemctl nao subiu")
     monkeypatch.setattr(atualizar, "_reiniciar", _quebra)
     voltou = []
@@ -721,8 +812,8 @@ def test_troca_de_dono_do_lock_nunca_deixa_o_arquivo_vazio(repo, monkeypatch):
 def test_rollback_que_nao_sobe_nao_diz_que_esta_no_ar(repo, monkeypatch):
     """O restart que motivou o rollback já matou o processo antigo; se o do rollback também falha,
     não há nada rodando — dizer "no ar" manda a pessoa embora de um servidor morto."""
-    monkeypatch.setattr(atualizar, "_reaplicar", lambda t: None)
-    def _quebra(t):
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    def _quebra(t, *a, **k):
         raise RuntimeError("nao subiu nem na volta")
     monkeypatch.setattr(atualizar, "_reiniciar", _quebra)
     final = atualizar._voltar(atualizar._git("rev-parse", "HEAD").stdout.strip(),

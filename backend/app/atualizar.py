@@ -526,8 +526,61 @@ def _shell_mudou(de: str, para: str) -> bool:
     return any(linha and not linha.endswith(".test.cjs") for linha in p.stdout.splitlines())
 
 
+def _hash_arquivo(caminho: Path) -> str:
+    import hashlib
+    try:
+        return hashlib.sha256(caminho.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _preparar(topologia: str, *, dist: bool = True) -> None:
+    """O que o `git pull` não traz e o backend novo precisa pra subir — SEM o instalador.
+
+    O instalador inteiro (`install.ps1 -Update`, 8 etapas) rodava a cada atualização, e cada etapa
+    era uma chance de falhar sem ninguém ter pedido nada dela. O que muda de verdade entre dois
+    commits e não vem no `git pull` é curto: a tela compilada, as dependências do backend e, às
+    vezes, as do front. Wrapper, statusline, tarefa agendada e afins só mudam quando um commit os
+    muda — e esse commit declara o passo em `docs/atualizacoes/`, que roda o instalador cirúrgico.
+
+    `uv sync` sempre: é idempotente e sai em segundos com o lock igual. Comparar o lock entre
+    `de..para` seria o intervalo de commits, que mente em máquina reclonada ou resetada (regra
+    medida em `atualizacoes.py`). O `npm ci` não é barato, então esse compara o hash do lock
+    gravado no sidecar — do que JÁ RODOU aqui, não do intervalo.
+    """
+    if dist:
+        aviso = _atualizar_dist()
+        if aviso:
+            _escrever(avisos=list(estado().get("avisos") or []) + [aviso])
+            _log.warning(aviso)
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv nao encontrado: nao da pra sincronizar as dependencias do backend")
+    p = _rodar([uv, "sync"], cwd=REPO / "backend", timeout=600)
+    if p.returncode != 0:
+        raise RuntimeError(f"as dependencias do backend nao sincronizaram: {_cauda(p, 6)}")
+    lock = REPO / "package-lock.json"
+    marca = _base() / "package-lock.sha"
+    atual = _hash_arquivo(lock)
+    try:
+        aplicado = marca.read_text(encoding="utf-8").strip()
+    except OSError:
+        aplicado = ""
+    if atual and atual != aplicado and (REPO / "node_modules").is_dir():
+        npm = shutil.which("npm")
+        if not npm:
+            raise RuntimeError("package-lock.json mudou e nao achei o npm pra instalar as dependencias")
+        p = _rodar([npm, "ci", "--workspace=@hangar/core", "--workspace=frontend"], cwd=REPO, timeout=900)
+        if p.returncode != 0:
+            raise RuntimeError(f"as dependencias do front nao instalaram: {_cauda(p, 6)}")
+    if atual:
+        marca.parent.mkdir(parents=True, exist_ok=True)
+        marca.write_text(atual, encoding="utf-8")
+
+
 def _reaplicar(topologia: str) -> None:
-    """O que o `git pull` não atualiza: units, deps, build. Já existe, por sistema."""
+    """O instalador inteiro (`-Update`/`--update`). Não é mais o caminho do botão — fica pro
+    hook post-merge e pra quem chama na mão; o botão só roda o que um passo declarado pedir."""
     if _E_WINDOWS:
         p = _rodar(["powershell", "-ExecutionPolicy", "Bypass", "-File",
                     str(REPO / "install.ps1"), "-Update"])
@@ -573,7 +626,18 @@ def _avisar_sessoes() -> None:
         _log.debug("hangar-send indisponivel: %s", e)
 
 
-def _reiniciar(topologia: str) -> None:
+def _porta_do_front() -> int:
+    """`CP_FRONT_PORT` do `backend/.env`; 0 quando não há tarefa do front."""
+    try:
+        for ln in (REPO / "backend" / ".env").read_text(encoding="utf-8").splitlines():
+            if ln.startswith("CP_FRONT_PORT="):
+                return int(ln.split("=", 1)[1].strip() or 0)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _reiniciar(topologia: str, porta: int = 8765) -> None:
     if topologia == "systemd":
         unidades = ["hangar-backend.service"]
         if _rodar(["systemctl", "--user", "list-unit-files", "hangar-frontend.service"],
@@ -583,21 +647,16 @@ def _reiniciar(topologia: str) -> None:
         if p.returncode != 0:
             raise RuntimeError(f"nao consegui reiniciar o servidor: {_cauda(p)}")
     elif topologia == "windows":
-        # NADA a fazer aqui: o restart JÁ ACONTECEU na etapa anterior. O `install.ps1 -Update`
-        # derruba a instância velha (`Pare-Servico`) e chama `Start-ScheduledTask` para as tarefas
-        # `hangar-backend`/`hangar-frontend` — e esse bloco não é pulado no modo `-Update` (o que
-        # ele pula é só firewall/Tailscale e o hook). Ainda há o `hangar-vigia`, que confere se a
-        # porta está escutando e sobe a tarefa de novo se não estiver.
-        #
-        # Medido na máquina Windows em 25/08/2026: as três tarefas existem, o backend sobe como
-        # cadeia de três processos, e as tarefas ficam em `Ready` mesmo com o servidor vivo (o
-        # `.vbs` não espera). Antes disto, este ramo marcava "falta reiniciar o servidor" EM CIMA
-        # de um restart que já tinha acontecido — a tela mentia dizendo que faltava um passo.
-        #
-        # Reusar o instalador em vez de escrever um `taskkill` aqui não é preguiça: quem sabe o
-        # nome das tarefas, o caminho do checkout e como derrubar a cadeia inteira de processos
-        # é ele, e isso já está testado em produção.
-        pass
+        # Quem sabe derrubar a cadeia de processos e subir a tarefa é o `windows-tasks.ps1` (o
+        # mesmo que a vigia usa) — sem passar pelo instalador. Este processo é destacado do
+        # backend, e o `Restart-HangarTask` não encerra a árvore: o atualizador sobrevive.
+        helper = str(REPO / "scripts" / "windows-tasks.ps1").replace("'", "''")
+        raiz = str(REPO).replace("'", "''")
+        p = _rodar(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                    f". '{helper}'; Restart-HangarTasks '{raiz}' {int(porta)} {_porta_do_front()}"],
+                   timeout=180)
+        if p.returncode != 0:
+            raise RuntimeError(f"nao consegui reiniciar as tarefas: {_cauda(p, 6)}")
     else:
         # Instalação na mão: não há serviço para reiniciar, e inventar um `kill` no processo de
         # alguém seria pior que não reiniciar. A tela avisa que falta reiniciar à mão.
@@ -676,12 +735,8 @@ def _executar(porta: int) -> dict:
         _aplicar_passos()
 
         _etapa("instalar")
-        # Avisa ANTES do installer, e não antes da etapa "reiniciar": no Windows quem derruba e
-        # sobe o backend é o próprio `install.ps1 -Update`, chamado aqui — lá o aviso chegava
-        # depois do fato consumado. No Linux nada muda de ordem observável (o restart vem depois de
-        # qualquer forma), e avisar alguns segundos mais cedo não atrapalha ninguém.
         _avisar_sessoes()
-        _reaplicar(pre["topologia"])
+        _preparar(pre["topologia"])
 
     except Exception as e:                           # noqa: BLE001 — ver abaixo: é deliberado
         # `Exception`, e não uma lista de tipos. Isto roda num processo DESTACADO cuja única forma
@@ -697,19 +752,46 @@ def _executar(porta: int) -> dict:
     # processo antigo ANTES de subir o novo, então um erro neste ponto deixa a máquina sem serviço
     # nenhum, com código novo no disco. Esse caso tem que ir pro rollback, não pro "falhou e está
     # tudo como estava".
+    pid_antes = _pid_do_servidor(pre["topologia"], porta)
     try:
         _etapa("reiniciar")
-        _reiniciar(pre["topologia"])
+        _reiniciar(pre["topologia"], porta)
     except Exception as e:                           # noqa: BLE001 — mesmo motivo do de cima
         return _voltar(de, f"o servidor nao reiniciou: {e}", pre["topologia"], porta)
 
-    # Prova de vida só onde houve restart de verdade. Onde ele não acontece (Windows, instalação na
-    # mão), o backend velho segue respondendo — checar aqui devolveria um "subiu" que não prova nada.
-    if not estado().get("reiniciar_manual") and not _subiu(porta):
-        return _voltar(de, "o servidor nao respondeu depois de reiniciar", pre["topologia"], porta)
+    # Prova de vida só onde houve restart de verdade. Na instalação na mão o backend velho segue
+    # respondendo — checar aqui devolveria um "subiu" que não prova nada.
+    if not estado().get("reiniciar_manual"):
+        if not _subiu(porta):
+            return _voltar(de, "o servidor nao respondeu depois de reiniciar", pre["topologia"], porta)
+        # HTTP < 500 o processo VELHO também responde. O pid na porta é a prova de que trocou:
+        # foi assim que o `-Update` do Windows chegou a dizer ok com a instância anterior no ar.
+        pid_depois = _pid_do_servidor(pre["topologia"], porta)
+        if pid_antes and pid_depois == pid_antes:
+            return _voltar(de, f"o servidor nao reiniciou: o processo na porta e o mesmo de antes (pid {pid_antes})",
+                           pre["topologia"], porta)
 
+    _dist_velho_apagar()
     _escrever(fase="pronto", ok=True, texto="Atualizado")
     return estado()
+
+
+def _pid_do_servidor(topologia: str, porta: int) -> int | None:
+    """Quem está servindo agora. `None` quando não dá pra saber — e aí a prova por pid não se
+    aplica, sem virar falha."""
+    try:
+        if topologia == "systemd":
+            p = _rodar(["systemctl", "--user", "show", "-p", "MainPID", "--value",
+                        "hangar-backend.service"], timeout=15)
+            return int(p.stdout.strip() or 0) or None
+        if topologia == "windows":
+            import psutil
+            for c in psutil.net_connections(kind="tcp"):
+                if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == porta:
+                    return c.pid or None
+    except Exception:                                # noqa: BLE001 — prova opcional, nunca derruba
+        _log.debug("pid do servidor indisponivel", exc_info=True)
+    return None
 
 
 def _falhou(msg: str, de: str = "", no_ar: bool | None = None, porta: int = 8765) -> dict:
@@ -746,8 +828,9 @@ def _voltar(commit: str, motivo: str, topologia: str, porta: int) -> dict:
         return _falhou(f"{motivo}; e nao consegui voltar pra versao anterior: {_cauda(r)}",
                        no_ar=False)
     try:
-        _reaplicar(topologia)
-        _reiniciar(topologia)
+        _dist_velho_voltar()
+        _preparar(topologia, dist=False)
+        _reiniciar(topologia, porta)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
         # `no_ar=False` explícito: chegar aqui quer dizer que o restart que motivou o rollback já
         # matou o processo antigo, e o restart do próprio rollback também falhou — não há nada
@@ -928,6 +1011,23 @@ def reiniciar_agora() -> dict:
 _DIST_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-latest"
 
 
+def _DIST_VELHO() -> Path:
+    return REPO / "frontend" / ".dist-velho"
+
+
+def _dist_velho_apagar() -> None:
+    shutil.rmtree(_DIST_VELHO(), ignore_errors=True)
+
+
+def _dist_velho_voltar() -> None:
+    """Rollback da tela: o dist anterior volta ao lugar, se ainda existe."""
+    velho, dist = _DIST_VELHO(), REPO / "frontend" / "dist"
+    if not velho.is_dir():
+        return
+    shutil.rmtree(dist, ignore_errors=True)
+    velho.rename(dist)
+
+
 def _atualizar_dist() -> str | None:
     """Troca o `frontend/dist` pelo build que o CI publicou. Devolve o aviso quando não deu.
 
@@ -961,14 +1061,14 @@ def _atualizar_dist() -> str | None:
         if not (tmp / "index.html").is_file():
             return "tela não atualizada: o dist do CI veio incompleto"
         # O dist velho só sai DEPOIS de o novo estar no lugar: um rename que falha no meio não
-        # pode deixar a máquina sem tela nenhuma.
+        # pode deixar a máquina sem tela nenhuma. E fica guardado até o fim: o rollback devolve
+        # a tela do commit anterior junto com o código dele.
         dist = REPO / "frontend" / "dist"
-        velho = dist.with_name(".dist-velho")
+        velho = _DIST_VELHO()
         shutil.rmtree(velho, ignore_errors=True)
         if dist.exists():
             dist.rename(velho)
         tmp.rename(dist)
-        shutil.rmtree(velho, ignore_errors=True)
     except (OSError, tarfile.TarError) as e:
         return f"tela não atualizada: não consegui baixar o dist do CI ({e})"
     finally:
@@ -992,6 +1092,7 @@ def executar_reinicio() -> None:
         _escrever(avisos=[aviso] if aviso else [])
         _avisar_sessoes()
         _reiniciar(_topologia())
+        _dist_velho_apagar()
     except Exception as e:                           # noqa: BLE001 — ver docstring
         _escrever(reinicio_erro=f"{type(e).__name__}: {e}")
 

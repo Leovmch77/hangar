@@ -120,6 +120,24 @@ function Restart-HangarTask([string]$name, [int]$port, [string]$directory) {
     }
 }
 
+# Reinicio das tarefas pelo atualizador, sem o instalador. Mesmo mutex do install.ps1 e da vigia:
+# os tres controlam a parada das mesmas tarefas e nao podem se sobrepor.
+function Restart-HangarTasks([string]$raiz, [int]$portaBack, [int]$portaFront) {
+    $mutex = New-Object Threading.Mutex($false, 'Local\HangarInstall')
+    $locked = $false
+    try {
+        try { $locked = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
+        if (-not $locked) { throw 'Instalacao ou recuperacao em andamento; tente de novo em instantes' }
+        Restart-HangarTask 'hangar-backend' $portaBack (Join-Path $raiz 'backend')
+        if ($portaFront -gt 0 -and (Get-ScheduledTask -TaskName 'hangar-frontend' -ErrorAction SilentlyContinue)) {
+            Restart-HangarTask 'hangar-frontend' $portaFront (Join-Path $raiz 'frontend')
+        }
+    } finally {
+        if ($locked) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
 function Repair-HangarTask([string]$name, [int]$port, [string]$directory) {
     $mutex = New-Object Threading.Mutex($false, 'Local\HangarInstall')
     $locked = $false
