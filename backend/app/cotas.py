@@ -34,6 +34,7 @@ nem gastar a requisição; 401/403 caem no mesmo estado.
 """
 import json
 import logging
+import os
 import threading
 import time
 import tomllib
@@ -48,7 +49,8 @@ from typing import Callable, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app import apelidos, codex_appserver, codex_contas, contas, engines, opencode_cota, renova_token
+from app import (apelidos, atomico, codex_appserver, codex_contas, contas, engines, log_paths,
+                 opencode_cota, renova_token)
 from app.adapters.kimi import sessions as kimi_sessions
 from app.auth import require_auth
 from app.config import list_config_dirs
@@ -61,6 +63,10 @@ cotas_router = APIRouter(prefix="/api/cotas")
 # pior caso). Conta EM USO não depende deste TTL pra parecer viva — a statusline da sessão dela
 # continua desenhando o número no chat; aqui o que importa é a conta parada ter algum número.
 _TTL_S = 300.0
+# 429 é o provedor pedindo pra parar: insistir no próximo poll só renova o 429. Medido em
+# 14/09/2026: três restarts do backend em 3 min releram as 5 contas de uma vez e todas ficaram
+# em "não informa cota".
+_ESPERA_429_S = 600.0
 _HTTP_TIMEOUT = 8.0
 _URL_CLAUDE = "https://api.anthropic.com/api/oauth/usage"
 # Mesmo cabeçalho que o CLI manda no endpoint OAuth; sem ele a rota responde, mas mandá-lo é o
@@ -652,6 +658,60 @@ def conta_de_provider_pi(provider: str | None) -> str | None:
 
 _cache: dict[str, tuple[float, CotaConta]] = {}
 _lock = threading.Lock()
+_cache_carregado = False
+
+
+def _arquivo_cache() -> Path | None:
+    # Sob pytest o cache de disco fica fora, pelo motivo do `_avisar_sessoes` do atualizar: a
+    # suíte gravaria fontes de mentira no arquivo REAL da máquina. Teste do próprio cache
+    # substitui esta função por um caminho em tmp.
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return None
+    return log_paths.base().parent / "cotas-cache.json"
+
+
+def _carregar_cache() -> None:
+    """O cache era só memória: cada restart do backend relia todas as contas de uma vez — e uma
+    sequência de restarts virava 429 em todas. O que está dentro do TTL volta do disco."""
+    global _cache_carregado
+    if _cache_carregado:
+        return
+    _cache_carregado = True
+    arquivo = _arquivo_cache()
+    if arquivo is None:
+        return
+    try:
+        bruto = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(bruto, dict):
+        return
+    agora, mono = time.time(), time.monotonic()
+    for chave, item in bruto.items():
+        try:
+            idade = agora - float(item["gravado_em"])
+            if idade < 0 or idade >= _TTL_S:
+                continue
+            _cache[chave] = (mono - idade, CotaConta.model_validate(item["cota"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+
+def _gravar_cache() -> None:
+    """Chamado com `_lock` tomado. Falha de disco não derruba a leitura — o cache é otimização."""
+    alvo = _arquivo_cache()
+    if alvo is None:
+        return
+    agora, mono = time.time(), time.monotonic()
+    dados = {chave: {"gravado_em": agora - (mono - carimbo), "cota": cota.model_dump()}
+             for chave, (carimbo, cota) in _cache.items()}
+    try:
+        alvo.parent.mkdir(parents=True, exist_ok=True)
+        tmp = alvo.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dados), encoding="utf-8")
+        atomico.substituir(tmp, alvo)
+    except OSError:
+        _log.debug("cache de cotas nao gravado", exc_info=True)
 
 
 def _fontes() -> list[_Fonte]:
@@ -734,6 +794,7 @@ def _atualizar(fontes: list[_Fonte], forcar: bool = False) -> None:
     de AGORA, não a do cache de 5 min (o poll da faixa continua sem ele)."""
     agora = time.monotonic()
     with _lock:
+        _carregar_cache()
         vencidas = [f for f in fontes
                     if forcar or (h := _cache.get(f.chave)) is None or agora - h[0] >= _TTL_S]
     if not vencidas:
@@ -743,15 +804,18 @@ def _atualizar(fontes: list[_Fonte], forcar: bool = False) -> None:
     with _lock:
         for f, (estado, janelas, motivo) in zip(vencidas, leituras):
             anterior = _cache.get(f.chave)
+            # 429: o carimbo vai pro futuro, e a fonte só vence de novo depois da espera.
+            carimbo = time.monotonic() + (_ESPERA_429_S - _TTL_S if motivo == "http-429" else 0.0)
             if estado == "indisponivel" and anterior is not None and anterior[1].estado == "lida":
                 # Mantém a leitura boa mas deixa o carimbo do TTL novo: sem isto uma queda de rede
                 # faria as 8 requisições voltarem a cada poll de 60s.
-                _cache[f.chave] = (time.monotonic(), anterior[1])
+                _cache[f.chave] = (carimbo, anterior[1])
                 continue
-            _cache[f.chave] = (time.monotonic(), CotaConta(
+            _cache[f.chave] = (carimbo, CotaConta(
                 id=f.chave, label=f.label, provedor=f.provedor, ativa=f.ativa, estado=estado,
                 janelas=janelas, ts=time.time() if estado == "lida" else None, motivo=motivo,
             ))
+        _gravar_cache()
 
 
 @cotas_router.get("", dependencies=[Depends(require_auth)], response_model=list[CotaConta])

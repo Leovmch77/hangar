@@ -257,6 +257,57 @@ def test_conta_deslogada_sobrescreve_o_numero_velho(monkeypatch):
     assert guardada.estado == "expirada" and guardada.janelas == []
 
 
+def test_429_espera_mais_que_o_ttl_antes_de_insistir(monkeypatch, tmp_path):
+    """Insistir no próximo poll só renova o 429 (medido 14/09/2026 com três restarts seguidos)."""
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_arquivo_cache", lambda: tmp_path / "c.json")
+    chamadas = []
+
+    def leitor():
+        chamadas.append(1)
+        return ("indisponivel", [], "http-429")
+
+    f = cotas._Fonte("claude:/x", "x", "claude", leitor)
+    cotas._atualizar([f])
+    carimbo = cotas._cache["claude:/x"][0]
+    assert carimbo - time.monotonic() > cotas._ESPERA_429_S - cotas._TTL_S - 5
+    monkeypatch.setattr(cotas, "_TTL_S", 0.0)         # TTL vencido, mas a espera do 429 não
+    cotas._atualizar([f])
+    assert len(chamadas) == 1
+
+
+def test_cache_volta_do_disco_dentro_do_ttl(monkeypatch, tmp_path):
+    """Restart do backend não relê todas as contas: o que está no TTL volta do arquivo."""
+    arq = tmp_path / "c.json"
+    monkeypatch.setattr(cotas, "_arquivo_cache", lambda: arq)
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_cache_carregado", False)
+    cotas._atualizar([_fonte("claude:/x", ("lida", [cotas.JanelaCota(rotulo="5h", pct=13.0)], None))])
+    assert arq.is_file()
+    # "restart": memória zerada, arquivo fica
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_cache_carregado", False)
+    chamadas = []
+    f = cotas._Fonte("claude:/x", "x", "claude", lambda: (chamadas.append(1), ("lida", [], None))[1])
+    cotas._atualizar([f])
+    assert not chamadas
+    assert cotas._cache["claude:/x"][1].janelas[0].pct == 13.0
+
+
+def test_cache_do_disco_vencido_e_ignorado(monkeypatch, tmp_path):
+    arq = tmp_path / "c.json"
+    arq.write_text(json.dumps({"claude:/x": {"gravado_em": time.time() - 3600,
+                                             "cota": {"id": "claude:/x", "label": "x", "provedor": "claude",
+                                                      "estado": "lida", "janelas": []}}}), encoding="utf-8")
+    monkeypatch.setattr(cotas, "_arquivo_cache", lambda: arq)
+    monkeypatch.setattr(cotas, "_cache", {})
+    monkeypatch.setattr(cotas, "_cache_carregado", False)
+    chamadas = []
+    f = cotas._Fonte("claude:/x", "x", "claude", lambda: (chamadas.append(1), ("lida", [], None))[1])
+    cotas._atualizar([f])
+    assert chamadas == [1]
+
+
 def test_dentro_do_ttl_nao_relê(monkeypatch):
     monkeypatch.setattr(cotas, "_cache", {})
     chamadas = []
