@@ -27,7 +27,7 @@ from app.askquestion import clear_pending_askq, pergunta_aberta
 from app.state import (classify, _live_spinner, rate_limit_reset, corrige_ocioso_kimi,
                        aprovacao_kimi, codex_turno_aberto, menu_codex,
                        status_line as _pane_status)
-from app.statusline import read as _sidecar_status
+from app.statusline import read as _sidecar_status, escolhas as _escolhas_status
 from app.adapters.codex.adapter import status_line_do_rollout as _codex_status_line
 from app.hook_state import hook_state
 from app.planprog import plan_progress, plano_escondido
@@ -413,6 +413,11 @@ def agente_do_pane(pid, children: Optional[dict[int, list[int]]] = None) -> tupl
 
 def provider_of_pane(pid, children: Optional[dict[int, list[int]]] = None) -> str:
     return agente_do_pane(pid, children)[0]
+
+
+def _pid_do_agente(pane_pid):
+    """Pid de onde ler conta, motor e modelo: o do agente dentro do pane, ou o próprio pane."""
+    return (agente_do_pane(pane_pid)[1] or pane_pid) if pane_pid else None
 
 
 # Cache pid -> (instante de inicio do processo, nome da sessao tmux). Um processo nunca muda de
@@ -1981,8 +1986,13 @@ class SessionRegistry:
             raise ValueError("sessao sem terminal nao encontrada")
         hl = get_adapter(CLAUDE_HEADLESS)
         jsonl = hl.transcript_path_de(meta)
+        escolha = meta
+        if not meta.get("engine"):
+            # O processo sabe o modelo e o esforço em uso; o sidecar só guarda o que foi pedido.
+            vivo_m, vivo_e = hl.escolhas(name)
+            escolha = {**meta, "model": vivo_m or meta.get("model"), "effort": vivo_e or meta.get("effort")}
         # Comando inteiro ANTES de matar: validação que estoura depois deixaria a sessão sem nada.
-        cmd = self._comando_terminal(meta, resume=Path(jsonl).exists())
+        cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists())
         headless_sessions.marcar_troca(name)
         headless_sessions.delete(name)
         hl.close_sync(name, meta)
@@ -2034,17 +2044,23 @@ class SessionRegistry:
         sid = Path(jsonl).stem
         uuid.UUID(sid)
         # Tudo lido do processo vivo ANTES do kill: o /proc (ou o psutil) some com ele.
-        cdir = _config_dir_of(pid) if pid else None
-        motor = _engine_of(pid) if pid else None
-        modelo, esforco = procinfo._model_of(pid) if pid else (None, None)
-        janela = procinfo._env_var_of(pid, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if pid else None
+        ag = _pid_do_agente(pid)
+        cdir = _config_dir_of(ag) if ag else None
+        motor = _engine_of(ag) if ag else None
+        modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
+        janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
-        subagente = procinfo._env_var_of(pid, "CLAUDE_CODE_SUBAGENT_MODEL") if pid and not motor else None
+        subagente = procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL") if ag and not motor else None
         if motor:
             from app import engines
             if motor not in engines.listar():
                 # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
                 motor = modelo = esforco = janela = None
+        else:
+            # O cmdline só sabe o modelo do boot; `/model` na TUI, ou sessão aberta sem `--model`,
+            # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
+            vivo_m, vivo_e = _escolhas_status(sid)
+            modelo, esforco = vivo_m or modelo, vivo_e or esforco
         model_args.validar("claude", modelo, esforco, permission_mode)
         filhos = _descendant_pids(pid) if pid else []
         headless_sessions.marcar_troca(name)
@@ -2315,7 +2331,8 @@ class SessionRegistry:
             raise ValueError("sessao nao encontrada")
         self._refuse_non_claude_resume(pane)
         cwd = pane["cwd"]
-        cdir = _config_dir_of(pane["pid"]) if pane.get("pid") else None
+        ag = _pid_do_agente(pane.get("pid"))
+        cdir = _config_dir_of(ag) if ag else None
         proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
         files = sorted(proj.glob("*.jsonl"),
                        key=lambda f: (f.stat().st_mtime if f.exists() else 0.0), reverse=True)[:6] \
@@ -2343,11 +2360,13 @@ class SessionRegistry:
         # a listagem de candidatos e cai direto no relance (que mata o pane).
         self._refuse_non_claude_resume(pane)
         cwd = pane["cwd"]
-        cdir = _config_dir_of(pane["pid"]) if pane.get("pid") else None
+        # Aberta no terminal, o pid do pane é o shell: conta, motor e modelo moram no `claude` filho.
+        ag = _pid_do_agente(pane.get("pid"))
+        cdir = _config_dir_of(ag) if ag else None
         # Motor da sessão que está morrendo. Sem reaplicar, uma sessão Kimi ressuscita na conta
         # Anthropic continuando um transcript de Kimi — calado. Tem que ler ANTES do kill_session: o
         # /proc do pane some com ele.
-        motor = _engine_of(pane["pid"]) if pane.get("pid") else None
+        motor = _engine_of(ag) if ag else None
         motor_sumiu = False
         if motor:
             from app import engines
@@ -2362,17 +2381,16 @@ class SessionRegistry:
         # Modelo/esforço com que a sessão SUBIU, lidos do cmdline do processo que está morrendo.
         # Sem reaplicar, `claude --resume <sid>` pelado volta pro modelo do motor — a escolha some
         # sem aviso. Mesma regra do motor: ler ANTES do kill_session, o /proc do pane some com ele.
-        modelo, esforco = procinfo._model_of(pane["pid"]) if pane.get("pid") else (None, None)
+        modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
         # A janela mora no MESMO /proc/<pid>/environ — lê-la junto de motor/modelo, nunca depois
         # do kill (B2 da revisão final: o kill derruba o processo e a leitura pós-kill devolve
         # nada, e a sessão ressuscitava sem --context, calado).
-        janela = (procinfo._env_var_of(pane["pid"], "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
-                  if pane.get("pid") else None)
+        janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         if motor_sumiu:
             modelo = esforco = janela = None
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
-        subagente = (procinfo._env_var_of(pane["pid"], "CLAUDE_CODE_SUBAGENT_MODEL")
-                     if pane.get("pid") and not motor and not motor_sumiu else None)
+        subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")
+                     if ag and not motor and not motor_sumiu else None)
         proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
         jsonl = proj / f"{session_id}.jsonl"
         if not jsonl.exists():

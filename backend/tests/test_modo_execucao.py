@@ -39,6 +39,7 @@ def test_sem_terminal_vira_pane_com_resume_e_as_escolhas(reg, tmp_path, monkeypa
     fake_hl = MagicMock()
     fake_hl.transcript_path_de.side_effect = ClaudeHeadlessAdapter().transcript_path_de
     fake_hl.close_sync.side_effect = lambda n, m: ordem.append(("fechou", S.exists(n)))
+    fake_hl.escolhas.return_value = (None, None)
     monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
 
     def nova(name, cwd, cmd, cfg=None, provider="claude", env=None):
@@ -61,7 +62,7 @@ def test_pane_que_nao_nasce_devolve_o_sidecar(reg, tmp_path, monkeypatch):
     from app import registry as R
     S.save("hl", str(tmp_path), SID, model="haiku")
     monkeypatch.setattr("app.adapters.get_adapter", lambda chave: MagicMock(
-        transcript_path_de=lambda m: str(tmp_path / "nao-existe.jsonl")))
+        transcript_path_de=lambda m: str(tmp_path / "nao-existe.jsonl"), escolhas=lambda n: (None, None)))
     monkeypatch.setattr(R.tmux, "new_session", lambda *a, **k: False)
     with pytest.raises(ValueError):
         reg.para_terminal("hl")
@@ -80,6 +81,8 @@ def _pane(reg, tmp_path, monkeypatch, *, mata=True):
     monkeypatch.setattr(R.procinfo, "_env_var_of",
                         lambda pid, n: "haiku" if n == "CLAUDE_CODE_SUBAGENT_MODEL" else None)
     monkeypatch.setattr(R, "_descendant_pids", lambda pid: [999, 1000])
+    monkeypatch.setattr(R, "agente_do_pane", lambda pid, children=None: ("claude", 999))
+    monkeypatch.setattr(R, "_escolhas_status", lambda sid: (None, None))
     mortos = []
 
     def kill(n):
@@ -97,6 +100,47 @@ def test_pane_vira_sem_terminal_com_sid_vivo_conta_e_modo(reg, tmp_path, monkeyp
     assert meta["config_dir"] == str(tmp_path / ".claude-b")
     assert (meta["model"], meta["effort"], meta["permission_mode"]) == ("sonnet", "high", "plan")
     assert meta["subagent_model"] == "haiku"
+
+
+def test_pane_aberto_no_shell_le_conta_e_escolhas_do_claude_filho(reg, tmp_path, monkeypatch):
+    # Sessão aberta no terminal: o pid do pane é o fish, e só o `claude` filho tem a conta e o modelo.
+    from app import registry as R
+    _pane(reg, tmp_path, monkeypatch)
+    so_filho = lambda valor: (lambda pid, *a: valor if pid == 1000 else None)
+    monkeypatch.setattr(R, "agente_do_pane", lambda pid, children=None: ("claude", 1000))
+    monkeypatch.setattr(R, "_config_dir_of", so_filho(tmp_path / ".claude-b"))
+    monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: ("sonnet", "high") if pid == 1000 else (None, None))
+    monkeypatch.setattr(R.procinfo, "_env_var_of", so_filho("haiku"))
+    meta = reg.para_headless("t1", "plan")
+    assert meta["config_dir"] == str(tmp_path / ".claude-b")
+    assert (meta["model"], meta["effort"], meta["subagent_model"]) == ("sonnet", "high", "haiku")
+
+
+def test_pane_leva_o_modelo_em_uso_nao_o_do_boot(reg, tmp_path, monkeypatch):
+    # Aberta sem --model (ou trocada por /model na TUI): quem sabe o modelo em uso é a statusline.
+    from app import registry as R
+    _pane(reg, tmp_path, monkeypatch)
+    monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: (None, None))
+    monkeypatch.setattr(R, "_escolhas_status", lambda sid: ("claude-opus-5[1m]", "high"))
+    meta = reg.para_headless("t1", "plan")
+    assert (meta["model"], meta["effort"]) == ("claude-opus-5[1m]", "high")
+
+
+def test_sem_terminal_volta_com_o_modelo_em_uso(reg, tmp_path, monkeypatch):
+    from app import registry as R
+    from pathlib import Path
+    meta = S.save("hl", str(tmp_path), SID)
+    jsonl = ClaudeHeadlessAdapter().transcript_path_de(meta)
+    Path(jsonl).parent.mkdir(parents=True, exist_ok=True)
+    Path(jsonl).write_text("{}\n")
+    fake_hl = MagicMock()
+    fake_hl.transcript_path_de.side_effect = ClaudeHeadlessAdapter().transcript_path_de
+    fake_hl.escolhas.return_value = ("claude-opus-5[1m]", "high")
+    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
+    cmds = []
+    monkeypatch.setattr(R.tmux, "new_session", lambda name, cwd, cmd, *a, **k: cmds.append(cmd) or True)
+    reg.para_terminal("hl")
+    assert "--model 'claude-opus-5[1m]'" in cmds[0] and "--effort high" in cmds[0]
 
 
 def test_pane_que_nao_morre_nao_vira_sem_terminal(reg, tmp_path, monkeypatch):

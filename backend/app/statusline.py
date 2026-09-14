@@ -52,6 +52,18 @@ def dirs_de_config() -> list[Path]:
 
 def read(stem: Optional[str]) -> Optional[str]:
     """Linha inteira publicada pela sessao `stem`, ou None (o caller cai no pane)."""
+    o = _publicado(stem)
+    return o["line"] if o else None
+
+
+def escolhas(stem: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(modelo, esforço) EM USO na sessão `stem`, como a statusline recebeu do Claude Code."""
+    o = _publicado(stem) or {}
+    m, e = o.get("model"), o.get("effort")
+    return (m if isinstance(m, str) and m else None), (e if isinstance(e, str) and e else None)
+
+
+def _publicado(stem: Optional[str]) -> Optional[dict]:
     if not stem:
         return None
     for base in dirs_de_config():
@@ -78,5 +90,5 @@ def read(stem: Optional[str]) -> Optional[str]:
             continue
         if isinstance(ts, (int, float)) and time.time() - ts > _MAX_AGE:
             continue
-        return line
+        return o
     return None

@@ -477,6 +477,11 @@ class ClaudeHeadlessAdapter:
             sess.modo_nao_plan = sess.permission_mode
             hl_sessions.update(sess.name, previous_non_plan=sess.modo_nao_plan)
 
+    def escolhas(self, name: str) -> tuple[str | None, str | None]:
+        """(modelo, esforço) em uso no processo vivo — o `init` da CLI e o `/effort` confirmado."""
+        sess = self._sessions.get(name)
+        return (sess.model, sess.effort) if sess else (None, None)
+
     async def set_model(self, name: str, model: str | None, effort: str | None) -> bool:
         """Troca modelo em voo (`set_model`). Esforço vai como o comando local `/effort <x>` pelo
         stdin — medido: a CLI responde "Set effort level to <x> (this session only)" sem chamar a
@@ -1286,10 +1291,15 @@ class ClaudeHeadlessAdapter:
         contexto sai da última chamada (`_aplicar_uso_da_chamada`)."""
         if isinstance(ev.get("total_cost_usd"), (int, float)):
             sess.cost = float(ev["total_cost_usd"])
-        for m, dados in (ev.get("modelUsage") or {}).items():
-            if isinstance(dados, dict) and dados.get("contextWindow"):
-                sess.model = sess.model or m
-                sess.context_window = int(dados["contextWindow"])
+        # O turno lista também o modelo interno do Claude Code (haiku, 200k). O da conversa é o que
+        # mais leu contexto: ele relê o histórico inteiro a cada chamada.
+        com_janela = [(m, d) for m, d in (ev.get("modelUsage") or {}).items()
+                      if isinstance(d, dict) and d.get("contextWindow")]
+        if com_janela:
+            m, dados = max(com_janela, key=lambda md: sum(
+                md[1].get(k) or 0 for k in ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")))
+            sess.model = sess.model or m
+            sess.context_window = int(dados["contextWindow"])
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
         antes = sess.state

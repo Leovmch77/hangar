@@ -428,6 +428,15 @@ def test_contexto_vem_da_ultima_chamada_nao_da_soma_do_turno(adapter):
     assert adapter.status_line(sess) == "🤖 Opus5·1M │ 💬 71k/100 71k/1M │ 💵 $0.50"
 
 
+def test_janela_e_do_modelo_da_conversa_nao_do_auxiliar(adapter):
+    # O Claude Code usa um haiku interno no mesmo turno; vindo por último, ele pintava "de 200k".
+    sess = adapter._sessions["s1"]
+    uso = {"claude-opus-5[1m]": {"inputTokens": 2, "cacheReadInputTokens": 470000, "contextWindow": 1000000},
+           "claude-haiku-4-5-20251001": {"inputTokens": 897, "contextWindow": 200000}}
+    _run(adapter._on_event(sess, {"type": "result", "subtype": "success", "modelUsage": uso}))
+    assert sess.context_window == 1000000
+
+
 def test_contexto_apos_religar_le_a_ultima_chamada_do_transcript(adapter):
     sess = adapter._sessions["s1"]
     caminho = adapter.transcript_path_de(sess.meta)

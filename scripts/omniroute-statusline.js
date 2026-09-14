@@ -423,6 +423,10 @@ process.stdin.on('end', () => {
         fs.writeFileSync(tmp, JSON.stringify({
           line: segs.join(sep).replace(/\x1b\[[0-9;:?]*[ -/]*[@-~]/g, ''),
           ts: Math.floor(Date.now() / 1000),
+          // Modelo e esforço EM USO (inclui o /model feito na TUI): a troca terminal ⇄ sem
+          // terminal lê daqui pra continuar na mesma escolha; o cmdline só sabe o do boot.
+          model: data.model?.id ?? null,
+          effort: effortLvl ?? null,
         }));
         fs.renameSync(tmp, alvo);   // atômico: o backend pode ler no meio da escrita
       }

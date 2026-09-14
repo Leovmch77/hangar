@@ -23,6 +23,17 @@ def test_reads_the_full_line_published_by_the_session(monkeypatch, tmp_path):
     assert statusline.read("2026_abc") == inteira
 
 
+def test_escolhas_devolve_modelo_e_esforco_em_uso(monkeypatch, tmp_path):
+    _dirs(monkeypatch, tmp_path)
+    d = tmp_path / ".hangar-status"
+    d.mkdir()
+    (d / "s1.json").write_text(json.dumps({"line": "🤖 Opus5·1M", "ts": time.time(),
+                                           "model": "claude-opus-5[1m]", "effort": "high"}))
+    assert statusline.escolhas("s1") == ("claude-opus-5[1m]", "high")
+    _publica(tmp_path, "s2", "🤖 k3")          # publisher antigo, sem os campos
+    assert statusline.escolhas("s2") == (None, None)
+
+
 def test_missing_or_empty_sidecar_falls_back_to_the_pane(monkeypatch, tmp_path):
     # Sessao sem a extensao instrumentada nao pode ficar SEM statusline — None e o sinal de
     # "usa o pane", que e o comportamento de sempre.

@@ -119,6 +119,7 @@ def _prep_resume(tmp_path, monkeypatch, visto, motor):
 
     def _fake_new(name, cwd, command, config_dir=None, *, provider="claude"):
         visto["command"] = command
+        visto["config_dir"] = config_dir
         return True
 
     monkeypatch.setattr(reg, "_engine_of", lambda pid: motor)
@@ -129,6 +130,8 @@ def _prep_resume(tmp_path, monkeypatch, visto, motor):
     r = reg.SessionRegistry(projects_dir=tmp_path / "projects")
     monkeypatch.setattr(r, "_pane_of", lambda name: {"cwd": "/tmp", "pid": 4242})
     monkeypatch.setattr(r, "_forget", lambda name: None)
+    # Sem isto a busca do `claude` dentro do pane leria o /proc real, onde o pid 4242 pode existir.
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", None))
     return r, sid
 
 
@@ -139,6 +142,22 @@ def test_resume_de_pane_vivo_preserva_o_motor(tmp_path, monkeypatch):
     info = r.resume("s", sid)
     assert visto["command"] == f"hangar-engine --exec kimi -- claude --resume {sid}"
     assert info.engine == "kimi"
+
+
+def test_resume_de_pane_aberto_no_shell_usa_a_conta_do_claude_filho(tmp_path, monkeypatch):
+    # O pid do pane é o fish; a conta mora no ambiente do `claude` filho (4243).
+    visto = {}
+    r, sid = _prep_resume(tmp_path, monkeypatch, visto, None)
+    conta = tmp_path / ".claude-b"
+    (conta / "projects" / "-tmp").mkdir(parents=True)
+    (conta / "projects" / "-tmp" / f"{sid}.jsonl").write_text("", encoding="utf-8")
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(reg, "_config_dir_of", lambda pid: conta if pid == 4243 else None)
+    monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("sonnet", None) if pid == 4243 else (None, None))
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: None)
+    info = r.resume("s", sid)
+    assert info.jsonl == str(conta / "projects" / "-tmp" / f"{sid}.jsonl")
+    assert visto["config_dir"] == str(conta) and "--model sonnet" in visto["command"]
 
 
 def test_resume_de_motor_removido_nao_trava_a_sessao(tmp_path, monkeypatch):
