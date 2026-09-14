@@ -88,11 +88,13 @@ def _write(name: str, meta: dict) -> None:
         Path(tmp.name).unlink(missing_ok=True)
 
 
-def save(name: str, thread_id: str, rollout_path: str, cwd: str,
+def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
          model: str | None = None, effort: str | None = None,
          endpoint: str | None = None, app_pid: int | None = None,
          codex_home: str | Path | None = None,
-         codex_account: str | None = None) -> None:
+         codex_account: str | None = None,
+         headless: bool = False, key: str | None = None,
+         permission_mode: str | None = None) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -121,8 +123,23 @@ def save(name: str, thread_id: str, rollout_path: str, cwd: str,
         meta["codex_home"] = str(Path(codex_home).expanduser().absolute())
     if codex_account is not None:
         meta["codex_account"] = codex_account
+    if headless:
+        # Sem terminal: o app-server roda atrás de um cano (sem_terminal.py). `key` é a chave do
+        # cano (varredura de órfãos) e `permission_mode` o modo do app, que vira sandbox/approval.
+        meta.update(headless=True, key=key, permission_mode=permission_mode, cano=None)
     with _locked(name):
         _write(name, meta)
+
+
+def update(name: str, **campos) -> dict | None:
+    """Mescla campos no sidecar existente e devolve o meta novo. None sem sidecar."""
+    with _locked(name):
+        meta = load(name)
+        if meta is None:
+            return None
+        meta = {**meta, **campos}
+        _write(name, meta)
+        return meta
 
 
 def update_model(name: str, model: str | None, effort: str | None) -> None:

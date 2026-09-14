@@ -840,41 +840,7 @@ class ClaudeHeadlessAdapter:
         await self._drenar_fim_de_turno(sess)
 
     async def _conectar(self, cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
-        """Abre a conexão com o cano e lê o snapshot. None = não há cano escutando ali (morto, ou
-        ainda subindo além de `esperar` segundos)."""
-        escuta, token = cano.get("escuta") or "", cano.get("token")
-        fim = time.monotonic() + esperar
-        while True:
-            try:
-                # limit: o `control_response` do initialize passa de 100 KB numa linha só; o teto
-                # padrão do asyncio (64 KB) estourava a leitura e o leitor ficava pendurado.
-                if escuta.startswith("unix:"):
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_unix_connection(escuta[5:], limit=_LIMITE_LINHA), 3)
-                elif escuta.startswith("tcp:"):
-                    host, porta = escuta[4:].rsplit(":", 1)
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(host, int(porta), limit=_LIMITE_LINHA), 3)
-                else:
-                    return None
-                break
-            except (OSError, asyncio.TimeoutError):
-                if time.monotonic() >= fim:
-                    return None
-                await asyncio.sleep(0.1)
-        try:
-            if token:
-                writer.write((token + "\n").encode())
-                await writer.drain()
-            linha = await asyncio.wait_for(reader.readline(), 5)
-            snap = json.loads(linha)
-            if not isinstance(snap, dict) or snap.get("type") != "cano_snapshot":
-                raise ValueError("primeira linha não é snapshot")
-        except (OSError, ValueError, asyncio.TimeoutError):
-            _log.warning("claude headless: cano em %s não deu snapshot", escuta, exc_info=True)
-            writer.close()
-            return None
-        return _Ligacao(reader, writer, snap.get("pid")), snap
+        return await conectar_cano(cano, esperar=esperar)
 
     async def _aplicar_snapshot(self, sess: _Sessao, snap: dict) -> None:
         # O que estava em aberto quando o backend anterior saiu — na ordem em que aconteceu.
@@ -1825,6 +1791,44 @@ def _esquecer_cano(name: str, pid: int | None) -> None:
         hl_sessions.update(name, cano=None)
 
 
+async def conectar_cano(cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
+    """Abre a conexão com o cano e lê o snapshot. None = não há cano escutando ali (morto, ou
+    ainda subindo além de `esperar` segundos)."""
+    escuta, token = cano.get("escuta") or "", cano.get("token")
+    fim = time.monotonic() + esperar
+    while True:
+        try:
+            # limit: o `control_response` do initialize passa de 100 KB numa linha só; o teto
+            # padrão do asyncio (64 KB) estourava a leitura e o leitor ficava pendurado.
+            if escuta.startswith("unix:"):
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_unix_connection(escuta[5:], limit=_LIMITE_LINHA), 3)
+            elif escuta.startswith("tcp:"):
+                host, porta = escuta[4:].rsplit(":", 1)
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, int(porta), limit=_LIMITE_LINHA), 3)
+            else:
+                return None
+            break
+        except (OSError, asyncio.TimeoutError):
+            if time.monotonic() >= fim:
+                return None
+            await asyncio.sleep(0.1)
+    try:
+        if token:
+            writer.write((token + "\n").encode())
+            await writer.drain()
+        linha = await asyncio.wait_for(reader.readline(), 5)
+        snap = json.loads(linha)
+        if not isinstance(snap, dict) or snap.get("type") != "cano_snapshot":
+            raise ValueError("primeira linha não é snapshot")
+    except (OSError, ValueError, asyncio.TimeoutError):
+        _log.warning("cano em %s não deu snapshot", escuta, exc_info=True)
+        writer.close()
+        return None
+    return _Ligacao(reader, writer, snap.get("pid")), snap
+
+
 async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str, log: Path,
                               tarefas: set | None = None) -> tuple[dict, asyncio.subprocess.Process]:
     """Sobe um cano com `argv` como filho, fora do cgroup do backend. Devolve o dict `cano` do
@@ -1904,6 +1908,8 @@ def matar_orfaos() -> int:
     if not proc.exists():
         return 0
     vivas = {m.get("key") for m in hl_sessions.list_all() if m.get("key")}
+    from app.adapters.codex import sessions as codex_sessions
+    vivas |= {m.get("key") for m in codex_sessions.list_all() if m.get("headless") and m.get("key")}
     meu_uid = os.getuid()
     sem_permissao = 0
     marca = f"{_MARCADOR_CANO}=".encode()

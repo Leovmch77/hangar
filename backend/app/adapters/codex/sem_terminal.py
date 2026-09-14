@@ -1,0 +1,148 @@
+"""Codex sem terminal: `codex app-server --stdio` atrás de um cano, sem pane tmux.
+
+O cano é o mesmo do Claude sem terminal (`claude_headless/cano.py`): dono do processo, fora do
+cgroup do backend, socket local; o backend conecta, cai e reconecta. O que muda em relação à
+sessão com TUI: quem sobe o servidor e abre a thread é o backend, e as aprovações chegam aqui
+(na TUI o servidor nunca perguntava: `approval_policy=never` + `danger-full-access`).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import uuid
+from pathlib import Path
+
+from app import codex_contas
+from app.adapters.claude_headless import adapter as hl_adapter
+from app.adapters.codex import sessions as codex_sessions
+from app.adapters.codex.appserver import AppServerClient
+from app.adapters.codex.lancador import CLIENT_INFO
+
+_log = logging.getLogger("hangar.codex.sem_terminal")
+
+# Nomes iguais aos do picker `/permissions` da TUI, pra pílula do app ser a mesma nos dois modos.
+# `untrusted` deixou de existir (codex-cli 0.154: o app-server sai com "no longer supported"), então
+# o que separa os dois primeiros é só o sandbox — e sandbox não troca ao vivo por RPC
+# (`codex_permissions.py`), por isso ele vai no `-c` da subida e trocar é reiniciar o servidor.
+MODOS: list[tuple[str, str, str, str]] = [
+    ("Ask for approval", "on-request", "read-only",
+     "Codex só lê o workspace; editar ou rodar comando pede aprovação."),
+    ("Approve for me", "on-request", "workspace-write",
+     "Codex edita o workspace sozinho; fora dele ou com rede, pede aprovação."),
+    ("Full Access", "never", "danger-full-access",
+     "Codex faz tudo sem perguntar."),
+]
+MODO_PADRAO = "Approve for me"
+
+
+def politica(modo: str | None) -> tuple[str, str]:
+    """(approval_policy, sandbox_mode) do modo do app; modo desconhecido cai no padrão."""
+    for nome, approval, sandbox, _ in MODOS:
+        if nome.lower() == (modo or MODO_PADRAO).strip().lower():
+            return approval, sandbox
+    return politica(MODO_PADRAO)
+
+
+def modos_para_tela(atual: str | None) -> dict:
+    """Mesmo shape do `list_codex_permissions` (picker da TUI), pro front não saber a diferença."""
+    atual = atual or MODO_PADRAO
+    return {"modes": [{"numero": i + 1, "nome": nome, "desc": desc,
+                       "cursor": nome == atual, "atual": nome == atual}
+                      for i, (nome, _, _, desc) in enumerate(MODOS)],
+            "current": atual}
+
+
+def argv(meta: dict) -> list[str]:
+    approval, sandbox = politica(meta.get("permission_mode"))
+    return ["codex", "app-server", "--stdio",
+            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
+
+
+def _ambiente(meta: dict) -> dict:
+    env = dict(os.environ)
+    home = meta.get("codex_home")
+    if home:
+        path = Path(home).expanduser().absolute()
+        default = codex_contas.default_home().expanduser().absolute()
+        account = codex_contas.Account("default", path, True) if path == default else \
+            codex_contas.Account(meta.get("codex_account") or "selected", path, False)
+        env = codex_contas.environment(account, base=env)
+    # Backend subido de dentro de um tmux (dev) passaria o pane do OPERADOR pro processo.
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env["CP_SESSION_NAME"] = meta["name"]
+    env[hl_adapter._MARCADOR_CANO] = meta["key"]
+    return env
+
+
+async def subir(meta: dict, tarefas: set | None = None) -> dict:
+    """Sobe o cano com o app-server dentro e grava `cano` no sidecar. Devolve o dict do cano."""
+    if shutil.which("codex") is None:
+        raise RuntimeError("binário não encontrado: codex")
+    log = codex_sessions._dir() / f"cano-{meta['key'][:16]}.log"
+    cano, _ = await hl_adapter.subir_cano_processo(argv(meta), cwd=meta["cwd"], env=_ambiente(meta),
+                                                   key=meta["key"], log=log, tarefas=tarefas)
+    codex_sessions.update(meta["name"], cano=cano)
+    return cano
+
+
+async def conectar(cano: dict, *, esperar: float = 0.0) -> tuple[AppServerClient, dict] | None:
+    """Liga um AppServerClient ao cano e lê o snapshot. None = nada escutando ali."""
+    ligacao = await hl_adapter.conectar_cano(cano, esperar=esperar)
+    if ligacao is None:
+        return None
+    lig, snap = ligacao
+    client = AppServerClient()
+    client._attach(lig.stdout, lig.stdin)
+    for linha in snap.get("stderr_tail") or []:
+        client.stderr_tail.append(linha)
+    # Pedidos que o servidor fez enquanto o backend estava fora: voltam pela fila como se
+    # estivessem chegando agora, e o adapter monta o cartão de aprovação.
+    for bruto in snap.get("pendentes") or []:
+        try:
+            msg = json.loads(bruto)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and msg.get("id") is not None and "method" in msg:
+            client.server_requests[msg["id"]] = msg
+            client._notifications.put_nowait(msg)
+    return client, snap
+
+
+async def initialize(client: AppServerClient) -> None:
+    """`initialize` no app-server; religando no mesmo processo ele responde "Already initialized"
+    (-32600), que aqui é sucesso."""
+    try:
+        await client.request("initialize", {"clientInfo": CLIENT_INFO,
+                                            "capabilities": {"experimentalApi": True}})
+    except RuntimeError as exc:
+        if "already initialized" not in str(exc).lower():
+            raise
+
+
+def rollout_de(thread_id: str, codex_home: str | None) -> str:
+    raiz = Path(codex_home or os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser() / "sessions"
+    achados = sorted(raiz.glob(f"*/*/*/rollout-*-{thread_id}.jsonl"),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(achados[0]) if achados else ""
+
+
+def matar(meta: dict | None) -> None:
+    """SIGTERM no grupo do cano (cano + app-server). Idempotente; sem cano não faz nada."""
+    cano = (meta or {}).get("cano") or {}
+    if cano.get("pid"):
+        hl_adapter._matar_grupo(int(cano["pid"]), (meta or {}).get("name") or "?")
+    key = (meta or {}).get("key")
+    if key:
+        for arq in codex_sessions._dir().glob(f"cano-{key[:16]}*"):
+            try:
+                arq.unlink()
+            except OSError:
+                pass
+
+
+def nova_chave() -> str:
+    return uuid.uuid4().hex

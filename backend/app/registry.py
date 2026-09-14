@@ -1213,9 +1213,9 @@ class SessionRegistry:
                              .expanduser().resolve(strict=False))
             br, wt = head_info(meta.get("cwd"))
             out.append(SessionInfo(
-                name=meta["name"], cwd=meta.get("cwd"), jsonl=meta.get("rollout_path"),
+                name=meta["name"], cwd=meta.get("cwd"), jsonl=meta.get("rollout_path") or None,
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
-                codex_home=codex_home,
+                codex_home=codex_home, headless=bool(meta.get("headless")),
                 branch=br, worktree=wt,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
@@ -1352,7 +1352,8 @@ class SessionRegistry:
                     # ressalva acima (as duas ultimas linhas virariam uma segunda statusline) vale
                     # pro Codex JA rodando, nao pra um seletor numerado, que e o que `classify`
                     # reconhece. Sem menu, o lançador pode informar a etapa da preparação.
-                    pendente_sem_thread.append(info)
+                    if not info.headless:
+                        pendente_sem_thread.append(info)
                     continue
                 marker = hook_state.get_state(_sid(info.jsonl))
                 if marker and marker[0] != "awaiting_input":
@@ -1648,10 +1649,15 @@ class SessionRegistry:
                 raise ValueError("modelo dos subagentes so vale para claude sem motor")
             model_args.validar("claude", subagent_model, None)
         if headless:
-            if provider != "claude":
-                raise ValueError("sessao sem terminal so vale para provider claude")
+            if provider not in ("claude", "codex"):
+                raise ValueError("sessao sem terminal so vale para provider claude ou codex")
             if read_only or initial_prompt:
                 raise ValueError("sessao sem terminal nao aceita read_only nem prompt inicial")
+            if provider == "codex":
+                if engine:
+                    raise ValueError("motor so vale para provider claude")
+                return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
+                                                   permission_mode, codex_account)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model)
         codex_home = None
@@ -1925,6 +1931,39 @@ class SessionRegistry:
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
                            headless=True, engine=engine)
 
+    def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
+                               model: str | None, effort: str | None, permission_mode: str | None,
+                               codex_account: str | None) -> SessionInfo:
+        """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
+        pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
+        from app.adapters.codex import sem_terminal
+        try:
+            account = codex_contas.resolve_account(codex_account or "default")
+        except codex_contas.AccountError as exc:
+            raise ValueError(f"{exc.code}: {exc.params}") from None
+        codex_home = str(account.home.expanduser().absolute())
+        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
+            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider="codex",
+                           detalhe="nome_ja_em_uso")
+            raise ValueError("ja existe uma sessao com esse nome")
+        model_args.validar("codex", model, effort)
+        if permission_mode is not None and not any(
+                m[0].lower() == permission_mode.strip().lower() for m in sem_terminal.MODOS):
+            raise ValueError("permission_mode: use um de " + ", ".join(m[0] for m in sem_terminal.MODOS))
+        diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
+        codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
+        self._forget(name)
+        rollout = sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else ""
+        codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
+                            codex_home=codex_home, codex_account=codex_account,
+                            headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode)
+        PromptQueue(name).clear()
+        ThenLink(name).clear()
+        self._clear_pair(name)
+        diag.registrar("sessao.criada", sessao=name, provider="codex", etapa="sidecar_gravado")
+        return SessionInfo(name=name, cwd=cwd, jsonl=rollout or None, tracked=True, provider="codex",
+                           headless=True, conta=f"codex:{codex_home}", codex_home=codex_home)
+
     # ── Troca terminal ⇄ sem terminal (mesma conversa) ──────────────────────────────────────
     # É troca, não cópia: o antigo morre antes do novo nascer, e fila, `then` e pareamento ficam
     # (são da sessão, não do transporte). Quem garante que a sessão está ociosa é a API.
@@ -2135,7 +2174,7 @@ class SessionRegistry:
             # tentado: falhando ele (o caso que esta funcao existe pra pegar), a excecao dizia "nao
             # consegui encerrar" com a TUI ja sem servidor — sinal trocado, e a sessao que sobrou na
             # tela nao fala mais com ninguem. Agora falha antes de qualquer estrago.
-            if not tmux.kill_session(name):
+            if not (codex_sessions.load(name) or {}).get("headless") and not tmux.kill_session(name):
                 raise KillFailed(name)
             get_adapter("codex").close_sync(name)
             self._kill_hidden_shell(name)

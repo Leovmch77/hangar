@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
+from app.adapters.codex import sem_terminal
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
 from app.adapters.codex.async_questions import AsyncQuestions
@@ -394,6 +395,7 @@ class CodexAdapter:
         self._tmux_watchers: dict[str, asyncio.Task] = {}
         # Task de assinatura da thread (thread/resume com retry) — ver _subscribe_when_ready.
         self._subscribers: dict[str, asyncio.Task] = {}
+        self._falhas_subida: dict[str, int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def _start_tmux_watcher(self, name: str) -> None:
@@ -655,6 +657,10 @@ class CodexAdapter:
                 return sess["client"]
             if meta is None:
                 return None
+            if meta.get("headless"):
+                if sess is not None:
+                    return sess["client"]
+                return await self._ligar_sem_terminal(name, meta)
             if sess is not None:
                 # A TUI trocou de conversa; só a conexão antiga termina, nunca o app-server do pane.
                 self._sessions.pop(name, None)
@@ -723,6 +729,90 @@ class CodexAdapter:
             _log.info("codex ensure_running: resumed thread=%s name=%s", thread_id, name)
             return client
 
+    # ── sem terminal ───────────────────────────────────────────────────────────────────────
+
+    # Subidas seguidas que falharam (por sessão). No teto, para de tentar até ação do usuário
+    # (encerrar/recriar) — o watch_sessions passa a cada 2s e viraria um spam de spawn.
+    TETO_SUBIDAS = 3
+
+    async def _ligar_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
+        cano = meta.get("cano") or {}
+        if cano:
+            ligado = await sem_terminal.conectar(cano)
+            if ligado is not None:
+                client, snap = ligado
+                if snap.get("saiu") is None:
+                    try:
+                        await sem_terminal.initialize(client)
+                        thread = {}
+                        if meta.get("thread_id"):
+                            result = await client.request("thread/read", {"threadId": meta["thread_id"],
+                                                                          "includeTurns": False})
+                            thread = result.get("thread") or {}
+                    except Exception:
+                        await client.close()
+                        _log.warning("codex sem terminal: religação no cano falhou name=%s", name, exc_info=True)
+                        return await self._subir_sem_terminal(name, meta)
+                    self.attach(name, client, meta.get("thread_id") or "", model=meta.get("model"),
+                                effort=meta.get("effort"), subscribed=True)
+                    self._sessions[name].update(headless=True, cano=cano)
+                    self._restore_turn(self._sessions[name], thread, include_turns=False)
+                    _log.info("codex sem terminal: religado name=%s cano=%s", name, cano.get("pid"))
+                    return client
+                await client.close()
+                _log.info("codex sem terminal: app-server saiu rc=%s name=%s — subindo outro",
+                          snap.get("saiu"), name)
+        return await self._subir_sem_terminal(name, meta)
+
+    async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        falhas = self._falhas_subida.get(name, 0)
+        if falhas >= self.TETO_SUBIDAS:
+            return None
+        sem_terminal.matar(meta)
+        try:
+            cano = await sem_terminal.subir(meta)
+            ligado = await sem_terminal.conectar(cano, esperar=10.0)
+            if ligado is None:
+                raise RuntimeError("cano não escutou em 10s")
+            client, _ = ligado
+            try:
+                await sem_terminal.initialize(client)
+                approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
+                if meta.get("thread_id"):
+                    result = await client.request("thread/resume", {
+                        "threadId": meta["thread_id"], "cwd": meta.get("cwd"),
+                        "approvalPolicy": approval, "sandbox": sandbox})
+                else:
+                    params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox}
+                    if meta.get("model"):
+                        params["model"] = meta["model"]
+                    result = await client.request("thread/start", params)
+            except Exception:
+                await client.close()
+                raise
+        except Exception as exc:
+            self._falhas_subida[name] = falhas + 1
+            sem_terminal.matar(codex_sessions.load(name))
+            codex_sessions.update(name, cano=None)
+            _log.warning("codex sem terminal: subida %d/%d falhou name=%s: %s",
+                         falhas + 1, self.TETO_SUBIDAS, name, exc)
+            raise
+        self._falhas_subida.pop(name, None)
+        thread = result.get("thread") or {}
+        thread_id = thread.get("id") or meta.get("thread_id")
+        rollout = thread.get("path") or sem_terminal.rollout_de(thread_id, meta.get("codex_home"))
+        meta = codex_sessions.update(name, thread_id=thread_id, rollout_path=rollout) or meta
+        self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
+                    default_model=result.get("model"), default_effort=_effort_da_thread(result),
+                    subscribed=True)
+        self._sessions[name].update(headless=True, cano=meta.get("cano"))
+        self._sessions[name]["async_questions"].hydrate(thread)
+        self._restore_turn(self._sessions[name], thread)
+        _log.info("codex sem terminal: subiu name=%s thread=%s cano=%s", name, thread_id,
+                  (meta.get("cano") or {}).get("pid"))
+        return client
+
     async def warm_sessions(self) -> None:
         """Reconecta sidecars Codex em série, sem atrasar a subida do backend."""
         for meta in await asyncio.to_thread(codex_sessions.list_all):
@@ -755,6 +845,8 @@ class CodexAdapter:
         O SIGTERM vai pelo PID do sidecar: desde o lancador unico o servidor nao e filho do backend,
         entao `client.terminate()` sozinho seria um no-op e o servidor sobreviveria ao encerrar."""
         matar_app_server(name)
+        sem_terminal.matar(codex_sessions.load(name))
+        self._falhas_subida.pop(name, None)
         sess = self._sessions.pop(name, None)
         watcher = self._tmux_watchers.pop(name, None)
         if watcher is not None:
@@ -794,7 +886,8 @@ class CodexAdapter:
                 fila.put_nowait(None)
             sess["ouvintes"] = []
             self._sessions[new] = sess
-            self._start_tmux_watcher(new)
+            if not sess.get("headless"):
+                self._start_tmux_watcher(new)
             self._start_bomba(new, sess)
             if not sess.get("subscribed"):
                 meta = codex_sessions.load(new) or {}
@@ -846,7 +939,7 @@ class CodexAdapter:
         return StateEvent(session=name, state=state,
                           status_line=self._status_line(sess), codex_mode=sess.get("mode"),
                           codex_buffering=sess.get("codex_buffering", False),
-                          codex_question=question)
+                          codex_question=question, headless=bool(sess.get("headless")))
 
     def async_question_status(self, name: str) -> tuple[int, str | None]:
         sess = self._sessions.get(name)
