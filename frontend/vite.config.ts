@@ -5,18 +5,21 @@ import { VitePWA } from 'vite-plugin-pwa'
 import { build as esbuild } from 'esbuild'
 import { fileURLToPath } from 'url'
 import { execSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'http'
 
-// Versão e data do build, injetadas no bundle (tela Sobre): `2026.09.14-ae8a7bf` (data do
-// commit + hash), o mesmo formato do `diag.versao_legivel` do backend, pra as duas compararem
-// igual. git falhou (fora de um repo) -> 'dev'; o build não pode morrer por causa de metadata.
+// Versão e data do build, injetadas no bundle (tela Sobre): `0.1.0.2533` = VERSION (à mão) +
+// número de commits (build), o mesmo formato do `diag.versao_legivel` do backend, pra as duas
+// compararem igual. git falhou (fora de um repo) -> 'dev'; o build não pode morrer por metadata.
 const hangarVersion = (() => {
   try {
-    const v = execSync('git log -1 --format=%cd-%h --date=format:%Y.%m.%d').toString().trim()
+    const raiz = execSync('git rev-parse --show-toplevel').toString().trim()
+    const base = readFileSync(`${raiz}/VERSION`, 'utf-8').trim()
+    const n = execSync('git rev-list --count HEAD').toString().trim()
     let sujo = false
     // `top`: o build roda com cwd em frontend/, e pathspec sem âncora seria frontend/frontend/dist.
     try { execSync('git diff --quiet HEAD -- . ":(exclude,top)frontend/dist"') } catch { sujo = true }
-    return sujo ? `${v}-dirty` : v
+    return sujo ? `${base}.${n}-dirty` : `${base}.${n}`
   } catch { return 'dev' }
 })()
 const hangarBuildDate = new Date().toISOString().slice(0, 10)

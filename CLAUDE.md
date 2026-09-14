@@ -353,7 +353,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
   recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
   Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
-- **Versão é data do commit + hash** (`2026.09.14-360978f7`), calculada, nunca mantida à mão.
+- **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no
+  arquivo da raiz, build calculado — nunca tag de release nem commit do CI.
 - **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que

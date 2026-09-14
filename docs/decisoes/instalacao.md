@@ -155,15 +155,19 @@ processo velho seguia na porta com o código novo no disco. E o modal mostrava a
     impressa por `Falha`/`Pare` no `.ps1` e por `fail` no `.sh`; a cauda de 12 linhas é só o
     fallback sem marca.
 
-## Versão legível é data do commit + hash
+## Versão é `VERSION` + número de commits (`0.1.0.2533`)
 
-(`diag.versao_legivel`, `vite.config.ts`, 14/09/2026.) `pyproject` ficou em 0.1.0 e `package.json`
-em 0.0.0 para sempre: número mantido à mão apodrece, e tag de release exige lembrar de taguear.
-`git describe` contra a `dist-latest` (que o CI move a cada push) dava `dist-latest-28-g360978f7`,
-que ninguém lê. `2026.09.14-360978f7` responde "de quando é o código" sem ninguém fazer nada; o
-hash desempata o mesmo dia. `GET /api/atualizacao` traz as três (`repo`, `backend`, `remoto`) e
-`atras` (commits em `origin/main` que faltam), e a barra do desktop e o rodapé do celular mostram
-`v2026.09.14` com o tooltip dizendo atualizado / N atrás / falta reiniciar.
+(`VERSION`, `diag.versao_legivel`, `vite.config.ts`, 14/09/2026.) `pyproject` ficou em 0.1.0 e
+`package.json` em 0.0.0 para sempre: número que só sobe à mão apodrece. A primeira versão desta
+regra era data + hash (`2026.09.14-360978f7`), e o usuário recusou: "isso não é versão". O
+formato pedido é `major.minor.patch.build`: os três primeiros vêm do arquivo `VERSION` na raiz
+(mexido à mão quando ele quiser marcar algo) e o `build` é `git rev-list --count` — sobe sozinho
+a cada commit na `main`, sem tag e sem commit do CI, e é comparável entre disco, processo e
+`origin/main` (o `VERSION` é lido do próprio ref, `git show ref:VERSION`, porque o remoto pode
+ter um bump que o checkout ainda não puxou). `GET /api/atualizacao` traz as três em
+`versao_legivel` (`repo`, `backend`, `remoto`) e `atras`; a barra do desktop e o rodapé do
+celular mostram `v0.1.0.2533` com o tooltip dizendo atualizado / N atrás / falta reiniciar.
+Sem git, o campo é `null` — palavra fixa virava `vindisponivel` na tela.
 
 ## Instalador com portão de prova por etapa
 

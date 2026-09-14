@@ -196,20 +196,24 @@ VERSAO_EM_EXECUCAO = _git_describe()
 
 
 def versao_legivel(ref: str = "HEAD") -> str | None:
-    """`2026.09.14-ae8a7bf`: a data do commit e o hash curto. É o que a tela chama de versão.
-    `None` quando o git não responde — a tela trata ausência; uma palavra fixa viraria texto cru
-    (`vindisponivel`) nos dois idiomas.
+    """`0.1.0.2533`: major.minor.patch do arquivo `VERSION` (mexido à mão quando o dono quiser) e
+    build = número de commits até `ref` — sobe sozinho a cada push, sem tag nem CI. `None` quando
+    o git não responde: a tela trata ausência; uma palavra fixa viraria texto cru (`vindisponivel`).
 
-    Não há tag de release nem número mantido à mão (o `pyproject` ficou em 0.1.0 pra sempre): o
-    que se compara entre duas máquinas é "de quando é o código", e a data responde isso sem
-    ninguém lembrar de bumpar nada. O hash desempata dois commits do mesmo dia.
+    O `VERSION` é lido do próprio `ref` (`git show ref:VERSION`), não do disco: `origin/main` pode
+    ter um bump que este checkout ainda não puxou.
     """
+    raiz = Path(__file__).resolve().parents[2]
     try:
-        p = subprocess.run(
-            ["git", "log", "-1", "--format=%cd-%h", "--date=format:%Y.%m.%d", ref],
-            cwd=Path(__file__).resolve().parents[2], capture_output=True,
-            text=True, timeout=5, encoding="utf-8", errors="replace")
-        return p.stdout.strip() or None
+        n = subprocess.run(["git", "rev-list", "--count", ref], cwd=raiz, capture_output=True,
+                           text=True, timeout=5, encoding="utf-8", errors="replace").stdout.strip()
+        if not n.isdigit():
+            return None
+        v = subprocess.run(["git", "show", f"{ref}:VERSION"], cwd=raiz, capture_output=True,
+                           text=True, timeout=5, encoding="utf-8", errors="replace").stdout.strip()
+        if not v:
+            v = (raiz / "VERSION").read_text(encoding="utf-8").strip()
+        return f"{v}.{n}" if v else None
     except Exception:                                # noqa: BLE001 — versão nunca derruba nada
         return None
 

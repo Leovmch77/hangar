@@ -952,6 +952,16 @@ describe('parseImageMessage', () => {
     expect(out.caption).toBe(cap);
     expect(out.filenames).toEqual(['1787356601-230c76.png']);
   });
+  it('conta os marcadores pra quem desenha descontar a foto que já veio do transcript', () => {
+    // Hoje o Claude Code deixa o path da foto absorvida ESCRITO: marcadores == filenames, e a
+    // bolha somava path + transcript — a mesma imagem duas vezes (medido 14/09/2026).
+    expect(parseImageMessage(`${cap} — 📎 imagem: /up/a.png`)!.marcadores).toBe(1);
+    expect(parseImageMessage(`${cap} — 📎 imagem: /up/a.png 📎 imagem: /up/b.png`)!.marcadores).toBe(2);
+    // Formato antigo: o último path some e sobra o marcador pendurado.
+    const antigo = parseImageMessage(`${cap} — 📎 imagem:\n/up/a.png 📎 imagem:`)!;
+    expect(antigo.marcadores).toBe(2);
+    expect(antigo.filenames).toEqual(['a.png']);
+  });
   it('lê o formato REESCRITO pelo Claude Code (prefixo, quebra de linha, último path consumido)', () => {
     // Sem isto a bolha que SOBRA no chat (a do transcript) mostrava os caminhos em texto cru --
     // era a metade feia do par duplicado que o usuário viu em 03/08/2026.

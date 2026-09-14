@@ -483,8 +483,15 @@
                msg veio do APP (tem "📎 imagem: <path>"), a legenda entra LIMPA e as fotos enviadas
                entram junto: o Claude Code so absorve a ULTIMA como anexo real e deixa as outras como
                path escrito — sem isto a bolha que fica no chat mostra os caminhos em texto cru. -->
+          <!-- Path escrito para TODAS as fotos (marcadores == filenames): as últimas `image_count`
+               já vêm do transcript — mostrar as duas fontes duplicava cada imagem (medido 14/09). -->
+          {@const enviadas = img
+            ? (img.marcadores === img.filenames.length
+                ? img.filenames.slice(0, Math.max(0, img.filenames.length - ev.image_count))
+                : img.filenames)
+            : []}
           <ImageBubble caption={img ? img.caption : ev.text ?? ''}
-                       srcs={[...(img?.filenames ?? []).map((f) => uploadUrl(sessionName, f)),
+                       srcs={[...enviadas.map((f) => uploadUrl(sessionName, f)),
                               ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i))]} />
         {:else if ev.id.startsWith('queued-') || ev.id.startsWith('held:')}
           <!-- Msg da fila durável ("queued-") ou recado preso em entrega bloqueada ("held:", o

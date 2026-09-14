@@ -412,7 +412,7 @@ export function parseMediaUrls(text: string): FileRef[] {
 // "<legenda> — 📎 imagem: <path1> 📎 imagem: <path2> ..." (1+ imagens, ou sem legenda).
 // Devolve { caption, filenames } ou null. Cada filename e o basename do path (sem espaco,
 // nome gerado), entao da pra separar varias numa linha so pelo proprio marcador.
-export function parseImageMessage(text: string): { caption: string; filenames: string[] } | null {
+export function parseImageMessage(text: string): { caption: string; filenames: string[]; marcadores: number } | null {
   // O separador e uma REGEX, nao a string "📎 imagem: ": o que a fila digita numa linha so volta do
   // transcript reescrito pelo Claude Code — quebra de linha depois do marcador, prefixo "[Image #N]"
   // na frente e o path da ULTIMA imagem consumido (ela virou anexo de verdade, entao o marcador fica
@@ -442,7 +442,11 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // exatamente o que esta funcao existe pra evitar. Quem precisa das miniaturas checa o tamanho.
   let caption = text.slice(0, first).replace(/^(?:\[Image #\d+\])+\s*/, '').trim();
   if (caption.endsWith('—')) caption = caption.slice(0, -1).trim();
-  return { caption, filenames };
+  // `marcadores` > `filenames.length` = o Claude Code apagou o path da foto que absorveu como
+  // anexo (comportamento antigo); iguais = o path ficou escrito E a foto veio no transcript, e
+  // quem desenha precisa descontar uma delas — senão a mesma imagem sai duas vezes na bolha.
+  const marcadores = (text.slice(first).match(marker) ?? []).length;
+  return { caption, filenames, marcadores };
 }
 
 // Painel de tarefas do TUI dentro da PREVIA AO VIVO. Ele nao e prosa: e o mesmo TodoWrite/TodoList
