@@ -2319,7 +2319,7 @@
           <CodexVoice {sessionName} disabled={recording || starting || transcribing}
             onPrepare={prepareVoice} onBusyChange={(busy) => { voiceBusy = busy; }} />
         {/if}
-        {#if isCodex && isWorking && hasInput && !sendToPair}
+        {#if (isCodex || headless) && isWorking && hasInput && !sendToPair}
           <button class="model-pill" onclick={() => submit(true)} disabled={!canSend}
             title={m.codex_orientar_ajuda()}>{m.codex_orientar()}</button>
         {/if}

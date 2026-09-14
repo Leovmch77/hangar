@@ -19,6 +19,23 @@ def test_user_text_message():
     assert evs == [ChatEvent(kind="user_msg", id="u1", text="corrige o bug")]
 
 
+def test_mensagem_orientada_no_claude_sem_terminal_vira_bolha():
+    # Formato gravado pelo CLI quando um `user` chega no stdin com turno em voo.
+    [ev] = parse_line(_line({
+        "type": "attachment", "uuid": "att1", "parentUuid": "u1",
+        "timestamp": "2026-09-14T11:47:33.802Z",
+        "attachment": {"type": "queued_command", "commandMode": "prompt",
+                       "prompt": [{"type": "text", "text": "MUDANÇA: pare os sleeps"}]},
+        "rendered": [{"content": [{"type": "text", "text": "<system-reminder>..."}]}],
+    }))
+    assert ev.kind == "user_msg"
+    assert ev.id == "att1"
+    assert ev.text == "MUDANÇA: pare os sleeps"
+    assert ev.ts is not None
+    assert parse_line(_line({"type": "attachment", "uuid": "att2",
+                             "attachment": {"type": "hook_success"}})) == []
+
+
 def test_assistant_text_message():
     [ev] = parse_line(_line({
         "type": "assistant", "uuid": "a1", "parentUuid": "u1",

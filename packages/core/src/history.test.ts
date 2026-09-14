@@ -11,6 +11,7 @@ it('Codex conta só mensagens ainda não encaminhadas, preservando Kimi e o lega
     ev('real'), { ...ev('queued-task'), kind: 'tool_result' }];
   expect(ids(queuedMessages(events, 'codex'))).toEqual(['queued-legado', 'queued-pendente']);
   expect(ids(queuedMessages(events, 'kimi'))).toEqual(['queued-legado', 'queued-enviada', 'queued-pendente']);
+  expect(ids(queuedMessages(events, 'claude', true))).toEqual(['queued-legado', 'queued-pendente']);
   expect(events).toHaveLength(6);
 });
 

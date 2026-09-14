@@ -141,3 +141,16 @@ it('não confirma recebimento quando nenhuma orientação foi encaminhada', asyn
   document.querySelector<HTMLButtonElement>('.fila-chip')!.click(); await flush();
   expect(document.querySelector('.steer-feedback')?.textContent).toBe(m.codex_orientar_sem_envio());
 });
+
+it('Claude sem terminal oferece Orientar no envio e o chip da fila, como o Codex', async () => {
+  const props = await montar();
+  (props as unknown as { provider: string }).provider = 'claude';
+  (props as unknown as { headless: boolean }).headless = true;
+  await flush();
+  expect(document.querySelector('button.fila-chip')).not.toBeNull();
+  props.inputText = 'corrigir caminho'; await flush();
+  const orient = [...document.querySelectorAll('button')].find(b => b.title === m.codex_orientar_ajuda());
+  expect(orient).toBeDefined();
+  orient!.click(); await flush();
+  expect(props.onSend).toHaveBeenLastCalledWith('corrigir caminho', true);
+});

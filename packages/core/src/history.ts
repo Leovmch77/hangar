@@ -7,9 +7,11 @@
 // veio do backend.
 import type { ChatEvent } from './types';
 
-export function queuedMessages(events: ChatEvent[], provider?: string | null): ChatEvent[] {
+export function queuedMessages(events: ChatEvent[], provider?: string | null, headless = false): ChatEvent[] {
+  // Codex e Claude sem terminal: a fila é do processo, entregue não conta mais como espera.
+  const filaDoProcesso = provider === 'codex' || headless;
   return events.filter(e => e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu
-    && (provider !== 'codex' || !e.queued_delivered));
+    && (!filaDoProcesso || !e.queued_delivered));
 }
 
 /** Historico COMPLETO recem-buscado + a cauda que ja esta na tela -> lista com os eventos

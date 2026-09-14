@@ -317,6 +317,24 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
                               id=f"queued:{obj.get('timestamp', '')}:{digest}", text=cleaned)]
         return []
 
+    # Claude sem terminal: a msg orientada no meio do turno (stdin com turno em voo) entra como
+    # `attachment/queued_command`, não como `queue-operation remove` da TUI. O CLI a mostra ao
+    # modelo dentro de um system-reminder junto do próximo tool_result; sem este ramo, ela some do
+    # chat ao recarregar (só a bolha local a exibia).
+    if etype == "attachment":
+        att = obj.get("attachment")
+        if isinstance(att, dict) and att.get("type") == "queued_command":
+            texto = "\n".join(
+                b.get("text", "") for b in (att.get("prompt") or [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+            if not texto or _is_command_meta(texto):
+                return []
+            texto = _strip_meta_blocks(texto)
+            if texto:
+                return [ChatEvent(kind="user_msg", id=uid, text=texto, ts=_ts(obj))]
+        return []
+
     msg = obj.get("message")
     if not isinstance(msg, dict):
         return []
