@@ -272,14 +272,18 @@
   // Map interno persiste) — entradas de transcript antigo pos-reset ficam orfas no Map, inofensivas.
   let _trMap = new Map<string, ChatEvent>();
   let _trLen = 0;
+  // tool_use_id -> tool_use, pelo mesmo padrão: quem precisa achar o lançamento de um Agent
+  // rodando não pode varrer `events` inteiro a cada evento.
+  let _tuMap = new Map<string, ChatEvent>();
   const toolResults = $derived.by(() => {
-    if (events.length < _trLen) { _trMap = new Map(); _trLen = 0; }
+    if (events.length < _trLen) { _trMap = new Map(); _tuMap = new Map(); _trLen = 0; }
     for (let i = _trLen; i < events.length; i++) {
       const ev = events[i];
       if (ev.kind === 'tool_result' && ev.tool_use_id) _trMap.set(ev.tool_use_id, ev);
+      else if (ev.kind === 'tool_use' && ev.tool_use_id) _tuMap.set(ev.tool_use_id, ev);
     }
     _trLen = events.length;
-    return { get: (id: string) => _trMap.get(id) };
+    return { get: (id: string) => _trMap.get(id), tool_use: (id: string) => _tuMap.get(id) };
   });
 
   // Ids presentes no MOMENTO do mount = historico. Bubble de historico NAO anima: a paginacao pra
@@ -413,7 +417,7 @@
   // em vez de subir com as mensagens seguintes (decisão do usuário).
   const cartoesRodando = $derived.by(() => {
     if (!agentesRodandoIds.size) return [] as ChatEvent[];
-    return events.filter((e) => e.kind === 'tool_use' && !!e.tool_use_id && agentesRodandoIds.has(e.tool_use_id));
+    return [...agentesRodandoIds].map((id) => toolResults.tool_use(id)).filter((e): e is ChatEvent => !!e);
   });
 
   // Auto-scroll APENAS quando ja estamos no fim. NAO depende de stateEvent (o tick do cronometro/status
@@ -423,6 +427,7 @@
     void pending.length;
     void dockH; // composer cresceu (anexo/multilinha) -> re-scrolla pra ultima msg limpar o glass
     void preview; // preview cresce token a token -> acompanha o fundo enquanto o usuario esta colado
+    void cartoesRodando.length; // Agent começou a rodar sem evento novo: o bloco grudado nasce no fim
     // Mantem a janela: encolheu (reset/clear) re-ancora na cauda; colado no fim acompanha a cauda
     // (remonta o topo SO com o usuario no fundo = sem pulo); rolado pra cima congela. Termina: ao
     // escrever windowEnd=len o effect re-roda e nextWindowEnd vira no-op.
@@ -570,6 +575,8 @@
         {#if plan?.eventId === ev.id}
           <SessionPlanPreview {...planoProps()} />
         {/if}
+        {:else if ev.kind === 'tool_use' && agentesRodandoIds.has(ev.tool_use_id ?? '')}
+          <!-- Agent rodando: o cartão dele está grudado no fim; aqui ficaria em dobro. -->
         {:else if ev.kind === 'tool_use'}
           <ToolCard event={ev} result={resultadoDe(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} />
           {#if plan?.eventId === ev.id}
