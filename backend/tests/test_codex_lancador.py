@@ -10,8 +10,11 @@ O que estes testes protegem, e que nao da pra ver lendo o codigo:
 - o sidecar sai com endpoint E pid, que e o que deixa o backend se ligar a um servidor que nao e
   filho dele.
 """
+import contextlib
+import http.server
 import json
 import os
+import threading
 import runpy
 import signal
 import subprocess
@@ -112,6 +115,34 @@ def _ambiente(tmp_path, cwd):
     env.pop("CP_SESSION_NAME", None)
     (tmp_path / "home").mkdir()
     return env
+
+
+@contextlib.contextmanager
+def _backend_conta_pronta(env):
+    """Conta secundária só abre depois do preparo no backend; aqui ele responde pronto na hora."""
+    class _Pronto(http.server.BaseHTTPRequestHandler):
+        def _responder(self):
+            corpo = json.dumps({"status": "ready", "issues": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(corpo)))
+            self.end_headers()
+            self.wfile.write(corpo)
+
+        do_GET = do_POST = _responder
+
+        def log_message(self, *_args):
+            pass
+
+    servidor = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Pronto)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    env["CP_PORT"] = str(servidor.server_address[1])
+    env["CP_AUTH_TOKEN"] = "teste"
+    try:
+        yield
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
 
 
 def _sidecar(env, nome):
@@ -548,11 +579,12 @@ def test_lancador_secundario_remove_token_openai_herdado(tmp_path):
     env["FAKE_TUI_SLEEP"] = "0.3"
     env["FAKE_TUI_TOKEN"] = str(tmp_path / "tui-token.txt")
     env["OPENAI_API_KEY"] = "sentinel"
-    r = subprocess.run(
-        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
-         "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
-    )
+    with _backend_conta_pronta(env):
+        r = subprocess.run(
+            [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+             "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+        )
     assert r.returncode == 0, r.stderr
     assert Path(env["FAKE_TUI_TOKEN"]).read_text() == ""
 
@@ -565,10 +597,11 @@ def test_lancador_nao_reclassifica_conta_pelo_codex_home_herdado(tmp_path):
     env["CODEX_HOME"] = str(tmp_path / "stale-tmux-default")
     env["OPENAI_API_KEY"] = "sentinel"
     env["FAKE_TUI_TOKEN"] = str(tmp_path / "tui-token.txt")
-    r = subprocess.run(
-        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
-         "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
-    )
+    with _backend_conta_pronta(env):
+        r = subprocess.run(
+            [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+             "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+        )
     assert r.returncode == 0, r.stderr
     assert Path(env["FAKE_TUI_TOKEN"]).read_text() == ""

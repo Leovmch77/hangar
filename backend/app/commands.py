@@ -258,7 +258,20 @@ def _matar_arvore(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+        exe = shutil.which("taskkill")
+        if exe is None:
+            _log.warning("commands: taskkill não encontrado; hooks filhos do pid=%s podem seguir vivos", proc.pid)
+            proc.kill()
+        else:
+            try:
+                r = subprocess.run([exe, "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                _log.warning("commands: taskkill falhou pid=%s", proc.pid, exc_info=True)
+            else:
+                # 128 = o processo já tinha saído: não é falha.
+                if r.returncode not in (0, 128):
+                    _log.warning("commands: taskkill rc=%s pid=%s: %s", r.returncode, proc.pid,
+                                 (r.stderr or b"").decode(errors="replace").strip()[:200])
     else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
