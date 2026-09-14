@@ -77,6 +77,8 @@ function carimbo() {
 // Devolve o caminho de cada folha gerada (uma a cada MAX_POR_FOLHA prints).
 function montar(arqs, { dir, prefixo = 'folha' }) {
   if (!arqs.length) throw new Error('nenhuma imagem pra juntar');
+  // Absoluto: um nome começando com `-` viraria opção do magick.
+  arqs = arqs.map((a) => path.resolve(a));
   for (const a of arqs) if (!fs.existsSync(a)) throw new Error(`não existe: ${a}`);
   fs.mkdirSync(dir, { recursive: true });
   const [w, h] = magick(['identify', '-format', '%w %h', `${arqs[0]}[0]`]).trim().split(' ').map(Number);

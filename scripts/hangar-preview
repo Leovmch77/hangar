@@ -33,7 +33,7 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
@@ -256,20 +256,19 @@ if (VERBOS_SERVIDOR.has(cmd)) {
 if (cmd === 'folha') {
   const pasta = pastaShots();
   const marca = join(pasta, '.ultima-folha');
-  const desde = existsSync(marca) ? statSync(marca).mtimeMs : 0;
-  const shots = existsSync(pasta)
-    ? readdirSync(pasta)
-      .filter((a) => /^\d+\.png$/.test(a) && statSync(join(pasta, a)).mtimeMs > desde)
-      .sort()
-      .map((a) => join(pasta, a))
+  // O marcador guarda o carimbo do último shot incluído: mtime de baixa resolução perderia shots.
+  const desde = existsSync(marca) ? Number(readFileSync(marca, 'utf8')) || 0 : 0;
+  const nomes = existsSync(pasta)
+    ? readdirSync(pasta).filter((a) => /^\d+\.png$/.test(a) && parseInt(a, 10) > desde)
+      .sort((a, b) => parseInt(a, 10) - parseInt(b, 10))
     : [];
-  if (!shots.length) erro('nenhum shot novo desde a última folha (tire com: hangar-preview shot)');
+  if (!nomes.length) erro('nenhum shot novo desde a última folha (tire com: hangar-preview shot)');
   try {
-    for (const saida of folha.montar(shots, { dir: pasta })) console.log(`ok: ${saida}`);
+    for (const saida of folha.montar(nomes.map((a) => join(pasta, a)), { dir: pasta })) console.log(`ok: ${saida}`);
   } catch (err) {
     erro(err.message);
   }
-  writeFileSync(marca, '');
+  writeFileSync(marca, String(parseInt(nomes.at(-1), 10)));
   process.exit(0);
 }
 
