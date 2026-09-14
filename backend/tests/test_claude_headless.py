@@ -1064,6 +1064,39 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
 
 
+def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch):
+    # No Windows o `hangar-engine` é `.CMD`: o CreateProcess do cano não acha o nome sem extensão.
+    visto = {}
+
+    async def exec_falso(*argv, env, **kw):
+        visto["argv"] = argv
+
+        class _P:
+            pid = 1
+
+            async def wait(self):
+                return 0
+        return _P()
+
+    async def conectar_falso(cano, **kw):
+        return _ligacao_com([]), {"type": "cano_snapshot", "versao": A.cano_mod.VERSAO, "pid": 2,
+                                  "init": None, "aberto": False, "pendentes": [], "stderr_tail": []}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_falso)
+    exe = r"C:\Users\x\.local\bin\hangar-engine.CMD"
+    monkeypatch.setattr(A.shutil, "which", lambda b: exe if b == "hangar-engine" else None)
+    ad = ClaudeHeadlessAdapter()
+    sess = _Sessao("s1", S.update("s1", engine="kimi"))
+    ad._conectar = conectar_falso                 # type: ignore[method-assign]
+    ad._ler = lambda s: asyncio.sleep(0)          # type: ignore[method-assign]
+    ad._agendar_cota = lambda s: None             # type: ignore[method-assign]
+    ad._esperar_initialize = lambda s: asyncio.sleep(0)   # type: ignore[method-assign]
+    _run(ad._spawn(sess))
+    argv = list(visto["argv"])
+    depois_do_cano = argv[argv.index("--", argv.index(str(A._CANO_PY))) + 1:]
+    assert depois_do_cano[:3] == [exe, "--exec", "kimi"]
+    assert depois_do_cano[depois_do_cano.index("--") + 1] == "claude"
+
+
 def test_religa_no_cano_vivo_e_recupera_permissao_pendente(sidecar, monkeypatch):
     # Backend novo, cano de antes ainda vivo com turno aberto e permissão sem resposta: o
     # snapshot reconstrói tudo sem subir processo.
