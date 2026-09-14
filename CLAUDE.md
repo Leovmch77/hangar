@@ -20,7 +20,9 @@ only peeks at the tmux pane for live **state**. Backend pieces (`backend/app/`):
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — um app-server WebSocket de loopback por sessão Codex; o backend
   consome eventos JSON-RPC enquanto a TUI `codex --remote` da mesma thread roda no tmux.
-  O app-server é do PANE, não do backend. Decisões e armadilhas:
+  O app-server é do PANE, não do backend. Sem terminal (`sem_terminal.py`), ele roda em stdio
+  como filho do mesmo cano do Claude sem terminal, e o backend abre a thread e responde as
+  aprovações por cartão. Decisões e armadilhas:
   [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md).
 - `difusor.py` — **uma fonte por chave, não uma por conexão**: monitor de estado,
   acumulador de estatísticas e git da listagem são compartilhados entre os SSE abertos.
@@ -234,6 +236,12 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Integração nativa do Codex: o Codex converte, o backend decide quando, o lançador só avisa.**
   Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. Nunca gravar confiança
   para autoaprovar hooks. Fonte inválida nunca significa remoção.
+- **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
+  religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
+  initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
+  Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
+  de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
+  sucesso vazio. Um cliente por cano.
 - **Contas Codex adicionais têm `CODEX_HOME` próprio**; a identidade é `credential_id=codex:<home>`,
   nunca a chave. Sem migração, rotação ou troca automática por cota.
 - **Abrir Codex adicional não espera no modal**: o pane nasce primeiro, e o lançador espera o

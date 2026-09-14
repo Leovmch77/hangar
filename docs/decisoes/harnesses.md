@@ -1212,6 +1212,38 @@ escreve, com o input parcial) são fontes `PushPreviewSource` à parte, com even
 e `ferramenta`. O servidor limpa quando o bloco cai no `.jsonl`; o front espera o evento real do
 transcript pra tirar de cena, com 3s de carência, senão abria um buraco entre os dois.
 
+## Codex sem terminal: o app-server é do cano (14/09/2026, codex-cli 0.154.0)
+
+`adapters/codex/sem_terminal.py` + o ramo `headless` de `adapter.py`. A regra "o app-server é do
+PANE" existia porque a TUI era quem o matava ao sair; sem TUI o dono passa a ser o mesmo cano do
+Claude sem terminal (`claude_headless/cano.py`), com `codex app-server --stdio` como filho. O cano
+ganhou rastreio genérico de pedido JSON-RPC (`method`+`id` do filho, limpo pela resposta do
+cliente ou por `serverRequest/resolved`), e é isso que faz uma aprovação pendente sobreviver ao
+restart do backend. Medido:
+
+- `initialize` repetido no mesmo processo (backend religando) devolve `-32600 "Already
+  initialized"` — tratado como sucesso.
+- `thread/start` pelo cliente funciona; `on-request` + `read-only` gera
+  `item/commandExecution/requestApproval` (com `reason`, `command`, `cwd`) e `{"decision":
+  "accept"}` libera. Thread aberta por RPC que nunca teve turno não tem rollout e o
+  `thread/resume` da reabertura falha com `no rollout found` — o adapter abre outra e troca o
+  sidecar.
+- `approval_policy = "untrusted"` foi removido na 0.154: o app-server sai na hora com `Error:
+  approval_policy = "untrusted" is no longer supported`. Só restam `on-request` e `never`, por
+  isso os três modos do app se distinguem pelo sandbox — e sandbox não troca ao vivo por RPC
+  (`codex_permissions.py`): fica no `-c` da subida e trocar de modo reabre o app-server ocioso
+  com `thread/resume`. `approvalPolicy` vai em cada `turn/start`.
+- Sonda real: turno com aprovação pendente → `kill -9` no backend → religou no mesmo cano
+  (`pendentes=1` no snapshot) → `Permitir` pelo app → o comando rodou e o turno fechou. Sem
+  resposta, o pedido ficou em aberto por 16s sem ninguém decidir por ele.
+- Um cliente por cano: um segundo backend (ou sonda) apontando pro mesmo sidecar rouba a conexão
+  do primeiro, que vê `conexao encerrada`. Sonda com o serviço no ar precisa de pasta de sidecars
+  própria.
+
+Fora do escopo por enquanto: renomear uma sessão Codex sem terminal (a rota passa pelo tmux),
+sincronização de conta secundária na subida (segue os gatilhos existentes) e o botão de trocar
+terminal ⇄ sem terminal, que é só do Claude.
+
 ## Voz Codex no web
 
 (`codex_voice.py`, `CodexVoice.svelte`, `lib/codexVoice.ts`, 10/09/2026):

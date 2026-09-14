@@ -1890,6 +1890,8 @@
   "criar_modo_exec_tmux_ajuda": "Claude Code opens in a tmux session on this machine: you can open the terminal panel, see its screen and continue the same conversation from the terminal. The app reads history from the .jsonl and state from the screen.",
   "criar_modo_exec_headless": "No terminal (Hangar process)",
   "criar_modo_exec_headless_ajuda": "Claude Code runs as a process of Hangar itself, no tmux: permissions and questions land right in the chat, no screen reading. There is no terminal panel or mirror — history stays in Claude's .jsonl and can be resumed later with `claude --resume`. The process restarts with Hangar and picks the conversation up on the next prompt.",
+  "criar_modo_exec_tmux_ajuda_codex": "The Codex TUI opens in a tmux session on this machine, with the app-server beside it: you can open the terminal panel and keep the same conversation there.",
+  "criar_modo_exec_headless_ajuda_codex": "The Codex app-server runs without a TUI, as a process of Hangar itself: command and file approvals arrive as a card in the chat. There is no terminal panel and no TUI pickers (/status, /approvals); the permission mode is switched from the app. It survives a Hangar restart and the conversation continues in the Codex rollout.",
   "criar_lista_reduzida": "Shortened list — open a session on this account once for the app to learn its models.",
   "criar_abre_padrao": "{erro} — the session opens with the default.",
   "criar_raciocinio": "Reasoning",

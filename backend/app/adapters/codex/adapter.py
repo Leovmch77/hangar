@@ -779,11 +779,20 @@ class CodexAdapter:
             try:
                 await sem_terminal.initialize(client)
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
+                result = None
                 if meta.get("thread_id"):
-                    result = await client.request("thread/resume", {
-                        "threadId": meta["thread_id"], "cwd": meta.get("cwd"),
-                        "approvalPolicy": approval, "sandbox": sandbox})
-                else:
+                    try:
+                        result = await client.request("thread/resume", {
+                            "threadId": meta["thread_id"], "cwd": meta.get("cwd"),
+                            "approvalPolicy": approval, "sandbox": sandbox})
+                    except RuntimeError as exc:
+                        # Thread aberta por RPC que nunca teve turno não tem rollout, e o resume
+                        # a recusa: nada a perder, abre outra.
+                        if "no rollout found" not in str(exc):
+                            raise
+                        _log.info("codex sem terminal: thread %s sem rollout — abrindo outra name=%s",
+                                  meta["thread_id"], name)
+                if result is None:
                     params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox}
                     if meta.get("model"):
                         params["model"] = meta["model"]

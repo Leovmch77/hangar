@@ -1838,8 +1838,9 @@ async def create_session(body: CreateBody):
             raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
         if body.engine not in await asyncio.to_thread(engines.listar):
             raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
-    # permission_mode só vale para claude
-    if body.permission_mode is not None and body.provider != "claude":
+    # permission_mode só vale para claude — e para o Codex sem terminal (vira sandbox/approval).
+    if body.permission_mode is not None and body.provider != "claude" \
+            and not (body.provider == "codex" and body.headless):
         raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
     if body.omp_profile and body.provider != "omp":
         raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
@@ -1855,7 +1856,9 @@ async def create_session(body: CreateBody):
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
     try:
-        model_args.validar(body.provider, body.model, body.effort, body.permission_mode)
+        # O modo do Codex sem terminal tem lista própria (sem_terminal.MODOS), validada no registry.
+        model_args.validar(body.provider, body.model, body.effort,
+                           None if body.provider == "codex" else body.permission_mode)
     except ValueError as e:
         # permission_mode fora da lista deve ser 409 com código específico, não 400 genérico
         msg = str(e)
@@ -2021,7 +2024,10 @@ async def create_session(body: CreateBody):
         if body.headless:
             _kw2["headless"] = True
         info = await _create_registry(_kw2)
-        if body.headless:
+        if body.headless and body.provider == "codex":
+            # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
+            _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
+        elif body.headless:
             get_adapter(CLAUDE_HEADLESS).acordar(info.name)
         return info
     except ValueError as e:
@@ -4348,6 +4354,19 @@ async def _guard_permissao_codex(name: str) -> None:
 def _codex_sem_terminal(name: str) -> bool:
     from app.adapters.codex import sessions as codex_sessions
     return bool((codex_sessions.load(name) or {}).get("headless"))
+
+
+_tarefas_soltas: set[asyncio.Task] = set()
+
+
+async def _aquecer_codex_sem_terminal(name: str) -> None:
+    try:
+        await get_adapter("codex").ensure_running(name)
+    except Exception:
+        # O watch_sessions do adapter tenta de novo (até o teto de subidas); aqui só o log.
+        _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
+    finally:
+        _tarefas_soltas.discard(asyncio.current_task())
 
 
 @app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])

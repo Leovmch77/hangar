@@ -778,7 +778,8 @@
     const g = codexGeneration, server = codexServer, account = codexAccount;
     const baton = bastao;
     const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
-      model: modelo || null, effort: esforco || null };
+      model: modelo || null, effort: esforco || null,
+      ...(provider === 'codex' && semTerminal ? { headless: true } : {}) };
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -1266,7 +1267,7 @@
       {/if}
       </div>
 
-      {#if !conversaAlvo && provider === 'claude' && !bastao}
+      {#if !conversaAlvo && (provider === 'claude' || provider === 'codex') && !bastao}
         <!-- Onde a sessão roda. Fora da grade de duas colunas, porque a explicação da opção
              escolhida fica SEMPRE à vista: a diferença (pane no tmux × processo do Hangar) é o que
              decide se vai existir painel de terminal, e ninguém adivinha isso por um nome. -->
@@ -1277,7 +1278,9 @@
             opcoes={[{ value: 'tmux', label: m.criar_modo_exec_tmux() },
                      { value: 'headless', label: m.criar_modo_exec_headless() }]}
             onchange={(v) => (semTerminal = v === 'headless')} />
-          <p class="hint">{semTerminal ? m.criar_modo_exec_headless_ajuda() : m.criar_modo_exec_tmux_ajuda()}</p>
+          <p class="hint">{provider === 'codex'
+            ? (semTerminal ? m.criar_modo_exec_headless_ajuda_codex() : m.criar_modo_exec_tmux_ajuda_codex())
+            : (semTerminal ? m.criar_modo_exec_headless_ajuda() : m.criar_modo_exec_tmux_ajuda())}</p>
         </div>
       {/if}
 
