@@ -972,6 +972,34 @@ class CodexAdapter:
         await sess["client"].respond(req["id"], {"decision": sem_terminal.decisao(option)})
         return True
 
+    def permission_modes_sem_terminal(self, name: str) -> dict:
+        meta = codex_sessions.load(name) or {}
+        return sem_terminal.modos_para_tela(meta.get("permission_mode"))
+
+    async def set_permission_mode_sem_terminal(self, name: str, modo: str) -> dict:
+        """Troca o modo da sessão sem terminal. approvalPolicy vale no próximo turno; sandbox só
+        muda reabrindo o app-server (thread/resume) — quem chama já garantiu que está ociosa."""
+        nome = next((m[0] for m in sem_terminal.MODOS if m[0].lower() == modo.strip().lower()), None)
+        if nome is None:
+            raise ValueError("modo desconhecido: " + modo + " (os modos são: "
+                             + ", ".join(m[0] for m in sem_terminal.MODOS) + ")")
+        meta = codex_sessions.load(name) or {}
+        sandbox_antes = sem_terminal.politica(meta.get("permission_mode"))[1]
+        meta = codex_sessions.update(name, permission_mode=nome) or meta
+        if sem_terminal.politica(nome)[1] != sandbox_antes:
+            lock = self._locks.setdefault(name, asyncio.Lock())
+            async with lock:
+                sess = self._sessions.pop(name, None)
+                if sess is not None:
+                    bomba = sess.get("bomba")
+                    if bomba is not None:
+                        bomba.cancel()
+                    await sess["client"].close()
+                    PushPreviewSource._sources.pop(name, None)
+                self._falhas_subida.pop(name, None)
+                await self._subir_sem_terminal(name, meta)
+        return {"current": nome}
+
     async def _recusar_pedido(self, name: str, client: AppServerClient, req: dict) -> None:
         metodo = req.get("method")
         try:
@@ -1259,6 +1287,11 @@ class CodexAdapter:
         sess = self._sessions[name]
         params: dict = {"threadId": sess["thread_id"],
                         "input": await self._user_input(name, text)}
+        if sess.get("headless"):
+            # Sem TUI ninguém aplica o /permissions: o approvalPolicy vai a cada turno (é o
+            # único eixo que o turn/start aplica de verdade; o sandbox é do processo).
+            meta = await asyncio.to_thread(codex_sessions.load, name) or {}
+            params["approvalPolicy"] = sem_terminal.politica(meta.get("permission_mode"))[0]
         try:
             result = await client.request("turn/start", params)
             sess["turn_id"] = (result.get("turn") or {}).get("id")

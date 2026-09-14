@@ -4345,9 +4345,16 @@ async def _guard_permissao_codex(name: str) -> None:
                                              "a sessao esta trabalhando — espere ela terminar"))
 
 
+def _codex_sem_terminal(name: str) -> bool:
+    from app.adapters.codex import sessions as codex_sessions
+    return bool((codex_sessions.load(name) or {}).get("headless"))
+
+
 @app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
 async def permissoes_do_codex(name: str):
     await _guard_permissao_codex(name)
+    if _codex_sem_terminal(name):
+        return get_adapter("codex").permission_modes_sem_terminal(name)
     try:
         return await asyncio.to_thread(terminal.list_codex_permissions, name)
     except (PickerError, terminal.NaoDigitou) as exc:
@@ -4357,6 +4364,13 @@ async def permissoes_do_codex(name: str):
 @app.post("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
 async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
     await _guard_permissao_codex(name)
+    if _codex_sem_terminal(name):
+        try:
+            return await get_adapter("codex").set_permission_mode_sem_terminal(name, body.mode)
+        except ValueError as exc:
+            raise HTTPException(400, detail=erro("erro_permissao_picker", str(exc)))
+        except RuntimeError as exc:
+            raise HTTPException(503, detail=erro("erro_permissao_picker", f"não consegui reabrir o Codex: {exc}"))
     try:
         return await asyncio.to_thread(terminal.set_codex_permission, name, body.mode)
     except (PickerError, terminal.NaoDigitou) as exc:

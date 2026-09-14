@@ -36,10 +36,14 @@ for linha in sys.stdin:
     elif m == "thread/start":
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "path": ""}, "model": "gpt-falso"}})
     elif m == "thread/resume":
+        with open("resume.txt", "w") as f:
+            f.write(json.dumps(ev["params"]))
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
     elif m == "thread/read":
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "turns": []}}})
     elif m == "turn/start":
+        with open("turno.txt", "w") as f:
+            f.write(json.dumps(ev["params"]))
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"turn": {"id": "t-1"}}})
         out({"jsonrpc": "2.0", "method": "turn/started", "params": {"threadId": "th-1", "turn": {"id": "t-1"}}})
         out({"jsonrpc": "2.0", "id": 0, "method": "item/commandExecution/requestApproval",
@@ -137,6 +141,37 @@ def test_sobe_no_cano_abre_thread_e_religa_com_aprovacao_pendente(ambiente):
                 break
             await asyncio.sleep(0.05)
         assert not Path(f"/proc/{pid_cano}").exists()
+    asyncio.run(corpo())
+
+
+def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(ambiente):
+    async def corpo():
+        ad = CodexAdapter()
+        _sidecar("cx-modo", ambiente)
+        await ad.ensure_running("cx-modo")
+        pid1 = codex_sessions.load("cx-modo")["cano"]["pid"]
+        assert ad.permission_modes_sem_terminal("cx-modo")["current"] == "Ask for approval"
+        await ad.send_prompt("cx-modo", "oi")
+        for _ in range(50):
+            if (ambiente / "turno.txt").exists():
+                break
+            await asyncio.sleep(0.05)
+        assert json.loads((ambiente / "turno.txt").read_text())["approvalPolicy"] == "on-request"
+        await ad.select("cx-modo", 2)
+        for _ in range(100):
+            if (ambiente / "elicitacao.txt").exists() and not ad._sessions["cx-modo"].get("in_progress"):
+                break
+            await asyncio.sleep(0.05)
+        assert (await ad.set_permission_mode_sem_terminal("cx-modo", "full access"))["current"] == "Full Access"
+        meta = codex_sessions.load("cx-modo")
+        assert meta["permission_mode"] == "Full Access" and meta["cano"]["pid"] != pid1
+        assert not Path(f"/proc/{pid1}").exists()
+        resume = json.loads((ambiente / "resume.txt").read_text())
+        assert resume == {"threadId": "th-1", "cwd": str(ambiente), "approvalPolicy": "never",
+                          "sandbox": "danger-full-access"}
+        with pytest.raises(ValueError):
+            await ad.set_permission_mode_sem_terminal("cx-modo", "yolo")
+        ad.close_sync("cx-modo")
     asyncio.run(corpo())
 
 
