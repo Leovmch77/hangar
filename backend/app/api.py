@@ -4734,8 +4734,9 @@ async def _auto_update_loop():
 def get_config(request: Request):
     """Config editavel pelo app + o que e so-leitura (exige reiniciar o servico).
 
-    Segredo NUNCA volta inteiro: `estado()` devolve mascarado (gsk_••••1234) — da pra conferir QUAL
-    chave esta la sem conseguir copia-la de volta."""
+    O bloco so-leitura (`_somente_leitura`) volta tambem no POST: parte dele depende de campo
+    editavel. Segredo NUNCA volta inteiro: `estado()` devolve mascarado (gsk_••••1234) — da pra
+    conferir QUAL chave esta la sem conseguir copia-la de volta."""
     return {
         "campos": runtime_config.estado(),
         "somente_leitura": _somente_leitura(request),
