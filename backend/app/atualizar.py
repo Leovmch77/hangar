@@ -565,7 +565,10 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
     try:
         aplicado = marca.read_text(encoding="utf-8").strip()
     except OSError:
-        aplicado = ""
+        # Sem marca ainda: o `node_modules` que existe é o do instalador, feito com o lock de
+        # então. Rodar `npm ci` aqui só por falta de registro custou 5 min na primeira
+        # atualização da VM; a marca nasce do que já está no disco.
+        aplicado = atual
     if atual and atual != aplicado and (REPO / "node_modules").is_dir():
         npm = shutil.which("npm")
         if not npm:
@@ -832,12 +835,12 @@ def _voltar(commit: str, motivo: str, topologia: str, porta: int) -> dict:
         _preparar(topologia, dist=False)
         _reiniciar(topologia, porta)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
-        # `no_ar=False` explícito: chegar aqui quer dizer que o restart que motivou o rollback já
-        # matou o processo antigo, e o restart do próprio rollback também falhou — não há nada
-        # rodando. O default `True` do `_falhou` vale pro caso comum (falha antes de qualquer
-        # restart), e aqui ele diria "está no ar" com a máquina sem serviço nenhum.
+        # MEDE (`no_ar=None`), não supõe. No systemd o restart que motivou o rollback já matou o
+        # processo antigo; no Windows o `Restart-HangarTasks` pode recusar ANTES de parar qualquer
+        # coisa (mutex ocupado) — medido na VM em 14/09/2026: `no_ar=False` cravado, com o backend
+        # anterior respondendo na porta.
         return _falhou(f"{motivo}; e a volta para a versao anterior tambem falhou: {e}",
-                       no_ar=False)
+                       no_ar=None, porta=porta)
     # Dois campos, não um. `voltou` diz que o código anterior está de volta no disco (aconteceu
     # aqui em cima, incondicionalmente); `no_ar` diz se o servidor respondeu depois disso. Com um
     # campo só, o caso "reverti e mesmo assim não subiu" era indistinguível de "não revertei", e a

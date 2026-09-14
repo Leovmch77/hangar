@@ -435,6 +435,26 @@ def test_preparar_roda_npm_ci_so_quando_o_lock_mudou(repo, monkeypatch):
         atualizar._hash_arquivo(repo / "package-lock.json")
 
 
+def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatch):
+    """Primeira atualização depois desta mudança: sem marca gravada, o `node_modules` é o do
+    instalador — `npm ci` só por falta de registro custou 5 min na VM. A marca nasce do disco."""
+    chamadas = []
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    (repo / "backend").mkdir(exist_ok=True)
+    (repo / "package-lock.json").write_text("{}", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    atualizar._preparar("systemd")
+    assert not any("npm ci" in " ".join(c) for c in chamadas)
+    assert (atualizar._base() / "package-lock.sha").read_text() == \
+        atualizar._hash_arquivo(repo / "package-lock.json")
+
+
 def test_preparar_sem_node_modules_nao_instala_front(repo, monkeypatch):
     """Máquina que serve o dist do CI sem nunca ter rodado `npm ci` não ganha um `node_modules`
     de 400 MB só porque o lock mudou."""
