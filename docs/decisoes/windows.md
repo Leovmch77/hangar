@@ -234,6 +234,29 @@ Nine functions
   separador de comando do tmux, então `send-keys "a ; b" Enter` digitou só o `a` — e mesmo esse não
   rodou: foi preciso um `send-keys … Enter` **separado** para o shell do pane executar.
 
+## Buffers do psmux: são da SESSÃO, o `-b` é ignorado e o nome do `-F` é outro
+
+(14/09/2026, psmux 3.3.8, Claude Code v2.1.270). O `/btw` no Windows respondia sempre
+"o /btw respondeu, mas não consegui ler a resposta" (502 `erro_btw_ilegivel`), com a resposta
+pronta no overlay e copiada. O `c` do overlay manda OSC 52 e o psmux grava o texto em buffer; a
+leitura é que falhava em silêncio, por três diferenças do tmux que se somam:
+
+- **Buffers são por sessão.** Sem `-t`, `list-buffers` fala com a sessão padrão de quem chama
+  (a do `TMUX` do ambiente, ou outra quando não há). O backend não tem `TMUX`: quando a padrão era
+  a do `/btw`, o buffer aparecia; quando não era, caía na leitura do pane e "funcionava" — por isso
+  uma reprodução feita de dentro de uma sessão passa e o backend falha.
+- **`list-buffers -F '#{buffer_name}'` devolve `buffer0000`**, enquanto a listagem padrão mostra
+  o nome real `buffer0`. Um OSC 52 vira **dois** buffers iguais.
+- **`show-buffer -b <nome>` devolve vazio com rc 0** e `delete-buffer -b <nome>` não apaga nada,
+  com o nome do `-F` ou com o real. Sem `-b`, os dois agem no buffer mais recente.
+
+No tmux os buffers são do servidor e `-t` é flag desconhecida nesses comandos. Por isso
+`btw._buffer_cmd` tenta com `-t =<sessão>` e, se o código de retorno recusar, guarda a resposta e
+segue sem `-t` — nunca pelo nome do sistema. A leitura tenta `-b` e, vazia, lê o mais recente (o
+`_COPIA_LOCK` garante que é o do `c`); a limpeza apaga pelo nome e, enquanto sobrar buffer além
+dos de antes, apaga o mais recente. Buffer vazio cai na leitura do pane em vez de virar erro.
+Validado ao vivo: resposta de 4574 caracteres lida inteira do buffer, sem buffer sobrando.
+
 ## The pane's environment comes from the SERVER on tmux and from the CALLER on psmux — which is why `CLAUDE_CONFIG_DIR` cannot be exported unconditionally
 
 (measured on psmux 3.3.7,
