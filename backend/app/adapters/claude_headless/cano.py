@@ -127,6 +127,17 @@ class Cano:
                 self.pendentes[str(ev["id"])] = linha
             elif ev["method"] == "serverRequest/resolved":
                 self.pendentes.pop(str((ev.get("params") or {}).get("requestId")), None)
+            elif ev["method"] == "turn/completed":
+                # Turno fechado (interrompido inclusive) leva os pedidos da thread junto, como o
+                # cliente faz — senão o snapshot repovoa um cartão que o servidor já esqueceu.
+                thread = (ev.get("params") or {}).get("threadId")
+                for rid, bruto in list(self.pendentes.items()):
+                    try:
+                        pedido = json.loads(bruto)
+                    except ValueError:
+                        continue
+                    if (pedido.get("params") or {}).get("threadId") == thread:
+                        self.pendentes.pop(rid, None)
 
     def _observar_cliente(self, linha: str) -> None:
         try:

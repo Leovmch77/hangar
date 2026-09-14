@@ -4384,10 +4384,13 @@ async def permissoes_do_codex(name: str):
 async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
     await _guard_permissao_codex(name)
     if _codex_sem_terminal(name):
+        from app.adapters.codex.sem_terminal import Ocupada
         try:
             return await get_adapter("codex").set_permission_mode_sem_terminal(name, body.mode)
         except ValueError as exc:
             raise HTTPException(400, detail=erro("erro_permissao_picker", str(exc)))
+        except Ocupada as exc:
+            raise HTTPException(409, detail=erro("erro_permissao_ocupada", str(exc)))
         except RuntimeError as exc:
             raise HTTPException(503, detail=erro("erro_permissao_picker", f"não consegui reabrir o Codex: {exc}"))
     try:

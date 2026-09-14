@@ -23,6 +23,10 @@ from app.adapters.codex.lancador import CLIENT_INFO
 
 _log = logging.getLogger("hangar.codex.sem_terminal")
 
+
+class Ocupada(RuntimeError):
+    """A sessão está num turno; a operação pedida derrubaria a conexão no meio dele."""
+
 # Nomes iguais aos do picker `/permissions` da TUI, pra pílula do app ser a mesma nos dois modos.
 # `untrusted` deixou de existir (codex-cli 0.154: o app-server sai com "no longer supported"), então
 # o que separa os dois primeiros é só o sandbox — e sandbox não troca ao vivo por RPC
@@ -89,13 +93,13 @@ def argv(meta: dict) -> list[str]:
 
 def _ambiente(meta: dict) -> dict:
     env = dict(os.environ)
-    home = meta.get("codex_home")
-    if home:
-        path = Path(home).expanduser().absolute()
-        default = codex_contas.default_home().expanduser().absolute()
-        account = codex_contas.Account("default", path, True) if path == default else \
-            codex_contas.Account(meta.get("codex_account") or "selected", path, False)
-        env = codex_contas.environment(account, base=env)
+    # Resolvida pelo id, com a validação da conta: secundária apagada depois da criação falha aqui
+    # com nome, não lá na frente com um CODEX_HOME que não existe.
+    try:
+        account = codex_contas.resolve_account(meta.get("codex_account") or "default")
+    except codex_contas.AccountError as exc:
+        raise RuntimeError(f"conta Codex indisponível: {exc.code} {exc.params}") from None
+    env = codex_contas.environment(account, base=env)
     # Backend subido de dentro de um tmux (dev) passaria o pane do OPERADOR pro processo.
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)

@@ -158,6 +158,9 @@ for linha in sys.stdin:
              "params": {"threadId": "th", "itemId": "i1", "command": "touch x"}})
         out({"jsonrpc": "2.0", "id": 1, "method": "item/fileChange/requestApproval",
              "params": {"threadId": "th", "itemId": "i2"}})
+    elif ev.get("method") == "turn/interrupt":
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
+        out({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "th"}})
     elif "method" not in ev and ev.get("id") is not None:
         out({"jsonrpc": "2.0", "method": "serverRequest/resolved", "params": {"threadId": "th", "requestId": ev["id"]}})
         if ev["id"] == 1:
@@ -192,8 +195,10 @@ def test_pedido_jsonrpc_do_servidor_fica_pendente_no_snapshot(tmp_path):
         b = _Cliente(sock)
         snap = b.le()
         assert [json.loads(x)["id"] for x in snap["pendentes"]] == [1]
-        b.manda({"jsonrpc": "2.0", "id": 1, "result": {"decision": "decline"}})
-        b.le(); b.le()
+        # Turno fechado sem resolver o pedido (interrupção) leva o pendente junto.
+        b.manda({"jsonrpc": "2.0", "id": 8, "method": "turn/interrupt", "params": {"threadId": "th"}})
+        assert b.le()["id"] == 8
+        assert b.le()["method"] == "turn/completed"
         b.fecha()
         time.sleep(0.2)
         c = _Cliente(sock)

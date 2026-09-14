@@ -157,7 +157,14 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
                 break
             await asyncio.sleep(0.05)
         assert json.loads((ambiente / "turno.txt").read_text())["approvalPolicy"] == "on-request"
-        await ad.select("cx-modo", 2)
+        for _ in range(50):
+            if ad.aprovacao_pendente("cx-modo")[0]:
+                break
+            await asyncio.sleep(0.05)
+        # Com o turno aberto, trocar o sandbox é recusado (derrubaria a conexão no meio).
+        with pytest.raises(sem_terminal.Ocupada):
+            await ad.set_permission_mode_sem_terminal("cx-modo", "Full Access")
+        assert await ad.select("cx-modo", 2) is True
         for _ in range(100):
             if (ambiente / "elicitacao.txt").exists() and not ad._sessions["cx-modo"].get("in_progress"):
                 break

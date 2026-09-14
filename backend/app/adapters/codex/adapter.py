@@ -886,6 +886,8 @@ class CodexAdapter:
             lock = self._locks.pop(old, None)
             if lock is not None:
                 self._locks[new] = lock
+            if old in self._falhas_subida:
+                self._falhas_subida[new] = self._falhas_subida.pop(old)
             if sess is None:
                 return
             bomba = sess.pop("bomba", None)
@@ -994,19 +996,26 @@ class CodexAdapter:
                              + ", ".join(m[0] for m in sem_terminal.MODOS) + ")")
         meta = codex_sessions.load(name) or {}
         sandbox_antes = sem_terminal.politica(meta.get("permission_mode"))[1]
-        meta = codex_sessions.update(name, permission_mode=nome) or meta
-        if sem_terminal.politica(nome)[1] != sandbox_antes:
-            lock = self._locks.setdefault(name, asyncio.Lock())
-            async with lock:
-                sess = self._sessions.pop(name, None)
-                if sess is not None:
-                    bomba = sess.get("bomba")
-                    if bomba is not None:
-                        bomba.cancel()
-                    await sess["client"].close()
-                    PushPreviewSource._sources.pop(name, None)
-                self._falhas_subida.pop(name, None)
-                await self._subir_sem_terminal(name, meta)
+        if sem_terminal.politica(nome)[1] == sandbox_antes:
+            codex_sessions.update(name, permission_mode=nome)
+            return {"current": nome}
+        lock = self._locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            sess = self._sessions.get(name)
+            # A guarda da API olhou o estado antes da trava; um prompt pode ter entrado no meio,
+            # e fechar a conexão agora derrubaria o turno sem aviso.
+            if sess is not None and sess.get("in_progress"):
+                raise sem_terminal.Ocupada("a sessão está trabalhando — espere ela terminar")
+            meta = codex_sessions.update(name, permission_mode=nome) or meta
+            sess = self._sessions.pop(name, None)
+            if sess is not None:
+                bomba = sess.get("bomba")
+                if bomba is not None:
+                    bomba.cancel()
+                await sess["client"].close()
+                PushPreviewSource._sources.pop(name, None)
+            self._falhas_subida.pop(name, None)
+            await self._subir_sem_terminal(name, meta)
         return {"current": nome}
 
     async def _recusar_pedido(self, name: str, client: AppServerClient, req: dict) -> None:
@@ -1014,9 +1023,11 @@ class CodexAdapter:
         try:
             await client.respond(req["id"], None, erro={"code": -32601,
                                                          "message": f"{metodo} não é atendido pelo Hangar sem terminal"})
-        except Exception:
+            texto = f"O Codex pediu `{metodo}`, que a sessão sem terminal não atende; o pedido foi recusado."
+        except Exception as exc:
             _log.warning("codex sem terminal: não consegui recusar %s name=%s", metodo, name, exc_info=True)
-        texto = f"O Codex pediu `{metodo}`, que a sessão sem terminal não atende; o pedido foi recusado."
+            texto = (f"O Codex pediu `{metodo}`, que a sessão sem terminal não atende, e a recusa não "
+                     f"chegou nele ({exc}). O turno pode ficar preso; interrompa se não andar.")
         try:
             await asyncio.to_thread(PromptQueue(name).append_saida_local, texto)
         except Exception:
