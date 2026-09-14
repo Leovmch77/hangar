@@ -38,7 +38,7 @@ from app import atomico, cotas, model_args, pensamento
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
-from app.adapters.preview_push import PushPreviewSource, fonte_pensamento
+from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.config import settings
 from app.pqueue import PromptQueue
 from app.procinfo import pid_vivo
@@ -934,6 +934,7 @@ class ClaudeHeadlessAdapter:
             sess.state = "dead"
             await PushPreviewSource.get(sess.name).push("")
             await self._limpar_pensamento(sess)
+            await self._limpar_ferramenta(sess)
             await self._notify(sess)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
@@ -1010,6 +1011,8 @@ class ClaudeHeadlessAdapter:
             if any(isinstance(b, dict) and b.get("type") == "thinking" for b in blocos):
                 # Mesmo raciocínio: o bloco já está no .jsonl e vira o ThinkingBlock da conversa.
                 await self._limpar_pensamento(sess)
+            if tools:
+                await self._limpar_ferramenta(sess)
             await self._notify(sess)
             return
         if t == "user":
@@ -1072,6 +1075,7 @@ class ClaudeHeadlessAdapter:
             self._recalcular_estado(sess)
             await PushPreviewSource.get(sess.name).push("")
             await self._limpar_pensamento(sess)
+            await self._limpar_ferramenta(sess)
             await self._notify(sess)
             if time.time() - sess.janelas_ts > 300:
                 self._agendar_cota(sess)
@@ -1157,6 +1161,10 @@ class ClaudeHeadlessAdapter:
         sess.pensamento = ""
         await fonte_pensamento(sess.name).push("")
 
+    @staticmethod
+    async def _limpar_ferramenta(sess: _Sessao) -> None:
+        await fonte_ferramenta(sess.name).push("")
+
     def _rotulo_tarefas(self, sess: _Sessao) -> str | None:
         vivas = list(sess.tarefas.values())
         if not vivas:
@@ -1178,6 +1186,7 @@ class ClaudeHeadlessAdapter:
             elif bloco.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
                 sess.tool_nome, sess.tool_json = bloco.get("name"), ""
                 sess.label = _rotulo_tool(sess.tool_nome, None)
+                await fonte_ferramenta(sess.name).push(json.dumps({"nome": sess.tool_nome or "tool", "input": {}}))
             elif bloco.get("type") == "thinking":
                 sess.label = "Pensando…"
                 sess.pensando_desde = time.monotonic()
@@ -1196,7 +1205,9 @@ class ClaudeHeadlessAdapter:
                 await fonte_pensamento(sess.name).push(sess.pensamento)
             elif d.get("type") == "input_json_delta" and sess.tool_nome is not None:
                 sess.tool_json += d.get("partial_json") or ""
-                rotulo = _rotulo_tool(sess.tool_nome, _input_parcial(sess.tool_json))
+                parcial = _input_parcial(sess.tool_json)
+                await fonte_ferramenta(sess.name).push(json.dumps({"nome": sess.tool_nome, "input": parcial}))
+                rotulo = _rotulo_tool(sess.tool_nome, parcial)
                 if rotulo != sess.label:
                     sess.label = rotulo
                     await self._notify(sess)

@@ -77,3 +77,9 @@ def fonte_pensamento(name: str) -> PushPreviewSource:
     """Pensamento em voo do Claude sem terminal: fonte à parte da prévia, senão o raciocínio
     viraria bolha de resposta e o dedup contra o transcript o compararia com texto errado."""
     return PushPreviewSource.get(f"{name}#pensamento")
+
+
+def fonte_ferramenta(name: str) -> PushPreviewSource:
+    """Chamada de ferramenta cujo pedido o modelo ainda escreve: JSON `{nome, input parcial}`, ou
+    "" quando ela já está no .jsonl."""
+    return PushPreviewSource.get(f"{name}#ferramenta")

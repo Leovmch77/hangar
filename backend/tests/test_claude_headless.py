@@ -160,6 +160,27 @@ def test_pensamento_em_voo_vai_pra_fonte_propria_e_sai_quando_o_bloco_cai_no_jso
     _run(fluxo())
 
 
+def test_ferramenta_em_voo_publica_nome_e_input_parcial_ate_cair_no_jsonl(adapter):
+    from app.adapters.preview_push import fonte_ferramenta
+    sess = adapter._sessions["s1"]
+
+    def stream(ev):
+        return adapter._on_event(sess, {"type": "stream_event", "event": ev})
+
+    async def fluxo():
+        await stream({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "name": "Bash"}})
+        assert json.loads(fonte_ferramenta("s1").text) == {"nome": "Bash", "input": {}}
+        await stream({"type": "content_block_delta", "index": 1,
+                      "delta": {"type": "input_json_delta", "partial_json": '{"command": "uv run py'}})
+        assert json.loads(fonte_ferramenta("s1").text) == {"nome": "Bash", "input": {"command": "uv run py"}}
+        await stream({"type": "content_block_stop", "index": 1})
+        assert fonte_ferramenta("s1").text != ""   # só sai quando o .jsonl tem a chamada
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "uv run pytest"}}]}})
+        assert fonte_ferramenta("s1").text == ""
+    _run(fluxo())
+
+
 def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
     from app import pensamento
     monkeypatch.setattr(pensamento, "ler", lambda: True)

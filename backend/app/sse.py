@@ -10,7 +10,7 @@ import traceback
 from pathlib import Path
 from app import atomico, diag
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
-from app.adapters.preview_push import PushPreviewSource, fonte_pensamento
+from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
 from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
@@ -801,21 +801,23 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa="previa", erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
-    pensamento_slot = {"text": "", "pending": False}
+    em_voo_slots = {"pensamento": {"text": "", "pending": False},
+                    "ferramenta": {"text": "", "pending": False}}
 
-    async def pensamento_pump():
-        # Raciocínio em voo (só o Claude sem terminal publica). Mesmo slot coalescido da prévia:
-        # rajada de deltas não pode atrasar o transcript na fila compartilhada. Sessão de outro
-        # provider só fica esperando uma fonte que nunca muda.
+    async def em_voo_pump(evento: str, fonte):
+        # Pensamento e ferramenta em voo (só o Claude sem terminal publica). Mesmo slot coalescido
+        # da prévia: rajada de deltas não pode atrasar o transcript na fila compartilhada. Sessão de
+        # outro provider só fica esperando uma fonte que nunca muda.
+        slot = em_voo_slots[evento]
         try:
-            async for text, _md, _full in fonte_pensamento(name).subscribe():
-                pensamento_slot["text"] = text
-                if not pensamento_slot["pending"]:
-                    pensamento_slot["pending"] = True
-                    queue.put_nowait(("pensamento", None))
+            async for text, _md, _full in fonte.subscribe():
+                slot["text"] = text
+                if not slot["pending"]:
+                    slot["pending"] = True
+                    queue.put_nowait((evento, None))
         except Exception as exc:  # surface, never swallow
             diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
-                           etapa="pensamento", erro_tipo=type(exc).__name__)
+                           etapa=evento, erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
@@ -855,7 +857,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(ping_loop()),
         asyncio.create_task(nav_pump()),
         preview_task,
-        asyncio.create_task(pensamento_pump()),
+        asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
+        asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
     ]
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
@@ -963,10 +966,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                                             full=bool(preview_slot["full"]),
                                             vivo=isinstance(broker, PushPreviewSource)).model_dump_json()}
                 continue
-            if event == "pensamento":
-                # SEM id, como a prévia: reconexão não pode replayar raciocínio velho.
-                pensamento_slot["pending"] = False
-                yield {"event": "pensamento", "data": json.dumps({"text": pensamento_slot["text"]})}
+            if event in em_voo_slots:
+                # SEM id, como a prévia: reconexão não pode replayar o que já saiu de cena.
+                slot = em_voo_slots[event]
+                slot["pending"] = False
+                yield {"event": event, "data": json.dumps({"text": slot["text"]})}
                 continue
             if event == "state":
                 # Rastreia transicoes do awaiting_input pra resetar o guard de emissao unica.
