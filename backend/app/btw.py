@@ -65,9 +65,44 @@ def _limpar_composer_as_cegas(name: str) -> None:
                          "no composer", name)
 
 
-def _buffers() -> list[str]:
-    cp = tmux._run(["tmux", "list-buffers", "-F", "#{buffer_name}"])
+# No tmux os buffers são do servidor e `-t` é flag desconhecida nos comandos de buffer; no psmux são
+# da SESSÃO, e sem `-t` o comando fala com outra. None = ainda não medido: decide o código de retorno.
+_BUFFER_COM_ALVO: bool | None = None
+
+
+def _buffer_cmd(name: str, sub: str, *args: str):
+    global _BUFFER_COM_ALVO
+    if _BUFFER_COM_ALVO is not False:
+        cp = tmux._run(["tmux", sub, "-t", f"={name}", *args])
+        if _BUFFER_COM_ALVO or cp.returncode == 0:
+            _BUFFER_COM_ALVO = True
+            return cp
+        if cp.returncode == tmux.RC_INDISPONIVEL:
+            return cp
+        _BUFFER_COM_ALVO = False
+    return tmux._run(["tmux", sub, *args])
+
+
+def _buffers(name: str) -> list[str]:
+    cp = _buffer_cmd(name, "list-buffers", "-F", "#{buffer_name}")
     return [b for b in (cp.stdout or "").split("\n") if b]
+
+
+def _ler_buffer(name: str, nome: str) -> str:
+    # O psmux ignora o `-b` (vazio com rc 0) e nem devolve o nome real no `-F`. Sem `-b` vem o mais
+    # recente, que é o do `c` — o `_COPIA_LOCK` garante que ninguém copiou no meio.
+    texto = _buffer_cmd(name, "show-buffer", "-b", nome).stdout or ""
+    return texto if texto.strip() else (_buffer_cmd(name, "show-buffer").stdout or "")
+
+
+def _apagar_buffers(name: str, novos: list[str], quantos_antes: int) -> None:
+    for b in novos:
+        _buffer_cmd(name, "delete-buffer", "-b", b)
+    # psmux: o `-b` não apagou nada e o OSC 52 vira duas cópias; sem `-b` sai o mais recente.
+    for _ in range(4):
+        if len(_buffers(name)) <= quantos_antes:
+            break
+        _buffer_cmd(name, "delete-buffer")
 
 
 def _resposta_do_pane(name: str, pergunta: str) -> str:
@@ -167,24 +202,25 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
                 raise BtwError(504, "erro_btw_sem_resposta", "o /btw não respondeu a tempo")
 
         with _COPIA_LOCK:
-            antes = set(_buffers())
+            antes = _buffers(name)
             tmux.send_keys(name, "c")
             fim = time.monotonic() + _PRAZO_COPIA
-            novo = None
+            novos: list[str] = []
             while time.monotonic() < fim:
                 time.sleep(_POLL)
-                novo = next((b for b in _buffers() if b not in antes), None)
-                if novo or _COPIADO in _rodape(name):
+                novos = [b for b in _buffers(name) if b not in antes]
+                if novos or _COPIADO in _rodape(name):
                     break
-            if novo:
-                resposta = tmux._run(["tmux", "show-buffer", "-b", novo]).stdout or ""
-                tmux._run(["tmux", "delete-buffer", "-b", novo])
-        if novo:
+            resposta = ""
+            if novos:
+                resposta = _ler_buffer(name, novos[0])
+                _apagar_buffers(name, novos, len(antes))
+        if resposta.strip():
             fonte = "buffer"
         else:
             resposta = _resposta_do_pane(name, pergunta)
             fonte = "pane"
-            _log.warning("btw de %r: OSC 52 não virou buffer; resposta lida do pane", name)
+            _log.warning("btw de %r: o buffer do OSC 52 não trouxe a resposta; resposta lida do pane", name)
         tmux.send_keys(name, "Escape")
         time.sleep(_SETTLE)  # overlay ainda fechando engolia o próximo `/btw` digitado em seguida
     resposta = resposta.rstrip("\n")

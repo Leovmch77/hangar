@@ -15,12 +15,18 @@ def _tela(*linhas):
 
 
 class TmuxFalso:
-    def __init__(self, telas, buffer_apos_c=True):
+    """`modo="tmux"`: buffers do servidor, `-t` é flag desconhecida nos comandos de buffer.
+    `modo="psmux"` (medido no 3.3.8): buffers da SESSÃO — sem `-t` o comando fala com outra —,
+    `-F '#{buffer_name}'` devolve `buffer000N` em vez do nome real, `show-buffer -b` devolve vazio
+    com rc 0 e `delete-buffer -b` não apaga nada; sem `-b`, os dois agem no buffer mais recente."""
+
+    def __init__(self, telas, buffer_apos_c=True, modo="tmux", resposta="1. Apple\n2. Banana\n"):
         self.telas = list(telas)
         self.teclas = []
-        self.buffers = []
+        self.buffers = []  # [(nome, conteúdo)], mais recente primeiro, como o list-buffers
         self.buffer_apos_c = buffer_apos_c
-        self.apagados = []
+        self.modo = modo
+        self.resposta = resposta
 
     def capture_pane(self, name, lines=200):
         return self.telas.pop(0) if len(self.telas) > 1 else self.telas[0]
@@ -55,17 +61,36 @@ class TmuxFalso:
             return True
         self.teclas.append(keys)
         if keys == "c" and self.buffer_apos_c:
-            self.buffers.append("buffer7")
+            # O OSC 52 do psmux vira DOIS buffers iguais (medido).
+            for _ in range(2 if self.modo == "psmux" else 1):
+                self.buffers.insert(0, (f"buffer{7 + len(self.buffers)}", self.resposta))
         return True
 
     def _run(self, args, input=None):
-        if args[1] == "list-buffers":
-            return subprocess.CompletedProcess(args, 0, "\n".join(self.buffers) + "\n", "")
-        if args[1] == "show-buffer":
-            return subprocess.CompletedProcess(args, 0, "1. Apple\n2. Banana\n", "")
-        if args[1] == "delete-buffer":
-            self.apagados.append(args[3])
-            return subprocess.CompletedProcess(args, 0, "", "")
+        sub, resto = args[1], args[2:]
+        alvo = "-t" in resto
+        nome_b = resto[resto.index("-b") + 1] if "-b" in resto else None
+        ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if self.modo == "tmux" and alvo:
+            return subprocess.CompletedProcess(args, 1, "", "command list-buffers: unknown flag -t\n")
+        # psmux sem alvo: a sessão padrão é outra, que não tem os buffers desta.
+        buffers = self.buffers if (self.modo == "tmux" or alvo) else []
+        if sub == "list-buffers":
+            if self.modo == "psmux":
+                return ok("".join(f"buffer{i:04d}\n" for i in range(len(buffers))))
+            return ok("".join(f"{n}\n" for n, _ in buffers))
+        if sub == "show-buffer":
+            if self.modo == "psmux" and nome_b is not None:
+                return ok("")
+            achado = next((c for n, c in buffers if nome_b in (None, n)), None)
+            return ok(achado or "")
+        if sub == "delete-buffer":
+            if self.modo == "psmux" and nome_b is not None:
+                return ok()
+            i = next((i for i, (n, _) in enumerate(buffers) if nome_b in (None, n)), None)
+            if i is not None:
+                buffers.pop(i)
+            return ok()
         raise AssertionError(args)
 
 
@@ -79,6 +104,7 @@ def falso(monkeypatch):
         monkeypatch.setattr(btw, "_esvaziar_composer_claude", f.esvaziar)
         monkeypatch.setattr(btw, "_texto_composer_claude", f.composer)
         monkeypatch.setattr(btw.time, "sleep", lambda s: None)
+        monkeypatch.setattr(btw, "_BUFFER_COM_ALVO", None)
         return f
     return montar
 
@@ -95,7 +121,32 @@ def test_le_a_resposta_do_buffer_e_fecha_o_overlay(falso):
     assert r["fonte"] == "buffer"
     assert r["question"] == "list fruits"
     assert f.teclas == ["C-u", "/btw list fruits", "Enter", "c", "Escape"]
-    assert f.apagados == ["buffer7"]
+    assert f.buffers == []
+
+
+def test_psmux_le_o_buffer_da_sessao_e_apaga_as_duas_copias(falso):
+    # No psmux o buffer é da sessão e o `-b` é ignorado: ler por nome devolvia vazio com rc 0 e o
+    # app mostrava "respondeu, mas não consegui ler" com a resposta parada no buffer.
+    f = falso([
+        _tela("❯ "),
+        _tela("    /btw q", "      corte da tela", RODAPE_PRONTO),
+        _tela("    /btw q", "      corte da tela", RODAPE_COPIADO),
+    ], modo="psmux", resposta="resposta inteira\ncom duas linhas\n")
+    r = btw.perguntar("s", "q")
+    assert r["answer"] == "resposta inteira\ncom duas linhas"
+    assert r["fonte"] == "buffer"
+    assert f.buffers == []
+
+
+def test_buffer_vazio_cai_no_pane(falso):
+    f = falso([
+        _tela("❯ "),
+        _tela("    /btw q", "      4", RODAPE_PRONTO),
+        _tela("    /btw q", "      4", RODAPE_COPIADO),
+    ], resposta="")
+    r = btw.perguntar("s", "q")
+    assert r["answer"] == "4"
+    assert r["fonte"] == "pane"
 
 
 def test_sem_buffer_cai_no_pane(falso):

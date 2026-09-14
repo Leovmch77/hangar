@@ -310,6 +310,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   `set -g <qualquer coisa>` volta do `show -g`. Endereço é `=<sessão>:<janela>.<pane>`.
 - **Multi-linha vai pelo CLIPBOARD**, porque os buffers do psmux cortam no primeiro `\n`. O
   fallback ramifica pelo **código de retorno**, nunca pelo nome do sistema.
+- **Buffer do psmux é da SESSÃO e ignora `-b`**: sem `-t` o comando fala com outra sessão,
+  `show-buffer -b` devolve vazio com rc 0 e o `-F '#{buffer_name}'` não dá o nome real. Leia o
+  mais recente com `-t`; no tmux, `-t` é recusado e o código de retorno decide.
 - **O ambiente do pane vem do SERVIDOR no tmux e de QUEM CHAMA no psmux** — por isso
   `CLAUDE_CONFIG_DIR` não pode ser exportado incondicionalmente ali.
 - **`Path.replace` É `os.replace`** e carrega o mesmo WinError 5; toda troca atômica passa por
