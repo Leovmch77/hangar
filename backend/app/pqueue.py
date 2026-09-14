@@ -215,9 +215,13 @@ def _entry_event(entry: dict) -> ChatEvent:
     # exibir (senao bubble enfileirada mostraria hora e as do transcript nao -> inconsistente).
     # `desistiu` vai junto: e a UNICA forma de o front distinguir "esperando a vez" de "perdida".
     # Sem ele a bolha desistida acendia solida igual a uma aceita (ver models.ChatEvent.desistiu).
+    # `queued_ts` é o relógio da entrada pra ORDENAR: a reconexão do SSE reemite a fila inteira, e
+    # sem ele uma desistida de horas atrás era anexada no fim como se fosse nova.
+    ts = entry.get("ts")
     return ChatEvent(kind="user_msg", id="queued-" + str(entry.get("id")), text=entry.get("text"),
                      queued_delivered=entry.get("delivered") if isinstance(entry.get("delivered"), bool) else None,
-                     desistiu=True if entry.get("desistiu") else None)
+                     desistiu=True if entry.get("desistiu") else None,
+                     queued_ts=float(ts) if isinstance(ts, (int, float)) else None)
 
 
 def _ts_of_obj(obj: dict) -> float:

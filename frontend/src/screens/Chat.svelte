@@ -1820,14 +1820,16 @@
           const next = events.slice();
           next[i] = ev;
           events = next;
-        } else if (ev.id.startsWith('queued-') && typeof ev.ts === 'number' && events.length
-                   && (events[events.length - 1].ts ?? 0) > ev.ts + 1) {
+        } else if (ev.id.startsWith('queued-') && typeof ev.queued_ts === 'number' && events.length
+                   && (events[events.length - 1].ts ?? 0) > ev.queued_ts + 1) {
           // Reconexão do SSE reemite a fila inteira (o `seen` do follow zera), inclusive uma
           // entrada desistida de horas atrás. Anexada no fim, ela "aparecia agora" entre mensagens
-          // recentes — parecia mensagem nova que ninguém mandou. Entra no lugar do relógio dela,
-          // como o histórico já faz no reload.
+          // recentes — parecia mensagem nova que ninguém mandou. Entra no lugar do relógio dela
+          // (`queued_ts`; o `ts` de exibição da bolha da fila é null de propósito), como o
+          // histórico já faz no reload.
+          const quando = ev.queued_ts;
           let pos = events.length;
-          while (pos > 0 && (events[pos - 1].ts ?? 0) > ev.ts) pos--;
+          while (pos > 0 && (events[pos - 1].ts ?? 0) > quando) pos--;
           events = [...events.slice(0, pos), ev, ...events.slice(pos)];
           rebuildIndex();
         } else {

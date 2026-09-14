@@ -194,6 +194,9 @@ class ChatEvent(BaseModel):
     desistiu: Optional[bool] = None
     # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
     queued_delivered: Optional[bool] = None
+    # Só em bolha da fila: o relógio da ENTRADA (epoch), pra ordenar no front quando ela chega ao
+    # vivo por reconexão. Não é o `ts` de exibição (esse fica None de propósito, ver pqueue).
+    queued_ts: Optional[float] = None
     # Remove o eco pelo id, mesmo quando a mensagem real saiu da janela do histórico.
     queued_confirmed: Optional[bool] = None
     # Nº de imagens base64 anexadas a uma msg do user via TERMINAL (paste na TUI do Claude). O front

@@ -1043,6 +1043,15 @@ def test_entry_event_carrega_desistiu():
     assert _entry_event({"id": "e1", "text": "oi", "desistiu": True}).desistiu is True
 
 
+def test_entry_event_carrega_o_relogio_da_entrada_sem_virar_ts_de_exibicao():
+    # A reconexão do SSE reemite a fila inteira; sem `queued_ts` o front anexava uma desistida de
+    # horas atrás no fim da conversa, como se fosse nova. O `ts` de exibição segue None.
+    from app.pqueue import _entry_event
+    ev = _entry_event({"id": "e1", "text": "oi", "ts": 1789391249.9})
+    assert ev.queued_ts == 1789391249.9 and ev.ts is None
+    assert _entry_event({"id": "e1", "text": "oi"}).queued_ts is None
+
+
 @pytest.mark.parametrize("delivered", [False, True, None])
 def test_entry_event_informa_transporte_sem_inferir_confirmacao(delivered):
     entry = {"id": "e1", "text": "oi", "desistiu": True}
