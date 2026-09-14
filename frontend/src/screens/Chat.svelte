@@ -1820,6 +1820,16 @@
           const next = events.slice();
           next[i] = ev;
           events = next;
+        } else if (ev.id.startsWith('queued-') && typeof ev.ts === 'number' && events.length
+                   && (events[events.length - 1].ts ?? 0) > ev.ts + 1) {
+          // Reconexão do SSE reemite a fila inteira (o `seen` do follow zera), inclusive uma
+          // entrada desistida de horas atrás. Anexada no fim, ela "aparecia agora" entre mensagens
+          // recentes — parecia mensagem nova que ninguém mandou. Entra no lugar do relógio dela,
+          // como o histórico já faz no reload.
+          let pos = events.length;
+          while (pos > 0 && (events[pos - 1].ts ?? 0) > ev.ts) pos--;
+          events = [...events.slice(0, pos), ev, ...events.slice(pos)];
+          rebuildIndex();
         } else {
           idIndex.set(ev.id, events.length);
           events = [...events, ev];
