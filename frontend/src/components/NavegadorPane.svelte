@@ -108,9 +108,17 @@
     endereco = aberta;
   }
 
-  function trocarPara(id: number) {
+  // Clique numa aba que o shell já não tem (fechada pelo CLI no mesmo instante) não pode morrer
+  // calado: o painel avisa e o próximo onEstado tira a aba da faixa.
+  async function trocarPara(id: number) {
     abaPendente = false;
-    void nativo?.tabSwitch?.(navKey, id);
+    const r = await nativo?.tabSwitch?.(navKey, id)?.catch(() => undefined);
+    if (r && !r.ok) avisar(m.nav_aba_sumiu());
+  }
+
+  async function fecharAba(id: number) {
+    const r = await nativo?.tabClose?.(navKey, id)?.catch(() => undefined);
+    if (r && !r.ok) avisar(m.nav_aba_sumiu());
   }
 
   async function abrirAba(u: string) {
@@ -274,7 +282,7 @@
             {aba.titulo || aba.url.replace(/^https?:\/\//, '') || m.nav_aba_vazia()}
           </button>
           <button type="button" class="nav-aba-x" aria-label={m.nav_aba_fechar()} title={m.nav_aba_fechar()}
-                  onclick={() => void nativo?.tabClose?.(navKey, aba.id)}>×</button>
+                  onclick={() => void fecharAba(aba.id)}>×</button>
         </div>
       {/each}
       {#if abaPendente}

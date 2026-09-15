@@ -508,6 +508,10 @@ function fecharNavegador(win, chave) {
     try { if (!win.isDestroyed()) win.contentView.removeChildView(view); } catch (err) { avisar('removeChildView', err); }
     try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (err) { avisar('close', err); }
   }
+  // A mesma sessão aberta em OUTRA janela do app ainda tem abas vivas no registro: o sidecar
+  // passa a contar só elas. Apagar aqui deixava o CLI, o espelho do celular e o GET /navegador
+  // dizendo "sem navegador" para uma sessão que seguia sendo dirigida na outra janela.
+  if (registros.get(chave)?.abas.size) { gravarSidecarNav(chave); return; }
   try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch (err) { avisar('sidecar', err); }
 }
 
@@ -734,9 +738,6 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
     console.error('[nav] depurador nao anexou:', err && err.message);
   }
   reg.abas.set(id, { ctl, view, urlPedida: destino, targetId: null });
-  // Aba morta por fora (Target.closeTarget via CDP, crash do renderer) não passa por `fecharAba`:
-  // sem `garantirAtiva`, a sessão ficava com abas vivas e sem ativa, e o CLI respondia "nao tem
-  // navegador aberto" para todas elas. A checagem de identidade é o que impede um `destroyed`
   // Aba morta por fora (Target.closeTarget via CDP, crash do renderer) não passa pelo × nem pelo
   // `fecharAba`. A conferência de identidade impede um `destroyed` ATRASADO (o `close` do view é
   // assíncrono e a mesma chave pode ser reaberta antes de ele terminar) de apagar a aba NOVA:
