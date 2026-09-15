@@ -140,6 +140,27 @@ código de saída do processo só reflete falha de transporte (sessão sem naveg
 ar), não falha do comando em si (`erro: ref @eN nao existe` sai com código 0, porque é uma resposta
 válida do navegador, não uma falha de chamada).
 
+## Abas
+
+O navegador de cada sessão tem até 8 abas. A **ativa é uma só**, compartilhada entre o painel do
+usuário e o CLI: clicar numa aba no painel muda onde os próximos comandos caem.
+
+| Comando | Faz |
+|---|---|
+| `hangar-preview tab list` | Lista as abas; `*` marca a ativa. |
+| `hangar-preview tab new <url>` | Abre outra aba e a torna ativa. |
+| `hangar-preview tab <id>` | Torna essa aba a ativa (é a que o usuário vê). |
+| `hangar-preview tab close [id]` | Fecha a aba (sem id, a ativa). A última fecha o navegador. |
+
+`--aba <id>` age em outra aba **sem trocar a ativa** — vale para `snapshot`, `click`, `fill`,
+`type`, `press`, `hover`, `wait`, `eval`, `console`, `network`, `text`, `url`, `shot`. O print de
+aba escondida custa 2-3 s a mais que o da visível.
+
+`url` e `shot` terminam em ` (aba N de M)` quando a sessão tem mais de uma aba — é assim que se
+sabe onde se está sem pedir `tab list`. Com uma aba só a saída é a mesma de sempre.
+
+No `batch` cada linha pode levar o seu `--aba`, e linhas `tab ...` valem normalmente.
+
 ## Se um comando falhar
 
 **Falha não autoriza trocar de navegador.** Continue pelo `hangar-preview`: não abra outro

@@ -378,3 +378,22 @@ mantém pra sessão com o mesmo nome E mesmo jsonl. Vale nas duas interfaces (st
 `mobile/src/stores/sessions.ts`). O cache de cauda do chat (`chat-cauda`, TanStack) já era por
 jsonl e não entrou nisso. Não reproduzido de ponta a ponta pelo navegador embutido: o item
 "Fechar" do menu de contexto não aceitou o clique sintético.
+
+## Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI
+
+(14/09/2026).
+O navegador da sessão ganhou abas (até 8). A alternativa era cada lado ter o seu foco — a pessoa
+numa aba, o agente noutra —, e ela quebra o que o preview existe pra fazer: o print que o agente
+lê deixaria de ser a tela que a pessoa está olhando, e "vê como ficou" viraria duas telas
+diferentes discutindo a mesma. Então a ativa é única: clicar numa aba no painel muda onde os
+próximos comandos do CLI caem. Para o caso legítimo de mexer numa página sem tirar a outra da
+frente existe `--aba <id>`, que age na aba escondida sem trocar a ativa — o print dela custa 2-3 s
+a mais, porque o Electron precisa render a view que não está composta na tela.
+
+O sidecar `~/.hangar/nav/<chave>.json` é **aditivo** pelo mesmo motivo prático: `url` e `targetId`
+no topo continuam sendo os da aba ativa, e `ativa`/`abas` entram ao lado. Três leitores dependem do
+topo — `backend/app/navsock.py` (espelho do celular e teclado remoto, que resolve a sessão por
+`sc.get("targetId")`), `backend/app/navshell.py` e o `GET /api/sessions/{name}/navegador` que o
+front usa pra saber se a sessão tem navegador. Mover qualquer um desses campos para dentro de
+`abas` quebraria os três de uma vez, e a suíte do backend passando **sem mudança** é a prova de que
+não quebrou.

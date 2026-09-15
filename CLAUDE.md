@@ -215,6 +215,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Terminal real no rodapé e no celular**: um PTY por WebSocket, backend não interpreta nada.
   Um painel por sessão; xterm com fundo `rgba(0,0,0,0)`, nunca `'transparent'`. Com o painel
   aberto, quem conta linha de pane responde 409 — e o app tem que MOSTRAR esse texto.
+- **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
+  outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
+  são os da aba ativa, e é só isso que o backend lê.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

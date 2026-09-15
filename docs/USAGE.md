@@ -392,6 +392,22 @@ não tem).
   um `systemctl --user restart` a derruba junto. Sem emulador conhecido no PATH ele diz isso; pra
   escolher qual usar, `CP_TERMINAL` (tabela da seção 2).
 
+### Navegador embutido (só no desktop)
+
+O botão de globo no topo do chat abre um **navegador de verdade dentro do app** — um Chromium por
+sessão, na coluna da direita, ao lado do Contexto. Digite o endereço na barra e a página abre ali:
+serve pra ver o `localhost:3000` do projeto sem sair do Hangar. O agente daquela sessão dirige o
+MESMO navegador pelo `hangar-preview` (`open`, clicar, preencher, tirar print) — quando ele abre
+uma página, o painel aparece sozinho na sua tela.
+
+**Abas.** Acima da barra de endereço fica a faixa de abas: `×` fecha uma, `+` abre uma "Nova aba"
+e põe o cursor no campo de endereço — a página em si só é carregada quando você dá Enter. Até 8
+abas por sessão; **fechar a última fecha o navegador inteiro**, e o painel some.
+
+A aba ativa é uma só, sua e do agente ao mesmo tempo: se você clicar numa aba, é nela que os
+próximos comandos dele caem. Quando ele precisa mexer numa página sem tirar da sua frente a que
+você está olhando, ele usa a aba escondida — a sua tela não muda.
+
 ### Checkpoints de código (Pi e OMP)
 
 Requer **Git 2.32 ou superior**, para isolar a configuração global durante as operações.
