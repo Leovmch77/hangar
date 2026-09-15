@@ -62,8 +62,9 @@ const FOCO = `(()=>{const a=document.activeElement;if(!a||a===document.body)retu
 
 // tetoEspera vale pra TODO comando que pode não voltar (wait e eval): view escondido suspende
 // requestAnimationFrame, e um comando pendurado trava o agente sem erro nenhum.
-function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }) {
+function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}, tetoEspera = 15000 }) {
   let fila = Promise.resolve();
+  let emVoo = 0;
   let refs = new Map();
   let temaAtual = 'sistema';
   let oculto = false;
@@ -175,9 +176,26 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
     return v === '' ? null : (v || 'desconhecido');
   }
 
+  // Escondida e sem ninguém dirigindo, a aba é CONGELADA (Page lifecycle `frozen`): sem isto uma
+  // animação CSS mantém o compositor a 60 fps numa aba que ninguém vê — o modo economia do
+  // Chromium não segura isso, e a emulação de tamanho (viewport da aba escondida) menos ainda.
+  // CDP continua respondendo na página congelada; só o que roda sozinho (timers, rAF, animação)
+  // para. `aoDirigir` avisa o main, que tira/põe o modo economia no mesmo compasso.
+  let congelada = false;
+  async function economia() {
+    const alvo = oculto && emVoo === 0;
+    if (alvo === congelada) return;
+    congelada = alvo;
+    aoDirigir(!alvo);
+    await dbg.sendCommand('Page.setWebLifecycleState', { state: alvo ? 'frozen' : 'active' }).catch(() => {});
+  }
+
+  // Descongela ANTES do verbo e recongela quando a fila esvazia; dois verbos encavalados são
+  // uma rajada só.
   function enfileirar(fn) {
-    const resultado = fila.then(fn, fn);
-    fila = resultado.then(() => {}, () => {});
+    emVoo++;
+    const resultado = fila.then(economia).then(fn, fn);
+    fila = resultado.then(() => {}, () => {}).then(() => { emVoo--; return economia(); });
     return resultado;
   }
 
@@ -225,6 +243,13 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
     async definirOculto(valor) {
       oculto = !!valor;
       await aplicarViewport();
+      await economia();
+    },
+    // Documento novo nasce ativo (o congelamento é do documento, não do view): o main chama no
+    // fim do load pra recongelar a aba escondida — congelar no meio do load travaria o parse.
+    async recongelar() {
+      congelada = false;
+      await economia();
     },
     // Dois caminhos, e qual serve depende de o view estar na tela. Visível: `capturePage` do
     // Electron. Escondido: ele REJEITA com UnknownVizError (não devolve imagem vazia), e quem

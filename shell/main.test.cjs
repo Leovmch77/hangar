@@ -22,6 +22,7 @@ function criarControladorFalso(opcoes) {
   const c = { enfileirar: (fn) => fn(), fechado: false, opcoes, ocultos: [] };
   c.fechar = () => { c.fechado = true; };
   c.definirOculto = async (v) => { c.ocultos.push(v); };
+  c.recongelar = async () => {};
   criadas.push(c);
   return c;
 }

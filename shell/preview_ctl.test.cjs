@@ -76,6 +76,31 @@ test('fila continua apos comando do meio rejeitar', async () => {
   await assert.rejects(async () => b, /falha/, 'segundo comando rejeitou pra quem chamou');
 });
 
+test('escondida e ociosa a aba congela; verbo descongela antes de rodar e a fila vazia recongela', async () => {
+  const dbg = dubleDbg();
+  const sinais = [];
+  const estados = () => dbg.chamadas.filter(([m]) => m === 'Page.setWebLifecycleState').map(([, p]) => p.state);
+  const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {}, aoDirigir: (v) => sinais.push(v) });
+  await ctl.enfileirar(async () => {});
+  assert.deepEqual(estados(), [], 'visivel nao congela nem manda estado');
+  await ctl.definirOculto(true);
+  assert.deepEqual(estados(), ['frozen']);
+  assert.deepEqual(sinais, [false]);
+  let vistoNoVerbo = null;
+  const a = ctl.enfileirar(async () => { vistoNoVerbo = estados().at(-1); await new Promise((r) => setTimeout(r, 10)); });
+  const b = ctl.enfileirar(async () => { throw new Error('falha'); });
+  await a;
+  await assert.rejects(async () => b, /falha/);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(vistoNoVerbo, 'active', 'descongela ANTES do verbo');
+  assert.deepEqual(estados(), ['frozen', 'active', 'frozen'], 'dois verbos encavalados = uma rajada; rejeicao tambem recongela');
+  assert.deepEqual(sinais, [false, true, false]);
+  await ctl.recongelar();
+  assert.deepEqual(estados(), ['frozen', 'active', 'frozen', 'frozen'], 'documento novo nasce ativo: recongelar manda de novo');
+  await ctl.definirOculto(false);
+  assert.deepEqual(estados().at(-1), 'active', 'mostrar descongela');
+});
+
 test('rede guarda no maximo o teto e devolve as ultimas', async () => {
   const dbg = dubleDbg();
   const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });

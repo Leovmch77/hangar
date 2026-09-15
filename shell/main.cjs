@@ -369,7 +369,8 @@ function abrirJanela(origem) {
 // Navegador embutido. UM WebContentsView POR ABA, agrupados por sessão (chave serverId::nome),
 // pendurado no contentView da janela — navegação top-level, então X-Frame-Options não se aplica
 // (diferente de iframe). Trocar de sessão ESCONDE o view (nav-hide), não fecha: o agente segue
-// dirigindo ele via CDP em background (backgroundThrottling: false abaixo é por isso). Fechar de
+// dirigindo ele via CDP em background (o controlador tira o view do modo economia enquanto um
+// verbo roda — ver `aoDirigir`). Fechar de
 // verdade é só pelo × do painel (nav-close). A POSIÇÃO é medida pelo front (div âncora no
 // NavegadorPane) e chega por IPC: o view não é DOM, flutua POR CIMA da página — o front esconde
 // com bounds zero quando um overlay DOM abre, e o layout do Chat reserva a faixa pra nada cobrir
@@ -673,9 +674,7 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
   const escondida = oculto ?? (anterior ? !anterior.view.getVisible() : false);
   // persist: cookies/localStorage no disco. COMPARTILHADA entre sessões de propósito — o uso é
   // cada sessão com suas URLs, não isolamento de conta; se um dia precisar, vira por-sessão.
-  const view = new WebContentsView({
-    webPreferences: { partition: 'persist:nav', backgroundThrottling: false },
-  });
+  const view = new WebContentsView({ webPreferences: { partition: 'persist:nav' } });
   const wc = view.webContents;
   wc.setUserAgent(uaDeChrome(wc.getUserAgent()));
   // target=_blank vai pro navegador do sistema, mesmo padrão do cockpit.
@@ -708,7 +707,7 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
     if (entrada) entrada.urlPedida = u;
     gravarSidecarNav(chave);
   });
-  wc.on('did-finish-load', () => devolverFoco(win, view));
+  wc.on('did-finish-load', () => { devolverFoco(win, view); ctl?.recongelar(); });
   // Preenchimento de login com as senhas salvas do Chrome do usuário, ao terminar de carregar
   // uma página cujo domínio tem senha salva. Uma vez por URL (o `dom-ready` repete em SPA).
   let ultimoPreenchido = '';
@@ -737,6 +736,9 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
       dbg,
       capturarPagina: () => wc.capturePage(),
       aoNavegar: (cb) => wc.on('did-navigate', cb),
+      // Modo economia do Chromium (timers a 1 Hz, sem rAF) só sai enquanto um verbo dirige a aba
+      // escondida; o que segura o compositor é o congelamento, no controlador.
+      aoDirigir: (dirigindo) => { if (!wc.isDestroyed()) wc.setBackgroundThrottling(!dirigindo); },
     });
   } catch (err) {
     // Falha aqui custa os verbos novos, não o navegador: a aba entra no registro sem controlador
