@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar } = require('./navegador.cjs');
+const { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar, proximaAtiva } = require('./navegador.cjs');
 
 test('uaDeChrome remove marcas de app e vira Chrome vanilla', () => {
   const ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) hangar/0.1.3 Chrome/142.0.0.0 Electron/43.3.0 Safari/537.36 hangar-shell';
@@ -29,6 +29,16 @@ test('urlNavegavel aceita http(s) e recusa o resto', () => {
   assert.equal(urlNavegavel('file:///etc/passwd'), null);
   assert.equal(urlNavegavel('javascript:alert(1)'), null);
   assert.equal(urlNavegavel('não é url'), null);
+});
+
+test('proximaAtiva prefere a aba criada logo antes, senao a seguinte', () => {
+  // Fechou a 2 com a 1 tendo sido a anterior: volta pra 1.
+  assert.equal(proximaAtiva([1, 3, 5], 2, 1), 1);
+  // Sem anterior valido (ela tambem ja morreu): a seguinte em ordem de id.
+  assert.equal(proximaAtiva([1, 3, 5], 2, null), 3);
+  assert.equal(proximaAtiva([1, 3, 5], 9, null), 1, 'fechou a ultima: volta pra primeira');
+  assert.equal(proximaAtiva([], 1, null), null, 'sem abas nao ha ativa');
+  assert.equal(proximaAtiva([1, 3], 2, 7), 3, 'anterior que nao existe mais nao vale');
 });
 
 test('nomeSidecar: chave vira nome de arquivo seguro, com sufixo casável', () => {

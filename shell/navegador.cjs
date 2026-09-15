@@ -36,4 +36,13 @@ function nomeSidecar(chave) {
   return String(chave).replace(/::/g, '--').replace(/[^\w.-]+/g, '-');
 }
 
-module.exports = { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar };
+// Qual aba fica ativa quando a atual fecha. A criada logo antes (o "anterior") é a que o usuário
+// tinha na tela e espera de volta, como no Chrome; sem ela, a de id seguinte.
+function proximaAtiva(ids, fechada, anterior) {
+  const vivos = [...ids].filter((i) => i !== fechada).sort((a, b) => a - b);
+  if (!vivos.length) return null;
+  if (anterior != null && vivos.includes(anterior)) return anterior;
+  return vivos.find((i) => i > fechada) ?? vivos[0];
+}
+
+module.exports = { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar, proximaAtiva };

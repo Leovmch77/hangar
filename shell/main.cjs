@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { ler, gravar } = require('./settings.cjs');
-const { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar } = require('./navegador.cjs');
+const { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar, proximaAtiva } = require('./navegador.cjs');
 const { criarControlador } = require('./preview_ctl.cjs');
 const { commitDoCheckout } = require('./versao.cjs');
 const { importarCookiesDoChrome, PAGINA_ATIVAR } = require('./cookies_chrome.cjs');
@@ -233,15 +233,15 @@ async function criarJanela() {
   win.on('close', () => {
     // Janela morrendo leva TODOS os views de navegador dela — sem isto o Map guardaria
     // referência de webContents mortos.
-    const views = navegadores.get(win);
-    if (views) {
+    const porChave = navegadores.get(win);
+    if (porChave) {
       navegadores.delete(win);
-      for (const [chave, v] of views) {
-        soltarControlador(chave, v);
-        try { v.webContents.close(); } catch { /* já morreu */ }
-      }
-      // ...e os sidecars das chaves dela, senão o CLI lista "MORTO" acumulando lixo a cada quit.
-      for (const chave of views.keys()) {
+      for (const [chave, abas] of porChave) {
+        for (const v of abas.values()) {
+          soltarControlador(chave, v);
+          try { v.webContents.close(); } catch { /* já morreu */ }
+        }
+        // ...e o sidecar da chave, senão o CLI lista "MORTO" acumulando lixo a cada quit.
         try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch { /* sem sidecar */ }
       }
     }
@@ -265,7 +265,7 @@ async function criarJanela() {
   // Navegador de novo. Esconde todos os views da janela na hora; quem reexibe é o painel ao montar.
   win.webContents.on('did-start-navigation', (_e, _u, _inPlace, isMainFrame) => {
     if (!isMainFrame) return;
-    for (const v of navegadores.get(win)?.values() ?? []) {
+    for (const v of viewsDaJanela(win)) {
       try { v.setBounds({ x: 0, y: 0, width: 0, height: 0 }); } catch { /* view já morto */ }
     }
   });
@@ -365,25 +365,50 @@ function abrirJanela(origem) {
 }
 
 // ---------------------------------------------------------------------------
-// Navegador embutido. UM WebContentsView POR SESSÃO (chave serverId::nome), pendurado no
-// contentView da janela — navegação top-level, então X-Frame-Options não se aplica (diferente de
-// iframe). Trocar de sessão ESCONDE o view (nav-hide), não fecha: o agente segue dirigindo ele
-// via CDP em background (backgroundThrottling: false abaixo é por isso). Fechar de verdade é só
-// pelo × do painel (nav-close). A POSIÇÃO é medida pelo front (div âncora no NavegadorPane) e
-// chega por IPC: o view não é DOM, flutua POR CIMA da página — o front esconde com bounds zero
-// quando um overlay DOM abre, e o layout do Chat reserva a faixa pra nada cobrir texto/composer.
-const navegadores = new Map();   // BrowserWindow -> Map<chave, WebContentsView>
+// Navegador embutido. UM WebContentsView POR ABA, agrupados por sessão (chave serverId::nome),
+// pendurado no contentView da janela — navegação top-level, então X-Frame-Options não se aplica
+// (diferente de iframe). Trocar de sessão ESCONDE o view (nav-hide), não fecha: o agente segue
+// dirigindo ele via CDP em background (backgroundThrottling: false abaixo é por isso). Fechar de
+// verdade é só pelo × do painel (nav-close). A POSIÇÃO é medida pelo front (div âncora no
+// NavegadorPane) e chega por IPC: o view não é DOM, flutua POR CIMA da página — o front esconde
+// com bounds zero quando um overlay DOM abre, e o layout do Chat reserva a faixa pra nada cobrir
+// texto/composer.
+const navegadores = new Map();   // BrowserWindow -> Map<chave, Map<id, WebContentsView>>
 
-// chave da sessão -> { ctl, view }. Vive fora do `navegadores` porque a vida é a mesma do VIEW,
-// não a da janela, e é por ele que o servidor local acha o alvo de um comando. Guarda o `view`
-// junto do controlador (não só o controlador) porque é a identidade que `soltarControlador`
-// confere antes de apagar — ver comentário ali.
-const controladores = new Map();
+// chave da sessão -> { proximoId, ativa, abas: Map<id, { ctl, view, urlPedida, targetId }> }.
+// Vive fora do `navegadores` porque a vida é a mesma dos VIEWS, não a da janela, e é por ele que
+// o servidor local acha o alvo de um comando. Guarda o `view` junto do controlador (não só o
+// controlador) porque é a identidade que `soltarControlador` confere antes de apagar — ver
+// comentário ali. O CONTADOR mora aqui, não no Map por janela: duas janelas do app com a mesma
+// sessão não podem gerar o mesmo id.
+const registros = new Map();
 
-function viewsDa(win) {
-  let m = navegadores.get(win);
-  if (!m) { m = new Map(); navegadores.set(win, m); }
-  return m;
+const TETO_ABAS = 8;
+
+function regDe(chave) {
+  let r = registros.get(chave);
+  if (!r) { r = { proximoId: 1, ativa: null, abas: new Map() }; registros.set(chave, r); }
+  return r;
+}
+
+function entradaDe(chave, id) {
+  const r = registros.get(chave);
+  if (!r) return null;
+  return r.abas.get(id ?? r.ativa) || null;
+}
+
+function abasDaJanela(win, chave) {
+  let porChave = navegadores.get(win);
+  if (!porChave) { porChave = new Map(); navegadores.set(win, porChave); }
+  let abas = porChave.get(chave);
+  if (!abas) { abas = new Map(); porChave.set(chave, abas); }
+  return abas;
+}
+
+// Todos os views de uma janela, de todas as chaves — o que `did-start-navigation` e o `close` da
+// janela precisam varrer.
+function* viewsDaJanela(win) {
+  for (const abas of navegadores.get(win)?.values() ?? []) yield* abas.values();
 }
 
 // Fecha o controlador de uma chave e desanexa o depurador do view — trio repetido em três
@@ -391,15 +416,25 @@ function viewsDa(win) {
 // dos três, o Map fica com controlador órfão apontando pra webContents morto: o servidor local
 // acha ele (não devolve null) e um comando vira 500 de CDP em vez do 404 "sem navegador aberto".
 // A CONFERÊNCIA DE IDENTIDADE (entrada.view === view) é o que impede uma janela A de apagar o
-// controlador da janela B: com duas janelas do app abrindo a MESMA sessão, a segunda sobrescreve
-// a entrada da primeira no Map global `controladores` (chave é só a sessão, não a janela); sem
-// checar de quem é a entrada ATUAL antes de soltar, fechar a janela A apagava o controlador vivo
-// da B — o painel dela ficava aberto respondendo 404 pra todo comando. Mesma guarda que já
-// existia no ouvinte `destroyed` (linha abaixo), agora na função compartilhada — vale pros três
-// chamadores, não só pra esse.
+// controlador da janela B: com duas janelas do app abrindo a MESMA sessão, as abas das duas caem
+// no MESMO registro global (a chave é só a sessão, não a janela); sem procurar a entrada DAQUELE
+// view antes de soltar, fechar a janela A apagava o controlador vivo da B — o painel dela ficava
+// aberto respondendo 404 pra todo comando. Mesma guarda que já existia no ouvinte `destroyed`
+// (linha abaixo), agora na função compartilhada — vale pros três chamadores, não só pra esse.
 function soltarControlador(chave, view) {
-  const entrada = controladores.get(chave);
-  if (entrada && entrada.view === view) { entrada.ctl.fechar(); controladores.delete(chave); }
+  const r = registros.get(chave);
+  if (r) {
+    for (const [id, entrada] of r.abas) {
+      if (entrada.view !== view) continue;
+      entrada.ctl.fechar();
+      r.abas.delete(id);
+      // Só ZERA a ativa; escolher a sucessora aqui a deixaria registrada mas invisível — quem
+      // decide qual entra também tem que exibi-la, e isso é de quem fechou a aba.
+      if (r.ativa === id) r.ativa = null;
+      break;
+    }
+    if (!r.abas.size) registros.delete(chave);
+  }
   try { view.webContents.debugger.detach(); } catch { /* já solto */ }
 }
 
@@ -407,8 +442,9 @@ function soltarControlador(chave, view) {
 // de tamanho que dá viewport e print a um view escondido. Espera a página carregar, porque
 // emular tamanho no `about:blank` de um view recém-criado derruba o processo com SIGSEGV.
 function avisarOculto(chave, view, oculto) {
-  const entrada = controladores.get(chave);
-  if (!entrada || entrada.view !== view || !entrada.ctl.definirOculto) return;
+  const r = registros.get(chave);
+  const entrada = r && [...r.abas.values()].find((e) => e.view === view);
+  if (!entrada || !entrada.ctl.definirOculto) return;
   const aplicar = () => entrada.ctl.definirOculto(oculto).catch((err) => {
     console.error('[nav] viewport do view escondido:', err && err.message);
   });
@@ -430,9 +466,7 @@ function anexarNaJanela(win, view) {
 }
 
 const algumViewVisivel = (win) => {
-  const m = navegadores.get(win);
-  if (!m) return false;
-  for (const v of m.values()) if (viewVivo(win, v) && v.getVisible()) return true;
+  for (const v of viewsDaJanela(win)) if (viewVivo(win, v) && v.getVisible()) return true;
   return false;
 };
 
@@ -460,31 +494,35 @@ function devolverFoco(win, view) {
   win.webContents.focus();
 }
 
+// Fecha TODAS as abas da chave naquela janela: o × do painel é do navegador inteiro, não da aba.
 function fecharNavegador(win, chave) {
-  const m = navegadores.get(win);
-  const view = m && m.get(chave);
-  if (!view) return;
-  m.delete(chave);
-  if (m.size === 0) navegadores.delete(win);
-  soltarControlador(chave, view);
+  const porChave = navegadores.get(win);
+  const abas = porChave && porChave.get(chave);
+  if (!abas || !abas.size) return;
+  porChave.delete(chave);
+  if (porChave.size === 0) navegadores.delete(win);
   // "Já morto" é silencioso; qualquer outra falha aqui deixaria um view vivo com o painel
   // desmontado e o CLI dizendo "ok" — precisa aparecer no log.
   const avisar = (etapa, err) => console.error(`[nav] fechar ${chave}: ${etapa}:`, err && err.message);
-  try { if (!win.isDestroyed()) win.contentView.removeChildView(view); } catch (err) { avisar('removeChildView', err); }
-  try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (err) { avisar('close', err); }
+  for (const view of abas.values()) {
+    soltarControlador(chave, view);
+    try { if (!win.isDestroyed()) win.contentView.removeChildView(view); } catch (err) { avisar('removeChildView', err); }
+    try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (err) { avisar('close', err); }
+  }
   try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch (err) { avisar('sidecar', err); }
 }
 
 // `hangar-preview close`: o CLI só conhece a chave, não a janela. O painel não pediu o fechamento,
 // então precisa ser avisado — sem o evento ele seguia mostrando um view que não existe mais.
 function fecharNavegadorPorChave(chave) {
-  // Duas janelas com a mesma chave: o navegador "de verdade" é o do controlador registrado
-  // (último open ganha em `controladores`); fechar o outro deixaria o vivo na tela.
-  const vivo = controladores.get(chave)?.view;
+  // Duas janelas com a mesma chave: o navegador "de verdade" é o da aba ATIVA registrada (último
+  // open ganha no registro); fechar o outro deixaria o vivo na tela.
+  const vivo = entradaDe(chave)?.view;
   let alvo = null;
-  for (const [win, m] of navegadores) {
-    if (!m.has(chave)) continue;
-    if (!alvo || m.get(chave) === vivo) alvo = win;
+  for (const [win, porChave] of navegadores) {
+    const abas = porChave.get(chave);
+    if (!abas) continue;
+    if (!alvo || [...abas.values()].includes(vivo)) alvo = win;
   }
   if (!alvo) return false;
   fecharNavegador(alvo, chave);
@@ -559,8 +597,13 @@ async function gravarSidecarNav(chave, urlInicial, view) {
   }
 }
 
+// A ATIVA da janela do remetente. Com a ativa global ausente daquela janela (duas janelas, mesma
+// sessão), cai na primeira dela — é o view que aquele painel tem na tela.
 function viewDe(ev, chave) {
-  return navegadores.get(BrowserWindow.fromWebContents(ev.sender))?.get(chave);
+  const win = BrowserWindow.fromWebContents(ev.sender);
+  const abas = win && navegadores.get(win)?.get(chave);
+  if (!abas || !abas.size) return undefined;
+  return abas.get(registros.get(chave)?.ativa) ?? abas.values().next().value;
 }
 
 // `oculto`: pedido que veio pelo stream da LISTA (agente abriu com a sessão fora da tela). O view
@@ -569,8 +612,10 @@ function viewDe(ev, chave) {
 ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}) => {
   const win = BrowserWindow.fromWebContents(ev.sender);
   if (!win || !chave) return { ok: false };
-  const views = viewsDa(win);
-  let view = views.get(chave);
+  const abas = abasDaJanela(win, chave);
+  const reg = regDe(chave);
+  let id = reg.ativa != null && abas.has(reg.ativa) ? reg.ativa : ([...abas.keys()][0] ?? null);
+  let view = id != null ? abas.get(id) : undefined;
   if (oculto && view && view.webContents && !view.webContents.isDestroyed() && view.getVisible?.()) return { ok: true, oculto: true };
   const novo = !view || !view.webContents || view.webContents.isDestroyed();
   // O webContents pode ter morrido por fora (fechado via CDP Target.closeTarget, crash do
@@ -579,10 +624,11 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
   // isDestroyed()===true) — sem o `!view.webContents` o acesso a `.isDestroyed()` lança e derruba
   // o handler do IPC inteiro, antes de soltar o controlador.
   if (view && (!view.webContents || view.webContents.isDestroyed())) {
-    views.delete(chave);
+    abas.delete(id);
     soltarControlador(chave, view);
     try { win.contentView.removeChildView(view); } catch { /* já saiu */ }
     view = undefined;
+    id = null;
   }
   if (!view) {
     // View novo SÓ nasce com URL; o reexibir (troca de sessão, reload do front) chama open sem
@@ -614,7 +660,8 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
     } else {
       anexarNaJanela(win, view);
     }
-    views.set(chave, view);
+    id = reg.proximoId++;
+    abas.set(id, view);
     // Estado de navegação pro painel (barra de carregamento, ✕/↻, voltar/avançar, endereço que
     // acompanha os cliques). O view não tem DOM no cockpit — sem isto a página carrega em silêncio.
     const publicar = () => {
@@ -650,11 +697,12 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
       for (const dominio of ['Runtime.enable', 'Log.enable', 'DOM.enable']) {
         dbg.sendCommand(dominio).catch(() => {});
       }
-      controladores.set(chave, { ctl: criarControlador({
+      reg.abas.set(id, { ctl: criarControlador({
         dbg,
         capturarPagina: () => view.webContents.capturePage(),
         aoNavegar: (cb) => view.webContents.on('did-navigate', cb),
-      }), view });
+      }), view, urlPedida: destino, targetId: null });
+      reg.ativa = id;
       // Alvo morrendo por fora (Target.closeTarget via CDP, crash do renderer) não passa pelo ×
       // do painel nem pelo close da janela — sem isto o controlador ficava órfão no Map até o
       // usuário reabrir o painel, e um comando nesse meio-tempo virava 500 de CDP em vez do 404
@@ -663,7 +711,7 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
       // `view.webContents.close()`, que é assíncrono, e o usuário pode reabrir a MESMA chave antes
       // dele terminar) de apagar o controlador do view NOVO — quem morre só limpa o que é dele.
       view.webContents.once('destroyed', () => {
-        if (views.get(chave) === view) soltarControlador(chave, view);
+        if (abas.get(id) === view) soltarControlador(chave, view);
       });
     } catch (err) {
       // Falha aqui custa os verbos novos, não o navegador: o painel abre e o usuário navega na mão.
@@ -811,7 +859,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     limparSidecaresNav();
     subirServidor({
-      controladorDe: (chave) => controladores.get(chave)?.ctl || null,
+      controladorDe: (chave, aba) => entradaDe(chave, aba)?.ctl || null,
       fecharDe: fecharNavegadorPorChave,
       escrever: (dados) => {
         fs.mkdirSync(NAV_SIDECARS, { recursive: true });

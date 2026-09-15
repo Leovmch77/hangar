@@ -33,7 +33,7 @@ require.cache[previewCtlPath] = {
 
 function criarWebContentsFalso() {
   // `url` começa vazia como no view recém-criado; dispararLoad() simula o did-finish-load.
-  const estado = { url: '', ouvintesLoad: [] };
+  const estado = { url: '', titulo: '', ouvintes: {}, ouvintesLoad: [] };
   const dbg = {
     attached: false,
     isAttached: () => dbg.attached,
@@ -47,9 +47,14 @@ function criarWebContentsFalso() {
     setWindowOpenHandler: () => {}, loadURL: async () => {}, getURL: () => estado.url,
     capturePage: async () => ({ isEmpty: () => false, toPNG: () => Buffer.alloc(0) }),
     close: () => {}, isDestroyed: () => false,
-    on: (ev, cb) => { if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
+    getTitle: () => estado.titulo,
+    isLoading: () => false,
+    navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+    setTitulo: (t) => { estado.titulo = t; },
+    on: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
     once: (ev, cb) => { if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
     removeListener: () => {},
+    emitir: (ev, ...a) => (estado.ouvintes[ev] || []).forEach((cb) => cb(...a)),
     dispararLoad: () => { estado.url = 'https://z.test/'; estado.ouvintesLoad.splice(0).forEach((cb) => cb()); },
     debugger: dbg,
   };
@@ -91,7 +96,8 @@ require.cache[electronPath] = {
 require('./main.cjs');
 
 function novaJanela({ focada = true } = {}) {
-  const webContents = { focos: 0, focus() { this.focos++; } }; // identidade distinta: o remetente do IPC desta janela
+  // identidade distinta: o remetente do IPC desta janela
+  const webContents = { focos: 0, focus() { this.focos++; }, enviados: [], send(canal, payload) { this.enviados.push({ canal, payload }); } };
   const children = [];
   const emFoco = [];
   const win = {
@@ -119,15 +125,15 @@ test('fechar o painel de uma janela nao mata o controlador vivo da MESMA sessao 
   const fechar = handlers.get('hangar:nav-close');
   assert.ok(abrir && fechar, 'handlers hangar:nav-open e hangar:nav-close registrados');
 
-  // Duas janelas abrem a MESMA chave — a segunda sobrescreve a entrada da primeira no Map
-  // global `controladores` (é a situação que o item 1 descreve).
+  // Duas janelas abrem a MESMA chave — as duas abas caem no MESMO registro global (é a situação
+  // que o item 1 descreve).
   await abrir(a.ev, { chave, url: 'https://a.test', bounds: {} });
   await abrir(b.ev, { chave, url: 'https://b.test', bounds: {} });
   assert.equal(criadas.length, 2, 'um controlador por open');
   const ctlB = criadas[1];
 
   // Janela A fecha o SEU painel dessa sessão. Sem a guarda de identidade, soltarControlador
-  // apagava incondicionalmente `controladores.get(chave)` — que agora é o controlador de B.
+  // apagava incondicionalmente a entrada da chave — que agora é a do controlador de B.
   fechar(a.ev, { chave });
   assert.equal(ctlB.fechado, false, 'controlador de B sobrevive ao close de A (bug do item 1)');
 
