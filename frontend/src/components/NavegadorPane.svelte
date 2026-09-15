@@ -43,8 +43,9 @@
   let abaAtiva = $state<number | null>(null);
   let campoUrl = $state<HTMLInputElement | null>(null);
   let avisoAba = $state('');
-  // O shell só cria aba COM endereço, então o + não cria nada sozinho: ele prepara o campo e
-  // quem cria a aba é o Enter, no ir().
+  // A aba do `+` aparece na faixa na hora, como no Chrome, mas é só interface: o shell não abre
+  // aba sem endereço (a emulação de tamanho que dá viewport e print ao view escondido não pode
+  // ser aplicada em `about:blank`). O view nasce no Enter, no ir().
   let abaPendente = $state(false);
   const temAbas = !!nativo?.tabNew;
   // Fechado por fora (`hangar-preview close`): mesmo caminho do ×, menos o `close` ao shell, que já
@@ -95,10 +96,21 @@
 
   function novaAba() {
     if (abas.length >= TETO_ABAS) { avisar(m.nav_aba_teto()); return; }
-    // Aba vazia não existe no shell: o campo de endereço é o próximo passo, então já recebe o foco.
     abaPendente = true;
     endereco = '';
     campoUrl?.focus();
+  }
+
+  // Fechar a pendente é só tirá-la da faixa: não há view no shell para fechar, e a aba que estava
+  // ativa antes continua sendo a ativa de verdade.
+  function cancelarPendente() {
+    abaPendente = false;
+    endereco = aberta;
+  }
+
+  function trocarPara(id: number) {
+    abaPendente = false;
+    void nativo?.tabSwitch?.(navKey, id);
   }
 
   async function abrirAba(u: string) {
@@ -254,17 +266,25 @@
   {#if temAbas && abas.length}
     <div class="nav-abas" role="tablist" aria-label={m.ctx_navegador()}>
       {#each abas as aba (aba.id)}
-        <div class="nav-aba" class:ativa={aba.id === abaAtiva}>
+        <div class="nav-aba" class:ativa={!abaPendente && aba.id === abaAtiva}>
           <button type="button" role="tab" class="nav-aba-titulo"
-                  aria-selected={aba.id === abaAtiva}
+                  aria-selected={!abaPendente && aba.id === abaAtiva}
                   title={aba.url}
-                  onclick={() => void nativo?.tabSwitch?.(navKey, aba.id)}>
+                  onclick={() => trocarPara(aba.id)}>
             {aba.titulo || aba.url.replace(/^https?:\/\//, '') || m.nav_aba_vazia()}
           </button>
           <button type="button" class="nav-aba-x" aria-label={m.nav_aba_fechar()} title={m.nav_aba_fechar()}
                   onclick={() => void nativo?.tabClose?.(navKey, aba.id)}>×</button>
         </div>
       {/each}
+      {#if abaPendente}
+        <div class="nav-aba ativa">
+          <button type="button" role="tab" class="nav-aba-titulo" aria-selected="true"
+                  onclick={() => campoUrl?.focus()}>{m.nav_aba_vazia()}</button>
+          <button type="button" class="nav-aba-x" aria-label={m.nav_aba_fechar()} title={m.nav_aba_fechar()}
+                  onclick={cancelarPendente}>×</button>
+        </div>
+      {/if}
       <button type="button" class="nav-aba-mais" aria-label={m.nav_aba_nova()} title={m.nav_aba_nova()}
               disabled={abas.length >= TETO_ABAS} onclick={novaAba}>+</button>
     </div>
