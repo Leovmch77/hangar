@@ -25,17 +25,26 @@ test('compactarAX pula nó ignorado e nó sem nome nem papel útil', () => {
 
 test('parseLote ignora vazio e comentário e preserva texto com espaço', () => {
   assert.deepEqual(parseLote('click @e1\n\n# comentário\nfill @e2 dois nomes\n'), [
-    { verbo: 'click', args: ['@e1'] },
-    { verbo: 'fill', args: ['@e2', 'dois nomes'] },
+    { verbo: 'click', args: ['@e1'], aba: undefined },
+    { verbo: 'fill', args: ['@e2', 'dois nomes'], aba: undefined },
   ]);
 });
 
 test('parseLote mantem a flag do wait separada do texto', () => {
   assert.deepEqual(parseLote('wait --text Encerrar esta conversa\nwait --url conversa\nwait @e3\nwait --idle\nwait 300'), [
-    { verbo: 'wait', args: ['--text', 'Encerrar esta conversa'] },
-    { verbo: 'wait', args: ['--url', 'conversa'] },
-    { verbo: 'wait', args: ['@e3'] },
-    { verbo: 'wait', args: ['--idle'] },
-    { verbo: 'wait', args: ['300'] },
+    { verbo: 'wait', args: ['--text', 'Encerrar esta conversa'], aba: undefined },
+    { verbo: 'wait', args: ['--url', 'conversa'], aba: undefined },
+    { verbo: 'wait', args: ['@e3'], aba: undefined },
+    { verbo: 'wait', args: ['--idle'], aba: undefined },
+    { verbo: 'wait', args: ['300'], aba: undefined },
   ]);
+});
+
+test('parseLote entende tab e --aba por linha', () => {
+  const r = parseLote('tab new http://x.test\nurl --aba 2\ntab 3\nfill @e1 dois nomes\n');
+  assert.deepEqual(r[0], { verbo: 'tab-new', args: ['http://x.test'], aba: undefined });
+  assert.deepEqual(r[1], { verbo: 'url', args: [], aba: 2 });
+  assert.deepEqual(r[2], { verbo: 'tab-switch', args: ['3'], aba: undefined });
+  assert.deepEqual(r[3], { verbo: 'fill', args: ['@e1', 'dois nomes'], aba: undefined },
+    'a juncao de texto do fill continua igual');
 });

@@ -20,6 +20,11 @@
 //   hangar-preview url                     URL atual do navegador desta sessão
 //   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<hora>.png)
 //   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
+//   hangar-preview tab list                lista as abas (* = ativa)
+//   hangar-preview tab new <url>           abre outra aba com a url e torna ativa
+//   hangar-preview tab <id>                torna a aba ativa (aparece no painel)
+//   hangar-preview tab close [id]          fecha a aba (sem id, a ativa; a última fecha o navegador)
+//   hangar-preview <verbo> --aba <id>      age nessa aba SEM trocar a ativa (verbos de página)
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
 //
 // A sessão é resolvida pela chave estável do sidecar no modo sem terminal e pelo tmux no modo com
@@ -57,8 +62,10 @@ const flags = {};
 const pos = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--sessao') flags.sessao = args[++i];
+  else if (args[i] === '--aba') flags.aba = Number(args[++i]);
   else pos.push(args[i]);
 }
+if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
 const cmd = pos[0];
 if (!cmd || cmd === 'help' || cmd === '--help') {
   console.log(`uso: hangar-preview <verbo> [args] [--sessao <nome>]
@@ -83,6 +90,11 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   url                     URL atual
   shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<hora>.png)
   folha                   junta numa grade (6 por folha) os shots sem nome desde a última folha
+  tab list                lista as abas (* = ativa)
+  tab new <url>           abre outra aba com a url e torna ativa
+  tab <id>                torna a aba ativa (aparece no painel)
+  tab close [id]          fecha a aba (sem id, a ativa; a última fecha o navegador)
+  --aba <id>              age nessa aba SEM trocar a ativa (vale pros verbos de página)
   close                   fecha o navegador desta sessão (o painel some; terminou de usar, feche)
   batch                   lê várias linhas do stdin, uma por comando
 
@@ -194,12 +206,13 @@ function srv() {
   return dados;
 }
 
-async function comando(chave, verbo, cmdArgs) {
+// `aba` explícito (o batch manda por linha) vence o flag global.
+async function comando(chave, verbo, cmdArgs, aba = flags.aba) {
   const { porta, token } = srv();
   const r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chave, verbo, args: cmdArgs }),
+    body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
   });
   const texto = await r.text();
   console.log(texto);
@@ -237,10 +250,18 @@ if (cmd === 'list') {
   const vivos = await targets();
   const linhas = lerSidecars().map((s) => {
     const vivo = vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
-    return `${s.chave}  ${s.url}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}`;
+    // Sidecar de shell antigo não tem `abas`: vale como uma aba só, e a saída fica idêntica à de hoje.
+    const sufixo = Array.isArray(s.abas) && s.abas.length > 1 ? `  (aba ${s.ativa} de ${s.abas.length})` : '';
+    return `${s.chave}  ${s.url}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;
   });
   console.log(linhas.length ? linhas.join('\n') : 'nenhum navegador registrado');
   process.exit(0);
+}
+
+if (cmd === 'tab') {
+  const chave = sidecarDa(nomeSessao()).chave;
+  const { verbo, args: cmdArgs } = fmt.verboDeTab(pos.slice(1));
+  process.exit(await comando(chave, verbo, cmdArgs));
 }
 
 if (VERBOS_SERVIDOR.has(cmd)) {
@@ -284,8 +305,13 @@ if (cmd === 'batch') {
   // Para na PRIMEIRA linha que falhar: seguir depois de um `click` que não achou o alvo faz o
   // próximo `type` (ex.: senha) digitar no que estiver com foco, que não é o campo pretendido.
   for (let i = 0; i < comandos.length; i++) {
-    const { verbo, args: a } = comandos[i];
-    const codigo = await comando(chave, verbo, a);
+    const { verbo, args: a, aba } = comandos[i];
+    // `--aba` sem número vira NaN e o corpo JSON o transforma em null, que o servidor lê como
+    // "a ativa": o comando cairia calado na aba errada, que é o desastre que este batch evita.
+    if (aba !== undefined && !Number.isInteger(aba)) {
+      erro(`--aba precisa do numero da aba (linha ${i + 1}: ${verbo})`);
+    }
+    const codigo = await comando(chave, verbo, a, aba);
     if (codigo !== 0) {
       console.error(`hangar-preview: batch parou na linha ${i + 1} (${verbo})`);
       process.exit(codigo);
@@ -294,4 +320,4 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|close|batch)`);

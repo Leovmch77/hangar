@@ -40,6 +40,16 @@ function compactarAX(nos) {
   return { linhas, refs };
 }
 
+// `tab list|new <url>|close [id]|<id>` -> verbo do servidor. Fora do CLI porque o `batch` lê as
+// mesmas linhas e precisa da mesma tradução.
+function verboDeTab(args) {
+  const [sub, ...resto] = args;
+  if (sub === undefined || sub === 'list') return { verbo: 'tab-list', args: [] };
+  if (sub === 'new') return { verbo: 'tab-new', args: [resto.join(' ')] };
+  if (sub === 'close') return { verbo: 'tab-close', args: resto.length ? [resto[0]] : [] };
+  return { verbo: 'tab-switch', args: [sub] };
+}
+
 // Uma linha = um comando. O primeiro campo é o verbo, o resto vai inteiro pro último argumento
 // quando o verbo aceita texto — `fill @e2 dois nomes` não pode virar três argumentos.
 function parseLote(texto) {
@@ -49,13 +59,19 @@ function parseLote(texto) {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
     .map((l) => {
-      const [verbo, ...resto] = l.split(/\s+/);
-      if (!COM_TEXTO.has(verbo) || resto.length < 2) return { verbo, args: resto };
+      const campos = l.split(/\s+/);
+      // `--aba N` vale por linha, em qualquer posição: sai daqui e vira campo do pedido.
+      let aba;
+      const i = campos.indexOf('--aba');
+      if (i >= 0) { aba = Number(campos[i + 1]); campos.splice(i, 2); }
+      const [verbo, ...resto] = campos;
+      if (verbo === 'tab') return { ...verboDeTab(resto), aba };
+      if (!COM_TEXTO.has(verbo) || resto.length < 2) return { verbo, args: resto, aba };
       // fill leva a ref antes do texto; wait leva a flag (--text/--url) antes dele — colada ao
       // texto, o wait nunca a reconhecia e estourava o teto com o texto já na tela.
       const corte = verbo === 'fill' || (verbo === 'wait' && resto[0].startsWith('--')) ? 1 : 0;
-      return { verbo, args: [...resto.slice(0, corte), resto.slice(corte).join(' ')] };
+      return { verbo, args: [...resto.slice(0, corte), resto.slice(corte).join(' ')], aba };
     });
 }
 
-module.exports = { compactarAX, parseLote };
+module.exports = { compactarAX, parseLote, verboDeTab };
