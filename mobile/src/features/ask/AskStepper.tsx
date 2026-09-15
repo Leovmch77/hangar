@@ -91,11 +91,23 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
 
   const currentPick = picks[step] as PickState | undefined;
   const selectedIndices = currentPick?.kind === 'option' ? currentPick.indices : [];
+  const statusHeader = (
+    <View style={styles.statusRow}>
+      <View style={[styles.statusGlyph, { backgroundColor: theme.tokens.bg.elevated }]}>
+        <Text style={[styles.statusGlyphText, { color: theme.tokens.accent.base }]}>?</Text>
+      </View>
+      <Text style={[styles.statusLabel, { color: theme.tokens.text.secondary }]}>{m.board_precisa_de_voce()}</Text>
+      <View style={[styles.statusBadge, { backgroundColor: `${theme.tokens.status.warning}20` }]}>
+        <Text style={[styles.statusBadgeText, { color: theme.tokens.status.warning }]}>{m.estado_aguardando()}</Text>
+      </View>
+    </View>
+  );
 
   // Revisão quando step fora das perguntas
   if (step >= questions.length) {
     return (
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        {statusHeader}
         <Text style={[styles.sheetTitle, { color: theme.tokens.text.primary }]}>{m.askq_revisar()}</Text>
         <View style={styles.reviewList}>
           {questions.map((q, qi) => (
@@ -129,6 +141,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
 
   return (
     <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      {statusHeader}
       <View style={styles.stepNav}>
         {step > 0 ? (
           <Pressable onPress={goBack} hitSlop={8} style={styles.backLink} accessibilityRole="button">
@@ -160,13 +173,21 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
                 { backgroundColor: theme.tokens.bg.surface, borderColor: sel ? theme.tokens.accent.base : theme.tokens.border.default },
                 sel && { backgroundColor: theme.tokens.accent.dim },
               ]}
-              accessibilityRole="button"
+              accessibilityRole={q.multiSelect ? 'checkbox' : 'radio'}
+              accessibilityState={{ checked: sel }}
             >
-              {q.multiSelect ? (
-                <View style={[styles.checkBox, { borderColor: theme.tokens.border.strong }, sel && { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }]}>
-                  <Text style={[styles.checkMark, { color: sel ? '#fff' : theme.tokens.accent.base }]}>{sel ? '✓' : ''}</Text>
-                </View>
-              ) : null}
+              <View style={[
+                styles.choiceMark,
+                { borderColor: theme.tokens.border.strong },
+                q.multiSelect && styles.checkBox,
+                q.multiSelect && sel && { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base },
+              ]}>
+                {q.multiSelect ? (
+                  <Text style={[styles.checkMark, { color: sel ? theme.tokens.text.inverse : theme.tokens.accent.base }]}>{sel ? '✓' : ''}</Text>
+                ) : sel ? (
+                  <View style={[styles.radioDot, { backgroundColor: theme.tokens.accent.base }]} />
+                ) : null}
+              </View>
               <View style={styles.optContent}>
                 <Text style={[styles.optLabel, { color: theme.tokens.text.primary }]}>{opt.label}</Text>
                 {opt.description ? (
@@ -264,6 +285,37 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.base.space[3],
     paddingBottom: 32,
   },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.base.space[2],
+  },
+  statusGlyph: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.base.radius.full,
+  },
+  statusGlyphText: {
+    fontSize: theme.base.text.xs,
+    fontWeight: '700',
+  },
+  statusLabel: {
+    flex: 1,
+    fontSize: theme.base.text.xs,
+    fontWeight: '600',
+  },
+  statusBadge: {
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: 3,
+    borderRadius: theme.base.radius.full,
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+  },
   stepNav: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -311,13 +363,25 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.md,
   },
-  checkBox: {
-    width: 22,
-    height: 22,
+  choiceMark: {
+    width: 18,
+    height: 18,
     borderWidth: 1.5,
-    borderRadius: 4,
+    borderRadius: theme.base.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
+    marginTop: 2,
+  },
+  checkBox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    marginTop: 1,
+  },
+  radioDot: {
+    width: 8,
+    height: 8,
+    borderRadius: theme.base.radius.full,
   },
   checkMark: {
     fontSize: 12,

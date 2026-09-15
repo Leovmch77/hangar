@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeNew, resizeBox, MIN_W, MIN_H, CARD_W, CARD_H, GAP, PAD, type CanvasLayout } from './canvasLayout';
+import { canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox, MIN_W, MIN_H, CARD_W, CARD_H, GAP, PAD, type CanvasLayout } from './canvasLayout';
 
 const row = (key: string, serverId: string, pairGid: string | null = null) => ({ key, serverId, pairGid });
 
@@ -81,5 +81,47 @@ describe('resizeBox', () => {
     expect(out.y).toBe(0);
     expect(out.w).toBe(500);   // x0 + w0
     expect(out.h).toBe(400);
+  });
+});
+
+describe('connectBoxes', () => {
+  it('liga pelas bordas laterais quando os cards estão lado a lado', () => {
+    const link = connectBoxes(
+      { x: 20, y: 30, w: 200, h: 100 },
+      { x: 320, y: 70, w: 180, h: 120 },
+    );
+    expect(link.from).toEqual({ x: 220, y: 80 });
+    expect(link.to).toEqual({ x: 320, y: 130 });
+    expect(link.path).toBe('M 220 80 C 270 80, 270 130, 320 130');
+  });
+
+  it('liga pelas bordas verticais quando um card fica abaixo do outro', () => {
+    const link = connectBoxes(
+      { x: 100, y: 40, w: 200, h: 120 },
+      { x: 130, y: 300, w: 160, h: 100 },
+    );
+    expect(link.from).toEqual({ x: 200, y: 160 });
+    expect(link.to).toEqual({ x: 210, y: 300 });
+    expect(link.path).toBe('M 200 160 C 200 230, 210 230, 210 300');
+  });
+});
+
+describe('fitCanvasScale', () => {
+  it('reduz para caber nos dois eixos e nunca amplia acima de 100%', () => {
+    expect(fitCanvasScale(1000, 700, 1200, 800)).toBe(0.8);
+    expect(fitCanvasScale(1600, 1000, 900, 600)).toBe(1);
+  });
+
+  it('respeita o piso de 10%', () => {
+    expect(fitCanvasScale(100, 80, 2000, 1400)).toBe(0.1);
+  });
+});
+
+describe('canvasBounds', () => {
+  it('mede só a área realmente ocupada pelos cards', () => {
+    expect(canvasBounds([
+      { x: 100, y: 300, w: 200, h: 100 },
+      { x: 500, y: 200, w: 100, h: 250 },
+    ])).toEqual({ x: 100, y: 200, w: 500, h: 250 });
   });
 });

@@ -13,6 +13,44 @@ export const PAD = 24;
 
 export const MIN_W = 240;
 export const MIN_H = 160;
+export const MIN_SCALE = 0.1;
+export const MAX_SCALE = 1.5;
+
+export interface CanvasPoint { x: number; y: number }
+export interface CanvasConnection { from: CanvasPoint; to: CanvasPoint; path: string }
+
+export function canvasBounds(boxes: CardBox[]): CardBox {
+  if (boxes.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+  const x = Math.min(...boxes.map((box) => box.x));
+  const y = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map((box) => box.x + box.w));
+  const bottom = Math.max(...boxes.map((box) => box.y + box.h));
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+/** Curva sem direção entre as bordas mais próximas de dois cards. */
+export function connectBoxes(a: CardBox, b: CardBox): CanvasConnection {
+  const ac = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
+  const bc = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  if (Math.abs(bc.x - ac.x) >= Math.abs(bc.y - ac.y)) {
+    const forward = bc.x >= ac.x;
+    const from = { x: forward ? a.x + a.w : a.x, y: ac.y };
+    const to = { x: forward ? b.x : b.x + b.w, y: bc.y };
+    const control = (from.x + to.x) / 2;
+    return { from, to, path: `M ${from.x} ${from.y} C ${control} ${from.y}, ${control} ${to.y}, ${to.x} ${to.y}` };
+  }
+  const forward = bc.y >= ac.y;
+  const from = { x: ac.x, y: forward ? a.y + a.h : a.y };
+  const to = { x: bc.x, y: forward ? b.y : b.y + b.h };
+  const control = (from.y + to.y) / 2;
+  return { from, to, path: `M ${from.x} ${from.y} C ${from.x} ${control}, ${to.x} ${control}, ${to.x} ${to.y}` };
+}
+
+/** Escala que cabe o conteúdo inteiro, com folga, sem ampliar acima de 100%. */
+export function fitCanvasScale(viewportW: number, viewportH: number, contentW: number, contentH: number): number {
+  const scale = Math.min((viewportW - 40) / contentW, (viewportH - 40) / contentH, 1);
+  return Math.max(MIN_SCALE, Math.round(scale * 100) / 100);
+}
 
 /** Nova caixa ao arrastar uma borda/canto (`dir` com n/s/e/w). O CSS `resize` nativo só dá o canto
  *  inferior-direito, então o canvas desenha as 8 alças e chama isto. Puxar a borda oeste/norte move

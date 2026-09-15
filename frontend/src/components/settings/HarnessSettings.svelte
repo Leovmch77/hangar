@@ -780,50 +780,54 @@
               <p class="cfg-motivo">{m.harness_codex_memoria_prazo()}</p>
             </details>
             {#if contaCodex === 'default'}
-              <p class="hs-aviso" role="status">
-                {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
-                {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
-              </p>
-              {#if integracao.estado === 'executando' && integracao.progresso}
-                {@const p = integracao.progresso}
-                <div class="hs-progresso">
-                  <span>{m.harness_codex_progresso({ passo: p.passo, total: p.total })}{#if p.sub}
-                    · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}{#if integracao.etapa_segundos != null}
-                    · {m.harness_codex_etapa_tempo({ s: integracao.etapa_segundos })}{/if}</span>
-                  <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-                    aria-valuenow={pctIntegracao(p)} aria-label={m.harness_codex_integracao()}
-                    ><span style="width: {pctIntegracao(p)}%"></span></span>
-                </div>
-              {/if}
-              <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
-              {#if integracao.proxima_atualizacao}
-                <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
-              {/if}
-              <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
-              {#if integracao.skills}
-                <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
-              {/if}
-              {#if integracao.plugins.length}
-                <ul class="hs-plugins">
-                  {#each integracao.plugins as plugin}
-                    <li><b>{plugin.id}</b> · {plugin.versao} · {plugin.origem}</li>
-                  {/each}
-                </ul>
-              {/if}
-              {#if integracao.confianca_pendente}
-                <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
-              {/if}
-              {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
-              {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
+              <div class="hs-integracao-status">
+                <p class="hs-aviso" role="status">
+                  {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
+                  {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
+                </p>
+                {#if integracao.estado === 'executando' && integracao.progresso}
+                  {@const p = integracao.progresso}
+                  <div class="hs-progresso">
+                    <span>{m.harness_codex_progresso({ passo: p.passo, total: p.total })}{#if p.sub}
+                      · {m.harness_codex_progresso_sub({ atual: p.sub.atual, total: p.sub.total })}{/if}{#if integracao.etapa_segundos != null}
+                      · {m.harness_codex_etapa_tempo({ s: integracao.etapa_segundos })}{/if}</span>
+                    <span class="hs-barra det" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                      aria-valuenow={pctIntegracao(p)} aria-label={m.harness_codex_integracao()}
+                      ><span style="width: {pctIntegracao(p)}%"></span></span>
+                  </div>
+                {/if}
+                <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
+                {#if integracao.proxima_atualizacao}
+                  <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
+                {/if}
+                <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
+                {#if integracao.skills}
+                  <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
+                {/if}
+                {#if integracao.plugins.length}
+                  <ul class="hs-plugins">
+                    {#each integracao.plugins as plugin}
+                      <li><b>{plugin.id}</b> · {plugin.versao} · {plugin.origem}</li>
+                    {/each}
+                  </ul>
+                {/if}
+                {#if integracao.confianca_pendente}
+                  <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
+                {/if}
+                {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
+                {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
+              </div>
             {:else if contaSelecionada && syncConta}
-              {#if contaSelecionada.auth.email}<p class="hs-aviso">{contaSelecionada.auth.email}</p>{/if}
-              <p class="hs-aviso" role="status">{ESTADOS_CONTA[syncConta.status]?.() ?? syncConta.status}</p>
-              {#if syncConta.trust_pending}
-                <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
-              {/if}
-              {#each syncConta.issues as issue (`${issue.code}:${JSON.stringify(issue.params)}`)}
-                <p class="hs-aviso" class:erro={syncConta.status === 'error'}>{codexAccountMessage(issue)}</p>
-              {/each}
+              <div class="hs-integracao-status">
+                {#if contaSelecionada.auth.email}<p class="hs-aviso">{contaSelecionada.auth.email}</p>{/if}
+                <p class="hs-aviso" role="status">{ESTADOS_CONTA[syncConta.status]?.() ?? syncConta.status}</p>
+                {#if syncConta.trust_pending}
+                  <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
+                {/if}
+                {#each syncConta.issues as issue (`${issue.code}:${JSON.stringify(issue.params)}`)}
+                  <p class="hs-aviso" class:erro={syncConta.status === 'error'}>{codexAccountMessage(issue)}</p>
+                {/each}
+              </div>
             {/if}
           {/if}
           {#if opcoesDoCodex}
@@ -905,9 +909,15 @@
                 border-radius: var(--radius-full); background: transparent; border: 1px solid var(--border-subtle);
                 color: var(--text-secondary); font-size: var(--text-xs); }
   .hs-leg { margin: 0 0 var(--space-3); font-size: var(--text-xs); color: var(--text-muted); }
-  .hs-card { padding: var(--space-2) var(--space-3); margin-bottom: var(--space-2);
-             border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+  /* O mesmo card desenha todos os harnesses. Cabeçalho e linhas separados mantêm o inventário
+     denso legível sem transformar cada item em outro card. */
+  .hs-card { padding: 0; margin-bottom: var(--space-2); overflow: hidden;
+             border: 1px solid var(--border-default); border-radius: var(--radius-lg);
              background: var(--surface-inset); }
+  .hs-card > .hs-topo { padding: var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+  .hs-card > .hs-item { margin: 0; padding: 9px var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+  .hs-card > .hs-porque { margin: 0; padding: 0 var(--space-3) var(--space-2) calc(var(--space-3) + 16px + var(--space-2));
+                         border-bottom: 1px solid var(--border-subtle); }
   .hs-card.fora { opacity: 0.6; }
   .hs-topo { display: flex; align-items: center; gap: var(--space-2); }
   .hs-ponto { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
@@ -975,10 +985,22 @@
                  font-size: var(--text-xs); color: var(--text-primary);
                  white-space: pre-wrap; overflow-wrap: anywhere; }
   .hs-integracao { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); padding-top: var(--space-1); }
+  .hs-card .hs-integracao { margin: 0; padding: var(--space-2) var(--space-3) var(--space-3); border-top: 0; }
+  .hs-card .hs-integracao > .hs-item { margin: 0; padding: 9px 0; border-bottom: 1px solid var(--border-subtle); }
+  .hs-card .hs-integracao > .hs-integracao-cab { padding-top: var(--space-1); }
+  .hs-card .hs-integracao > .hs-porque { margin: 0; padding: var(--space-1) 0 var(--space-2); }
+  .hs-integracao-status { padding: var(--space-2) 0 var(--space-1); border-bottom: 1px solid var(--border-subtle); }
+  .hs-integracao-status .hs-aviso:first-child { margin-top: 0; color: var(--text-primary); font-weight: 600; }
   .hs-integracao-cab { flex-wrap: wrap; }
   .hs-conta { max-width: 240px; min-height: 30px; padding: 0 var(--space-2);
               border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
               background: var(--surface-raised); color: var(--text-primary); font-size: var(--text-xs); }
   .hs-integracao .hs-aviso, .hs-plugins { overflow-wrap: anywhere; }
   .hs-plugins { margin: var(--space-1) 0 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--text-secondary); }
+  .hs-card .hs-plugins { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0; list-style: none; }
+  .hs-card .hs-plugins li { padding: 3px 7px; border-radius: var(--radius-sm); background: var(--fill-subtle); }
+  @container (max-width: 520px) {
+    .hs-card .hs-integracao > .hs-item { align-items: flex-start; }
+    .hs-card .hs-conta { max-width: 46%; }
+  }
 </style>

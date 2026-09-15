@@ -515,7 +515,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
         <p class="bc-user" class:bc-pending={!p.ackAt}>{p.text}</p>
       {/each}
       {#if tailError}
-        <button class="bc-error bc-retry" onclick={loadTail}>{tailError}</button>
+        <div class="bc-recovery" role="alert">
+          <span class="bc-recovery-icon" aria-hidden="true">!</span>
+          <span class="bc-recovery-copy"><b>{m.chat_nao_carregou_historico()}</b><span>{tailError}</span></span>
+          <button class="bc-recovery-action" onclick={loadTail}>{m.lista_tentar_novamente()}</button>
+        </div>
       {/if}
       {#if session.state === 'working' && session.label}
         <p class="bc-typing">✳ {session.label}</p>
@@ -584,7 +588,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
        erro do answer() ficava engolido ali dentro. E se a sessão sumir da lista o card inteiro
        evapora: aí o recibo é o do Board (orphanErrors). Clicar dispensa. -->
   {#if sendError}
-    <button class="bc-error" onclick={() => onSendError('')} title={m.board_dispensar()}>{sendError}</button>
+    <div class="bc-recovery bc-recovery--send" role="alert">
+      <span class="bc-recovery-icon" aria-hidden="true">!</span>
+      <span class="bc-recovery-copy"><b>{m.board_msg_nao_entregue()}</b><span>{sendError}</span></span>
+      <button class="bc-recovery-dismiss" onclick={() => onSendError('')} title={m.board_dispensar()} aria-label={m.board_dispensar()}>×</button>
+    </div>
   {/if}
 </article>
 
@@ -772,6 +780,29 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .bc-opt { font-size: var(--text-xs); padding: 3px 10px; border-radius: var(--radius-full); border: 1px solid var(--border-default); background: var(--surface-raised); color: var(--text-primary); cursor: pointer; }
   .bc-opt:hover:not(:disabled) { background: var(--bg-hover); }
   .bc-opt:disabled { opacity: 0.5; cursor: default; }
+  .bc-recovery {
+    display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--space-2);
+    padding: var(--space-3); border: 1px solid color-mix(in srgb, var(--error) 28%, transparent);
+    border-radius: var(--radius-md); background: color-mix(in srgb, var(--error) 6%, transparent);
+    color: var(--text-secondary); font-size: var(--text-xs);
+  }
+  .bc-recovery-icon {
+    display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); font-weight: 700;
+  }
+  .bc-recovery-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; line-height: 1.4; }
+  .bc-recovery-copy b { color: var(--text-primary); font-weight: 600; }
+  .bc-recovery-action {
+    grid-column: 2; justify-self: start; min-height: 0; padding: 5px 9px;
+    border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--text-inverse);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .bc-recovery--send { position: relative; margin: 0 var(--space-3) var(--space-3); }
+  .bc-recovery-dismiss {
+    position: absolute; top: 5px; right: 5px; width: 26px; height: 26px; min-width: 0; min-height: 0;
+    border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer;
+  }
+  .bc-recovery-dismiss:hover { background: var(--bg-hover); color: var(--text-primary); }
   /* Input FANTASMA: 15 cards × 15 inputs com borda = 15 alvos competindo. Borda real só no
      hover/focus. */
   .bc-foot {
@@ -818,15 +849,4 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .bc-foot textarea:focus { border-color: var(--accent); outline: none; }
   .bc-send { width: 28px; border-radius: var(--radius-md); border: 0; background: var(--accent); color: var(--text-inverse); cursor: pointer; }
   .bc-send:disabled { opacity: 0.4; cursor: default; }
-  /* Erro de envio e marcador de falha da cauda: mesma cor/tamanho. Os dois são <button> porque os
-     dois têm ação (dispensar / tentar de novo); min-* zerados = mesmo escape do alvo global de 44px
-     usado no .col-collapse do Board (o quadro é desktop-only). */
-  .bc-error {
-    display: block; width: 100%; text-align: left;
-    color: var(--error); font-family: inherit; font-size: var(--text-xs);
-    background: none; border: 0; cursor: pointer; min-height: 0; min-width: 0;
-    padding: 0 var(--space-3) var(--space-3); margin: 0;
-  }
-  /* No corpo do card o recuo já vem do .bc-body. */
-  .bc-retry { padding: 0; }
 </style>

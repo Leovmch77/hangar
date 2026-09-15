@@ -31,6 +31,7 @@
 
   // AggSession ⊇ BoardRow — o card só precisa de serverId a mais que SessionInfo (o store já enriquece).
   const rows = $derived<BoardRow[]>(sessionsStore.rows);
+  const loading = $derived(sessionsStore.loading);
   // Banner de offline mesmo com lista stale: filtra por error SEM gate de loaded.
   const offline = $derived(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.label));
   const servers = $derived(sessionsStore.servers);
@@ -51,6 +52,15 @@
   const cols = $derived(
     COLS.map((c) => ({ ...c, rows: rows.filter((r) => r.state === c.state).sort(byRecency) })),
   );
+  function emptyCopy(state: State): { icon: string; title: string; description: string } {
+    if (state === 'awaiting_input') return {
+      icon: '✓', title: m.board_vazio_atencao_titulo(), description: m.board_vazio_atencao_desc(),
+    };
+    if (state === 'working') return {
+      icon: '◌', title: m.board_vazio_trabalho_titulo(), description: m.board_vazio_trabalho_desc(),
+    };
+    return { icon: '○', title: m.board_vazio_pronto_titulo(), description: m.board_vazio_pronto_desc() };
+  }
 
   // Chave do estado içado: a MESMA pros rascunhos, ecos e erros.
   const rowKey = (r: BoardRow) => `${r.serverId}::${r.name}`;
@@ -102,8 +112,8 @@
   {/each}
   <div class="board-cols">
     {#each cols as col (col.state)}
-      <section class="board-col">
-        <header class="col-head" style="--col-color: {stateColors[col.state]}">
+      <section class="board-col" style="--col-color: {stateColors[col.state]}">
+        <header class="col-head">
           <span class="col-dot" class:pulse={col.state === 'awaiting_input'} aria-hidden="true"></span>
           <span class="col-title">{col.title}</span>
           <span class="col-count">{col.rows.length}</span>
@@ -124,7 +134,18 @@
             />
           {/each}
           {#if col.rows.length === 0}
-            <p class="col-empty">{m.board_vazio()}</p>
+            {#if loading}
+              <div class="col-skeleton" role="status" aria-label={m.comum_carregando()}>
+                <span></span><span></span><span></span><span></span>
+              </div>
+            {:else}
+              {@const empty = emptyCopy(col.state)}
+              <div class="col-empty">
+                <span class="col-empty-icon" aria-hidden="true">{empty.icon}</span>
+                <strong>{empty.title}</strong>
+                <p>{empty.description}</p>
+              </div>
+            {/if}
           {/if}
         </div>
       </section>
@@ -169,5 +190,21 @@
     font-variant-numeric: tabular-nums;
   }
   .col-cards { flex: 1; overflow-y: auto; padding: var(--space-2) 2px; display: flex; flex-direction: column; gap: var(--space-2); }
-  .col-empty { color: var(--text-muted); font-size: var(--text-xs); text-align: center; padding: var(--space-4) 0; }
+  .col-empty { color: var(--text-muted); text-align: center; padding: var(--space-8) var(--space-4); }
+  .col-empty-icon {
+    display: grid; place-items: center; width: 40px; height: 40px; margin: 0 auto var(--space-3);
+    border-radius: var(--radius-md); background: var(--fill-subtle); color: var(--col-color);
+    font-size: var(--text-lg);
+  }
+  .col-empty strong { display: block; color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; }
+  .col-empty p { margin: var(--space-2) 0 0; font-size: var(--text-xs); line-height: 1.45; }
+  .col-skeleton {
+    display: flex; flex-direction: column; gap: 9px; padding: var(--space-4);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-card);
+  }
+  .col-skeleton span { height: 10px; border-radius: var(--radius-full); background: var(--fill-subtle); }
+  .col-skeleton span:nth-child(1) { width: 42%; }
+  .col-skeleton span:nth-child(2) { width: 72%; }
+  .col-skeleton span:nth-child(3) { width: 92%; }
+  .col-skeleton span:nth-child(4) { width: 61%; }
 </style>

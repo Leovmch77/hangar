@@ -154,9 +154,9 @@
         class:selected={selectedIndices.includes(i)}
         onclick={() => toggleOption(i)}
       >
-        {#if q.multiSelect}
-          <span class="check-box" aria-hidden="true">{selectedIndices.includes(i) ? '✓' : ''}</span>
-        {/if}
+        <span class="choice-mark" class:multiple={q.multiSelect} class:selected={selectedIndices.includes(i)} aria-hidden="true">
+          {q.multiSelect && selectedIndices.includes(i) ? '✓' : ''}
+        </span>
         <span class="opt-content">
           <span class="opt-label">{opt.label}</span>
           {#if opt.description}
@@ -257,15 +257,21 @@
   }
 
   .sheet-title {
-    font-size: var(--text-xl);
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: var(--space-2);
+    display: inline-flex;
+    width: fit-content;
+    margin: 0 0 var(--space-2);
+    padding: 3px 8px;
+    border-radius: var(--radius-full);
+    background: var(--accent-dim);
+    color: var(--accent);
+    font-size: var(--text-xs);
+    font-weight: 650;
   }
 
   .question-text {
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--text-primary);
     margin-bottom: var(--space-4);
     line-height: 1.5;
   }
@@ -301,25 +307,34 @@
     background: var(--bg-hover);
   }
 
-  .check-box {
+  .choice-mark {
     flex-shrink: 0;
-    width: 22px;
-    height: 22px;
+    width: 18px;
+    height: 18px;
     border: 1.5px solid var(--border-strong);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-full);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: var(--text-sm);
+    font-size: 11px;
     font-weight: 700;
     color: var(--accent);
-    margin-top: 1px;
+    margin-top: 2px;
   }
 
-  .selected .check-box {
+  .choice-mark.selected:not(.multiple)::after {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-full);
+    background: var(--accent);
+  }
+
+  .choice-mark.multiple { width: 20px; height: 20px; border-radius: var(--radius-sm); margin-top: 1px; }
+  .choice-mark.multiple.selected {
     border-color: var(--accent);
     background: var(--accent);
-    color: #fff;
+    color: var(--text-inverse);
   }
 
   .opt-content {
@@ -449,7 +464,7 @@
     height: 50px;
     background: var(--accent);
     border-radius: var(--radius-md);
-    color: #fff;
+    color: var(--text-inverse);
     font-size: var(--text-base);
     font-weight: 600;
     transition: background 180ms var(--ease-out);
@@ -481,5 +496,10 @@
     font-size: var(--text-sm);
     color: var(--error);
     margin-bottom: var(--space-3);
+  }
+
+  @container (min-width: 500px) {
+    .escapes, .text-actions { flex-direction: row; }
+    .escapes .ghost-btn, .text-actions .primary-btn, .text-actions .ghost-btn { width: auto; flex: 1; margin-top: 0; }
   }
 </style>

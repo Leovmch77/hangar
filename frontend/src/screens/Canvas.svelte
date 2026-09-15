@@ -10,7 +10,11 @@ import * as m from '../paraglide/messages';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { serverColor } from '../lib/auth';
   import { pairColor } from '@hangar/core';
-  import { placeNew, resizeBox, PAD, GAP, CARD_W, CARD_H, type CanvasLayout, type CardBox } from '../lib/canvasLayout';
+  import {
+    canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox,
+    MIN_SCALE, MAX_SCALE, PAD, GAP, CARD_W, CARD_H,
+    type CanvasLayout, type CardBox,
+  } from '../lib/canvasLayout';
 
   interface Props { onOpenSession: (name: string, serverId: string) => void }
   let { onOpenSession }: Props = $props();
@@ -129,6 +133,31 @@ import * as m from '../paraglide/messages';
     return out;
   });
 
+  // Linhas de vínculo no idioma do n8n: curvas entre as bordas dos cards, sem seta porque o grupo
+  // não tem ordem. Uma corrente por posição evita a teia completa de N×N em grupos maiores.
+  const groupLinks = $derived.by(() => {
+    const byGid = new Map<string, { key: string; box: CardBox }[]>();
+    for (const row of visibleRows) {
+      const gid = gkeyOf(row);
+      const box = layout[rowKey(row)];
+      if (!gid || !box) continue;
+      const member = { key: rowKey(row), box };
+      const group = byGid.get(gid);
+      if (group) group.push(member); else byGid.set(gid, [member]);
+    }
+    return [...byGid].flatMap(([gid, members]) => {
+      const ordered = [...members].sort((a, b) =>
+        (a.box.x + a.box.w / 2) - (b.box.x + b.box.w / 2)
+        || (a.box.y + a.box.h / 2) - (b.box.y + b.box.h / 2));
+      return ordered.slice(1).map((member, index) => ({
+        gid,
+        key: `${ordered[index].key}->${member.key}`,
+        color: pairColor(gid),
+        ...connectBoxes(ordered[index].box, member.box),
+      }));
+    });
+  });
+
   // Grupo colapsado = UM card compacto no lugar dos membros (posição = canto do bounding box
   // salvo; expande de volta no clique). Membros mantêm posição no layout — expandir restaura.
   const collapsedCards = $derived.by(() =>
@@ -140,13 +169,25 @@ import * as m from '../paraglide/messages';
       const x = boxes.length ? Math.min(...boxes.map((b) => b.x)) : PAD;
       const y = boxes.length ? Math.min(...boxes.map((b) => b.y)) : PAD;
       const w = boxes.length ? Math.max(...boxes.map((b) => b.w)) : CARD_W;
-      return [{ gid: gk, x, y, w, color: pairColor(gk), label: members[0].pair_task ?? null, members }];
+      return [{ gid: gk, x, y, w, h: 40 + members.length * 30, color: pairColor(gk), label: members[0].pair_task ?? null, members }];
     }));
 
   // ── Organizar: recoloca TODOS os visíveis numa grade — pareados (gid) contíguos, quem espera
   // por você primeiro, depois working, depois idle; 3 colunas dividindo a LARGURA da tela por
   // igual (pedido: cards redimensionados pra preencher, não 320px fixos encostados à esquerda). ──
   let planeWidth = $state(0);
+  let planeHeight = $state(0);
+  let canvasEl = $state<HTMLDivElement>();
+  let zoom = $state(1);
+  const setZoom = (value: number) => (zoom = Math.min(MAX_SCALE, Math.max(MIN_SCALE, Math.round(value * 20) / 20)));
+  function fitView() {
+    zoom = fitCanvasScale(planeWidth, Math.max(200, planeHeight - 48), bounds.w + PAD * 2, bounds.h + PAD * 2);
+    requestAnimationFrame(() => canvasEl?.scrollTo({
+      left: Math.max(0, (bounds.x - PAD) * zoom),
+      top: Math.max(0, (bounds.y - PAD) * zoom),
+      behavior: 'smooth',
+    }));
+  }
   function autoArrange() {
     const rank = (s: string) => (s === 'awaiting_input' ? 0 : s === 'working' ? 1 : 2);
     const groups = new Map<string, BoardRow[]>();
@@ -164,7 +205,7 @@ import * as m from '../paraglide/messages';
     // 3 colunas dividindo a largura visível por igual (fallback CARD_W se a medida ainda não veio).
     const cols = 3;
     const w = planeWidth > 0
-      ? Math.max(280, Math.floor((planeWidth - PAD * 2 - GAP * (cols - 1)) / cols))
+      ? Math.max(280, Math.floor((planeWidth / zoom - PAD * 2 - GAP * (cols - 1)) / cols))
       : CARD_W;
     const next: CanvasLayout = { ...layout };
     let i = 0;
@@ -224,32 +265,40 @@ import * as m from '../paraglide/messages';
     if (Object.keys(fresh).length) { layout = { ...layout, ...fresh }; saveLayout(); }
   });
 
-  // Extensão do plano: o container interno cresce pra caber o card mais fundo/largo.
+  const renderedBoxes = $derived([
+    ...visibleRows.map((row) => layout[rowKey(row)]).filter(Boolean),
+    ...collapsedCards.map((group) => ({ x: group.x, y: group.y, w: group.w, h: group.h })),
+  ]);
+
+  // Extensão do plano: o container interno cresce pra caber todo conteúdo renderizado, inclusive
+  // o card compacto de um grupo colapsado quando não há membro individual na tela.
   const extent = $derived.by(() => {
     let w = 900, h = 600;
-    for (const r of visibleRows) {
-      const b = layout[rowKey(r)];
-      if (!b) continue;
+    for (const b of renderedBoxes) {
       w = Math.max(w, b.x + b.w + PAD);
       h = Math.max(h, b.y + b.h + PAD);
     }
     return { w, h };
   });
+  const bounds = $derived(canvasBounds(renderedBoxes));
 
   // ── Drag pelo handle (o card em si é interativo — input/botões — então o drag tem faixa própria). ──
-  let drag: { key: string; dx: number; dy: number } | null = null;
+  let drag: { key: string; x0: number; y0: number; box: CardBox } | null = null;
   function dragStart(e: PointerEvent, key: string) {
     const b = layout[key];
     if (!b) return;
-    drag = { key, dx: e.clientX - b.x, dy: e.clientY - b.y };
+    drag = { key, x0: e.clientX, y0: e.clientY, box: { ...b } };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   }
   function dragMove(e: PointerEvent) {
     if (!drag) return;
-    const b = layout[drag.key];
-    if (!b) { drag = null; return; }   // sessão morreu no meio do arrasto -> não grava entrada corrompida sem w/h
-    layout = { ...layout, [drag.key]: { ...b, x: Math.max(0, e.clientX - drag.dx), y: Math.max(0, e.clientY - drag.dy) } };
+    if (!layout[drag.key]) { drag = null; return; }   // sessão morreu no meio do arrasto -> não grava entrada corrompida sem w/h
+    layout = { ...layout, [drag.key]: {
+      ...drag.box,
+      x: Math.max(0, drag.box.x + (e.clientX - drag.x0) / zoom),
+      y: Math.max(0, drag.box.y + (e.clientY - drag.y0) / zoom),
+    } };
   }
   function dragEnd() {
     if (!drag) return;
@@ -330,7 +379,7 @@ import * as m from '../paraglide/messages';
     // arrastado nunca chegava ao localStorage.
     if (e.buttons === 0) { resizeEnd(); return; }
     if (!layout[rs.key]) { rs = null; return; }   // entrada sumiu do layout: não grava caixa corrompida
-    layout = { ...layout, [rs.key]: resizeBox(rs.box, rs.dir, e.clientX - rs.x0, e.clientY - rs.y0) };
+    layout = { ...layout, [rs.key]: resizeBox(rs.box, rs.dir, (e.clientX - rs.x0) / zoom, (e.clientY - rs.y0) / zoom) };
   }
   function resizeEnd() {
     if (!rs) return;
@@ -362,7 +411,8 @@ import * as m from '../paraglide/messages';
   );
 </script>
 
-<div class="canvas" bind:clientWidth={planeWidth}>
+<div class="canvas-shell">
+<div class="canvas" bind:this={canvasEl} bind:clientWidth={planeWidth} bind:clientHeight={planeHeight}>
   <!-- Topo fixo: ⚡5h/📅7d por servidor (compartilhado pela conta) + ações do canvas. -->
   <div class="cv-top">
     <RateStrip buckets={sessionsStore.byServer} />
@@ -400,7 +450,17 @@ import * as m from '../paraglide/messages';
       {key.split('::')[1]}: {msg} — {m.board_msg_nao_entregue()}
     </button>
   {/each}
-  <div class="cv-plane" style="width: {extent.w}px; height: {extent.h}px;">
+  <div class="cv-world" style="width: {extent.w * zoom}px; height: {extent.h * zoom}px;">
+  <div class="cv-plane" style="width: {extent.w}px; height: {extent.h}px; transform: scale({zoom});">
+    {#if groupLinks.length}
+      <svg class="cv-links" width={extent.w} height={extent.h} aria-hidden="true">
+        {#each groupLinks as link (link.key)}
+          <path d={link.path} style="stroke: {link.color};" vector-effect="non-scaling-stroke" />
+          <circle cx={link.from.x} cy={link.from.y} r={3 / zoom} style="fill: var(--surface-card); stroke: {link.color};" vector-effect="non-scaling-stroke" />
+          <circle cx={link.to.x} cy={link.to.y} r={3 / zoom} style="fill: var(--surface-card); stroke: {link.color};" vector-effect="non-scaling-stroke" />
+        {/each}
+      </svg>
+    {/if}
     <!-- Etiqueta do grupo sobre o membro mais alto (label + ações). O pertencimento é o ARO nos
          cards membros (.cv-card.paired) — a caixa envolvente antiga enganava: card estranho parado
          dentro do retângulo parecia membro. -->
@@ -497,11 +557,21 @@ import * as m from '../paraglide/messages';
       <p class="cv-empty">{m.board_cards_ocultos()}</p>
     {/if}
   </div>
+  </div>
+</div>
+<div class="cv-zoom" role="group" aria-label={m.canvas_zoom_aria()}>
+    <button onclick={fitView} title={m.canvas_ajustar()}>{m.canvas_ajustar()}</button>
+    <span class="cv-zoom-sep" aria-hidden="true"></span>
+    <button onclick={() => setZoom(zoom - 0.1)} disabled={zoom <= MIN_SCALE} aria-label={m.canvas_reduzir_zoom()}>−</button>
+    <span class="cv-zoom-value">{Math.round(zoom * 100)}%</span>
+    <button onclick={() => setZoom(zoom + 0.1)} disabled={zoom >= MAX_SCALE} aria-label={m.canvas_aumentar_zoom()}>+</button>
+  </div>
 </div>
 
 <style>
-  /* Canvas livre: scroll nativo nos 2 eixos (sem pan/zoom na v1); cards absolutos. Mesmas regras
+  /* Canvas livre: scroll nativo nos 2 eixos; o plano inteiro escala, inclusive conexões e cards. Mesmas regras
      visuais do board: cor não tinge fundo, elevação por borda hairline, sem animação nova. */
+  .canvas-shell { height: 100%; min-height: 0; position: relative; }
   .canvas { height: 100%; overflow: auto; padding: 0; position: relative; }
   .cv-offline { color: var(--warning); font-size: var(--text-xs); margin: var(--space-2) 24px 0; position: sticky; top: 8px; left: 24px; z-index: 3; }
   .cv-senderr {
@@ -510,9 +580,13 @@ import * as m from '../paraglide/messages';
     color: var(--error); font-family: inherit; font-size: var(--text-xs);
     position: sticky; left: 24px; z-index: 3;
   }
-  .cv-plane { position: relative; }
+  .cv-world { position: relative; }
+  .cv-plane { position: relative; transform-origin: top left; transition: transform 180ms var(--ease-out); }
+  .cv-links { position: absolute; inset: 0; z-index: 0; overflow: visible; pointer-events: none; }
+  .cv-links path { fill: none; stroke-width: 1.5; opacity: 0.72; }
+  .cv-links circle { stroke-width: 1.5; }
   .cv-card {
-    position: absolute; display: flex; flex-direction: column;
+    position: absolute; z-index: 1; display: flex; flex-direction: column;
     overflow: hidden;
     min-width: 240px; min-height: 160px;                 /* espelha MIN_W/MIN_H de canvasLayout */
     border-radius: var(--radius-lg);
@@ -622,7 +696,7 @@ import * as m from '../paraglide/messages';
 
   /* Grupo colapsado: card compacto — header expande, linhas abrem o chat do membro. */
   .cv-gcard {
-    position: absolute; display: flex; flex-direction: column;
+    position: absolute; z-index: 1; display: flex; flex-direction: column;
     background: var(--surface-card);
     border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
     border-radius: var(--radius-lg); overflow: hidden;
@@ -651,4 +725,18 @@ import * as m from '../paraglide/messages';
     font-family: inherit; min-height: 0; min-width: 0;
   }
   .cv-empty-btn:hover { color: var(--text-primary); }
+  .cv-zoom {
+    position: absolute; right: var(--space-3); bottom: var(--space-3); z-index: 5;
+    display: flex; align-items: center; gap: 2px; width: max-content;
+    padding: 4px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    background: var(--bg-elevated); box-shadow: var(--elev-2, 0 8px 28px rgba(0,0,0,.24));
+  }
+  .cv-zoom button {
+    min-width: 32px; min-height: 30px; padding: 0 8px; border: 0; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer;
+  }
+  .cv-zoom button:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+  .cv-zoom button:disabled { opacity: .35; cursor: default; }
+  .cv-zoom-sep { width: 1px; height: 18px; margin: 0 2px; background: var(--border-subtle); }
+  .cv-zoom-value { width: 44px; text-align: center; color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
 </style>

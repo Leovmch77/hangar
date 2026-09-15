@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import AskQuestionStepper from './AskQuestionStepper.svelte';
+import AskQuestionCard from './AskQuestionCard.svelte';
 import type { AskQuestionPayload } from '@hangar/core';
 import { overwriteGetLocale } from '../paraglide/runtime';
 
@@ -80,5 +81,26 @@ describe('AskQuestionStepper: saídas de texto', () => {
     expect(el.querySelectorAll('.escapes .ghost-btn').length).toBe(2);
     expect(el.querySelector('input[type="text"]')).toBeNull();   // só depois de clicar em digitar
     unmount(comp);
+  });
+
+  it('refina só o Ask nativo e mantém a múltipla escolha selecionável', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(AskQuestionCard, { target: el, props: {
+      open: true, onSubmit: vi.fn(), onClose: vi.fn(), escapes: true, payload: {
+        ...payload,
+        questions: [{ ...payload.questions[0], multiSelect: true }],
+      },
+    } });
+    await tick();
+    expect(el.querySelector('.ask-status')).not.toBeNull();
+    const marks = el.querySelectorAll('.choice-mark.multiple');
+    expect(marks).toHaveLength(2);
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click();
+    await tick(); await tick();
+    expect(el.querySelector('.choice-mark.multiple.selected')).not.toBeNull();
+    expect(el.querySelector<HTMLButtonElement>('.primary-btn')!.disabled).toBe(false);
+    await unmount(comp);
+    el.remove();
   });
 });
