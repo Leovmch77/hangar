@@ -780,8 +780,8 @@ class SessionRegistry:
     # das travadas, com este cache, e o que liga o radar sem raspar toda sessao a cada poll.
     _limit_cache: dict[str, tuple[float, Optional[str]]] = {}
     _LIMIT_CACHE_S = 30.0
-    # name -> (jsonl, mtime, provider, texto, ts). A lista roda a cada 1,5s; a cauda só é relida
-    # quando o transcript muda e a sessão volta a ficar parada.
+    # name -> (jsonl, mtime, provider, texto, ts). A cauda só é relida quando o transcript muda e a
+    # sessão volta a ficar parada; sem isto cada atualização da lista reparsaria todas as conversas.
     _reply_cache: dict[str, tuple[str, Optional[float], str, Optional[str], Optional[float]]] = {}
     # Nomes ja avisados por _agent_pane (Task 5.5): sessao com 2+ panes e nenhum reconhecido como
     # agente. De classe pela MESMA razao das demais acima (list() roda em ambas instancias).

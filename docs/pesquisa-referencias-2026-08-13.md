@@ -701,6 +701,10 @@ com avatar e idade relativa** (`3m`, `1h`). No celular do Orca é igual:
 - **Depende de:** nada.
 - **Tamanho:** pequeno no front, pequeno no backend. É o melhor retorno da lista inteira.
 
+> **App nativo adiado em 15/09/2026:** ele ainda não está em uso. Quando entrar, levar
+> `last_reply`/`last_reply_at` e `headless` para `mobile/src/features/sessions/SessionRow.tsx`; o
+> contrato compartilhado já expõe os campos. O navegador embutido continua exclusivo do desktop.
+
 ## A2. Não-lido, e "pronto para revisar" como estado
 
 /home/jefferson/pessoal/hangar/.refs/outros/vibekanban-sidebar-acordeao.png
