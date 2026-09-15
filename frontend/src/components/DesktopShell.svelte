@@ -11,7 +11,10 @@ import * as m from '../paraglide/messages';
   import QuotaStrip from './QuotaStrip.svelte';
   import { quotaBarra } from '../lib/quotaBarra.svelte';
   import GitColuna from './git/GitColuna.svelte';
-  import { ctxPanel, alternarColunaGit } from '../lib/ctxPanel.svelte';
+  import { ctxPanel, alternarColunaGit, larguraCtxAplicada } from '../lib/ctxPanel.svelte';
+  import { shellLayout } from '../lib/shellLayout.svelte';
+  import { sidebarPrefs } from '../lib/sidebarPrefs.svelte';
+  import { arrasto } from '../lib/arrastoBloco.svelte';
   import Chat from '../screens/Chat.svelte';
   import Board from '../screens/Board.svelte';
   import Canvas from '../screens/Canvas.svelte';
@@ -380,6 +383,47 @@ import * as m from '../paraglide/messages';
   // Linha da sessão em foco — pelo SERVIDOR e pelo nome. Só pelo nome, homônimas em servidores
   // diferentes devolviam a primeira da lista: o git abria com o cwd do repo errado, ou nem abria
   // (a de outro servidor sem branch). Só cai no nome quando a rota é a forma legada, sem servidor.
+  // Painel de contexto na tela: a MESMA condição que decide o `showContextPanel` dos dois Chats
+  // abaixo. Duas contas separadas divergiriam e a coluna ficaria reservada sem nada dentro.
+  const ctxNaTela = $derived(
+    (view === 'chat' && !!currentSession && currentSession !== 'null' && currentSession !== 'undefined'
+      && splitSessions.length === 0)
+    || (!!overlaySession && (view === 'board' || view === 'canvas')),
+  );
+  let ctxHost = $state<HTMLElement | null>(null);
+
+  // Formato de dock ("Aparência → Altura da barra lateral → Só o conteúdo"): a barra vira caixa
+  // centrada de altura do conteúdo, e a coluna ENCOSTADA nela tem que virar junto — senão uma peça
+  // é caixa e a vizinha é parede de ponta a ponta, coladas. A regra é da POSIÇÃO, não da coluna de
+  // git: quem é o primeiro bloco muda com o arranjo. CSS não alcança um irmão, então a medida sai
+  // de um ResizeObserver na barra — um só, aqui, em vez de um por coluna.
+  const dockLigado = $derived(sidebarPrefs.height === 'content');
+
+  // Trilhos do grid: a barra lateral na primeira coluna (largura dela) e, depois, uma coluna por
+  // grupo do arranjo. A da conversa é a elástica, com o piso de 360px — a largura mais estreita em
+  // que o app ainda se lê (abaixo de 820px ele já usa o arranjo de celular). As outras são `auto`:
+  // cada bloco declara a própria largura, e a coluna de um bloco escondido encolhe a zero sozinha.
+  const trilhos = $derived(
+    ['auto', ...shellLayout.colunas.map((c) => (c.includes('chat') ? 'minmax(360px, 1fr)' : 'auto'))]
+      .join(' '),
+  );
+  let alturaSidebar = $state(0);
+  $effect(() => {
+    if (!dockLigado) { alturaSidebar = 0; return; }
+    const alvo = document.querySelector('.sidebar');
+    if (!alvo) return;
+    const medir = () => { alturaSidebar = alvo.getBoundingClientRect().height; };
+    const ro = new ResizeObserver(medir);
+    ro.observe(alvo);
+    medir();
+    return () => ro.disconnect();
+  });
+  // Recolhido COM toggle externo o painel some por inteiro (regra do próprio painel): a coluna
+  // tem que sumir junto, senão fica uma faixa vazia do tamanho do trilho.
+  const larguraCtxSlot = $derived(
+    ctxPanel.recolhido && toggleExterno ? 0 : larguraCtxAplicada(),
+  );
+
   const sessaoFoco = $derived(
     rows.find((r) => r.name === currentSession && (!serverIdPrincipal || r.serverId === serverIdPrincipal))
     ?? rows.find((r) => r.name === currentSession),
@@ -459,7 +503,9 @@ import * as m from '../paraglide/messages';
                  {ctxDisponivel} />
   {/if}
 
-  <div class="shell-linha">
+  <div class="shell-linha"
+       style:grid-template-columns={trilhos}
+       style:grid-template-rows={`repeat(${shellLayout.linhas}, 1fr)`}>
   <!-- ESCONDIDA, não desmontada, no modo abas: a barra do topo delega "nova sessão", "mais opções" e
        o menu de contexto da aba pra dentro da Sidebar (sidebarBridge). Um `{#if}` aqui tiraria ela do
        DOM e esses três botões virariam nada. -->
@@ -483,10 +529,16 @@ import * as m from '../paraglide/messages';
     <GitColuna
       sessionName={currentSession}
       cwd={sessaoFoco?.cwd ?? null}
+      coluna={shellLayout.coluna('git')}
+      linha={shellLayout.linha('git')}
+      empilhado={shellLayout.empilhado('git')}
+      dock={dockLigado && shellLayout.ehVizinhoDaSidebar('git') && !shellLayout.empilhado('git')}
+      alturaDock={alturaSidebar}
       onFechar={alternarColunaGit} />
   {/if}
 
-  <div class="desktop-com-terminal">
+  <div class="desktop-com-terminal" data-bloco="chat"
+       style:grid-column={shellLayout.coluna('chat')} style:grid-row={shellLayout.linha('chat')}>
   <main class="desktop-main" class:split={splitSessions.length > 0} class:has-attention={hasAttention}
         class:tp-max-hide={terminalMaximizado}>
     {#if hasAttention}
@@ -531,6 +583,7 @@ import * as m from '../paraglide/messages';
               topInset={hasAttention ? 52 : 0}
               onOpenWorkspacePalette={() => (commandOpen = true)}
               showContextPanel={true}
+              {ctxHost}
               ctxToggleExterno={toggleExterno}
               publishWorkspaceActions={true}
               onWorkspaceActionsChange={handleChatActionsChange}
@@ -556,6 +609,7 @@ import * as m from '../paraglide/messages';
             topInset={hasAttention ? 52 : 0}
             onOpenWorkspacePalette={() => (commandOpen = true)}
             showContextPanel={splitSessions.length === 0}
+            {ctxHost}
             splitTab={splitSessions.length > 0}
             ctxToggleExterno={toggleExterno}
             publishWorkspaceActions={true}
@@ -600,6 +654,19 @@ import * as m from '../paraglide/messages';
                  onClose={() => (terminalOpen = false)}
                  onMaximizar={(v) => (terminalMaximizado = v)} />
   </div>
+
+  <!-- Coluna do painel de contexto. O painel continua sendo FILHO do Chat (ele depende de 43
+       props calculadas lá dentro); o que muda é onde ele desenha — o Chat reparenta o nó pra cá.
+       Sem isto o painel era um card absoluto por cima da conversa, e não tinha como ele trocar de
+       lugar com a coluna de git. Quem sabe se há painel é o mesmo sinal que o Chat usa pra montá-lo. -->
+  {#if ctxNaTela && !terminalMaximizado}
+    <div class="ctx-slot" data-bloco="ctx" bind:this={ctxHost} style:--cp-ctx-w={larguraCtxSlot + 'px'}
+         style:grid-column={shellLayout.coluna('ctx')} style:grid-row={shellLayout.linha('ctx')}
+         class:empilhado={shellLayout.empilhado('ctx')}
+         class:dock={dockLigado && shellLayout.ehVizinhoDaSidebar('ctx')
+                     && !shellLayout.empilhado('ctx') && alturaSidebar > 0}
+         style:--col-h={alturaSidebar ? Math.round(alturaSidebar) + 'px' : null}></div>
+  {/if}
   </div><!-- /.shell-linha -->
 
   <!-- Faixa de cota (Task 9): irmã de .shell-linha dentro de .desktop-shell — base absoluta
@@ -614,6 +681,19 @@ import * as m from '../paraglide/messages';
       serverKey={currentKey?.split('::')[0] || getActiveId() || ''}
       onIrParaContas={() => abrirConfig('contas', getActiveId())}
     />
+  {/if}
+
+  <!-- Marca de onde o bloco arrastado vai cair: um véu sobre o alvo e uma barra grossa na borda
+       mirada. `position: fixed` com o rect medido, porque o alvo pode ser qualquer bloco e a marca
+       não pode entrar na conta do layout de nenhum deles. -->
+  {#if arrasto.alvo}
+    {@const a = arrasto.alvo}
+    <div class="solta-veu" aria-hidden="true"
+         style:left={a.rect.left + 'px'} style:top={a.rect.top + 'px'}
+         style:width={a.rect.width + 'px'} style:height={a.rect.height + 'px'}></div>
+    <div class="solta-borda" aria-hidden="true" data-borda={a.borda}
+         style:left={a.rect.left + 'px'} style:top={a.rect.top + 'px'}
+         style:width={a.rect.width + 'px'} style:height={a.rect.height + 'px'}></div>
   {/if}
 
   <WorkspaceCommandPalette
@@ -643,8 +723,13 @@ import * as m from '../paraglide/messages';
     width: 100%;
     overflow: hidden;
   }
+  /* GRID, não flex: os blocos precisam poder trocar de coluna E dividir uma coluna em duas linhas,
+     e no grid isso é só `grid-column`/`grid-row` em cada um — o DOM nunca muda. Reagrupar os
+     blocos dentro de divs de coluna (o caminho óbvio no flex) faria a conversa trocar de pai a
+     cada rearranjo, e trocar de pai no Svelte destrói e recria o componente: SSE novo e histórico
+     recarregado a cada arrasto. Os trilhos vêm por style inline, do arranjo. */
   .shell-linha {
-    display: flex;
+    display: grid;
     flex: 1;
     /* SEM fundo próprio, de propósito. Cheguei a pintar `--surface-inset` aqui achando que a costura
        vertical entre o trilho e o chat era diferença de cor — não era: medido na tela do usuário,
@@ -674,7 +759,10 @@ import * as m from '../paraglide/messages';
        fora da tela. O conserto ja existia no filho (.desktop-main, logo abaixo) e no ramo do split
        (.desktop-main.split .pane) — faltou no pai, que e quem manda.
        A regra que isto garante: conteudo nunca empurra o layout, ele rola ou e cortado dentro da
-       propria caixa. */
+       propria caixa.
+       O piso de 360px da conversa nao mora mais aqui: ele virou o `minmax(360px, 1fr)` do trilho
+       do grid (ver `trilhos`). No item, `min-width: 0` continua sendo o certo — e o que impede o
+       conteudo de empurrar o layout. */
     min-width: 0;
     min-height: 0;
     position: relative;
@@ -685,6 +773,38 @@ import * as m from '../paraglide/messages';
     height: 100%;
     position: relative;
     overflow: hidden;
+  }
+  /* Coluna do painel de contexto: só reserva a faixa: quem desenha é o painel reparentado aqui
+     pelo Chat. `display: flex` pra ele esticar na altura sem precisar saber o tamanho da janela.
+     Abaixo de 1280px o painel é `display: none` (regra dele) — a coluna some pela mesma régua,
+     senão sobra uma faixa vazia do lado da conversa. */
+  .ctx-slot {
+    width: var(--cp-ctx-w, 264px);
+    display: flex;
+    min-height: 0;
+    min-width: 0;
+  }
+  /* Dividindo a coluna com outro bloco, a folga de baixo sai: as duas caixas empilhadas ficam
+     separadas pela margem de uma só, senão o vão entre elas é o dobro do que há nas laterais. */
+  .ctx-slot.empilhado :global(.session-context) { margin-bottom: 0; }
+  /* Mesmo alinhamento do `.git-coluna.empilhado`: o trilho vem do mais largo e os dois esticam
+     até ele, pra os empilhados lerem como uma coluna só. */
+  .ctx-slot.empilhado { min-width: 100%; }
+  /* Dock: a coluna encosta na barra lateral e copia o formato dela (altura do conteúdo, centrada).
+     Mesma regra que a `.git-coluna.flutuante` aplica quando quem está ali é o git. */
+  .ctx-slot.dock {
+    align-self: center;
+    height: var(--col-h, auto);
+    max-height: calc(100% - var(--space-8));
+  }
+  /* "Colados" desfaz o dock, igual à coluna de git: a barra vira parede e a vizinha também. */
+  :global(html[data-panels='edge']) .ctx-slot.dock {
+    align-self: stretch;
+    height: auto;
+    max-height: none;
+  }
+  @media (max-width: 1279px) {
+    .ctx-slot { display: none; }
   }
   /* Terminal maximizado: esconde o chat/board/canvas por baixo (o painel de contexto da direita
      vem de graca, e um descendente de .desktop-main via Chat.svelte). `visibility`, NAO
@@ -705,6 +825,10 @@ import * as m from '../paraglide/messages';
      TAMBEM no trilho (`barraRecolhida`) -- fixada aberta continua visivel, dividindo a largura com
      o painel. */
   .sidebar-wrap { display: contents; }
+  /* A barra lateral fica FORA do arranjo: primeira coluna, altura inteira, sempre. Ela é o chrome
+     do app, não um painel da sessão (mesma divisão do MonoCode). Alcança a filha porque o wrapper
+     é `display: contents` e não gera caixa — quem é item do grid é a `.sidebar`. */
+  .sidebar-wrap :global(.sidebar) { grid-column: 1; grid-row: 1 / -1; }
   /* `display: none` no WRAP não bastaria: ele é `display: contents`, então quem ocupa espaço é a
      `.sidebar` filha — esconder o pai que não gera caixa não esconde a filha. Alcança a filha. */
   .sidebar-wrap.oculta :global(.sidebar) { display: none; }
@@ -781,4 +905,22 @@ import * as m from '../paraglide/messages';
   .empty-mark { color: var(--accent); opacity: 0.22; margin-bottom: var(--space-4); }
   .empty-title { font-size: var(--text-lg); color: var(--text-secondary); font-weight: 500; }
   .empty-sub { font-size: var(--text-sm); color: var(--text-muted); }
+
+  /* Marca do arrasto. `pointer-events: none` é obrigatório: ela fica sob o cursor o tempo todo, e
+     capturando o ponteiro o `elementFromPoint` passaria a achar a própria marca em vez do bloco. */
+  .solta-veu, .solta-borda {
+    position: fixed; z-index: 60; pointer-events: none;
+    box-sizing: border-box;
+  }
+  .solta-veu {
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-radius: var(--radius-xl);
+  }
+  /* A barra grossa desenha em qual borda o bloco entra — é a diferença entre reordenar (lateral)
+     e empilhar (cima/baixo), e é a única pista de que as duas coisas existem. */
+  .solta-borda { border: 0 solid var(--accent); border-radius: var(--radius-xl); }
+  .solta-borda[data-borda='esquerda'] { border-left-width: 4px; }
+  .solta-borda[data-borda='direita'] { border-right-width: 4px; }
+  .solta-borda[data-borda='cima'] { border-top-width: 4px; }
+  .solta-borda[data-borda='baixo'] { border-bottom-width: 4px; }
 </style>

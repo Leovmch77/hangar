@@ -4,10 +4,10 @@
   // a lista de sessões mistura repositórios e "de qual git é este" não pode depender de memória.
   import { untrack } from 'svelte';
   import * as m from '../../paraglide/messages';
-  import { sidebarPrefs } from '../../lib/sidebarPrefs.svelte';
   import { gitStoreDaSessao, gitPainel, abrirArquivo, abrirCommit, limparAbas } from '../../lib/gitPainel.svelte';
   import { basename } from '@hangar/core';
   import FileIcon from '../files/FileIcon.svelte';
+  import MoverBloco from '../MoverBloco.svelte';
   import CommitBox from './CommitBox.svelte';
   import CommitList from './CommitList.svelte';
   import CommitMenu from './CommitMenu.svelte';
@@ -17,9 +17,23 @@
   interface Props {
     sessionName: string;
     cwd?: string | null;
+    /** Célula no grid da `.shell-linha` — quem manda é o arranjo escolhido (shellLayout). */
+    coluna?: number;
+    linha?: string;
+    /** Divide a coluna com outro bloco: perde a folga de baixo e a altura é do grid. */
+    empilhado?: boolean;
+    /**
+     * Esta coluna é a VIZINHA da barra lateral E a barra está em "Só o conteúdo"? Então ela vira
+     * dock também: altura do conteúdo, centrada. A regra é da POSIÇÃO, não desta coluna — quem
+     * encostar na barra segue o formato dela, senão uma peça é caixa centrada e a do lado é
+     * parede de ponta a ponta. Quem sabe a posição e mede a barra é o DesktopShell.
+     */
+    dock?: boolean;
+    alturaDock?: number;
     onFechar: () => void;
   }
-  let { sessionName, cwd = null, onFechar }: Props = $props();
+  let { sessionName, cwd = null, coluna = 2, linha = '1 / -1', empilhado = false,
+        dock = false, alturaDock = 0, onFechar }: Props = $props();
 
   const git = $derived(gitStoreDaSessao(sessionName));
   let escolhidos = $state<string[]>([]);
@@ -98,21 +112,6 @@
     return () => { cancelAnimationFrame(id); ro.disconnect(); };
   });
 
-  // Altura casando com a sidebar: no modo dock ("Só o conteúdo") ela tem altura de conteúdo, e uma
-  // coluna vizinha indo de ponta a ponta ao lado dela lê como peça solta. CSS não alcança um irmão,
-  // então a medida vem de um ResizeObserver na própria sidebar.
-  let alturaSidebar = $state(0);
-  $effect(() => {
-    if (sidebarPrefs.height !== 'content') { alturaSidebar = 0; return; }
-    const alvo = document.querySelector('.sidebar');
-    if (!alvo) return;
-    const medir = () => { alturaSidebar = alvo.getBoundingClientRect().height; };
-    const ro = new ResizeObserver(medir);
-    ro.observe(alvo);
-    medir();
-    return () => ro.disconnect();
-  });
-
   // Rolagem infinita do histórico: 200px antes do fim já pede o próximo lote, então rolar não
   // esbarra num botão. `rootMargin` no root da rolagem (.grafo), não na janela.
   let fimEl = $state<HTMLElement | null>(null);
@@ -182,8 +181,8 @@
 <!-- `flutuante` espelha Aparência → "Altura da barra lateral → Só o conteúdo" (Sidebar.svelte:357):
      como esta coluna é extensão da sidebar, ela tem que virar dock junto, senão uma peça é caixa
      centrada e a outra é parede de ponta a ponta, coladas. -->
-<aside class="git-coluna" class:flutuante={sidebarPrefs.height === 'content'} class:redim
-       style="--git-col-w: {largura}px{alturaSidebar ? `; --git-col-h: ${Math.round(alturaSidebar)}px` : ''}"
+<aside class="git-coluna" data-bloco="git" class:flutuante={dock} class:redim class:empilhado
+       style="grid-column: {coluna}; grid-row: {linha}; --git-col-w: {largura}px{dock && alturaDock ? `; --git-col-h: ${Math.round(alturaDock)}px` : ''}"
        bind:this={raiz} aria-label={m.git_coluna_titulo({ repo })}>
   <div class="larg-handle" role="separator" aria-orientation="vertical"
        aria-label={m.git_largura_coluna()}
@@ -200,6 +199,7 @@
         {#if !git.ahead && !git.behind}<span class="ok">✓</span>{/if}
       </span>
     {/if}
+    <span class="arrumar"><MoverBloco bloco="git" /></span>
     <button class="fechar" onclick={onFechar} aria-label={m.git_coluna_fechar()}>×</button>
   </header>
 
@@ -308,12 +308,18 @@
   .git-coluna {
     position: relative;
     display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    width: var(--git-col-w, 264px); flex: none;
+    width: var(--git-col-w, 264px);
     /* overflow: sem isso a coluna cresce com o conteúdo, passa do pé da janela e leva o histórico
        junto — o clamp do arrasto não salva um contêiner que já transbordou. */
     overflow: hidden;
     height: auto;
-    margin: var(--space-3) 0 var(--space-3) var(--space-3);
+    /* Folga nos QUATRO lados, não só à esquerda: a coluna pode estar em qualquer posição do
+       arranjo, e a margem de um lado só a deixava encostada na borda da janela quando ela é a
+       última. */
+    margin: var(--space-3);
+    /* A altura é da célula do grid, não do conteúdo: `height: auto` aqui deixava a coluna crescer
+       além do pé quando ela divide o espaço com outro bloco. */
+    min-height: 0;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-xl);
     box-shadow: var(--elev-3);
@@ -326,6 +332,16 @@
     container-type: inline-size;
   }
   .git-coluna.redim { transition: none; }
+  /* Dividindo a coluna: altura da célula (nada de `height: auto`, que estouraria o vão) e sem a
+     folga de baixo, pra o espaço entre os dois empilhados ser o mesmo das laterais. */
+  /* Dividindo a coluna: altura da célula (nada de `height: auto`, que estouraria o vão) e sem a
+     folga de baixo, pra o espaço entre os dois empilhados ser o mesmo das laterais.
+     A LARGURA passa a ser da coluna, não desta caixa: `auto` faz ela esticar até o trilho, e quem
+     define o trilho é o bloco de baixo. Duas caixas empilhadas com larguras próprias liam como
+     peças desalinhadas, e duas divisórias mexendo na mesma coluna não têm o que significar — por
+     isso o punho de largura some junto (regra abaixo). */
+  .git-coluna.empilhado { height: auto; margin-bottom: 0; width: auto; min-width: 0; }
+  .git-coluna.empilhado .larg-handle { display: none; }
   /* Handle de largura: mesma pegada do resize-handle da Sidebar (lá a borda é a direita também). */
   .larg-handle {
     position: absolute; top: 0; right: 0; width: 6px; height: 100%;
@@ -378,8 +394,21 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: 0 var(--recuo) var(--space-3); border-bottom: 1px solid var(--border-subtle);
   }
-  .repo { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* `flex` explícito com piso: sem ele o nome do repo era o único item elástico da linha e, com
+     as setas de arranjo ocupando o canto, encolhia até zero — sumia inteiro em vez de truncar. */
+  /* `flex` explícito com piso: sem ele o nome do repo era o único item elástico da linha e, com
+     as setas de arranjo ocupando o canto, encolhia até zero — sumia inteiro em vez de truncar.
+     O piso é generoso porque saber DE QUAL repo é esta coluna é a razão de ela ter cabeçalho. */
+  .repo {
+    flex: 1 1 auto; min-width: 7ch;
+    font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* A pílula da branch cede espaço ANTES do nome do repo: numa coluna estreita é o nome que
+     precisa aparecer inteiro; a branch já está no chip do composer e na barra lateral. */
   .branch {
+    /* Cede espaço ANTES do nome do repo, mas com piso: cortada em "m" ela não diz nada, e
+       "main…" ainda diz. */
+    flex: 0 1 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis;
     font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-secondary);
     background: var(--fill-subtle); border: 1px solid var(--border-default);
     border-radius: 999px; padding: 2px 9px; white-space: nowrap;
@@ -402,8 +431,11 @@
   @media (hover: hover) and (pointer: fine) {
     .mais-log:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
   }
+  /* Empurra as setas e o × pro fim da linha; o `margin-left: auto` saiu do × porque agora são
+     dois itens no canto e só o primeiro pode empurrar. */
+  .arrumar { margin-left: auto; display: flex; }
   .fechar {
-    margin-left: auto; background: none; border: 0; color: var(--text-muted);
+    background: none; border: 0; color: var(--text-muted);
     font-size: var(--text-base); line-height: 1; cursor: pointer; padding: 2px 4px;
   }
   .fechar:hover { color: var(--text-primary); }
@@ -459,6 +491,11 @@
   @container (max-width: 320px) {
     .git-coluna :global(.cb-actions) { flex-direction: column-reverse; }
     .git-coluna :global(.cb-btn) { width: 100%; }
+    /* Numa coluna estreita o cabeçalho não cabe: nome do repo + branch + ↑↓ + setas de arranjo +
+       fechar empurravam o × pra fora da caixa. Quem sai são a branch e o ↑↓, que já aparecem no
+       chip do composer, na barra lateral e na seção REPOSITÓRIO do painel de contexto — o nome do
+       repo, que é a razão deste cabeçalho existir, fica. Alargando a coluna, os dois voltam. */
+    .branch, .sync { display: none; }
   }
   /* Feedback de toque: 0.96 é o valor da referência — abaixo de 0.95 exagera. Transição nomeando
      as propriedades (só o que muda) e curta, porque é interação de alta frequência. */

@@ -26,25 +26,25 @@ describe('navegadorPanel — largura redimensionável', () => {
 
   it('arrastar a divisória até clientX=900 dá largura 700', async () => {
     const mod = await importarFresco();
-    mod.arrastarNav(900);
+    mod.arrastarNav(900, window.innerWidth);
     expect(mod.navegadorPanel.largura).toBe(700);
   });
 
   it('respeita o teto: janela menos chat e trilho da sidebar', async () => {
     const mod = await importarFresco();
-    mod.arrastarNav(100);   // pediria 1500, mas 1600-520-52 = 1028
+    mod.arrastarNav(100, window.innerWidth);   // pediria 1500, mas 1600-520-52 = 1028
     expect(mod.navegadorPanel.largura).toBe(1028);
   });
 
   it('respeita o mínimo', async () => {
     const mod = await importarFresco();
-    mod.arrastarNav(1599);
+    mod.arrastarNav(1599, window.innerWidth);
     expect(mod.navegadorPanel.largura).toBe(NAV_MIN);
   });
 
   it('guarda ao soltar e restaura ao remontar', async () => {
     const mod = await importarFresco();
-    mod.arrastarNav(900);
+    mod.arrastarNav(900, window.innerWidth);
     mod.salvarNav();
     const mod2 = await importarFresco();
     expect(mod2.navegadorPanel.largura).toBe(700);

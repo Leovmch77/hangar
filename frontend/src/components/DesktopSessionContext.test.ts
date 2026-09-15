@@ -170,6 +170,11 @@ describe('DesktopSessionContext — divisória redimensionável (task 17)', () =
     HTMLElement.prototype.setPointerCapture = vi.fn();
     try {
       const handle = document.querySelector<HTMLElement>('.ctx-resize-handle')!;
+      // O arrasto mede a borda direita da COLUNA do painel, não a da janela (ele deixou de colar
+      // no lado da tela). happy-dom não faz layout, então a medida vem daqui: 1600 = painel na
+      // ponta direita, que é o arranjo padrão e o caso que este teste descreve.
+      const painel = document.querySelector<HTMLElement>('.session-context')!;
+      painel.getBoundingClientRect = () => ({ right: 1600 }) as DOMRect;
       // janela 1600 -> teto 560; clientX 1200 -> 400, dentro da faixa clampsa
       handle.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 1, clientX: 1200, bubbles: true }));
       handle.dispatchEvent(new PointerEvent('pointermove', { pointerId: 1, clientX: 1200, bubbles: true }));

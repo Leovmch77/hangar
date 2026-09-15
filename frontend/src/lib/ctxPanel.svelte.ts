@@ -18,7 +18,10 @@ const CHAVE_GIT = 'cp_git_coluna_aberta';
 // LARGURA_ABERTO é o default quando nada foi salvo. Recolhido: só a aba da borda, o que devolve
 // ~230px de leitura ao chat.
 export const LARGURA_ABERTO = 264;
-export const LARGURA_TRILHO = 34;
+// 36 = a largura do trilho no CSS do painel (.session-context.recolhido). Enquanto o painel era
+// card absoluto os dois números podiam divergir (ele passava por cima da reserva); virando coluna
+// do shell, a reserva TEM que ser a largura dele.
+export const LARGURA_TRILHO = 36;
 
 // Larguras do painel aberto. MIN: abaixo disso a árvore de arquivos e a lista de tarefas ficam
 // ilegíveis (o painel nasceu em 264 e 240 ainda lê caminho e título). MAX: acima disso o visor de
@@ -107,6 +110,17 @@ export function alternarColunaGit(): void {
   } catch { /* modo privado: vale só nesta sessão */ }
 }
 
+/**
+ * Largura que o painel ocupa AGORA — recolhido vira trilho, e na aba Navegador quem manda é a
+ * largura do browser. Mora aqui porque o Chat e o DesktopShell precisam do mesmo número: o shell
+ * reserva a coluna, o Chat desenha dentro dela, e duas cópias da conta divergiriam na hora de
+ * arrastar.
+ */
+export function larguraCtxAplicada(): number {
+  if (ctxPanel.recolhido) return LARGURA_TRILHO;
+  return ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura;
+}
+
 export function alternarCtxPanel(): void {
   ctxPanel.recolhido = !ctxPanel.recolhido;
   try {
@@ -122,6 +136,7 @@ export function alternarCtxPanel(): void {
 // como sempre (o NavegadorPane re-mede e o view acompanha). Se o usuário mexeu no fold no meio, a
 // escolha dele fica.
 import { sidebarPin } from './sidebarPin.svelte';
+import { navegadorPanel } from './navegadorPanel.svelte';
 
 let sidebarAntesAba: boolean | null = null;
 $effect.root(() => {
@@ -137,12 +152,14 @@ $effect.root(() => {
   });
 });
 
-// Largura aplicada durante o arrasto da divisória (mesma régua da Sidebar, espelhada: lá o painel
-// cola na esquerda e `largura = clientX`; aqui cola na direita e `largura = janela - clientX`).
+// Largura aplicada durante o arrasto da divisória (mesma régua da Sidebar, espelhada: lá o punho
+// fica na direita, aqui na esquerda). `bordaDireita` é o lado direito DO PAINEL, não o da janela:
+// desde que ele virou coluna do shell pode haver coluna à direita dele, e medir pela janela dava
+// uma largura maior que a real — arrastar engordava o painel sozinho.
 // Clampa pelo mesmo teto da carga, então arrastar não espreme o visor ao lado.
-export function arrastarLargura(clientX: number): void {
+export function arrastarLargura(clientX: number, bordaDireita: number): void {
   if (typeof window === 'undefined') return;
-  ctxPanel.largura = clampLargura(window.innerWidth - clientX);
+  ctxPanel.largura = clampLargura(bordaDireita - clientX);
 }
 
 export function salvarLargura(): void {

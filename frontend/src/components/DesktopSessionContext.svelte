@@ -17,6 +17,7 @@
   import ActivitySheet from './ActivitySheet.svelte';
   import { gitPainel } from '../lib/gitPainel.svelte';
   import GitPainelAbas from './git/GitPainelAbas.svelte';
+  import MoverBloco from './MoverBloco.svelte';
 import * as m from '../paraglide/messages';
 import GroupGlyph from './icons/GroupGlyph.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
@@ -218,8 +219,14 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     if (!ctxPanel.resizing) return;
     // Com a aba Navegador ativa a divisória mexe na largura DELE (store próprio, teto próprio) —
     // a coluna engrossa pro browser; nas outras abas, a do contexto como sempre.
-    if (ctxPanel.aba === 'navegador') arrastarNav(e.clientX);
-    else arrastarLargura(e.clientX);
+    // A borda direita sai da COLUNA, não da janela: o painel não cola mais no lado da tela (pode
+    // ter a conversa ou o git à direita) e o que se arrasta é a largura da coluna, que inclui a
+    // folga do card — medir pelo painel encolhia 24px a cada volta do arrasto.
+    const alca = e.currentTarget as HTMLElement;
+    const direita = (alca.closest('.ctx-slot') ?? alca.closest('.session-context'))
+      ?.getBoundingClientRect().right ?? window.innerWidth;
+    if (ctxPanel.aba === 'navegador') arrastarNav(e.clientX, direita);
+    else arrastarLargura(e.clientX, direita);
   }
   function resizeEnd() {
     if (!ctxPanel.resizing) return;
@@ -282,6 +289,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
       {#if stateDetail}<p class="header-detail">{stateDetail}</p>{/if}
     </div>
     <div class="header-right">
+      <MoverBloco bloco="ctx" />
       <StateChip {state} size="md" />
       {#if loopLabel}
         <button type="button" class="loop-chip" style="color: {loopColor};" onclick={onLoopTap} aria-label={m.ctx_aria_loop({ n: loopLabel })}>{loopLabel}</button>
@@ -579,20 +587,22 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
        scroller, entao o nome da sessao e o botao Terminal subiam junto com as metricas. */
     display: flex;
     flex-direction: column;
-    position: absolute;
-    /* A navbar tem um fade visual abaixo da altura medida; começa depois dele para o título do
-       painel não ficar sob o scrim (o conteúdo do chat pode rolar ali, um header fixo não).
-       >=1280px a navbar some (Chat esconde) e o painel sobe pro topo. */
-    top: calc(var(--nav-h, 56px) + var(--navbar-fade, 24px) + var(--ctx-gap));
-    right: var(--ctx-gap);
-    bottom: var(--ctx-gap);
+    /* COLUNA do shell, não card por cima da conversa: o nó é reparentado pelo Chat pra `.ctx-slot`
+       (DesktopShell), que é quem reserva a largura. `relative` fica pelos filhos absolutos daqui
+       (o punho de arrastar, os pontinhos de aviso). Enquanto era `absolute`, trocar de lugar com
+       a coluna de git era impossível — ele não era irmão de ninguém. */
+    position: relative;
+    flex: 1;
+    min-width: 0;
     z-index: 17;
     /* CAIXA SOLTA, não parede colada na borda (mesma ideia do painel do Gemini no Gmail): folga em
        volta, cantos redondos e sombra, pra ler como uma seção à parte em vez de "o chat encolheu".
-       A faixa reservada pelo Chat (`--ctx-w`, Chat.svelte:1287) continua a MESMA: a folga sai de
-       dentro dela, então a coluna de mensagens não precisa saber que o painel virou card. */
+       A folga sai de DENTRO da coluna: a largura salva pela pessoa continua sendo a da coluna
+       inteira, como era com a faixa reservada pelo Chat. */
     --ctx-gap: var(--space-3);
-    width: calc(var(--ctx-w, 248px) - var(--ctx-gap));
+    /* Folga nos quatro lados: o painel pode ficar em qualquer posição do arranjo, e a margem só
+       à direita o deixava encostado no trilho quando ele vai pra esquerda da conversa. */
+    margin: var(--ctx-gap);
     overflow: hidden;
     /* MESMA receita da sidebar e da faixa de cota (18/08): eram três acabamentos parecidos e
        nenhum igual — este usava --border-default (mais forte) e uma sombra SEM o brilho de borda
@@ -694,12 +704,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     overscroll-behavior: contain;
   }
 
-  @media (min-width: 1280px) {
-    /* Sem navbar, --nav-h carrega so o topInset (ex: faixa de atencao, 52px) — o painel comeca
-       abaixo dela, nunca embaixo. */
-    .session-context { top: calc(var(--nav-h, 0px) + var(--ctx-gap)); }
-  }
-
   header {
     min-height: 64px;
     display: flex;
@@ -714,8 +718,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     background: color-mix(in srgb, var(--bg-elevated) 52%, transparent);
   }
 
+  /* Piso de largura: com as setas de arranjo no canto direito, o título era o único item elástico
+     e cedia tudo — o nome da sessão virava "han…" num painel de 316px. */
   .ctx-heading {
-    min-width: 0;
+    flex: 1 1 auto;
+    min-width: 9ch;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1082,7 +1089,12 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
      toggle externo (sidebar expandida), sobra uma PORTA DISCRETA no topo — o ctx-fold na posição
      do header (36px), não uma aba flutuante: clicar reexpande. */
   .session-context.recolhido {
+    /* Trilho: largura fixa e sem folga nenhuma — a aba encosta na borda, que é o que faz ela ler
+       como puxador. A coluna do shell reserva exatamente estes 36px (LARGURA_TRILHO), então
+       qualquer margem aqui viraria estouro e sobraria faixa vazia ao lado. */
+    flex: none;
     width: 36px;
+    margin: 0;
     border-color: transparent;
     box-shadow: none;
     pointer-events: none;

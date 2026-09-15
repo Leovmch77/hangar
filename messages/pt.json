@@ -1712,6 +1712,8 @@
   "git_alterado_1": "1 arquivo alterado",
   "git_alterados": "{n} arquivos alterados",
   "git_nenhum": "nenhum",
+  "layout_arrastar": "arrastar até a borda de outro bloco pra mudar o arranjo",
+  "layout_voltar_padrao": "voltar ao arranjo padrão",
   "git_grupo_staged": "staged",
   "git_grupo_nao_staged": "não staged",
   "git_abas_anteriores": "abas anteriores",

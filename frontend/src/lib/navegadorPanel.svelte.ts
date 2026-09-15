@@ -144,9 +144,14 @@ export function podarNavMortos(vivos: Map<string, Map<string, string | null>>): 
 }
 
 // O painel cola na direita: largura = janela - clientX (espelho do arrastarLargura do ctxPanel).
-export function arrastarNav(clientX: number): void {
+/**
+ * `bordaDireita` é o lado direito do painel, não o da janela: desde que ele virou coluna do shell
+ * pode haver outra coluna à direita dele, e medir pela janela dava uma largura maior que a real —
+ * o painel crescia sozinho ao arrastar.
+ */
+export function arrastarNav(clientX: number, bordaDireita: number): void {
   if (typeof window === 'undefined') return;
-  navegadorPanel.largura = clampLargura(window.innerWidth - clientX);
+  navegadorPanel.largura = clampLargura(bordaDireita - clientX);
 }
 
 export function salvarNav(): void {

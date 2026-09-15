@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { ctxPanel, LARGURA_TRILHO, reclamparLargura } from '../lib/ctxPanel.svelte';
+  import { ctxPanel, reclamparLargura } from '../lib/ctxPanel.svelte';
   import NavBar from '../components/NavBar.svelte';
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
@@ -115,6 +115,11 @@
     topInset?: number;
     onOpenWorkspacePalette?: () => void;
     showContextPanel?: boolean;
+    // Onde o painel de contexto vai DESENHAR: uma coluna do DesktopShell, irmã da conversa e da
+    // coluna de git. O painel continua sendo filho deste componente (são 43 props vindas daqui);
+    // só o nó muda de pai. Sem destino, ele fica escondido em vez de aparecer solto no meio do
+    // chat — é o estado de um quadro só (o slot do shell entra no mesmo flush).
+    ctxHost?: HTMLElement | null;
     // Follow-up visual: existe um toggle do painel de contexto FORA dele (barra de abas no modo
     // 'tabs', ou rodapé do rail no modo 'rail' com a sidebar recolhida) — repassado ao
     // DesktopSessionContext pra ele não duplicar o botão nem virar aba vertical.
@@ -134,7 +139,8 @@
   let {
     sessionName, onBack, onNavigateToChat, desktop = false, onOpenSplit, onOpenTerminalPanel,
     terminalPanelOpen = false, terminalPanelDisponivel = true,
-    topInset = 0, onOpenWorkspacePalette, showContextPanel = false, ctxToggleExterno = false,
+    topInset = 0, onOpenWorkspacePalette, showContextPanel = false, ctxHost = null,
+    ctxToggleExterno = false,
     publishWorkspaceActions = false, onWorkspaceActionsChange, nested = false,
     splitTab = false, onCloseSplit,
   }: Props = $props();
@@ -200,17 +206,12 @@
   // desses componentes medem a JANELA e não veem isto, por isso a régua vem daqui, por classe e
   // por prop, em vez de container query: `container-type` no .chat-screen viraria containing
   // block pros sheets position:fixed que moram dentro dele.
-  // O `isDesktopLargo` na conta é o que impede descontar uma faixa que não existe: abaixo de
-  // 1280px o painel é display:none e a reserva --recuo-dir nem é declarada, então sem ele TODA
-  // janela entre 820 e 1279px descontava 240-560px de nada e caía no arranjo de celular.
+  // Desde que o painel virou COLUNA do shell, não há mais o que descontar: ele não fica por cima
+  // da conversa, então o `clientWidth` daqui já é a largura livre. A subtração que existia aqui
+  // (a faixa do painel) passaria a tirar duas vezes — a conversa se daria por estreita 264px
+  // antes da hora e cairia no arranjo de celular numa janela larga.
   let larguraTela = $state(0);
-  const larguraColuna = $derived(
-    larguraTela === 0 ? 0
-      : larguraTela - (desktop && isDesktopLargo && showContextPanel
-          ? (ctxPanel.recolhido ? LARGURA_TRILHO
-             : ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura)
-          : 0),
-  );
+  const larguraColuna = $derived(larguraTela);
   const colunaEstreita = $derived(desktop && larguraColuna > 0 && larguraColuna < 820);
 
   // O painel de contexto esta VISIVEL? (B1, Task 12): o Git desktop so esconde a aba Arquivos
@@ -2634,7 +2635,6 @@
   class:with-context={desktop && showContextPanel}
   class:coluna-estreita={colunaEstreita}
   bind:clientWidth={larguraTela}
-  style:--cp-ctx-w={`${ctxPanel.recolhido ? LARGURA_TRILHO : ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura}px`}
   bind:this={screenEl}
   style:--nav-h={navH + topInset + 'px'}
 >
@@ -2666,6 +2666,16 @@
   {/if}
 
   {#if desktop && showContextPanel}
+  <!-- `display: contents`: o wrapper existe só pra ter um nó que o portal move; ele não pode
+       virar caixa nenhuma, senão o painel deixa de ser o item flex da coluna do shell. -->
+  <div class="ctx-portal" class:sem-destino={!ctxHost}
+       {@attach (node: HTMLElement) => {
+         ctxHost?.appendChild(node);
+         // A limpeza é OBRIGATÓRIA: quem apaga o bloco é o Svelte, e ele apaga pelo trecho entre
+         // as âncoras dele no Chat — onde o nó não está mais. Sem isto, trocar de sessão deixava
+         // o painel da anterior pendurado no slot, e os dois dividiam a coluna.
+         return () => node.remove();
+       }}>
     <DesktopSessionContext
       toggleExterno={ctxToggleExterno}
       state={currentState}
@@ -2709,6 +2719,7 @@
       {planLoading}
       {planError}
     />
+  </div>
   {/if}
 
   {#if visorAberto && arquivoAberto}
@@ -3297,6 +3308,11 @@
     z-index: 20;
   }
 
+  /* Wrapper do portal: sem caixa própria, pra o painel ser o item flex da coluna do shell. Sem
+     destino ainda (o slot do shell não montou), some — nunca aparece solto no meio da conversa. */
+  .ctx-portal { display: contents; }
+  .ctx-portal.sem-destino { display: none; }
+
   /* O painel contextual é um card FLUTUANTE (position:absolute, DesktopSessionContext.svelte:279),
      então quem abre espaço pra ele é aqui — e a reserva tem que valer na MESMA faixa em que ele
      existe: 1280px (abaixo disso ele é display:none, DesktopSessionContext.svelte:656). Enquanto a
@@ -3307,8 +3323,11 @@
     /* O painel lateral ocupa espaço real de leitura. Reservamos essa faixa no próprio scroller,
        então a coluna continua centrada no espaço restante quando a sidebar abre/fecha, em vez de
        ficar presa a uma margem direita fixa que desloca o chat em larguras intermediárias. */
-    /* a largura vem do estado do painel (ctxPanel), via style inline no elemento */
-    .chat-screen.with-context { --ctx-w: var(--cp-ctx-w, 264px); }
+    /* ZERO desde que o painel virou coluna do DesktopShell: ele não fica mais por cima da
+       conversa, então não há faixa a reservar aqui — quem tira a largura dele do chat é o flex do
+       shell. A variável fica (em vez de apagar as regras que a usam) porque é ela que carrega a
+       ideia de "faixa coberta à direita": voltando a existir uma, é só ela que muda. */
+    .chat-screen.with-context { --ctx-w: 0px; }
 
     /* A coluna vive no ESPAÇO LIVRE entre a sidebar e o painel de contexto — começa onde a
        sidebar termina (o .chat-screen JÁ começa depois dela, quem reserva a faixa é o
@@ -3332,8 +3351,12 @@
     }
     .chat-screen.desktop :global(.message-list) {
       box-sizing: border-box;
-      padding-left: var(--recuo-esq);
-      padding-right: var(--recuo-dir);
+      /* O respiro lateral era efeito colateral da faixa que o painel de contexto ocupava aqui
+         dentro; com ele virando coluna do shell, o texto passou a encostar nas duas bordas.
+         A folga agora é explícita, e continua somando ao recuo — quem centraliza segue sendo o
+         `margin-inline: auto` da .messages-inner. */
+      padding-left: calc(var(--recuo-esq) + var(--space-4));
+      padding-right: calc(var(--recuo-dir) + var(--space-4));
     }
     .chat-screen.desktop .bottom-dock {
       left: var(--recuo-esq);

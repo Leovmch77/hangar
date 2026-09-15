@@ -13,6 +13,7 @@ import * as m from '../paraglide/messages';
   import { sidebarBridge } from '../lib/sidebarBridge';
   import { prefetchContas } from '../lib/queries';
   import { ctxPanel, alternarCtxPanel } from '../lib/ctxPanel.svelte';
+  import { shellLayout } from '../lib/shellLayout.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { getActiveId, serverColor } from '../lib/auth';
   import HangarMark from './icons/HangarMark.svelte';
@@ -40,6 +41,10 @@ import * as m from '../paraglide/messages';
   }
   let { currentKey, onSelect, onOpenConfig, onIrParaContas, ctxDisponivel = true,
         temAtualizacao = false, onAbrirAtualizar = () => {}, versao = null, atras = 0 }: Props = $props();
+
+  // Painel de contexto na PRIMEIRA posição = ele encosta na barra lateral, do lado esquerdo da
+  // tela; o toggle dele vai junto.
+  const ctxNaEsquerda = $derived(shellLayout.ehVizinhoDaSidebar('ctx'));
 
   // A versão fica só no tooltip (e no Sobre): na cara da barra era ruído, decisão do usuário.
   // "commits atrás" responde "está atualizado?" sem abrir nada.
@@ -249,7 +254,11 @@ import * as m from '../paraglide/messages';
   <!-- Toggle do painel de contexto (follow-up visual): vive no EXTREMO DIREITO da barra, como o
        OpenCode. MESMO ícone do .ctx-fold (painel dividido) e alterna o store nos dois sentidos.
        Sem painel montado: desabilitado com tooltip (decisão do usuário). -->
+  <!-- Segue o LADO do painel: ele é o único controle da barra que aponta pra uma borda da tela
+       (o ícone desenha uma coluna colada numa delas), então ficar na direita com o painel à
+       esquerda lê como invertido. `order: -1` joga ele pro começo da barra; o ícone espelha junto. -->
   <button class="tab-action tab-ctx" class:aberto={!ctxPanel.recolhido}
+    class:espelhado={ctxNaEsquerda} style:order={ctxNaEsquerda ? -1 : null}
     onclick={alternarCtxPanel} disabled={!ctxDisponivel}
     aria-label={!ctxDisponivel ? m.ctx_sem_painel()
       : (ctxPanel.recolhido ? m.ctx_expandir_painel() : m.ctx_recolher_painel())}
@@ -427,6 +436,9 @@ import * as m from '../paraglide/messages';
   /* Toggle do contexto: painel ABERTO = accent (mesmo vocabulário do .select-toggle-btn.active);
      sem contexto montado = esmaecido e inerte (decisão do usuário). */
   .tab-ctx.aberto { color: var(--accent); }
+  /* Painel do outro lado: o desenho vira o espelho de si mesmo, pra a coluna do ícone apontar
+     pro lado em que o painel realmente está. */
+  .tab-ctx.espelhado svg { transform: scaleX(-1); }
   .tab-action:disabled { color: var(--text-muted); opacity: 0.55; cursor: default; }
   .tab-action:disabled:hover { background: transparent; }
   /* PWA em window-controls-overlay: a faixa vira a área arrastável da janela; botões e faixa de
