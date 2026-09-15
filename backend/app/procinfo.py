@@ -17,6 +17,7 @@ arquivo, um namespace, um alvo de patch.
 """
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -456,3 +457,42 @@ def _start_time_psutil(pid: int) -> Optional[float]:
         return psutil.Process(pid).create_time()
     except psutil.Error:
         return None
+
+
+# O Claude Code roda cada Bash num shell que carrega um prologo (snapshot do ambiente, guardas de
+# glob) antes do comando de verdade, que vai dentro de um `eval '...'`. Mostrar a linha inteira
+# enche a tela de prologo; o que interessa e o que foi pedido.
+# O sufixo depois do `eval` varia (`< /dev/null`, redirecionamento do background, `&& pwd -P`), entao
+# o corte e na ULTIMA aspa seguida de espaco ou fim de linha — nao numa cauda fixa, que ja deixou
+# passar linha crua de shell de background.
+_EVAL_RE = re.compile(r"eval '(.*)'(?:\s|$)", re.DOTALL)
+
+
+def _comando_pedido(bruto: str) -> str:
+    m = _EVAL_RE.search(bruto)
+    if not m:
+        return bruto.strip()
+    # O shell escapa aspas simples do comando como '"'"' — desfaz pra ler como a pessoa escreveu.
+    return m.group(1).replace("""'"'"'""", "'").strip()
+
+
+def shells_de(pid: int) -> list[dict]:
+    """Comandos de shell que esta sessao deixou rodando: os filhos DIRETOS do processo do agente.
+
+    Existe porque "a sessao esta ocupada" e "sobrou um comando rodando" sao coisas diferentes, e so
+    a segunda explica por que uma sessao parada aparece trabalhando. Filho direto, nao descendente:
+    o que interessa e o comando que o agente disparou, nao a arvore que ele abriu.
+
+    Degrada como o resto do modulo: sem /proc e sem psutil, lista vazia.
+    """
+    try:
+        filhos = _proc_children_map().get(pid, [])
+    except Exception:  # noqa: BLE001 - leitura de processo nunca derruba quem pergunta
+        return []
+    out: list[dict] = []
+    for f in filhos:
+        cmd = _comando_pedido(_cmdline(f))
+        if not cmd:
+            continue
+        out.append({"pid": f, "cmd": cmd, "desde": _proc_start_time(f)})
+    return out

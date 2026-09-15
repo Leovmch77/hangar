@@ -67,7 +67,7 @@
     uploadUrl,
     descartarDaFila,
   } from '@hangar/core';
-  import { formataErro } from '@hangar/core';
+  import { formataErro, relativeTime } from '@hangar/core';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
@@ -1291,6 +1291,9 @@
   // store aqui abria 1 stream de lista POR SERVIDOR no celular (com offline = retry eterno) e
   // derrubava a conexão do pocket — regressão real vista no iPhone, revertida.
   const loopChip = $derived(loopBadge(stateEvent?.loop_status, stateEvent?.loop_iter, stateEvent?.loop_max));
+  // Comando de background que sobrou com o turno encerrado (o "N shells still running" da TUI). O
+  // backend só manda quando é isso que segura a sessão, então não há o que filtrar aqui.
+  const shellsVivos = $derived(stateEvent?.shells ?? []);
   const crumbs = $derived(
     desktop ? { server: serverLabel, session: sessionName, branch: status?.branch, dirty: status?.dirty ?? false } : null
   );
@@ -2847,6 +2850,21 @@
     {/if}
   {/if}
 
+  {#if shellsVivos.length}
+    <!-- A sessão está PARADA com um comando de background de pé. Informação, não alerta: fica no
+         fluxo, sem pulsar nem competir com as pills acima do dock. -->
+    <div class="shells-vivos">
+      <span class="shells-vivos-titulo">
+        {shellsVivos.length > 1
+          ? m.chat_shell_rodando_n({ n: shellsVivos.length })
+          : m.chat_shell_rodando({ quando: relativeTime(shellsVivos[0].desde) })}
+      </span>
+      {#each shellsVivos as sh (sh.pid)}
+        <code class="shells-vivos-cmd" title={sh.cmd}>{sh.cmd}</code>
+      {/each}
+    </div>
+  {/if}
+
   {#if tuiOverlay && !sessionHeadless && !mirrorOpen && !xtermOpen && !terminalPanelOpen}
     <!-- Aviso DESTACADO: ha um painel que SO da pra interagir pela TUI. Pulsa pra chamar atencao;
          tocar abre o espelho. Nao toma a tela (so um banner acima do dock). -->
@@ -3444,6 +3462,28 @@
     -webkit-tap-highlight-color: transparent;
   }
   .hist-pill:active { background: var(--bg-hover); }
+
+  /* Informação, não alerta: fica no fluxo, discreta, e o comando pode ser longo — rola em vez de
+     empurrar o layout. Superfície de vidro (--surface-inset), nunca retângulo opaco. */
+  .shells-vivos {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: var(--space-2) var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--surface-inset);
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+  .shells-vivos-titulo { font-weight: 600; }
+  .shells-vivos-cmd {
+    overflow-x: auto;
+    white-space: nowrap;
+    font-family: var(--font-mono, monospace);
+    color: var(--text-secondary);
+  }
 
   /* O arquivo aberto (Task 11): cobre SÓ a área da conversa — da navbar ao rodapé, do começo
      do chat até o painel de contexto (--ctx-w). A árvore do painel continua viva e clicável ao

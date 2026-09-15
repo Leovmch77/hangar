@@ -219,6 +219,13 @@ class ChatEvent(BaseModel):
         return scrub_surrogates(data) if isinstance(data, dict) else data
 
 
+class ShellVivo(BaseModel):
+    """Um comando de background que a sessao deixou rodando."""
+    pid: int
+    cmd: str
+    desde: Optional[float] = None       # epoch em segundos; None quando o sistema nao soube dizer
+
+
 class StateEvent(BaseModel):
     session: str
     state: State
@@ -257,6 +264,11 @@ class StateEvent(BaseModel):
     # consulta é a do servidor ATIVO: sessão de outro servidor (ou lista que ainda não chegou)
     # não diria que não há terminal, e o botão dele aparecia.
     headless: bool = False
+    # Comandos de background que a sessao deixou rodando com o turno JA encerrado (a TUI do Claude
+    # chama de "N shells still running"). Lista vazia no caso normal. Existe porque uma sessao
+    # parada com um comando pendurado nao e uma sessao trabalhando: o estado e `idle` e o chip diz
+    # o que sobrou, com o comando e desde quando — um shell de horas quase sempre e algo travado.
+    shells: list[ShellVivo] = []
 
 
 class PreviewEvent(BaseModel):

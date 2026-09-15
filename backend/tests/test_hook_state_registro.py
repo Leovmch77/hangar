@@ -49,6 +49,32 @@ def test_registro_de_pid_morto_cai_no_marcador(tmp_path):
     assert hs.get_state("aaa")[0] == "working"
 
 
+def test_registro_shell_e_sessao_ociosa_com_comando_vivo(tmp_path):
+    # Turno encerrado com um comando de background de pe: a TUI diz `shell`. O agente aceita
+    # mensagem, entao vale `idle` — antes o status ficava de fora do mapa, o registro inteiro era
+    # descartado e o fallback do pane dizia "working" numa sessao parada.
+    _marcador(tmp_path, "aaa", "working")
+    _registro(tmp_path, os.getpid(), "aaa", "shell")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "idle"
+
+
+def test_shells_so_no_status_shell(tmp_path, monkeypatch):
+    monkeypatch.setattr(hook_state, "shells_de", lambda pid: [{"pid": 4242, "cmd": "sleep 900", "desde": None}])
+    hs = hook_state.HookState()
+
+    hs._apply_registro(_registro(tmp_path, os.getpid(), "aaa", "shell"))
+    assert [s["cmd"] for s in hs.shells("aaa")] == ["sleep 900"]
+
+    # Trabalhando, o filho direto e o comando em PRIMEIRO plano: o turno acontecendo, nao resto.
+    hs._apply_registro(_registro(tmp_path, os.getpid(), "aaa", "busy"))
+    assert hs.shells("aaa") == []
+
+    hs._apply_registro(_registro(tmp_path, PID_MORTO, "aaa", "shell"))
+    assert hs.shells("aaa") == [], "pid morto nao tem filho pra mostrar"
+
+
 def test_registro_status_desconhecido_nao_vale(tmp_path):
     _marcador(tmp_path, "aaa", "working")
     _registro(tmp_path, os.getpid(), "aaa", "blocked")

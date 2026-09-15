@@ -665,6 +665,8 @@
   "chat_voltar_sessoes": "Back to sessions",
   "chat_historico_antigo": "Older history didn't load — tap to retry",
   "chat_sem_historico_anterior": "No earlier history — the transcript changed",
+  "chat_shell_rodando": "Command still running, started {quando}:",
+  "chat_shell_rodando_n": "{n} commands still running:",
   "chat_sessao_encerrada": "This session was ended.",
   "chat_sse_recusado": "The server refused this session's stream.",
   "chat_sse_tentar": "Try again",

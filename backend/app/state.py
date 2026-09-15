@@ -812,9 +812,12 @@ class StateMonitor:
             loop_status = loop_d.get("status") if loop_d else None
             loop_iter = loop_d.get("iter") if loop_d else None
             loop_max = loop_d.get("max_iters") if loop_d else None
+            # Comando de background que sobrou com o turno encerrado. So o pid entra no dedupe: o
+            # tempo corre sozinho e faria um evento novo a cada poll.
+            shells = hook_state.shells(self.sid_get()) if self.sid_get is not None else []
             key = (state, label, question, tuple(options or ()), status, overlay, login,
                    limited, limit_reset, loop_status, loop_iter, loop_max,
-                   permission_mode, previous_non_plan)
+                   permission_mode, previous_non_plan, tuple(s["pid"] for s in shells))
             if key != last_key:
                 last_key = key
                 held_state, held_label = state, label
@@ -824,5 +827,6 @@ class StateMonitor:
                                  limited=limited, limit_reset=limit_reset,
                                  loop_status=loop_status, loop_iter=loop_iter, loop_max=loop_max,
                                  claude_permission_mode=permission_mode,
-                                 claude_previous_non_plan=previous_non_plan)
+                                 claude_previous_non_plan=previous_non_plan,
+                                 shells=shells)
             await asyncio.sleep(self.poll)

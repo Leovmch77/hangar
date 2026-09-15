@@ -191,6 +191,16 @@ export interface StateEvent {
   // Hoje só a sessão Claude sem terminal publica.
   problema?: string | null;
   problema_detalhe?: string | null;
+  // Comandos de background que a sessão deixou rodando com o turno já encerrado. Vazio no caso
+  // normal: só vem quando a TUI diz que é isso que a segura, e é o que distingue "parada com um
+  // comando pendurado" de "trabalhando".
+  shells?: ShellVivo[];
+}
+
+export interface ShellVivo {
+  pid: number;
+  cmd: string;
+  desde?: number | null;   // epoch em SEGUNDOS (não ms), como o backend manda
 }
 
 // Evento SSE `preview` (app/preview.py): texto em voo, full-replace. md = veio do sidecar do

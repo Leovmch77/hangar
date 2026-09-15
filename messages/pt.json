@@ -665,6 +665,8 @@
   "chat_voltar_sessoes": "Voltar às sessões",
   "chat_historico_antigo": "Histórico antigo não carregou — tocar pra tentar",
   "chat_sem_historico_anterior": "Sem o histórico anterior — o transcript mudou",
+  "chat_shell_rodando": "Comando ainda rodando, iniciado {quando}:",
+  "chat_shell_rodando_n": "{n} comandos ainda rodando:",
   "chat_sessao_encerrada": "Esta sessão foi encerrada.",
   "chat_sse_recusado": "O servidor recusou a conexão desta sessão.",
   "chat_sse_tentar": "Tentar de novo",

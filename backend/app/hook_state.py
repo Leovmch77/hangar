@@ -7,7 +7,7 @@ from typing import Callable, Optional
 from watchfiles import Change, awatch
 
 from app import atomico
-from app.procinfo import pid_vivo
+from app.procinfo import pid_vivo, shells_de
 
 _log = logging.getLogger("hangar.hook_state")
 
@@ -17,7 +17,16 @@ _SUBDIR = ".hangar-state"
 # de par segurado E dialogo aberto (/model, /config) — pra este ultimo o pane rebaixa (demote).
 _REGISTRO_DIR = "sessions"
 _REGISTRO_RE = re.compile(r"^\d+\.json$")
-_ESTADO_REGISTRO = {"idle": "idle", "busy": "working", "waiting": "awaiting_input"}
+# `shell` e a sessao PARADA com um comando de background que ela disparou ainda vivo (a TUI mostra
+# "N shells still running"). O agente nao esta pensando: aceita mensagem, e por isso vale `idle`.
+# Antes ele nao estava no mapa, o KeyError descartava o registro INTEIRO e o estado caia no
+# fallback que raspa o pane — que via atividade e dizia "working" numa sessao ociosa.
+_ESTADO_REGISTRO = {
+    "idle": "idle",
+    "busy": "working",
+    "waiting": "awaiting_input",
+    "shell": "idle",
+}
 
 
 class HookState:
@@ -30,7 +39,7 @@ class HookState:
         # Registro nativo por session_id -> (state, ts, pid). Vence o marcador enquanto o pid vive:
         # e o estado que a TUI tem, sem depender de hook instalado nem de evento que nao existe
         # (Esc num pedido de permissao nao dispara Stop e deixava o marcador preso em working).
-        self._registro: dict[str, tuple[str, float, int]] = {}
+        self._registro: dict[str, tuple[str, float, int, str]] = {}
         self._registro_arquivo: dict[str, str] = {}  # caminho -> session_id (pra remover na saida)
         # Dirs registrados (load_existing/watch) — demote_awaiting precisa achar o sidecar.
         self._dirs: list[Path] = []
@@ -48,6 +57,20 @@ class HookState:
         if r is not None and pid_vivo(r[2]):
             return (r[0], r[1])
         return self._map.get(session_id)
+
+    def shells(self, session_id: Optional[str]) -> list[dict]:
+        """Comandos que a sessao deixou rodando, quando a TUI diz que e isso que a segura.
+
+        So no status `shell`: perguntar ao /proc a cada poll de uma sessao que esta de fato
+        trabalhando seria varrer processo por nada, e o filho direto ali e o comando em primeiro
+        plano — que nao e resto nenhum, e so o turno acontecendo.
+        """
+        if not session_id:
+            return []
+        r = self._registro.get(session_id)
+        if r is None or r[3] != "shell" or not pid_vivo(r[2]):
+            return []
+        return shells_de(r[2])
 
     def _apply(self, path: Path, notify: bool = False) -> None:
         # Le UM marcador pro mapa. Falha-soft: marcador parcial/corrompido e ignorado.
@@ -67,12 +90,13 @@ class HookState:
         try:
             o = json.loads(path.read_text(encoding="utf-8"))
             sid, pid = str(o["sessionId"]), int(o["pid"])
-            state = _ESTADO_REGISTRO[o["status"]]
+            nativo = str(o["status"])
+            state = _ESTADO_REGISTRO[nativo]
             ts = float(o.get("statusUpdatedAt") or o["updatedAt"]) / 1000.0
         except Exception:
             return
         prev = self.get_state(sid)
-        self._registro[sid] = (state, ts, pid)
+        self._registro[sid] = (state, ts, pid, nativo)
         self._registro_arquivo[str(path)] = sid
         if notify:
             self._notificar(sid, prev, self.get_state(sid))

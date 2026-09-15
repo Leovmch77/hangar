@@ -305,6 +305,54 @@ def test_pid_vivo_de_outro_dono_e_vivo(monkeypatch):
     assert procinfo.pid_vivo(os.getpid()) is True
 
 
+def test_comando_pedido_tira_o_prologo_do_shell():
+    """O que o agente pediu, nao o prologo que o Claude Code poe em volta.
+
+    A linha real tem snapshot de ambiente, guardas de glob e o comando dentro de um `eval '...'`;
+    mostrar tudo isso num chip nao diz nada sobre o que ficou rodando.
+    """
+    bruto = (
+        "/usr/bin/zsh -c source /home/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null "
+        "|| true && setopt NO_EXTENDED_GLOB 2>/dev/null || true && "
+        "eval 'cd /repo/shell && node --test preview_srv.test.cjs' < /dev/null && pwd -P >| /tmp/x-cwd"
+    )
+    assert procinfo._comando_pedido(bruto) == "cd /repo/shell && node --test preview_srv.test.cjs"
+
+    # Aspas simples dentro do comando chegam escapadas como '"'"' — voltam ao que foi escrito.
+    escapado = """/usr/bin/zsh -c eval 'python3 -c '"'"'print(1)'"'"'' < /dev/null"""
+    assert procinfo._comando_pedido(escapado) == "python3 -c 'print(1)'"
+
+    # Sem o embrulho (processo que nao veio do Bash do agente) o comando e a propria linha.
+    assert procinfo._comando_pedido("  sleep 900  ") == "sleep 900"
+
+    # O sufixo depois do eval nao e sempre `< /dev/null`: shell de background redireciona a saida, e
+    # exigir a cauda fixa deixava a linha CRUA (com snapshot e guardas) chegar ao chip.
+    bg = "/usr/bin/zsh -c source /snap.sh || true && eval 'sleep 300; echo fim' > /tmp/b.output 2>&1"
+    assert procinfo._comando_pedido(bg) == "sleep 300; echo fim"
+
+
+def test_shells_de_lista_filho_direto_com_comando_e_inicio():
+    import subprocess
+    import time as _t
+    filho = subprocess.Popen(["sleep", "30"])
+    try:
+        # O mapa de filhos tem TTL de 1s: quem precisa ver um processo que ACABOU de nascer
+        # invalida antes, como o fallback de sessao recem-criada ja faz.
+        procinfo._invalidar_children_map()
+        achados = [s for s in procinfo.shells_de(os.getpid()) if s["pid"] == filho.pid]
+        assert len(achados) == 1, "o filho direto tem que aparecer"
+        assert achados[0]["cmd"] == "sleep 30"
+        assert achados[0]["desde"] and achados[0]["desde"] <= _t.time()
+    finally:
+        filho.kill()
+        filho.wait()
+
+
+def test_shells_de_pid_sem_filho_e_lista_vazia():
+    # Nao levanta nem inventa: sessao sem comando pendurado simplesmente nao tem chip.
+    assert procinfo.shells_de(2 ** 22 - 7) == []
+
+
 def test_descendant_pids_mapa_com_anel_termina():
     """ppid reciclado no Windows fecha anel no mapa ppid->filhos: sem visitados o `while stack` nunca terminava e o `out` crescia sem fim.
 
