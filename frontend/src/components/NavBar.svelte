@@ -516,13 +516,20 @@
     left: 0; right: 0; bottom: 0;
     height: 2px;
     z-index: 1;
+    overflow: hidden;
+  }
+  /* Anima transform, nao background-position: o compositor faz sozinho, sem repintar a navbar
+     a cada quadro. Faixa de 50% indo de -60% a 160% de si mesma = o mesmo percurso de antes. */
+  .work-sweep::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    width: 50%;
     background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    background-size: 50% 100%;
-    background-repeat: no-repeat;
     animation: work-sweep 1.8s ease-in-out infinite;
   }
   @keyframes work-sweep {
-    0%   { background-position: -60% 0; }
-    100% { background-position: 160% 0; }
+    0%   { transform: translateX(-60%); }
+    100% { transform: translateX(160%); }
   }
 </style>

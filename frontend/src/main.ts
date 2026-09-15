@@ -3,7 +3,7 @@ import './app.css';
 import App from './App.svelte';
 import { applyTheme, getThemePref, getTextoDoDesktop } from './lib/theme';
 import { buscarPaleta, aplicarPaleta, ligarAtualizacaoAoFocar } from './lib/desktopTheme';
-import { applyBg, applyAppearance } from './lib/background';
+import { applyBg, applyAppearance, applyLiquid } from './lib/background';
 import { ensureCookie, getBaseUrl, getToken, dropActiveServer } from './lib/auth';
 import { localeAtual } from './lib/locale';
 import { configureApi, configureLocale, configureDiag } from '@hangar/core';
@@ -74,12 +74,9 @@ if (getThemePref() === 'desktop') {
 // Foco custa zero conexao persistente (SSE ja usa ~2 das ~6 por host); EventSource/poller nao entram.
 ligarAtualizacaoAoFocar(() => getThemePref() === 'desktop', getTextoDoDesktop);
 
-// Liquid glass (refracao SVG real) so funciona em Chromium: Safari/Firefox NAO suportam filtro SVG
-// dentro de backdrop-filter (restricao WebKit). userAgentData existe SO em Chromium -> usa como gate.
+// Liquid glass: so Chromium e so se a pessoa nao desligou na Aparencia (gate e motivo em background.ts).
 // Onde nao tem (iOS/Safari), o glass fica no frosted (blur), que e o maximo possivel la.
-if ((navigator as unknown as { userAgentData?: unknown }).userAgentData) {
-  document.documentElement.setAttribute('data-liquid', '');
-}
+applyLiquid();
 
 const app = mount(App, {
   target: document.getElementById('app')!,

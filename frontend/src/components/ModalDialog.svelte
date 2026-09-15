@@ -174,6 +174,11 @@
     background: rgba(4, 6, 10, 0.34);
     backdrop-filter: blur(16px) saturate(150%);
   }
+  /* Filtro do vidro desligado (Aparencia): sem o blur o 0.34 deixa a tela de tras legivel atraves do
+     modal — o dimmer tem que apagar sozinho, como fora do liquid. */
+  :global(html[data-liquid][data-sem-filtro]) .modal-backdrop {
+    background: rgba(4, 6, 10, 0.88);
+  }
 
   /* Foco programatico ao abrir (a11y) desenhava o anel `auto` do Chrome em volta do dialog e do
      botao fechar — a moldura branca grossa dos prints. O container nao precisa de anel: ele nao e

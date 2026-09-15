@@ -336,7 +336,7 @@
      painel opaco (ele perde o material): e apagar o que esta atras, que e o que um scrim de modal
      deve fazer mesmo. Fora do liquid porque la o blur ja resolve, e fora do `naomodal` porque o dock
      lateral desliga o scrim de proposito. */
-  :global(html:is([data-bg='image'], [data-bg='desktop']):not([data-liquid])) .backdrop:not(.naomodal) {
+  :global(html:is([data-bg='image'], [data-bg='desktop']):is(:not([data-liquid]), [data-sem-filtro])) .backdrop:not(.naomodal) {
     background: rgba(0, 0, 0, 0.88);
   }
 

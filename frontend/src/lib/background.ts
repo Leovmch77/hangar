@@ -182,6 +182,51 @@ export function setDesktopGlass(v: boolean): void {
   applyBg();
 }
 
+// Liquid glass (refracao SVG + blur(20px) em backdrop-filter na sidebar, painel de contexto e
+// abas). So Chromium suporta filtro SVG dentro de backdrop-filter; userAgentData existe SO la e
+// serve de gate. Custa caro: com qualquer animacao na tela o Chromium refaz o filtro dos paineis
+// inteiros a cada quadro — por isso e desligavel. Ligado e o padrao (era o comportamento antes).
+const LIQUID_KEY = 'cp_liquid_glass';
+
+export function liquidSuportado(): boolean {
+  return typeof navigator !== 'undefined'
+    && !!(navigator as unknown as { userAgentData?: unknown }).userAgentData;
+}
+
+export function getLiquidGlass(): boolean {
+  try { return localStorage.getItem(LIQUID_KEY) !== '0'; } catch { return true; }
+}
+
+export function setLiquidGlass(v: boolean): void {
+  try {
+    if (v) localStorage.removeItem(LIQUID_KEY);
+    else localStorage.setItem(LIQUID_KEY, '0');
+  } catch { /* modo privado */ }
+  applyLiquid();
+}
+
+export function applyLiquid(): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.toggleAttribute('data-liquid', liquidSuportado() && getLiquidGlass());
+  document.documentElement.toggleAttribute('data-sem-filtro', !getFiltroVidro());
+}
+
+// Filtro do vidro (backdrop-filter) separado da tinta: e ele que custa CPU, e no fundo Janela nao
+// tem o que borrar. Ligado e o padrao. A regra que aplica esta em app.css (`html[data-sem-filtro]`).
+const FILTRO_KEY = 'cp_vidro_filtro';
+
+export function getFiltroVidro(): boolean {
+  try { return localStorage.getItem(FILTRO_KEY) !== '0'; } catch { return true; }
+}
+
+export function setFiltroVidro(v: boolean): void {
+  try {
+    if (v) localStorage.removeItem(FILTRO_KEY);
+    else localStorage.setItem(FILTRO_KEY, '0');
+  } catch { /* modo privado */ }
+  applyLiquid();
+}
+
 // A blob URL da foto do desktop. Guardada pra ser REVOGADA na troca: sem isto cada recarga da
 // imagem (troca de papel de parede, volta do foco) deixa a anterior presa na memoria do processo.
 let urlDesktop: string | null = null;

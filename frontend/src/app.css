@@ -580,6 +580,19 @@ html[data-theme="light"]:is([data-bg="image"], [data-bg="desktop"]) { --chrome-b
    do painel e o vidro liquido precisa poder ficar bem mais leve que isso pra a refracao existir. */
 html[data-liquid]:is([data-bg="image"], [data-bg="desktop"]) { --glass-bg: color-mix(in srgb, rgb(var(--glass-rgb)) calc((0.22 + 0.70 * var(--cp-solidez, 0.19)) * 100%), transparent); }
 html[data-liquid][data-theme="light"]:is([data-bg="image"], [data-bg="desktop"]) { --glass-bg: color-mix(in srgb, rgb(var(--glass-rgb)) calc((0.28 + 0.68 * var(--cp-solidez, 0.19)) * 100%), transparent); }
+/* "Filtro do vidro" desligado (Aparencia): tira SO o backdrop-filter, a tinta do liquid fica. O filtro
+   e o que custa CPU (recalculado a cada quadro em toda a area dos paineis); no fundo Janela ele nem
+   tem o que borrar, porque o desktop esta atras da janela, fora da pagina. */
+html[data-sem-filtro] * { backdrop-filter: none !important; }
+/* Sem o filtro, a tinta fina do liquid (linha 581) nao segura a leitura sozinha: sidebar e painel
+   de contexto voltam ao vidro de PAINEL (a rede de seguranca do bloco --glass-panel la em cima). */
+html[data-liquid][data-sem-filtro] { --glass-bg: var(--glass-panel); }
+/* Fundo Janela com o filtro desligado: o backdrop-filter numa janela transparente nao borra o
+   desktop (ele esta fora da pagina) — ele TAMPA, pintando o fundo interno da janela como uma chapa
+   lisa. Esta tinta quase opaca reproduz a chapa sem o filtro (cor do escuro medida na tela; no
+   claro e o vidro claro quase opaco). */
+html[data-liquid][data-sem-filtro][data-bg="desktop"]:not([data-desktop-glass]) { --glass-bg: rgb(var(--glass-rgb) / 0.96); }
+html[data-liquid][data-sem-filtro][data-bg="desktop"][data-theme="dark"]:not([data-desktop-glass]) { --glass-bg: rgb(24 29 40 / 0.96); }
 html[data-theme="light"]:is([data-bg="image"], [data-bg="desktop"]) { --glass-panel: rgb(var(--glass-panel-rgb) / var(--cp-panel-alpha, 0.78)); }
 /* Vale tambem pro `desktop`, e a foto NAO volta junto: `applyBg('desktop')` remove
    `--cp-wallpaper`, entao `var(--cp-wallpaper, none)` la embaixo cai no `none` e a camada nasce so

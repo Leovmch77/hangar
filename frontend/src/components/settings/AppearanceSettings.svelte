@@ -10,6 +10,8 @@
     getSurfaceSolid, setSurfaceSolid,
     getBackdropBlur, setBackdropBlur,
     getBgPref, getDesktopGlass, setDesktopGlass,
+    getLiquidGlass, setLiquidGlass, liquidSuportado,
+    getFiltroVidro, setFiltroVidro,
     getPalette, setPalette,
     READ_ALPHA_PADRAO, TEXT_BOOST_PADRAO, SURFACE_SOLID_PADRAO,
     type ReadMode, type PanelStyle, type FontPref, type MedidaTexto, type BackdropBlurPref, type BgPref,
@@ -105,6 +107,16 @@
   // acontece por clique, nunca sozinha.
   let fundo = $state<BgPref>(getBgPref());
   let vidroDesktop = $state(getDesktopGlass());
+  let liquid = $state(getLiquidGlass());
+  const opcoesLiquid: { v: 'on' | 'off'; label: string; aria: string }[] = [
+    { v: 'on', label: m.comum_ligado(), aria: m.config_aparencia_liquid_on_aria() },
+    { v: 'off', label: m.comum_desligado(), aria: m.config_aparencia_liquid_off_aria() },
+  ];
+  let filtroVidro = $state(getFiltroVidro());
+  const opcoesFiltroVidro: { v: 'on' | 'off'; label: string; aria: string }[] = [
+    { v: 'on', label: m.comum_ligado(), aria: m.config_aparencia_filtro_vidro_on_aria() },
+    { v: 'off', label: m.comum_desligado(), aria: m.config_aparencia_filtro_vidro_off_aria() },
+  ];
   // `tema` e $state e nao `getThemePref()` direto: aquela funcao le localStorage por chamada comum,
   // sem sinal reativo, entao o bloco nunca reavaliaria e o controle so apareceria ao reabrir a
   // folha. Mesmo remedio do `caixas` (linhas 71-76) e do `onEscolha` do BackgroundToggle.
@@ -312,6 +324,26 @@
     {:else}
       <p class="hint">{m.config_aparencia_desfoque_hint()}</p>
     {/if}
+  </div>
+
+  {#if liquidSuportado()}
+    <div class="ap-row">
+      <div class="ap-label">
+        <strong>{m.config_aparencia_liquid()}</strong>
+        <span>{m.config_aparencia_liquid_desc()}</span>
+      </div>
+      <SegmentedPicker value={liquid ? 'on' : 'off'} options={opcoesLiquid} ariaLabel={m.config_aparencia_liquid()}
+                       onPick={(v) => { liquid = v === 'on'; setLiquidGlass(liquid); }} />
+    </div>
+  {/if}
+
+  <div class="ap-row">
+    <div class="ap-label">
+      <strong>{m.config_aparencia_filtro_vidro()}</strong>
+      <span>{m.config_aparencia_filtro_vidro_desc()}</span>
+    </div>
+    <SegmentedPicker value={filtroVidro ? 'on' : 'off'} options={opcoesFiltroVidro} ariaLabel={m.config_aparencia_filtro_vidro()}
+                     onPick={(v) => { filtroVidro = v === 'on'; setFiltroVidro(filtroVidro); }} />
   </div>
 
   <!-- Pele das chamadas de ferramenta. Interruptor, não migração: 'Clássico' é o padrão e nada
