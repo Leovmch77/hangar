@@ -29,6 +29,7 @@
       "preview_fmt.cjs",
       "preview_ctl.cjs",
       "preview_srv.cjs",
+      "log.cjs",
       "package.json"
     ],
     "linux": {

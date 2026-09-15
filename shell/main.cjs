@@ -9,6 +9,7 @@ const { criarControlador } = require('./preview_ctl.cjs');
 const { commitDoCheckout } = require('./versao.cjs');
 const { importarCookiesDoChrome, PAGINA_ATIVAR } = require('./cookies_chrome.cjs');
 const { credenciaisPara } = require('./senhas_chrome.cjs');
+require('./log.cjs').instalar();
 
 // Preenche usuário/senha no view a partir das senhas salvas do Chrome. A decifração roda no MAIN
 // (não no renderer): a senha em claro só existe aqui e no campo da página, some depois, nunca vai

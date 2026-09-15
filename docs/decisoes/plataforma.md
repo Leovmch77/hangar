@@ -52,6 +52,11 @@ três backups. Os avisos/erros de `hangar`, `app`, `uvicorn.error` e `asyncio` a
 diário apenas arquivo/função/linha e tipo da exceção. O setup roda também no lifespan, pois
 a configuração do uvicorn substitui seus handlers depois do início do processo principal.
 O atualizador destacado usa `atualizacao.log`, para não disputar a rotação do backend.
+O shell Electron escreve em `privado/shell.log` (`shell/log.cjs`, uma rotação de 4 MiB na
+subida): lançado pelo `.desktop` ou pela tarefa do Windows ele nasce com stdout/stderr em
+`/dev/null`, e os `[nav]` que dizem por que uma aba do navegador embutido não congelou ou não
+descongelou morriam sem leitura — foi o que faltou ao investigar um "ficou branco" que não se
+reproduziu depois.
 
 Os diários antigos são copiados por origem para `diario/legado`, sem juntar arquivos de
 mesmo nome nem apagar originais; o download atualiza a cópia se uma versão antiga ainda

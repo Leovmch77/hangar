@@ -398,7 +398,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
-  dele. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
+  dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
+  console dele vai pro `/dev/null`. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
 
 ## tmux + Claude Code truecolor
 
