@@ -1278,6 +1278,18 @@ terminal ⇄ sem terminal, que é só do Claude.
 
 ## Identidade e permissão no Codex sem terminal (14/09/2026)
 
+Revisão posterior: a troca de sandbox religa no cano sem reiniciar e confirma o estado antes de
+encerrá-lo. Estado desconhecido, inclusive depois de uma reconexão pelo monitor, mantém o processo
+e a permissão. A consulta inicial do Composer não pode sobrescrever uma leitura ou troca mais
+recente confirmada pelo popover.
+
+O Codex associa a confiança dos hooks à posição no arquivo. A reconciliação preserva posição e
+agrupamento dos hooks inalterados: retirar os importados e reapendê-los após o `guard_tmux`
+deslocava seus índices, e `hooks/list` passava a informar `modified`. Isso também impede a execução
+no headless. A confiança já invalidada requer aprovação nativa explícita; o Hangar não regrava
+`trusted_hash` para contornar essa aprovação. `exec_command` chega aos hooks como `Bash`, portanto
+o nome da ferramenta não era a causa desse problema.
+
 Scripts executados dentro de uma sessão sem terminal recebem `CP_SESSION_KEY`; o nome atual vem do
 sidecar que contém essa chave. O Claude já fazia isso em `~/.hangar/claude-headless/`. O Codex
 exportava apenas `HANGAR_CANO_KEY`, enquanto `hangar-preview` e `hangar-send` só procuravam o

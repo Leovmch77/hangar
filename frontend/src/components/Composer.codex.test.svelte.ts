@@ -68,6 +68,30 @@ it('Codex headless mostra a permissão conhecida mesmo durante o turno', async (
   expect(permission?.closest('.status-tab')).toBeNull();
 });
 
+it('consulta inicial atrasada não desfaz a permissão confirmada pelo popover', async () => {
+  let finish!: (value: Awaited<ReturnType<typeof api.getCodexPermissions>>) => void;
+  vi.mocked(api.getCodexPermissions)
+    .mockReturnValueOnce(new Promise(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce({ current: 'Approve for me', modes: [
+      { numero: 1, nome: 'Approve for me', desc: '', cursor: true, atual: true },
+      { numero: 2, nome: 'Full Access', desc: '', cursor: false, atual: false },
+    ] });
+  vi.mocked(api.setCodexPermission).mockResolvedValueOnce({ current: 'Full Access' });
+  const props = await montar();
+  (props as unknown as { headless: boolean }).headless = true;
+  (props as unknown as { estreito: boolean }).estreito = true;
+  await flush();
+  document.querySelector<HTMLButtonElement>('.pill-duo button[aria-haspopup][aria-label="' + m.composer_permissao() + '"]')!.click();
+  await flush();
+  button('Full Access').click();
+  await flush();
+  expect(document.querySelector('.pill-duo button[aria-label="Full Access"]')).not.toBeNull();
+
+  finish({ current: 'Approve for me', modes: [] });
+  await flush();
+  expect(document.querySelector('.pill-duo button[aria-label="Full Access"]')).not.toBeNull();
+});
+
 it('reconexão sem modo confirmado mostra Modo e Shift+Tab pede Planejar', async () => {
   const props = await montar();
   props.codexMode = null; await flush();

@@ -750,6 +750,7 @@
   let codexPermOpen = $state(false);
   let codexPermPillEl = $state<HTMLElement | null>(null);
   let codexPerm = $state<string | null>(null);
+  let codexPermSeq = 0;
   const codexPermCompacta = $derived(
     codexPerm === 'Ask for approval' ? m.permissao_codex_curta_perguntar()
       : codexPerm === 'Approve for me' ? m.permissao_codex_curta_auto()
@@ -760,11 +761,15 @@
   // Sem terminal o modo está no sidecar e pode ser lido até durante o turno. No Codex com TUI,
   // ler aqui dirigiria `/permissions` no pane; por isso ele continua sob demanda no popover.
   $effect(() => {
+    const seq = ++codexPermSeq;
+    codexPerm = null;
     if (!isCodex || !headless) return;
     const sn = sessionName;
+    let active = true;
     getCodexPermissions(sn)
-      .then((res) => { if (sn === sessionName) codexPerm = res.current; })
+      .then((res) => { if (active && seq === codexPermSeq && sn === sessionName) codexPerm = res.current; })
       .catch(() => {});
+    return () => { active = false; };
   });
 
   // ── Pill de modelo do Pi: mesmo desenho do de Codex, terceira fonte ──────────────────────────
@@ -2483,7 +2488,7 @@
     anchor={codexPermPillEl}
     {sessionName}
     {headless}
-    onApplied={(modo) => (codexPerm = modo)}
+    onApplied={(modo) => { codexPermSeq++; codexPerm = modo; }}
     onClose={() => (codexPermOpen = false)}
   />
 

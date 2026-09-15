@@ -738,7 +738,7 @@ class CodexAdapter:
     # (encerrar/recriar) — o watch_sessions passa a cada 2s e viraria um spam de spawn.
     TETO_SUBIDAS = 3
 
-    async def _ligar_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+    async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
         cano = meta.get("cano") or {}
         if cano:
@@ -753,8 +753,12 @@ class CodexAdapter:
                             result = await client.request("thread/read", {"threadId": meta["thread_id"],
                                                                           "includeTurns": False})
                             thread = result.get("thread") or {}
+                        if not reabrir and (thread.get("status") or {}).get("type") not in {"active", "idle"}:
+                            raise RuntimeError("não foi possível confirmar o estado do turno; permissão mantida")
                     except Exception:
                         await client.close()
+                        if not reabrir:
+                            raise
                         _log.warning("codex sem terminal: religação no cano falhou name=%s", name, exc_info=True)
                         return await self._subir_sem_terminal(name, meta)
                     self.attach(name, client, meta.get("thread_id") or "", model=meta.get("model"),
@@ -766,6 +770,8 @@ class CodexAdapter:
                 await client.close()
                 _log.info("codex sem terminal: app-server saiu rc=%s name=%s — subindo outro",
                           snap.get("saiu"), name)
+        if not reabrir:
+            raise RuntimeError("não foi possível reconectar ao Codex; permissão mantida")
         return await self._subir_sem_terminal(name, meta)
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
@@ -1008,22 +1014,28 @@ class CodexAdapter:
 
     async def set_permission_mode_sem_terminal(self, name: str, modo: str) -> dict:
         """Troca o modo da sessão sem terminal. approvalPolicy vale no próximo turno; sandbox só
-        muda reabrindo o app-server (thread/resume) — quem chama já garantiu que está ociosa."""
+        muda reabrindo o app-server (thread/resume), após confirmar que está ociosa."""
         nome = next((m[0] for m in sem_terminal.MODOS if m[0].lower() == modo.strip().lower()), None)
         if nome is None:
             raise ValueError("modo desconhecido: " + modo + " (os modos são: "
                              + ", ".join(m[0] for m in sem_terminal.MODOS) + ")")
-        meta = codex_sessions.load(name) or {}
-        sandbox_antes = sem_terminal.politica(meta.get("permission_mode"))[1]
-        if sem_terminal.politica(nome)[1] == sandbox_antes:
-            codex_sessions.update(name, permission_mode=nome)
-            return {"current": nome}
         lock = self._locks.setdefault(name, asyncio.Lock())
-        async with lock:
+        async with self.delivery_lock(name), lock:
+            meta = codex_sessions.load(name) or {}
+            sandbox_antes = sem_terminal.politica(meta.get("permission_mode"))[1]
+            if sem_terminal.politica(nome)[1] == sandbox_antes:
+                codex_sessions.update(name, permission_mode=nome)
+                return {"current": nome}
             sess = self._sessions.get(name)
-            # A guarda da API olhou o estado antes da trava; um prompt pode ter entrado no meio,
-            # e fechar a conexão agora derrubaria o turno sem aviso.
-            if sess is not None and sess.get("in_progress"):
+            # Após restart, a ausência na memória não prova que o cano está ocioso.
+            if sess is None and meta.get("cano"):
+                await self._ligar_sem_terminal(name, meta, reabrir=False)
+                sess = self._sessions.get(name)
+            if sess is not None and not sess.get("in_progress") and not sess.get("turn_state_known"):
+                await self.read_settings(name)
+                if not sess.get("in_progress") and not sess.get("turn_state_known"):
+                    raise RuntimeError("não foi possível confirmar o estado do turno; permissão mantida")
+            if sess is not None and (sess.get("in_progress") or sess["client"].server_requests):
                 raise sem_terminal.Ocupada(
                     "a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar")
             meta = codex_sessions.update(name, permission_mode=nome) or meta

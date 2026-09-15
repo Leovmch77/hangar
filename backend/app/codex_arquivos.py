@@ -229,12 +229,38 @@ def mesclar_hooks(atual: dict, fonte: dict, anteriores: dict) -> dict:
         substituidos = {
             identidade(grupo, hook) for grupo in conhecidos for hook in grupo["hooks"]
         }
+        pendentes = copy.deepcopy([g for g in desejados if g["hooks"]])
+        vazios = copy.deepcopy([g for g in desejados if not g["hooks"]])
         grupos = []
         for grupo in hooks.get(evento, []):
-            resto = [hook for hook in grupo["hooks"] if identidade(grupo, hook) not in substituidos]
-            if resto or (not grupo["hooks"] and grupo not in conhecidos):
-                grupos.append({**grupo, "hooks": resto})
-        grupos.extend(copy.deepcopy(desejados))
+            # A confiança do Codex usa os índices: reconciliar não pode mover hooks inalterados.
+            resto = []
+            base = None
+            misto = False
+            for hook in grupo["hooks"]:
+                chave = identidade(grupo, hook)
+                encontrado = next(((g, h) for g in pendentes for h in g["hooks"]
+                                   if identidade(g, h) == chave), None)
+                if encontrado is not None:
+                    destino, novo = encontrado
+                    if base is None:
+                        base = destino
+                    elif base is not destino:
+                        misto = True
+                    resto.append(novo)
+                    destino["hooks"].remove(novo)
+                elif chave not in substituidos:
+                    resto.append(hook)
+                    misto = True
+            if not grupo["hooks"] and grupo in vazios:
+                vazios.remove(grupo)
+                grupos.append(grupo)
+            elif resto or (not grupo["hooks"] and grupo not in conhecidos):
+                if base is None or misto:
+                    base = grupo
+                grupos.append({**copy.deepcopy(base), "hooks": resto})
+        grupos.extend(g for g in pendentes if g["hooks"])
+        grupos.extend(vazios)
         if grupos:
             hooks[evento] = grupos
         else:

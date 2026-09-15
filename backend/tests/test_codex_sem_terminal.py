@@ -25,6 +25,7 @@ import json, sys
 def out(o):
     sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 iniciado = False
+status = "idle"
 for linha in sys.stdin:
     ev = json.loads(linha)
     m = ev.get("method")
@@ -41,8 +42,9 @@ for linha in sys.stdin:
             f.write(json.dumps(ev["params"]))
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
     elif m == "thread/read":
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "turns": []}}})
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
+        status = "active"
         with open("turno.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"turn": {"id": "t-1"}}})
@@ -59,6 +61,7 @@ for linha in sys.stdin:
     elif m is None and ev.get("id") == 9:
         with open("elicitacao.txt", "w") as f:
             f.write(json.dumps(ev))
+        status = "idle"
         out({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "th-1", "turn": {"id": "t-1", "status": "completed"}}})
     else:
         out({"jsonrpc": "2.0", "id": ev.get("id"), "result": {}})
@@ -227,6 +230,11 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
             if (ambiente / "elicitacao.txt").exists() and not ad._sessions["cx-modo"].get("in_progress"):
                 break
             await asyncio.sleep(0.05)
+        client = ad._sessions["cx-modo"]["client"]
+        await client.close()
+        sess = ad._sessions.pop("cx-modo", None)
+        if sess is not None:
+            sess["bomba"].cancel()
         assert (await ad.set_permission_mode_sem_terminal("cx-modo", "full access"))["current"] == "Full Access"
         meta = codex_sessions.load("cx-modo")
         assert meta["permission_mode"] == "Full Access" and meta["cano"]["pid"] != pid1
@@ -237,6 +245,63 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
         with pytest.raises(ValueError):
             await ad.set_permission_mode_sem_terminal("cx-modo", "yolo")
         ad.close_sync("cx-modo")
+    asyncio.run(corpo())
+
+
+@pytest.mark.parametrize("estado", ["active", "active_sem_aprovacao", "desconhecido", "desconhecido_anexado", "erro"])
+def test_troca_de_sandbox_apos_restart_preserva_turno_vivo(ambiente, estado):
+    sem_aprovacao = estado in {"active_sem_aprovacao", "desconhecido_anexado"}
+    if estado != "active":
+        fake = ambiente / "bin" / "codex"
+        codigo = fake.read_text()
+        if sem_aprovacao:
+            codigo = codigo.replace(
+                '"id": 0, "method": "item/commandExecution/requestApproval"',
+                '"method": "teste/turnoAtivo"')
+        if estado == "erro":
+            codigo = codigo.replace(
+                'elif m == "thread/read":',
+                'elif m == "thread/read":\n'
+                '        out({"jsonrpc": "2.0", "id": ev["id"], "error": {"code": -32603, "message": "indisponível"}})\n'
+                '        continue')
+        elif estado.startswith("desconhecido"):
+            codigo = codigo.replace('"type": status', '"type": "unknown"')
+        fake.write_text(codigo)
+
+    async def corpo():
+        ad = CodexAdapter()
+        _sidecar("cx-reinicio", ambiente)
+        client = await ad.ensure_running("cx-reinicio")
+        pid = codex_sessions.load("cx-reinicio")["cano"]["pid"]
+        try:
+            assert await ad.send_prompt("cx-reinicio", "oi") == "sent"
+            for _ in range(50):
+                if sem_aprovacao or 0 in client.server_requests:
+                    break
+                await asyncio.sleep(0.05)
+            assert (0 in client.server_requests) == (not sem_aprovacao)
+            await client.close()
+            sess = ad._sessions.pop("cx-reinicio", None)
+            if sess is not None:
+                sess["bomba"].cancel()
+            if estado == "desconhecido_anexado":
+                assert await ad.ensure_running("cx-reinicio") is not None
+            with pytest.raises(sem_terminal.Ocupada if estado.startswith("active") else RuntimeError):
+                await ad.set_permission_mode_sem_terminal("cx-reinicio", "Full Access")
+            meta = codex_sessions.load("cx-reinicio")
+            assert meta["cano"]["pid"] == pid
+            assert Path(f"/proc/{pid}").exists()
+            assert meta["permission_mode"] == "Ask for approval"
+            assert not (ambiente / "resume.txt").exists()
+            if estado == "active":
+                assert await ad.select("cx-reinicio", 1) is True
+                for _ in range(50):
+                    if (ambiente / "elicitacao.txt").exists():
+                        break
+                    await asyncio.sleep(0.05)
+                assert (ambiente / "elicitacao.txt").exists()
+        finally:
+            ad.close_sync("cx-reinicio")
     asyncio.run(corpo())
 
 

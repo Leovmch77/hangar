@@ -1,9 +1,11 @@
 """Mesclagem identifica hooks pelo matcher e recusa leituras parciais ou inválidas."""
 from copy import deepcopy
+import json
 
 import pytest
 
 from app.codex_arquivos import mesclar_hooks
+from app.codex_hook_installer import ensure_codex_state_hook_installed
 
 
 def _grupo(command, matcher="Bash", **extras):
@@ -15,7 +17,7 @@ def test_mesmo_comando_em_matcher_pessoal_nao_e_removido():
     pessoal = _grupo("igual", "Read", descricao="meu")
     atual = {"hooks": {"PreToolUse": [_grupo("igual"), pessoal]}}
     novo = mesclar_hooks(atual, fonte, {})
-    assert novo["hooks"]["PreToolUse"] == [pessoal, _grupo("igual")]
+    assert novo["hooks"]["PreToolUse"] == [_grupo("igual"), pessoal]
     assert mesclar_hooks(novo, fonte, fonte) == novo
 
 
@@ -56,6 +58,102 @@ def test_hook_nao_command_e_preservado_e_nao_duplica():
     fonte = {"hooks": {"PreToolUse": [prompt]}}
     atual = {"hooks": {"PreToolUse": [pessoal, prompt]}}
     assert mesclar_hooks(atual, fonte, fonte) == atual
+
+
+def test_instalacao_e_reconciliacoes_preservam_indices_dos_hooks(tmp_path):
+    fonte = {"hooks": {"PreToolUse": [_grupo("review"), _grupo("rtk")]}}
+    path = tmp_path / "hooks.json"
+    path.write_text(json.dumps(fonte))
+    ensure_codex_state_hook_installed(tmp_path, windows=False)
+    instalado = json.loads(path.read_text())
+
+    primeira = mesclar_hooks(instalado, fonte, fonte)
+    segunda = mesclar_hooks(primeira, fonte, fonte)
+
+    assert primeira == instalado
+    assert segunda == instalado
+
+
+def test_adicionar_hook_preserva_grupos_existentes_e_indices():
+    anterior = {"hooks": {"PreToolUse": [_grupo("review"), _grupo("rtk")]}}
+    atual = deepcopy(anterior)
+    atual["hooks"]["PreToolUse"].append(_grupo("guarda"))
+    fonte = deepcopy(anterior)
+    fonte["hooks"]["PreToolUse"].insert(0, _grupo("novo"))
+
+    novo = mesclar_hooks(atual, fonte, anterior)
+
+    assert novo["hooks"]["PreToolUse"] == [*atual["hooks"]["PreToolUse"], _grupo("novo")]
+    assert mesclar_hooks(novo, fonte, fonte) == novo
+
+
+def test_atualizacao_de_hook_em_grupo_misto_preserva_slots_e_metadata():
+    grupo = _grupo("review", descricao="pessoal")
+    grupo["hooks"].insert(0, {"type": "command", "command": "pessoal"})
+    atual = {"hooks": {"PreToolUse": [grupo, _grupo("guarda")]}}
+    anterior = {"hooks": {"PreToolUse": [_grupo("review")]}}
+    fonte = deepcopy(anterior)
+    fonte["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = 12
+
+    novo = mesclar_hooks(atual, fonte, anterior)
+
+    esperado = deepcopy(atual)
+    esperado["hooks"]["PreToolUse"][0]["hooks"][1]["timeout"] = 12
+    assert novo == esperado
+    assert mesclar_hooks(novo, fonte, fonte) == novo
+
+
+def test_atualizacao_de_metadata_do_grupo_gerenciado_nao_move_outros():
+    anterior = {"hooks": {"PreToolUse": [_grupo("review", descricao="antigo")]}}
+    atual = deepcopy(anterior)
+    atual["hooks"]["PreToolUse"].append(_grupo("guarda"))
+    fonte = {"hooks": {"PreToolUse": [_grupo("review", description="novo")]}}
+
+    novo = mesclar_hooks(atual, fonte, anterior)
+
+    assert novo["hooks"]["PreToolUse"] == [_grupo("review", description="novo"), _grupo("guarda")]
+
+
+def test_remocao_no_grupo_atualiza_metadata_na_primeira_reconciliacao():
+    grupo = _grupo("review", description="antigo")
+    grupo["hooks"].append({"type": "command", "command": "rtk"})
+    atual = {"hooks": {"PreToolUse": [grupo]}}
+    fonte = {"hooks": {"PreToolUse": [_grupo("review", description="novo")]}}
+
+    novo = mesclar_hooks(atual, fonte, atual)
+
+    assert novo == fonte
+    assert mesclar_hooks(novo, fonte, fonte) == novo
+
+
+def test_adicao_no_grupo_atualiza_metadata_sem_mover_hooks_existentes():
+    anterior = {"hooks": {"PreToolUse": [_grupo("review", description="antigo")]}}
+    atual = deepcopy(anterior)
+    atual["hooks"]["PreToolUse"].append(_grupo("guarda"))
+    grupo = _grupo("review", description="novo")
+    grupo["hooks"].append({"type": "command", "command": "rtk"})
+    fonte = {"hooks": {"PreToolUse": [grupo]}}
+
+    novo = mesclar_hooks(atual, fonte, anterior)
+
+    assert novo["hooks"]["PreToolUse"] == [
+        _grupo("review", description="novo"), _grupo("guarda"),
+        _grupo("rtk", description="novo"),
+    ]
+    assert mesclar_hooks(novo, fonte, fonte) == novo
+
+
+@pytest.mark.parametrize("vazio_primeiro", [False, True])
+def test_grupo_consumido_nao_se_confunde_com_grupo_originalmente_vazio(vazio_primeiro):
+    grupo = _grupo("review")
+    vazio = {"matcher": "Bash", "hooks": []}
+    grupos = [vazio, grupo] if vazio_primeiro else [grupo, vazio]
+    fonte = {"hooks": {"PreToolUse": grupos}}
+
+    novo = mesclar_hooks(fonte, fonte, fonte)
+
+    assert novo == fonte
+    assert mesclar_hooks(novo, fonte, fonte) == novo
 
 
 @pytest.mark.parametrize("invalido", [
