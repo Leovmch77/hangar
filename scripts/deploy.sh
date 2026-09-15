@@ -153,8 +153,10 @@ rollback() {
     rejected_pid=0
   fi
   if ! wait_healthy "$rejected_pid"; then
-    journalctl --user -u "$BACK" --since "$DEPLOY_STARTED" -n 100 --no-pager \
-      > "$BACKUP/backend-rollback.log" 2>&1 || true
+    if ! journalctl --user -u "$BACK" --since "$DEPLOY_STARTED" -n 100 --no-pager \
+        > "$BACKUP/backend-rollback.log" 2>&1; then
+      log "AVISO: não foi possível capturar o journal do backend."
+    fi
     if (( RESTART_ATTEMPTED )); then
       systemctl --user stop "${UNITS[@]}" || log "CRITICO: não foi possível interromper o crash-loop."
     fi
