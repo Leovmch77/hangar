@@ -3,7 +3,7 @@ const { app, BrowserWindow, WebContentsView, clipboard, dialog, ipcMain, screen,
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { ler, gravar } = require('./settings.cjs');
+const { ler, gravar, urlSemConfig, urlInicial } = require('./settings.cjs');
 const { uaDeChrome, normalizaBounds, urlNavegavel, nomeSidecar, proximaAtiva } = require('./navegador.cjs');
 const { criarControlador } = require('./preview_ctl.cjs');
 const { commitDoCheckout } = require('./versao.cjs');
@@ -149,7 +149,7 @@ async function criarJanela() {
   const dir = app.getPath('userData');
   const cfg = ler(dir);
   // Precedência: variável de ambiente > escolha salva > padrão.
-  const url = process.env.COCKPIT_URL || cfg.url || PADRAO;
+  const url = urlSemConfig(process.env.COCKPIT_URL || cfg.url || PADRAO);
   // Ultimo endereco que CARREGOU de verdade (did-navigate abaixo mantem isto atualizado). `url`
   // acima fica congelada no valor do boot; sem esta variavel a tela de recuperacao reoferecia
   // 127.0.0.1:8765 depois que o usuario ja tinha corrigido pra outro endereco e ele caiu de novo.
@@ -244,7 +244,7 @@ async function criarJanela() {
     // Na tela de recuperacao (data:) nao ha endereco de cockpit pra salvar — usa o ULTIMO que
     // carregou de verdade (urlBoa), nao o `cfg.url` do boot, que fica pra tras assim que o
     // usuario troca de endereco em tela.
-    gravar(dir, { url: u.startsWith('data:') ? urlBoa : u,
+    gravar(dir, { url: u.startsWith('data:') ? urlBoa : urlSemConfig(u),
                   janela: win.getBounds() });
   });
 
@@ -252,8 +252,8 @@ async function criarJanela() {
   // recuperação, que navega por conta própria.
   win.webContents.on('did-navigate', (_e, u) => {
     if (u.startsWith('data:')) return;
-    urlBoa = u;
-    gravar(dir, { url: u, janela: win.getBounds() });
+    urlBoa = urlSemConfig(u);
+    gravar(dir, { url: urlBoa, janela: win.getBounds() });
   });
   // Reload/navegação da página (Ctrl+R) derruba o DOM sem rodar o desmonte do NavegadorPane,
   // então o view nativo ficava pintado no lugar antigo, por cima do chat, até alguém abrir a aba
@@ -310,7 +310,9 @@ async function criarJanela() {
       // Desregistra o SW ANTES de limpar o armazenamento dele. `clearStorageData` apaga os bytes,
       // mas o registro vivo continua na página: ele volta a se instalar no reload e pode reservir
       // o bundle antigo. Sem isto o atalho "funcionava" e a tela continuava velha, que foi o que o
-      // usuário viu — e como a promessa era engolida, nada aparecia dizendo o que houve.
+    // usuário viu — e como a promessa era engolida, nada aparecia dizendo o que houve.
+      const atual = win.webContents.getURL();
+      const inicio = urlInicial(atual.startsWith('data:') ? urlBoa : atual);
       win.webContents
         .executeJavaScript(`navigator.serviceWorker?.getRegistrations?.()
             .then(rs => Promise.all(rs.map(r => r.unregister())))
@@ -322,7 +324,11 @@ async function criarJanela() {
         }))
         .then(() => console.log('[recarregar] cache do service worker limpo'))
         .catch((err) => console.error('[recarregar] limpeza falhou:', err))
-        .finally(() => win.webContents.reloadIgnoringCache());
+        // `loadURL` não tem o bypass de cache do reloadIgnoringCache; apaga também o cache HTTP
+        // antes de ir para a raiz. Cookies e localStorage continuam preservados.
+        .then(() => win.webContents.session.clearCache())
+        .catch((err) => console.error('[recarregar] cache HTTP falhou:', err))
+        .finally(() => win.loadURL(inicio));
     }
     // Ctrl+Shift+I — DevTools. Mesmo motivo do R: o `removeMenu()` acima leva junto TODOS os
     // aceleradores padrão, e o DevTools é um deles. Sem menu, sem atalho — e sem DevTools não há

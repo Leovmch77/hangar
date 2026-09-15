@@ -3,7 +3,23 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { ler, gravar } = require('./settings.cjs');
+const { ler, gravar, urlSemConfig, urlInicial } = require('./settings.cjs');
+
+test('urlSemConfig preserva servidor e tela de trás, mas não reabre Configurações', () => {
+  assert.equal(
+    urlSemConfig('https://pc.test/?token=abc#/chat/local/sessao?config=sobre&srv=local'),
+    'https://pc.test/?token=abc#/chat/local/sessao',
+  );
+  assert.equal(urlSemConfig('https://pc.test/#/?config=aparencia'), 'https://pc.test/#/');
+  assert.equal(urlSemConfig('https://pc.test/#/chat/sessao'), 'https://pc.test/#/chat/sessao');
+});
+
+test('urlInicial preserva servidor e token, mas volta para a raiz sem Configurações', () => {
+  assert.equal(
+    urlInicial('https://pc.test/?token=abc#/chat/local/sessao?config=sobre&srv=local'),
+    'https://pc.test/?token=abc#/',
+  );
+});
 
 test('ler() em diretório inexistente devolve {}', () => {
   const dir = path.join(os.tmpdir(), 'cp-shell-settings-missing-' + Date.now());
