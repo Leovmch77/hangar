@@ -64,6 +64,11 @@ class HookState:
         So no status `shell`: perguntar ao /proc a cada poll de uma sessao que esta de fato
         trabalhando seria varrer processo por nada, e o filho direto ali e o comando em primeiro
         plano — que nao e resto nenhum, e so o turno acontecendo.
+
+        Roda em OUTRA thread (o `to_thread` do StateMonitor) enquanto o watcher escreve
+        `_registro` no event loop. Sem trava de proposito: a entrada e uma tupla imutavel trocada
+        de uma vez, entao a leitura pega a antiga ou a nova, nunca uma pela metade. Guardar parte
+        da tupla em variavel antes de usar quebraria essa garantia.
         """
         if not session_id:
             return []

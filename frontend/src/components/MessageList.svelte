@@ -675,6 +675,12 @@
 {/if}
 
 <style>
+  /* `.message-list` e `.messages-inner` são alcançados de fora: o painel de Atividade embute esta
+     lista para mostrar a conversa de um subagente e precisa anular, com `!important`, a reserva da
+     coluna de contexto (o padding-direito que o Chat aplica) e o teto da coluna de leitura — numa
+     caixa estreita as duas somadas esmagavam o texto até uma letra por linha. Renomear estas duas
+     classes faz aquele CSS parar de casar em SILÊNCIO: sem erro de build, só o texto ilegível.
+     Se renomear, acerte junto o `.sub-chat :global(...)` do ActivitySheet.svelte. */
   .message-list {
     flex: 1;
     /* flex column + margin-top:auto no inner = conversa CURTA nasce colada em cima do composer e

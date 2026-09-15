@@ -75,6 +75,7 @@
   });
 
   async function openWorkflow(rid: string) {
+    subError = '';
     runId = rid;
     level = 'workflow';
     detail = null;
@@ -185,6 +186,9 @@
   // Abre pelo OBJETO. O `openSubagent` casa por prompt porque parte de uma linha do transcript; aqui
   // já se tem o subagente, e re-casar por texto só criaria uma chance de errar o alvo.
   function abrirDoDisco(s2: SubagentRun) {
+    // O aviso é do clique ANTERIOR: sem zerar, ele fica em cima da conversa que abriu certo,
+    // dizendo "não achei" sobre um agente que achou.
+    subError = '';
     subTitle = tituloDoSub(s2);
     subDetail = s2;
     level = 'subagent';
@@ -220,6 +224,9 @@
       subError = m.atividade_agente_nao_achado();
       subDetail = null;
       level = 'list';
+      // O poll é do agente que estava aberto antes: voltando pra lista ele seguiria batendo no
+      // backend a cada 2,5s, invisível.
+      stopSubPoll();
       return;
     }
     subTitle = title;

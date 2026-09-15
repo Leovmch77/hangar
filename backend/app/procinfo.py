@@ -496,20 +496,24 @@ def shells_de(pid: int) -> list[dict]:
     try:
         filhos = _proc_children_map().get(pid, [])
     except Exception:  # noqa: BLE001 - leitura de processo nunca derruba quem pergunta
+        # Lista vazia aqui e indistinguivel de "nao ha comando rodando", e a sessao aparece limpa
+        # justamente quando a TUI diz que ha shell de pe: o log e o unico jeito de saber depois.
+        _log.warning("shells_de(%s): nao consegui ler os filhos do processo", pid, exc_info=True)
         return []
     out: list[dict] = []
     for f in filhos:
-        bruto = _cmdline(f)
-        if not bruto or not _e_shell(bruto):
+        if not _e_shell(f):
             continue
-        cmd = _comando_pedido(bruto)
+        cmd = _comando_pedido(_cmdline(f))
         if not cmd:
             continue
         out.append({"pid": f, "cmd": cmd, "desde": _proc_start_time(f)})
     return out
 
 
-def _e_shell(bruto: str) -> bool:
-    # O executavel e o primeiro token da linha; basta o nome dele.
-    primeiro = bruto.strip().split(" ", 1)[0]
-    return os.path.basename(primeiro) in _SHELLS
+def _e_shell(pid: int) -> bool:
+    # argv0 vem do `_argv`, nao de split no `_cmdline`: o caminho do executavel tem espaco na
+    # maioria das instalacoes Windows e o split devolveria "C:\\Program" como argv0 — a mesma
+    # armadilha que o docstring do `_argv` ja registra, medida naquela VM.
+    argv = _argv(pid)
+    return bool(argv) and os.path.basename(argv[0]) in _SHELLS
