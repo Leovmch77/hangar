@@ -114,6 +114,7 @@ import { sidebarPin } from '../lib/sidebarPin.svelte';
 import { sidebarBridge } from '../lib/sidebarBridge';
 import { navMode } from '../lib/navMode.svelte';
 import { ctxPanel } from '../lib/ctxPanel.svelte';
+import { fecharNav, marcarNavAberto } from '../lib/navegadorPanel.svelte';
 import * as api from '@hangar/core';
 import * as m from '../paraglide/messages';
 import type { AggSession } from '@hangar/core';
@@ -528,6 +529,37 @@ describe('Sidebar — trilho original no modo rail', () => {
     await tick();
     expect(document.querySelector('.sess-main')!.getAttribute('aria-label')).toBeNull();
     expect(document.querySelector('.sess-name')!.textContent).toContain('hangar');
+    unmount(t.comp);
+  });
+
+  it('EXPANDIDA: sessão parada mostra a última resposta e o tempo na linha secundária', async () => {
+    navMode.mode = 'rail';
+    sidebarPin.setUser(false);
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [sess('hangar', 'srv-a', 'idle', {
+      last_reply: 'A causa estava no listener desmontado.',
+      last_reply_at: Date.now() / 1000 - 2 * 60,
+    })] }]);
+    const t = montar();
+    await tick();
+    expect(t.el.querySelector('.status-sub.reply')?.textContent).toContain('A causa estava no listener desmontado.');
+    expect(t.el.querySelector('.reply-time')?.textContent).toContain('2');
+    unmount(t.comp);
+  });
+
+  it('EXPANDIDA: navegador aberto e sem terminal aparecem junto ao nome', async () => {
+    navMode.mode = 'rail';
+    sidebarPin.setUser(false);
+    marcarNavAberto('srv-a::hangar');
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [
+      sess('hangar', 'srv-a', 'idle', { headless: true }),
+    ] }]);
+    const t = montar();
+    await tick();
+    const browser = t.el.querySelector('.session-signal--browser');
+    expect(browser).not.toBeNull();
+    expect(browser?.closest('.name-and-signals')?.querySelector('.sess-name')?.textContent).toBe('hangar');
+    expect(t.el.querySelector('.session-signal--headless')).not.toBeNull();
+    fecharNav('srv-a::hangar');
     unmount(t.comp);
   });
 

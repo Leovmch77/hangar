@@ -18,8 +18,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import { chipDaConta } from '../lib/conta';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
+  import SessionSignals from './SessionSignals.svelte';
   import type { SessionInfo, AggSession, Provider } from '@hangar/core';
-  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, latestAssistantEvent, clusterByPair, untrackedReason, providerTag } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, clusterByPair, untrackedReason, providerTag } from '@hangar/core';
   import { updateBadge } from '../lib/badge';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import { planBadge } from '@hangar/core';
@@ -31,6 +32,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
+  import { navegadorPanel } from '../lib/navegadorPanel.svelte';
   import { createSessionListModel } from '../lib/sessionListModel.svelte';
 
   const DEFAULT_BRANCHES = new Set(['main', 'master']);
@@ -795,13 +797,22 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               {#if expanded}
               <span class="row-info">
                   <span class="name-row">
-                    <span class="sess-name">{s.name}</span>
+                    <span class="name-and-signals">
+                      <span class="sess-name">{s.name}</span>
+                      <SessionSignals browser={rowKey in navegadorPanel.abertos} headless={s.headless === true} />
+                    </span>
                     {#if pendingQuestions > 0}
                       <span class="sess-badge pending-questions" title={questionLabel} aria-label={questionLabel}>? {pendingQuestions}</span>
                     {/if}
                     {#if s.tracked === false}<span class="sess-badge" title={untrackedReason(s.provider)}>{m.sessao_sem_id()}</span>{/if}
                   </span>
-                  {#if sub}
+                  {#if s.state === 'idle' && s.last_reply}
+                    <span class="status-sub reply" title={s.last_reply}>
+                      <span class="reply-mark" aria-hidden="true">◆</span>
+                      <span class="reply-text">{s.last_reply}</span>
+                      {#if s.last_reply_at}<span class="reply-time">{relativeTime(s.last_reply_at)}</span>{/if}
+                    </span>
+                  {:else if sub}
                     <span
                       class="status-sub"
                       class:asking={s.state === 'awaiting_input' || pendingQuestions > 0}
@@ -1651,6 +1662,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .sess-list.compact .branch { display: none; }
   .row-info { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
   .name-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+  .name-and-signals { display: flex; align-items: center; gap: 3px; min-width: 0; }
   /* Subtítulo de estado vivo: a pergunta (awaiting) ou o texto do spinner (working), truncado —
      linha acionável sem abrir a sessão (feature #1). */
   .status-sub {
@@ -1662,6 +1674,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   .status-sub.asking { color: var(--warning); font-weight: 600; }
   .status-sub.working { color: var(--text-secondary); font-style: italic; }
+  .status-sub.reply { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }
+  .reply-mark { flex-shrink: 0; color: var(--text-muted); font-size: 8px; }
+  .reply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reply-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; }
   /* Pasta + branch + diff numa linha. O `.cwd` cede a largura (shrink) e o diff nunca encolhe:
      o número é curto e é o que some primeiro se ele puder encolher. */
   .cwd-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
@@ -1829,7 +1845,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      relação ao body inteiro em vez de ficar na base desta linha. */
   .sidebar.collapsed .sess-main { justify-content: center; padding: 0; position: relative; }
   .sess-row.active .sess-main { color: var(--text-primary); }
-  .sess-name { flex: 1; min-width: 0; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-name { min-width: 0; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sess-main.untracked { opacity: 0.45; cursor: default; }
   /* Kimi "sem id" (pré-1º-prompt) ABRE o chat: cursor normal pra não mentir que a linha é inerte. */
   .sess-main.untracked.untracked-open { cursor: pointer; }

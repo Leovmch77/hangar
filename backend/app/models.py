@@ -91,6 +91,10 @@ class SessionInfo(BaseModel):
     conta: Optional[str] = None
     state: State = "idle"
     last_activity: Optional[float] = None
+    # Resposta final mais recente, curta e sem marcadores de markdown. Só é preenchida quando a
+    # sessão está parada; trabalhando/aguardando usam label/question na mesma linha da interface.
+    last_reply: Optional[str] = None
+    last_reply_at: Optional[float] = None
     # Vinculo nome<->transcript e confiavel? True = resolvido por --session-id/fd/cache (determinismo).
     # False = chute newest-by-mtime (claude manual sem --session-id) -> UI marca "sem id" e desliga chat.
     tracked: bool = True

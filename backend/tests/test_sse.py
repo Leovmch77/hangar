@@ -2,13 +2,31 @@ import pytest
 import asyncio
 import json
 from app.sse import merged_events
-from app.models import ChatEvent, StateEvent
+from app.models import ChatEvent, SessionInfo, StateEvent
 from app.adapters.preview_push import PushPreviewSource
 
 
 class _StubModel:
     def model_dump(self):
         return {}
+
+
+def test_lista_reemite_quando_a_ultima_resposta_muda():
+    from app.sse import _list_sig
+
+    before = SessionInfo(name="s", last_reply="primeira", last_reply_at=1)
+    after = SessionInfo(name="s", last_reply="segunda", last_reply_at=2)
+
+    assert _list_sig([before]) != _list_sig([after])
+
+
+def test_lista_reemite_quando_o_modo_sem_terminal_muda():
+    from app.sse import _list_sig
+
+    terminal = SessionInfo(name="s", headless=False)
+    headless = SessionInfo(name="s", headless=True)
+
+    assert _list_sig([terminal]) != _list_sig([headless])
 
 
 async def _empty_agen():

@@ -42,6 +42,9 @@ export interface SessionInfo {
   headless?: boolean;
   state: State;
   last_activity?: number | null;
+  /** Resposta final mais recente; só viaja na lista enquanto a sessão está parada. */
+  last_reply?: string | null;
+  last_reply_at?: number | null;
   // Vínculo nome<->transcript confiável? false = claude manual sem --session-id (chute mtime) ->
   // marca "sem id" e bloqueia o chat (evita mostrar/trocar a conversa errada).
   tracked?: boolean;

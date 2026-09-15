@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import type { SessionInfo } from '@hangar/core';
+  import type { AggSession, SessionInfo } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
   import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen } from '@hangar/core';
@@ -14,6 +14,9 @@ import { textoProblema } from '../lib/problema';
   import HangarWorking from './icons/HangarWorking.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
+  import SessionSignals from './SessionSignals.svelte';
+  import { navegadorPanel } from '../lib/navegadorPanel.svelte';
+  import { workspaceSessionKey } from '../lib/workspaceCommands';
 
   interface Props {
     session: SessionInfo;
@@ -38,6 +41,9 @@ import { textoProblema } from '../lib/problema';
 
   const title = $derived(session.name);
   const pendingQuestions = $derived(session.pending_questions ?? 0);
+  const serverId = $derived('serverId' in session ? (session as AggSession).serverId : '');
+  const navKey = $derived(serverId ? workspaceSessionKey({ serverId, name: session.name }) : '');
+  const browserOpen = $derived(!!navKey && navKey in navegadorPanel.abertos);
 
   const cwdPartes = $derived(cwdParts(session.cwd));
 
@@ -82,7 +88,8 @@ import { textoProblema } from '../lib/problema';
   // Provider da linha — só as não-Claude ganham chip (ver providerTag em lib/format).
   const provTag = $derived(providerTag(session.provider));
   // Tempo relativo da última atividade ("51 min atrás" — o "51m ago" do card do super.engineering).
-  const agoLabel = $derived(relativeTime(session.last_activity));
+  const agoLabel = $derived(session.last_reply ? '' : relativeTime(session.last_activity));
+  const replyTime = $derived(relativeTime(session.last_reply_at));
 
   // ── Swipe-to-actions ───────────────────────────────────────────────────────
   // Arrasta a linha pra esquerda revelando Git / Loop / Excluir. touch-action:pan-y deixa o scroll
@@ -290,6 +297,7 @@ import { textoProblema } from '../lib/problema';
           />
         {:else}
           <span class="session-name">{title}</span>
+          <SessionSignals browser={browserOpen} headless={session.headless === true} />
           {#if pendingQuestions > 0}
             <span class="untracked-badge pending-questions" title={`${m.ask_perguntas()}: ${pendingQuestions}`} aria-label={`${m.ask_perguntas()}: ${pendingQuestions}`}>? {pendingQuestions}</span>
           {/if}
@@ -302,6 +310,12 @@ import { textoProblema } from '../lib/problema';
         <span class="status-sub asking" title={session.question}>{session.question}</span>
       {:else if session.state === 'working' && session.label}
         <span class="status-sub working" title={session.label}>{session.label}</span>
+      {:else if session.state === 'idle' && session.last_reply}
+        <span class="status-sub reply" title={session.last_reply}>
+          <span class="reply-mark" aria-hidden="true">◆</span>
+          <span class="reply-text">{session.last_reply}</span>
+          {#if replyTime}<span class="reply-time">{replyTime}</span>{/if}
+        </span>
       {/if}
       <!-- UMA meta-line só (antes eram duas: cwd e branch). Ordem = importancia: a branch e o que
            muda, entao vem primeiro e nunca some; o cwd fecha a linha e trunca primeiro. O tempo
@@ -714,6 +728,10 @@ import { textoProblema } from '../lib/problema';
   }
   .status-sub.asking { color: var(--warning); font-weight: 600; }
   .status-sub.working { color: var(--text-secondary); font-style: italic; }
+  .status-sub.reply { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }
+  .reply-mark { flex-shrink: 0; color: var(--text-muted); font-size: 8px; }
+  .reply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reply-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; }
   .srv {
     font-weight: 600;
     flex-shrink: 0;

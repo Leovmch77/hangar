@@ -101,6 +101,13 @@ export function fecharNav(chave: string): void {
   salvarAbertos();
 }
 
+/** Mantém o estado global em dia quando o CLI fecha um navegador fora do painel daquela sessão. */
+export function ouvirFechamentoNav(): () => void {
+  const nativo = navegadorNativo();
+  if (!nativo?.onFechado) return () => {};
+  return nativo.onFechado(({ chave }) => fecharNav(chave));
+}
+
 // Sessão que sumiu da lista — ou que está lá com outro transcript — leva o navegador junto:
 // a marca sobrevivia à morte da sessão e uma sessão nova com o mesmo nome no mesmo repo nascia
 // com o view e a URL de uma morta, e o agente dela era avisado de um navegador que nunca abriu.

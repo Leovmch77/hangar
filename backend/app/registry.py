@@ -16,7 +16,8 @@ from app import runtime_config
 from app.names import sanitize_session_name
 from app.git_ops import git_summary, git_diffstat, head_info
 from app.models import SessionInfo, session_key
-from app.pqueue import PromptQueue, _sanitize
+from app.pqueue import PromptQueue, _sanitize, merged_history
+from app.archive import _texto_simples
 from app.chain import ThenLink
 from app import pair, pair_texto
 from app.pair import PairLink, rename_pair, leave as pair_leave
@@ -779,6 +780,9 @@ class SessionRegistry:
     # das travadas, com este cache, e o que liga o radar sem raspar toda sessao a cada poll.
     _limit_cache: dict[str, tuple[float, Optional[str]]] = {}
     _LIMIT_CACHE_S = 30.0
+    # name -> (jsonl, mtime, provider, texto, ts). A lista roda a cada 1,5s; a cauda só é relida
+    # quando o transcript muda e a sessão volta a ficar parada.
+    _reply_cache: dict[str, tuple[str, Optional[float], str, Optional[str], Optional[float]]] = {}
     # Nomes ja avisados por _agent_pane (Task 5.5): sessao com 2+ panes e nenhum reconhecido como
     # agente. De classe pela MESMA razao das demais acima (list() roda em ambas instancias).
     _SEM_AGENTE_AVISADAS: set[str] = set()
@@ -994,6 +998,7 @@ class SessionRegistry:
         self._status_cache.pop(name, None)
         self._label_cache.pop(name, None)
         self._limit_cache.pop(name, None)
+        self._reply_cache.pop(name, None)
 
     def _repl_sid(self, pid, children: Optional[dict[int, list[int]]] = None) -> Optional[str]:
         # --session-id do REPL principal da sessao (pula daemon/agent). Identidade do DONO de um
@@ -1607,6 +1612,32 @@ class SessionRegistry:
                 and (now - info.last_activity) > runtime_config.get("stall_seconds")
             )
         await self._radar_de_limite(infos, raspadas={i.name for i in pending})
+        # Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
+        # /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo.
+        def _decorate_replies() -> None:
+            for info in infos:
+                info.last_reply = None
+                info.last_reply_at = None
+                if info.state != "idle" or not info.jsonl:
+                    continue
+                provider = getattr(info, "provider", "claude")
+                marker = (info.jsonl, info.last_activity, provider)
+                cached = self._reply_cache.get(info.name)
+                if cached is None or cached[:3] != marker:
+                    try:
+                        event = next((ev for ev in reversed(merged_history(
+                            info.name, info.jsonl, provider, limit=8
+                        )) if ev.kind == "assistant_msg" and ev.text), None)
+                    except Exception:
+                        _log.warning("lista: falha lendo ultima resposta sessao=%s", info.name,
+                                     exc_info=True)
+                        continue
+                    text = _texto_simples(event.text)[:160] if event and event.text else None
+                    cached = (*marker, text, (event.ts or info.last_activity) if event else None)
+                    self._reply_cache[info.name] = cached
+                info.last_reply, info.last_reply_at = cached[3], cached[4]
+
+        await asyncio.to_thread(_decorate_replies)
         # Estado de git por sessão — SÓ aqui (payload do /api/sessions), nunca em list(): git_summary
         # forka `git status` e list() é o caminho leve chamado por kill()/resume/SSE. E como
         # list_with_state é awaitado direto no event loop (/api/sessions, sse, stall_watch), o loop

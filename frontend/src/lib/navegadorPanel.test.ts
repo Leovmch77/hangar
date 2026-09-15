@@ -64,6 +64,27 @@ describe('navegadorPanel — largura redimensionável', () => {
     expect(JSON.parse(localStorage.getItem('cp_nav_abertos')!)).not.toHaveProperty('srv-x::hangar');
   });
 
+  it('fechamento externo limpa a marca mesmo sem o painel da sessão montado', async () => {
+    let fechado: ((p: { chave: string }) => void) | undefined;
+    const off = vi.fn();
+    (window as unknown as { hangar?: unknown }).hangar = {
+      nav: { onFechado: (cb: (p: { chave: string }) => void) => { fechado = cb; return off; } },
+    };
+    const mod = await importarFresco();
+    mod.marcarNavAberto('srv-x::hangar');
+    const ouvir = (mod as typeof mod & { ouvirFechamentoNav?: () => () => void }).ouvirFechamentoNav;
+    expect(typeof ouvir).toBe('function');
+    if (!ouvir) return;
+    const parar = ouvir();
+
+    fechado?.({ chave: 'srv-x::hangar' });
+
+    expect(mod.navegadorPanel.abertos).not.toHaveProperty('srv-x::hangar');
+    parar();
+    expect(off).toHaveBeenCalledOnce();
+    delete (window as unknown as { hangar?: unknown }).hangar;
+  });
+
   it('abertos acompanha a URL da aba ativa', async () => {
     const mod = await importarFresco();
     mod.marcarNavAberto('srv-x::hangar');

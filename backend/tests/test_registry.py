@@ -20,11 +20,13 @@ def _clear_jsonl_cache():
     SessionRegistry._fd_locked.clear()
     SessionRegistry._status_cache.clear()
     SessionRegistry._label_cache.clear()
+    SessionRegistry._reply_cache.clear()
     yield
     SessionRegistry._jsonl_cache.clear()
     SessionRegistry._fd_locked.clear()
     SessionRegistry._status_cache.clear()
     SessionRegistry._label_cache.clear()
+    SessionRegistry._reply_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -367,6 +369,31 @@ async def test_list_with_state_frozen_spinner_reads_idle(tmp_path, monkeypatch):
     monkeypatch.setattr(registry.tmux, "capture_pane", lambda name, lines=200: "✻ Worked for 8s\n")
     out = await reg.list_with_state()
     assert out[0].state == "idle"
+
+
+async def test_list_with_state_expoe_ultima_resposta_quando_parada(tmp_path, monkeypatch):
+    from app.models import SessionInfo
+
+    jsonl = tmp_path / "reply.jsonl"
+    jsonl.write_text(
+        '{"type":"user","uuid":"u1","timestamp":"2026-09-15T12:00:00Z",'
+        '"message":{"role":"user","content":"confere"}}\n'
+        '{"type":"assistant","uuid":"a1","timestamp":"2026-09-15T12:01:00Z",'
+        '"message":{"role":"assistant","content":[{"type":"text",'
+        '"text":"**Pronto** — veja `app.py`."}]}}\n',
+        encoding="utf-8",
+    )
+    reg = SessionRegistry(projects_dir=tmp_path)
+    info = SessionInfo(name="reply", jsonl=str(jsonl), tracked=True)
+    monkeypatch.setattr(reg, "list", lambda: [info])
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda _sid: ("idle", 1.0))
+    monkeypatch.setattr(registry, "pergunta_aberta", lambda _sid: None)
+    reg._status_cache["reply"] = (time.monotonic(), None)
+
+    out = await reg.list_with_state()
+
+    assert getattr(out[0], "last_reply", None) == "Pronto — veja app.py."
+    assert getattr(out[0], "last_reply_at", None) == pytest.approx(1789473660)
 
 
 async def test_list_with_state_scrapes_pane_for_awaiting_marker(tmp_path, monkeypatch):

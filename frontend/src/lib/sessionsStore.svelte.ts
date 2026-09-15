@@ -10,7 +10,7 @@ import type { EventSourceLike } from '@hangar/core';
 import { openSessionsStream, registrarDiag, novoReqDiag } from '@hangar/core';
 import { listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
-import { podarNavMortos } from './navegadorPanel.svelte';
+import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
 
 function createSessionsStore() {
@@ -63,6 +63,7 @@ function createSessionsStore() {
   }
   let refs = 0;
   let offChanged: (() => void) | null = null;
+  let offNavFechado: (() => void) | null = null;
   // Exclusão otimista: chaves `serverId::name` escondidas da lista enquanto o delete está em voo.
   // A faxina roda a cada recompute — quando o SSE confirma o sumiço, a marca sai sozinha.
   let hidden = new Map<string, string | null>();
@@ -246,6 +247,7 @@ function createSessionsStore() {
 
   function start() {
     servers = listServers();
+    offNavFechado = ouvirFechamentoNav();
     connect(servers);
     offChanged = onServersChanged(() => { servers = listServers(); connect(servers); });
     document.addEventListener('visibilitychange', onVisibleKick);
@@ -253,6 +255,8 @@ function createSessionsStore() {
   function stop() {
     offChanged?.();
     offChanged = null;
+    offNavFechado?.();
+    offNavFechado = null;
     document.removeEventListener('visibilitychange', onVisibleKick);
     // Timers primeiro: um watchdog disparando pós-stop reabriria streams com refs = 0.
     for (const t of watchdogs.values()) clearTimeout(t);

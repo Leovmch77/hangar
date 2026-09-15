@@ -5,12 +5,16 @@ import { configureDiag } from '@hangar/core';
 
 const streams = vi.hoisted(() => new Map<string, Map<string, (event: { data: string }) => void>>());
 const connectionIds = vi.hoisted(() => new Map<string, string | undefined>());
+const navListener = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn() }));
 vi.mock('./auth', () => ({
   listServers: () => ['lan', 'vpn'].map(id => ({ id, label: id, baseUrl: `http://${id}`, token: 'test' })),
   onServersChanged: () => () => {},
 }));
 vi.mock('./navPelaLista', () => ({ navPelaLista: vi.fn() }));
-vi.mock('./navegadorPanel.svelte', () => ({ podarNavMortos: vi.fn() }));
+vi.mock('./navegadorPanel.svelte', () => ({
+  podarNavMortos: vi.fn(),
+  ouvirFechamentoNav: () => { navListener.start(); return navListener.stop; },
+}));
 vi.mock('@hangar/core', async original => ({
   ...await original<typeof import('@hangar/core')>(),
   openSessionsStream: (server: { id: string }, req?: string) => {
@@ -33,6 +37,15 @@ it('passa à abertura da lista o mesmo ID registrado em cada servidor', () => {
   for (const [server, req] of connectionIds) {
     expect(registrar).toHaveBeenCalledWith(expect.objectContaining({ evento: 'lista.abrir', req }), `http://${server}`);
   }
+});
+
+it('ouve fechamento externo do navegador enquanto a lista está viva', () => {
+  const starts = navListener.start.mock.calls.length;
+  const stops = navListener.stop.mock.calls.length;
+  sessionsStore.retain();
+  expect(navListener.start).toHaveBeenCalledTimes(starts + 1);
+  sessionsStore.release();
+  expect(navListener.stop).toHaveBeenCalledTimes(stops + 1);
 });
 
 it('preserva a sessão da VPN quando a LAN assume a duplicata na lista visual', () => {

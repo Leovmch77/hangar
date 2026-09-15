@@ -5,7 +5,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import SessionCard from './SessionCard.svelte';
-import type { SessionInfo } from '@hangar/core';
+import type { AggSession, SessionInfo } from '@hangar/core';
+import { fecharNav, marcarNavAberto } from '../lib/navegadorPanel.svelte';
 
 function sessao(over: Partial<SessionInfo>): SessionInfo {
   return { name: 's1', state: 'idle', ...over } as SessionInfo;
@@ -102,6 +103,26 @@ describe('SessionCard: diff stats e tempo (referência super.engineering)', () =
   it('tempo relativo da última atividade aparece no fim da meta-line', () => {
     const { el, comp } = montar(sessao({ last_activity: Date.now() / 1000 - 45 * 60 }));
     expect(el.querySelector('.ago')?.textContent).toContain('45');
+    unmount(comp);
+  });
+
+  it('sessão parada mostra a última resposta e o tempo na linha secundária', () => {
+    const { el, comp } = montar(sessao({
+      last_reply: 'Os testes focados passaram.',
+      last_reply_at: Date.now() / 1000 - 8 * 60,
+    }));
+    expect(el.querySelector('.status-sub.reply')?.textContent).toContain('Os testes focados passaram.');
+    expect(el.querySelector('.reply-time')?.textContent).toContain('8');
+    unmount(comp);
+  });
+
+  it('navegador aberto e sem terminal aparecem junto ao nome', () => {
+    marcarNavAberto('srv-a::s1');
+    const session = { ...sessao({ headless: true }), serverId: 'srv-a' } as AggSession;
+    const { el, comp } = montar(session);
+    expect(el.querySelector('.session-signal--browser')).not.toBeNull();
+    expect(el.querySelector('.session-signal--headless')).not.toBeNull();
+    fecharNav('srv-a::s1');
     unmount(comp);
   });
 
