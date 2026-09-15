@@ -22,8 +22,8 @@
 //   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
 //
-// A sessão é resolvida pelo nome da sessão tmux atual (dentro do tmux); fora dele, ou pra operar
-// o navegador de OUTRA sessão, use --sessao <nome>.
+// A sessão é resolvida pela chave estável do sidecar no modo sem terminal e pelo tmux no modo com
+// terminal. Para operar o navegador de OUTRA sessão, use --sessao <nome>.
 //
 // Como funciona: o shell mantém um controlador por navegador (fila, refs, tema, buffers de
 // console/rede) dentro do processo Electron, e publica porta+token efêmeros num sidecar que só o
@@ -63,6 +63,8 @@ const cmd = pos[0];
 if (!cmd || cmd === 'help' || cmd === '--help') {
   console.log(`uso: hangar-preview <verbo> [args] [--sessao <nome>]
 
+Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
+
   open <url>              abre o navegador desta sessão com a url
   list                    navegadores vivos (chave, url, vivo/morto)
   snapshot                árvore de acessibilidade compacta, com refs @eN
@@ -91,18 +93,21 @@ Referência completa: skill hangar-preview.`);
 // --- resolve a sessão (chave serverId::nome) ---
 function nomeHeadless() {
   // Sessão SEM terminal: a chave do sidecar (env do processo) não muda no rename nem no /clear.
-  const chave = process.env.CP_SESSION_KEY;
+  const chave = process.env.CP_SESSION_KEY || process.env.HANGAR_CANO_KEY;
   if (!chave) return null;
-  const pasta = join(homedir(), '.hangar', 'claude-headless');
-  try {
-    for (const arq of readdirSync(pasta)) {
-      if (!arq.endsWith('.json')) continue;
-      try {
-        const meta = JSON.parse(readFileSync(join(pasta, arq), 'utf8'));
-        if (meta && meta.key === chave && meta.name) return String(meta.name);
-      } catch { /* sidecar em escrita ou inválido */ }
-    }
-  } catch { /* sem pasta: nunca houve sessão sem terminal aqui */ }
+  const pastas = ['claude-headless', 'codex-sessions']
+    .map((nome) => join(homedir(), '.hangar', nome));
+  for (const pasta of pastas) {
+    try {
+      for (const arq of readdirSync(pasta)) {
+        if (!arq.endsWith('.json')) continue;
+        try {
+          const meta = JSON.parse(readFileSync(join(pasta, arq), 'utf8'));
+          if (meta && meta.key === chave && meta.name) return String(meta.name);
+        } catch { /* sidecar em escrita ou inválido */ }
+      }
+    } catch { /* esta família de sessão sem terminal nunca existiu nesta máquina */ }
+  }
   return null;
 }
 
@@ -149,7 +154,7 @@ function lerSidecars() {
 function sidecarDa(nome) {
   const todos = lerSidecars();
   if (!todos.length) erro('nenhum navegador aberto em nenhuma sessão (abra o seu com: hangar-preview open <url>)');
-  if (!nome) erro('fora do tmux não dá pra saber a sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${s.url}`).join('\n'));
+  if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${s.url}`).join('\n'));
   const achados = todos.filter((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
   if (achados.length === 1) return achados[0];
   if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto. Vivos:\n` + todos.map((s) => `  ${s.chave}  ${s.url}`).join('\n'));
@@ -210,7 +215,7 @@ if (cmd === 'open') {
   const url = pos[1];
   if (!url) erro('open precisa de uma url: hangar-preview open localhost:3000');
   const nome = nomeSessao();
-  if (!nome) erro('fora do tmux não dá pra saber a sessão — use --sessao <nome>');
+  if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>');
   const repo = join(dirname(realpathSync(process.argv[1])), '..');
   let token = '';
   try {

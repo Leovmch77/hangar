@@ -48,8 +48,8 @@ function clampPct(n: number): number {
 }
 
 export function parseStatusLine(raw: string | null | undefined, session?: SessionInfo | null): StatusFields | null {
-  // O Codex não publica Git na statusline; a lista já consulta o repositório da sessão.
-  const git = session?.provider === 'codex' && session.cwd && session.branch
+  // Codex e Claude sem terminal não publicam Git na statusline; a lista já consulta o repositório.
+  const git = (session?.provider === 'codex' || session?.headless === true) && session.cwd && session.branch
     ? { repo: basename(session.cwd), branch: session.branch,
         dirty: session.git_dirty == null ? undefined : session.git_dirty > 0 }
     : null;

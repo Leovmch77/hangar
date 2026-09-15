@@ -18,14 +18,15 @@
 #                                  Peer com caminho nativo NÃO recebe pelo tmux: o script sai com
 #                                  código 3 listando a quem mandar por SendMessage, com o texto
 #                                  exato. --tmux força o caminho antigo.
-#   hangar-send --new <nome> [cwd]     cria sessão Claude nova (tmux gerenciado pelo app: --session-id,
-#                                  truecolor, visível no app). cwd default = home.
+#   hangar-send --new <nome> [cwd]     cria sessão nova, com terminal gerenciado ou headless.
+#                                  cwd default = home.
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
 #                                  nova (default claude). Ex: --provider kimi abre o Kimi Code.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
-#                                  --headless (só claude) abre a sessão SEM terminal: o Claude roda
-#                                  fora do tmux e conversa só pelo app. Combina com --model/--effort/
-#                                  --permissao/--conta.
+#                                  --headless (claude ou codex) abre a sessão SEM terminal: o agente
+#                                  roda fora do tmux e conversa só pelo app. Combina com --model,
+#                                  --effort e --permissao. Ex.: --provider codex --headless
+#                                  --permissao "Full Access".
 #                                  --engine <motor> nasce num motor de ~/.claude/engines.json
 #                                  (outro modelo, conta do provedor — ver "Par noutro modelo").
 #                                  --conta <nome> nasce em OUTRA CONTA Anthropic (ver abaixo).
@@ -33,11 +34,10 @@
 #                                  login, sessões e config em ~/.omp/profiles/<nome>/agent.
 #                                  --conta auto deixa a cota escolher: a conta Claude com mais
 #                                  folga na janela que mais aperta (5h, 7d ou a do modelo).
-#                                  --model <id> a sessão já ABRE nesse modelo (opus, sonnet,
-#                                  haiku, claude-opus-5…) — vale pra claude, pi e kimi.
-#                                  --effort <low|medium|high|xhigh|max> já abre nesse esforço
-#                                  (claude; no pi vira --thinking, que aceita também off/minimal;
-#                                  kimi não tem esforço por flag). SEMPRE prefira nascer no
+#                                  --model <id> abre no modelo escolhido — vale pra claude, codex,
+#                                  pi e kimi. --effort <nivel> abre nesse esforço (claude/codex;
+#                                  no pi vira --thinking, que aceita também off/minimal; kimi não
+#                                  tem esforço por flag). SEMPRE prefira nascer no
 #                                  modelo/esforço certo a mandar /model no primeiro recado — a
 #                                  sessão trabalha ANTES de ler o recado.
 #   hangar-send --help                 esta ajuda (o cabeçalho deste arquivo).
@@ -50,7 +50,7 @@
 # `--conta auto` pergunta ao backend (GET /api/cotas/sugestao) qual conta tem mais folga e nasce
 # nela; sem nenhuma conta com leitura de cota o script para com erro, nunca cai calado na padrão.
 #
-# Remetente é detectado pelo nome da sessão tmux atual e prefixado como "[de: X]",
+# Remetente é detectado pelo sidecar no modo sem terminal ou pelo tmux e prefixado como "[de: X]",
 # pra sessão destino saber a origem e pra onde responder.
 #
 # Cross-server: backend/peers.json (ver peers.json.example; NUNCA commitar — tem token) mapeia
@@ -214,14 +214,22 @@ me() {
     # 0) Sessão SEM terminal: não há pane nem sessão tmux. A chave vem do env do processo
     #    (CP_SESSION_KEY, posta pelo adapter) e não muda no rename nem no /clear; o nome atual é
     #    o do sidecar que carrega essa chave.
-    if [[ -n "${CP_SESSION_KEY:-}" ]]; then
-        local sidecar
-        sidecar=$(grep -ls "\"key\": \"$CP_SESSION_KEY\"" "${HANGAR_HEADLESS_DIR:-$HOME/.hangar/claude-headless}"/*.json 2>/dev/null | head -1)
-        if [[ -n "$sidecar" ]]; then
-            local nome
-            nome=$(sed -n 's/.*"name": "\([^"]*\)".*/\1/p' "$sidecar" | head -1)
-            if [[ -n "$nome" ]]; then echo "$nome"; return; fi
+    local chave_headless="${CP_SESSION_KEY:-${HANGAR_CANO_KEY:-}}"
+    if [[ -n "$chave_headless" ]]; then
+        local pasta sidecar nome
+        local -a pastas
+        if [[ -n "${HANGAR_HEADLESS_DIR:-}" ]]; then
+            pastas=("$HANGAR_HEADLESS_DIR")
+        else
+            pastas=("$HOME/.hangar/claude-headless" "$HOME/.hangar/codex-sessions")
         fi
+        for pasta in "${pastas[@]}"; do
+            sidecar=$(grep -ls "\"key\": \"$chave_headless\"" "$pasta"/*.json 2>/dev/null | head -1)
+            if [[ -n "$sidecar" ]]; then
+                nome=$(sed -n 's/.*"name": "\([^"]*\)".*/\1/p' "$sidecar" | head -1)
+                if [[ -n "$nome" ]]; then echo "$nome"; return; fi
+            fi
+        done
     fi
     local dono=""
     if [[ -n "${TMUX_PANE:-}" ]]; then
@@ -297,8 +305,7 @@ if [[ "$1" == "--new" ]]; then
     cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            # --headless: sessão Claude sem terminal (o campo `headless` do POST, o mesmo da tela de
-            # criar sessão). Sem o flag aqui, quem orquestra por hangar-send só abria com terminal.
+            # --headless: sessão Claude ou Codex sem terminal (o mesmo campo da tela de criação).
             --headless)
                 [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
                 headless="true"; shift ;;
@@ -322,7 +329,7 @@ if [[ "$1" == "--new" ]]; then
                 model="${2:?uso: --model <id>}"; shift 2 ;;
             --effort)
                 [[ -n "$effort" ]] && { echo "erro: --effort informado duas vezes" >&2; exit 2; }
-                effort="${2:?uso: --effort <low|medium|high|xhigh|max>}"; shift 2 ;;
+                effort="${2:?uso: --effort <nivel>}"; shift 2 ;;
             --permissao)
                 [[ -n "$permissao" ]] && { echo "erro: --permissao informado duas vezes" >&2; exit 2; }
                 permissao="${2:?uso: --permissao <acceptEdits|auto|bypassPermissions|manual|dontAsk|plan>}"; shift 2 ;;
@@ -334,9 +341,9 @@ if [[ "$1" == "--new" ]]; then
         esac
     done
     cwd="${cwd:-$HOME}"
-    # Sessão sem terminal só existe pro Claude; parar aqui evita criar nada com provider errado.
-    if [[ -n "$headless" && -n "$provider" && "$provider" != "claude" ]]; then
-        echo "erro: --headless só vale com provider claude (veio: $provider)" >&2
+    # Os demais providers dependem de pane; parar antes do POST evita criação incoerente.
+    if [[ -n "$headless" && -n "$provider" && "$provider" != "claude" && "$provider" != "codex" ]]; then
+        echo "erro: --headless só vale com provider claude ou codex (veio: $provider)" >&2
         exit 2
     fi
     # Conta inexistente para AQUI, antes do POST: o backend recusaria com 400, mas o erro do

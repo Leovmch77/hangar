@@ -11,6 +11,13 @@ it('mostra o Git do Codex sem depender da statusline e acompanha a branch', () =
   expect(parseStatusLine(null, { ...session, provider: 'claude' })).toBeNull();
 });
 
+it('mostra o Git do Claude headless sem depender da statusline', () => {
+  const session = { name: 'cl', state: 'idle' as const, provider: 'claude' as const,
+    headless: true, cwd: '/projetos/hangar', branch: 'feature/headless', git_dirty: 1 };
+  expect(parseStatusLine('🤖 Opus5·1M │ ⚡5h:50%', session))
+    .toMatchObject({ repo: 'hangar', branch: 'feature/headless', dirty: true });
+});
+
 describe('parseStatusLine — uso de contexto', () => {
   it('deriva ctxPct do 2º par (usado/janela) quando há métrica de contexto', () => {
     const s = parseStatusLine('💬 20k/1k 40k/200k');

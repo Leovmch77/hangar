@@ -69,11 +69,13 @@ rm -f "$TMP/corpo.json"
 bash "$TMP/scripts/hangar-send" --new sem-flag /tmp >/dev/null 2>&1
 checa "sem --headless, sem a chave" 'null' "$(campo headless 2>/dev/null)"
 
-# 3. Só com provider claude: outro provider para ANTES do POST.
+# 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"
-bash "$TMP/scripts/hangar-send" --new hl-codex /tmp --headless --provider codex >/dev/null 2>&1
-checa "--headless com codex: código" '2' "$?"
-checa "--headless com codex: nada enviado" 'nao' "$([[ -f "$TMP/corpo.json" ]] && echo sim || echo nao)"
+bash "$TMP/scripts/hangar-send" --new hl-codex /tmp --headless --provider codex --permissao "Full Access" >/dev/null 2>&1
+checa "--headless com codex: código" '0' "$?"
+checa "--headless com codex: provider" '"codex"' "$(campo provider 2>/dev/null)"
+checa "--headless com codex: flag" 'true' "$(campo headless 2>/dev/null)"
+checa "--headless com codex: permissão" '"Full Access"' "$(campo permission_mode 2>/dev/null)"
 
 # 4. Repetido é erro, como os outros flags.
 bash "$TMP/scripts/hangar-send" --new hl-2x /tmp --headless --headless >/dev/null 2>&1

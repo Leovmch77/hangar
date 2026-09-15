@@ -37,6 +37,7 @@ _log = logging.getLogger("hangar.atualizacoes")
 REPO = Path(__file__).resolve().parents[2]
 
 _TIMEOUT = 600.0
+_WINDOWS = os.name == "nt"
 
 
 def _dir() -> Path:
@@ -89,7 +90,8 @@ def _passo(arquivo: Path) -> dict | None:
         # pega o erro ANTES de ele sair da máquina de quem publica é `test_passos_declarados.py`.
         _log.warning("passo %s ignorado: falta 'titulo'", arquivo.name)
         return None
-    if campos.get("comando") and not campos.get("prova"):
+    tem_comando = any(campos.get(k) for k in ("comando", "comando_posix", "comando_windows"))
+    if tem_comando and not campos.get("prova"):
         # Comando sem prova é literalmente o defeito que esta feature existe pra eliminar: "saiu com
         # 0" vira "deu certo", o id entra no registro e o passo nunca mais roda — com o efeito dele
         # ausente. Recusar é melhor que aplicar sem saber. Passo só de texto (sem comando) não
@@ -99,7 +101,8 @@ def _passo(arquivo: Path) -> dict | None:
     return {
         "id": ident,
         "titulo": campos["titulo"],
-        "comando": campos.get("comando", "").strip(),
+        "comando": (campos.get("comando_windows" if _WINDOWS else "comando_posix")
+                    or campos.get("comando", "")).strip(),
         "prova": campos.get("prova", "").split(),
         "destrutivo": campos.get("destrutivo", "").strip().lower() in ("true", "sim", "1"),
         "texto": corpo,

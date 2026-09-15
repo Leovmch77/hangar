@@ -39,6 +39,15 @@ def test_valor_com_dois_pontos_sobrevive(passos):
     assert p["titulo"] == "Um: com dois pontos" and p["comando"] == "echo a:b"
 
 
+def test_comando_especifico_da_plataforma_vence_o_generico(passos, monkeypatch):
+    _escreve(passos, "x", id="x", titulo="Instala", comando="echo generico",
+             comando_posix="echo posix", comando_windows="echo windows", prova="docs")
+    monkeypatch.setattr(atualizacoes, "_WINDOWS", False, raising=False)
+    assert atualizacoes.todos()[0]["comando"] == "echo posix"
+    monkeypatch.setattr(atualizacoes, "_WINDOWS", True)
+    assert atualizacoes.todos()[0]["comando"] == "echo windows"
+
+
 def test_sem_titulo_e_ignorado_sem_derrubar_o_resto(passos):
     """Arquivo malformado não pode travar a atualização de todo mundo."""
     _escreve(passos, "quebrado", id="quebrado", comando="echo oi", prova="docs")

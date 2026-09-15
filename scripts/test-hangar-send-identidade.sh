@@ -47,6 +47,7 @@ FAKE
 chmod +x "$TMP/bin/tmux"
 export PATH="$TMP/bin:$PATH"
 source "$TMP/me.sh"
+unset CP_SESSION_KEY HANGAR_CANO_KEY HANGAR_HEADLESS_DIR
 
 checa() { # <caso> <esperado> <obtido>
     if [[ "$2" == "$3" ]]; then
@@ -88,10 +89,18 @@ export HANGAR_HEADLESS_DIR="$TMP/headless" CP_SESSION_KEY="abc123" CP_SESSION_NA
 export TMUX=1 TMUX_PANE="%1" PANES_FAKE=$'%1 outra' SESSAO_ATUAL="outra"
 checa "sem terminal (chave do sidecar)" "renomeada" "$(me 2>/dev/null)"
 
-# 6) Chave sem sidecar (sessão encerrada e arquivo apagado): segue pros passos de sempre.
+# 6) Codex sem terminal usa o sidecar próprio, sem cair no tmux.
+mkdir -p "$TMP/home/.hangar/codex-sessions"
+printf '{"name": "codex-headless", "provider": "codex", "key": "cx123", "headless": true}\n' > "$TMP/home/.hangar/codex-sessions/codex-headless.json"
+unset HANGAR_HEADLESS_DIR
+HOME_ANTIGO=$HOME
+HOME="$TMP/home" HANGAR_CANO_KEY="cx123" checa "codex sem terminal" "codex-headless" "$(HOME="$TMP/home" CP_SESSION_KEY="" HANGAR_CANO_KEY="cx123" me 2>/dev/null)"
+HOME=$HOME_ANTIGO
+
+# 7) Chave sem sidecar (sessão encerrada e arquivo apagado): segue pros passos de sempre.
 export CP_SESSION_KEY="nao-existe"
 checa "chave órfã cai no pane" "outra" "$(me 2>/dev/null)"
-unset CP_SESSION_KEY HANGAR_HEADLESS_DIR
+unset CP_SESSION_KEY HANGAR_CANO_KEY HANGAR_HEADLESS_DIR
 
 echo
 if (( falhas )); then echo "$falhas falha(s)"; exit 1; fi

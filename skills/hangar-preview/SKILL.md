@@ -5,7 +5,7 @@ description: |
   embutido" no prompt) e a tarefa envolver VER, ler, clicar, testar ou tirar screenshot de uma
   página web — mexeu numa tela e quer conferir, "testa o login", "vê como ficou", "clica no botão
   lá", "lê o console da página" —, mesmo que o usuário não fale em preview ou navegador. A skill
-  ABRE o navegador embutido desta sessão (`hangar-preview open <url>`, o painel monta na tela do
+  ABRE o navegador embutido desta sessão (`hangar-preview open URL`, o painel monta na tela do
   usuário) e o dirige por refs de acessibilidade. Com o app desktop aberto ela vence agent-browser
   e ver-front pra página local. Cada sessão tem o SEU navegador; --sessao opera o de outra só
   quando o usuário pedir. NÃO use para: máquina sem o app desktop (sem o aviso do hook, é
@@ -17,8 +17,9 @@ allowed-tools: Bash(hangar-preview:*)
 # hangar-preview — dirigir o navegador embutido da sessão
 
 O navegador embutido é um Chromium de verdade (view nativo do Electron), um por sessão. O CLI
-resolve sozinho QUAL é o da sua sessão (pelo nome da sessão tmux) e fala com o servidor local do
-shell — duas sessões com a mesma URL aberta não se confundem.
+resolve sozinho QUAL é o da sua sessão: pela chave estável do sidecar no modo sem terminal e pelo
+nome do tmux no modo com terminal. Depois fala com o servidor local do shell — duas sessões com a
+mesma URL aberta não se confundem.
 
 ## O fluxo comum: mexeu na tela, quer conferir
 
@@ -196,9 +197,9 @@ como um único argumento de texto.
 
 ## Regras
 
-- O alvo é **sempre o navegador da própria sessão** — resolvido pelo nome da sessão tmux, sem
-  precisar de flag. `--sessao <nome>` é a exceção explícita, só quando o usuário pedir pra mexer no
-  navegador de outra sessão.
+- O alvo é **sempre o navegador da própria sessão** — resolvido pelo sidecar no modo sem terminal
+  ou pelo tmux no modo com terminal, sem precisar de flag. `--sessao <nome>` é a exceção explícita,
+  só quando o usuário pedir pra mexer no navegador de outra sessão.
 - O view continua vivo quando o usuário troca de sessão no app — você pode seguir trabalhando nele
   via CLI em background, sem atrapalhar a tela dele.
 - Não fique abrindo e fechando navegador em loop nem trocando a url a cada passo: cada `open` pisca

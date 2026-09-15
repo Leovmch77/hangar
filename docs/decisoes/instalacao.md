@@ -155,6 +155,16 @@ processo velho seguia na porta com o código novo no disco. E o modal mostrava a
     impressa por `Falha`/`Pare` no `.ps1` e por `fail` no `.sh`; a cauda de 12 linhas é só o
     fallback sem marca.
 
+## Passo com comando por sistema (14/09/2026)
+
+Um único `comando` não expressava a própria tabela de `docs/atualizacoes/README.md`: reinstalar
+`hangar-send`, skills e o bloco global usa `./scripts/install-hangar-send.sh` no POSIX e
+`install.ps1 -Update` no Windows. Rodar o primeiro pelo `cmd.exe` falha antes da prova; rodar o
+segundo em Linux nem existe. O frontmatter agora aceita `comando_posix` e `comando_windows`, com
+fallback em `comando`. A variante da plataforma é escolhida ao ler o passo, e qualquer uma das
+três chaves exige `prova`. O teste lê o mesmo passo simulando as duas plataformas e confirma o
+comando efetivo.
+
 ## Versão é `VERSION` + número de commits (`0.1.0.2533`)
 
 (`VERSION`, `diag.versao_legivel`, `vite.config.ts`, 14/09/2026.) `pyproject` ficou em 0.1.0 e

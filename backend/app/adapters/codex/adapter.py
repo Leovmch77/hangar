@@ -1024,7 +1024,8 @@ class CodexAdapter:
             # A guarda da API olhou o estado antes da trava; um prompt pode ter entrado no meio,
             # e fechar a conexão agora derrubaria o turno sem aviso.
             if sess is not None and sess.get("in_progress"):
-                raise sem_terminal.Ocupada("a sessão está trabalhando — espere ela terminar")
+                raise sem_terminal.Ocupada(
+                    "a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar")
             meta = codex_sessions.update(name, permission_mode=nome) or meta
             sess = self._sessions.pop(name, None)
             if sess is not None:

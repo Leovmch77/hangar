@@ -109,12 +109,12 @@
   .mode-control { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
   .trigger {
     display: inline-flex; align-items: center; gap: 6px; height: 30px; min-height: 0; min-width: 0; max-width: 100%;
-    padding: 4px var(--space-2); border-radius: var(--radius-md); background: var(--surface-raised);
+    padding: 4px var(--space-2); border-radius: var(--radius-md); background: var(--mode-control-bg, var(--accent-dim));
     color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer;
   }
   .trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .trigger > svg { flex: none; }
-  .trigger.planning { background: var(--accent-dim); color: var(--accent); font-weight: 650; }
+  .trigger.planning { color: var(--accent); font-weight: 650; }
   .error { color: var(--error); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .options { list-style: none; margin: 0; padding: 4px 0; }
   .option {

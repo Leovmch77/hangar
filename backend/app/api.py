@@ -1479,8 +1479,8 @@ class CreateBody(_StrictBody):
     omp_profile: str | None = None
 
     read_only: bool = Field(default=False, strict=True)
-    # Claude SEM terminal: o `claude` vira processo filho do backend (stream-json), sem tmux.
-    # Só vale com provider claude; o que depende de pane (painel de terminal, espelho) não existe.
+    # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
+    # (painel de terminal, espelho) não existe.
     headless: bool = Field(default=False, strict=True)
 
 
@@ -4373,9 +4373,12 @@ async def _aquecer_codex_sem_terminal(name: str) -> None:
 
 @app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
 async def permissoes_do_codex(name: str):
-    await _guard_permissao_codex(name)
     if _codex_sem_terminal(name):
+        if _provider_of(name) != "codex":
+            raise HTTPException(400, detail=erro("erro_permissao_so_codex",
+                                                 "este modo de permissao so vale para sessoes Codex"))
         return get_adapter("codex").permission_modes_sem_terminal(name)
+    await _guard_permissao_codex(name)
     try:
         return await asyncio.to_thread(terminal.list_codex_permissions, name)
     except (PickerError, terminal.NaoDigitou) as exc:
@@ -4384,7 +4387,6 @@ async def permissoes_do_codex(name: str):
 
 @app.post("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
 async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
-    await _guard_permissao_codex(name)
     if _codex_sem_terminal(name):
         from app.adapters.codex.sem_terminal import Ocupada
         try:
@@ -4395,6 +4397,7 @@ async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
             raise HTTPException(409, detail=erro("erro_permissao_ocupada", str(exc)))
         except RuntimeError as exc:
             raise HTTPException(503, detail=erro("erro_permissao_picker", f"não consegui reabrir o Codex: {exc}"))
+    await _guard_permissao_codex(name)
     try:
         return await asyncio.to_thread(terminal.set_codex_permission, name, body.mode)
     except (PickerError, terminal.NaoDigitou) as exc:

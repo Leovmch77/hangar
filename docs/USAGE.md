@@ -106,7 +106,7 @@ falha:
 
 ## 2. Subir (3 partes)
 
-**a) Claude ou Codex gerenciado dentro do tmux** (a sessão que o app vai espelhar):
+**a) Claude ou Codex com terminal, gerenciado dentro do tmux**:
 ```bash
 tmux new -s cc        # rode `claude` dentro dela
 ```
@@ -198,22 +198,22 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   manualmente: **Configurações → Geral → Idioma · Language** (o app recarrega ao trocar).
 
 ### Sessões
-- **Criar:** botão **＋ / Nova sessão** → escolha a pasta (cwd). O backend roda
-  `claude --session-id <novo>` num tmux novo → vem **limpa** (resolve o transcript pelo
-  processo, não pelo mais recente).
-- **Sem terminal (só Claude):** na Nova sessão, em **Como rodar**, escolha **Sem terminal
-  (processo do Hangar)**. Pelo terminal: `hangar-send --new <nome> [cwd] --headless`, que combina
-  com `--model`, `--effort`, `--permissao` e `--conta`. O Claude Code roda fora do tmux:
-  permissões e perguntas chegam direto no chat, e um restart do Hangar não interrompe o turno.
+- **Criar:** botão **＋ / Nova sessão** → escolha a pasta (cwd), o agente e como ele roda. Com
+  terminal, o backend cria um tmux novo; sem terminal, cria um processo gerenciado pelo Hangar.
+- **Sem terminal (Claude ou Codex):** na Nova sessão, em **Como rodar**, escolha **Sem terminal
+  (processo do Hangar)**. Pelo terminal, use `hangar-send --new <nome> [cwd] --headless`; acrescente
+  `--provider codex` para Codex. Combina com `--model`, `--effort` e `--permissao`. O agente roda
+  fora do tmux: permissões e perguntas chegam direto no chat, e reiniciar o Hangar não corta o turno.
+  Para abrir Codex sem confirmações nem sandbox, use `--permissao "Full Access"`.
   - Não há painel de terminal nem espelho; `/btw` e os comandos que só existem na TUI
     (`/color`, `/doctor`, `/reload-plugins`) ficam fora.
-  - O histórico continua no `.jsonl` do Claude: dá pra retomar no terminal com `claude --resume`.
-  - Login e confiança na pasta precisam ter sido feitos uma vez no terminal (`claude` naquela
-    pasta); sem isso a sessão avisa no chat que não conseguiu subir.
+  - O histórico continua no `.jsonl` do Claude ou no rollout do Codex e pode ser retomado depois.
+  - Login e confiança na pasta precisam estar preparados para a conta escolhida; sem isso a sessão
+    mostra no chat por que não conseguiu subir.
 - **Trocar:** toque no título (mobile) / clique na sidebar (desktop).
 - **Renomear:** **toque longo** no nome (sidebar/desktop) → edita inline → Enter salva.
   Não quebra o histórico (resolve por `/proc`, não pelo nome).
-- **Apagar:** × na linha (mata o tmux).
+- **Apagar:** × na linha (encerra o pane ou o processo sem terminal).
 
 ### Enviar
 - **Texto:** digite e envie. **Multi-linha** funciona (Shift+Enter / colar — vai por bracketed paste).
@@ -617,7 +617,8 @@ hangar-send api-fix "mensagem"        # manda prompt pra outra sessão (fila se 
 hangar-send --pair api-fix "tarefa"   # pareia ESTA sessão com outra num grupo de trabalho
 hangar-send --group "terminei"        # aviso de marco pro grupo todo (unidirecional)
 hangar-send --new front ~/repo/front  # cria sessão nova gerenciada pelo app (visível na UI)
-hangar-send --new front ~/repo/front --headless  # idem, Claude sem terminal (ver "Sessões")
+hangar-send --new front ~/repo/front --headless  # Claude sem terminal
+hangar-send --new api ~/repo/api --provider codex --headless  # Codex sem terminal
 ```
 
 **Instalar** (uma vez por máquina; o passo 6/6 do `install.sh` também oferece):

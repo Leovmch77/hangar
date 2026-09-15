@@ -12,10 +12,11 @@
     open: boolean;
     anchor: HTMLElement | null;
     sessionName: string;
+    headless?: boolean;
     onApplied: (modo: string) => void;
     onClose: () => void;
   }
-  let { open, anchor, sessionName, onApplied, onClose }: Props = $props();
+  let { open, anchor, sessionName, headless = false, onApplied, onClose }: Props = $props();
 
   let modos = $state<CodexPermissionMode[]>([]);
   let atual = $state<string | null>(null);
@@ -88,7 +89,7 @@
   {#if carregando}
     <p class="vazio">{m.comum_carregando()}</p>
   {:else if modos.length === 0}
-    <p class="vazio">{m.permissao_codex_sem_lista()}</p>
+    <p class="vazio">{headless ? m.permissao_codex_headless_sem_lista() : m.permissao_codex_sem_lista()}</p>
   {:else}
     <ul class="lista">
       {#each modos as modo (modo.numero)}

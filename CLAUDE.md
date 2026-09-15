@@ -1,7 +1,8 @@
 # Hangar
 
-Drive a live Claude Code session (running in a `tmux` session on your machine) from your phone over
-LAN/VPN, as a mobile chat. Single-user, LAN/VPN-only by design. Backend: Python 3.14 + FastAPI
+Drive live Claude Code, Codex, Pi, omp, and Kimi sessions from your phone over LAN/VPN. Terminal
+sessions run in `tmux`; Claude and Codex can instead run as Hangar-managed headless processes.
+Single-user, LAN/VPN-only by design. Backend: Python 3.14 + FastAPI
 (`backend/`). Frontend: Svelte 5 PWA (`frontend/`).
 
 - **Architecture + full API table + run guide:** [`README.md`](README.md).
@@ -10,11 +11,11 @@ LAN/VPN, as a mobile chat. Single-user, LAN/VPN-only by design. Backend: Python 
 
 ## Architecture at a glance
 
-The app never scrapes the terminal for chat content — it reads Claude Code's **JSONL transcript** and
-only peeks at the tmux pane for live **state**. Backend pieces (`backend/app/`):
+The app never scrapes the terminal for chat content — it reads structured transcripts/events.
+Only terminal sessions use the tmux pane for live **state** and input. Backend pieces (`backend/app/`):
 
-- `registry.py` — SessionRegistry: tmux list/new/kill ↔ maps Claude sessions to JSONL and Codex
-  sessions to their durable thread/rollout sidecar.
+- `registry.py` — SessionRegistry: joins terminal sessions from tmux with durable Claude/Codex
+  headless sidecars and their JSONL/rollout history.
 - `transcript.py` — tails `~/.claude/projects/<cwd>/<uuid>.jsonl` (the chat content).
 - `state.py` — classifies live state from `tmux capture-pane`: `working` / `idle` / `awaiting_input` / `dead`.
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
@@ -94,8 +95,9 @@ npm --prefix frontend run check            # svelte-check + tsc — THIS is the 
 node scripts/test-pi-hangar-state.mjs          # hangar-state.ts: fork de subagente do Pi não rouba o pane
 ```
 
-Sessions must run as `claude --session-id <uuid>` **inside tmux** — `scripts/install-claude-wrapper.sh`
-sets this up. A `claude` without an id, or outside tmux, is invisible to the app or flagged ⚠ no id.
+Claude sessions with a terminal must run as `claude --session-id <uuid>` **inside tmux** —
+`scripts/install-claude-wrapper.sh` sets this up. Headless Claude/Codex sessions are created by the
+app or `hangar-send --new ... --headless` and are discovered from their durable sidecars.
 The same installer also wraps interactive `codex`: it calls the local backend through `scripts/hangar-codex`,
 creates a managed Codex app-server/TUI pair, and attaches the caller to that tmux session. Codex
 subcommands/advanced flags remain raw; `command codex` is the explicit bypass.
@@ -242,6 +244,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
+  `~/.hangar/claude-headless/`, Codex em `~/.hangar/codex-sessions/`; tmux só identifica sessões com
+  terminal. Rename e `/clear` preservam a chave; `HANGAR_CANO_KEY` cobre sessões Codex já abertas
+  antes dessa identidade comum.
 - **Contas Codex adicionais têm `CODEX_HOME` próprio**; a identidade é `credential_id=codex:<home>`,
   nunca a chave. Sem migração, rotação ou troca automática por cota.
 - **Abrir Codex adicional não espera no modal**: o pane nasce primeiro, e o lançador espera o
@@ -356,6 +362,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
   recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
   Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
+- **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
+  continua sendo o fallback comum; qualquer variante que executa algo exige `prova`.
 - **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no
   arquivo da raiz, build calculado — nunca tag de release nem commit do CI.
 - **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é

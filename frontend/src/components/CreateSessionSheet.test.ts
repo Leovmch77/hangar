@@ -1009,6 +1009,21 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
+  it('envia a permissão escolhida ao criar Codex sem terminal', async () => {
+    const { comp } = await abrirNoCodex();
+    const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
+      .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
+    headless!.click();
+    await tick();
+    expect(document.querySelector('#perm-pick')).not.toBeNull();
+    await escolherNoCombo('#perm-pick', 'Full Access');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
+      expect.objectContaining({ provider: 'codex', headless: true, permission_mode: 'Full Access' }));
+    unmount(comp);
+  });
+
   it('fechar durante a criação não navega quando a resposta chega', async () => {
     const { comp } = await abrirNoCodex();
     let resolve!: (value: api.SessionInfo) => void;

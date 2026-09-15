@@ -10,6 +10,8 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof api>(),
   getCommands: vi.fn().mockResolvedValue([{ name: 'revisar', display: '/revisar', source: 'skill', description: 'Revisão' }]),
   getCodexModels: vi.fn().mockResolvedValue({ models: [], current: { model: 'gpt-6-astra', effort: 'high', mode: 'default' } }),
+  getCodexPermissions: vi.fn().mockResolvedValue({ modes: [], current: 'Full Access' }),
+  setCodexPermission: vi.fn(),
   setCodexMode: vi.fn().mockImplementation(async (_s, mode) => ({ model: 'gpt-6-astra', effort: 'high', mode })),
 }));
 let componentes: ReturnType<typeof mount>[];
@@ -53,6 +55,17 @@ it('mudanças recebidas do terminal atualizam o esforço e o modo', async () => 
   expect(button('xhigh')).toBeTruthy();
   expect([...document.querySelectorAll('.pill-model')].some(e => e.textContent === 'gpt-5.6-sol')).toBe(true);
   expect(button(m.codex_modo_plan())).toBeTruthy();
+});
+
+it('Codex headless mostra a permissão conhecida mesmo durante o turno', async () => {
+  const props = await montar();
+  (props as unknown as { headless: boolean }).headless = true;
+  (props as unknown as { estreito: boolean }).estreito = true;
+  await flush();
+  expect(api.getCodexPermissions).toHaveBeenCalledWith('codex-test');
+  const permission = document.querySelector<HTMLButtonElement>('.pill-duo button[aria-label="Full Access"]');
+  expect(permission).not.toBeNull();
+  expect(permission?.closest('.status-tab')).toBeNull();
 });
 
 it('reconexão sem modo confirmado mostra Modo e Shift+Tab pede Planejar', async () => {

@@ -104,6 +104,7 @@ def _ambiente(meta: dict) -> dict:
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
     env["CP_SESSION_NAME"] = meta["name"]
+    env["CP_SESSION_KEY"] = meta["key"]
     env[hl_adapter._MARCADOR_CANO] = meta["key"]
     return env
 

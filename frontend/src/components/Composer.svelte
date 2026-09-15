@@ -59,7 +59,7 @@
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
-  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
+  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
   import type { UploadFile } from '@hangar/core';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '@hangar/core';
@@ -745,11 +745,27 @@
     codexEffort = effort;
   }
 
-  // Permissão do Codex: o rótulo é o do picker vivo (`Full Access`, `Ask for approval`…), então a
-  // pill só ganha texto depois da primeira leitura — o genérico "Permissão" é o estado até lá.
+  // Permissão do Codex: headless lê o sidecar na montagem; com TUI, o rótulo vem do picker vivo
+  // (`Full Access`, `Ask for approval`…) quando a pessoa abre o controle.
   let codexPermOpen = $state(false);
   let codexPermPillEl = $state<HTMLElement | null>(null);
   let codexPerm = $state<string | null>(null);
+  const codexPermCompacta = $derived(
+    codexPerm === 'Ask for approval' ? m.permissao_codex_curta_perguntar()
+      : codexPerm === 'Approve for me' ? m.permissao_codex_curta_auto()
+      : codexPerm === 'Full Access' ? m.permissao_codex_curta_total()
+      : m.composer_permissao(),
+  );
+
+  // Sem terminal o modo está no sidecar e pode ser lido até durante o turno. No Codex com TUI,
+  // ler aqui dirigiria `/permissions` no pane; por isso ele continua sob demanda no popover.
+  $effect(() => {
+    if (!isCodex || !headless) return;
+    const sn = sessionName;
+    getCodexPermissions(sn)
+      .then((res) => { if (sn === sessionName) codexPerm = res.current; })
+      .catch(() => {});
+  });
 
   // ── Pill de modelo do Pi: mesmo desenho do de Codex, terceira fonte ──────────────────────────
   // O `/model` do Pi e uma lista com busca de ~300 modelos e o nivel de raciocinio mora dentro do
@@ -2286,21 +2302,37 @@
                 <span class="pill-model">{codexEffort ?? m.composer_esforco()}</span>
               </span>
             </button>
+            {#if compacto && headless}
+              <button
+                class="model-pill"
+                bind:this={codexPermPillEl}
+                onclick={() => (codexPermOpen = true)}
+                aria-haspopup="dialog"
+                aria-expanded={codexPermOpen}
+                aria-label={codexPerm ?? m.composer_permissao()}
+              >
+                <span class="pill-label">
+                  <span class="pill-model">{codexPermCompacta}</span>
+                </span>
+              </button>
+            {/if}
           </span>
           <!-- Permissão do Codex em pill própria, fora do duo: ela não é escolha de modelo, e o
                que ela move (sandbox + aprovação) é o mesmo eixo da pill de permissão do Claude. -->
-          <button
-            class="model-pill"
-            bind:this={codexPermPillEl}
-            onclick={() => (codexPermOpen = true)}
-            aria-haspopup="dialog"
-            aria-expanded={codexPermOpen}
-            aria-label={m.composer_permissao()}
-          >
-            <span class="pill-label">
-              <span class="pill-model">{codexPerm ?? m.composer_permissao()}</span>
-            </span>
-          </button>
+          {#if !compacto || !headless}
+            <button
+              class="model-pill"
+              bind:this={codexPermPillEl}
+              onclick={() => (codexPermOpen = true)}
+              aria-haspopup="dialog"
+              aria-expanded={codexPermOpen}
+              aria-label={m.composer_permissao()}
+            >
+              <span class="pill-label">
+                <span class="pill-model">{codexPerm ?? m.composer_permissao()}</span>
+              </span>
+            </button>
+          {/if}
         {/if}
         <button class="attach-btn" onclick={() => fileInput?.click()} aria-label={m.composer_anexar_arquivo()}>
           <IconAttach size={20} />
@@ -2450,6 +2482,7 @@
     open={codexPermOpen}
     anchor={codexPermPillEl}
     {sessionName}
+    {headless}
     onApplied={(modo) => (codexPerm = modo)}
     onClose={() => (codexPermOpen = false)}
   />
@@ -2778,7 +2811,7 @@
 
   .mode-slot { flex: none; min-width: 0; max-width: 180px; }
   .control-row > .mode-slot { margin-right: auto; }
-  .status-tab > .mode-slot { margin-left: auto; }
+  .status-tab > .mode-slot { --mode-control-bg: transparent; }
 
   /* ── Control row ────────────────────────────────────────────────────────── */
   .control-row {

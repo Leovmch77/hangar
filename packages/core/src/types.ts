@@ -37,8 +37,8 @@ export interface SessionInfo {
   cwd?: string;
   jsonl?: string | null;
   provider?: Provider;
-  // Claude sem terminal: processo filho do backend, sem pane. Painel de terminal, espelho e shell
-  // não existem nessa sessão.
+  // Claude ou Codex sem terminal: processo gerenciado pelo Hangar, sem pane. Painel de terminal,
+  // espelho e shell não existem nessa sessão.
   headless?: boolean;
   state: State;
   last_activity?: number | null;
@@ -168,7 +168,7 @@ export interface StateEvent {
   codex_mode?: 'default' | 'plan' | null;
   claude_permission_mode?: string | null;
   claude_previous_non_plan?: string | null;
-  headless?: boolean;          // Claude sem terminal (vem do stream da sessão, não da lista)
+  headless?: boolean;          // Claude/Codex sem terminal (vem do stream da sessão, não da lista)
   session: string;
   state: State;
   label?: string | null;

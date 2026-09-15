@@ -291,6 +291,17 @@ describe('createSession', () => {
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
     expect(body).toMatchObject({ name: 'x', cwd: '/home/eu/proj', provider: 'kimi', config_dir: null, engine: null });
   });
+
+  it('manda headless ao criar uma sessão Codex sem terminal', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ name: 'x', state: 'idle' }), { status: 200 }),
+    );
+
+    await createSession('x', '/home/eu/proj', null, 'codex', null, null, null, null, null, null, true);
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ provider: 'codex', headless: true });
+  });
 });
 
 // Task 10 — errorDetail entende as DUAS formas do detail: string (endpoint nao migrado) e dict

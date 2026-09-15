@@ -28,7 +28,7 @@ Hangar is a self-hosted PWA that lets you keep an eye on agent sessions without 
 - **Free-form canvas:** arrange floating session tiles by project, topic, or priority and resize them independently.
 - **Mixed agent workflows:** keep Claude Code, Codex, Kimi, and Pi conversations visible from the same cockpit.
 - **Live status:** streaming previews, model/context badges, plans, workflows, notifications, uploads, and session history.
-- **Claude without a terminal:** open a Claude Code session that runs as a Hangar-managed process instead of a tmux pane — permissions and questions arrive straight in the chat, and restarting Hangar doesn't cut the turn. Pick **No terminal (Hangar process)** under *How it runs* in New session, or `hangar-send --new <name> [cwd] --headless`.
+- **Claude or Codex without a terminal:** run the agent as a Hangar-managed process instead of a tmux pane. Permissions and questions arrive in chat, and restarting Hangar doesn't cut the turn. Pick **No terminal (Hangar process)** under *How it runs*, or add `--headless` to `hangar-send --new` (`--provider codex` selects Codex).
 - **Pi controls:** choose a Pi model and thinking level for the active session.
 - **Alternative Claude engines:** run a session through another compatible provider while keeping its skills and history in the same Claude environment.
 - **Pairing:** use `hangar-send` to message sibling sessions and coordinate a working group with a shared contract.
@@ -202,15 +202,15 @@ Phone or desktop PWA
         │  HTTP(S)/SSE + authenticated API
         ▼
 FastAPI backend
-   ├── Claude Code: JSONL transcript + tmux state/input
+   ├── Claude Code: JSONL + tmux state/input or a managed headless pipe
    ├── Pi: JSONL transcript + Pi extension sidecars
    ├── Kimi Code: wire.jsonl transcript + state hooks
-   └── Codex: local app-server events + managed tmux TUI
+   └── Codex: local app-server + managed tmux TUI or a headless stdio pipe
         ▼
 Your local agent sessions
 ```
 
-Chat content comes from structured session data rather than scraping the terminal transcript. The terminal multiplexer is used for live state and input, while Codex has a local loopback app-server adapter. The backend is the bridge and does not add a vendor relay; the CLIs and providers you configure may still send data according to their own policies.
+Chat content comes from structured session data rather than scraping the terminal transcript. The terminal multiplexer is used only by sessions with a terminal; headless Claude and Codex sessions use managed pipes and durable sidecars. The backend is the bridge and does not add a vendor relay; the CLIs and providers you configure may still send data according to their own policies.
 
 ## Security model
 
@@ -243,7 +243,7 @@ hangar-send --list
 hangar-send --pair <session-name> "coordinate the demo task"
 hangar-send --pair <session-name> --substituir-tarefa "new task"
 hangar-send --group [--tmux] "milestone for the whole group"
-hangar-send --new <session-name> [cwd] [--headless] [--model <id>]
+hangar-send --new <session-name> [cwd] [--provider claude|codex] [--headless] [--model <id>]
 ```
 
 Pairing is local to the machine. The app shows the shared contract and conversation, while each session remains independently controlled.

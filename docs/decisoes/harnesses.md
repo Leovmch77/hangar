@@ -1244,6 +1244,22 @@ Fora do escopo por enquanto: renomear uma sessão Codex sem terminal (a rota pas
 sincronização de conta secundária na subida (segue os gatilhos existentes) e o botão de trocar
 terminal ⇄ sem terminal, que é só do Claude.
 
+## Identidade e permissão no Codex sem terminal (14/09/2026)
+
+Scripts executados dentro de uma sessão sem terminal recebem `CP_SESSION_KEY`; o nome atual vem do
+sidecar que contém essa chave. O Claude já fazia isso em `~/.hangar/claude-headless/`. O Codex
+exportava apenas `HANGAR_CANO_KEY`, enquanto `hangar-preview` e `hangar-send` só procuravam o
+diretório do Claude; ambos caíam no fallback de tmux, que não existe nesse modo. O Codex passou a
+exportar a chave comum e os dois CLIs procuram também `~/.hangar/codex-sessions/`; eles ainda
+aceitam `HANGAR_CANO_KEY` para as sessões abertas antes da atualização. Os testes usam sidecars
+temporários e confirmam que rename/ausência de tmux não muda o nome resolvido.
+
+O modo de permissão do Codex sem terminal é o `permission_mode` do sidecar; ausente significa
+`Approve for me`. A leitura é segura durante um turno porque não dirige `/permissions` nem reinicia
+o app-server. A troca continua recusada durante o turno, pois mudar o sandbox exige reabrir o cano.
+O formulário agora oferece os três modos e envia a escolha na criação; o Composer carrega o valor
+na montagem e o mostra também no layout compacto do PWA.
+
 ## Voz Codex no web
 
 (`codex_voice.py`, `CodexVoice.svelte`, `lib/codexVoice.ts`, 10/09/2026):

@@ -202,9 +202,10 @@
 
   // Modos de permissão do Claude Code (--permission-mode), mesma lista do backend (model_args.py).
   const MODOS_PERMISSAO = ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'];
+  const MODOS_PERMISSAO_CODEX_HEADLESS = ['Ask for approval', 'Approve for me', 'Full Access'];
   let permissao = $state('');
-  // Claude sem terminal: processo filho do backend (stream-json), sem tmux. Só no provider claude,
-  // fora do modo bastão e sem retomar conversa (a retomada nasce por outro caminho).
+  // Claude/Codex sem terminal: processo gerenciado pelo backend, sem tmux. Fora do modo bastão e
+  // sem retomar conversa (a retomada nasce por outro caminho).
   let semTerminal = $state(false);
 
   // `targetServer` (acima) é o servidor de destino. Ele entra na chave porque MOTOR É POR SERVIDOR
@@ -789,7 +790,8 @@
     const baton = bastao;
     const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
       model: modelo || null, effort: esforco || null,
-      ...(provider === 'codex' && semTerminal ? { headless: true } : {}) };
+      ...(provider === 'codex' && semTerminal
+        ? { headless: true, permission_mode: permissao || null } : {}) };
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -1003,7 +1005,11 @@
               class:on={provider === p}
               aria-pressed={provider === p}
               disabled={providers[p] ? !providers[p].disponivel : false}
-              onclick={() => { if (p !== provider) semTerminal = false; provider = p; carregarModelos(); }}
+              onclick={() => {
+                if (p !== provider) { semTerminal = false; permissao = ''; }
+                provider = p;
+                carregarModelos();
+              }}
             >
               <ProviderGlyph provider={p} size={18} />
               <span>{providerName(p)}</span>
@@ -1231,12 +1237,14 @@
         <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
       {/if}
 
-      {#if !conversaAlvo && provider === 'claude'}
+      {#if !conversaAlvo && (provider === 'claude' || (provider === 'codex' && semTerminal))}
         <div class="field">
           <label class="field-label" for="perm-pick">{m.criar_permissao()}</label>
           <Select id="perm-pick" class="field-input" ariaLabel={m.criar_permissao()} value={permissao}
             opcoes={[{ value: '', label: m.criar_permissao_padrao() },
-                     ...MODOS_PERMISSAO.map((n) => ({ value: n, label: n }))]}
+                     ...(provider === 'codex'
+                       ? MODOS_PERMISSAO_CODEX_HEADLESS
+                       : MODOS_PERMISSAO).map((n) => ({ value: n, label: n }))]}
             onchange={(v) => (permissao = v)} />
         </div>
       {/if}
