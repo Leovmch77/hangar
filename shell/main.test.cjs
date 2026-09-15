@@ -147,6 +147,23 @@ test('fechar o painel de uma janela nao mata o controlador vivo da MESMA sessao 
   assert.equal(ctlB.fechado, true, 'o proprio close de B fecha o controlador de B');
 });
 
+test('open publica o estado: o painel que acabou de montar recebe a faixa de abas', async () => {
+  const a = novaJanela();
+  const chave = 'srv::remonta';
+  const abrir = handlers.get('hangar:nav-open');
+  await abrir(a.ev, { chave, url: 'https://um.test', bounds: { x: 0, y: 0, width: 10, height: 10 } });
+
+  // O painel desmonta e monta de novo (troca de sessão, reload do front): ele perdeu tudo que foi
+  // publicado antes de existir e chama `open` sem url só pra reexibir.
+  a.win.webContents.enviados.length = 0;
+  await abrir(a.ev, { chave, bounds: { x: 0, y: 0, width: 10, height: 10 } });
+
+  const estado = a.win.webContents.enviados.filter((e) => e.canal === 'hangar:nav-estado').at(-1);
+  assert.ok(estado, 'reexibir publica estado — sem isso a faixa so apareceria na proxima navegacao');
+  assert.equal(estado.payload.abas.length, 1);
+  assert.equal(estado.payload.ativa, 1);
+});
+
 test('open oculto cria o view escondido e ja dirigivel; view visivel nao e tocado', async () => {
   const a = novaJanela();
   const chave = 'srv::fora-da-tela';

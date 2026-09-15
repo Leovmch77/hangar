@@ -900,6 +900,10 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
     // print é a emulação de tamanho, e ela SÓ entra com a página carregada (antes disso, SIGSEGV).
     trocarAba(chave, id, { oculto: !!oculto, bounds: oculto ? undefined : bounds });
   }
+  // Quem chama este handler é o painel montando (ou remontando): ele perdeu tudo que foi
+  // publicado antes de existir, e sem esta publicação a faixa de abas só apareceria na próxima
+  // navegação — reabrir o navegador com uma aba só deixava a faixa invisível para sempre.
+  publicarEstado(win, chave);
   if (oculto) {
     devolverFoco(win, view);
     // `oculto: true` na resposta é a prova de que este shell entendeu o pedido: um shell antigo
