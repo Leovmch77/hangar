@@ -813,8 +813,10 @@ class StateMonitor:
             loop_iter = loop_d.get("iter") if loop_d else None
             loop_max = loop_d.get("max_iters") if loop_d else None
             # Comando de background que sobrou com o turno encerrado. So o pid entra no dedupe: o
-            # tempo corre sozinho e faria um evento novo a cada poll.
-            shells = hook_state.shells(self.sid_get()) if self.sid_get is not None else []
+            # tempo corre sozinho e faria um evento novo a cada poll. Varre /proc -> to_thread,
+            # mesma regra do capture_pane acima: sincrono aqui seguraria o backend inteiro.
+            shells = (await asyncio.to_thread(hook_state.shells, self.sid_get())
+                      if self.sid_get is not None else [])
             key = (state, label, question, tuple(options or ()), status, overlay, login,
                    limited, limit_reset, loop_status, loop_iter, loop_max,
                    permission_mode, previous_non_plan, tuple(s["pid"] for s in shells))

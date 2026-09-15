@@ -141,8 +141,10 @@ class HookState:
         sidecar importa: o boot re-semeia o mapa de la (load_existing). ts original preservado."""
         r = self._registro.get(session_id)
         if r is not None and r[0] == "awaiting_input":
-            # So em memoria: o arquivo e do Claude. O proximo `waiting` real regrava.
-            self._registro[session_id] = ("idle", r[1], r[2])
+            # So em memoria: o arquivo e do Claude. O proximo `waiting` real regrava. O status cru
+            # acompanha o rebaixamento: a tupla tem QUATRO campos desde que `shells()` passou a
+            # depender dele, e gravar tres aqui estourava IndexError dentro do gerador do estado.
+            self._registro[session_id] = ("idle", r[1], r[2], "idle")
         cur = self._map.get(session_id)
         if not cur or cur[0] != "awaiting_input":
             return

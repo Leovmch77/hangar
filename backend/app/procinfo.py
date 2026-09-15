@@ -462,10 +462,18 @@ def _start_time_psutil(pid: int) -> Optional[float]:
 # O Claude Code roda cada Bash num shell que carrega um prologo (snapshot do ambiente, guardas de
 # glob) antes do comando de verdade, que vai dentro de um `eval '...'`. Mostrar a linha inteira
 # enche a tela de prologo; o que interessa e o que foi pedido.
-# O sufixo depois do `eval` varia (`< /dev/null`, redirecionamento do background, `&& pwd -P`), entao
-# o corte e na ULTIMA aspa seguida de espaco ou fim de linha — nao numa cauda fixa, que ja deixou
-# passar linha crua de shell de background.
-_EVAL_RE = re.compile(r"eval '(.*)'(?:\s|$)", re.DOTALL)
+# Ancorado no `&& eval '` do PROLOGO (a primeira ocorrencia: o prologo vem antes do comando), e o
+# corte e na ultima aspa seguida de espaco ou fim — o sufixo varia (`< /dev/null`, redirecionamento
+# do background, `&& pwd -P`). Sem a ancora, um comando cujo TEXTO contenha `eval '` era cortado no
+# meio e o chip mostrava um pedaco sem sentido.
+# Limite conhecido: sufixo com aspas (redirecionar pra caminho entre aspas) entra no texto exibido.
+_EVAL_RE = re.compile(r"&& eval '(.*)'(?:\s|$)", re.DOTALL)
+
+# Filhos que NAO sao comando do agente: servidor MCP em stdio, hook e a propria statusline nascem
+# como filhos diretos do processo e apareciam no chip como "comando ainda rodando" — a statusline,
+# viva desde o inicio da sessao, lia como um travamento de horas. O comando do agente sempre passa
+# por um shell, entao o shell e o criterio.
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 
 
 def _comando_pedido(bruto: str) -> str:
@@ -491,8 +499,17 @@ def shells_de(pid: int) -> list[dict]:
         return []
     out: list[dict] = []
     for f in filhos:
-        cmd = _comando_pedido(_cmdline(f))
+        bruto = _cmdline(f)
+        if not bruto or not _e_shell(bruto):
+            continue
+        cmd = _comando_pedido(bruto)
         if not cmd:
             continue
         out.append({"pid": f, "cmd": cmd, "desde": _proc_start_time(f)})
     return out
+
+
+def _e_shell(bruto: str) -> bool:
+    # O executavel e o primeiro token da linha; basta o nome dele.
+    primeiro = bruto.strip().split(" ", 1)[0]
+    return os.path.basename(primeiro) in _SHELLS

@@ -319,8 +319,13 @@ def test_comando_pedido_tira_o_prologo_do_shell():
     assert procinfo._comando_pedido(bruto) == "cd /repo/shell && node --test preview_srv.test.cjs"
 
     # Aspas simples dentro do comando chegam escapadas como '"'"' — voltam ao que foi escrito.
-    escapado = """/usr/bin/zsh -c eval 'python3 -c '"'"'print(1)'"'"'' < /dev/null"""
+    escapado = """/usr/bin/zsh -c true && eval 'python3 -c '"'"'print(1)'"'"'' < /dev/null"""
     assert procinfo._comando_pedido(escapado) == "python3 -c 'print(1)'"
+
+    # Comando cujo TEXTO contem `eval '`: a ancora e o `&& eval '` do prologo, entao o corte nao
+    # acontece dentro do comando — sem ela o chip mostrava um pedaco do meio, sem sentido nenhum.
+    com_eval = """/usr/bin/zsh -c source /s.sh || true && eval 'grep -n "eval '"'"'" arquivo.py' < /dev/null"""
+    assert procinfo._comando_pedido(com_eval) == """grep -n "eval '" arquivo.py"""
 
     # Sem o embrulho (processo que nao veio do Bash do agente) o comando e a propria linha.
     assert procinfo._comando_pedido("  sleep 900  ") == "sleep 900"
@@ -331,21 +336,34 @@ def test_comando_pedido_tira_o_prologo_do_shell():
     assert procinfo._comando_pedido(bg) == "sleep 300; echo fim"
 
 
-def test_shells_de_lista_filho_direto_com_comando_e_inicio():
+def test_shells_de_lista_shell_filho_e_ignora_o_que_nao_e_shell():
+    """So comando do agente entra: ele sempre nasce num shell.
+
+    Servidor MCP em stdio, hook e a propria statusline tambem sao filhos diretos do processo, e
+    apareciam como "comando ainda rodando" — a statusline, viva desde o inicio da sessao, lia como
+    um travamento de horas.
+    """
     import subprocess
+    import sys
     import time as _t
-    filho = subprocess.Popen(["sleep", "30"])
+    # `sh -c "sleep 30"` com UM comando simples vira exec e o processo deixa de ser shell; com mais
+    # de um o shell continua de pe, que e a forma do embrulho real do Claude Code.
+    shell = subprocess.Popen(["sh", "-c", "sleep 30; true"])
+    naoshell = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         # O mapa de filhos tem TTL de 1s: quem precisa ver um processo que ACABOU de nascer
         # invalida antes, como o fallback de sessao recem-criada ja faz.
         procinfo._invalidar_children_map()
-        achados = [s for s in procinfo.shells_de(os.getpid()) if s["pid"] == filho.pid]
-        assert len(achados) == 1, "o filho direto tem que aparecer"
-        assert achados[0]["cmd"] == "sleep 30"
-        assert achados[0]["desde"] and achados[0]["desde"] <= _t.time()
+        achados = procinfo.shells_de(os.getpid())
+        meu = [s for s in achados if s["pid"] == shell.pid]
+        assert len(meu) == 1, "o shell filho tem que aparecer"
+        assert meu[0]["cmd"] == "sh -c sleep 30; true"
+        assert meu[0]["desde"] and meu[0]["desde"] <= _t.time()
+        assert not [s for s in achados if s["pid"] == naoshell.pid], "python nao e comando do agente"
     finally:
-        filho.kill()
-        filho.wait()
+        for p in (shell, naoshell):
+            p.kill()
+            p.wait()
 
 
 def test_shells_de_pid_sem_filho_e_lista_vazia():

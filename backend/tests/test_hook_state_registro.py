@@ -60,6 +60,17 @@ def test_registro_shell_e_sessao_ociosa_com_comando_vivo(tmp_path):
     assert hs.get_state("aaa")[0] == "idle"
 
 
+def test_demote_awaiting_nao_quebra_shells(tmp_path, monkeypatch):
+    # O rebaixamento reescreve a entrada do registro: com uma tupla curta, a proxima consulta de
+    # shells estourava IndexError DENTRO do gerador do estado e matava o stream daquela sessao.
+    monkeypatch.setattr(hook_state, "shells_de", lambda pid: [])
+    hs = hook_state.HookState()
+    hs._apply_registro(_registro(tmp_path, os.getpid(), "aaa", "waiting"))
+    hs.demote_awaiting("aaa")
+    assert hs.get_state("aaa")[0] == "idle"
+    assert hs.shells("aaa") == []
+
+
 def test_shells_so_no_status_shell(tmp_path, monkeypatch):
     monkeypatch.setattr(hook_state, "shells_de", lambda pid: [{"pid": 4242, "cmd": "sleep 900", "desde": None}])
     hs = hook_state.HookState()

@@ -8,7 +8,7 @@
   import MessageList from './MessageList.svelte';
   import { onDestroy, tick } from 'svelte';
   import type { Activity, TaskStatus } from '@hangar/core';
-  import type { WorkflowSummary, WorkflowDetail, WorkflowAgentDetail, SubagentRun, SessionInfo, PlanDetail } from '@hangar/core';
+  import type { WorkflowSummary, WorkflowDetail, WorkflowAgentDetail, SubagentRun, SessionInfo, PlanDetail, ShellVivo } from '@hangar/core';
 
   interface Props {
     open: boolean;
@@ -23,8 +23,13 @@
     planDetail?: PlanDetail | null;
     planLoading?: boolean;
     planError?: boolean;
+    // Processos VIVOS (vem do /proc, pelo evento de estado) — lista diferente da de shells acima,
+    // que vem do transcript. Uma sabe o que foi PEDIDO (e perde o que veio de subagente ou de antes
+    // de um /clear); a outra sabe o que EXISTE agora. Sem chave comum pra cruzar as duas, então
+    // cada uma aparece com o seu nome em vez de virar um número só que mente nos dois sentidos.
+    processos?: ShellVivo[];
   }
-  let { open, activity, sessionName, onClose, showPlan = false, session = null, planDetail = null, planLoading = false, planError = false }: Props = $props();
+  let { open, activity, sessionName, onClose, showPlan = false, session = null, planDetail = null, planLoading = false, planError = false, processos = [] }: Props = $props();
 
   // 3 níveis: lista geral -> detalhe do workflow (fases+agentes) -> detalhe do agente (prompt+result).
   let level = $state<'list' | 'workflow' | 'agent' | 'subagent'>('list');
@@ -491,6 +496,30 @@
               </div>
             {/if}
 
+            {#if processos.length > 0}
+              <!-- Processos VIVOS agora, lidos do sistema. É a lista que a de cima não alcança:
+                   comando de subagente, comando anterior a um /clear, e qualquer um que tenha
+                   ficado de pé sem o transcript saber. É esta que explica a sessão parada que a
+                   TUI mostra como "N shells still running". -->
+              <div class="section">
+                <span class="section-label">
+                  {m.atividade_processos()}
+                  <span class="shell-vivos">{m.atividade_processos_n({ n: processos.length })}</span>
+                </span>
+                {#each processos as p (p.pid)}
+                  <div class="shell-row" title={p.cmd}>
+                    <span class="ring-spin" aria-hidden="true"></span>
+                    <span class="agent-body">
+                      <span class="shell-cmd">{p.cmd}</span>
+                      <span class="agent-now">
+                        pid {p.pid}{#if p.desde} · {m.atividade_shell_ha({ t: formatarIntervalo(agora - p.desde) })}{/if}
+                      </span>
+                    </span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
             {#if activity.tasks.length > 0}
               <div class="section">
                 <span class="section-label">{m.atividade_tarefas()}</span>
@@ -504,7 +533,7 @@
             {/if}
 
             {#if subError}<p class="activity-error">⚠ {subError}</p>{/if}
-            {#if workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && shellsVivos.length === 0}
+            {#if workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && shellsVivos.length === 0 && processos.length === 0}
               <p class="activity-empty">{m.atividade_vazio()}</p>
             {/if}
           </div>
