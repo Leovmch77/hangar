@@ -722,6 +722,38 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   assinatura de valor fixo, mesmo motivo do Claude em motor). O ⏱ dele é a idade do
   `wire.jsonl` (birthtime), não duração de API como no Claude.
 
+## Estado da sessão Claude pelo registro nativo (14/09/2026)
+
+O Claude Code 2.1.271 publica, sem flag e por conta própria, um registro por processo vivo em
+`<config>/sessions/<pid>.json` (`pid`, `sessionId`, `cwd`, `name`, `status`, `statusUpdatedAt`,
+`messagingSocketPath`), apagado na saída normal. É a infraestrutura do `ListAgents`/`SendMessage`
+entre sessões locais; as contas (`~/.claude-<nome>/sessions`) são symlink pro principal. O
+`status` é a TUI dizendo o próprio estado: `busy` = turno rodando ou subagente delegado;
+`waiting` = pedido de permissão, AskUserQuestion, recado de par segurado ou diálogo aberto
+(`/model`, `/config`); `idle` = o resto. Medido numa sessão descartável em modo `default`:
+
+| situação | registro | marcador do hook |
+|---|---|---|
+| pedido de permissão do Bash | `waiting` em 3,0 s | `working` (Notification ainda não tinha vindo) |
+| Esc no pedido de permissão | `idle` na hora | `working` preso (Esc não dispara Stop) |
+| AskUserQuestion na tela | `waiting` | `awaiting_input` |
+| turno escrevendo | `busy` | `working` |
+| `/model` aberto | `waiting` | nada |
+| `kill-session` | arquivo removido | fica |
+
+Contrato em `hook_state.py`: o registro vence o marcador enquanto `pid_vivo(pid)`; sem arquivo,
+pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `waiting` vira
+`awaiting_input`, e o pane continua dono da pergunta e das opções (a lista raspa quem está
+`awaiting`) e do rebaixamento quando não há menu (`demote_awaiting`, só em memória — o arquivo é
+do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
+manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
+
+Os mods (function hooks, `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) e o socket de mensagens
+(`/run/user/<uid>/cc-socks/<pid>.sock`, JSON por linha, `auth` com o `peerToken` de
+`sessions/<pid>.<sha>.key`) foram medidos no mesmo dia e ficaram de fora: o mod é early access e a
+API muda sem aviso; o socket embrulha tudo como "mensagem de outra sessão" (`isMeta`, origem
+`peer`), não roda comando de barra e é o mesmo canal que o `SendMessage` nativo já usa.
+
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
 — duas armadilhas medidas em

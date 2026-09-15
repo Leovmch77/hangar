@@ -1,0 +1,113 @@
+import json
+import os
+import time
+from pathlib import Path
+
+from app import hook_state
+
+PID_MORTO = 2 ** 22 - 7  # acima de qualquer pid_max real desta suite
+
+
+def _marcador(base: Path, sid: str, state: str) -> None:
+    d = base / ".hangar-state"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sid}.json").write_text(json.dumps({"state": state, "ts": time.time()}))
+
+
+def _registro(base: Path, pid: int, sid: str, status: str) -> Path:
+    d = base / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{pid}.json"
+    f.write_text(json.dumps({"pid": pid, "sessionId": sid, "status": status,
+                             "statusUpdatedAt": int(time.time() * 1000)}))
+    return f
+
+
+def test_registro_vence_marcador_com_pid_vivo(tmp_path):
+    _marcador(tmp_path, "aaa", "working")
+    _registro(tmp_path, os.getpid(), "aaa", "waiting")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "awaiting_input"
+
+
+def test_registro_mapeia_busy_e_idle(tmp_path):
+    _registro(tmp_path, os.getpid(), "aaa", "busy")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "working"
+    f = _registro(tmp_path, os.getpid(), "aaa", "idle")
+    hs._apply_registro(f)
+    assert hs.get_state("aaa")[0] == "idle"
+
+
+def test_registro_de_pid_morto_cai_no_marcador(tmp_path):
+    _marcador(tmp_path, "aaa", "working")
+    _registro(tmp_path, PID_MORTO, "aaa", "idle")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "working"
+
+
+def test_registro_status_desconhecido_nao_vale(tmp_path):
+    _marcador(tmp_path, "aaa", "working")
+    _registro(tmp_path, os.getpid(), "aaa", "blocked")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "working"
+
+
+def test_registro_removido_volta_ao_marcador(tmp_path):
+    _marcador(tmp_path, "aaa", "idle")
+    f = _registro(tmp_path, os.getpid(), "aaa", "busy")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    assert hs.get_state("aaa")[0] == "working"
+    f.unlink()
+    hs._remover_registro(f)
+    assert hs.get_state("aaa")[0] == "idle"
+
+
+def test_registro_dispara_transicao_e_awaiting(tmp_path):
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    vistos, awaiting = [], []
+    hs.on_transition = lambda sid, st: vistos.append((sid, st))
+    hs.on_awaiting = awaiting.append
+    f = _registro(tmp_path, os.getpid(), "aaa", "busy")
+    hs._apply_registro(f, notify=True)
+    _registro(tmp_path, os.getpid(), "aaa", "waiting")
+    hs._apply_registro(f, notify=True)
+    hs._apply_registro(f, notify=True)  # mesmo status regravado: nao re-dispara
+    assert vistos == [("aaa", "working"), ("aaa", "awaiting_input")]
+    assert awaiting == ["aaa"]
+
+
+def test_marcador_nao_gera_transicao_enquanto_registro_manda(tmp_path):
+    _registro(tmp_path, os.getpid(), "aaa", "busy")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    vistos = []
+    hs.on_transition = lambda sid, st: vistos.append((sid, st))
+    _marcador(tmp_path, "aaa", "idle")
+    hs._apply(tmp_path / ".hangar-state" / "aaa.json", notify=True)
+    assert hs.get_state("aaa")[0] == "working"
+    assert vistos == []
+
+
+def test_demote_awaiting_rebaixa_registro_em_memoria(tmp_path):
+    f = _registro(tmp_path, os.getpid(), "aaa", "waiting")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    hs.demote_awaiting("aaa")
+    assert hs.get_state("aaa")[0] == "idle"
+    assert json.loads(f.read_text())["status"] == "waiting"  # o arquivo e do Claude
+
+
+def test_registro_dirs_symlink_conta_uma_vez(tmp_path):
+    principal = tmp_path / "principal"
+    (principal / "sessions").mkdir(parents=True)
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    (conta / "sessions").symlink_to(principal / "sessions")
+    assert hook_state.HookState._registro_dirs([principal, conta]) == [(principal / "sessions").resolve()]

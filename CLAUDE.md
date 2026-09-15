@@ -232,6 +232,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Statusline e prévia vêm de sidecar do agente, não do pane.** O pane corta na largura da
   janela. `""` é resposta ("nada em voo"), `None` é ausência. Sessão Pi já aberta só publica
   depois de `/reload`.
+- **Estado da sessão Claude vem do registro nativo (`<config>/sessions/<pid>.json`) quando ele
+  existe e o pid vive**; marcador de hook e pane são o fallback. `idle`/`busy`/`waiting` são o
+  estado da TUI escrito por ela mesma; `waiting` inclui diálogo aberto (`/model`), que o pane
+  rebaixa. Nunca escrever nesse arquivo.
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
