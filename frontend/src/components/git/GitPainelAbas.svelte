@@ -41,6 +41,35 @@
     if (a?.tipo === 'arquivo') untrack(() => git.openFileDiff(a.path));
   });
 
+  // Rolagem da faixa de abas: passando de ~4 abas a tira transborda, e sem seta ninguém descobre
+  // que há aba escondida (a barra de rolagem horizontal não aparece até o ponteiro entrar nela).
+  let faixaEl = $state<HTMLElement | null>(null);
+  let temEsq = $state(false);
+  let temDir = $state(false);
+  function medirFaixa() {
+    const e = faixaEl;
+    if (!e) return;
+    temEsq = e.scrollLeft > 1;
+    temDir = e.scrollLeft + e.clientWidth < e.scrollWidth - 1;
+  }
+  function rolar(dir: 1 | -1) {
+    faixaEl?.scrollBy({ left: dir * Math.max(120, (faixaEl.clientWidth || 0) * 0.7), behavior: 'smooth' });
+  }
+  $effect(() => {
+    const e = faixaEl;
+    if (!e) return;
+    const ro = new ResizeObserver(medirFaixa);
+    ro.observe(e);
+    return () => ro.disconnect();
+  });
+  // Aba nova (ou a que sobrou depois de fechar outra) entra na vista sozinha: sem isto abrir o
+  // quinto arquivo abria uma aba que ninguém vê.
+  $effect(() => {
+    void gitPainel.ativa; void gitPainel.abas.length;
+    faixaEl?.querySelector<HTMLElement>('.aba.sel')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    medirFaixa();
+  });
+
   function abrirDoCommit(path: string) {
     const a = aba;
     if (!a || a.tipo !== 'commit') return;
@@ -51,7 +80,11 @@
 </script>
 
 <div class="git-painel">
-  <div class="faixa" role="tablist">
+  <div class="faixa-linha">
+  {#if temEsq}
+    <button class="seta" onclick={() => rolar(-1)} aria-label={m.git_abas_anteriores()}>‹</button>
+  {/if}
+  <div class="faixa" role="tablist" bind:this={faixaEl} onscroll={medirFaixa}>
     {#each gitPainel.abas as a (a.id)}
       <div class="aba" class:sel={a.id === gitPainel.ativa}>
         <button class="aba-nome" role="tab" aria-selected={a.id === gitPainel.ativa}
@@ -62,6 +95,10 @@
         <button class="aba-x" onclick={() => fecharAba(a.id)} aria-label={m.git_aba_fechar()}>×</button>
       </div>
     {/each}
+  </div>
+  {#if temDir}
+    <button class="seta" onclick={() => rolar(1)} aria-label={m.git_abas_proximas()}>›</button>
+  {/if}
   </div>
 
   {#if !aba}
@@ -101,11 +138,26 @@
 
 <style>
   .git-painel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .faixa {
-    display: flex; gap: 2px; align-items: center; overflow-x: auto; flex: none;
-    padding: var(--space-1) var(--space-2);
+  /* A costura de baixo passou pra linha inteira: as setas ficam ao lado da tira, não dentro dela
+     (dentro elas rolariam junto com as abas). */
+  .faixa-linha {
+    display: flex; align-items: center; flex: none;
     border-bottom: 1px solid var(--border-subtle);
   }
+  .faixa {
+    display: flex; gap: 2px; align-items: center; overflow-x: auto; flex: 1; min-width: 0;
+    padding: var(--space-1) var(--space-2);
+    /* Barra de rolagem fora: ela só aparece com o ponteiro em cima (foi por isso que ninguém
+       percebia a aba escondida) e ainda roubava altura da tira. Quem avisa agora são as setas. */
+    scrollbar-width: none;
+  }
+  .faixa::-webkit-scrollbar { display: none; }
+  .seta {
+    flex: none; background: none; border: 0; cursor: pointer; padding: 2px 6px;
+    color: var(--text-muted); font-size: var(--text-base); line-height: 1;
+    transition: color 120ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .seta:hover { color: var(--text-primary); }
   /* Faixa com 4px de padding → aba em 8px (12 − 4): raio concêntrico com o card do painel. */
   .aba {
     display: flex; align-items: center; gap: var(--space-1);

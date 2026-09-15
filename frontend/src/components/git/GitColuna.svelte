@@ -12,7 +12,7 @@
   import CommitList from './CommitList.svelte';
   import CommitMenu from './CommitMenu.svelte';
   import ArquivoMenu from './ArquivoMenu.svelte';
-  import type { GitCommit } from '@hangar/core';
+  import type { ChangedFile, GitCommit } from '@hangar/core';
 
   interface Props {
     sessionName: string;
@@ -47,6 +47,12 @@
 
   const repo = $derived(cwd ? basename(cwd) : sessionName);
   const marcado = (p: string) => escolhidos.includes(p);
+
+  // Arquivo com as duas metades sujas ("MM") cai só no grupo staged: a lista é uma linha por
+  // caminho, e é o caminho inteiro que vai pro commit.
+  const staged = $derived(git.files.filter((f) => f.staged));
+  const naoStaged = $derived(git.files.filter((f) => !f.staged));
+  const marcarTodos = () => (escolhidos = git.files.map((f) => f.path));
 
   let menuCommit = $state<GitCommit | null>(null);
   let menuArquivo = $state<{ path: string; x: number; y: number } | null>(null);
@@ -203,34 +209,54 @@
 
   <CommitBox {git} chosen={escolhidos} onDone={() => (escolhidos = [])} />
 
-  <h3 class="sec">{m.git_aba_mudancas()}<span class="qtd">{git.files.length}</span></h3>
+  <h3 class="sec">
+    {m.git_aba_mudancas()}<span class="qtd">{git.files.length}</span>
+    {#if git.files.length}
+      <span class="sel-acoes">
+        <button class="acao" onclick={marcarTodos}>{m.custos_todos()}</button>
+        <button class="acao" onclick={() => (escolhidos = [])}>{m.git_nenhum()}</button>
+      </span>
+    {/if}
+  </h3>
+
+  {#snippet linhaArquivo(f: ChangedFile)}
+    <li>
+      <input type="checkbox" checked={marcado(f.path)} onchange={() => alternar(f.path)}
+             aria-label={f.path} />
+      <button class="linha" onclick={() => abrirArquivo(sessionName, f.path)} title={f.path}
+              oncontextmenu={(e) => { e.preventDefault(); menuArquivo = { path: f.path, x: e.clientX, y: e.clientY }; }}>
+        <FileIcon nome={f.path} />
+        <span class="nome">{basename(f.path)}</span>
+        <span class="dir">{f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : ''}</span>
+        {#if f.added !== null && f.removed !== null}
+          <span class="num"><span class="mais">+{f.added}</span> <span class="menos">−{f.removed}</span></span>
+        {/if}
+        <span class="cod" class:novo={f.code.trim() === '??'}>{f.code.trim() || 'M'}</span>
+      </button>
+      <!-- Mesmo ⋯ dos commits: o menu do arquivo não fica só no clique direito. -->
+      <button class="mini" aria-label={m.git_acoes_curto()}
+              onclick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                menuArquivo = { path: f.path, x: r.left, y: r.bottom + 4 }; }}>⋯</button>
+    </li>
+  {/snippet}
 
   {#if git.loading && !git.files.length}
     <p class="vazio">{m.git_diff_carregando()}</p>
   {:else if !git.files.length}
     <p class="vazio">{m.git_sem_diferencas()}</p>
   {:else}
+    <!-- Staged e não staged em grupos separados: o que já está no índice vai pro commit por outro
+         caminho que o resto, e ver os dois na mesma lista escondia essa diferença. Um grupo só
+         (tudo staged ou nada staged) não ganha subtítulo — seria enfeite. -->
     <ul class="arquivos" bind:this={listaEl} style="height: {alturaLista}px">
-      {#each git.files as f (f.path)}
-        <li>
-          <input type="checkbox" checked={marcado(f.path)} onchange={() => alternar(f.path)}
-                 aria-label={f.path} />
-          <button class="linha" onclick={() => abrirArquivo(sessionName, f.path)} title={f.path}
-                  oncontextmenu={(e) => { e.preventDefault(); menuArquivo = { path: f.path, x: e.clientX, y: e.clientY }; }}>
-            <FileIcon nome={f.path} />
-            <span class="nome">{basename(f.path)}</span>
-            <span class="dir">{f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : ''}</span>
-            {#if f.added !== null && f.removed !== null}
-              <span class="num"><span class="mais">+{f.added}</span> <span class="menos">−{f.removed}</span></span>
-            {/if}
-            <span class="cod" class:novo={f.code.trim() === '??'}>{f.code.trim() || 'M'}</span>
-          </button>
-          <!-- Mesmo ⋯ dos commits: o menu do arquivo não fica só no clique direito. -->
-          <button class="mini" aria-label={m.git_acoes_curto()}
-                  onclick={(e) => { const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                                    menuArquivo = { path: f.path, x: r.left, y: r.bottom + 4 }; }}>⋯</button>
-        </li>
-      {/each}
+      {#if staged.length && naoStaged.length}
+        <li class="grupo">{m.git_grupo_staged()}<span class="grupo-n">{staged.length}</span></li>
+      {/if}
+      {#each staged as f (f.path)}{@render linhaArquivo(f)}{/each}
+      {#if staged.length && naoStaged.length}
+        <li class="grupo">{m.git_grupo_nao_staged()}<span class="grupo-n">{naoStaged.length}</span></li>
+      {/if}
+      {#each naoStaged as f (f.path)}{@render linhaArquivo(f)}{/each}
     </ul>
   {/if}
 
@@ -392,8 +418,32 @@
     background: var(--accent); color: var(--text-inverse); border-radius: 999px;
     padding: 0 7px; font-size: 10px; letter-spacing: 0;
   }
+  /* Todos/nenhum encostados na direita do título, longe do × de fechar a coluna. */
+  .sel-acoes { margin-left: auto; display: flex; gap: var(--space-1); }
+  .acao {
+    background: none; border: 0; padding: 2px 4px; border-radius: 6px; cursor: pointer;
+    color: var(--text-muted); font: inherit; font-size: 10px; letter-spacing: 0;
+    text-transform: none; font-weight: 500;
+    transition: background-color 120ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .acao:hover { background: var(--fill-subtle); color: var(--text-primary); }
+  }
   .vazio { padding: var(--space-2) var(--recuo); color: var(--text-muted); font-size: var(--text-xs); }
   .arquivos { list-style: none; margin: 0; padding: 0; overflow: auto; flex: none; }
+  /* Subtítulo de grupo: gruda no topo enquanto o grupo dele rola, senão em lista longa some a
+     informação de qual metade se está olhando. */
+  .arquivos li.grupo {
+    position: sticky; top: 0; z-index: 1;
+    gap: var(--space-1); padding: var(--space-2) var(--recuo) var(--space-1);
+    background: var(--glass-bg-solid);
+    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--text-muted);
+  }
+  /* Mesmo material do card (::before acima): sob liquid o fundo sólido viraria remendo. */
+  :global(html[data-liquid]) .arquivos li.grupo { background: var(--glass-panel); }
+  :global(html[data-liquid][data-theme='dark']) .arquivos li.grupo { background: var(--glass-bg); }
+  .grupo-n { font-family: var(--font-mono); letter-spacing: 0; }
   .sash {
     height: 5px; flex: none; cursor: row-resize; position: relative;
     border-bottom: 1px solid var(--border-subtle);

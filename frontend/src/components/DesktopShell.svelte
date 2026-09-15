@@ -377,6 +377,14 @@ import * as m from '../paraglide/messages';
   // sessoesNaTela trazia "<ativo>::<nome>", e o $effect abaixo fechava o painel no mesmo flush.
   const serverIdPrincipal = $derived((currentKey?.split('::')[0] || getActiveId()) ?? '');
 
+  // Linha da sessão em foco — pelo SERVIDOR e pelo nome. Só pelo nome, homônimas em servidores
+  // diferentes devolviam a primeira da lista: o git abria com o cwd do repo errado, ou nem abria
+  // (a de outro servidor sem branch). Só cai no nome quando a rota é a forma legada, sem servidor.
+  const sessaoFoco = $derived(
+    rows.find((r) => r.name === currentSession && (!serverIdPrincipal || r.serverId === serverIdPrincipal))
+    ?? rows.find((r) => r.name === currentSession),
+  );
+
   const sessoesNaTela = $derived.by(() => {
     if (view === 'board' || view === 'canvas') {
       return overlaySession ? [workspaceSessionKey(overlaySession)] : [];
@@ -469,12 +477,12 @@ import * as m from '../paraglide/messages';
 
   <!-- `branch != null`: sessão sem repositório não abre a coluna nem por estado salvo — lá o git
        só responde "not a git repository". -->
-  {#if ctxPanel.colunaGit && currentSession && view === 'chat' && rows.find((r) => r.name === currentSession)?.branch != null}
+  {#if ctxPanel.colunaGit && currentSession && view === 'chat' && sessaoFoco?.branch != null}
     <!-- Coluna de git: entre a sidebar e a conversa, do repo da sessão em foco. A direita segue
          com Contexto/Arquivos — são escopos iguais, painéis diferentes. -->
     <GitColuna
       sessionName={currentSession}
-      cwd={rows.find((r) => r.name === currentSession)?.cwd ?? null}
+      cwd={sessaoFoco?.cwd ?? null}
       onFechar={alternarColunaGit} />
   {/if}
 
