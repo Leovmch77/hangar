@@ -184,3 +184,75 @@ test('verbo shot sem caminho devolve erro', async () => {
   assert.match(await r.text(), /shot precisa de um caminho de arquivo/);
   srv.fechar();
 });
+
+function servidorComAbas(extra = {}) {
+  const estado = { ativa: 2, abas: [{ id: 1, url: 'http://um.test', titulo: 'Um' }, { id: 2, url: 'http://dois.test', titulo: 'Dois' }] };
+  const ctls = { 1: { ...ctlFalso, marca: 'um' }, 2: { ...ctlFalso, marca: 'dois' } };
+  return subirServidor({
+    controladorDe: (_chave, aba) => ctls[aba ?? estado.ativa] || null,
+    escrever: () => {},
+    abasDe: () => estado,
+    ...extra,
+  });
+}
+
+async function pedir(srv, corpo) {
+  const r = await fetch(`http://127.0.0.1:${srv.porta}/cmd`, {
+    method: 'POST', headers: { Authorization: `Bearer ${srv.token}` }, body: JSON.stringify(corpo),
+  });
+  return { status: r.status, texto: await r.text() };
+}
+
+test('--aba resolve o controlador daquela aba e aba inexistente da 404', async () => {
+  const vistos = [];
+  const srv = await servidorComAbas({
+    controladorDe: (_c, aba) => { vistos.push(aba); return aba === 9 ? null : { enfileirar: (fn) => fn(), avaliar: async () => `http://aba${aba ?? 2}.test` }; },
+  });
+  const r1 = await pedir(srv, { chave: 'srv::a', verbo: 'url', args: [], aba: 1 });
+  assert.match(r1.texto, /aba1/);
+  const r2 = await pedir(srv, { chave: 'srv::a', verbo: 'url', args: [], aba: 9 });
+  srv.fechar();
+  assert.equal(r2.status, 404);
+  assert.match(r2.texto, /nao tem a aba 9/);
+});
+
+test('url e shot ganham sufixo so com mais de uma aba', async () => {
+  const srv = await servidorComAbas({
+    controladorDe: () => ({ enfileirar: (fn) => fn(), avaliar: async () => 'http://dois.test' }),
+  });
+  const com = await pedir(srv, { chave: 'srv::a', verbo: 'url', args: [] });
+  assert.equal(com.texto, 'http://dois.test (aba 2 de 2)');
+
+  const so = await subirServidor({
+    controladorDe: () => ({ enfileirar: (fn) => fn(), avaliar: async () => 'http://x.test' }),
+    escrever: () => {},
+    abasDe: () => ({ ativa: 1, abas: [{ id: 1, url: 'http://x.test', titulo: '' }] }),
+  });
+  const r = await pedir(so, { chave: 'srv::a', verbo: 'url', args: [] });
+  srv.fechar(); so.fechar();
+  assert.equal(r.texto, 'http://x.test', 'uma aba: saida identica a de hoje');
+});
+
+test('tab-list marca a ativa com asterisco e os tab-* nao passam pela fila do controlador', async () => {
+  let enfileirou = false;
+  const srv = await servidorComAbas({
+    controladorDe: () => ({ enfileirar: (fn) => { enfileirou = true; return fn(); } }),
+    abaNova: async () => ({ ok: true, id: 3 }),
+    abaTrocar: async () => ({ ok: true }),
+    abaFechar: async () => ({ ok: true, fechouNavegador: false }),
+  });
+  const lista = await pedir(srv, { chave: 'srv::a', verbo: 'tab-list', args: [] });
+  assert.match(lista.texto, /^ {2}1 {2}Um {2}http:\/\/um\.test\n\* 2 {2}Dois/);
+  assert.equal((await pedir(srv, { chave: 'srv::a', verbo: 'tab-new', args: ['http://tres.test'] })).texto, 'ok: aba 3 http://tres.test');
+  assert.equal((await pedir(srv, { chave: 'srv::a', verbo: 'tab-switch', args: ['1'] })).texto, 'ok: aba 1 ativa');
+  assert.equal((await pedir(srv, { chave: 'srv::a', verbo: 'tab-close', args: [] })).texto, 'ok: aba 2 fechada');
+  srv.fechar();
+  assert.equal(enfileirou, false, 'tab-* mexe no conjunto de controladores: fora da fila');
+});
+
+test('tab-new recusado pelo teto responde erro, nao ok', async () => {
+  const srv = await servidorComAbas({ abaNova: async () => ({ ok: false, motivo: 'teto' }) });
+  const r = await pedir(srv, { chave: 'srv::a', verbo: 'tab-new', args: ['http://x.test'] });
+  srv.fechar();
+  assert.match(r.texto, /erro: a sessao srv::a ja tem 8 abas/);
+});

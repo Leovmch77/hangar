@@ -35,12 +35,56 @@ const VERBOS = {
 
 const TETO_CORPO = 128 * 1024; // folgado: o maior corpo real é um eval com trecho de JS
 
+// O teto vive no main (é ele quem recusa); aqui só entra no texto do erro.
+const TETO_ABAS = 8;
+
+// Abas: mexem no CONJUNTO de controladores, então rodam fora da fila do controlador — mesmo
+// motivo do `close`. Cada uma devolve o texto que o CLI imprime.
+function verbosDeAba({ abasDe, abaNova, abaTrocar, abaFechar }) {
+  return {
+    'tab-list': async (chave) => {
+      const info = abasDe && abasDe(chave);
+      if (!info) return `erro: a sessao ${chave} nao tem navegador aberto`;
+      return info.abas
+        .map((a) => `${a.id === info.ativa ? '*' : ' '} ${a.id}  ${a.titulo || '-'}  ${a.url}`)
+        .join('\n');
+    },
+    'tab-new': async (chave, args) => {
+      if (!abaNova) return 'erro: este shell nao sabe abrir aba pelo CLI';
+      const url = args[0];
+      if (!url) return 'erro: tab new precisa de uma url';
+      const r = await abaNova(chave, url);
+      if (r && r.motivo === 'teto') return `erro: a sessao ${chave} ja tem ${TETO_ABAS} abas`;
+      if (r && r.motivo === 'url') return `erro: ${url} nao e um endereco http(s)`;
+      if (!r || !r.ok) return `erro: a sessao ${chave} nao tem navegador aberto`;
+      return `ok: aba ${r.id} ${url}`;
+    },
+    'tab-switch': async (chave, args) => {
+      if (!abaTrocar) return 'erro: este shell nao sabe trocar de aba pelo CLI';
+      const id = Number(args[0]);
+      if (!Number.isInteger(id)) return 'erro: tab precisa do numero da aba (veja: hangar-preview tab list)';
+      const r = await abaTrocar(chave, id);
+      return r && r.ok ? `ok: aba ${id} ativa` : `erro: a sessao ${chave} nao tem a aba ${id}`;
+    },
+    'tab-close': async (chave, args) => {
+      if (!abaFechar) return 'erro: este shell nao sabe fechar aba pelo CLI';
+      const info = abasDe && abasDe(chave);
+      const id = args[0] != null ? Number(args[0]) : (info ? info.ativa : null);
+      if (!Number.isInteger(id)) return `erro: a sessao ${chave} nao tem navegador aberto`;
+      const r = await abaFechar(chave, id);
+      if (!r || !r.ok) return `erro: a sessao ${chave} nao tem a aba ${id}`;
+      return r.fechouNavegador ? 'ok: navegador fechado' : `ok: aba ${id} fechada`;
+    },
+  };
+}
+
 // `fecharDe(chave)` fecha o navegador de verdade (view, controlador, sidecar) e avisa o painel;
 // devolve false quando a chave não tem navegador. Fica fora de VERBOS porque não passa pela
 // fila do controlador — o controlador é justamente o que morre.
-async function subirServidor({ controladorDe, escrever, fecharDe }) {
+async function subirServidor({ controladorDe, escrever, fecharDe, abasDe, abaNova, abaTrocar, abaFechar }) {
   const token = crypto.randomBytes(24).toString('hex');
   const tokenBuf = Buffer.from(`Bearer ${token}`);
+  const abas = verbosDeAba({ abasDe, abaNova, abaTrocar, abaFechar });
   const servidor = http.createServer(async (req, res) => {
     const responder = (codigo, texto) => {
       res.writeHead(codigo, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -73,14 +117,30 @@ async function subirServidor({ controladorDe, escrever, fecharDe }) {
         if (!fecharDe) return responder(500, 'erro: este shell nao sabe fechar navegador pelo CLI');
         return responder(200, fecharDe(pedido.chave) ? 'ok: close' : `erro: a sessao ${pedido.chave} nao tem navegador aberto`);
       }
-      const ctl = controladorDe(pedido.chave);
-      if (!ctl) return responder(404, `erro: a sessao ${pedido.chave} nao tem navegador aberto`);
+      if (Object.hasOwn(abas, pedido.verbo)) {
+        return responder(200, String(await abas[pedido.verbo](pedido.chave, pedido.args || [])));
+      }
+      const ctl = controladorDe(pedido.chave, pedido.aba);
+      if (!ctl) {
+        // Distinguir "aba errada" de "sessão sem navegador" é o que diz ao agente se ele erra o
+        // número ou se não há navegador nenhum.
+        const info = abasDe && abasDe(pedido.chave);
+        if (info && pedido.aba != null) return responder(404, `erro: a sessao ${pedido.chave} nao tem a aba ${pedido.aba}`);
+        return responder(404, `erro: a sessao ${pedido.chave} nao tem navegador aberto`);
+      }
       // Object.hasOwn, nao `VERBOS[pedido.verbo]` direto: um verbo tipo "constructor" alcancaria o
       // prototype (Object.prototype.constructor) e devolveria 200 com [object Object] em vez do
       // 400 de verbo desconhecido.
       if (!Object.hasOwn(VERBOS, pedido.verbo)) return responder(400, `erro: verbo desconhecido: ${pedido.verbo}`);
       const fn = VERBOS[pedido.verbo];
-      responder(200, String(await ctl.enfileirar(() => fn(ctl, pedido.args || []))));
+      let texto = String(await ctl.enfileirar(() => fn(ctl, pedido.args || [])));
+      if ((pedido.verbo === 'url' || pedido.verbo === 'shot') && !texto.startsWith('erro:')) {
+        const info = abasDe && abasDe(pedido.chave);
+        // Com uma aba só a saída é idêntica à de sempre: o sufixo existe pra dizer ONDE o agente
+        // está quando há mais de uma.
+        if (info && info.abas.length > 1) texto += ` (aba ${pedido.aba ?? info.ativa} de ${info.abas.length})`;
+      }
+      responder(200, texto);
     } catch (err) {
       responder(500, `erro: ${err && err.message ? err.message : err}`);
     }

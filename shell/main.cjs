@@ -1044,6 +1044,23 @@ if (!app.requestSingleInstanceLock()) {
     subirServidor({
       controladorDe: (chave, aba) => entradaDe(chave, aba)?.ctl || null,
       fecharDe: fecharNavegadorPorChave,
+      abasDe,
+      // A janela é a da aba ativa: aba nova nasce ao lado da que está na tela, não numa janela
+      // que o CLI teria de escolher no escuro.
+      abaNova: (chave, url) => {
+        const ativa = entradaDe(chave);
+        const win = janelaDoView(ativa?.view);
+        if (!win) return { ok: false };
+        const r = criarAba(win, chave, {
+          url,
+          oculto: ativa ? !ativa.view.getVisible() : false,
+          bounds: ativa && ativa.view.getBounds ? ativa.view.getBounds() : null,
+        });
+        if (r.ok) { gravarSidecarNav(chave); publicarEstado(win, chave); }
+        return r;
+      },
+      abaTrocar: (chave, id) => trocarAba(chave, id),
+      abaFechar: (chave, id) => fecharAba(janelaDoView(entradaDe(chave, id)?.view), chave, id),
       escrever: (dados) => {
         fs.mkdirSync(NAV_SIDECARS, { recursive: true });
         fs.writeFileSync(path.join(NAV_SIDECARS, '_srv.json'), JSON.stringify(dados), { mode: 0o600 });
