@@ -977,13 +977,22 @@
     border-radius: var(--radius-md);
     overflow: hidden;
   }
-  /* A conversa do subagente reusa a lista de mensagens do chat, e a coluna de leitura dela se
-     dimensiona pelo espaço da TELA — dentro desta caixa ela colapsava (medido: 64px de largura num
-     container de 506px) e o texto quebrava uma letra por linha. Aqui a caixa é o limite, então a
-     coluna ocupa a largura toda e o teto de leitura não vale. */
+  /* A conversa do subagente reusa a lista de mensagens do CHAT, e ela carrega duas coisas que só
+     fazem sentido em tela cheia — aqui dentro as duas esmagavam o texto até uma letra por linha
+     (medido na tela dele: conteúdo de 0px num container de 528).
+     1. `.chat-screen.desktop .message-list` reserva no padding-direito a faixa do painel de
+        contexto (`--ctx-w`). Esta lista VIVE dentro desse painel: a faixa já é a caixa, e o padding
+        consumia a largura inteira.
+     2. `.messages-inner` limita a coluna de leitura pela preferência da pessoa
+        (`--cp-width-scale`), que numa caixa já estreita se aplica de novo.
+     `!important` nas duas porque quem manda é CSS de outro componente, com especificidade maior,
+     que não conhece este contexto. */
+  .sub-chat :global(.message-list) {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
   .sub-chat :global(.messages-inner) {
-    width: 100%;
-    max-width: none;
+    max-width: none !important;
   }
   .ag-ultima { font-family: var(--font-mono); }
   .sub-text { color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.5; max-height: 40vh; overflow-y: auto; }

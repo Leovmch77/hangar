@@ -9,6 +9,10 @@
 
 const CHAVE = 'cp_ctx_recolhido';
 const CHAVE_LARGURA = 'cp_ctx_w';
+// Declarada aqui, ACIMA do `ctxPanel`: o inicializador do store chama `leColunaGit()`, e com a
+// const lá embaixo ela ainda estava na zona morta — o ReferenceError caía no catch e a coluna
+// nascia fechada sempre, por mais que a escolha estivesse gravada.
+const CHAVE_GIT = 'cp_git_coluna_aberta';
 
 // Largura da faixa reservada pelo Chat. Aberto: vem de `ctxPanel.largura` (arrastável, guardada);
 // LARGURA_ABERTO é o default quando nada foi salvo. Recolhido: só a aba da borda, o que devolve
@@ -89,8 +93,6 @@ export const ctxPanel = $state({
   // porque o escopo é o mesmo — a sessão focada.
   colunaGit: leColunaGit(),
 });
-
-const CHAVE_GIT = 'cp_git_coluna_aberta';
 
 function leColunaGit(): boolean {
   try { return localStorage.getItem(CHAVE_GIT) === '1'; } catch { return false; }
