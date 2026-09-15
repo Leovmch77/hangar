@@ -283,6 +283,9 @@ import * as m from '../paraglide/messages';
     background: var(--glass-panel);
     border-bottom-color: transparent;
   }
+  :global(html[data-panels='edge'][data-liquid]) .tabs-bar {
+    backdrop-filter: url(#liquid-glass) blur(20px) saturate(180%);
+  }
   :global(html[data-panels='edge'][data-liquid][data-theme='dark']) .tabs-bar {
     background: var(--glass-bg);
   }
