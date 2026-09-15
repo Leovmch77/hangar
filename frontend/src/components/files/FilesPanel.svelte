@@ -514,7 +514,11 @@
     min-height: 0;
     min-width: 0;
   }
-  .no:hover { background: var(--bg-hover); }
+  /* hover atrás da media query (idem Sidebar): em touch o toque deixa o item aceso ao sair. */
+  @media (hover: hover) and (pointer: fine) {
+    .no:hover { background: var(--bg-hover); }
+  }
+  .no:active { scale: 0.99; }
   .no:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .linha1 { display: flex; align-items: center; gap: 5px; min-width: 0; }
   .no .ico { width: 16px; flex: none; display: grid; place-items: center; }

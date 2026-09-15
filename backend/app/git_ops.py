@@ -292,6 +292,19 @@ def git_action(cwd: str, action: str) -> dict:
 _LOG_FMT = "%H%x1f%h%x1f%P%x1f%D%x1f%an%x1f%at%x1f%ar%x1f%s%x1f%b%x1e"
 
 
+def _nao_enviados(cwd: str) -> set[str]:
+    """SHAs que existem só aqui: `git rev-list @{upstream}..HEAD`. Sem upstream (branch nova, repo
+    sem remoto) devolve vazio em vez de marcar tudo como local — dizer "nada foi enviado" quando
+    não há com o que comparar seria inventar um fato."""
+    try:
+        p = _run(cwd, "rev-list", "@{upstream}..HEAD")
+    except GitError:
+        return set()
+    if p.returncode != 0:
+        return set()
+    return {linha.strip() for linha in p.stdout.splitlines() if linha.strip()}
+
+
 def git_log(cwd: str, n: int = 50, grep: str | None = None) -> list[dict]:
     """Ultimos n commits, estruturados. --topo-order (nao por data) pro grafo nao intercalar branches.
     grep filtra por texto da mensagem. Tres cuidados: (1) o texto vai GRUDADO na flag
@@ -308,6 +321,7 @@ def git_log(cwd: str, n: int = 50, grep: str | None = None) -> list[dict]:
         if "does not have any commits" in p.stderr or "bad default revision" in p.stderr:
             return []
         raise GitError(409, (p.stderr or "git log falhou").strip() or "git log falhou")
+    locais = _nao_enviados(cwd)
     out = []
     for rec in p.stdout.split("\x1e"):
         rec = rec.strip("\n")
@@ -330,6 +344,8 @@ def git_log(cwd: str, n: int = 50, grep: str | None = None) -> list[dict]:
             "rel": rel,
             "subject": subject,
             "body": body,
+            # True = ainda não está no upstream (o "unpublished" do VS Code).
+            "local": full in locais,
         })
     return out
 

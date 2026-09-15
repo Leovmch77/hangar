@@ -3162,5 +3162,10 @@
   "git_painel_vazio": "click a file or commit in the git column",
   "git_altura_lista": "drag to resize the changes list",
   "git_menu_copiar_caminho": "Copy path",
-  "git_largura_coluna": "drag to resize the git column"
+  "git_largura_coluna": "drag to resize the git column",
+  "git_commit_local": "not pushed yet",
+  "git_commit_enviado": "already on the remote",
+  "git_merge_de": "merge of {n} parents",
+  "git_sync_titulo": "{ahead} to push, {behind} to pull",
+  "git_carregar_mais": "load more ({n} loaded)"
 }

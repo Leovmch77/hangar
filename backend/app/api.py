@@ -79,7 +79,7 @@ from app import contas, default_model, engine_probe, engines, procinfo
 from app.costs import report as costs_report, usd_brl as _usd_brl, PERIODOS as _COST_PERIODOS
 from app import pricing
 from app.git_ops import (
-    list_branches, switch_branch, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of,
+    list_branches, switch_branch, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
 )
 from app import loop as loop_mod
 from app.transcript import last_assistant_text
@@ -5351,12 +5351,17 @@ def git_files(name: str):
 
 
 @app.get("/api/sessions/{name}/git/log", dependencies=[Depends(require_auth)])
-def git_log_route(name: str, q: str | None = None):
+def git_log_route(name: str, q: str | None = None, n: int = 50):
     try:
-        commits = git_log(_session_cwd(name), grep=q)
+        cwd = _session_cwd(name)
+        # `n` vem do "carregar mais" da coluna: a lista pede o dobro a cada vez. Teto de 2000 pra
+        # uma URL forjada não fazer o git montar o histórico inteiro de um repo grande.
+        commits = git_log(cwd, n=max(1, min(n, 2000)), grep=q)
+        resumo = git_summary(cwd) or {}
         # Com busca ativa (q), NAO monta o grafo: --grep tira commits do meio e assign_lanes
         # desenharia arestas pra parents que sumiram da lista (lane que nunca fecha).
-        return {"commits": commits if q else assign_lanes(commits)}
+        return {"commits": commits if q else assign_lanes(commits),
+                "ahead": resumo.get("ahead"), "behind": resumo.get("behind")}
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 

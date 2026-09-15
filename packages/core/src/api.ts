@@ -1755,13 +1755,23 @@ export interface GitCommit {
   rel: string;        // data relativa pronta ("2 hours ago")
   subject: string;
   body: string;       // corpo da mensagem (%b), sem o assunto; '' quando o commit nao tem corpo
+  // true = ainda não está no upstream (o "unpublished" do VS Code). Sem upstream configurado, o
+  // backend devolve false em todos: não dá pra afirmar que algo falta enviar sem ter com o que comparar.
+  local?: boolean;
   col?: number;       // coluna (lane) do commit no grafo — preenchida por assign_lanes no backend
   edges?: { to_col: number; curved: boolean }[];  // arestas descendo pros parents (merge = curva)
   passthrough?: number[];  // colunas de outras lanes que cruzam esta linha sem dot (vertical cheia)
 }
 
-export function getGitLog(name: string, q?: string): Promise<{ commits: GitCommit[] }> {
-  const qs = q ? `?q=${encodeURIComponent(q)}` : '';
+// `n` = quantos commits pedir (o "carregar mais" da coluna dobra a cada clique).
+// `ahead`/`behind` vêm junto porque a lista é o lugar onde "falta enviar" precisa aparecer;
+// `null` nos dois = branch sem upstream, e aí não há o que comparar.
+export function getGitLog(name: string, q?: string, n?: number):
+  Promise<{ commits: GitCommit[]; ahead: number | null; behind: number | null }> {
+  const p = new URLSearchParams();
+  if (q) p.set('q', q);
+  if (n) p.set('n', String(n));
+  const qs = p.toString() ? `?${p}` : '';
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/git/log${qs}`);
 }
 

@@ -134,15 +134,21 @@
   }
   .sha { font-family: var(--font-mono); color: var(--accent); }
   .qtd { margin-left: auto; font-family: var(--font-mono); }
+  /* `justify-content: flex-start`: o botão herdava `center` do estilo global e cada caminho
+     começava num x diferente — a lista parecia escalonada em vez de alinhada. */
   .arq {
-    display: flex; align-items: center; gap: var(--space-2); width: 100%;
+    display: flex; align-items: center; justify-content: flex-start;
+    gap: var(--space-2); width: 100%;
     background: none; border: 0; color: var(--text-secondary); font: inherit;
     font-size: var(--text-xs); text-align: left; padding: 5px var(--space-2);
     border-radius: 8px; cursor: pointer;
     transition: background-color 120ms cubic-bezier(0.2, 0, 0, 1);
   }
   .arq:active { scale: 0.98; }
-  .arq:hover, .arq.aberto { background: var(--fill-subtle); color: var(--text-primary); }
+  .arq.aberto { background: var(--fill-subtle); color: var(--text-primary); }
+  @media (hover: hover) and (pointer: fine) {
+    .arq:hover { background: var(--fill-subtle); color: var(--text-primary); }
+  }
   .chev { color: var(--text-muted); width: 10px; flex: none; }
   .cam { font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .inline { padding: 0 0 var(--space-2) var(--space-4); }

@@ -138,7 +138,12 @@
     min-height: 0;
     min-width: 0;
   }
-  .no:hover { background: var(--bg-hover); }
+  /* hover atrás da media query: em touch o toque dispara hover e o item fica "aceso" depois de
+     sair dele. Mesmo padrão que a Sidebar já usa. */
+  @media (hover: hover) and (pointer: fine) {
+    .no:hover { background: var(--bg-hover); }
+  }
+  .no:active { scale: 0.99; }   /* lista densa: feedback de toque sem parecer botão */
   .no:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .no.sel { background: var(--accent-dim); color: var(--text-primary); }
   .no .chev {

@@ -36,7 +36,10 @@
   {#each commits as c (c.hash)}
     {@const cx = laneX(c.col ?? 0)}
     <div class="git-commit-row">
-      <button class="git-commit" class:sel={selectedHash === c.hash} onclick={() => onSelect(c)} title={c.subject}>
+      <!-- O title explica a LINHA inteira: autor, quando, se já foi enviado e o que o desenho da
+           bolinha quer dizer. Antes o grafo não tinha explicação nenhuma ao passar o mouse. -->
+      <button class="git-commit" class:sel={selectedHash === c.hash} onclick={() => onSelect(c)}
+              title={`${c.short} · ${c.author} · ${c.rel}\n${c.subject}${c.parents.length > 1 ? `\n${m.git_merge_de({ n: c.parents.length })}` : ''}\n${c.local ? m.git_commit_local() : m.git_commit_enviado()}`}>
         {#if !noGraph}
           <svg class="git-graph" width={graphW} height={GRAPH_H} viewBox="0 0 {graphW} {GRAPH_H}" aria-hidden="true">
             <!-- lanes de OUTRAS branches que cruzam esta linha (vertical cheia, sem dot) -->
@@ -55,10 +58,17 @@
                 <line x1={cx} y1={GRAPH_H / 2} x2={tx} y2={GRAPH_H} stroke={laneColor(e.to_col)} stroke-width="2" />
               {/if}
             {/each}
-            <circle cx={cx} cy={GRAPH_H / 2} r={GRAPH_R} fill={laneColor(c.col ?? 0)} />
+            <!-- Commit ainda não enviado: bolinha OCA, como o VS Code faz com o "unpublished".
+                 A forma (não só a cor) carrega o estado — daltonismo e tema claro incluídos. -->
+            {#if c.local}
+              <circle cx={cx} cy={GRAPH_H / 2} r={GRAPH_R} fill="var(--bg-base)"
+                      stroke={laneColor(c.col ?? 0)} stroke-width="2" />
+            {:else}
+              <circle cx={cx} cy={GRAPH_H / 2} r={GRAPH_R} fill={laneColor(c.col ?? 0)} />
+            {/if}
           </svg>
         {/if}
-        <span class="git-c-hash">{c.short}</span>
+        <span class="git-c-hash" class:local={c.local} title={c.local ? m.git_commit_local() : undefined}>{c.short}</span>
         {#if c.refs}<span class="git-c-ref">{c.refs.split(', ')[0].replace('HEAD -> ', '')}</span>{/if}
         <span class="git-c-sub">{c.subject}</span>
         <span class="git-c-when">{c.rel}</span>
@@ -104,6 +114,9 @@
   .git-graph { flex: 0 0 auto; overflow: visible; }
   /* Hash e o campo MENOS importante -> muted; o assunto lidera (primary), estilo GitLens/TortoiseGit. */
   .git-c-hash { flex: 0 0 auto; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); }
+  /* Ainda não enviado: hash na cor de destaque + a bolinha oca no grafo. Duas pistas, porque só
+     a cor não serve (tema claro, daltonismo) e só a forma passa despercebida numa lista longa. */
+  .git-c-hash.local { color: var(--accent); }
   .git-c-ref {
     flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-size: 10px; padding: 0 6px; border-radius: var(--radius-full);

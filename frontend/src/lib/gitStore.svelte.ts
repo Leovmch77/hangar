@@ -33,6 +33,13 @@ export function createGitStore(sessionName: string) {
   // `logFiltered` separado nem `filtered` no payload — seria a mesma informacao em 3 lugares,
   // com chance de discordarem.
   let logQuery = $state('');
+  // Histórico paginado: 50 é o que cabe sem pesar; "carregar mais" dobra até o teto do backend.
+  let limiteLog = $state(50);
+  let temMais = $state(true);
+  let carregandoMais = $state(false);
+  // Quantos commits faltam enviar / faltam trazer. null = branch sem upstream.
+  let ahead = $state<number | null>(null);
+  let behind = $state<number | null>(null);
 
   async function refresh() {
     const [b, f] = await Promise.all([getBranches(sessionName), getChangedFiles(sessionName)]);
@@ -76,8 +83,21 @@ export function createGitStore(sessionName: string) {
   }
   async function openLog() {
     error = '';
-    try { commits = (await getGitLog(sessionName, logQuery || undefined)).commits; }
-    catch (e) { error = cleanErr(e); }
+    try {
+      const r = await getGitLog(sessionName, logQuery || undefined, limiteLog);
+      commits = r.commits;
+      ahead = r.ahead; behind = r.behind;
+      // Veio menos do que o pedido = fim do histórico; sem isso o "carregar mais" ficaria
+      // eternamente oferecendo mais de um repo que já acabou.
+      temMais = r.commits.length >= limiteLog;
+    } catch (e) { error = cleanErr(e); }
+  }
+  /** "Carregar mais" do histórico: dobra o limite e relê. */
+  async function maisLog() {
+    if (carregandoMais || !temMais) return;
+    carregandoMais = true;
+    limiteLog = Math.min(limiteLog * 2, 2000);
+    try { await openLog(); } finally { carregandoMais = false; }
   }
   // Helper interno pras acoes de commit: busy/error/output + refresh/openLog.
   // Devolve 'ok' | 'conflito' | 'erro' | 'ocupado' — nao um booleano: quem chama precisa distinguir
@@ -244,6 +264,9 @@ export function createGitStore(sessionName: string) {
     get output() { return output; },
     get pendingAbort() { return pendingAbort; },
     get logQuery() { return logQuery; },
+    get ahead() { return ahead; }, get behind() { return behind; },
+    get temMais() { return temMais; }, get carregandoMais() { return carregandoMais; },
+    maisLog,
     get diffPath() { return diffPath; }, get diffRows() { return diffRows; },
     get diffLoading() { return diffLoading; }, get diffSha() { return diffSha; },
     get diffTruncated() { return diffTruncated; },

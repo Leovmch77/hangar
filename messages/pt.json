@@ -3162,5 +3162,10 @@
   "git_painel_vazio": "clique num arquivo ou commit na coluna de git",
   "git_altura_lista": "arraste para mudar a altura da lista de mudanças",
   "git_menu_copiar_caminho": "Copiar caminho",
-  "git_largura_coluna": "arraste para mudar a largura da coluna de git"
+  "git_largura_coluna": "arraste para mudar a largura da coluna de git",
+  "git_commit_local": "ainda não enviado ao remoto",
+  "git_commit_enviado": "já está no remoto",
+  "git_merge_de": "merge de {n} pais",
+  "git_sync_titulo": "{ahead} para enviar, {behind} para trazer",
+  "git_carregar_mais": "carregar mais ({n} carregados)"
 }

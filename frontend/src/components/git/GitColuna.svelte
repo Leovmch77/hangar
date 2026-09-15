@@ -107,6 +107,21 @@
     return () => ro.disconnect();
   });
 
+  // Rolagem infinita do histórico: 200px antes do fim já pede o próximo lote, então rolar não
+  // esbarra num botão. `rootMargin` no root da rolagem (.grafo), não na janela.
+  let fimEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const alvo = fimEl;
+    const raizRolagem = grafoEl;
+    if (!alvo || !raizRolagem) return;
+    const io = new IntersectionObserver(
+      (entradas) => { if (entradas.some((e) => e.isIntersecting)) untrack(() => git.maisLog()); },
+      { root: raizRolagem, rootMargin: '200px' },
+    );
+    io.observe(alvo);
+    return () => io.disconnect();
+  });
+
   // ── Largura da coluna (handle na borda direita, como a sidebar) ──────────
   const CHAVE_LARGURA = 'cp_git_coluna_w';
   // A árvore de arquivos precisa de largura pra caber nome + pasta + ±N: abaixo de 240 tudo vira
@@ -171,6 +186,14 @@
   <header class="topo">
     <span class="repo" title={cwd ?? repo}>{repo}</span>
     {#if git.current}<span class="branch">{git.current}{#if git.dirty}<span class="sujo">*</span>{/if}</span>{/if}
+    <!-- ↑ falta enviar, ↓ falta trazer. Só com upstream: sem ele não há com o que comparar. -->
+    {#if git.ahead !== null || git.behind !== null}
+      <span class="sync" title={m.git_sync_titulo({ ahead: git.ahead ?? 0, behind: git.behind ?? 0 })}>
+        {#if git.ahead}<span class="ah">↑{git.ahead}</span>{/if}
+        {#if git.behind}<span class="be">↓{git.behind}</span>{/if}
+        {#if !git.ahead && !git.behind}<span class="ok">✓</span>{/if}
+      </span>
+    {/if}
     <button class="fechar" onclick={onFechar} aria-label={m.git_coluna_fechar()}>×</button>
   </header>
 
@@ -228,6 +251,14 @@
       <CommitList commits={git.commits} selectedHash={shaAtivo}
                   onSelect={(c) => c && abrirCommit(sessionName, c)}
                   onMenu={(c) => (menuCommit = c)} wtCount={git.files.length} />
+      {#if git.temMais}
+        <!-- Sentinela: chegar perto do fim da rolagem já carrega o próximo lote. O botão continua
+             como saída pra teclado e pra quando o observer não dispara (lista menor que a área). -->
+        <div bind:this={fimEl} class="fim-lista" aria-hidden="true"></div>
+        <button class="mais-log" onclick={() => git.maisLog()} disabled={git.carregandoMais}>
+          {git.carregandoMais ? m.comum_carregando() : m.git_carregar_mais({ n: git.commits.length })}
+        </button>
+      {/if}
     </div>
   {/if}
 </aside>
@@ -328,6 +359,23 @@
     border-radius: 999px; padding: 2px 9px; white-space: nowrap;
   }
   .sujo { color: var(--warning); }
+  .sync { display: flex; gap: var(--space-1); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .sync .ah { color: var(--accent); }
+  .sync .be { color: var(--warning); }
+  .sync .ok { color: var(--ok); }
+  .mais-log {
+    display: block; width: calc(100% - var(--recuo) * 2); margin: var(--space-2) var(--recuo);
+    padding: 6px; border-radius: var(--radius-md);
+    background: var(--fill-subtle); border: 1px solid var(--border-default);
+    color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer;
+    transition: background-color 120ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .fim-lista { height: 1px; }
+  .mais-log:disabled { opacity: 0.5; cursor: default; }
+  .mais-log:active:not(:disabled) { scale: 0.96; }
+  @media (hover: hover) and (pointer: fine) {
+    .mais-log:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+  }
   .fechar {
     margin-left: auto; background: none; border: 0; color: var(--text-muted);
     font-size: var(--text-base); line-height: 1; cursor: pointer; padding: 2px 4px;
@@ -378,23 +426,33 @@
   /* Raio concêntrico: a coluna é 24 com 12 de recuo, então o que fica encostado nesse recuo pede
      24 − 12 = 12 (--radius-md). Com 6px o item parecia de outra peça. */
   .linha {
-    flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-2);
+    flex: 1; min-width: 0; display: flex; align-items: center; justify-content: flex-start;
+    gap: var(--space-2);
     background: none; border: 0; color: inherit; font: inherit; font-size: var(--text-xs);
     padding: 5px var(--space-2); border-radius: var(--radius-md); cursor: pointer; text-align: left;
     transition: background-color 120ms cubic-bezier(0.2, 0, 0, 1);
   }
-  .linha:hover { background: var(--fill-subtle); }
+  /* hover só em ponteiro fino: em touch o toque deixa a linha acesa depois de sair dela. */
+  @media (hover: hover) and (pointer: fine) {
+    .linha:hover { background: var(--fill-subtle); }
+  }
   .linha:active { scale: 0.98; }   /* lista densa: menos que os 0.96 de botão */
   /* ⋯ do arquivo: aparece no hover/foco pra não poluir a linha, mas ocupa o lugar sempre (sem
      `display:none`), senão a lista dança quando o mouse passa. */
   .mini {
     flex: none; width: 20px; background: none; border: 0; cursor: pointer;
     color: var(--text-muted); font-size: var(--text-xs); line-height: 1; padding: 2px;
-    border-radius: 6px; opacity: 0;
+    border-radius: 6px;
     transition: opacity 120ms cubic-bezier(0.2, 0, 0, 1), background-color 120ms cubic-bezier(0.2, 0, 0, 1);
   }
-  .arquivos li:hover .mini, .mini:focus-visible { opacity: 1; }
-  .mini:hover { background: var(--fill-subtle); color: var(--text-primary); }
+  /* Em touch não há hover pra revelar o ⋯: ele fica sempre visível ali. */
+  .mini { opacity: 1; }
+  @media (hover: hover) and (pointer: fine) {
+    .mini { opacity: 0; }
+    .arquivos li:hover .mini, .mini:hover { opacity: 1; }
+    .mini:hover { background: var(--fill-subtle); color: var(--text-primary); }
+  }
+  .mini:focus-visible { opacity: 1; }
   .mini:active { scale: 0.96; }
   .nome { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .dir { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
