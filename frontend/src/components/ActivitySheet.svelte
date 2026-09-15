@@ -213,7 +213,15 @@
       }
     }
     const match = matchSub(prompt);
-    if (!match) return;
+    if (!match) {
+      // Agora isto chega de um CLIQUE no cartão da conversa, não só da lista (onde o casamento por
+      // prompt já tinha acontecido). Sem avisar, clicar num agente que não casa deixaria a tela no
+      // agente ANTERIOR — pior que vazio: é a conversa errada com cara de certa.
+      subError = m.atividade_agente_nao_achado();
+      subDetail = null;
+      level = 'list';
+      return;
+    }
     subTitle = title;
     subDetail = match;
     level = 'subagent';
@@ -409,6 +417,9 @@
            scrolls aninhados foi o que fez a tela parecer quebrada — o rodapé saía do campo de
            visão e a roda do mouse pegava ora um, ora outro. -->
       <div class="modal-body" class:body-fixo={level === 'subagent'}>
+        <!-- O aviso fica FORA dos níveis: ele nasce de uma leitura que pode falhar em qualquer um
+             deles, e preso a dois níveis a falha sumia calada pra quem estava num workflow. -->
+        {#if subError}<p class="activity-error">⚠ {subError}</p>{/if}
         {#if level === 'list'}
           <div class="activity">
             <!-- plan_hidden junto: com "nenhum plano" escolhido, o plan_name some e o painel — que
@@ -561,7 +572,6 @@
               </div>
             {/if}
 
-            {#if subError}<p class="activity-error">⚠ {subError}</p>{/if}
             {#if workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && shellsVivos.length === 0 && processos.length === 0}
               <p class="activity-empty">{m.atividade_vazio()}</p>
             {/if}
@@ -622,7 +632,6 @@
               {:else}
                 <p class="activity-empty">{m.atividade_pensando()}</p>
               {/if}
-              {#if subError}<p class="activity-error">⚠ {subError}</p>{/if}
 
               {#if subDetail.tools.length > 0}
                 <div class="conv">

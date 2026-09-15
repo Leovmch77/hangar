@@ -166,6 +166,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   $effect(() => {
     if (ctxPanel.aba === 'navegador' && !temNav) ctxPanel.aba = 'contexto';
   });
+  // Mesmo guard pra Atividade, pelo mesmo motivo: a atividade termina (ou a sessão trocada não tem
+  // nenhuma) e a aba fica selecionada sobre uma coluna que não desenha mais nada.
+  $effect(() => {
+    if (ctxPanel.aba === 'atividade' && !temAtividade) ctxPanel.aba = 'contexto';
+  });
   // Abas de git abertas pela coluna, e só se forem desta sessão: mostrar o diff do repo anterior
   // depois de trocar de sessão seria outro projeto na tela sem nada avisando.
   const gitAberto = $derived(
@@ -841,14 +846,21 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     top: 0;
     height: 2px;
     z-index: 1;
+    overflow: hidden;
+  }
+  /* Anima transform, nao background-position: o compositor faz sozinho, sem repintar o painel
+     a cada quadro. Faixa de 50% indo de -60% a 160% de si mesma = o mesmo percurso de antes. */
+  .ctx-sweep::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    width: 50%;
     background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    background-size: 50% 100%;
-    background-repeat: no-repeat;
     animation: ctx-sweep 1.8s ease-in-out infinite;
   }
   @keyframes ctx-sweep {
-    0%   { background-position: -60% 0; }
-    100% { background-position: 160% 0; }
+    0%   { transform: translateX(-60%); }
+    100% { transform: translateX(160%); }
   }
 
   /* Barra de abas Contexto | Arquivos (desenho do mock aprovado). O padding lateral segue o

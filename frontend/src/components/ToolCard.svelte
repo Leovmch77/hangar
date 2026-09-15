@@ -260,6 +260,7 @@
   role="button"
   tabindex="0"
   aria-expanded={ehAgente ? undefined : expanded}
+  aria-label={ehAgente ? m.tool_abrir_agente() : undefined}
   onclick={aoClicar}
   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aoClicar(); } }}
 >

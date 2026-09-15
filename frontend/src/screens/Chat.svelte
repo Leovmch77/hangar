@@ -1303,6 +1303,12 @@
     ctxPanel.aba = 'atividade';
     agenteAberto = { prompt, titulo };
   }
+  // O pedido morre ao sair da aba. Sem isto ele fica pendurado na prop: trocar pra Contexto desmonta
+  // o painel, e voltar pra Atividade o remonta — o efeito lá dentro veria o pedido velho como novo e
+  // reabriria aquele agente, desfazendo o `‹` que o usuário já tinha usado pra voltar à lista.
+  $effect(() => {
+    if (ctxPanel.aba !== 'atividade' && agenteAberto) agenteAberto = null;
+  });
   const crumbs = $derived(
     desktop ? { server: serverLabel, session: sessionName, branch: status?.branch, dirty: status?.dirty ?? false } : null
   );
