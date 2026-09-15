@@ -6,7 +6,7 @@
   // Mora no módulo, e não na instância, porque este painel NÃO remonta na troca de sessão: só o
   // `navChave` muda. Foi o que derrubou a primeira tentativa, feita com onMount/onDestroy — ela
   // nunca reexecutava, e a aba continuava se perdendo.
-  const ABA_POR_SESSAO = new Map<string, 'contexto' | 'arquivos' | 'navegador'>();
+  const ABA_POR_SESSAO = new Map<string, 'contexto' | 'arquivos' | 'navegador' | 'atividade'>();
 </script>
 
 <script lang="ts">
@@ -14,6 +14,7 @@
   import { navegadorPanel, arrastarNav, salvarNav } from '../lib/navegadorPanel.svelte';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
   import NavegadorPane from './NavegadorPane.svelte';
+  import ActivitySheet from './ActivitySheet.svelte';
   import { gitPainel } from '../lib/gitPainel.svelte';
   import GitPainelAbas from './git/GitPainelAbas.svelte';
 import * as m from '../paraglide/messages';
@@ -24,7 +25,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import PlanRing from './PlanRing.svelte';
   import FilesPanel from './files/FilesPanel.svelte';
   import StateChip from './StateChip.svelte';
-  import type { Provider, State, SessionInfo, PlanDetail, ChatEvent } from '@hangar/core';
+  import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields } from '@hangar/core';
   import { ctxWindow, providerName } from '@hangar/core';
   import { planBadge } from '@hangar/core';
@@ -68,6 +69,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenActivity?: () => void;
     activityBadge?: number;
     activityRunning?: boolean;
+    // Atividade como ABA daqui (desktop): é estado ao vivo, como o Navegador, e no modal central
+    // ela nascia espremida — o conteúdo é do celular, onde a caixa é a tela toda.
+    activity?: Activity | null;
+    processos?: ShellVivo[];
+    abrirAgente?: { prompt?: string; titulo: string } | null;
     onExpandUsage?: () => void;
     limited?: boolean;
     limitReset?: string | null;
@@ -112,6 +118,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenRun = undefined, runRunning = false,
     onOpenAttachments = undefined,
     onOpenActivity = undefined, activityBadge = 0, activityRunning = false,
+    activity = null, processos = [], abrirAgente = null,
     onExpandUsage = undefined, limited = false, limitReset = null,
     working = false,
     loopLabel = null, loopColor = undefined, onLoopTap = undefined,
@@ -126,6 +133,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
   const temNav = $derived(navChave in navegadorPanel.abertos);
+  // Mesma regra do Navegador: a aba só existe quando há o que mostrar, senão vira uma aba morta
+  // em toda sessão. `onOpenActivity` é o gate que o Chat já calcula (tarefas, agentes, subagentes
+  // no disco), e processo vivo entra junto.
+  const temAtividade = $derived(!!activity && (!!onOpenActivity || processos.length > 0));
   // Qual sessão este painel já viu. Por INSTÂNCIA, não no módulo: hoje só existe um painel montado
   // por vez (no split os Chat extras não recebem showContextPanel, e o overlay é ramo `:else if`),
   // mas com a marca no módulo dois painéis vivos brigariam — um deles nunca casaria a chave e
@@ -370,6 +381,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
       {m.ctx_navegador()}
     </button>
     {/if}
+    {#if temAtividade}
+    <button type="button" id="aba-ctx-atividade" class="aba" class:sel={ctxPanel.aba === 'atividade'}
+            role="tab" aria-selected={ctxPanel.aba === 'atividade'} aria-controls="painel-ctx-atividade"
+            onclick={() => (ctxPanel.aba = 'atividade')}>
+      {m.ctx_atividade()}
+    </button>
+    {/if}
     <!-- Git NÃO é aba deste painel: abre a coluna à esquerda da conversa e deixa Contexto/Arquivos
          no lugar. Por isso é um toggle (aria-pressed), não um role="tab".
          `status?.repo`: sessão cujo cwd não é repositório não ganha o botão — abrir a coluna lá só
@@ -396,6 +414,15 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
        painel -> nav-hide; o agente segue usando via CDP), nunca fecha. O × dele é quem fecha. -->
   <div id="painel-ctx-navegador" role="tabpanel" aria-labelledby="aba-ctx-navegador" class="ctx-tab ctx-tab-nav">
     <NavegadorPane navKey={navChave} />
+  </div>
+  {/if}
+
+  {#if !gitAberto && ctxPanel.aba === 'atividade' && temAtividade && activity}
+  <!-- Mesmo corpo do modal do celular, sem o embrulho de dialog: aqui ele tem a altura da coluna,
+       que é o que faltava pro detalhe de um agente caber sem virar caixinha. -->
+  <div id="painel-ctx-atividade" role="tabpanel" aria-labelledby="aba-ctx-atividade" class="ctx-tab">
+    <ActivitySheet docado open {activity} sessionName={sessionName ?? ''} {processos} {abrirAgente}
+                   onClose={() => (ctxPanel.aba = 'contexto')} session={session} {planDetail} {planLoading} {planError} />
   </div>
   {/if}
 

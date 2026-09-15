@@ -43,6 +43,9 @@
      *  pelo tool_result o cartão dizia "concluído" com o agente ainda trabalhando; a conversa
      *  seguia, o cartão subia e a sessão parecia parada. */
     agentesRodando?: AgentRun[];
+    /** Clique no cartão de um subagente: abre a conversa dele (painel de Atividade, no desktop).
+     *  Ausente = o cartão expande como qualquer outro. */
+    onAbrirAgente?: (prompt: string | undefined, titulo: string) => void;
     dockH: number;
     codex?: boolean;
     plan?: {
@@ -101,7 +104,7 @@
   }
 
   let {
-    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [],
+    events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0
@@ -578,7 +581,7 @@
         {:else if ev.kind === 'tool_use' && agentesRodandoIds.has(ev.tool_use_id ?? '')}
           <!-- Agent rodando: o cartão dele está grudado no fim; aqui ficaria em dobro. -->
         {:else if ev.kind === 'tool_use'}
-          <ToolCard event={ev} result={resultadoDe(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} />
+          <ToolCard event={ev} result={resultadoDe(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} {onAbrirAgente} />
           {#if plan?.eventId === ev.id}
             <SessionPlanPreview {...planoProps()} />
           {/if}
@@ -614,7 +617,7 @@
            subiu com a conversa e a sessão parecia ociosa. -->
       <div class="agentes-rodando" aria-live="polite">
         {#each cartoesRodando as ev (ev.id)}
-          <ToolCard event={ev} result={null} {sessionName} animate={false} />
+          <ToolCard event={ev} result={null} {sessionName} animate={false} {onAbrirAgente} />
         {/each}
       </div>
     {/if}

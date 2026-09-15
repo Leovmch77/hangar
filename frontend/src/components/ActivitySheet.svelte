@@ -28,8 +28,24 @@
     // de um /clear); a outra sabe o que EXISTE agora. Sem chave comum pra cruzar as duas, então
     // cada uma aparece com o seu nome em vez de virar um número só que mente nos dois sentidos.
     processos?: ShellVivo[];
+    // Docado: a aba do painel da direita no desktop, sem o embrulho de modal. O conteúdo é o
+    // mesmo; muda quem segura a caixa e o fechar (a aba não fecha, troca).
+    docado?: boolean;
+    // Abrir JÁ num agente: o clique no cartão dele na conversa. O casamento é pelo prompt, a mesma
+    // chave que a lista usa — o cartão não conhece o `agentId` do disco.
+    abrirAgente?: { prompt?: string; titulo: string } | null;
   }
-  let { open, activity, sessionName, onClose, showPlan = false, session = null, planDetail = null, planLoading = false, planError = false, processos = [] }: Props = $props();
+  let { open, activity, sessionName, onClose, showPlan = false, session = null, planDetail = null, planLoading = false, planError = false, processos = [], docado = false, abrirAgente = null }: Props = $props();
+
+  // Pedido de fora ("abre neste agente"): dispara UMA vez por pedido. Sem a marca, voltar pra lista
+  // com o `‹` seria desfeito no próximo ciclo do efeito e o painel ficaria preso no agente.
+  let ultimoPedido: unknown = null;
+  $effect(() => {
+    const pedido = abrirAgente;
+    if (!pedido || pedido === ultimoPedido) return;
+    ultimoPedido = pedido;
+    void openSubagent(pedido.prompt, pedido.titulo);
+  });
 
   // 3 níveis: lista geral -> detalhe do workflow (fases+agentes) -> detalhe do agente (prompt+result).
   let level = $state<'list' | 'workflow' | 'agent' | 'subagent'>('list');
@@ -364,8 +380,15 @@
 
 </script>
 
-<ModalDialog {open} ariaLabel={headerTitle} onClose={() => (level === 'list' ? onClose() : back())} className="activity-dialog">
-    <div class="modal">
+<!-- O MESMO corpo serve aos dois formatos: modal no celular (onde a tela é a janela toda) e aba
+     docada no desktop, onde ele ganha a altura da coluna. Snippet em vez de dois markups porque
+     duplicar esta árvore é garantir que uma das duas telas vai ficar para trás numa mudança. -->
+{#snippet corpo()}
+    <div class="modal" class:docado>
+      <!-- Docado no primeiro nível o cabeçalho some: o nome já está na aba selecionada logo acima, e
+           um ✕ ao lado do seletor de abas promete fechar o que só troca. Dentro de um agente ele
+           volta, porque aí o ‹ é a única saída e o título diz de quem é a conversa. -->
+      {#if !docado || level !== 'list'}
       <header class="modal-head">
         {#if level !== 'list'}
           <button class="modal-icon-btn" onclick={back} aria-label={m.comum_voltar()}>‹</button>
@@ -376,8 +399,11 @@
         {:else if level === 'workflow' && detail}
           <span class="wf-status wf-status--{detail.status}">{detail.status}</span>
         {/if}
-        <button class="modal-icon-btn modal-close" onclick={onClose} aria-label={m.sessao_fechar()}>✕</button>
+        {#if !docado}
+          <button class="modal-icon-btn modal-close" onclick={onClose} aria-label={m.sessao_fechar()}>✕</button>
+        {/if}
       </header>
+      {/if}
 
       <!-- No detalhe do subagente o corpo NÃO rola: quem rola é a conversa, por dentro. Dois
            scrolls aninhados foi o que fez a tela parecer quebrada — o rodapé saía do campo de
@@ -448,7 +474,10 @@
               <div class="section">
                 <span class="section-label">{m.atividade_subagentes()}</span>
                 {#each orfaos as s2 (s2.agentId)}
-                  <button type="button" class="agent-row openable"
+                  <!-- Concluído recua: numa sessão longa são dezenas, e quem abre o painel está
+                       atrás do que ainda corre. Atenuar em vez de esconder porque o histórico é o
+                       que explica o que já rodou. -->
+                  <button type="button" class="agent-row openable" class:concluido={s2.finished}
                           onclick={() => abrirDoDisco(s2)}>
                     <span class="agent-body">
                       <span class="agent-head">
@@ -732,7 +761,15 @@
         {/if}
       </div>
     </div>
-</ModalDialog>
+{/snippet}
+
+{#if docado}
+  {@render corpo()}
+{:else}
+  <ModalDialog {open} ariaLabel={headerTitle} onClose={() => (level === 'list' ? onClose() : back())} className="activity-dialog">
+    {@render corpo()}
+  </ModalDialog>
+{/if}
 
 <style>
   /* ── Modal responsivo: mobile = full-screen; desktop (≥720px) = card central largo ── */
@@ -747,6 +784,13 @@
     max-height: inherit;
     background: transparent;
     animation: slide-up 220ms var(--ease-out) both;
+  }
+  /* Docado: a coluna INTEIRA é a caixa. Sem max-height herdada de dialog nenhum e sem a animação
+     de entrada — a aba troca, não sobe do rodapé. */
+  .modal.docado {
+    height: 100%;
+    max-height: none;
+    animation: none;
   }
   /* Desktop (>=820px, mesmo corte do DesktopShell): DOCA como painel lateral direito, igual aos
      demais sheets (Git/Custo/Sessões) — era o único overlay que abria como modal central. Um pouco
@@ -893,6 +937,8 @@
   .shell-vivos { margin-left: var(--space-1); color: var(--accent); }
   .agent-row.openable { width: 100%; padding: var(--space-1) var(--space-2); margin-inline: calc(var(--space-2) * -1); border-radius: var(--radius-md); text-align: left; cursor: pointer; }
   .agent-row.openable:hover { background: var(--bg-hover); }
+  .agent-row.concluido { opacity: 0.6; }
+  .agent-row.concluido:hover { opacity: 1; }
   .agent-now { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
   .agent-arrow { flex-shrink: 0; color: var(--text-muted); font-size: var(--text-base); line-height: 1; }
 
@@ -921,6 +967,14 @@
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     overflow: hidden;
+  }
+  /* A conversa do subagente reusa a lista de mensagens do chat, e a coluna de leitura dela se
+     dimensiona pelo espaço da TELA — dentro desta caixa ela colapsava (medido: 64px de largura num
+     container de 506px) e o texto quebrava uma letra por linha. Aqui a caixa é o limite, então a
+     coluna ocupa a largura toda e o teto de leitura não vale. */
+  .sub-chat :global(.messages-inner) {
+    width: 100%;
+    max-width: none;
   }
   .ag-ultima { font-family: var(--font-mono); }
   .sub-text { color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.5; max-height: 40vh; overflow-y: auto; }

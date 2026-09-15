@@ -27,9 +27,21 @@
     ultimo?: boolean;
     /** Chamada cujo pedido o modelo ainda escreve (Claude sem terminal). */
     escrevendo?: boolean;
+    /** Cartão de `Agent`: abrir a conversa DELE (painel de Atividade) em vez de expandir o cartão,
+     *  que só mostraria o texto do lançamento. Ausente = comportamento de sempre. */
+    onAbrirAgente?: (prompt: string | undefined, titulo: string) => void;
   }
   let { event, result = null, sessionName, animate = true, soDetalhe = false, emGrupo = false, ultimo = false,
-        escrevendo = false }: Props = $props();
+        escrevendo = false, onAbrirAgente = undefined }: Props = $props();
+
+  // Cartão de subagente COM destino: o clique abre a conversa dele. Sem `onAbrirAgente` (celular,
+  // ou qualquer outra ferramenta) nada muda — o cartão expande como sempre.
+  const ehAgente = $derived(event.tool_name === 'Agent' && !!onAbrirAgente);
+  function aoClicar() {
+    if (!ehAgente) { expanded = !expanded; return; }
+    const input = (event.tool_input ?? {}) as { prompt?: string; description?: string };
+    onAbrirAgente?.(input.prompt, input.description || m.atividade_subagente());
+  }
 
   // Edit/MultiEdit/Write: o tool_input ja traz o texto antigo e o novo (no Write, o antigo e vazio
   // e sai tudo como adicao) -> da pra mostrar o DIFF (estilo Pi, lado a lado) no lugar do resultado
@@ -247,9 +259,9 @@
   class:tool-row--error={phase === 'error'}
   role="button"
   tabindex="0"
-  aria-expanded={expanded}
-  onclick={() => (expanded = !expanded)}
-  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); expanded = !expanded; } }}
+  aria-expanded={ehAgente ? undefined : expanded}
+  onclick={aoClicar}
+  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); aoClicar(); } }}
 >
   <div class="tr-call">
     <span class="tr-dot" class:pending={phase === 'pending'} data-phase={phase} aria-hidden="true"></span>

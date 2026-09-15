@@ -82,7 +82,7 @@ export const ctxPanel = $state({
   // Contexto, que e o estado inicial do produto.
   // (Cuidado: a chave literal de bloco no comentario quebraria a varredura de string crua,
   // que trata arquivo .ts como markup.)
-  aba: 'contexto' as 'contexto' | 'arquivos' | 'navegador',
+  aba: 'contexto' as 'contexto' | 'arquivos' | 'navegador' | 'atividade',
 
   // Coluna de git aberta. Não é uma aba deste painel de propósito: o git mora entre a sidebar e a
   // conversa, e a direita continua servindo Contexto/Arquivos ao mesmo tempo. O botão fica aqui

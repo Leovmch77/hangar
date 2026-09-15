@@ -1294,6 +1294,15 @@
   // Comando de background que sobrou com o turno encerrado (o "N shells still running" da TUI). O
   // backend só manda quando é isso que segura a sessão, então não há o que filtrar aqui.
   const shellsVivos = $derived(stateEvent?.shells ?? []);
+
+  // Clique no cartão de um subagente: abre a aba de Atividade JÁ na conversa dele. Objeto novo a
+  // cada clique de propósito — é o que faz o painel reabrir quando se clica no mesmo agente depois
+  // de ter voltado pra lista.
+  let agenteAberto = $state<{ prompt?: string; titulo: string } | null>(null);
+  function abrirAgenteNoPainel(prompt: string | undefined, titulo: string) {
+    ctxPanel.aba = 'atividade';
+    agenteAberto = { prompt, titulo };
+  }
   const crumbs = $derived(
     desktop ? { server: serverLabel, session: sessionName, branch: status?.branch, dirty: status?.dirty ?? false } : null
   );
@@ -2640,7 +2649,7 @@
   {/if}
   <div class="navbar-mount" bind:this={navEl}>
     {#if !splitTab}
-    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (activityOpen = true) : undefined} {activityBadge} {activityRunning} onOpenTerminal={sessionHeadless ? undefined : abrirTerminalReal} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
+    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={sessionHeadless ? undefined : abrirTerminalReal} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
     {/if}
   </div>
 
@@ -2671,9 +2680,12 @@
       onOpenRun={() => (runOpen = true)}
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
-      onOpenActivity={hasActivity ? () => (activityOpen = true) : undefined}
+      onOpenActivity={hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined}
       {activityBadge}
       {activityRunning}
+      {activity}
+      processos={shellsVivos}
+      abrirAgente={agenteAberto}
       onExpandUsage={() => (usageOpen = true)}
       limited={stateEvent?.limited ?? false}
       limitReset={stateEvent?.limit_reset ?? null}
@@ -2801,6 +2813,7 @@
     {/snippet}
     <MessageList
       {events}
+      onAbrirAgente={desktop ? abrirAgenteNoPainel : undefined}
       codex={sessionProvider === 'codex'}
       plan={planControls}
       footer={chatPlans}
@@ -2932,7 +2945,7 @@
         {sendToPair}
         onToggleSendToPair={() => (sendToPair = !sendToPair)}
         shellsRodando={activity.runningShells}
-        onOpenActivity={() => (activityOpen = true)}
+        onOpenActivity={() => (desktop ? (ctxPanel.aba = 'atividade') : (activityOpen = true))}
       />
     {/if}
   </div>
