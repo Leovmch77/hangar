@@ -182,19 +182,35 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   // CDP continua respondendo na página congelada; só o que roda sozinho (timers, rAF, animação)
   // para. `aoDirigir` avisa o main, que tira/põe o modo economia no mesmo compasso.
   let congelada = false;
+  let fechado = false;
+  // Devolve se a página ficou no estado pedido. Nunca rejeita: falha vai pro log e `congelada`
+  // fica como estava, pra próxima chamada tentar de novo — congelar que falhou calado é aba
+  // gastando GPU escondida sem ninguém saber.
   async function economia() {
+    if (fechado) return true;
     const alvo = oculto && emVoo === 0;
-    if (alvo === congelada) return;
-    congelada = alvo;
-    aoDirigir(!alvo);
-    await dbg.sendCommand('Page.setWebLifecycleState', { state: alvo ? 'frozen' : 'active' }).catch(() => {});
+    if (alvo === congelada) return true;
+    const estado = alvo ? 'frozen' : 'active';
+    try {
+      aoDirigir(!alvo);
+      await dbg.sendCommand('Page.setWebLifecycleState', { state: estado });
+      congelada = alvo;
+      return true;
+    } catch (err) {
+      console.error(`[nav] aba nao foi para ${estado}:`, err && err.message ? err.message : err);
+      return false;
+    }
   }
 
   // Descongela ANTES do verbo e recongela quando a fila esvazia; dois verbos encavalados são
-  // uma rajada só.
+  // uma rajada só. Verbo numa página ainda congelada rodaria com timers e rAF parados (print
+  // velho, `wait --idle` passando cedo): recusar alto é melhor que responder errado.
   function enfileirar(fn) {
     emVoo++;
-    const resultado = fila.then(economia).then(fn, fn);
+    const resultado = fila.then(async () => {
+      if (!(await economia())) throw new Error('a aba escondida nao descongelou; tente de novo');
+      return fn();
+    });
     fila = resultado.then(() => {}, () => {}).then(() => { emVoo--; return economia(); });
     return resultado;
   }
@@ -276,7 +292,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       const png = Buffer.from(r.data, 'base64');
       return { isEmpty: () => png.length === 0, toPNG: () => png };
     },
-    fechar() { console_.length = 0; rede.length = 0; refs = new Map(); },
+    fechar() { fechado = true; console_.length = 0; rede.length = 0; refs = new Map(); },
     // Ref VELHA e ref INEXISTENTE dão no mesmo lugar de propósito: o `backendDOMNodeId` morre em
     // qualquer re-render que desmonte o nó, não só em navegação — e é justo o caso de uma lista
     // React que muda depois de um clique. Sem o try, isso voltaria como erro genérico de CDP e o

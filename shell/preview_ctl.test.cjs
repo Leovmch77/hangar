@@ -101,6 +101,33 @@ test('escondida e ociosa a aba congela; verbo descongela antes de rodar e a fila
   assert.deepEqual(estados().at(-1), 'active', 'mostrar descongela');
 });
 
+test('lifecycle que falha nao muda o estado lembrado, loga, e verbo em aba congelada e recusado', async () => {
+  let falhar = false;
+  const dbg = dubleDbg({ 'Page.setWebLifecycleState': () => { if (falhar) throw new Error('cdp caiu'); return {}; } });
+  const erros = [];
+  const originalError = console.error;
+  console.error = (...a) => erros.push(a.join(' '));
+  try {
+    const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });
+    await ctl.definirOculto(true);   // congela de verdade
+    falhar = true;
+    let rodou = false;
+    await assert.rejects(() => ctl.enfileirar(async () => { rodou = true; }), /nao descongelou/, 'descongelar falhou: verbo recusado alto');
+    assert.equal(rodou, false, 'verbo NAO roda em pagina congelada');
+    assert.match(erros.join('\n'), /nao foi para active.*cdp caiu/, 'falha vai pro log com o motivo');
+    await new Promise((r) => setImmediate(r));
+    falhar = false;
+    await ctl.enfileirar(async () => { rodou = true; });
+    assert.equal(rodou, true, 'estado lembrado seguiu "congelada": a proxima chamada tenta de novo e passa');
+    ctl.fechar();
+    const antes = dbg.chamadas.length;
+    await ctl.recongelar();
+    assert.equal(dbg.chamadas.length, antes, 'controlador fechado nao fala mais com o depurador');
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('rede guarda no maximo o teto e devolve as ultimas', async () => {
   const dbg = dubleDbg();
   const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });
