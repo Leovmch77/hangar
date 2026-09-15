@@ -418,12 +418,36 @@ def _desescapa(p: str) -> str:
             .encode("latin-1").decode("utf-8", "replace"))
 
 
+def _numstat_por_arquivo(cwd: str) -> dict[str, tuple[int, int]]:
+    """path -> (added, removed) do working tree vs HEAD. `--no-renames` porque o path tem que casar
+    com o do porcelain; binario ('-') fica de fora. Falha nunca sobe: sem numero, a lista aparece
+    igual (repo sem commits nao tem HEAD pra comparar)."""
+    try:
+        p = _run(cwd, "-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", "HEAD")
+    except GitError:
+        return {}
+    if p.returncode != 0:
+        return {}
+    fora = {}
+    for line in p.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3 or parts[0] == "-":
+            continue
+        try:
+            fora[_desescapa(parts[2])] = (int(parts[0]), int(parts[1]))
+        except ValueError:
+            continue
+    return fora
+
+
 def changed_files(cwd: str) -> list[dict]:
     """Arquivos com mudanca nao-commitada (git status --porcelain). Cada item: `path`, `code` (os 2
-    chars XY do porcelain: ' M', 'M ', '??', 'A '...) e `staged`. So leitura."""
+    chars XY do porcelain: ' M', 'M ', '??', 'A '...), `staged` e o par `added`/`removed` do numstat
+    (None em untracked e binario — `git diff HEAD` nao os ve). So leitura."""
     p = _run(cwd, "-c", "core.quotePath=false", "status", "--porcelain")
     if p.returncode != 0:
         raise GitError(409, (p.stderr or "git status falhou").strip() or "git status falhou")
+    nums = _numstat_por_arquivo(cwd)
     out = []
     for line in p.stdout.splitlines():
         if len(line) < 4:
@@ -431,7 +455,10 @@ def changed_files(cwd: str) -> list[dict]:
         code, path = line[:2], line[3:]
         if " -> " in path:                      # rename/copy: "old -> new" -> usa o novo path
             path = path.split(" -> ", 1)[1]
-        out.append({"path": _desescapa(path), "code": code, "staged": code[0] not in " ?"})
+        path = _desescapa(path)
+        add, rem = nums.get(path, (None, None))
+        out.append({"path": path, "code": code, "staged": code[0] not in " ?",
+                    "added": add, "removed": rem})
     return out
 
 

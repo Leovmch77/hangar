@@ -10,6 +10,8 @@ import * as m from '../paraglide/messages';
   import TerminalPanel from './TerminalPanel.svelte';
   import QuotaStrip from './QuotaStrip.svelte';
   import { quotaBarra } from '../lib/quotaBarra.svelte';
+  import GitColuna from './git/GitColuna.svelte';
+  import { ctxPanel, alternarColunaGit } from '../lib/ctxPanel.svelte';
   import Chat from '../screens/Chat.svelte';
   import Board from '../screens/Board.svelte';
   import Canvas from '../screens/Canvas.svelte';
@@ -464,6 +466,17 @@ import * as m from '../paraglide/messages';
              onCollapsedChange={(v) => (barraRecolhida = v)}
              {ctxDisponivel} {overlaySession} />
   </div>
+
+  <!-- `branch != null`: sessão sem repositório não abre a coluna nem por estado salvo — lá o git
+       só responde "not a git repository". -->
+  {#if ctxPanel.colunaGit && currentSession && view === 'chat' && rows.find((r) => r.name === currentSession)?.branch != null}
+    <!-- Coluna de git: entre a sidebar e a conversa, do repo da sessão em foco. A direita segue
+         com Contexto/Arquivos — são escopos iguais, painéis diferentes. -->
+    <GitColuna
+      sessionName={currentSession}
+      cwd={rows.find((r) => r.name === currentSession)?.cwd ?? null}
+      onFechar={alternarColunaGit} />
+  {/if}
 
   <div class="desktop-com-terminal">
   <main class="desktop-main" class:split={splitSessions.length > 0} class:has-attention={hasAttention}

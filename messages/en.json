@@ -3151,5 +3151,14 @@
   "custos_metodo_codex": "In Codex, input includes cache: reused tokens are separated before applying rates. Reasoning is already part of output and is not counted twice.",
   "custos_equivalente_metodo": "Weights token types by each model’s input rate. This does not measure subscription quota.",
   "term_liberar_origem_btn": "allow this origin",
-  "term_liberar_origem_erro": "Couldn't allow the origin: {msg}"
+  "term_liberar_origem_erro": "Couldn't allow the origin: {msg}",
+  "git_coluna_titulo": "Git for {repo}",
+  "git_coluna_fechar": "close the git column",
+  "git_coluna_abrir": "Git",
+  "git_linhas_sem_alteracao": "{n} unchanged lines",
+  "git_aba_fechar": "close this tab",
+  "git_painel_vazio": "click a file or commit in the git column",
+  "git_altura_lista": "drag to resize the changes list",
+  "git_menu_copiar_caminho": "Copy path",
+  "git_largura_coluna": "drag to resize the git column"
 }

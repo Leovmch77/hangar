@@ -1636,6 +1636,9 @@ export interface ChangedFile {
   path: string;
   code: string;      // 2 chars XY do git porcelain: ' M', 'M ', '??', 'A '...
   staged: boolean;
+  // numstat do arquivo vs HEAD. null em untracked e binario: `git diff HEAD` nao os enxerga.
+  added: number | null;
+  removed: number | null;
 }
 
 // `sequencer`: revert/cherry-pick em andamento (conflito ainda nao resolvido/abortado), lido do

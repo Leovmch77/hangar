@@ -83,7 +83,27 @@ export const ctxPanel = $state({
   // (Cuidado: a chave literal de bloco no comentario quebraria a varredura de string crua,
   // que trata arquivo .ts como markup.)
   aba: 'contexto' as 'contexto' | 'arquivos' | 'navegador',
+
+  // Coluna de git aberta. Não é uma aba deste painel de propósito: o git mora entre a sidebar e a
+  // conversa, e a direita continua servindo Contexto/Arquivos ao mesmo tempo. O botão fica aqui
+  // porque o escopo é o mesmo — a sessão focada.
+  colunaGit: leColunaGit(),
 });
+
+const CHAVE_GIT = 'cp_git_coluna_aberta';
+
+function leColunaGit(): boolean {
+  try { return localStorage.getItem(CHAVE_GIT) === '1'; } catch { return false; }
+}
+
+/** Abre/fecha a coluna de git e lembra a escolha — como a barra da esquerda faz com o pin. */
+export function alternarColunaGit(): void {
+  ctxPanel.colunaGit = !ctxPanel.colunaGit;
+  try {
+    if (ctxPanel.colunaGit) localStorage.setItem(CHAVE_GIT, '1');
+    else localStorage.removeItem(CHAVE_GIT);
+  } catch { /* modo privado: vale só nesta sessão */ }
+}
 
 export function alternarCtxPanel(): void {
   ctxPanel.recolhido = !ctxPanel.recolhido;

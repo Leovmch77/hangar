@@ -108,6 +108,17 @@ def test_changed_files_lists_tracked_and_untracked(tmp_path):
     assert files["novo.txt"]["code"] == "??"
 
 
+def test_changed_files_traz_numstat_por_arquivo(tmp_path):
+    """+N/−M por arquivo alimenta a lista de alteracoes; untracked fica sem numero porque
+    `git diff HEAD` nao o enxerga."""
+    d, f = _repo_with_file(tmp_path)
+    f.write_text("a\nb\nc\n")                       # 1 linha viroutres: +3 -1
+    (tmp_path / "novo.txt").write_text("x\n")       # untracked
+    files = {c["path"]: c for c in git_ops.changed_files(d)}
+    assert files["tracked.txt"]["added"] == 3 and files["tracked.txt"]["removed"] == 1
+    assert files["novo.txt"]["added"] is None and files["novo.txt"]["removed"] is None
+
+
 def test_file_diff_rejects_unlisted_path(tmp_path):
     d, _ = _repo_with_file(tmp_path)
     for bad in ("nao-existe.txt", "../../etc/passwd", "--output=x"):

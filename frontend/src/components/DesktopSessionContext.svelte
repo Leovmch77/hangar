@@ -10,10 +10,12 @@
 </script>
 
 <script lang="ts">
-  import { ctxPanel, alternarCtxPanel, arrastarLargura, salvarLargura } from '../lib/ctxPanel.svelte';
+  import { ctxPanel, alternarCtxPanel, alternarColunaGit, arrastarLargura, salvarLargura } from '../lib/ctxPanel.svelte';
   import { navegadorPanel, arrastarNav, salvarNav } from '../lib/navegadorPanel.svelte';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
   import NavegadorPane from './NavegadorPane.svelte';
+  import { gitPainel } from '../lib/gitPainel.svelte';
+  import GitPainelAbas from './git/GitPainelAbas.svelte';
 import * as m from '../paraglide/messages';
 import GroupGlyph from './icons/GroupGlyph.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
@@ -153,6 +155,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   $effect(() => {
     if (ctxPanel.aba === 'navegador' && !temNav) ctxPanel.aba = 'contexto';
   });
+  // Abas de git abertas pela coluna, e só se forem desta sessão: mostrar o diff do repo anterior
+  // depois de trocar de sessão seria outro projeto na tela sem nada avisando.
+  const gitAberto = $derived(
+    ctxPanel.colunaGit && !!sessionName && gitPainel.sessao === sessionName && gitPainel.abas.length > 0,
+  );
   // Atalho da secao Grupo: com UM par, tocar abre a sessao dele direto no modal. Com 2+ membros a
   // secao continua abrindo a PairSheet — la existe o botao por membro, e escolher por quem clicou
   // seria adivinhacao.
@@ -363,9 +370,28 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
       {m.ctx_navegador()}
     </button>
     {/if}
+    <!-- Git NÃO é aba deste painel: abre a coluna à esquerda da conversa e deixa Contexto/Arquivos
+         no lugar. Por isso é um toggle (aria-pressed), não um role="tab".
+         `status?.repo`: sessão cujo cwd não é repositório não ganha o botão — abrir a coluna lá só
+         mostrava o "fatal: not a git repository" do git. -->
+    {#if status?.repo}
+    <button type="button" class="aba git-toggle" class:sel={ctxPanel.colunaGit}
+            aria-pressed={ctxPanel.colunaGit}
+            onclick={alternarColunaGit}>
+      {m.git_coluna_abrir()}
+    </button>
+    {/if}
   </div>
 
-  {#if ctxPanel.aba === 'navegador' && temNav}
+  {#if gitAberto && sessionName}
+  <!-- Abas de git: o que a coluna abriu (arquivo ou commit). Fica POR CIMA de Contexto/Arquivos,
+       não vira uma quarta aba — fechar a última devolve o painel exatamente como estava. -->
+  <div class="ctx-tab">
+    <GitPainelAbas {sessionName} />
+  </div>
+  {/if}
+
+  {#if !gitAberto && ctxPanel.aba === 'navegador' && temNav}
   <!-- O navegador é uma ABA da coluna: trocar pra Contexto/Arquivos esconde o view (desmonta o
        painel -> nav-hide; o agente segue usando via CDP), nunca fecha. O × dele é quem fecha. -->
   <div id="painel-ctx-navegador" role="tabpanel" aria-labelledby="aba-ctx-navegador" class="ctx-tab ctx-tab-nav">
@@ -373,7 +399,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   </div>
   {/if}
 
-  {#if ctxPanel.aba === 'contexto'}
+  {#if !gitAberto && ctxPanel.aba === 'contexto'}
   <div id="painel-ctx-contexto" role="tabpanel" aria-labelledby="aba-ctx-contexto" class="ctx-tab">
 
   <!-- A secao "Estado" saiu: repetia o chip do header a 60px de distancia, mesma palavra e mesma
@@ -605,6 +631,26 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     display: flex;
     flex-direction: column;
   }
+  .commit-topo {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .commit-sha { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--accent); }
+  .commit-sub {
+    font-size: var(--text-xs); color: var(--text-secondary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .commit-x {
+    margin-left: auto; background: none; border: 0; color: var(--text-muted);
+    cursor: pointer; padding: 0 var(--space-1); line-height: 1;
+  }
+  .commit-x:hover { color: var(--text-primary); }
+  /* position: relative pela regra do overflow próprio: sem isso um .sr-only absoluto de dentro
+     do diff escaparia pra área rolável da conversa. */
+  .commit-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }
   /* A aba Navegador deixa 8px à esquerda: o handle de redimensionar da coluna (absolute, left:0,
      6px) precisa ficar FORA do view nativo, senão o view cobre a divisória e o clique morre —
      era o "depois que abre uma página não dá pra redimensionar". */
