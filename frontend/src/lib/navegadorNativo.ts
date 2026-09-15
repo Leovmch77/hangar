@@ -9,7 +9,13 @@
  * monta componente depois (mesmo motivo do pastaNativa).
  */
 export type NavBounds = { x: number; y: number; width: number; height: number };
-export type NavEstado = { chave: string; url: string; carregando: boolean; voltar: boolean; avancar: boolean };
+export type NavAba = { id: number; url: string; titulo: string; carregando: boolean };
+export type NavEstado = {
+  chave: string; url: string; carregando: boolean; voltar: boolean; avancar: boolean;
+  /** Abas do shell novo; shell antigo não manda (a faixa não monta). */
+  ativa?: number | null;
+  abas?: NavAba[];
+};
 
 export type NavNativo = {
   /** Cria ou reexibe o view da sessão. Sem `url`: só reexibe — ok:false se o main não tem o view.
@@ -26,6 +32,12 @@ export type NavNativo = {
   onEstado?: (cb: (p: NavEstado) => void) => () => void;
   /** Navegador fechado por fora do painel (`hangar-preview close`). Opcional: shell antigo não tem. */
   onFechado?: (cb: (p: { chave: string }) => void) => () => void;
+  /** Abas. Opcionais: shell antigo não as tem — a faixa só monta com `tabNew` presente.
+   *  `tabNew` SÓ cria com url: o shell recusa aba sem endereço (`motivo: 'url'`). */
+  tabNew?: (chave: string, url?: string) => Promise<{ ok: boolean; id?: number; motivo?: string }>;
+  tabSwitch?: (chave: string, id: number) => Promise<{ ok: boolean }>;
+  tabClose?: (chave: string, id?: number) => Promise<{ ok: boolean; fechouNavegador: boolean }>;
+  onAbaFechada?: (cb: (p: { chave: string; id: number; ativa: number | null }) => void) => () => void;
   /** Cookies do Chrome real (CDP) pro view. Opcional: shell antigo não tem. Nunca rejeita. */
   importCookies?: (chave: string, host: string, porta?: number, recarregar?: boolean) =>
     Promise<{ ok: boolean; gravados: number; falhos: number; erro?: string; detalhe?: string }>;

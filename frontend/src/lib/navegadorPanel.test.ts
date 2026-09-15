@@ -64,6 +64,14 @@ describe('navegadorPanel — largura redimensionável', () => {
     expect(JSON.parse(localStorage.getItem('cp_nav_abertos')!)).not.toHaveProperty('srv-x::hangar');
   });
 
+  it('abertos acompanha a URL da aba ativa', async () => {
+    const mod = await importarFresco();
+    mod.marcarNavAberto('srv-x::hangar');
+    mod.atualizarNavUrl('srv-x::hangar', 'http://um.test/');
+    mod.atualizarNavUrl('srv-x::hangar', 'http://dois.test/');   // trocou de aba: o estado empurra a nova ativa
+    expect(mod.navegadorPanel.abertos['srv-x::hangar']).toBe('http://dois.test/');
+  });
+
   it('sessão que sumiu da lista leva o navegador junto; servidor sem lista lida não decide', async () => {
     const close = vi.fn();
     (window as unknown as { hangar?: unknown }).hangar = { nav: { close } };

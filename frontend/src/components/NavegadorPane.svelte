@@ -10,7 +10,7 @@
   // cobrir nada.
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { navegadorNativo } from '../lib/navegadorNativo';
+  import { navegadorNativo, type NavAba } from '../lib/navegadorNativo';
   import { navegadorPanel, atualizarNavUrl, fecharNav } from '../lib/navegadorPanel.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
@@ -36,6 +36,17 @@
   let carregando = $state(false);
   let podeVoltar = $state(false);
   let podeAvancar = $state(false);
+  // Abas da sessão (o shell manda a lista inteira a cada mudança). Shell antigo não tem `tabNew`
+  // e a faixa nem monta.
+  const TETO_ABAS = 8;
+  let abas = $state<NavAba[]>([]);
+  let abaAtiva = $state<number | null>(null);
+  let campoUrl = $state<HTMLInputElement | null>(null);
+  let avisoAba = $state('');
+  // O shell só cria aba COM endereço, então o + não cria nada sozinho: ele prepara o campo e
+  // quem cria a aba é o Enter, no ir().
+  let abaPendente = $state(false);
+  const temAbas = !!nativo?.tabNew;
   // Fechado por fora (`hangar-preview close`): mesmo caminho do ×, menos o `close` ao shell, que já
   // fechou. Sem isto o painel seguia aberto sobre um view morto.
   $effect(() => {
@@ -53,6 +64,12 @@
       carregando = p.carregando;
       podeVoltar = p.voltar;
       podeAvancar = p.avancar;
+      if (p.abas) {
+        abas = p.abas;
+        // Trocou de aba ativa: um "nova aba" que ficou pendente no campo perde a vez.
+        if ((p.ativa ?? null) !== abaAtiva) abaPendente = false;
+        abaAtiva = p.ativa ?? null;
+      }
       if (p.url && p.url !== aberta && !p.url.startsWith('about:')) {
         aberta = p.url;
         endereco = p.url;
@@ -60,6 +77,39 @@
       }
     });
   });
+  // UMA aba fechou (pelo × da faixa ou pelo CLI): o painel NÃO desmonta — quem desmonta é o
+  // onFechado, que continua sendo o navegador inteiro (inclusive ao fechar a última aba).
+  $effect(() => {
+    if (!nativo?.onAbaFechada) return;
+    return nativo.onAbaFechada((p) => {
+      if (p.chave !== navKey) return;
+      abas = abas.filter((a) => a.id !== p.id);
+      abaAtiva = p.ativa;
+    });
+  });
+
+  function avisar(texto: string) {
+    avisoAba = texto;
+    setTimeout(() => { if (avisoAba === texto) avisoAba = ''; }, 6000);
+  }
+
+  function novaAba() {
+    if (abas.length >= TETO_ABAS) { avisar(m.nav_aba_teto()); return; }
+    // Aba vazia não existe no shell: o campo de endereço é o próximo passo, então já recebe o foco.
+    abaPendente = true;
+    endereco = '';
+    campoUrl?.focus();
+  }
+
+  async function abrirAba(u: string) {
+    const r = await nativo?.tabNew?.(navKey, u).catch(() => undefined);
+    if (r?.ok) return;   // a URL da nova ativa chega pelo onEstado
+    if (r?.motivo === 'teto') { avisar(m.nav_aba_teto()); return; }
+    // Não deu pra criar a aba: abre na atual em vez de o endereço digitado sumir.
+    aberta = u;
+    atualizarNavUrl(navKey, u);
+    void abrirNativo(u);
+  }
 
   // O rect TEM que sair como objeto plano: getBoundingClientRect devolve DOMRect, cujas
   // propriedades são getters no prototype — o structuredClone do IPC vira {} e o view nasce
@@ -90,6 +140,7 @@
     const local = /^(localhost|127\.|10\.|192\.168\.|\[)/i.test(t) || !/\.[a-z]/i.test(t.split(/[/:]/)[0]) || /^[^/]+\.local(\/|:|$)/i.test(t);
     const u = /^https?:\/\//i.test(t) ? t : `${local ? 'http' : 'https'}://${t}`;
     endereco = u;
+    if (abaPendente) { abaPendente = false; void abrirAba(u); return; }
     aberta = u;
     atualizarNavUrl(navKey, u);
     void abrirNativo(u);
@@ -200,6 +251,25 @@
 </script>
 
 <div class="nav-pane">
+  {#if temAbas && abas.length}
+    <div class="nav-abas" role="tablist" aria-label={m.ctx_navegador()}>
+      {#each abas as aba (aba.id)}
+        <div class="nav-aba" class:ativa={aba.id === abaAtiva}>
+          <button type="button" role="tab" class="nav-aba-titulo"
+                  aria-selected={aba.id === abaAtiva}
+                  title={aba.url}
+                  onclick={() => void nativo?.tabSwitch?.(navKey, aba.id)}>
+            {aba.titulo || aba.url.replace(/^https?:\/\//, '') || m.nav_aba_vazia()}
+          </button>
+          <button type="button" class="nav-aba-x" aria-label={m.nav_aba_fechar()} title={m.nav_aba_fechar()}
+                  onclick={() => void nativo?.tabClose?.(navKey, aba.id)}>×</button>
+        </div>
+      {/each}
+      <button type="button" class="nav-aba-mais" aria-label={m.nav_aba_nova()} title={m.nav_aba_nova()}
+              disabled={abas.length >= TETO_ABAS} onclick={novaAba}>+</button>
+    </div>
+  {/if}
+  {#if avisoAba}<p class="nav-status" role="status">{avisoAba}</p>{/if}
   <header class="nav-bar" class:carregando>
     {#if nativo?.back}
       <button class="nav-btn" onclick={() => nativo?.back?.(navKey)} disabled={!podeVoltar}
@@ -210,6 +280,7 @@
     <form class="nav-form" onsubmit={(e) => { e.preventDefault(); ir(); }}>
       <input
         class="nav-url"
+        bind:this={campoUrl}
         bind:value={endereco}
         placeholder={m.nav_url_dica()}
         aria-label={m.nav_url_dica()}
@@ -284,6 +355,31 @@
     display: flex;
     flex-direction: column;
   }
+  /* A faixa rola em vez de encolher até ilegível; a inativa usa --surface-inset, não um
+     retângulo opaco (o vidro do app tem que aparecer atrás). */
+  .nav-abas {
+    display: flex; align-items: stretch; gap: 2px;
+    padding: var(--space-1) var(--space-2) 0;
+    overflow-x: auto; scrollbar-width: thin;
+  }
+  .nav-aba {
+    display: flex; align-items: center; min-width: 0;
+    flex: 0 1 180px;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    background: var(--surface-inset);
+  }
+  .nav-aba.ativa { background: var(--surface-raised); }
+  .nav-aba-titulo {
+    flex: 1; min-width: 0; padding: 4px 8px; border: 0; background: transparent; color: inherit;
+    font-size: var(--text-xs); text-align: left; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .nav-aba-x, .nav-aba-mais {
+    border: 0; background: transparent; color: inherit; cursor: pointer;
+    padding: 2px 6px; font-size: var(--text-sm); line-height: 1;
+  }
+  .nav-aba-mais { flex: 0 0 auto; align-self: center; }
+  .nav-aba-mais:disabled { opacity: 0.4; cursor: default; }
   .nav-bar {
     display: flex;
     align-items: center;
