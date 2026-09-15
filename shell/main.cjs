@@ -233,17 +233,12 @@ async function criarJanela() {
   win.on('close', () => {
     // Janela morrendo leva TODOS os views de navegador dela — sem isto o Map guardaria
     // referência de webContents mortos.
+    // Mesmo caminho do × do painel (view, controlador e o sidecar da chave — sem apagá-lo o CLI
+    // lista "MORTO" acumulando lixo a cada quit): um lugar só, exercitado pelo mesmo teste.
     const porChave = navegadores.get(win);
     if (porChave) {
+      for (const chave of [...porChave.keys()]) fecharNavegador(win, chave);
       navegadores.delete(win);
-      for (const [chave, abas] of porChave) {
-        for (const v of abas.values()) {
-          soltarControlador(chave, v);
-          try { v.webContents.close(); } catch { /* já morreu */ }
-        }
-        // ...e o sidecar da chave, senão o CLI lista "MORTO" acumulando lixo a cada quit.
-        try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch { /* sem sidecar */ }
-      }
     }
     const u = win.webContents.getURL();
     // Na tela de recuperacao (data:) nao ha endereco de cockpit pra salvar — usa o ULTIMO que
@@ -426,7 +421,8 @@ function soltarControlador(chave, view) {
   if (r) {
     for (const [id, entrada] of r.abas) {
       if (entrada.view !== view) continue;
-      entrada.ctl.fechar();
+      // Sem controlador quando o depurador não anexou na criação — a aba existe mesmo assim.
+      entrada.ctl?.fechar();
       r.abas.delete(id);
       // Só ZERA a ativa; escolher a sucessora aqui a deixaria registrada mas invisível — quem
       // decide qual entra também tem que exibi-la, e isso é de quem fechou a aba.
@@ -444,7 +440,7 @@ function soltarControlador(chave, view) {
 function avisarOculto(chave, view, oculto) {
   const r = registros.get(chave);
   const entrada = r && [...r.abas.values()].find((e) => e.view === view);
-  if (!entrada || !entrada.ctl.definirOculto) return;
+  if (!entrada || !entrada.ctl?.definirOculto) return;
   const aplicar = () => entrada.ctl.definirOculto(oculto).catch((err) => {
     console.error('[nav] viewport do view escondido:', err && err.message);
   });
@@ -476,6 +472,9 @@ const focoPendente = new WeakSet();
 
 function devolverFoco(win, view) {
   if (!viewVivo(win, view) || view.getVisible()) return;
+  // O teclado é de quem está na tela: se QUALQUER aba desta janela está visível, ele fica com ela
+  // — uma aba de fundo que terminou de carregar não pode arrancá-lo.
+  if (algumViewVisivel(win)) return;
   // Com a janela em segundo plano, `focus()` vira pedido de ativação (xdg-activation) e um
   // compositor com focus_on_activate traz o app pra frente — devolver o teclado não pode roubar a
   // tela de quem está noutro aplicativo. Espera a volta do usuário; focar já focado não ativa nada.
@@ -580,21 +579,275 @@ async function targetIdDe(view) {
   }
 }
 
-async function gravarSidecarNav(chave, urlInicial, view) {
-  const targetId = await targetIdDe(view);
+function gravarSidecarNav(chave) {
+  const reg = registros.get(chave);
+  if (!reg || !reg.abas.size) return;
+  const abas = [...reg.abas].map(([id, e]) => {
+    const wc = e.view.webContents;
+    const vivo = wc && !wc.isDestroyed();
+    // A url gravada cai na PEDIDA quando o alvo ainda não navegou: no instante da criação ele está
+    // em about:blank, que não é endereço de nada. Ela é só o plano B de quem não tem targetId.
+    return { id, url: (vivo && wc.getURL()) || e.urlPedida, titulo: vivo ? wc.getTitle() : '', targetId: e.targetId };
+  });
+  const ativa = abas.find((x) => x.id === reg.ativa) || abas[0];
   try {
     fs.mkdirSync(NAV_SIDECARS, { recursive: true });
     const arq = path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`);
     // O tmp leva o pid: duas janelas do app são o MESMO processo, mas o nome fixo ainda deixaria
     // duas gravações da mesma chave se sobreporem no rename.
     const tmp = path.join(NAV_SIDECARS, `.${nomeSidecar(chave)}.${process.pid}.tmp`);
-    // A url gravada é a PEDIDA, não a que o alvo mostra: no instante da criação ele ainda está em
-    // about:blank, que não é endereço de nada. Ela é só o plano B de quem não tem targetId.
-    fs.writeFileSync(tmp, JSON.stringify({ chave, url: urlInicial, targetId, ts: Date.now() }));
+    // `url` e `targetId` no TOPO continuam sendo os da ativa: é só isso que o backend lê, e
+    // `ativa`/`abas` entram AO LADO — por isso o Python não muda.
+    fs.writeFileSync(tmp, JSON.stringify({
+      chave, url: ativa.url, targetId: ativa.targetId, ts: Date.now(), ativa: reg.ativa, abas,
+    }));
     fs.renameSync(tmp, arq);
   } catch (err) {
     console.error('[nav] sidecar nao gravado:', err?.message || err);
   }
+}
+
+// O targetId chega depois (pergunta ao próprio alvo por CDP); a aba pode ter fechado nesse meio.
+async function registrarTargetId(chave, id, view) {
+  const tid = await targetIdDe(view);
+  const entrada = registros.get(chave)?.abas.get(id);
+  if (!entrada || entrada.view !== view) return;   // aba já fechou
+  entrada.targetId = tid;
+  gravarSidecarNav(chave);
+}
+
+// Um lugar só monta o payload: a faixa de abas e os campos planos (url/carregando/voltar/avançar)
+// têm que contar a MESMA verdade, e os planos são sempre os da ativa — front antigo lê só eles.
+function publicarEstado(win, chave) {
+  const reg = registros.get(chave);
+  if (!reg || !win || win.isDestroyed()) return;
+  const abas = [];
+  for (const [id, entrada] of reg.abas) {
+    const wc = entrada.view.webContents;
+    if (!wc || wc.isDestroyed()) continue;
+    abas.push({ id, url: wc.getURL(), titulo: wc.getTitle(), carregando: wc.isLoading() });
+  }
+  const ativa = reg.abas.get(reg.ativa)?.view?.webContents;
+  const viva = ativa && !ativa.isDestroyed();
+  win.webContents.send('hangar:nav-estado', {
+    chave, ativa: reg.ativa, abas,
+    url: viva ? ativa.getURL() : '',
+    carregando: viva ? ativa.isLoading() : false,
+    voltar: viva ? ativa.navigationHistory.canGoBack() : false,
+    avancar: viva ? ativa.navigationHistory.canGoForward() : false,
+  });
+}
+
+// O que o servidor local mostra no `tab list` e usa pra saber quantas abas há.
+function abasDe(chave) {
+  const reg = registros.get(chave);
+  if (!reg || !reg.abas.size) return null;
+  const abas = [...reg.abas].map(([id, e]) => {
+    const wc = e.view.webContents;
+    const vivo = wc && !wc.isDestroyed();
+    return { id, url: vivo ? wc.getURL() || e.urlPedida : e.urlPedida, titulo: vivo ? wc.getTitle() : '' };
+  });
+  return { ativa: reg.ativa, abas };
+}
+
+// Uma aba nova nasce na janela e no estado de exibição da ATIVA: o agente que abre aba com a
+// sessão fora da tela não pode puxar a janela pra frente, e o usuário que abre pelo + não pode
+// ganhar uma aba invisível.
+function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
+  const reg = regDe(chave);
+  if (reg.abas.size >= TETO_ABAS) return { ok: false, motivo: 'teto' };
+  // Aba SÓ nasce com URL: o reexibir (troca de sessão, reload do front) não passa por aqui.
+  const destino = urlNavegavel(url);
+  if (!destino) return { ok: false, motivo: 'url' };
+  const anterior = reg.ativa != null ? reg.abas.get(reg.ativa) : null;
+  const escondida = oculto ?? (anterior ? !anterior.view.getVisible() : false);
+  // persist: cookies/localStorage no disco. COMPARTILHADA entre sessões de propósito — o uso é
+  // cada sessão com suas URLs, não isolamento de conta; se um dia precisar, vira por-sessão.
+  const view = new WebContentsView({
+    webPreferences: { partition: 'persist:nav', backgroundThrottling: false },
+  });
+  const wc = view.webContents;
+  wc.setUserAgent(uaDeChrome(wc.getUserAgent()));
+  // target=_blank vai pro navegador do sistema, mesmo padrão do cockpit.
+  wc.setWindowOpenHandler(({ url: alvo }) => {
+    if (/^https?:/i.test(alvo)) shell.openExternal(alvo);
+    return { action: 'deny' };
+  });
+  // Escondido, o view carrega SOLTO e só entra na janela com a página pronta: é o primeiro load
+  // de um view anexado que leva o teclado (anexar depois não leva). Solto ele não tem quadro,
+  // por isso a anexação vem antes da emulação que o `avisarOculto` liga no mesmo evento.
+  if (escondida) {
+    // Load que falha também anexa: solto pra sempre, o view não teria print nem viewport e o
+    // agente que o dirige não receberia erro nenhum — só um `shot` que nunca responde.
+    const anexar = () => { wc.removeListener('did-finish-load', anexar); wc.removeListener('did-fail-load', falhou); anexarNaJanela(win, view); };
+    const falhou = (_e, codigo, descricao) => { console.error(`[nav] ${chave}: load escondido falhou (${codigo} ${descricao})`); anexar(); };
+    wc.once('did-finish-load', anexar);
+    wc.once('did-fail-load', falhou);
+  } else {
+    anexarNaJanela(win, view);
+  }
+  const id = reg.proximoId++;
+  abasDaJanela(win, chave).set(id, view);
+  // Estado de navegação pro painel (barra de carregamento, ✕/↻, voltar/avançar, endereço que
+  // acompanha os cliques). O view não tem DOM no cockpit — sem isto a página carrega em silêncio.
+  for (const nome of ['did-start-loading', 'did-stop-loading', 'did-navigate', 'did-navigate-in-page', 'page-title-updated']) {
+    wc.on(nome, () => publicarEstado(win, chave));
+  }
+  wc.on('did-navigate', (_e, u) => {
+    const entrada = reg.abas.get(id);
+    if (entrada) entrada.urlPedida = u;
+    gravarSidecarNav(chave);
+  });
+  wc.on('did-finish-load', () => devolverFoco(win, view));
+  // Preenchimento de login com as senhas salvas do Chrome do usuário, ao terminar de carregar
+  // uma página cujo domínio tem senha salva. Uma vez por URL (o `dom-ready` repete em SPA).
+  let ultimoPreenchido = '';
+  wc.on('dom-ready', () => {
+    if (win.isDestroyed() || wc.isDestroyed()) return;
+    let host = '';
+    try { host = new URL(wc.getURL()).hostname; } catch { return; }
+    const atual = wc.getURL();
+    if (!host || atual === ultimoPreenchido) return;
+    ultimoPreenchido = atual;
+    preencherLogin(wc, host);
+  });
+  // O depurador fica ANEXADO enquanto o view viver: é o que dá tema, console e rede contínuos.
+  // O `targetIdDe` que já existia anexa e solta na hora, e por isso não servia pra guardar estado.
+  // `isAttached` antes: o Electron lança quando já há depurador anexado.
+  let ctl = null;
+  try {
+    const dbg = wc.debugger;
+    if (!dbg.isAttached()) dbg.attach('1.3');
+    // Network e Accessibility ficam de fora de propósito: o controlador os liga no primeiro
+    // verbo que precisa (são os dois que custam CPU o tempo todo, mesmo sem ninguém dirigir).
+    for (const dominio of ['Runtime.enable', 'Log.enable', 'DOM.enable']) {
+      dbg.sendCommand(dominio).catch(() => {});
+    }
+    ctl = criarControlador({
+      dbg,
+      capturarPagina: () => wc.capturePage(),
+      aoNavegar: (cb) => wc.on('did-navigate', cb),
+    });
+  } catch (err) {
+    // Falha aqui custa os verbos novos, não o navegador: a aba entra no registro sem controlador
+    // (quem depende dele checa antes) e o usuário navega na mão.
+    console.error('[nav] depurador nao anexou:', err && err.message);
+  }
+  reg.abas.set(id, { ctl, view, urlPedida: destino, targetId: null });
+  // Aba morta por fora (Target.closeTarget via CDP, crash do renderer) não passa por `fecharAba`:
+  // sem `garantirAtiva`, a sessão ficava com abas vivas e sem ativa, e o CLI respondia "nao tem
+  // navegador aberto" para todas elas. A checagem de identidade é o que impede um `destroyed`
+  // Aba morta por fora (Target.closeTarget via CDP, crash do renderer) não passa pelo × nem pelo
+  // `fecharAba`. A conferência de identidade impede um `destroyed` ATRASADO (o `close` do view é
+  // assíncrono e a mesma chave pode ser reaberta antes de ele terminar) de apagar a aba NOVA:
+  // quem morre só limpa o que é dele. Sem o `garantirAtiva`, a sessão ficava com abas vivas e sem
+  // ativa, e o CLI respondia "nao tem navegador aberto" para todas elas.
+  wc.once('destroyed', () => {
+    if (abasDaJanela(win, chave).get(id) !== view) return;
+    abasDaJanela(win, chave).delete(id);
+    soltarControlador(chave, view);
+    garantirAtiva(win, chave);
+  });
+  wc.loadURL(destino).catch((err) => console.error('[nav] loadURL falhou:', err?.message || err));
+  // Nasce ESCONDIDA e sem emulação; quem exibe, emula e foca é `trocarAba` — um dono só para o
+  // estado de tela evita dois views visíveis empilhados e aba sem viewport.
+  view.setVisible(false);
+  if (bounds) view.setBounds(normalizaBounds(bounds));
+  registrarTargetId(chave, id, view);   // async, não bloqueia o IPC
+  trocarAba(chave, id, { oculto: escondida });
+  return { ok: true, id, view };
+}
+
+// Sessão que perdeu a ativa (aba morta por fora) volta a ter uma, no mesmo estado de tela das
+// outras — sem isto o navegador existe e ninguém o alcança.
+function garantirAtiva(win, chave) {
+  const reg = registros.get(chave);
+  if (!reg || !reg.abas.size) return;
+  if (reg.ativa != null && reg.abas.has(reg.ativa)) return;
+  // O -1 entra como "a fechada": id nenhum é negativo, então a escolha cai na primeira viva.
+  const proxima = proximaAtiva([...reg.abas.keys(), -1], -1, reg.anterior ?? null);
+  if (proxima != null) trocarAba(chave, proxima);
+  if (win && !win.isDestroyed()) publicarEstado(win, chave);
+}
+
+// ÚNICO dono do estado de tela de uma aba: quem entra fica visível (ou escondida), recebe a
+// emulação de tamanho e o teclado; quem sai é escondida. Espalhar isso por `criarAba` e
+// `fecharAba` deixava dois views visíveis empilhados e aba sem viewport.
+//
+// O estado é HERDADO da aba que sai: com o navegador escondido (usuário noutra sessão), um
+// `hangar-preview tab 2` não pode pintar o view por cima do chat — e, pior, tirar a emulação
+// que dá viewport e print à aba que o agente acabou de ativar.
+function trocarAba(chave, id, { oculto, bounds } = {}) {
+  const reg = registros.get(chave);
+  if (!reg || !reg.abas.has(id)) return { ok: false };
+  const anterior = reg.ativa != null && reg.ativa !== id ? reg.abas.get(reg.ativa) : null;
+  const nova = reg.abas.get(id);
+  const win = janelaDoView(nova.view);
+  // Sem pedido explícito, vale o que a anterior estava mostrando; sem anterior (primeira aba),
+  // visível.
+  const escondida = oculto ?? (anterior ? !anterior.view.getVisible() : false);
+  const caixa = bounds ? normalizaBounds(bounds) : anterior?.view.getBounds?.();
+  if (anterior) {
+    // Escondida SEM `devolverFoco`: o teclado tem que ficar com a aba que entrou, não voltar
+    // para o front.
+    anterior.view.setVisible(false);
+    avisarOculto(chave, anterior.view, true);
+  }
+  if (reg.ativa !== id) reg.anterior = reg.ativa;
+  reg.ativa = id;
+  if (caixa) nova.view.setBounds(caixa);
+  if (escondida) {
+    nova.view.setVisible(false);
+  } else {
+    if (win) anexarNaJanela(win, nova.view);
+    nova.view.setVisible(true);
+    // Clicar numa aba na faixa acontece no FRONT, que fica com o teclado; `setVisible` não foca.
+    try { nova.view.webContents.focus(); } catch { /* view morrendo */ }
+  }
+  avisarOculto(chave, nova.view, escondida);
+  gravarSidecarNav(chave);
+  if (win) publicarEstado(win, chave);
+  return { ok: true };
+}
+
+function janelaDoView(view) {
+  if (!view) return null;
+  for (const [win, porChave] of navegadores) {
+    for (const abas of porChave.values()) if ([...abas.values()].includes(view)) return win;
+  }
+  return null;
+}
+
+function fecharAba(win, chave, id) {
+  const reg = registros.get(chave);
+  const alvo = id ?? reg?.ativa;
+  if (!reg || alvo == null || !reg.abas.has(alvo)) return { ok: false, fechouNavegador: false, ativa: reg?.ativa ?? null };
+  // Última aba: o navegador inteiro fecha — mesmo efeito do × da barra (view, controlador,
+  // sidecar e aviso ao painel).
+  if (reg.abas.size === 1) {
+    fecharNavegador(win, chave);
+    if (win && !win.isDestroyed()) win.webContents.send('hangar:nav-fechado', { chave });
+    return { ok: true, fechouNavegador: true, ativa: null };
+  }
+  const view = reg.abas.get(alvo).view;
+  // `soltarControlador` zera a ativa quando a fechada era ela: quem era a ativa se decide ANTES.
+  const eraAtiva = reg.ativa === alvo;
+  // A sucessora é escolhida antes de soltar (que apaga a entrada) e no estado de tela da que sai
+  // — é `trocarAba` quem exibe.
+  const escondida = !view.getVisible();
+  const caixa = view.getBounds?.();
+  const proxima = proximaAtiva([...reg.abas.keys()], alvo, reg.anterior ?? null);
+  if (win) abasDaJanela(win, chave).delete(alvo);
+  soltarControlador(chave, view);
+  try { if (win && !win.isDestroyed()) win.contentView.removeChildView(view); } catch (err) { console.error('[nav] fechar aba: removeChildView:', err && err.message); }
+  try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (err) { console.error('[nav] fechar aba: close:', err && err.message); }
+  if (eraAtiva && proxima != null) trocarAba(chave, proxima, { oculto: escondida, bounds: caixa });
+  gravarSidecarNav(chave);
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('hangar:nav-aba-fechada', { chave, id: alvo, ativa: reg.ativa });
+    publicarEstado(win, chave);
+  }
+  return { ok: true, fechouNavegador: false, ativa: reg.ativa };
 }
 
 // A ATIVA da janela do remetente. Com a ativa global ausente daquela janela (duas janelas, mesma
@@ -617,7 +870,6 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
   let id = reg.ativa != null && abas.has(reg.ativa) ? reg.ativa : ([...abas.keys()][0] ?? null);
   let view = id != null ? abas.get(id) : undefined;
   if (oculto && view && view.webContents && !view.webContents.isDestroyed() && view.getVisible?.()) return { ok: true, oculto: true };
-  const novo = !view || !view.webContents || view.webContents.isDestroyed();
   // O webContents pode ter morrido por fora (fechado via CDP Target.closeTarget, crash do
   // renderer): sem esta checagem o view volta invisível e nunca mais pinta — a área fica preta.
   // Medido: um Target.closeTarget externo pode deixar `view.webContents` undefined (não só
@@ -631,116 +883,47 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
     id = null;
   }
   if (!view) {
-    // View novo SÓ nasce com URL; o reexibir (troca de sessão, reload do front) chama open sem
+    // Aba nova SÓ nasce com URL; o reexibir (troca de sessão, reload do front) chama open sem
     // url e recebe ok:false se o shell já não tiver o view — aí o front repete com a url salva.
-    const destino = urlNavegavel(url);
-    if (!destino) return { ok: false };
-    // persist: cookies/localStorage no disco. COMPARTILHADA entre sessões de propósito — o uso é
-    // cada sessão com suas URLs, não isolamento de conta; se um dia precisar, vira por-sessão.
-    view = new WebContentsView({
-      webPreferences: { partition: 'persist:nav', backgroundThrottling: false },
-    });
-    view.webContents.setUserAgent(uaDeChrome(view.webContents.getUserAgent()));
-    // target=_blank vai pro navegador do sistema, mesmo padrão do cockpit.
-    view.webContents.setWindowOpenHandler(({ url: alvo }) => {
-      if (/^https?:/i.test(alvo)) shell.openExternal(alvo);
-      return { action: 'deny' };
-    });
-    const wc = view.webContents;
-    // Escondido, o view carrega SOLTO e só entra na janela com a página pronta: é o primeiro load
-    // de um view anexado que leva o teclado (anexar depois não leva). Solto ele não tem quadro,
-    // por isso a anexação vem antes da emulação que o `avisarOculto` liga no mesmo evento.
-    if (oculto) {
-      // Load que falha também anexa: solto pra sempre, o view não teria print nem viewport e o
-      // agente que o dirige não receberia erro nenhum — só um `shot` que nunca responde.
-      const anexar = () => { wc.removeListener('did-finish-load', anexar); wc.removeListener('did-fail-load', falhou); anexarNaJanela(win, view); };
-      const falhou = (_e, codigo, descricao) => { console.error(`[nav] ${chave}: load escondido falhou (${codigo} ${descricao})`); anexar(); };
-      wc.once('did-finish-load', anexar);
-      wc.once('did-fail-load', falhou);
-    } else {
-      anexarNaJanela(win, view);
-    }
-    id = reg.proximoId++;
-    abas.set(id, view);
-    // Estado de navegação pro painel (barra de carregamento, ✕/↻, voltar/avançar, endereço que
-    // acompanha os cliques). O view não tem DOM no cockpit — sem isto a página carrega em silêncio.
-    const publicar = () => {
-      if (win.isDestroyed() || wc.isDestroyed()) return;
-      win.webContents.send('hangar:nav-estado', {
-        chave, url: wc.getURL(), carregando: wc.isLoading(),
-        voltar: wc.navigationHistory.canGoBack(), avancar: wc.navigationHistory.canGoForward(),
-      });
-    };
-    for (const ev of ['did-start-loading', 'did-stop-loading', 'did-navigate', 'did-navigate-in-page']) wc.on(ev, publicar);
-    wc.on('did-finish-load', () => devolverFoco(win, view));
-    // Preenchimento de login com as senhas salvas do Chrome do usuário, ao terminar de carregar
-    // uma página cujo domínio tem senha salva. Uma vez por URL (o `dom-ready` repete em SPA).
-    let ultimoPreenchido = '';
-    wc.on('dom-ready', () => {
-      if (win.isDestroyed() || wc.isDestroyed()) return;
-      let host = '';
-      try { host = new URL(wc.getURL()).hostname; } catch { return; }
-      const url = wc.getURL();
-      if (!host || url === ultimoPreenchido) return;
-      ultimoPreenchido = url;
-      preencherLogin(wc, host);
-    });
-    // O depurador fica ANEXADO enquanto o view viver: é o que dá tema, console e rede contínuos.
-    // O `targetIdDe` que já existia anexa e solta na hora, e por isso não servia pra guardar estado.
-    // `isAttached` antes: reabrir o painel da mesma sessão passa por aqui de novo, e o Electron
-    // lança quando já há depurador anexado — sem a guarda, a sessão ficava sem controlador.
-    try {
-      const dbg = view.webContents.debugger;
-      if (!dbg.isAttached()) dbg.attach('1.3');
-      // Network e Accessibility ficam de fora de propósito: o controlador os liga no primeiro
-      // verbo que precisa (são os dois que custam CPU o tempo todo, mesmo sem ninguém dirigir).
-      for (const dominio of ['Runtime.enable', 'Log.enable', 'DOM.enable']) {
-        dbg.sendCommand(dominio).catch(() => {});
-      }
-      reg.abas.set(id, { ctl: criarControlador({
-        dbg,
-        capturarPagina: () => view.webContents.capturePage(),
-        aoNavegar: (cb) => view.webContents.on('did-navigate', cb),
-      }), view, urlPedida: destino, targetId: null });
-      reg.ativa = id;
-      // Alvo morrendo por fora (Target.closeTarget via CDP, crash do renderer) não passa pelo ×
-      // do painel nem pelo close da janela — sem isto o controlador ficava órfão no Map até o
-      // usuário reabrir o painel, e um comando nesse meio-tempo virava 500 de CDP em vez do 404
-      // de sessão sem navegador. `once`: o próprio evento já indica que não há mais o que soltar.
-      // A checagem de identidade é o que impede um `destroyed` ATRASADO (fechar o painel dispara
-      // `view.webContents.close()`, que é assíncrono, e o usuário pode reabrir a MESMA chave antes
-      // dele terminar) de apagar o controlador do view NOVO — quem morre só limpa o que é dele.
-      view.webContents.once('destroyed', () => {
-        if (abas.get(id) === view) soltarControlador(chave, view);
-      });
-    } catch (err) {
-      // Falha aqui custa os verbos novos, não o navegador: o painel abre e o usuário navega na mão.
-      console.error('[nav] depurador nao anexou:', err && err.message);
-    }
-    view.webContents.loadURL(destino).catch((err) => console.error('[nav] loadURL falhou:', err?.message || err));
-    gravarSidecarNav(chave, destino, view);   // async, não bloqueia o IPC
+    // Escondida, ela ainda não tem retângulo nenhum: quem manda bounds é o painel montado.
+    const r = criarAba(win, chave, { url, oculto: !!oculto, bounds: oculto ? null : bounds });
+    if (!r.ok) return { ok: false };
+    view = r.view;
   } else {
     // Reexibir NUNCA recarrega: a URL atual do view pode ter mudado por navegação interna (o
     // agente clicou em links) e o front só manda `url` quando o usuário digita uma nova.
     const destino = url ? urlNavegavel(url) : null;
     if (destino && view.webContents.getURL() !== destino) view.webContents.loadURL(destino);
+    // Exibir, esconder, emular tamanho e posicionar é tudo do `trocarAba`: um dono só pro estado
+    // de tela. Escondido, a página fica em 0x0 e sem quadro — quem devolve viewport de desktop e
+    // print é a emulação de tamanho, e ela SÓ entra com a página carregada (antes disso, SIGSEGV).
+    trocarAba(chave, id, { oculto: !!oculto, bounds: oculto ? undefined : bounds });
   }
   if (oculto) {
-    if (novo) view.setVisible(false);
-    // Escondido, a página fica em 0x0 e sem quadro: quem devolve viewport de desktop e print é a
-    // emulação de tamanho, e ela SÓ pode entrar com a página carregada (antes disso, SIGSEGV).
-    avisarOculto(chave, view, true);
     devolverFoco(win, view);
     // `oculto: true` na resposta é a prova de que este shell entendeu o pedido: um shell antigo
     // ignora o campo, cria o view visível com bounds zero e devolve só {ok} — o front não confirma.
     return { ok: true, oculto: true };
   }
-  anexarNaJanela(win, view);
-  view.setVisible(true);
-  view.setBounds(normalizaBounds(bounds));
-  avisarOculto(chave, view, false);
   return { ok: true };
 });
+
+// A aba nova nasce na janela da ativa e herda o estado de tela dela — quem decide isso é o
+// `trocarAba` que o `criarAba` chama, não este handler.
+ipcMain.handle('hangar:nav-tab-new', async (ev, { chave, url } = {}) => {
+  const win = BrowserWindow.fromWebContents(ev.sender);
+  if (!win || !chave) return { ok: false, motivo: 'sessao' };
+  const r = criarAba(win, chave, { url });
+  if (!r.ok) return r;
+  gravarSidecarNav(chave);
+  publicarEstado(win, chave);
+  return { ok: true, id: r.id };
+});
+
+ipcMain.handle('hangar:nav-tab-switch', async (ev, { chave, id } = {}) => trocarAba(chave, id));
+
+ipcMain.handle('hangar:nav-tab-close', async (ev, { chave, id } = {}) =>
+  fecharAba(BrowserWindow.fromWebContents(ev.sender), chave, id));
 
 ipcMain.on('hangar:nav-hide', (ev, { chave } = {}) => {
   const win = BrowserWindow.fromWebContents(ev.sender);

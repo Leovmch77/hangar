@@ -33,7 +33,7 @@ require.cache[previewCtlPath] = {
 
 function criarWebContentsFalso() {
   // `url` começa vazia como no view recém-criado; dispararLoad() simula o did-finish-load.
-  const estado = { url: '', titulo: '', ouvintes: {}, ouvintesLoad: [] };
+  const estado = { url: '', titulo: '', morto: false, focos: 0, ouvintes: {}, ouvintesLoad: [] };
   const dbg = {
     attached: false,
     isAttached: () => dbg.attached,
@@ -46,16 +46,20 @@ function criarWebContentsFalso() {
     setUserAgent: () => {}, getUserAgent: () => 'UA',
     setWindowOpenHandler: () => {}, loadURL: async () => {}, getURL: () => estado.url,
     capturePage: async () => ({ isEmpty: () => false, toPNG: () => Buffer.alloc(0) }),
-    close: () => {}, isDestroyed: () => false,
+    close: () => {}, isDestroyed: () => estado.morto === true,
     getTitle: () => estado.titulo,
     isLoading: () => false,
+    focus: () => { estado.focos++; },
     navigationHistory: { canGoBack: () => false, canGoForward: () => false },
     setTitulo: (t) => { estado.titulo = t; },
     on: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
-    once: (ev, cb) => { if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
+    once: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
     removeListener: () => {},
     emitir: (ev, ...a) => (estado.ouvintes[ev] || []).forEach((cb) => cb(...a)),
     dispararLoad: () => { estado.url = 'https://z.test/'; estado.ouvintesLoad.splice(0).forEach((cb) => cb()); },
+    // Alvo derrubado por fora (Target.closeTarget via CDP, crash do renderer): ninguém chamou
+    // fechar aba nenhuma, mas o `destroyed` dispara igual.
+    matar: () => { estado.morto = true; (estado.ouvintes.destroyed || []).forEach((cb) => cb()); },
     debugger: dbg,
   };
 }
@@ -65,6 +69,7 @@ class WebContentsViewFalso {
   setVisible(v) { this.visivel = v; }
   getVisible() { return this.visivel === true; }
   setBounds(b) { this.bounds = b; }
+  getBounds() { return this.bounds; }
 }
 
 const winMap = new Map();
@@ -229,4 +234,117 @@ test('o controlador so e avisado do view escondido DEPOIS de a pagina carregar (
   // Trocar de sessão esconde o painel: o agente que continuar dirigindo precisa da emulação de volta.
   handlers.get('hangar:nav-hide')(a.ev, { chave: 'srv::viewport' });
   assert.deepEqual(ctl.ocultos, [true, false, true]);
+});
+
+test('criar, trocar e fechar aba: ids nao renumeram e a ultima fecha o navegador', async () => {
+  const a = novaJanela();
+  const chave = 'srv::abas';
+  const abrir = handlers.get('hangar:nav-open');
+  const nova = handlers.get('hangar:nav-tab-new');
+  const trocar = handlers.get('hangar:nav-tab-switch');
+  const fechar = handlers.get('hangar:nav-tab-close');
+  assert.ok(nova && trocar && fechar, 'handlers de aba registrados');
+
+  await abrir(a.ev, { chave, url: 'https://um.test', bounds: { x: 0, y: 0, width: 10, height: 10 } });
+  const r2 = await nova(a.ev, { chave, url: 'https://dois.test' });
+  const r3 = await nova(a.ev, { chave, url: 'https://tres.test' });
+  assert.deepEqual([r2.ok, r2.id, r3.id], [true, 2, 3], 'ids sequenciais a partir da aba 1');
+
+  // Fechar a 2 nao renumera a 3.
+  const f2 = await fechar(a.ev, { chave, id: 2 });
+  assert.equal(f2.fechouNavegador, false);
+  const depois = await nova(a.ev, { chave, url: 'https://quatro.test' });
+  assert.equal(depois.id, 4, 'id fechado nunca volta');
+
+  assert.deepEqual((await trocar(a.ev, { chave, id: 1 })), { ok: true });
+  // Sobram 1, 3 e 4: as duas primeiras fecham sem derrubar o navegador.
+  assert.equal((await fechar(a.ev, { chave, id: 3 })).fechouNavegador, false);
+  assert.equal((await fechar(a.ev, { chave, id: 4 })).fechouNavegador, false);
+  assert.equal((await fechar(a.ev, { chave, id: 1 })).fechouNavegador, true, 'a ultima aba fecha o navegador');
+});
+
+test('teto de 8 abas', async () => {
+  const a = novaJanela();
+  const chave = 'srv::teto';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://x.test', bounds: {} });
+  const nova = handlers.get('hangar:nav-tab-new');
+  for (let i = 0; i < 7; i++) assert.equal((await nova(a.ev, { chave, url: 'https://y.test' })).ok, true);
+  assert.deepEqual(await nova(a.ev, { chave, url: 'https://z.test' }), { ok: false, motivo: 'teto' });
+});
+
+test('trocar de aba nao devolve o teclado ao front', async () => {
+  const a = novaJanela();
+  const chave = 'srv::foco';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: { x: 0, y: 0, width: 10, height: 10 } });
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  const antes = a.win.webContents.focos;
+  await handlers.get('hangar:nav-tab-switch')(a.ev, { chave, id: 1 });
+  assert.equal(a.win.webContents.focos, antes, 'uma aba da janela continua visivel: o teclado fica nela');
+});
+
+test('sidecar reflete ativa e abas, e mantem url/targetId da ativa no topo', async () => {
+  const a = novaJanela();
+  const chave = 'srv::sidecar';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {} });
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  await new Promise((r) => setImmediate(r));   // gravarSidecarNav é fire-and-forget
+  const arq = path.join(process.env.HOME, '.hangar', 'nav', `${require('./navegador.cjs').nomeSidecar(chave)}.json`);
+  const s = JSON.parse(fs.readFileSync(arq, 'utf8'));
+  assert.equal(s.ativa, 2);
+  assert.equal(s.url, 'https://dois.test/', 'topo espelha a ativa — o backend le so isso');
+  assert.deepEqual(s.abas.map((x) => x.id), [1, 2]);
+  assert.ok('targetId' in s, 'campo do topo preservado');
+});
+
+test('fechar o navegador com 3 abas solta os 3 controladores', async () => {
+  const a = novaJanela();
+  const chave = 'srv::queda';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {} });
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://tres.test' });
+  const tres = criadas.slice(-3);
+  handlers.get('hangar:nav-close')(a.ev, { chave });
+  assert.deepEqual(tres.map((c) => c.fechado), [true, true, true], 'nenhum controlador orfao');
+});
+
+test('aba nova herda o estado de exibicao da ativa', async () => {
+  const a = novaJanela();
+  const chave = 'srv::herda';
+  // Sessão fora da tela: a aba 1 nasce escondida e com a emulação de tamanho ligada.
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {}, oculto: true });
+  viewsFalsos.at(-1).webContents.dispararLoad();
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  const nova = viewsFalsos.at(-1);
+  nova.webContents.dispararLoad();
+  assert.equal(nova.getVisible(), false, 'aba aberta pelo agente nao pinta por cima do chat');
+  assert.deepEqual(criadas.at(-1).ocultos, [true], 'escondida recebe a emulacao: sem ela, shot --aba le 0x0');
+});
+
+test('trocar de aba mantem visivel o que estava visivel, e esconde a anterior', async () => {
+  const a = novaJanela();
+  const chave = 'srv::troca';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: { x: 0, y: 0, width: 10, height: 10 } });
+  const um = viewsFalsos.at(-1);
+  um.webContents.dispararLoad();
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  const dois = viewsFalsos.at(-1);
+  dois.webContents.dispararLoad();
+  assert.deepEqual([um.getVisible(), dois.getVisible()], [false, true], 'a nova entra no lugar da anterior');
+
+  await handlers.get('hangar:nav-tab-switch')(a.ev, { chave, id: 1 });
+  assert.deepEqual([um.getVisible(), dois.getVisible()], [true, false]);
+  assert.deepEqual(dois.bounds, um.bounds, 'a que entra assume o retangulo da que saiu');
+});
+
+test('aba que morre por fora nao deixa a sessao sem ativa', async () => {
+  const a = novaJanela();
+  const chave = 'srv::morreu';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: { x: 0, y: 0, width: 10, height: 10 } });
+  const um = viewsFalsos.at(-1);
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  const dois = viewsFalsos.at(-1);
+  // Target.closeTarget por CDP na aba ATIVA: ninguem chamou fecharAba, mas a sessao nao pode
+  // ficar sem ativa — o CLI passaria a responder "nao tem navegador aberto" com aba viva.
+  dois.webContents.matar();
+  assert.equal(um.getVisible(), true, 'a que sobrou volta pra tela');
 });

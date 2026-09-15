@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld('hangar', {
       ipcRenderer.on('hangar:nav-estado', h);
       return () => ipcRenderer.removeListener('hangar:nav-estado', h);
     },
+    // Abas: o navegador de uma sessão tem até 8. A ATIVA é uma só, compartilhada com o CLI.
+    tabNew: (chave, url) => ipcRenderer.invoke('hangar:nav-tab-new', { chave, url }),
+    tabSwitch: (chave, id) => ipcRenderer.invoke('hangar:nav-tab-switch', { chave, id }),
+    tabClose: (chave, id) => ipcRenderer.invoke('hangar:nav-tab-close', { chave, id }),
+    // UMA aba fechou (pelo CLI): a faixa atualiza, o painel NÃO desmonta — quem desmonta é o
+    // `onFechado`, que continua significando o navegador inteiro.
+    onAbaFechada: (cb) => {
+      const h = (_e, p) => cb(p);
+      ipcRenderer.on('hangar:nav-aba-fechada', h);
+      return () => ipcRenderer.removeListener('hangar:nav-aba-fechada', h);
+    },
     close: (chave) => ipcRenderer.send('hangar:nav-close', { chave }),
     // O navegador foi fechado por fora do painel (`hangar-preview close`): o painel tem que
     // desmontar sozinho, senão fica mostrando um view que já morreu.
