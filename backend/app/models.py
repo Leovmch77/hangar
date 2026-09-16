@@ -430,6 +430,38 @@ class Applied(BaseModel):
     period: str = "all"
 
 
+class UsoBucket(BaseModel):
+    """Um corte do relatório de uso (skill, tool, comando Bash, servidor MCP, tipo de agente,
+    categoria de contexto injetado, plugin). Tokens e custo são REAIS só onde há `usage` por
+    trás (skill: as respostas da execução; agente: o transcript filho); `ctx_chars` é o que
+    entrou no contexto e `ctx_tokens_est` a estimativa dele — nunca vira dólar."""
+    key: str
+    label: Optional[str] = None
+    plugin: str = ""
+    sessions: int = 0
+    chamadas: int = 0
+    ctx_chars: int = 0
+    ctx_tokens_est: int = 0
+    input: int = 0
+    output: int = 0
+    cache_write: int = 0
+    cache_read: int = 0
+    cost: float = 0.0
+
+
+class UsoReport(BaseModel):
+    totals: UsoBucket = UsoBucket(key="totals")
+    by_skill: list[UsoBucket] = []
+    by_tool: list[UsoBucket] = []
+    by_bash: list[UsoBucket] = []
+    by_mcp: list[UsoBucket] = []
+    by_agente: list[UsoBucket] = []
+    by_contexto: list[UsoBucket] = []
+    by_plugin: list[UsoBucket] = []
+    applied: Optional[Applied] = None
+    usd_brl: Optional[float] = None
+
+
 class CostReport(BaseModel):
     totals: DimBucket = DimBucket(key="totals")
     by_day: list[DimBucket] = []

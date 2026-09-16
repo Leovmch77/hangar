@@ -27,14 +27,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import costs_cache, pricing
+from app import costs_cache, pricing, uso_claude
+from app.uso_claude import UsoLinha
 
 # `LOCAL` é cópia proposital: `costs_sources` vai importar ESTE módulo, então importar de lá
 # fecharia ciclo. Não "arrume" unificando — quebra o import.
 LOCAL = timezone(timedelta(hours=-3))
 
 # Suba isto ao mudar o formato do resumo, senão o cache velho é servido pra sempre.
-CACHE_VERSAO = 3
+CACHE_VERSAO = 5
 
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
@@ -77,38 +78,58 @@ def _int(v) -> int:
         return 0
 
 
+@dataclass(frozen=True)
+class Leitura:
+    """As duas leituras de um transcript, feitas numa passada só: tokens (custo) e uso
+    (tools/skills/contexto). Uma entrada de cache por arquivo guarda as duas."""
+    usos: list[UsoSessao]
+    uso: list[UsoLinha]
+
+
 def ler_transcript(path: Path) -> list[UsoSessao]:
-    """Uso por resposta, separado por dia/modelo; blocos da mesma resposta não somam novamente."""
+    return ler_completo(path).usos
+
+
+def _quando(ts) -> datetime | None:
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(LOCAL)
+    except ValueError:
+        return None
+
+
+def ler_completo(path: Path) -> Leitura:
+    """Uso por resposta, separado por dia/modelo; blocos da mesma resposta não somam novamente.
+    Na mesma passada, o acumulador de uso vê toda linha de assistant/user/attachment."""
     respostas: dict[tuple, UsoSessao] = {}
+    acumulador = uso_claude.Acumulador()
     try:
         f = path.open(encoding="utf-8", errors="replace")
     except OSError:
-        return []
+        return Leitura([], [])
     with f:
         for numero, linha in enumerate(f):
-            # Pré-filtro barato: 5,2 GB de transcript e só a minoria das linhas tem uso.
-            # Sem isto o json.loads roda em tudo e a varredura triplica.
-            if '"usage"' not in linha:
+            # Pré-filtro barato: a maior parte das linhas (progresso, fila, títulos) não tem
+            # nem uso nem tool nem attachment; sem isto o json.loads roda em tudo.
+            if '"usage"' not in linha and '"user"' not in linha and '"attachment"' not in linha:
                 continue
             try:
                 d = json.loads(linha)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(d, dict) or d.get("type") != "assistant":
+            if not isinstance(d, dict):
                 continue
+            quando = _quando(d.get("timestamp"))
             msg = d.get("message")
-            u = msg.get("usage") if isinstance(msg, dict) else None
-            if not isinstance(u, dict):
-                continue
-            m = msg.get("model")
+            m = msg.get("model") if isinstance(msg, dict) else None
             if isinstance(m, str) and m.strip() in pricing.IGNORADOS:
                 continue
-            ts = d.get("timestamp")
-            if not isinstance(ts, str):
+            acumulador.linha(d, quando.strftime("%Y-%m-%d") if quando else "")
+            if d.get("type") != "assistant":
                 continue
-            try:
-                quando = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(LOCAL)
-            except ValueError:
+            u = msg.get("usage") if isinstance(msg, dict) else None
+            if not isinstance(u, dict) or quando is None:
                 continue
             # Sem identidade não há prova de repetição: preserva as linhas antigas.
             key = (d.get("requestId"), msg["id"]) if msg.get("id") else (numero,)
@@ -133,11 +154,27 @@ def ler_transcript(path: Path) -> list[UsoSessao]:
             cache_write=antes.cache_write + uso.cache_write,
             cache_read=antes.cache_read + uso.cache_read,
             cache_write_1h=antes.cache_write_1h + uso.cache_write_1h)
-    return sorted(grupos.values(), key=lambda u: (u.ts, u.model, u.cwd))
+    return Leitura(sorted(grupos.values(), key=lambda u: (u.ts, u.model, u.cwd)),
+                   acumulador.resultado())
 
 
 def invalidar_cache() -> None:
     costs_cache.invalidar()
+
+
+def _serializar_leitura(le: Leitura) -> dict:
+    return {"usos": [_serializar(u) for u in le.usos], "uso": [l.para_dict() for l in le.uso]}
+
+
+def _desserializar_leitura(d: dict) -> Leitura | None:
+    try:
+        usos = [_desserializar(x) for x in d["usos"]]
+        uso = [UsoLinha.de_dict(x) for x in d["uso"]]
+    except (KeyError, TypeError):
+        return None
+    if any(x is None for x in usos) or any(x is None for x in uso):
+        return None
+    return Leitura(usos, uso)
 
 
 def _serializar(u: UsoSessao) -> dict:
@@ -160,19 +197,25 @@ def _desserializar(d: dict) -> UsoSessao | None:
         return None
 
 
-def varrer(raiz: Path) -> list[UsoSessao]:
-    """Todas as sessões de UMA raiz de projetos. Nunca vai à rede."""
+def _varrer(raiz: Path) -> list[tuple[str, Leitura]]:
     if not raiz.is_dir():
         return []
-    out: list[UsoSessao] = []
-    # `ler_transcript` resolvido na chamada, não capturado: o teste prova o cache trocando o
+    # `ler_completo` resolvido na chamada, não capturado: o teste prova o cache trocando o
     # nome no módulo e contando chamadas.
     pares = costs_cache.varrer_cacheado(
-        "transcripts", raiz, raiz.rglob("*.jsonl"), lambda p: ler_transcript(p),
-        _serializar, _desserializar, CACHE_VERSAO)
-    for p, usos in pares:
-        for uso in usos:
-            # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
-            # (medido: 168 de 446 ids repetidos entre arquivos).
-            out.append(replace(uso, session_id=str(p.relative_to(raiz).with_suffix(""))))
-    return out
+        "transcripts", raiz, raiz.rglob("*.jsonl"), lambda p: [ler_completo(p)],
+        _serializar_leitura, _desserializar_leitura, CACHE_VERSAO)
+    # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
+    # (medido: 168 de 446 ids repetidos entre arquivos).
+    return [(str(p.relative_to(raiz).with_suffix("")), le) for p, leituras in pares
+            for le in leituras]
+
+
+def varrer(raiz: Path) -> list[UsoSessao]:
+    """Uso de tokens de todas as sessões de UMA raiz de projetos. Nunca vai à rede."""
+    return [replace(u, session_id=sid) for sid, le in _varrer(raiz) for u in le.usos]
+
+
+def varrer_uso(raiz: Path) -> list[UsoLinha]:
+    """Uso de tools/skills/contexto da mesma raiz — mesma passada, mesmo cache."""
+    return [replace(l, session_id=sid) for sid, le in _varrer(raiz) for l in le.uso]

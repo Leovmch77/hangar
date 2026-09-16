@@ -32,13 +32,13 @@ def _contador(monkeypatch):
     """Devolve (dict com a contagem). Contar chamadas ao parser é a ÚNICA forma de provar
     que o cache existe — a lição da fase 1: comparar só o resultado passa sem cache nenhum."""
     n = {"v": 0}
-    real = ct.ler_transcript
+    real = ct.ler_completo
 
     def contado(p):
         n["v"] += 1
         return real(p)
 
-    monkeypatch.setattr(ct, "ler_transcript", contado)
+    monkeypatch.setattr(ct, "ler_completo", contado)
     return n
 
 

@@ -49,8 +49,9 @@ from app.pi_inbox import INBOX
 from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
-from app.models import (SessionInfo, ChatEvent, CostReport, RunnersResponse, RunBody, RunInfo,
-                        ProjectStatus, session_key)
+from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
+                        RunInfo, ProjectStatus, session_key)
+from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
                           PlanWriteError)
@@ -1811,9 +1812,24 @@ def costs_endpoint(period: str = "all"):
     try:
         return costs_report(period=period)
     except costs_sources.Aquecendo as e:
-        # Primeira leitura do histórico desta subida ainda rodando: a tela mostra o progresso e
-        # pergunta de novo, em vez de esperar 20s e dar a máquina como "não respondeu".
-        return JSONResponse({"aquecendo": True, "lidos": e.lidos, "total": e.total}, status_code=202)
+        return _aquecendo(e)
+
+
+def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
+    # Primeira leitura do histórico desta subida ainda rodando: a tela mostra o progresso e
+    # pergunta de novo, em vez de esperar 20s e dar a máquina como "não respondeu".
+    return JSONResponse({"aquecendo": True, "lidos": e.lidos, "total": e.total}, status_code=202)
+
+
+@app.get("/api/uso", dependencies=[Depends(require_auth)], response_model=UsoReport)
+def uso_endpoint(period: str = "all"):
+    """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs."""
+    if period not in _COST_PERIODOS and period != "all":
+        period = "all"
+    try:
+        return uso_report.report(period=period)
+    except costs_sources.Aquecendo as e:
+        return _aquecendo(e)
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app import codex_contas, costs_cache, costs_claude_transcript, pricing
+from app.uso_claude import UsoLinha
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
 from app.config import list_config_dirs
@@ -528,6 +529,30 @@ def coletar_ou_aquecendo(esperar: float = 3.0) -> list[UsageRow]:
         aquecer_em_background()
         raise Aquecendo(*costs_cache.progresso_total())
     return coletar(esperar)
+
+
+def coletar_uso(esperar: float | None = 3.0) -> tuple[list[UsoLinha], list[UsageRow]]:
+    """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas.
+
+    As de tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe
+    nas linhas de tokens. Mesma trava e mesma regra de aquecimento do `coletar()`: o cache é o
+    mesmo arquivo — a primeira coleta de custos já deixou o uso pronto.
+    """
+    if not _aquecido.is_set():
+        aquecer_em_background()
+        raise Aquecendo(*costs_cache.progresso_total())
+    if not _cache_lock.acquire(timeout=-1 if esperar is None else esperar):
+        raise Aquecendo(*costs_cache.progresso_total())
+    try:
+        uso: list[UsoLinha] = []
+        tokens: list[UsageRow] = []
+        for caminho, account_id in _config_dirs():
+            raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
+            uso.extend(costs_claude_transcript.varrer_uso(raiz))
+            tokens.extend(linhas_claude(Path(caminho), account_id))
+        return uso, tokens
+    finally:
+        _cache_lock.release()
 
 
 def account_info(config_dir: Path, fallback_label: str) -> tuple[str, str | None, str]:
