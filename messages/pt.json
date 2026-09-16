@@ -1795,6 +1795,7 @@
   "loop_estado_parado": "parado",
   "loop_estado_esgotou": "esgotou iterações",
   "loop_servidor_nao_respondeu": "servidor não respondeu",
+  "esfriamento_servidor_esperando": "{servidor} não respondeu; nova tentativa em {segundos}s",
   "loop_objetivo": "Objetivo",
   "loop_tentar_de_novo": "tentar de novo",
   "loop_desfazer": "desfazer",

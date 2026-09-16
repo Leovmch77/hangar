@@ -228,9 +228,9 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server): P
   // Servidor esfriando: recusa aqui, sem abrir socket. Só vale pra chamada a OUTRO servidor — o
   // local não tem rede no meio, e barrar a própria máquina deixaria o app mudo por engano.
   if (server && estaEsfriando(server.id)) {
-    const espera = Math.ceil(esperaDe(server.id) / 1000);
-    throw Object.assign(new Error(`${server.label} não respondeu; nova tentativa em ${espera}s`),
-                        { esfriando: true });
+    throw new Error(m.esfriamento_servidor_esperando({
+      servidor: server.label, segundos: Math.ceil(esperaDe(server.id) / 1000),
+    }, { locale: localeAtual() }));
   }
   let res: Response;
   try {

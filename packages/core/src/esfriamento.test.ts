@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  esperaDe, estaEsfriando, registrarFalha, registrarSucesso, retentarAgora,
+  esperaDe, esquecerServidor, estaEsfriando, registrarFalha, registrarSucesso, retentarAgora,
   _limparEsfriamentoParaTestes,
 } from './esfriamento';
 
@@ -42,15 +42,30 @@ describe('esfriamento por servidor', () => {
     expect(estaEsfriando('pc', t)).toBe(false);   // recomeça do zero, não da terceira
   });
 
-  it('buscar agora libera sem perdoar o histórico', () => {
+  it('buscar agora não recomeça a escala nem sobe de degrau', () => {
     const t = 0;
     registrarFalha('pc', t); registrarFalha('pc', t); registrarFalha('pc', t);
+    expect(esperaDe('pc', t)).toBe(60_000);
+
     retentarAgora('pc');
     expect(estaEsfriando('pc', t)).toBe(false);
-    // Continuou morta: a próxima espera é a SEGUINTE da escala, senão tocar no botão repetido
-    // prendia todo mundo no 60s pra sempre.
     registrarFalha('pc', t);
+    expect(esperaDe('pc', t)).toBe(60_000);   // continuou morta: a MESMA espera, não a seguinte
+
+    retentarAgora('pc'); registrarFalha('pc', t);
+    retentarAgora('pc'); registrarFalha('pc', t);
+    expect(esperaDe('pc', t)).toBe(60_000);   // tocar três vezes não vira castigo de 15 min
+
+    registrarFalha('pc', t);                  // falha que NÃO veio de toque: aí sim sobe
     expect(esperaDe('pc', t)).toBe(120_000);
+  });
+
+  it('servidor que sai da lista some do mapa', () => {
+    const t = 0;
+    registrarFalha('pc', t); registrarFalha('pc', t); registrarFalha('pc', t);
+    expect(estaEsfriando('pc', t)).toBe(true);
+    esquecerServidor('pc');
+    expect(estaEsfriando('pc', t)).toBe(false);
   });
 
   it('cada servidor tem o seu relógio', () => {

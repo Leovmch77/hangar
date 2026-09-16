@@ -17,14 +17,14 @@ const FALHAS_PARA_ESFRIAR = 3;
 // Esperas em ms, uma por rodada; a última vale para sempre daí em diante.
 const ESPERAS = [60_000, 120_000, 300_000, 900_000];
 
-type Estado = { falhas: number; rodada: number; ate: number };
+type Estado = { falhas: number; rodada: number; ate: number; ultima: number; liberadoNaMao: boolean };
 
 const estados = new Map<string, Estado>();
 
 function estado(id: string): Estado {
   let e = estados.get(id);
   if (!e) {
-    e = { falhas: 0, rodada: 0, ate: 0 };
+    e = { falhas: 0, rodada: 0, ate: 0, ultima: 0, liberadoNaMao: false };
     estados.set(id, e);
   }
   return e;
@@ -45,7 +45,15 @@ export function registrarFalha(id: string, agora = Date.now()): void {
   const e = estado(id);
   e.falhas += 1;
   if (e.falhas < FALHAS_PARA_ESFRIAR) return;
-  e.ate = agora + ESPERAS[Math.min(e.rodada, ESPERAS.length - 1)];
+  if (e.liberadoNaMao) {
+    // A tentativa que veio de um "buscar agora" repete a espera em vez de subir: quem toca no
+    // botão três vezes numa máquina morta estaria se punindo com 15 min de espera.
+    e.liberadoNaMao = false;
+    e.ate = agora + e.ultima;
+    return;
+  }
+  e.ultima = ESPERAS[Math.min(e.rodada, ESPERAS.length - 1)];
+  e.ate = agora + e.ultima;
   e.rodada += 1;
 }
 
@@ -54,15 +62,20 @@ export function registrarSucesso(id: string): void {
   estados.delete(id);
 }
 
-/** "Buscar agora": libera a espera sem apagar o histórico — se continuar morta, a próxima espera é
- *  a mesma de antes, e não recomeça do 60s a cada toque. */
+/** "Buscar agora": libera a espera sem apagar o histórico — continuando morta, a espera volta a ser
+ *  a MESMA (não recomeça do primeiro minuto nem sobe de degrau por causa do toque). */
 export function retentarAgora(id?: string): void {
-  if (id === undefined) {
-    for (const e of estados.values()) e.ate = 0;
-    return;
+  const alvos = id === undefined ? [...estados.values()]
+                                 : [estados.get(id)].filter((e) => e !== undefined);
+  for (const e of alvos) {
+    e.ate = 0;
+    e.liberadoNaMao = true;
   }
-  const e = estados.get(id);
-  if (e) e.ate = 0;
+}
+
+/** Servidor saiu da lista: some com o estado dele. Sem isto o mapa só cresce. */
+export function esquecerServidor(id: string): void {
+  estados.delete(id);
 }
 
 export function _limparEsfriamentoParaTestes(): void {
