@@ -83,6 +83,32 @@ describe('AskQuestionStepper: saídas de texto', () => {
     unmount(comp);
   });
 
+  it('volta da revisão para a pergunta com a escolha errada ainda marcada', async () => {
+    // Escolha única avança sozinha: sem a volta na revisão, um toque errado só saía cancelando.
+    const onSubmit = vi.fn();
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(AskQuestionStepper, {
+      target: el, props: { open: true, payload, onSubmit, onClose: vi.fn(), escapes: true },
+    });
+    await tick();
+    el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click();   // "Confiar", sem querer
+    await tick();
+    expect(el.querySelector('.review-list')).not.toBeNull();
+    el.querySelector<HTMLButtonElement>('.back-link')!.click();
+    await tick();
+    const opcoes = el.querySelectorAll<HTMLButtonElement>('.option-btn');
+    expect(opcoes).toHaveLength(2);
+    expect(opcoes[1].classList.contains('selected')).toBe(true);
+    opcoes[0].click();                                                  // agora a certa
+    await tick();
+    el.querySelector<HTMLButtonElement>('.primary-btn')!.click();
+    await tick();
+    expect(onSubmit).toHaveBeenCalledWith([expect.objectContaining({ labels: ['Revisar'] })]);
+    await unmount(comp);
+    el.remove();
+  });
+
   it('refina só o Ask nativo e mantém a múltipla escolha selecionável', async () => {
     const el = document.createElement('div');
     document.body.appendChild(el);

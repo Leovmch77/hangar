@@ -108,6 +108,14 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
     return (
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         {statusHeader}
+        {/* Escolha única avança sozinha ao tocar: sem esta volta, um toque errado na ÚLTIMA
+            pergunta (ou na única) só tinha saída pelo cancelar, que descarta tudo. */}
+        <View style={styles.stepNav}>
+          <Pressable onPress={goBack} hitSlop={8} disabled={sending} style={styles.backLink} accessibilityRole="button">
+            <Text style={[styles.backTxt, { color: theme.tokens.accent.base }]}>{'‹ '}{m.comum_voltar()}</Text>
+          </Pressable>
+          <Text style={[styles.counter, { color: theme.tokens.text.muted }]}>{questions.length} / {questions.length}</Text>
+        </View>
         <Text style={[styles.sheetTitle, { color: theme.tokens.text.primary }]}>{m.askq_revisar()}</Text>
         <View style={styles.reviewList}>
           {questions.map((q, qi) => (

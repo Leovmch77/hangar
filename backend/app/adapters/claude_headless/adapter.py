@@ -1338,6 +1338,11 @@ class ClaudeHeadlessAdapter:
                 md[1].get(k) or 0 for k in ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")))
             sess.model = sess.model or m
             sess.context_window = int(dados["contextWindow"])
+            if sess.meta.get("context_window") != sess.context_window:
+                # Durável: parada (ou depois de um restart) a sessão não tem de onde tirar a
+                # janela, e sem ela o contexto some da barra — some justamente quando a pessoa
+                # precisa dele pra decidir se continua aqui ou abre outra.
+                sess.meta = hl_sessions.update(sess.name, context_window=sess.context_window) or sess.meta
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
         antes = sess.state
@@ -1523,7 +1528,8 @@ class ClaudeHeadlessAdapter:
                 yield StateEvent(session=name, state="idle", headless=True,
                                  claude_permission_mode=meta.get("permission_mode"),
                                  claude_previous_non_plan=meta.get("previous_non_plan"),
-                                 status_line=_linha_parada(meta),
+                                 status_line=await asyncio.to_thread(
+                                     _linha_parada, meta, self.transcript_path_de(meta)),
                                  problema=prob[0] if prob else None,
                                  problema_detalhe=prob[1] if prob else None)
                 while True:
@@ -1792,12 +1798,25 @@ def _rotulo_modelo(modelo: str) -> str:
     return rotulo + ("·1M" if um else "")
 
 
-def _linha_parada(meta: dict) -> str | None:
-    """Sessão sem processo: modelo e esforço escolhidos na abertura, no mesmo formato da viva."""
-    if not meta.get("model"):
-        return None
-    esforco = meta.get("effort") or _esforco_padrao(meta.get("config_dir"))
-    return f"🤖 {_rotulo_modelo(meta['model'])}" + (f" ({esforco})" if esforco else "")
+def _linha_parada(meta: dict, transcript: str | None = None) -> str | None:
+    """Sessão sem processo: o que ela escolheu na abertura e o contexto que já gastou.
+
+    O contexto vem do transcript, não da memória: a sessão parada não tem processo, e é o único
+    número que responde "continuo aqui ou abro outra".
+    """
+    partes = []
+    if meta.get("model"):
+        esforco = meta.get("effort") or _esforco_padrao(meta.get("config_dir"))
+        partes.append(f"🤖 {_rotulo_modelo(meta['model'])}" + (f" ({esforco})" if esforco else ""))
+    janela = meta.get("context_window")
+    u = _uso_da_ultima_chamada(transcript) if transcript and janela else None
+    if u:
+        usado = sum(u.get(k) or 0 for k in
+                    ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        if usado:
+            partes.append(f"💬 {_fmt_tok(usado)}/{_fmt_tok(u.get('output_tokens') or 0)} "
+                          f"{_fmt_tok(usado)}/{_fmt_tok(janela)}")
+    return " │ ".join(partes) or None
 
 
 def _esforco_padrao(config_dir: str | None) -> str | None:

@@ -85,6 +85,23 @@ test('envia identidades nativas e mantém a pergunta quando RPC falha', async ()
   expect(container.textContent).toContain('indisponível');
 });
 
+test('volta da revisão para a pergunta em vez de obrigar o cancelar', async () => {
+  // Escolha única avança sozinha ao tocar: um toque errado precisa de volta, não de recomeço.
+  await open({ provider: 'codex', request_id: 43, questions: [{
+    id: 'choice', header: 'Escolha', question: 'Qual?', multiSelect: false,
+    options: [{ label: 'Primeira', description: '' }, { label: 'Segunda', description: '' }],
+  }] });
+  await click('Segunda');
+  expect(container.textContent).toContain(m.askq_revisar());
+  await click(`‹ ${m.comum_voltar()}`);
+  expect(container.textContent).not.toContain(m.askq_revisar());
+  await click('Primeira');
+  await click(m.lista_enviar());
+  expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)).toMatchObject({
+    request_id: 43, answers: [{ question_id: 'choice', indices: [0] }],
+  });
+});
+
 test('troca a pergunta aberta pelo ID novo e protege texto secreto na entrada e revisão', async () => {
   await open();
   await click('Primeira');

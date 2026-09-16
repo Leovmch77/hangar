@@ -490,6 +490,24 @@ def test_sessao_parada_mostra_modelo_e_esforco_da_abertura(tmp_path, monkeypatch
     assert A._linha_parada({**meta, "model": None}) is None
 
 
+def test_sessao_parada_mostra_o_contexto_que_ja_gastou(tmp_path, monkeypatch):
+    """Sem isto o contexto sumia justo quando a sessão para — e é ele que diz se ainda cabe."""
+    monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)
+    jsonl = tmp_path / "conversa.jsonl"
+    jsonl.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"usage": {"input_tokens": 1200, "cache_read_input_tokens": 98_800,
+                              "output_tokens": 800}},
+    }) + "\n", encoding="utf-8")
+    meta = {"model": "claude-opus-5", "effort": "high", "config_dir": str(tmp_path),
+            "context_window": 200_000}
+
+    assert A._linha_parada(meta, str(jsonl)) == "🤖 Opus5 (high) │ 💬 100k/800 100k/200k"
+    # Sem janela conhecida não há fração a mostrar: melhor só o modelo que um número solto.
+    assert A._linha_parada({**meta, "context_window": None}, str(jsonl)) == "🤖 Opus5 (high)"
+    assert A._linha_parada(meta, str(tmp_path / "nao-existe.jsonl")) == "🤖 Opus5 (high)"
+
+
 def test_esforco_cai_no_padrao_da_conta(adapter, tmp_path, monkeypatch):
     monkeypatch.setattr(A, "_esforco_padrao", _ESFORCO_PADRAO_REAL)   # tira o stub da fixture
     monkeypatch.delenv("CLAUDE_CODE_EFFORT_LEVEL", raising=False)

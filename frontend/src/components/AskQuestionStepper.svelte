@@ -212,6 +212,13 @@
 
 {:else if questions.length > 0}
   <!-- Revisão das respostas antes de enviar -->
+  <!-- Escolha única avança sozinha ao tocar: sem esta volta, um toque errado na ÚLTIMA pergunta
+       (ou na única) só tinha saída pelo cancelar, que descarta tudo. -->
+  <div class="step-nav">
+    <button class="back-link" onclick={goBack} disabled={sending}>{'‹ '}{m.comum_voltar()}</button>
+    <span class="step-counter">{questions.length} / {questions.length}</span>
+  </div>
+
   <h2 class="sheet-title">{m.askq_revisar()}</h2>
 
   <div class="review-list">
