@@ -1256,6 +1256,23 @@ def test_buracos_calados_viram_nota_no_chat(adapter, tmp_path, monkeypatch):
     q.clear()
 
 
+def test_command_lifecycle_de_mensagem_externa_abre_turno_sem_nota(adapter, tmp_path):
+    from app import pqueue
+    sess = adapter._sessions["s1"]
+    q = pqueue.PromptQueue("s1"); q.clear()
+
+    async def fluxo():
+        await adapter._on_event(sess, {"type": "command_lifecycle", "command_uuid": "msg-1",
+                                       "state": "started"})
+        assert sess.in_progress and sess.state == "working" and sess.turno_inicio is not None
+        await adapter._on_event(sess, {"type": "command_lifecycle", "command_uuid": "msg-1",
+                                       "state": "completed"})
+
+    _run(fluxo())
+    assert q.load() == []
+    assert not (tmp_path / "logs" / "privado" / "claude-headless-desconhecidos.jsonl").exists()
+
+
 def test_evento_desconhecido_tem_teto_por_tipo(adapter, tmp_path, monkeypatch):
     from app import pqueue
     monkeypatch.setattr(A, "_TETO_DESCONHECIDOS", 2)

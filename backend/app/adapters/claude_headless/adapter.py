@@ -1076,6 +1076,13 @@ class ClaudeHeadlessAdapter:
         if t == "stream_event":
             await self._on_stream(sess, ev.get("event") or {})
             return
+        if t == "command_lifecycle":
+            if ev.get("state") == "started" and not sess.in_progress:
+                sess.in_progress = True
+                sess.state = "working"
+                sess.iniciar_turno()
+                await self._notify(sess)
+            return
         if t == "assistant":
             blocos = (ev.get("message") or {}).get("content") or []
             if ev.get("local_command_source") is not None:
