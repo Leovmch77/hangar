@@ -558,21 +558,42 @@ class ClaudeHeadlessAdapter:
             return None
         agora = time.monotonic()
         cache = getattr(sess, "_recarga_cache", None)
-        if cache and agora - cache[0] < 10:
-            return cache[1]
-        motivo = "config" if _marca_config(sess.meta.get("config_dir")) != marca else None
-        sess._recarga_cache = (agora, motivo)   # type: ignore[attr-defined]
-        return motivo
+        if cache is None or agora - cache[0] >= 10:
+            # Lê arquivo fora do laço de eventos: o `state` sai a cada evento e o núcleo não
+            # espera feature. Responde o último valor conhecido e renova em segundo plano.
+            sess._recarga_cache = (agora, cache[1] if cache else None)   # type: ignore[attr-defined]
+            self._renovar_marca(sess, marca)
+        return sess._recarga_cache[1]   # type: ignore[attr-defined]
+
+    def _renovar_marca(self, sess: _Sessao, marca: str) -> None:
+        async def _rodar() -> None:
+            try:
+                atual = await asyncio.to_thread(_marca_config, sess.meta.get("config_dir"))
+            except Exception:
+                _log.warning("claude headless: marca de config ilegível name=%s", sess.name, exc_info=True)
+                return
+            sess._recarga_cache = (time.monotonic(), "config" if atual != marca else None)   # type: ignore[attr-defined]
+        try:
+            t = asyncio.get_running_loop().create_task(_rodar())
+        except RuntimeError:
+            return   # sem loop (teste síncrono): fica o último valor
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
 
     async def recarregar(self, name: str) -> None:
         """Encerra o processo e sobe outro com `--resume`, na mesma conversa. Quem chama já
         garantiu sessão ociosa e nada em aberto (a rota); parada, só acorda."""
         sess = self._sessions.get(name)
-        if sess is not None and sess.vivo:
-            pid = ((sess.meta or {}).get("cano") or {}).get("pid")
-            await self._encerrar(sess)
-            _esquecer_cano(name, pid)
-        self.acordar(name)
+        try:
+            if sess is not None and sess.vivo:
+                pid = ((sess.meta or {}).get("cano") or {}).get("pid")
+                await self._encerrar(sess)
+                _esquecer_cano(name, pid)
+        finally:
+            # Mesmo com o encerrar falhando no meio, a sessão não pode ficar sem processo e sem
+            # ninguém subindo outro. `acordar` é assíncrono; a subida tem trava por nome (`_ligar`),
+            # então um segundo recarregar no meio só encontra a mesma subida.
+            self.acordar(name)
 
     async def _encerrar(self, sess: _Sessao) -> None:
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
@@ -817,7 +838,11 @@ class ClaudeHeadlessAdapter:
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
         cano, proc = await subir_cano_processo(argv, cwd=meta["cwd"], env=env, key=meta["key"], log=log,
                                                tarefas=self._tarefas)
-        cano["config_marca"] = _marca_config(meta.get("config_dir"))
+        try:
+            cano["config_marca"] = await asyncio.to_thread(_marca_config, meta.get("config_dir"))
+        except (OSError, ValueError):
+            # Sem marca não há motivo de recarga; a sessão sobe do mesmo jeito.
+            _log.warning("claude headless: config da conta ilegível, sem marca de recarga name=%s", sess.name, exc_info=True)
         sess.meta = hl_sessions.update(sess.name, cano=cano) or {**meta, "cano": cano}
         ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
         if ligado is None:
@@ -1906,17 +1931,18 @@ def _marca_config(config_dir: str | None) -> str:
     """Impressão do que o `claude -p` lê ao nascer e não relê depois. Só o `mcpServers` do
     `.claude.json` (o resto do arquivo o próprio Claude Code reescreve a toda hora — pela data
     do arquivo, toda sessão parecia desatualizada) e o `settings.json` inteiro (hooks, statusline,
-    permissões)."""
+    permissões). Arquivo ausente conta como vazio; ilegível (permissão, JSON quebrado, bytes
+    inválidos) levanta: "não li" não pode virar nem "mudou" nem "não mudou"."""
     raiz = Path(config_dir or (Path.home() / ".claude")).expanduser()
     partes: list[str] = []
     try:
         dados = json.loads((raiz / ".claude.json").read_text(encoding="utf-8"))
-        partes.append(json.dumps(dados.get("mcpServers") if isinstance(dados, dict) else None, sort_keys=True))
-    except (OSError, ValueError):
-        partes.append("")
+    except FileNotFoundError:
+        dados = None
+    partes.append(json.dumps(dados.get("mcpServers") if isinstance(dados, dict) else None, sort_keys=True))
     try:
         partes.append((raiz / "settings.json").read_text(encoding="utf-8"))
-    except OSError:
+    except FileNotFoundError:
         partes.append("")
     return hashlib.sha1("\0".join(partes).encode("utf-8")).hexdigest()
 

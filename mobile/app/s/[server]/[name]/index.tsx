@@ -173,8 +173,13 @@ export default function ChatScreen() {
   // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra reler MCP/hooks/
   // settings. O motivo vem do backend no `state`; sem motivo a ação fica só no "⋯".
   const recarregavel = currentSession?.provider === 'claude' && !!(stateEvent?.headless ?? currentSession?.headless);
-  const recarregarBloqueado = stateEvent?.state !== 'idle';
-  const recarregar = () => { void recarregarSessao(name).catch((e) => mostrarAviso(e)); };
+  const [recarregando, setRecarregando] = useState(false);
+  const recarregarBloqueado = stateEvent?.state !== 'idle' || recarregando;
+  const recarregar = () => {
+    if (recarregando) return;
+    setRecarregando(true);
+    void recarregarSessao(name).catch((e) => mostrarAviso(e)).finally(() => setRecarregando(false));
+  };
   const handleCancelOptions = () => {
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;

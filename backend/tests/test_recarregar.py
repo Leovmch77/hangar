@@ -32,16 +32,38 @@ def test_motivo_config_so_quando_mcp_ou_settings_mudam(conta):
     ad = ClaudeHeadlessAdapter()
     (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}, "numStartups": 1}))
     marca = A._marca_config(str(conta))
-    assert ad.motivo_recarga(_sessao(conta, marca)) is None
-    # O próprio Claude Code reescreve o resto do .claude.json a toda hora: isso não é motivo.
-    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}, "numStartups": 2}))
-    assert ad.motivo_recarga(_sessao(conta, marca)) is None
-    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "y"}}, "numStartups": 2}))
-    assert ad.motivo_recarga(_sessao(conta, marca)) == "config"
-    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}}))
-    (conta / "settings.json").write_text('{"hooks": {}}')
-    assert ad.motivo_recarga(_sessao(conta, marca)) == "config"
-    assert ad.motivo_recarga(_sessao(conta, None)) is None   # processo de antes da marca
+
+    async def motivo(sess):
+        # A leitura roda em segundo plano: a primeira chamada devolve o último valor conhecido e
+        # dispara a renovação; o valor de verdade vem na chamada seguinte.
+        ad.motivo_recarga(sess)
+        await asyncio.gather(*ad._tarefas)
+        return ad.motivo_recarga(sess)
+
+    async def fluxo():
+        assert await motivo(_sessao(conta, marca)) is None
+        # O próprio Claude Code reescreve o resto do .claude.json a toda hora: isso não é motivo.
+        (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}, "numStartups": 2}))
+        assert await motivo(_sessao(conta, marca)) is None
+        (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "y"}}, "numStartups": 2}))
+        assert await motivo(_sessao(conta, marca)) == "config"
+        (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}}))
+        (conta / "settings.json").write_text('{"hooks": {}}')
+        assert await motivo(_sessao(conta, marca)) == "config"
+        assert await motivo(_sessao(conta, None)) is None   # processo de antes da marca
+        # Config ilegível: "não li" não vira "mudou" — fica o último valor e o aviso vai pro log.
+        (conta / "settings.json").write_bytes(b"\xff\xfe{")
+        sess = _sessao(conta, marca)
+        assert await motivo(sess) is None
+    asyncio.run(fluxo())
+
+
+def test_marca_ilegivel_levanta_e_ausente_conta_como_vazio(conta):
+    (conta / ".claude.json").unlink()
+    assert A._marca_config(str(conta)) == A._marca_config(str(conta))
+    (conta / ".claude.json").write_text("{nao é json")
+    with pytest.raises(ValueError):
+        A._marca_config(str(conta))
 
 
 def test_recarregar_encerra_e_acorda_na_mesma_sessao(conta):
