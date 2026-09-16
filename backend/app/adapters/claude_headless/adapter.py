@@ -1342,7 +1342,12 @@ class ClaudeHeadlessAdapter:
                 # Durável: parada (ou depois de um restart) a sessão não tem de onde tirar a
                 # janela, e sem ela o contexto some da barra — some justamente quando a pessoa
                 # precisa dele pra decidir se continua aqui ou abre outra.
-                sess.meta = hl_sessions.update(sess.name, context_window=sess.context_window) or sess.meta
+                gravado = hl_sessions.update(sess.name, context_window=sess.context_window)
+                if gravado is None:
+                    # Sidecar sumiu no meio do turno: seguir com o meta antigo é o certo, mas
+                    # calado o sintoma só apareceria num restart, sem nada apontando pra cá.
+                    _log.warning("claude headless: janela não gravada no sidecar name=%s", sess.name)
+                sess.meta = gravado or sess.meta
 
     def _recalcular_estado(self, sess: _Sessao) -> None:
         antes = sess.state
@@ -1762,7 +1767,12 @@ def _uso_da_ultima_chamada(path: str) -> dict | None:
             f.seek(0, os.SEEK_END)
             f.seek(max(0, f.tell() - _TAIL_TRANSCRIPT))
             linhas = f.read().decode("utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return None   # conversa que ainda não teve turno: o arquivo nasce depois
     except OSError:
+        # Ilegível não é o mesmo que vazio: quem chama só vê "sem contexto" e não teria como
+        # saber que a leitura é que está falhando.
+        _log.warning("claude headless: transcript %s ilegível", path, exc_info=True)
         return None
     for linha in reversed(linhas):
         if '"assistant"' not in linha:
