@@ -328,6 +328,59 @@ test('visivel: navegar NAO manda emulacao de tamanho nenhuma', async () => {
   assert.equal(dbg.chamadas.filter(([m]) => m.includes('DeviceMetrics')).length, 0);
 });
 
+test('layout personalizado reaplica o viewport ao navegar e tira shot no tamanho pedido', async () => {
+  const png = Buffer.from('png-personalizado');
+  const dbg = dubleDbg({ 'Page.captureScreenshot': { data: png.toString('base64') } });
+  let renavegar = null;
+  let nativas = 0;
+  const ctl = criarControlador({
+    dbg,
+    aoNavegar: (cb) => (renavegar = cb),
+    capturarPagina: async () => { nativas++; return { isEmpty: () => false }; },
+  });
+
+  assert.equal(await ctl.layout('1366', '768'), 'layout: 1366x768');
+  assert.equal(ctl.layoutAtual(), '1366x768');
+  await renavegar();
+  const metricas = dbg.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride');
+  assert.equal(metricas.length, 2, 'o override volta depois da navegacao');
+  assert.deepEqual(metricas[1][1], { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+
+  const img = await ctl.capturarPagina();
+  assert.equal(nativas, 0, 'capturePage mede o painel, nao o viewport pedido');
+  assert.deepEqual(img.toPNG(), png);
+  const shot = dbg.chamadas.find(([m]) => m === 'Page.captureScreenshot');
+  assert.deepEqual(shot[1], {
+    format: 'png', captureBeyondViewport: true,
+    clip: { x: 0, y: 0, width: 1366, height: 768, scale: 1 },
+  });
+});
+
+test('layout compartilhado e aplicado quando outra aba recebe comando', async () => {
+  const layoutEstado = { modo: 'desktop', width: null, height: null, versao: 0 };
+  const a = criarControlador({ dbg: dubleDbg(), capturarPagina: async () => Buffer.alloc(0),
+    aoNavegar: () => {}, layoutEstado });
+  const dbgB = dubleDbg({ 'Runtime.evaluate': { result: { value: '' } } });
+  const b = criarControlador({ dbg: dbgB, capturarPagina: async () => Buffer.alloc(0),
+    aoNavegar: () => {}, layoutEstado });
+
+  await a.layout('1366', '768');
+  await b.enfileirar(() => b.texto());
+
+  const metricas = dbgB.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride');
+  assert.deepEqual(metricas.at(-1)[1], { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+});
+
+test('layout mantem os atalhos e recusa dimensoes invalidas', async () => {
+  const ctl = criarControlador({ dbg: dubleDbg(), capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });
+  assert.equal(await ctl.layout('mobile'), 'layout: mobile');
+  assert.equal(await ctl.layout('desktop'), 'layout: desktop');
+  assert.equal(await ctl.layout('1920', '1080'), 'layout: 1920x1080');
+  assert.match(await ctl.layout('1366'), /^erro:/);
+  assert.match(await ctl.layout('0', '768'), /^erro:/);
+  assert.match(await ctl.layout('1366', '768', 'extra'), /^erro:/);
+});
+
 test('escondido: print que pendura devolve imagem vazia dentro do teto, sem travar o agente', async () => {
   const dbg = dubleDbg();
   const originalSend = dbg.sendCommand;

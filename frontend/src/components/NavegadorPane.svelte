@@ -11,7 +11,7 @@
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import { navegadorNativo, type NavAba } from '../lib/navegadorNativo';
-  import { navegadorPanel, atualizarNavUrl, fecharNav } from '../lib/navegadorPanel.svelte';
+  import { navegadorPanel, ajustarNavAoViewport, atualizarNavUrl, fecharNav } from '../lib/navegadorPanel.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
 
@@ -55,6 +55,7 @@
       carregando = p.carregando;
       podeVoltar = p.voltar;
       podeAvancar = p.avancar;
+      if (typeof p.layoutWidth === 'number') ajustarNavAoViewport(p.layoutWidth);
       if (p.abas) {
         abas = p.abas;
         // Trocou de aba ativa: um "nova aba" que ficou pendente no campo perde a vez.

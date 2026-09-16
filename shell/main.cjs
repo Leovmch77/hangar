@@ -390,7 +390,11 @@ const TETO_ABAS = 8;
 
 function regDe(chave) {
   let r = registros.get(chave);
-  if (!r) { r = { proximoId: 1, ativa: null, abas: new Map() }; registros.set(chave, r); }
+  if (!r) {
+    r = { proximoId: 1, ativa: null, abas: new Map(),
+      layoutEstado: { modo: 'desktop', width: null, height: null, versao: 0 } };
+    registros.set(chave, r);
+  }
   return r;
 }
 
@@ -643,6 +647,8 @@ function publicarEstado(win, chave) {
   const viva = ativa && !ativa.isDestroyed();
   win.webContents.send('hangar:nav-estado', {
     chave, ativa: reg.ativa, abas,
+    layoutWidth: reg.layoutEstado.modo === 'custom' ? reg.layoutEstado.width : null,
+    layoutHeight: reg.layoutEstado.modo === 'custom' ? reg.layoutEstado.height : null,
     url: viva ? ativa.getURL() : '',
     carregando: viva ? ativa.isLoading() : false,
     voltar: viva ? ativa.navigationHistory.canGoBack() : false,
@@ -737,6 +743,8 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
       dbg,
       capturarPagina: () => wc.capturePage(),
       aoNavegar: (cb) => wc.on('did-navigate', cb),
+      layoutEstado: reg.layoutEstado,
+      aoLayout: () => publicarEstado(win, chave),
       // Modo economia do Chromium (timers a 1 Hz, sem rAF) só sai enquanto um verbo dirige a aba
       // escondida; o que segura o compositor é o congelamento, no controlador.
       aoDirigir: (dirigindo) => { if (!wc.isDestroyed()) wc.setBackgroundThrottling(!dirigindo); },

@@ -84,6 +84,24 @@ test('--aba vai no corpo do pedido e tab vira verbo tab-*', async () => {
   assert.equal(t.status, 0);
 });
 
+test('layout encaminha largura e altura juntas ao shell', async () => {
+  const chamadas = [];
+  const ctlFalso = {
+    enfileirar: (fn) => fn(),
+    layout: async (...args) => { chamadas.push(args); return `layout: ${args.join('x')}`; },
+    layoutAtual: () => 'desktop',
+  };
+  const srv = await subirServidor({ controladorDe: () => ctlFalso, escrever: () => {} });
+  const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
+
+  const r = await rodarCli(['layout', '1366', '768', '--sessao', 'sessaoteste'], { home });
+  srv.fechar();
+
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout.trim(), 'layout: 1366x768');
+  assert.deepEqual(chamadas, [['1366', '768']]);
+});
+
 // O `list` confere no CDP da 9223 quem está vivo, então o teste precisa de ALGUÉM respondendo ali.
 // Sobe um falso; com a porta ocupada (app do usuário aberto) usa quem já responde, e só devolve
 // null — para o teste pular — quando ninguém responde.

@@ -154,6 +154,12 @@ export function arrastarNav(clientX: number, bordaDireita: number): void {
   navegadorPanel.largura = clampLargura(bordaDireita - clientX);
 }
 
+/** Faz a coluna acompanhar o viewport pedido pelo agente, limitada ao espaço real da janela. */
+export function ajustarNavAoViewport(width: number): void {
+  if (!Number.isFinite(width) || width <= 0) return;
+  navegadorPanel.largura = clampLargura(width);
+}
+
 export function salvarNav(): void {
   try {
     localStorage.setItem(CHAVE, String(navegadorPanel.largura));

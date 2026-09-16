@@ -14,6 +14,7 @@
 //   hangar-preview wait <@eN|--url texto|--text texto|--idle|Nms>   espera algo acontecer
 //   hangar-preview eval '<js>'             roda JS na página e imprime o resultado
 //   hangar-preview tema <claro|escuro|sistema>
+//   hangar-preview layout [mobile|desktop|<largura> <altura>]
 //   hangar-preview console [--limpar]      log do console da página
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
@@ -83,7 +84,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   wait <alvo>             @eN | --url <trecho> | --text <trecho> | --idle | <ms>
   eval '<js>'             roda JS na página (expressão ou declarações) e imprime o resultado
   tema <claro|escuro|sistema>
-  layout [mobile|desktop] tamanho e user-agent do navegador de verdade (sem valor, diz o atual)
+  layout [mobile|desktop|<largura> <altura>]
+                          emula o tamanho sem redimensionar a janela (sem valor, diz o atual)
   console [--limpar]      log do console da página
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore

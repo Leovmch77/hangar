@@ -338,6 +338,32 @@ test('aba nova herda o estado de exibicao da ativa', async () => {
   assert.deepEqual(criadas.at(-1).ocultos, [true], 'escondida recebe a emulacao: sem ela, shot --aba le 0x0');
 });
 
+test('abas da mesma sessao compartilham o estado persistente de layout', async () => {
+  const a = novaJanela();
+  const chave = 'srv::layout-compartilhado';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {} });
+  await handlers.get('hangar:nav-tab-new')(a.ev, { chave, url: 'https://dois.test' });
+  const [primeira, segunda] = criadas.slice(-2);
+
+  assert.ok(primeira.opcoes.layoutEstado, 'a sessao possui estado de layout');
+  assert.equal(primeira.opcoes.layoutEstado, segunda.opcoes.layoutEstado,
+    'trocar ou criar aba nao perde o tamanho pedido');
+});
+
+test('layout personalizado publica as dimensoes para o painel da direita crescer', async () => {
+  const a = novaJanela();
+  const chave = 'srv::layout-painel';
+  await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {} });
+  const ctl = criadas.at(-1);
+  Object.assign(ctl.opcoes.layoutEstado, { modo: 'custom', width: 1366, height: 768, versao: 1 });
+
+  ctl.opcoes.aoLayout();
+
+  const estado = a.win.webContents.enviados.filter((e) => e.canal === 'hangar:nav-estado').at(-1);
+  assert.equal(estado.payload.layoutWidth, 1366);
+  assert.equal(estado.payload.layoutHeight, 768);
+});
+
 test('trocar de aba mantem visivel o que estava visivel, e esconde a anterior', async () => {
   const a = novaJanela();
   const chave = 'srv::troca';

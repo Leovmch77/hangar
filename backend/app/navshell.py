@@ -1,8 +1,8 @@
 """Fala com o servidor do app desktop (`shell/preview_srv.cjs`) — os mesmos verbos do `hangar-preview`.
 
-Existe porque nem tudo do navegador embutido cabe no CDP direto: o layout (desktop/celular) é
-emulação que se perde ao navegar, e quem sabe repor é o controlador do shell. Uma fonte de verdade
-só, e ela mora lá.
+Existe porque nem tudo do navegador embutido cabe no CDP direto: o layout (desktop/celular ou
+dimensão pedida) é emulação que se perde ao navegar, e quem sabe repor é o controlador do shell.
+Uma fonte de verdade só, e ela mora lá.
 
 Endereço e token saem de `~/.hangar/nav/_srv.json`, que o shell reescreve a cada subida — a porta é
 efêmera e o token sorteado, então nada aqui pode ser cacheado entre chamadas.

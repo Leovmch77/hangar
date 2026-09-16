@@ -150,7 +150,7 @@ async def nova_sessao(ctx: Context, nome: str, cwd: str, provider: str = "claude
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless}
 
 
-VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "console",
+VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "layout", "console",
               "network", "text", "url", "shot", "close", "tab-list", "tab-new", "tab-switch", "tab-close")
 # Duas chamadas do mesmo turno não podem intercalar `click` e `snapshot`: o CLI serializa por
 # processo, aqui é uma trava por sessão.
@@ -196,7 +196,8 @@ async def nav_abrir(ctx: Context, url: str) -> dict[str, Any]:
                       "Verbos: snapshot (árvore com refs @eN), click/hover <ref>, fill <ref> <texto>, "
                       "type <texto>, press <tecla>, wait [--text|--url] <valor>, eval <js> (só estado "
                       "não-DOM, nunca pra clicar), console, network, text, url, shot (devolve o caminho "
-                      "do PNG), close, tab-list, tab-new <url>, tab-switch <id>, tab-close [id]. "
+                      "do PNG), layout [mobile|desktop|<largura> <altura>], close, tab-list, "
+                      "tab-new <url>, tab-switch <id>, tab-close [id]. "
                       "`aba` age numa aba sem trocar a que o usuário vê.")
 async def nav(ctx: Context, verbo: str, args: list[str] | None = None, aba: int | None = None) -> str:
     eu = await _eu(ctx)

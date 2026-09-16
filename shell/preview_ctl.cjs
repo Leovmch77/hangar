@@ -62,13 +62,14 @@ const FOCO = `(()=>{const a=document.activeElement;if(!a||a===document.body)retu
 
 // tetoEspera vale pra TODO comando que pode não voltar (wait e eval): view escondido suspende
 // requestAnimationFrame, e um comando pendurado trava o agente sem erro nenhum.
-function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}, tetoEspera = 15000 }) {
+function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}, aoLayout = () => {}, tetoEspera = 15000,
+  layoutEstado = { modo: 'desktop', width: null, height: null, versao: 0 } }) {
   let fila = Promise.resolve();
   let emVoo = 0;
   let refs = new Map();
   let temaAtual = 'sistema';
   let oculto = false;
-  let layoutMovel = false;
+  let layoutVersaoAplicada = -1;
   let ultimaRede = Date.now();
   let requisicoesEmVoo = 0;
   const console_ = [];
@@ -117,7 +118,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   // Emular tamanho numa página que ainda não carregou (o `about:blank` de um view recém-criado)
   // derruba o processo com SIGSEGV. Quem chama espera o load.
   async function aplicarViewport() {
-    if (layoutMovel) {
+    if (layoutEstado.modo === 'mobile') {
       // Layout de celular pedido por quem está olhando de fora (acesso remoto). Vale MAIS que o
       // `oculto`: quem escolheu ver em celular quer o site servindo mobile, com ou sem painel.
       // Sem a emulação de toque a página não recebe touchstart e um carrossel que só escuta toque
@@ -125,12 +126,18 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_MOVEL);
       await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
       await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: UA_MOVEL });
+      layoutVersaoAplicada = layoutEstado.versao;
       return;
     }
     await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: false });
     await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: '' });
-    if (oculto) await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_OCULTO);
+    if (layoutEstado.modo === 'custom') {
+      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width: layoutEstado.width, height: layoutEstado.height, deviceScaleFactor: 1, mobile: false,
+      });
+    } else if (oculto) await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_OCULTO);
     else await dbg.sendCommand('Emulation.clearDeviceMetricsOverride');
+    layoutVersaoAplicada = layoutEstado.versao;
   }
 
   async function aplicarTema() {
@@ -152,9 +159,9 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // O `oculto` aceita falhar calado (o comentário acima diz por quê). O layout de celular, não:
     // ele foi PEDIDO por alguém que está olhando, e se a emulação não voltar depois de navegar a
     // página vira desktop com a pill ainda marcando celular.
-    if (oculto || layoutMovel) {
+    if (oculto || layoutEstado.modo !== 'desktop') {
       await aplicarViewport().catch((err) => {
-        if (layoutMovel) console.error(`[nav] layout de celular nao voltou apos navegar: ${err && err.message ? err.message : err}`);
+        if (layoutEstado.modo !== 'desktop') console.error(`[nav] layout pedido nao voltou apos navegar: ${err && err.message ? err.message : err}`);
       });
     }
   });
@@ -209,6 +216,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     emVoo++;
     const resultado = fila.then(async () => {
       if (!(await economia())) throw new Error('a aba escondida nao descongelou; tente de novo');
+      if (layoutVersaoAplicada !== layoutEstado.versao) await aplicarViewport();
       return fn();
     });
     fila = resultado.then(() => {}, () => {}).then(() => { emVoo--; return economia(); });
@@ -235,13 +243,25 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // Layout do navegador de verdade — não de uma cópia: quem está vendo de fora escolhe, e o
     // agente que dirige esta mesma sessão passa a ver a mesma coisa. Mora junto do tema porque os
     // dois são emulação que `aplicarViewport`/`aoNavegar` precisam repor depois de navegar.
-    async layout(modo) {
-      if (modo !== 'mobile' && modo !== 'desktop') return `erro: layout desconhecido: ${modo}`;
-      layoutMovel = modo === 'mobile';
+    async layout(...args) {
+      const [modo, altura] = args;
+      if (args.length === 1 && (modo === 'mobile' || modo === 'desktop')) {
+        Object.assign(layoutEstado, { modo, width: null, height: null, versao: layoutEstado.versao + 1 });
+      } else {
+        const width = Number(modo);
+        const height = Number(altura);
+        if (args.length !== 2 || !Number.isInteger(width) || width <= 0
+            || !Number.isInteger(height) || height <= 0) {
+          return `erro: layout precisa ser mobile, desktop ou dois inteiros positivos: ${modo ?? ''} ${altura ?? ''}`.trimEnd();
+        }
+        Object.assign(layoutEstado, { modo: 'custom', width, height, versao: layoutEstado.versao + 1 });
+      }
       await aplicarViewport();
-      return `layout: ${modo}`;
+      aoLayout();
+      return `layout: ${this.layoutAtual()}`;
     },
-    layoutAtual: () => (layoutMovel ? 'mobile' : 'desktop'),
+    layoutAtual: () => (layoutEstado.modo === 'custom'
+      ? `${layoutEstado.width}x${layoutEstado.height}` : layoutEstado.modo),
     console(limpar) {
       const saida = console_.join('\n');
       if (limpar) console_.length = 0;
@@ -273,11 +293,16 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // senão pendura. O teto é a rede pra esse caso.
     async capturarPagina() {
       await quadro();
-      if (!oculto) {
+      const personalizado = layoutEstado.modo === 'custom';
+      if (!oculto && !personalizado) {
         const img = await capturarPagina().catch(() => null);
         if (img && !img.isEmpty()) return img;
       }
-      const pedido = dbg.sendCommand('Page.captureScreenshot', { format: 'png' });
+      const parametros = personalizado
+        ? { format: 'png', captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width: layoutEstado.width, height: layoutEstado.height, scale: 1 } }
+        : { format: 'png' };
+      const pedido = dbg.sendCommand('Page.captureScreenshot', parametros);
       pedido.catch(() => {});   // rejeição atrasada não pode virar rejeição solta no processo
       const r = await Promise.race([
         pedido.catch(() => null),

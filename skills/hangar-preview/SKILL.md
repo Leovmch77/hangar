@@ -110,6 +110,10 @@ tire `snapshot` de novo antes de agir.
 - `hangar-preview tema <claro|escuro|sistema>` — emula `prefers-color-scheme` **nesta sessão**. Fica
   valendo através de navegações (o Electron perde a emulação ao navegar; o controlador reaplica
   sozinho). `sistema` volta ao tema real da máquina.
+- `hangar-preview layout [mobile|desktop|<largura> <altura>]` — sem valor, informa o layout atual.
+  `mobile` e `desktop` são atalhos; dois inteiros positivos, como `1366 768`, emulam exatamente
+  esse viewport via CDP sem redimensionar a janela do Hangar. O tamanho continua valendo após
+  navegação, `open` e troca de aba.
 - `hangar-preview console [--limpar]` — log do console da página (`console.log`/`warn`/`error` e
   erros de runtime). `--limpar` esvazia o buffer depois de ler.
 - `hangar-preview network` — últimas respostas de rede (status + URL). A escuta de rede só liga na
@@ -120,7 +124,8 @@ tire `snapshot` de novo antes de agir.
   a árvore do `snapshot`.
 - `hangar-preview url` — URL atual.
 - `hangar-preview shot [arq.png]` — screenshot da **viewport** (o que está na tela, não a página
-  inteira; role com `eval 'scrollTo(0, 9999)'` pra ver o fim); default
+  inteira; com layout numérico, o PNG sai nas dimensões pedidas, não nas do painel; role com
+  `eval 'scrollTo(0, 9999)'` pra ver o fim); default
   `/tmp/hangar-preview-<sessao>/<hora>.png`, um arquivo por shot. Leia o PNG com a ferramenta de
   leitura de imagem e cite o caminho na resposta.
 - `hangar-preview folha` — junta numa grade (até 6 telas por folha, numeradas na ordem) os `shot`

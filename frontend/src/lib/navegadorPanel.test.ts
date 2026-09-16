@@ -42,6 +42,14 @@ describe('navegadorPanel — largura redimensionável', () => {
     expect(mod.navegadorPanel.largura).toBe(NAV_MIN);
   });
 
+  it('cresce para o viewport pedido sem roubar a reserva do chat', async () => {
+    const mod = await importarFresco();
+    mod.ajustarNavAoViewport(800);
+    expect(mod.navegadorPanel.largura).toBe(800);
+    mod.ajustarNavAoViewport(1366);
+    expect(mod.navegadorPanel.largura).toBe(1028);
+  });
+
   it('guarda ao soltar e restaura ao remontar', async () => {
     const mod = await importarFresco();
     mod.arrastarNav(900, window.innerWidth);

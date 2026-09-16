@@ -113,6 +113,21 @@ async def test_nav_shot_gera_caminho_e_aba_passa(identidade, monkeypatch, tmp_pa
         assert (tmp_path / ".hangar" / "nav" / "shots" / "eu").is_dir()
 
 
+async def test_nav_layout_encaminha_tamanho_personalizado(identidade, monkeypatch):
+    chamadas = []
+
+    def verbo(name, v, args=None, aba=None):
+        chamadas.append((name, v, args, aba))
+        return "layout: 1366x768"
+
+    monkeypatch.setattr(mcp_server.navshell, "verbo", verbo)
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("nav", {"verbo": "layout", "args": ["1366", "768"]})
+
+    assert not res.is_error and res.content[0].text == "layout: 1366x768"
+    assert chamadas == [("eu", "layout", ["1366", "768"], None)]
+
+
 async def test_nav_lote_para_no_primeiro_erro(identidade, monkeypatch):
     def verbo(name, v, args=None, aba=None):
         return "erro: ref @e9 nao existe" if v == "click" else f"ok: {v}"
