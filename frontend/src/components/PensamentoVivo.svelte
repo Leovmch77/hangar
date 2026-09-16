@@ -18,11 +18,6 @@
 
   // Só a cauda: o CSS mostra três linhas, e o resumo inteiro no DOM a cada pedaço é trabalho à toa.
   const cauda = $derived(texto.length > 600 ? '…' + texto.slice(-600) : texto);
-  // O degradê de cima só quando o texto de fato não cabe na caixa. Medido nos dois lados (texto e
-  // caixa), não num número fixo: com a escala de fonte do chat a linha cresce, o teto em px
-  // deixava de valer e o degradê apagava a primeira linha visível.
-  let alturaTexto = $state(0);
-  let alturaCaixa = $state(0);
 </script>
 
 <div class="pv" role="status" aria-live="off">
@@ -31,8 +26,8 @@
     <span class="pv-rotulo">{m.pensamento_vivo()}</span>
     <span class="pv-tempo">· {segundos}s</span>
   </div>
-  <div class="pv-texto" class:transborda={alturaTexto > alturaCaixa + 1} bind:clientHeight={alturaCaixa}>
-    <div bind:clientHeight={alturaTexto}>{cauda}</div>
+  <div class="pv-texto">
+    <div>{cauda}</div>
   </div>
 </div>
 
@@ -78,7 +73,8 @@
 
   .pv-tempo { font-variant-numeric: tabular-nums; opacity: 0.8; }
 
-  /* Três linhas presas ao fim: o texto novo entra embaixo e o antigo some no degradê de cima. */
+  /* Três linhas presas ao fim: o texto novo entra embaixo e o antigo sai por cima, com corte
+     seco — o texto já é apagado (--text-muted), degradê em cima dele só parecia defeito. */
   .pv-texto {
     margin-left: 22px;
     max-width: 62ch;
@@ -92,13 +88,6 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  /* Só a borda de cima (meia linha): o que está cortado some no degradê, o que está visível
-     continua legível. 45% da caixa levava a primeira linha inteira junto. */
-  .pv-texto.transborda {
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 0.8em);
-    mask-image: linear-gradient(to bottom, transparent 0, #000 0.8em);
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .pv-ic, .pv-rotulo { animation: none; }
     .pv-rotulo { background: none; color: var(--text-muted); }
