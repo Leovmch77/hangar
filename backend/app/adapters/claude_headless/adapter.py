@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import hashlib
 import json
 import logging
 import os
@@ -550,23 +551,16 @@ class ClaudeHeadlessAdapter:
 
     def motivo_recarga(self, sess: _Sessao) -> str | None:
         """Por que o processo desta sessão está desatualizado, ou None. Hoje um motivo só: a
-        config da conta (`.claude.json` com os MCP, `settings.json`) mudou depois de ele subir —
+        config da conta (MCP do `.claude.json`, `settings.json`) mudou depois de ele subir —
         o `claude -p` só relê isso quando nasce, e sem terminal não existe `/mcp reconnect`."""
-        subiu = ((sess.meta or {}).get("cano") or {}).get("ts")
-        if not subiu:
+        marca = ((sess.meta or {}).get("cano") or {}).get("config_marca")
+        if not marca:
             return None
         agora = time.monotonic()
         cache = getattr(sess, "_recarga_cache", None)
         if cache and agora - cache[0] < 10:
             return cache[1]
-        raiz = Path(sess.meta.get("config_dir") or (Path.home() / ".claude")).expanduser()
-        mudou = False
-        for arq in (raiz / ".claude.json", raiz / "settings.json"):
-            try:
-                mudou = mudou or arq.stat().st_mtime > float(subiu)
-            except OSError:
-                continue
-        motivo = "config" if mudou else None
+        motivo = "config" if _marca_config(sess.meta.get("config_dir")) != marca else None
         sess._recarga_cache = (agora, motivo)   # type: ignore[attr-defined]
         return motivo
 
@@ -823,6 +817,7 @@ class ClaudeHeadlessAdapter:
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
         cano, proc = await subir_cano_processo(argv, cwd=meta["cwd"], env=env, key=meta["key"], log=log,
                                                tarefas=self._tarefas)
+        cano["config_marca"] = _marca_config(meta.get("config_dir"))
         sess.meta = hl_sessions.update(sess.name, cano=cano) or {**meta, "cano": cano}
         ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
         if ligado is None:
@@ -1905,6 +1900,25 @@ def _matar_grupo(pid: int, name: str) -> None:
         pass
     except OSError:
         _log.warning("claude headless: não matou o cano name=%s pid=%s", name, pid, exc_info=True)
+
+
+def _marca_config(config_dir: str | None) -> str:
+    """Impressão do que o `claude -p` lê ao nascer e não relê depois. Só o `mcpServers` do
+    `.claude.json` (o resto do arquivo o próprio Claude Code reescreve a toda hora — pela data
+    do arquivo, toda sessão parecia desatualizada) e o `settings.json` inteiro (hooks, statusline,
+    permissões)."""
+    raiz = Path(config_dir or (Path.home() / ".claude")).expanduser()
+    partes: list[str] = []
+    try:
+        dados = json.loads((raiz / ".claude.json").read_text(encoding="utf-8"))
+        partes.append(json.dumps(dados.get("mcpServers") if isinstance(dados, dict) else None, sort_keys=True))
+    except (OSError, ValueError):
+        partes.append("")
+    try:
+        partes.append((raiz / "settings.json").read_text(encoding="utf-8"))
+    except OSError:
+        partes.append("")
+    return hashlib.sha1("\0".join(partes).encode("utf-8")).hexdigest()
 
 
 def _esquecer_cano(name: str, pid: int | None) -> None:

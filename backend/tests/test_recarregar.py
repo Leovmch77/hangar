@@ -1,6 +1,6 @@
 """Recarregar uma sessão Claude sem terminal: motivo no `state`, reciclagem do processo e rota."""
 import asyncio
-import os
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,19 +22,26 @@ def conta(tmp_path, monkeypatch):
     return raiz
 
 
-def _sessao(conta, subiu: float | None):
+def _sessao(conta, marca: str | None):
     meta = {"name": "s1", "cwd": "/tmp", "session_id": "x", "config_dir": str(conta),
-            "cano": {"pid": 4242, "ts": subiu} if subiu else None}
+            "cano": {"pid": 4242, "ts": time.time(), "config_marca": marca} if marca else None}
     return _Sessao("s1", meta)
 
 
-def test_motivo_config_quando_a_conta_mudou_depois_do_processo(conta):
+def test_motivo_config_so_quando_mcp_ou_settings_mudam(conta):
     ad = ClaudeHeadlessAdapter()
-    agora = time.time()
-    os.utime(conta / ".claude.json", (agora - 100, agora - 100))
-    assert ad.motivo_recarga(_sessao(conta, agora - 50)) is None       # processo é mais novo
-    assert ad.motivo_recarga(_sessao(conta, agora - 200)) == "config"  # config mudou depois
-    assert ad.motivo_recarga(_sessao(conta, None)) is None             # cano sem carimbo
+    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}, "numStartups": 1}))
+    marca = A._marca_config(str(conta))
+    assert ad.motivo_recarga(_sessao(conta, marca)) is None
+    # O próprio Claude Code reescreve o resto do .claude.json a toda hora: isso não é motivo.
+    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}, "numStartups": 2}))
+    assert ad.motivo_recarga(_sessao(conta, marca)) is None
+    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "y"}}, "numStartups": 2}))
+    assert ad.motivo_recarga(_sessao(conta, marca)) == "config"
+    (conta / ".claude.json").write_text(json.dumps({"mcpServers": {"a": {"url": "x"}}}))
+    (conta / "settings.json").write_text('{"hooks": {}}')
+    assert ad.motivo_recarga(_sessao(conta, marca)) == "config"
+    assert ad.motivo_recarga(_sessao(conta, None)) is None   # processo de antes da marca
 
 
 def test_recarregar_encerra_e_acorda_na_mesma_sessao(conta):
