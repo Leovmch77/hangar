@@ -2121,8 +2121,9 @@ class SessionRegistry:
                                           engine=motor, model=modelo, effort=esforco,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
-                                          previous_non_plan=(modo_permissao.ultimo_nao_plan(name)
-                                                             if permission_mode == "plan" else None))
+                                          previous_non_plan=(modo_permissao.ultimo_nao_plan(
+                                              name, modo_permissao.modo_da_conta(str(cdir) if cdir else None))
+                                              if permission_mode == "plan" else None))
         except OSError:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}

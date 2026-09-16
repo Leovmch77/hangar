@@ -775,6 +775,7 @@ class CodexAdapter:
         return await self._subir_sem_terminal(name, meta)
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
         if falhas >= self.TETO_SUBIDAS:
             # Desistiu: o motivo da última queda fica em _problemas; o watch_sessions continua
@@ -812,10 +813,18 @@ class CodexAdapter:
                     # `thread/start` aceita `model`, mas não tem campo de esforço: sem este update
                     # o nível escolhido na tela cai calado no `model_reasoning_effort` do
                     # config.toml. Sem TUI, ninguém mais aplica a escolha.
-                    await client.request("thread/settings/update", {
-                        "threadId": (result.get("thread") or {}).get("id") or meta.get("thread_id"),
-                        "model": meta.get("model") or result.get("model"),
-                        "effort": meta["effort"]})
+                    try:
+                        await client.request("thread/settings/update", {
+                            "threadId": (result.get("thread") or {}).get("id") or meta.get("thread_id"),
+                            "model": meta.get("model") or result.get("model"),
+                            "effort": meta["effort"]})
+                    except Exception as exc:
+                        # A thread já está aberta: derrubar a sessão por causa do nível seria trocar
+                        # uma escolha perdida por uma sessão que não existe. O nível fica o do
+                        # config.toml e isso APARECE.
+                        esforco_recusado = str(exc)[:300]
+                        _log.warning("codex sem terminal: esforço %s recusado name=%s: %s",
+                                     meta["effort"], name, exc)
             except Exception:
                 await client.close()
                 raise
@@ -833,6 +842,8 @@ class CodexAdapter:
             raise
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
+        if esforco_recusado:
+            self._problemas[name] = ("codex_esforco_nao_aplicado", esforco_recusado)
         thread = result.get("thread") or {}
         thread_id = thread.get("id") or meta.get("thread_id")
         rollout = thread.get("path") or sem_terminal.rollout_de(thread_id, meta.get("codex_home"))

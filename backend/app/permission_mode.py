@@ -10,6 +10,7 @@ Este módulo é stdlib + tmux, no padrão de model_picker.py.
 """
 
 import json
+import logging
 import re
 import threading
 import time
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Callable, TypeVar
 
 from app import tmux
+
+_log = logging.getLogger("hangar.permissao")
 
 # Regex que casa a frase do rodapé, sem depender do glifo. O glifo (⏸/⏵⏵) é usado só pra
 # priorizar linhas de rodapé e evitar falso positivo com texto da conversa que cite o modo.
@@ -55,10 +58,15 @@ def modo_da_conta(config_dir: str | None) -> str:
     """`permissions.defaultMode` da conta, ou o padrão do app quando ela não define nenhum."""
     from app import model_args
 
-    base = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    arquivo = (Path(config_dir).expanduser() if config_dir else Path.home() / ".claude") / "settings.json"
     try:
-        dados = json.loads((base / "settings.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        dados = json.loads(arquivo.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return PADRAO_DO_APP   # conta sem settings.json é o caso NORMAL: nada a avisar
+    except (OSError, ValueError) as exc:
+        # Ilegível não é o mesmo que ausente: o padrão é o modo mais permissivo que existe, e cair
+        # nele por arquivo quebrado parece escolha de quem abriu a sessão.
+        _log.warning("permissão: %s ilegível (%s) — sessão nasce em %s", arquivo, exc, PADRAO_DO_APP)
         return PADRAO_DO_APP
     modo = ((dados.get("permissions") or {}) if isinstance(dados, dict) else {}).get("defaultMode")
     if modo == "default":
@@ -96,10 +104,14 @@ def observar_ou_confirmado(name: str, modo: str,
         return modo, _ultimos_nao_plan.get(name, "manual")
 
 
-def ultimo_nao_plan(name: str) -> str:
-    """Consulta o modo anterior sem registrar a captura como confirmação."""
+def ultimo_nao_plan(name: str, padrao: str = "manual") -> str:
+    """Consulta o modo anterior sem registrar a captura como confirmação.
+
+    A memória é do processo: depois de um restart do backend ninguém viu modo nenhum desta sessão,
+    e aí quem pergunta é que sabe o que vale no lugar (o modo da conta, por exemplo).
+    """
     with _mem_lock:
-        return _ultimos_nao_plan.get(name, "manual")
+        return _ultimos_nao_plan.get(name, padrao)
 
 
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:

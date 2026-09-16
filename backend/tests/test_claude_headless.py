@@ -565,12 +565,17 @@ def test_plano_com_base_bypass_nao_pergunta_por_ferramenta(adapter):
                                                    "tool_name": "ExitPlanMode",
                                                    "input": {"plan": "passos"}}})
         assert list(sess.pending) == ["r2"]
+        # Escrita nunca sai sozinha: hoje a CLI a barra no plano, e se um dia perguntar vira cartão.
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r3",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "Write",
+                                                   "input": {"file_path": "/tmp/x"}}})
+        assert list(sess.pending) == ["r2", "r3"]
         # Fora do plano (ou com base que não é bypass) o cartão continua aparecendo.
         sess.modo_nao_plan = "manual"
-        await adapter._on_event(sess, {"type": "control_request", "request_id": "r3",
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r4",
                                        "request": {"subtype": "can_use_tool", "tool_name": "Bash",
                                                    "input": {"command": "ls"}}})
-        assert list(sess.pending) == ["r2", "r3"]
+        assert list(sess.pending) == ["r2", "r3", "r4"]
     _run(fluxo())
     respostas = [e["response"] for e in adapter.escritos if e["type"] == "control_response"]
     assert [r["request_id"] for r in respostas] == ["r1"]

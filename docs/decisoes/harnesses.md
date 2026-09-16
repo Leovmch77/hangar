@@ -249,7 +249,11 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   Medido numa sessão sem terminal criada com `--permission-mode plan`, com prompt que pedia pra
   ler um arquivo e gravar outro: o `Read` passou sem cartão, a gravação fora da pasta de planos a
   própria CLI barrou (nem chegou a perguntar) e o único `can_use_tool` do turno foi o
-  `ExitPlanMode`. Ou seja, o cartão por ferramenta que aparecia não era do plano: era do modo de
+  `ExitPlanMode`. Segunda sonda, negando tudo pra ver só O QUE ele pergunta, com três comandos de
+  shell no prompt: `curl -s -o /dev/null -w '%{http_code}' https://example.com` rodou direto (200,
+  sem cartão), e `touch` e `git init` a CLI recusou sozinha — *"Cria arquivo, escrita bloqueada no
+  plano mode"* —, de novo zero `can_use_tool`. Em plano, portanto, o que chega ao
+  `--permission-prompt-tool` é a saída do plano, não a ferramenta. Ou seja, o cartão por ferramenta que aparecia não era do plano: era do modo de
   base. Nesta máquina `~/.claude/settings.json` traz `permissions.defaultMode:
   "bypassPermissions"`; numa que não define nada, a sessão criada com **Permissão: padrão** nascia
   sem a flag (o campo ia nulo) e caía no manual da CLI — aí cada ferramenta pede, em plano ou fora
@@ -259,7 +263,9 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   criação, lido do `settings.json` dela, com `bypassPermissions` quando a conta não define nenhum —
   é o que o app já dá aos outros agentes (`lancador.SANDBOX`); (2) em plano, sessão cujo modo de
   base é bypass tem todo `can_use_tool` respondido com `allow` na hora, menos o `ExitPlanMode`,
-  que é o cartão do plano e continua sendo a sua conferência. Sessão que nasce JÁ no plano grava o
+  que é o cartão do plano e continua sendo a sua conferência, e menos as ferramentas de escrita
+  (`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) — hoje elas nem chegam a perguntar, e a lista existe
+  pra que uma CLI futura que pergunte receba um cartão em vez de um "sim" calado. Sessão que nasce JÁ no plano grava o
   modo de base em `previous_non_plan` — sem isso ela não teria base nenhuma e a regra (2) nunca
   valeria justamente pra quem abre no plano.
 
@@ -277,6 +283,11 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   Conserto: um `thread/settings/update` logo depois do start/resume, com modelo e nível do
   sidecar. Ao vivo, sessão criada com `gpt-5.6-luna`/`xhigh` gravou
   `turn_context: gpt-5.6-luna xhigh` no rollout.
+
+  Esse update falhar NÃO derruba a sessão: a thread já está aberta, e trocar uma escolha perdida
+  por uma sessão inexistente seria pior. O nível fica o do `config.toml` e a sessão carrega
+  `codex_esforco_nao_aplicado` como problema visível — perder a escolha calado é justamente o bug
+  que esta entrada conserta.
 
 ## Modelo de uma sessão Claude Code: a lista NUNCA é constante
 

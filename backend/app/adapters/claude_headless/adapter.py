@@ -1707,15 +1707,20 @@ def _rotulo_tool(nome: str | None, inp) -> str:
     return f"{nome}: {alvo}"
 
 
+# Fora da permissão automática do plano. `ExitPlanMode` é o cartão do plano em si. As de escrita
+# estão aqui como trava: medido, é a própria CLI que as barra no plano (nem chega a perguntar) —
+# se uma versão futura passar a perguntar, isso vira cartão, não um "sim" calado.
+_NUNCA_SOZINHO = {"ExitPlanMode", "Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
 def _plano_sem_perguntar(sess: _Sessao, tool: str | None) -> bool:
     """Em plano, sessão cujo modo de base é bypass não pergunta por ferramenta.
 
     O modo da CLI é um só: entrar no plano tira o bypass e cada ferramenta que o plano não libera
-    sozinha volta a pedir. Quem abriu em bypass não pediu isso — pediu o plano. O `ExitPlanMode`
-    fica de fora porque é o cartão do plano em si, não uma permissão de ferramenta.
+    sozinha volta a pedir. Quem abriu em bypass não pediu isso — pediu o plano.
     """
     return (sess.permission_mode == "plan" and sess.modo_nao_plan == "bypassPermissions"
-            and tool != "ExitPlanMode")
+            and tool not in _NUNCA_SOZINHO)
 
 
 def _modo_do_app(modo: str) -> str:

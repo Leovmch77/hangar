@@ -44,7 +44,10 @@ for linha in sys.stdin:
     elif m == "thread/settings/update":
         with open("settings.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
+        if ev["params"].get("effort") == "recusado":
+            out({"jsonrpc": "2.0", "id": ev["id"], "error": {"code": -32602, "message": "effort invalido"}})
+        else:
+            out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
     elif m == "thread/read":
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
@@ -105,6 +108,19 @@ def test_esforco_escolhido_chega_na_thread(ambiente):
         ajuste = json.loads((ambiente / "settings.txt").read_text())
         assert ajuste == {"threadId": "th-1", "model": "gpt-6-astra", "effort": "high"}
         ad.close_sync("cx-esforco")
+    asyncio.run(corpo())
+
+
+def test_esforco_recusado_deixa_a_sessao_de_pe_e_o_problema_visivel(ambiente):
+    """Nível que o servidor recusa não pode derrubar uma thread que já abriu — mas tem que aparecer."""
+    async def corpo():
+        ad = CodexAdapter()
+        _sidecar("cx-esforco-ruim", ambiente, model="gpt-6-astra", effort="recusado")
+        assert await ad.ensure_running("cx-esforco-ruim") is not None
+        assert codex_sessions.load("cx-esforco-ruim")["thread_id"] == "th-1"
+        assert ad.problema_de("cx-esforco-ruim") == "codex_esforco_nao_aplicado"
+        assert "effort invalido" in ad._problemas["cx-esforco-ruim"][1]
+        ad.close_sync("cx-esforco-ruim")
     asyncio.run(corpo())
 
 
