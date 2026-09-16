@@ -329,7 +329,13 @@ async function criarJanela() {
         // antes de recarregar a mesma rota, sem a query do hash. Cookies e localStorage continuam preservados.
         .then(() => win.webContents.session.clearCache())
         .catch((err) => console.error('[recarregar] cache HTTP falhou:', err))
-        .finally(() => win.loadURL(inicio));
+        .finally(() => {
+          // `loadURL` com a URL IDÊNTICA à atual (rota + hash, sem query pra tirar) é navegação
+          // de fragmento pro Chromium: não recarrega nada, e a tela ficava no bundle velho sem
+          // nem piscar. Só quando há query pra descartar a URL muda e o loadURL vale.
+          if (inicio === atual) win.webContents.reloadIgnoringCache();
+          else win.loadURL(inicio);
+        });
     }
     // Ctrl+Shift+I — DevTools. Mesmo motivo do R: o `removeMenu()` acima leva junto TODOS os
     // aceleradores padrão, e o DevTools é um deles. Sem menu, sem atalho — e sem DevTools não há

@@ -313,6 +313,9 @@
         window.location.hash = next.startsWith('#/board') ? '#/board' : next.startsWith('#/canvas') ? '#/canvas' : '#/';
         return; // o hash novo dispara este handler de novo, agora sem servidor a resolver
       }
+      // De onde se veio pras telas de relatório: o ‹ delas volta pra CÁ (a conversa que estava
+      // aberta), não pra lista. Só rotas "de trabalho" contam; relatório vindo de relatório não.
+      if (!ehRelatorio(currentHash)) hashAntesDoRelatorio = currentHash;
       currentHash = next;
     }
     window.addEventListener('hashchange', onHashChange);
@@ -341,6 +344,12 @@
 
   function navigateTo(hash: string) {
     window.location.hash = hash;
+  }
+
+  const ehRelatorio = (h: string) => h.startsWith('#/costs') || h.startsWith('#/uso');
+  let hashAntesDoRelatorio = '#/';
+  function voltarDoRelatorio() {
+    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/' : hashAntesDoRelatorio);
   }
 
   function navigateToChat(name: string) {
@@ -516,9 +525,9 @@
   {:else if route.name === 'login'}
     <Login {onLogin} onSyncLogin={onSyncLogin} />
   {:else if route.name === 'costs'}
-    <Costs onBack={() => navigateTo('#/')} />
+    <Costs onBack={voltarDoRelatorio} />
   {:else if route.name === 'uso'}
-    <Uso onBack={() => navigateTo('#/')} />
+    <Uso onBack={voltarDoRelatorio} />
   {:else if route.name === 'archive'}
     <!-- Remonta ao trocar de deep-link (busca -> outra conversa): reabre com o novo alvo. -->
     {#key route.deepLink ? `${route.deepLink.serverId}/${route.deepLink.project}/${route.deepLink.sessionId}` : ''}
