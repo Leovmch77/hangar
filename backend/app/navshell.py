@@ -43,13 +43,17 @@ def _chave(name: str) -> Optional[str]:
     return str(sc.get("chave")) if sc and sc.get("chave") else None
 
 
-def verbo(name: str, verbo: str, args: Optional[list[str]] = None) -> str:
-    """Roda um verbo do navegador daquela sessão. Levanta `ShellIndisponivel` sem app desktop."""
+def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None) -> str:
+    """Roda um verbo do navegador daquela sessão. Levanta `ShellIndisponivel` sem app desktop.
+    `aba` age numa aba sem trocar a que está na tela; `None` é a ativa."""
     srv = _servidor()
     chave = _chave(name)
     if not chave:
         raise ShellIndisponivel("esta sessão não tem navegador aberto")
-    corpo = json.dumps({"chave": chave, "verbo": verbo, "args": args or []}).encode()
+    pedido: dict[str, Any] = {"chave": chave, "verbo": verbo, "args": args or []}
+    if aba is not None:
+        pedido["aba"] = aba
+    corpo = json.dumps(pedido).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{int(srv['porta'])}/cmd", data=corpo, method="POST",
         headers={"Authorization": f"Bearer {srv['token']}", "Content-Type": "application/json"})

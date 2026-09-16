@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import re
 import secrets
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
@@ -18,7 +22,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import peers, quem_chama
+from app import navshell, peers, quem_chama
 from app.config import settings
 
 mcp = MCPServer("hangar")
@@ -89,6 +93,129 @@ async def enviar(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dic
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     return {"alvo": alvo, **resp}
+
+
+@mcp.tool(description="Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: "
+                      "chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um "
+                      "`[grupo: …]` com isto. `pulados` lista quem não recebeu (mande por SendMessage).")
+async def grupo(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
+    from app import api
+    eu = await _eu(ctx)
+    try:
+        return await api.group_message(eu, api.GroupMsgBody(text=texto, forcar_tmux=tmux))
+    except HTTPException as e:
+        raise ToolError(_detalhe(e)) from e
+
+
+@mcp.tool(description="Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> "
+                      "<tarefa>`: registra no app e injeta o protocolo nos dois lados. `alvo` aceita "
+                      "`servidor::sessao`. Só quando o usuário pedir pareamento.")
+async def parear(ctx: Context, alvo: str, tarefa: str = "", substituir_tarefa: bool = False) -> dict[str, Any]:
+    from app import api
+    eu = await _eu(ctx)
+    try:
+        return await api.pair_session(eu, api.PairBody(peer=alvo, task=tarefa, replace_task=substituir_tarefa))
+    except HTTPException as e:
+        raise ToolError(_detalhe(e)) from e
+
+
+@mcp.tool(description="Desfaz o pareamento desta sessão (`hangar-send --unpair`).")
+async def desparear(ctx: Context) -> dict[str, Any]:
+    from app import api
+    eu = await _eu(ctx)
+    try:
+        return await api.unpair_session(eu)
+    except HTTPException as e:
+        raise ToolError(_detalhe(e)) from e
+
+
+@mcp.tool(description="Cria outra sessão nesta máquina, como `hangar-send --new <nome> <cwd>`. Nunca "
+                      "`tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi; `headless` só "
+                      "claude/codex. Conta é a mesma desta sessão; pra outra conta use o CLI "
+                      "(`--conta`), que prepara a conta antes.")
+async def nova_sessao(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
+                      model: str | None = None, effort: str | None = None, permissao: str | None = None,
+                      headless: bool = False, read_only: bool = False) -> dict[str, Any]:
+    from app import api
+    await _eu(ctx)
+    if headless and provider not in ("claude", "codex"):
+        raise ToolError(f"headless só vale com provider claude ou codex (veio: {provider})")
+    try:
+        info = await api.create_session(api.CreateBody(
+            name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
+            permission_mode=permissao, headless=headless, read_only=read_only))
+    except HTTPException as e:
+        raise ToolError(_detalhe(e)) from e
+    return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless}
+
+
+VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "console",
+              "network", "text", "url", "shot", "close", "tab-list", "tab-new", "tab-switch", "tab-close")
+# Duas chamadas do mesmo turno não podem intercalar `click` e `snapshot`: o CLI serializa por
+# processo, aqui é uma trava por sessão.
+_travas_nav: dict[str, asyncio.Lock] = {}
+
+
+def _pasta_shots(sessao: str) -> Path:
+    return Path.home() / ".hangar" / "nav" / "shots" / re.sub(r"\W+", "-", sessao)
+
+
+async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) -> str:
+    if verbo not in VERBOS_NAV:
+        raise ToolError(f"verbo desconhecido: {verbo} (aceitos: {', '.join(VERBOS_NAV)})")
+    if verbo == "eval" and not args:
+        raise ToolError("eval precisa de um trecho JS")
+    if verbo == "shot":
+        # O shell grava onde mandarem; caminho nosso, estável, que o app do celular consegue servir.
+        pasta = _pasta_shots(sessao)
+        await asyncio.to_thread(pasta.mkdir, parents=True, exist_ok=True)
+        args = [str(pasta / f"{int(time.time() * 1000)}.png")]
+    try:
+        texto = await asyncio.to_thread(navshell.verbo, sessao, verbo, args, aba)
+    except navshell.ShellIndisponivel as e:
+        raise ToolError(str(e)) from e
+    if texto.startswith("erro:"):
+        raise ToolError(texto)
+    return texto
+
+
+@mcp.tool(description="Abre o navegador embutido desta sessão no app desktop do Hangar, como "
+                      "`hangar-preview open <url>`. O painel monta na tela do usuário: avise-o.")
+async def nav_abrir(ctx: Context, url: str) -> dict[str, Any]:
+    from app import api
+    eu = await _eu(ctx)
+    try:
+        await api.abrir_nav_sessao(eu, api.NavBody(url=url))
+    except HTTPException as e:
+        raise ToolError(_detalhe(e)) from e
+    return {"ok": True, "aviso": "a janela do usuário muda: o painel do navegador abre agora"}
+
+
+@mcp.tool(description="Um verbo do navegador embutido desta sessão (`hangar-preview <verbo>`). "
+                      "Verbos: snapshot (árvore com refs @eN), click/hover <ref>, fill <ref> <texto>, "
+                      "type <texto>, press <tecla>, wait [--text|--url] <valor>, eval <js> (só estado "
+                      "não-DOM, nunca pra clicar), console, network, text, url, shot (devolve o caminho "
+                      "do PNG), close, tab-list, tab-new <url>, tab-switch <id>, tab-close [id]. "
+                      "`aba` age numa aba sem trocar a que o usuário vê.")
+async def nav(ctx: Context, verbo: str, args: list[str] | None = None, aba: int | None = None) -> str:
+    eu = await _eu(ctx)
+    async with _travas_nav.setdefault(eu, asyncio.Lock()):
+        return await _verbo_nav(eu, verbo, list(args or []), aba)
+
+
+@mcp.tool(description="Vários verbos do navegador em sequência, como `hangar-preview batch`: para no "
+                      "primeiro que falhar e diz em qual. Cada passo é {verbo, args?, aba?}.")
+async def nav_lote(ctx: Context, passos: list[dict[str, Any]]) -> dict[str, Any]:
+    eu = await _eu(ctx)
+    feitos: list[str] = []
+    async with _travas_nav.setdefault(eu, asyncio.Lock()):
+        for i, p in enumerate(passos):
+            verbo = str(p.get("verbo") or "")
+            try:
+                feitos.append(await _verbo_nav(eu, verbo, [str(a) for a in p.get("args") or []], p.get("aba")))
+            except ToolError as e:
+                raise ToolError(f"parou no passo {i} ({verbo}): {e}\nfeitos antes: {json.dumps(feitos, ensure_ascii=False)}") from e
+    return {"feitos": feitos}
 
 
 # O gerenciador de sessões do SDK só roda UMA vez por instância: o sub-app nasce no lifespan.

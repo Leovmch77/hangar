@@ -7,6 +7,7 @@ prova: ~/.local/bin/hangar-mcp-headers ~/.claude.json
 destrutivo: false
 ---
 
-As sessões passam a ter as tools `quem_sou`, `sessoes` e `enviar` do MCP `hangar` (listar
-sessões e mandar recado sem passar pelo Bash). A atualização registra o servidor no Claude Code
+As sessões passam a ter o `hangar-send` e o `hangar-preview` como tools do MCP `hangar`
+(listar sessões, recado, grupo, pareamento, sessão nova e navegador embutido sem passar pelo
+Bash). A atualização registra o servidor no Claude Code
 de cada conta e no Codex; sessão já aberta só o vê depois de reconectar (`/mcp`) ou reabrir.

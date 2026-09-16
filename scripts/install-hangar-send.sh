@@ -79,7 +79,7 @@ BLOCK=$(cat <<'EOF'
 # Sessões-irmãs (hangar)
 
 - Outras sessões Claude vivas nesta máquina: `hangar-send --list` (nome, estado, cwd). Mandar recado: `hangar-send <sessao> "msg"` — chega como prompt lá (fila durável se ocupada). Referência completa e sempre atual dos comandos: `hangar-send --help`.
-- **MCP `hangar`** (quando as tools `quem_sou`/`sessoes`/`enviar` existirem na sessão): são o mesmo `hangar-send --list` e `hangar-send <sessao> "msg"` como tool tipada, sem Bash — prefira-as. O que não tem tool (`--new`, `--pair`, `--group`, navegador) continua no CLI. Sem as tools (sessão aberta antes do registro, Pi/omp/Kimi), tudo é CLI.
+- **MCP `hangar`** (quando as tools `quem_sou`/`sessoes`/`enviar`/`grupo`/`parear`/`desparear`/`nova_sessao`/`nav_abrir`/`nav`/`nav_lote` existirem na sessão): são o `hangar-send` e o `hangar-preview` como tool tipada, sem Bash — prefira-as; as regras abaixo valem igual. O que não tem tool (`--conta`, `folha`, `--sessao` de outra) continua no CLI. Sem as tools (sessão aberta antes do registro, Pi/omp/Kimi), tudo é CLI.
 - **Transporte:** use `SendMessage` quando a ferramenta existir e o alvo aparecer em `ListAgents`. Nos demais casos, use `hangar-send`, inclusive para criar/parear sessões, grupos e destinos remotos. Consulte `hangar-send --help` para flags e erros de entrega.
 - **Outro servidor:** recados e pareamento 1:1 usam `servidor::sessao`; `--group` continua local. Requer `backend/peers.json` e `CP_SERVER_ID`. Responda a `[de: servidor::sessao]` usando o endereço completo.
 - Prompt começando com `[de: <sessao>]` = recado 1:1 de outra sessão Claude, não do usuário. Tratar como informação/pedido do par; responder de volta via `hangar-send <sessao> "..."` SÓ se a mensagem pedir resposta (evita loop infinito).
