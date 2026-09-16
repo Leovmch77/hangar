@@ -47,6 +47,10 @@ function createSessionsStore() {
   const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const quedas = new Map<string, number>();
   const tentativas = new Map<string, number>();
+  // Quando cada stream deu o último sinal de vida (qualquer evento, inclusive o `ping` de 10s).
+  // É o que distingue stream vivo de stream ZUMBI na volta do segundo plano.
+  const ultimoSinal = new Map<string, number>();
+  const SEM_SINAL_MS = 20_000;
   // Agenda a re-tentativa de UM servidor com backoff. Usado pelo onerror E pelo watchdog — o
   // watchdog reconectando na hora deixava servidor PENDURADO (tailscale pra nó morto não recusa,
   // trava o socket) ciclando 25s/25s pra sempre e afogando os sockets do servidor bom no iOS.
@@ -119,7 +123,7 @@ function createSessionsStore() {
   function connect(list: Server[]) {
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
-        es.close(); streams.delete(id); slots.delete(id);
+        es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
         clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id); retryDelays.delete(id);
@@ -152,6 +156,7 @@ function createSessionsStore() {
         if (!jaContou && !intocavel(s)) { jaContou = true; registrarFalha(s.id); }
       };
       const arm = () => {
+        ultimoSinal.set(s.id, Date.now());
         clearTimeout(watchdogs.get(s.id));
         watchdogs.set(s.id, setTimeout(() => {
           falhou('silencio', WATCHDOG_MS);
@@ -291,6 +296,22 @@ function createSessionsStore() {
   // HORA — sem isto, o retry agendado pre-sleep deixava a lista "offline" por ate 60s com rede boa.
   function onVisibleKick() {
     if (document.visibilityState !== 'visible' || refs === 0) return;
+    // Stream ZUMBI: o iOS suspende o PWA, o socket morre sem `onerror` e o EventSource continua no
+    // mapa — como o `connect` só abre quem NÃO tem stream, ninguém o reabria, e o watchdog que
+    // pegaria isso não roda em segundo plano. O app ficava mudo com a rede perfeita até a pessoa
+    // religar a VPN (o que derruba o socket e finalmente dispara o erro). Medido em 16/09/2026:
+    // rota direta, ping respondendo, e zero pedido do celular ao backend por minutos.
+    const agora = Date.now();
+    for (const [id, es] of [...streams]) {
+      if (agora - (ultimoSinal.get(id) ?? 0) < SEM_SINAL_MS) continue;
+      const servidor = servers.find((x) => x.id === id);
+      if (servidor) registrarDiag({ evento: 'lista.reconectar', tela: 'lista',
+        codigo: 'stream_mudo' }, servidor.baseUrl);
+      es.close();
+      streams.delete(id);
+      clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
+      clearTimeout(primeiros.get(id)); primeiros.delete(id);
+    }
     for (const s of servers) if (!streams.has(s.id)) registrarDiag({
       evento: 'lista.reconectar', tela: 'lista', codigo: 'app_visivel' }, s.baseUrl);
     retryDelays.clear();
