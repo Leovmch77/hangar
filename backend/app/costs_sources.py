@@ -28,7 +28,7 @@ from app.config import list_config_dirs
 LOCAL = timezone(timedelta(hours=-3))
 PROJETO_DESCONHECIDO = "desconhecido"
 # Suba ao mudar o que `uso_codex` grava por rollout.
-_USO_CODEX_VERSAO = 1
+_USO_CODEX_VERSAO = 2
 _log = logging.getLogger("hangar.costs")
 # Raízes já avisadas: `coletar()` roda a cada abertura da tela de custos, e o aviso é um só.
 _AVISOU_RAIZ_UNICA: set[str] = set()

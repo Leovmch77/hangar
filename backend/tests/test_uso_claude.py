@@ -259,8 +259,9 @@ def test_contexto_mede_rendered_ou_content_e_ignora_stdout_de_hook(tmp_path):
     assert ctx["instructions"].ctx_chars == 1000
     pony = ctx["hook_success:SessionStart:startup · PONYTAIL MODE ACTIVE — level: full"]
     assert pony.ctx_chars == 40 and pony.plugin == "ponytail"
-    assert ctx["hook_success:PostToolUse:Edit"].ctx_chars == 0
-    assert ctx["hook_success:PostToolUse:Edit"].chamadas == 1
+    # Hook sem nada no contexto não é ocorrência — e contexto nunca soma em "chamadas".
+    assert "hook_success:PostToolUse:Edit" not in ctx
+    assert r.totals.chamadas == 0
     sug = ctx["hook_additional_context:UserPromptSubmit · [skill-suggester] Prompt casa com skills"]
     assert sug.ctx_chars == len("[skill-suggester] Prompt casa com skills\n- x") and sug.plugin == "skill-suggester"
     assert ctx["total_tokens_reminder"].ctx_chars == 90
@@ -463,6 +464,26 @@ def test_arquivo_de_outro_repositorio_usa_a_raiz_dele(tmp_path):
     fora = str(tmp_path / "wt" / "hangar-t1" / "frontend" / "x.ts")
     assert uso_areas.area_do_caminho(fora, cwd, uso_areas.regras_de(cwd)) == "front"
     assert uso_areas.area_do_caminho(str(tmp_path / "solto" / "a.md"), cwd, uso_areas.regras_de(cwd)) == "outros"
+
+
+def test_subagente_nao_e_sessao_e_periodo_anterior_compara_tokens(tmp_path):
+    def sessao(p, dia, i):
+        _escrever(p, [
+            {**_user("x", "p1", ts=f"{dia}T12:00:00Z")},
+            _assistant([{"type": "text", "text": "."}], f"m-{p.stem}", _usage(i=i), ts=f"{dia}T12:00:01Z"),
+        ])
+    sessao(tmp_path / "p" / "s1.jsonl", "2026-09-10", 100)
+    sessao(tmp_path / "p" / "s1" / "subagents" / "agent-a1.jsonl", "2026-09-10", 40)
+    sessao(tmp_path / "p" / "s0.jsonl", "2026-09-02", 70)               # semana anterior
+    agora = datetime(2026, 9, 10, 20, 0, tzinfo=uso_report.LOCAL)
+    # O histórico começa no meio da janela anterior: comparar mediria o que falta, não o uso.
+    assert uso_report.montar(ct.varrer_uso(tmp_path), [], "7d", now=agora).anterior is None
+    sessao(tmp_path / "p" / "s-velha.jsonl", "2026-08-20", 5)           # histórico cobre a janela
+    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "7d", now=agora)
+    assert (r.totals.sessions, r.totals.subagentes) == (1, 1)
+    assert r.totals.input == 100 + 40
+    assert r.anterior is not None and r.anterior.input == 70 and r.anterior.sessions == 1
+    assert uso_report.montar(ct.varrer_uso(tmp_path), [], "all", now=agora).anterior is None
 
 
 @pytest.mark.parametrize("caminho,esperado", [

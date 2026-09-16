@@ -62,6 +62,7 @@ class UsoLinha:
     ocupados: int = 0
     respostas: int = 0
     fonte: str = "claude"   # claude | codex — decide a tarifa no custo
+    subagente: bool = False  # transcript/rollout de subagente: não conta como sessão
     session_id: str = ""
     conta: str = ""     # identidade da conta (anthropic:<uuid>), aplicada depois do cache
 
@@ -456,6 +457,8 @@ class Acumulador:
                 if isinstance(s, dict) and isinstance(s.get("name"), str):
                     self._carregar(s["name"], "compactacao", _texto(s.get("content")), chamadas=0)
             return
+        if tipo.startswith("hook") and chars == 0:
+            return      # hook que não injetou nada não entrou no contexto: não é ocorrência
         if tipo.startswith("hook"):
             bruto = a.get("content")
             inicio = "".join(x if isinstance(x, str) else x.get("text", "") if isinstance(x, dict) else ""

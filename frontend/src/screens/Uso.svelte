@@ -143,7 +143,6 @@
   const tokensReais = (b: UsoBucket) => b.input + b.output + b.cache_write + b.cache_read;
   const ctxPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.ctx_tokens_est / b.chamadas : 0);
   const porSessao = (b: UsoBucket) => (b.sessions > 0 ? b.ctx_tokens_est / b.sessions : 0);
-  const totalImagens = $derived((report?.by_imagem ?? []).reduce((n, b) => n + b.chamadas, 0));
   const ocupadosSkills = $derived((report?.by_skill ?? []).reduce((n, b) => n + (b.ocupados_tokens_est ?? 0), 0));
   const ctxPorSessaoTotal = $derived(report && report.totals.sessions > 0
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
@@ -248,7 +247,7 @@
       return { dia, total: [...d.values()].reduce((n, v) => n + v, 0), partes: ordem.filter((a) => (d.get(a) ?? 0) > 0).map((a) => ({ area: a, v: d.get(a)! })) };
     });
     const padL = 6, padR = 6, padT = 8, padB = 20;
-    const W = Math.max(larguraAreaDia, 160), H = ALT;
+    const W = Math.max(larguraAreaDia, 160), H = ALT_TENDENCIA;
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const teto = Math.max(...lista.map((d) => d.total), 0) || 1;
     const passo = lista.length ? plotW / lista.length : plotW;
@@ -314,66 +313,35 @@
   let expandida = $state(false);
   $effect(() => { aba; expandida = false; });
 
-  // ── Gráfico principal: chamadas × custo (bolhas, log-log) ────────────────────
-  let larguraBolhas = $state(0);
-  let hoverBolha = $state<string | null>(null);
-  // Dois modos, uma medida cada: skills pelos tokens que ocuparam; agentes pelos tokens reais
-  // do transcript filho.
-  let modoBolhas = $state<'skills' | 'agentes'>('skills');
-  const medidaBolha = (b: UsoBucket) => (modoBolhas === 'skills' ? (b.ocupados_tokens_est ?? 0) : tokensReais(b));
-  const medidaPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? medidaBolha(b) / b.chamadas : 0);
-  const fmtMedida = (v: number) => (modoBolhas === 'skills' ? `≈ ${tok(v)}` : tok(v));
-  const bolhas = $derived.by(() => {
-    if (!report) return null;
-    const tipo: Aba = modoBolhas === 'skills' ? 'skill' : 'agente';
-    const itens = (modoBolhas === 'skills' ? report.by_skill : report.by_agente)
-      .filter((b) => b.chamadas > 0 && medidaBolha(b) > 0).map((b) => ({ b, tipo }));
-    if (!itens.length) return null;
-    const W = Math.max(larguraBolhas, 320), H = desktop ? 380 : 300;
-    const padL = 66, padR = 16, padT = 22, padB = 30;
-    const plotW = W - padL - padR, plotH = H - padT - padB;
-    const lx = itens.map(({ b }) => Math.log10(b.chamadas));
-    const ly = itens.map(({ b }) => Math.log10(medidaBolha(b)));
-    const x0 = Math.min(...lx) - 0.15, x1 = Math.max(...lx) + 0.15;
-    const y0 = Math.min(...ly) - 0.15, y1 = Math.max(...ly) + 0.15;
-    const sx = (v: number) => padL + ((v - x0) / (x1 - x0 || 1)) * plotW;
-    const sy = (v: number) => padT + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
-    const pcMax = Math.max(...itens.map(({ b }) => medidaPorChamada(b)));
-    const med = (a: number[]) => { const s = [...a].sort((p, q) => p - q); return s[Math.floor(s.length / 2)]; };
-    const mx = sx(med(lx)), my = sy(med(ly));
-    const pontos = itens.map(({ b, tipo }, i) => ({
-      b, tipo, x: sx(lx[i]), y: sy(ly[i]),
-      r: 4 + 14 * Math.sqrt(medidaPorChamada(b) / (pcMax || 1)),
-    }));
-    // Rótulo direto só nos que importam (3 maiores no total, 3 maiores por chamada), e nunca
-    // dois rótulos em cima um do outro: o segundo que cair a menos de 14px do primeiro fica só
-    // no tooltip. Perto da borda direita o texto vai pra esquerda da bolha.
-    const candidatos = [
-      ...[...pontos].sort((p, q) => medidaBolha(q.b) - medidaBolha(p.b)).slice(0, 3),
-      ...[...pontos].sort((p, q) => medidaPorChamada(q.b) - medidaPorChamada(p.b)).slice(0, 3),
-    ];
-    const rotulados = new Map<string, { x: number; y: number; fim: boolean; texto: string }>();
-    const maxRotulos = desktop ? 6 : 3;
-    for (const p of candidatos) {
-      if (rotulados.has(p.b.key) || rotulados.size >= maxRotulos) continue;
-      const colide = [...rotulados.values()].some((r) => Math.abs(r.y - p.y) < 14 && Math.abs(r.x - p.x) < 160);
-      if (colide) continue;
-      const fim = p.x > padL + plotW * 0.72;
-      const nome = p.b.label ?? p.b.key;
-      const texto = desktop || nome.length <= 22 ? nome : nome.slice(0, 20) + '…';
-      rotulados.set(p.b.key, { x: fim ? p.x - p.r - 4 : p.x + p.r + 4, y: p.y + 4, fim, texto });
-    }
-    const ticks = (v0: number, v1: number) => {
-      const out: number[] = [];
-      for (let e = Math.ceil(v0); e <= Math.floor(v1); e++) out.push(e);
-      return out;
-    };
-    return { W, H, padL, padT, plotW, plotH, mx, my, pontos, rotulados, xt: ticks(x0, x1).map((e) => ({ x: sx(e), v: 10 ** e })), yt: ticks(y0, y1).map((e) => ({ y: sy(e), v: 10 ** e })) };
+  // ── Topo: 4 números ──────────────────────────────────────────────────────────
+  const totalTokens = $derived(report ? tokensReais(report.totals) : 0);
+  // Variação contra a janela do mesmo tamanho logo antes; sem base (tudo, ou nada antes) não mostra.
+  const variacao = $derived.by(() => {
+    const antes = report?.anterior ? tokensReais(report.anterior) : 0;
+    return antes > 0 ? ((totalTokens - antes) / antes) * 100 : null;
   });
-  const bolhaHover = $derived(bolhas?.pontos.find((p) => p.b.key === hoverBolha) ?? null);
+  const tokensPorSessao = $derived(report && report.totals.sessions > 0 ? totalTokens / report.totals.sessions : 0);
+  const pctSkills = $derived(totalTokens > 0 ? (ocupadosSkills / totalTokens) * 100 : 0);
 
-  // ── Por dia e contexto (como antes) ──────────────────────────────────────────
+  // ── Rankings: barras horizontais, 8 itens + "outros" ─────────────────────────
+  const TOP_RANK = 8;
+  function ranking(lista: UsoBucket[], nome: (k: string) => string) {
+    const ord = [...lista].filter((b) => tokensReais(b) > 0).sort((a, b) => tokensReais(b) - tokensReais(a));
+    const total = ord.reduce((n, b) => n + tokensReais(b), 0) || 1;
+    const linhas = ord.slice(0, TOP_RANK).map((b) => ({ key: b.key, nome: nome(b.key), v: tokensReais(b) }));
+    const resto = ord.slice(TOP_RANK).reduce((n, b) => n + tokensReais(b), 0);
+    if (resto > 0) linhas.push({ key: '', nome: m.uso_outros_itens({ n: ord.length - TOP_RANK }), v: resto });
+    const max = Math.max(...linhas.map((l) => l.v), 1);
+    return linhas.map((l) => ({ ...l, frac: l.v / total, largura: l.v / max }));
+  }
+  const rankProjetos = $derived(ranking(report?.by_projeto ?? [], projectLabel));
+  const rankModelos = $derived(ranking(report?.by_modelo ?? [], (k) => k));
+  let avancadoAberto = $state(localStorage.getItem('cp_uso_avancado') === '1');
+  $effect(() => { localStorage.setItem('cp_uso_avancado', avancadoAberto ? '1' : '0'); });
+
+  // ── Por dia e contexto ───────────────────────────────────────────────────────
   const ALT = 140;
+  const ALT_TENDENCIA = 220;
   let larguraDia = $state(0);
   let hoverDia = $state<number | null>(null);
   let hoverCtx = $state<number | null>(null);
@@ -397,7 +365,6 @@
     };
   }
   const grafChamadas = $derived(colunas(dias, (b) => b.chamadas, larguraDia));
-  const grafTokens = $derived(colunas(dias, tokensReais, larguraDia));
   const grafSerie = $derived(colunas(serie, (b) => principal(b, abaAtual.medida), 300, 90));
   const diaCurto = (k: string) => k.slice(5).replace('-', '/');
 
@@ -433,7 +400,7 @@
  <div class="inner">
   <header class="topo">
     <div class="titulo">
-      <h1>{m.uso_titulo()}</h1>
+      <h1>{m.uso_painel_titulo()}</h1>
       <a class="link" href="#/costs">{m.uso_ir_custos()}</a>
     </div>
     <div class="toolbar">
@@ -524,47 +491,43 @@
     <p class="muted vazio">{m.uso_vazio()}</p>
   {:else}
     <dl class="numeros">
-      <div><dt>{m.uso_kpi_tokens()}</dt><dd>{tok(tokensReais(report.totals))}</dd></div>
-      <div title={m.uso_ocupados_nota()}><dt>{m.uso_kpi_ocupados_skills()}</dt><dd>≈ {tok(ocupadosSkills)}</dd></div>
-      <div><dt>{m.uso_kpi_chamadas()}</dt><dd>{tok(report.totals.chamadas)}</dd></div>
-      <div><dt>{m.uso_graf_ctx()}</dt><dd>≈ {tok(ctxPorSessaoTotal)}</dd></div>
-      <div><dt>{m.uso_kpi_imagens()}</dt><dd>{dec(totalImagens, 0)}</dd></div>
-      <div><dt>{m.uso_kpi_sessoes()}</dt><dd>{dec(report.totals.sessions, 0)}</dd></div>
+      <div>
+        <dt>{m.uso_kpi_tokens()}</dt><dd>{tok(totalTokens)}</dd>
+        {#if variacao !== null}<p class="sub">{variacao >= 0 ? '↑' : '↓'} {dec(Math.abs(variacao), 0)}% {m.uso_vs_anterior()}</p>{/if}
+      </div>
+      <div>
+        <dt>{m.uso_kpi_sessoes()}</dt><dd>{dec(report.totals.sessions, 0)}</dd>
+        {#if report.totals.subagentes}<p class="sub">{m.uso_mais_subagentes({ n: dec(report.totals.subagentes, 0) })}</p>{/if}
+      </div>
+      <div><dt>{m.uso_kpi_por_sessao()}</dt><dd>{tok(tokensPorSessao)}</dd></div>
+      <div title={m.uso_ocupados_nota()}>
+        <dt>{m.uso_kpi_skills_parte()}</dt><dd>{dec(pctSkills, 1)}%</dd>
+        <p class="sub">≈ {tok(ocupadosSkills)}</p>
+      </div>
     </dl>
 
     <div class="painel" class:com-detalhe={desktop && itemSelecionado}>
       <div class="principal">
-        <section class="bloco-graf areas">
+        <section class="bloco-graf tendencia">
           <div class="cab">
             <div>
-              <h2>{m.uso_graf_areas()}</h2>
-              <p class="hint">{m.uso_graf_areas_nota()}</p>
+              <h2>{m.uso_graf_tendencia()}</h2>
+              <p class="hint">{m.uso_graf_tendencia_nota()}</p>
             </div>
             <span class="total">{tok(areas.total)}</span>
           </div>
           {#if !areas.itens.length}
             <p class="muted">{m.uso_vazio_secao()}</p>
           {:else}
-            <div class="areas-corpo">
+            <ul class="legenda inline" aria-label={m.uso_graf_areas()}>
+              {#each areas.itens as s (s.b.key)}
+                <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
+                  <span class="swatch" style="background: {s.cor}"></span>{nomeArea(s.b.key)} <span class="dim">{dec(s.frac * 100, 0)}%</span>
+                </li>
+              {/each}
+            </ul>
+            <div>
               <div>
-                <div class="pilha" role="img" aria-label={m.uso_graf_areas()} onmouseleave={() => (hoverArea = null)}>
-                  {#each areas.itens as s (s.b.key)}
-                    <span class="seg-pilha" style="width: {s.frac * 100}%; background: {s.cor}" class:apagada={hoverArea !== null && hoverArea !== s.b.key}
-                          title="{nomeArea(s.b.key)}: {tok(tokensReais(s.b))}" onmouseenter={() => (hoverArea = s.b.key)} role="presentation"></span>
-                  {/each}
-                </div>
-                <ul class="legenda">
-                  {#each areas.itens as s (s.b.key)}
-                    <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
-                      <span class="swatch" style="background: {s.cor}"></span>
-                      <span class="lab">{nomeArea(s.b.key)}</span>
-                      <b>{tok(tokensReais(s.b))}</b><span class="dim">{dec(s.frac * 100, 0)}%</span>
-                    </li>
-                  {/each}
-                </ul>
-              </div>
-              <div class="mini">
-                <h3>{m.uso_graf_areas_dia()}</h3>
                 <div class="svgbox" bind:clientWidth={larguraAreaDia}>
                   <svg viewBox="0 0 {areaDias.W} {areaDias.H}" width={areaDias.W} height={areaDias.H} role="img" aria-label={m.uso_graf_areas_dia()}
                        onmouseleave={() => (hoverAreaDia = null)}>
@@ -594,71 +557,69 @@
           {/if}
         </section>
 
-        <section class="bloco-graf hero">
-          <div class="cab">
-            <div>
-              <h2>{m.uso_graf_bolhas()}</h2>
-              <p class="hint">{modoBolhas === 'skills' ? m.uso_graf_bolhas_nota_skills() : m.uso_graf_bolhas_nota_agentes()}</p>
-            </div>
-            <span class="seg" role="group" aria-label={m.uso_graf_bolhas()}>
-              <button aria-pressed={modoBolhas === 'skills'} onclick={() => (modoBolhas = 'skills')}>{m.uso_modo_skills()}</button>
-              <button aria-pressed={modoBolhas === 'agentes'} onclick={() => (modoBolhas = 'agentes')}>{m.uso_modo_agentes()}</button>
-            </span>
-          </div>
-          <div class="svgbox" bind:clientWidth={larguraBolhas}>
-            {#if bolhas}
-              <svg viewBox="0 0 {bolhas.W} {bolhas.H}" width={bolhas.W} height={bolhas.H} role="img" aria-label={m.uso_graf_bolhas()}
-                   onmouseleave={() => (hoverBolha = null)}>
-                <!-- quadrantes: linhas na mediana, rótulos nos cantos, em tinta de texto -->
-                <line x1={bolhas.mx} x2={bolhas.mx} y1={bolhas.padT} y2={bolhas.padT + bolhas.plotH} class="mediana" />
-                <line x1={bolhas.padL} x2={bolhas.padL + bolhas.plotW} y1={bolhas.my} y2={bolhas.my} class="mediana" />
-                <!-- rótulos de cima ficam ACIMA da área das bolhas, pra não brigar com o nome de um item no canto -->
-                <text x={bolhas.padL + 6} y={12} class="quad">{m.uso_quad_raras_pesadas()}</text>
-                <text x={bolhas.padL + bolhas.plotW - 6} y={12} text-anchor="end" class="quad">{m.uso_quad_freq_pesadas()}</text>
-                <text x={bolhas.padL + 6} y={bolhas.padT + bolhas.plotH - 6} class="quad">{m.uso_quad_raras_leves()}</text>
-                <text x={bolhas.padL + bolhas.plotW - 6} y={bolhas.padT + bolhas.plotH - 6} text-anchor="end" class="quad">{m.uso_quad_freq_leves()}</text>                {#each bolhas.xt as t (t.v)}
-                  {#if t.x < bolhas.padL + bolhas.plotW - 90}
-                    <text x={t.x} y={bolhas.H - 8} text-anchor="middle" class="tick">{dec(t.v, 0)}</text>
-                  {/if}
-                {/each}
-                {#each bolhas.yt as t (t.v)}
-                  <text x={bolhas.padL - 6} y={t.y + 3} text-anchor="end" class="tick">{tok(t.v)}</text>
-                {/each}
-                <text x={bolhas.padL + bolhas.plotW} y={bolhas.H - 8} text-anchor="end" class="eixo-nome">{m.uso_eixo_chamadas()}</text>
-                {#each bolhas.pontos as p (p.b.key)}
-                  <circle cx={p.x} cy={p.y} r={p.r} fill={p.tipo === 'skill' ? 'var(--chart-1)' : 'var(--chart-2)'}
-                          class="bolha" class:apagada={hoverBolha !== null && hoverBolha !== p.b.key}
-                          class:sel={selecionado?.key === p.b.key} />
-                  {#if bolhas.rotulados.get(p.b.key)}
-                    {@const r = bolhas.rotulados.get(p.b.key)!}
-                    <text x={r.x} y={r.y} text-anchor={r.fim ? 'end' : 'start'} class="rotulo">{r.texto}</text>
-                  {/if}
-                  <!-- alvo maior que a bolha -->
-                  <circle cx={p.x} cy={p.y} r={Math.max(p.r + 6, 14)} fill="transparent" role="presentation"
-                          onmouseenter={() => (hoverBolha = p.b.key)} onclick={() => { aba = p.tipo; selecionar(p.tipo, p.b.key); }} />
-                {/each}
-              </svg>
-              {#if bolhaHover}
-                <div class="tip" style="left: {Math.min(Math.max(bolhaHover.x, 90), bolhas.W - 90)}px; top: {Math.max(bolhaHover.y - bolhaHover.r - 54, 0)}px">
-                  <b>{bolhaHover.b.label ?? bolhaHover.b.key}</b>
-                  <span>{dec(bolhaHover.b.chamadas, 0)} {m.uso_graf_chamadas()} · {fmtMedida(medidaBolha(bolhaHover.b))} · {fmtMedida(medidaPorChamada(bolhaHover.b))} {m.uso_por_chamada()}</span>
-                </div>
+        <div class="linha-graf dois">
+          {#each [{ titulo: m.uso_top_projetos(), linhas: rankProjetos, filtro: 'projeto' as DimF },
+                  { titulo: m.uso_top_modelos(), linhas: rankModelos, filtro: 'modelo' as DimF }] as r (r.titulo)}
+            <section class="bloco-graf">
+              <div class="cab"><h2>{r.titulo}</h2></div>
+              {#if !r.linhas.length}
+                <p class="muted">{m.uso_vazio_secao()}</p>
+              {:else}
+                <ol class="rank">
+                  {#each r.linhas as l (l.key || l.nome)}
+                    <li>
+                      {#if l.key}
+                        <button class="rank-nome" title={m.uso_filtrar_por({ nome: l.nome })} onclick={() => setFiltro(r.filtro, [l.key])}>{l.nome}</button>
+                      {:else}
+                        <span class="rank-nome dim">{l.nome}</span>
+                      {/if}
+                      <span class="rank-barra"><i style="width: {l.largura * 100}%" class:resto={!l.key}></i></span>
+                      <b>{tok(l.v)}</b><span class="dim">{dec(l.frac * 100, 0)}%</span>
+                    </li>
+                  {/each}
+                </ol>
               {/if}
-            {:else}
-              <p class="muted">{m.uso_vazio_secao()}</p>
-            {/if}
-          </div>
-        </section>
+            </section>
+          {/each}
+        </div>
 
-        <div class="linha-graf">
+        <details class="avancado" bind:open={avancadoAberto}>
+        <summary>{m.uso_avancado()}</summary>
+        <div class="linha-graf tres">
           <section class="bloco-graf">
-            <div class="cab"><h2>{m.uso_graf_dia()}</h2></div>
+            <div class="cab">
+              <h2>{m.uso_graf_areas()}</h2>
+              <span class="total">{tok(areas.total)}</span>
+            </div>
+            {#if !areas.itens.length}
+              <p class="muted">{m.uso_vazio_secao()}</p>
+            {:else}
+              <div class="pilha" role="img" aria-label={m.uso_graf_areas()} onmouseleave={() => (hoverArea = null)}>
+                {#each areas.itens as s (s.b.key)}
+                  <span class="seg-pilha" style="width: {s.frac * 100}%; background: {s.cor}" class:apagada={hoverArea !== null && hoverArea !== s.b.key}
+                        title="{nomeArea(s.b.key)}: {tok(tokensReais(s.b))}" onmouseenter={() => (hoverArea = s.b.key)} role="presentation"></span>
+                {/each}
+              </div>
+              <ul class="legenda">
+                {#each areas.itens as s (s.b.key)}
+                  <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
+                    <span class="swatch" style="background: {s.cor}"></span>
+                    <span class="lab">{nomeArea(s.b.key)}</span>
+                    <b>{tok(tokensReais(s.b))}</b><span class="dim">{dec(s.frac * 100, 0)}%</span>
+                  </li>
+                {/each}
+              </ul>
+              <p class="hint">{m.uso_graf_areas_nota()}</p>
+            {/if}
+          </section>
+
+          <section class="bloco-graf">
+            <div class="cab"><h2>{m.uso_graf_chamadas_dia()}</h2></div>
             {#if !dias.length}
               <p class="muted">{m.uso_sem_dias()}</p>
             {:else}
-              <div class="duplo" bind:clientWidth={larguraDia}>
-                {#each [{ g: grafChamadas, titulo: m.uso_graf_chamadas(), fmt: (v: number) => tok(v), cor: 'var(--chart-1)' },
-                        { g: grafTokens, titulo: m.uso_graf_tokens(), fmt: (v: number) => tok(v), cor: 'var(--chart-2)' }] as p (p.titulo)}
+              <div bind:clientWidth={larguraDia}>
+                {#each [{ g: grafChamadas, titulo: m.uso_graf_chamadas(), fmt: (v: number) => dec(v, 0), cor: 'var(--chart-1)' }] as p (p.titulo)}
                   <div class="mini">
                     <h3>{p.titulo}</h3>
                     <div class="svgbox">
@@ -709,6 +670,7 @@
             </ul>
           </section>
         </div>
+        </details>
 
         <section class="ranking">
           <div class="abas" role="tablist">
@@ -887,24 +849,29 @@
   .cab h2 { font-size: var(--text-base); font-weight: 650; }
   .cab .hint { font-size: var(--text-xs); color: var(--text-secondary); max-width: 80ch; margin-top: 2px; }
   .cab .total { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-  .hero .svgbox { border-radius: var(--radius-sm); background: var(--surface-inset); }
-  .linha-graf { display: grid; grid-template-columns: 3fr 2fr; gap: var(--space-5); }
-  .areas-corpo { display: grid; grid-template-columns: 2fr 3fr; gap: var(--space-5); align-items: start; }
+  .linha-graf { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+  .linha-graf.tres { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .numeros .sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 2px; }
+  .tendencia .legenda.inline { flex-wrap: wrap; margin-bottom: var(--space-2); }
+  .rank { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .rank li { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) auto 3.5ch; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
+  .rank-nome { justify-self: stretch; min-width: 0; background: transparent; border: 0; padding: 0; font: inherit; color: var(--text-primary); text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button.rank-nome:hover { color: var(--accent); }
+  .rank-barra { height: 10px; border-radius: 4px; background: var(--surface-inset); overflow: hidden; }
+  .rank-barra > i { display: block; height: 100%; background: var(--chart-1); border-radius: 4px; }
+  .rank-barra > i.resto { background: var(--text-muted); }
+  .rank b { font-variant-numeric: tabular-nums; text-align: right; }
+  .rank .dim { text-align: right; font-variant-numeric: tabular-nums; }
+  .avancado { margin-bottom: var(--space-5); }
+  .avancado > summary { cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary); padding: var(--space-2) 0; margin-bottom: var(--space-2); }
+  .avancado > summary:hover { color: var(--text-primary); }
   .svgbox { position: relative; }
   .svgbox svg { display: block; max-width: 100%; height: auto; }
   .eixo { stroke: var(--border-default); stroke-width: 1; }
-  .mediana { stroke: var(--border-default); stroke-width: 1; stroke-dasharray: none; opacity: 0.8; }
   .tick { fill: var(--text-muted); font-size: 10px; }
-  .quad { fill: var(--text-muted); font-size: 11px; letter-spacing: 0.02em; text-transform: uppercase; }
-  .eixo-nome { fill: var(--text-muted); font-size: 10px; }
-  .rotulo { fill: var(--text-primary); font-size: 11px; pointer-events: none; }
-  .bolha { opacity: 0.85; stroke: var(--surface-inset); stroke-width: 2; transition: opacity 120ms; }
-  .bolha.apagada { opacity: 0.25; }
-  .bolha.sel { stroke: var(--text-primary); }
   .tip { position: absolute; transform: translateX(-50%); pointer-events: none; background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 4px 8px; font-size: var(--text-xs); display: flex; flex-direction: column; gap: 2px; white-space: nowrap; z-index: 2; }
   .tip b { font-variant-numeric: tabular-nums; }
   .tip span { color: var(--text-secondary); }
-  .duplo { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
   .mini h3 { font-size: var(--text-xs); color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: var(--space-1); }
   .pilha { display: flex; height: 20px; gap: 2px; border-radius: 4px; overflow: hidden; margin-bottom: var(--space-3); }
   .seg-pilha { display: block; height: 100%; min-width: 2px; transition: opacity 120ms; }
@@ -956,7 +923,7 @@
     .uso { padding-inline: var(--space-3); }
     .numeros { gap: var(--space-4); }
     .numeros dd { font-size: var(--text-base); }
-    .linha-graf, .duplo, .areas-corpo { grid-template-columns: 1fr; }
+    .linha-graf, .linha-graf.tres { grid-template-columns: 1fr; }
     .busca { min-width: 0; flex: 1 1 140px; }
     .ibar { width: 36px; }
     table.data td.nome { max-width: 24ch; }

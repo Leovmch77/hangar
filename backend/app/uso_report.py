@@ -27,9 +27,13 @@ _CHARS_POR_TOKEN_SKILL = 2.5
 
 
 def _zero() -> dict:
-    return {"sessions": set(), "chamadas": 0, "pedidas": 0, "ctx_chars": 0, "tokens_est": 0,
+    return {"sessions": set(), "subs": set(), "chamadas": 0, "pedidas": 0, "ctx_chars": 0, "tokens_est": 0,
             "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": "",
             "ocupados": 0, "respostas": 0, "regua": _CHARS_POR_TOKEN}
+
+
+def _sessao(b: dict, l: UsoLinha) -> None:
+    (b["subs"] if l.subagente else b["sessions"]).add(l.session_id)
 
 
 def _custo_real(l: UsoLinha) -> float:
@@ -73,7 +77,7 @@ def _custo_linha(l: UsoLinha, agentes: dict[str, dict]) -> float:
 
 
 def _bucket(key: str, v: dict) -> UsoBucket:
-    return UsoBucket(key=key, plugin=v["plugin"], sessions=len(v["sessions"]),
+    return UsoBucket(key=key, plugin=v["plugin"], sessions=len(v["sessions"]), subagentes=len(v["subs"]),
                      chamadas=v["chamadas"], pedidas=v["pedidas"], ctx_chars=v["ctx_chars"],
                      ctx_tokens_est=int(v["ctx_chars"] / v["regua"]) + v["tokens_est"],
                      input=v["input"], output=v["output"], cache_write=v["cache_write"],
@@ -101,14 +105,16 @@ _CAMPOS_TOKENS = ("input", "output", "cache_write", "cache_read")
 def _somar_em(b: dict, l: UsoLinha, agentes: dict[str, dict], do_item: bool = False) -> None:
     """Tokens reais do conjunto vêm das linhas de ÁREA, que somadas dão todo o uso do Claude
     sem repetição; `do_item` (série de uma skill/agente) soma os tokens do próprio item."""
-    b["sessions"].add(l.session_id)
+    _sessao(b, l)
     if l.tipo == "area":
         if not do_item:
             for k in _CAMPOS_TOKENS:
                 b[k] += getattr(l, k)
         return
     if _conta_no_total(l):
-        b["chamadas"] += l.chamadas
+        # Contexto injetado (instruções, lembretes, hooks) é ocorrência, não chamada.
+        if l.tipo != "contexto":
+            b["chamadas"] += l.chamadas
         b["ctx_chars"] += l.ctx_chars
         b["tokens_est"] += l.tokens_est
     b["cost"] += _custo_linha(l, agentes)
@@ -150,7 +156,7 @@ def _por_dia(uso: list[UsoLinha], agentes: dict[str, dict], do_item: bool = Fals
 
 
 def _somar_area(b: dict, l: UsoLinha) -> None:
-    b["sessions"].add(l.session_id)
+    _sessao(b, l)
     b["chamadas"] += l.chamadas
     for k in ("input", "output", "cache_write", "cache_read"):
         b[k] += getattr(l, k)
@@ -184,24 +190,36 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
            projeto: Filtro = None, modelo: Filtro = None,
            plugin: Filtro = None, foco: str | None = None) -> UsoReport:
     contas, projetos, modelos, plugins_f = _lista(conta), _lista(projeto), _lista(modelo), _lista(plugin)
+
+    def filtrar(linhas: list[UsoLinha]) -> list[UsoLinha]:
+        return [l for l in linhas
+                if (not contas or l.conta in contas)
+                and (not projetos or (l.cwd or PROJETO_DESCONHECIDO) in projetos)
+                and (not modelos or (pricing.canonizar(l.model) or "?") in modelos)
+                and (not plugins_f or l.plugin in plugins_f)]
+
     now = now or datetime.now(LOCAL)
     dias = costs.PERIODOS.get(period)
+    anterior = None
     if dias:
         corte = (now - timedelta(days=dias - 1)).date()
+        inicio_anterior = corte - timedelta(days=dias)
+        # Mesma janela, logo antes: é a comparação do número do topo ("↑ 12% vs antes"). Sem dado
+        # desde o começo dessa janela, a comparação mediria o histórico faltando, não o uso.
+        mais_antigo = min((l.dia for l in uso if l.dia), default="")
+        if mais_antigo and datetime.fromisoformat(mais_antigo).date() <= inicio_anterior:
+            antes = _zero()
+            for l in filtrar([l for l in uso if l.dia
+                              and inicio_anterior <= datetime.fromisoformat(l.dia).date() < corte]):
+                _somar_em(antes, l, {})
+            anterior = _bucket("anterior", antes)
         uso = [l for l in uso if l.dia and datetime.fromisoformat(l.dia).date() >= corte]
         tokens = [r for r in tokens if r.ts.date() >= corte]
     agentes = _custo_dos_agentes(tokens)
     por_conta = _por_dimensao(uso, agentes, lambda l: l.conta, rotulo_de_provedor)
     por_projeto = _por_dimensao(uso, agentes, lambda l: l.cwd or PROJETO_DESCONHECIDO)
     por_modelo = _por_dimensao(uso, agentes, lambda l: pricing.canonizar(l.model) or "?")
-    if contas:
-        uso = [l for l in uso if l.conta in contas]
-    if projetos:
-        uso = [l for l in uso if (l.cwd or PROJETO_DESCONHECIDO) in projetos]
-    if modelos:
-        uso = [l for l in uso if (pricing.canonizar(l.model) or "?") in modelos]
-    if plugins_f:
-        uso = [l for l in uso if l.plugin in plugins_f]
+    uso = filtrar(uso)
     # O custo do agente vem do transcript filho, que tem conta e projeto próprios: o filtro
     # vale pra ele também (o filho de outra conta não entra na soma desta).
     if contas or projetos:
@@ -216,7 +234,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
     for l in uso:
         b = por_tipo[l.tipo][l.nome]
         b["plugin"] = b["plugin"] or l.plugin
-        b["sessions"].add(l.session_id)
+        _sessao(b, l)
         b["chamadas"] += l.chamadas
         b["ctx_chars"] += l.ctx_chars
         b["tokens_est"] += l.tokens_est
@@ -240,7 +258,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         if l.plugin and l.tipo in ("skill", "contexto"):
             p = plugins[l.plugin]
             p["plugin"] = l.plugin
-            p["sessions"].add(l.session_id)
+            _sessao(p, l)
             p["chamadas"] += l.chamadas
             p["ctx_chars"] += l.ctx_chars
             p["ocupados"] += l.ocupados
@@ -267,6 +285,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
 
     return UsoReport(
         totals=_bucket("totals", total),
+        anterior=anterior,
         by_skill=_ordenar(por_tipo["skill"]),
         by_tool=_ordenar(por_tipo["tool"]),
         by_bash=_ordenar(por_tipo["bash"]),

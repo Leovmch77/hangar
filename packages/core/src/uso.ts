@@ -25,6 +25,8 @@ export interface UsoBucket {
   // Opcionais: servidor antigo da malha não manda.
   ocupados_tokens_est?: number;
   respostas?: number;
+  // Sessões de subagente, fora de `sessions`.
+  subagentes?: number;
 }
 
 export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_imagem'
@@ -45,6 +47,8 @@ export interface UsoFiltros {
 
 export interface UsoReport {
   totals: UsoBucket;
+  // Mesmos filtros, janela do mesmo tamanho logo antes; null em "tudo" ou servidor antigo.
+  anterior?: UsoBucket | null;
   by_skill: UsoBucket[];
   by_tool: UsoBucket[];
   by_bash: UsoBucket[];
@@ -89,7 +93,7 @@ export interface MergedUso {
 
 export const zeroUso = (key: string): UsoBucket => ({
   key, label: null, plugin: '', sessions: 0, chamadas: 0, pedidas: 0, ctx_chars: 0, ctx_tokens_est: 0,
-  input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0, ocupados_tokens_est: 0, respostas: 0,
+  input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0, ocupados_tokens_est: 0, respostas: 0, subagentes: 0,
 });
 
 // `?? 0` em tudo: servidor antigo da malha sem um campo não pode virar NaN na coluna inteira.
@@ -106,6 +110,7 @@ function somar(alvo: UsoBucket, b: Partial<UsoBucket>): void {
   alvo.cost += b.cost ?? 0;
   alvo.ocupados_tokens_est = (alvo.ocupados_tokens_est ?? 0) + (b.ocupados_tokens_est ?? 0);
   alvo.respostas = (alvo.respostas ?? 0) + (b.respostas ?? 0);
+  alvo.subagentes = (alvo.subagentes ?? 0) + (b.subagentes ?? 0);
 }
 
 function juntar(destino: Map<string, UsoBucket>, lista: UsoBucket[] | undefined): void {
@@ -125,6 +130,7 @@ const ordenar = (m: Map<string, UsoBucket>) =>
 
 export function mergeUso(results: UsoServerResult[], period: string): MergedUso {
   const totals = zeroUso('totals');
+  let anterior: UsoBucket | null = null;
   const dims = Object.fromEntries(USO_DIMS.map((d) => [d, new Map<string, UsoBucket>()])) as Record<UsoDim, Map<string, UsoBucket>>;
   const dias = new Map<string, UsoBucket>();
   const servidores: UsoBucket[] = [];
@@ -143,6 +149,7 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       return;
     }
     somar(totals, r.totals ?? {});
+    if (r.anterior) somar((anterior ??= zeroUso('anterior')), r.anterior);
     const bs = zeroUso(res.id ?? res.label ?? `#${i + 1}`);
     bs.label = res.label ?? null;
     somar(bs, r.totals ?? {});
@@ -157,6 +164,7 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
   return {
     report: {
       totals,
+      anterior,
       by_skill: ordenar(dims.by_skill),
       by_tool: ordenar(dims.by_tool),
       by_bash: ordenar(dims.by_bash),

@@ -35,7 +35,7 @@ from app.uso_claude import UsoLinha
 LOCAL = timezone(timedelta(hours=-3))
 
 # Suba isto ao mudar o formato do resumo, senão o cache velho é servido pra sempre.
-CACHE_VERSAO = 9
+CACHE_VERSAO = 10
 
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
@@ -221,4 +221,5 @@ def varrer(raiz: Path) -> list[UsoSessao]:
 
 def varrer_uso(raiz: Path) -> list[UsoLinha]:
     """Uso de tools/skills/contexto da mesma raiz — mesma passada, mesmo cache."""
-    return [replace(l, session_id=sid) for sid, le in _varrer(raiz) for l in le.uso]
+    return [replace(l, session_id=sid, subagente=_DIR_SUBAGENTE in Path(sid).parts)
+            for sid, le in _varrer(raiz) for l in le.uso]

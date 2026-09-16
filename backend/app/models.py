@@ -439,6 +439,7 @@ class UsoBucket(BaseModel):
     label: Optional[str] = None
     plugin: str = ""
     sessions: int = 0
+    subagentes: int = 0     # transcripts/rollouts de subagente, fora de `sessions`
     chamadas: int = 0
     # Das chamadas, quantas o USUÁRIO pediu: skill por barra (exato) ou agente com o prompt do
     # turno falando em agente (heurística). O resto foi o modelo sozinho.
@@ -458,6 +459,8 @@ class UsoBucket(BaseModel):
 
 class UsoReport(BaseModel):
     totals: UsoBucket = UsoBucket(key="totals")
+    # Mesmos filtros, janela do mesmo tamanho logo antes do período; None em "tudo".
+    anterior: Optional[UsoBucket] = None
     by_skill: list[UsoBucket] = []
     by_tool: list[UsoBucket] = []
     by_bash: list[UsoBucket] = []

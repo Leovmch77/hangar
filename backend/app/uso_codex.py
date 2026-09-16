@@ -72,6 +72,7 @@ class AcumuladorCodex(Acumulador):
     def __init__(self) -> None:
         super().__init__()
         self._sid = ""
+        self._subagente = False
         self._inicio: datetime | None = None
         self._herdado = False
         self._turno = ""
@@ -92,6 +93,8 @@ class AcumuladorCodex(Acumulador):
             ident = p.get("id") or p.get("session_id")
             if not self._sid:
                 self._sid, self._cwd, self._inicio = ident or "", p.get("cwd") or "", quando
+                fonte = p.get("source")
+                self._subagente = (isinstance(fonte, dict) and "subagent" in fonte) or fonte == "subagent"
             elif ident and ident != self._sid:
                 self._herdado = True               # o fork repete o histórico do pai
             return
@@ -177,7 +180,7 @@ class AcumuladorCodex(Acumulador):
                         "input_tokens": partes["input"][a], "output_tokens": partes["output"][a],
                         "cache_creation_input_tokens": partes["cache_write"][a],
                         "cache_read_input_tokens": partes["cache_read"][a]})
-        return sorted((replace(l, fonte="codex", session_id=self._sid) for l in self._linhas.values()),
+        return sorted((replace(l, fonte="codex", session_id=self._sid, subagente=self._subagente) for l in self._linhas.values()),
                       key=lambda l: (l.dia, l.tipo, l.nome, l.detalhe))
 
 
