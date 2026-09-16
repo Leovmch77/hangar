@@ -20,6 +20,9 @@ function dirLogs() {
 // Uma rotação só, na subida: passou do teto, o atual vira `.1` e o `.1` anterior some.
 // ponytail: sem rotação em voo; se o shell viver semanas logando muito, revisar.
 function instalar({ arquivo = path.join(dirLogs(), 'privado', 'shell.log'), console: con = console } = {}) {
+  // Preso ANTES da troca lá embaixo: é por onde as falhas deste arquivo saem. Usar `con.error`
+  // depois escreveria no stream que acabou de falhar, e a falha de escrita viraria laço.
+  const erroOriginal = con.error.bind(con);
   let stream;
   try {
     fs.mkdirSync(path.dirname(arquivo), { recursive: true });
@@ -27,8 +30,11 @@ function instalar({ arquivo = path.join(dirLogs(), 'privado', 'shell.log'), cons
     try { tamanho = fs.statSync(arquivo).size; } catch { /* ainda não existe */ }
     if (tamanho > TETO_BYTES) fs.renameSync(arquivo, `${arquivo}.1`);
     stream = fs.createWriteStream(arquivo, { flags: 'a', mode: 0o600 });
-    stream.on('error', () => {});
-  } catch {
+    stream.on('error', (e) => erroOriginal('[log] escrita no shell.log falhou:', e && e.message));
+  } catch (e) {
+    // Este arquivo existe pra que falha não passe calada — calar a falha DELE seria o pior caso:
+    // o log persistente some inteiro e nada no mundo diz por quê.
+    erroOriginal('[log] nao deu pra abrir o shell.log:', e && e.message);
     return null;   // disco/permissão: o console original segue valendo
   }
   for (const nivel of ['log', 'warn', 'error']) {

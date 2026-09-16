@@ -40,11 +40,16 @@ function valida(bruto: unknown): BlocoShell[][] | null {
 }
 
 function carregar(): BlocoShell[][] {
+  // O try cobre SÓ a leitura e o parse (modo privado, valor corrompido). A `valida` fica de fora
+  // de propósito: com ela dentro, um erro de programação nela seria indistinguível de "não tem
+  // nada salvo" e o arranjo que a pessoa montou resetaria sozinho, calado.
+  let bruto: unknown;
   try {
-    return valida(JSON.parse(localStorage.getItem(CHAVE) ?? 'null')) ?? copiar(ARRANJO_PADRAO);
+    bruto = JSON.parse(localStorage.getItem(CHAVE) ?? 'null');
   } catch {
     return copiar(ARRANJO_PADRAO);
   }
+  return valida(bruto) ?? copiar(ARRANJO_PADRAO);
 }
 
 const estado = $state({ colunas: carregar() });

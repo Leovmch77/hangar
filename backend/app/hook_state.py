@@ -28,6 +28,9 @@ _ESTADO_REGISTRO = {
     "shell": "idle",
 }
 
+# Status nativos que ja foram avisados no log — um aviso por status, nao por arquivo lido.
+_REGISTRO_DESCONHECIDOS: set[str] = set()
+
 
 class HookState:
     """Estado da LISTA por sessao, vindo dos hooks do Claude (state_hook.py grava marcadores).
@@ -96,9 +99,23 @@ class HookState:
             o = json.loads(path.read_text(encoding="utf-8"))
             sid, pid = str(o["sessionId"]), int(o["pid"])
             nativo = str(o["status"])
-            state = _ESTADO_REGISTRO[nativo]
             ts = float(o.get("statusUpdatedAt") or o["updatedAt"]) / 1000.0
-        except Exception:
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        # O mapa FORA do try, de proposito. Enquanto o `_ESTADO_REGISTRO[nativo]` ficava la dentro,
+        # um status novo da TUI (foi o caso do "shell") virava KeyError, caia no `except` e o
+        # registro inteiro era descartado EM SILENCIO -- a sessao parada aparecia como `working`
+        # porque o estado caia no fallback de raspar o pane. Acrescentar a chave conserta UM status;
+        # o proximo status novo repetiria o apagao sem uma linha de log dizendo por que. Um aviso por
+        # status desconhecido (nao por arquivo) basta pra achar isso em minutos, sem encher o log.
+        state = _ESTADO_REGISTRO.get(nativo)
+        if state is None:
+            if nativo not in _REGISTRO_DESCONHECIDOS:
+                _REGISTRO_DESCONHECIDOS.add(nativo)
+                _log.warning(
+                    "status nativo %r nao esta em _ESTADO_REGISTRO (%s) — a sessao cai no fallback "
+                    "do pane ate o mapa conhecer esse status", nativo, path,
+                )
             return
         prev = self.get_state(sid)
         self._registro[sid] = (state, ts, pid, nativo)

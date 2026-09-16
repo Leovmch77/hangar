@@ -42,6 +42,10 @@ test('diretorio que nao pode ser criado nao derruba o shell', () => {
   fs.writeFileSync(bloqueio, '');
   const con = consoleFalso();
   assert.equal(instalar({ arquivo: path.join(bloqueio, 'shell.log'), console: con }), null);
+  // A falha APARECE: este arquivo existe pra que erro não passe calado, e perder o log persistente
+  // inteiro em silêncio era o pior caso possível dele.
+  assert.equal(con.linhas[0][0], 'error');
+  assert.match(con.linhas[0][1][0], /nao deu pra abrir o shell\.log/);
   con.error('segue');
-  assert.equal(con.linhas.length, 1);
+  assert.equal(con.linhas.length, 2);
 });

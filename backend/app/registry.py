@@ -2157,6 +2157,8 @@ class SessionRegistry:
             self._label_cache[new] = self._label_cache.pop(old)
         if old in self._limit_cache:
             self._limit_cache[new] = self._limit_cache.pop(old)
+        if old in self._reply_cache:
+            self._reply_cache[new] = self._reply_cache.pop(old)
         # A fila duravel tambem e keyed por NOME -> move junto, senao a sessao renomeada perde as
         # entradas nao-drenadas e elas ficam orfas no nome velho (fantasma se reusarem `old`).
         PromptQueue(old).rename(new)
