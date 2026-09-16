@@ -2320,6 +2320,8 @@
   "modo_abrir_no_terminal_detalhe": "Same conversation in a terminal session (TUI)",
   "modo_continuar_sem_terminal_detalhe": "Same conversation without a terminal, the process starts now",
   "modo_so_ociosa": "Only while the session is idle",
+  "modo_confirmar_terminal_msg": "The session leaves headless mode and runs in a terminal window (tmux). The current process is stopped and the conversation resumes where it left off; anything in flight is lost.",
+  "modo_confirmar_sem_terminal_msg": "The session leaves the terminal and runs as a Hangar-managed process, with no window. The terminal is closed and the conversation resumes where it left off; anything in flight is lost.",
   "recarregar_sessao": "Reload",
   "recarregar_sessao_detalhe": "Restarts this session's process keeping the conversation; use when MCP, hooks or account config change",
   "recarregar_aviso_config": "This account's config changed after the process started (MCP, hooks or settings)",

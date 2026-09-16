@@ -18,6 +18,7 @@
   import { implementCodexPlan as requestCodexPlanImplementation } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
+  import ConfirmSheet from '../components/ConfirmSheet.svelte';
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
   import CodexLimitsSheet from '../components/CodexLimitsSheet.svelte';
   import ForwardSheet from '../components/ForwardSheet.svelte';
@@ -897,7 +898,14 @@
   // Troca terminal ⇄ sem terminal: só Claude e só parada (o backend confere de novo e dá 409).
   const modoTrocavel = $derived(sessionProvider === 'claude');
   let trocandoModo = $state(false);
-  async function trocarModo() {
+  // A troca reinicia o processo da sessão e muda onde ela vive; um clique no botão errado ("Abrir
+  // no terminal" ao lado de Navegador/Rodar) fazia isso sem aviso. Confirma antes, dizendo o quê.
+  let confirmaModo = $state(false);
+  function trocarModo() {
+    if (trocandoModo || currentState !== 'idle') return;
+    confirmaModo = true;
+  }
+  async function executarTrocaModo() {
     if (trocandoModo || currentState !== 'idle') return;
     trocandoModo = true;
     try {
@@ -3073,6 +3081,11 @@
              onRecarregar={recarregavel ? recarregar : undefined}
              recarregarBloqueado={currentState !== 'idle' || recarregando}
              {activityRunning} {activityBadge} />
+  <ConfirmSheet open={confirmaModo}
+                title={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
+                message={sessionHeadless ? m.modo_confirmar_terminal_msg() : m.modo_confirmar_sem_terminal_msg()}
+                confirmLabel={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
+                onConfirm={executarTrocaModo} onClose={() => (confirmaModo = false)} />
   <AttachmentsSheet open={anexosOpen} {sessionName} onClose={() => (anexosOpen = false)}
                     onUsarNoDitado={usarAnexoNoDitado} />
 

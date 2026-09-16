@@ -2320,6 +2320,8 @@
   "modo_abrir_no_terminal_detalhe": "Mesma conversa numa sessão de terminal (TUI)",
   "modo_continuar_sem_terminal_detalhe": "Mesma conversa sem terminal, o processo sobe já",
   "modo_so_ociosa": "Só com a sessão parada",
+  "modo_confirmar_terminal_msg": "A sessão sai do modo sem terminal e passa a rodar numa janela de terminal (tmux). O processo atual é encerrado e a conversa continua de onde parou; o que estiver em voo é perdido.",
+  "modo_confirmar_sem_terminal_msg": "A sessão sai do terminal e passa a rodar como processo do Hangar, sem janela. O terminal é fechado e a conversa continua de onde parou; o que estiver em voo é perdido.",
   "recarregar_sessao": "Recarregar",
   "recarregar_sessao_detalhe": "Reinicia o processo desta sessão mantendo a conversa; use quando MCP, hooks ou config da conta mudarem",
   "recarregar_aviso_config": "A config desta conta mudou depois que o processo subiu (MCP, hooks ou settings)",
