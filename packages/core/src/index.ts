@@ -10,6 +10,7 @@ export type { ApiEnv, EventSourceLike } from './apiEnv';
 export * from './types';
 export * from './history';
 export * from './costs';
+export * from './uso';
 export * from './loop';
 export * from './loopGuide';
 export * from './messageKeys';

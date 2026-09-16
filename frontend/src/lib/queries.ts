@@ -8,13 +8,13 @@
 import { QueryClient, queryOptions } from '@tanstack/svelte-query';
 import { getActiveId, type Server } from './auth';
 import {
-  fetchCostsForServer, getArchive, getEngines, getEnginesForServer, getOrqDetalheForServer,
-  getOrqGrupo, getOrqPolitica,
+  fetchCostsForServer, fetchUsoForServer, getArchive, getEngines, getEnginesForServer,
+  getOrqDetalheForServer, getOrqGrupo, getOrqPolitica,
   type ArchiveFolder, type EnginesResponse,
 } from '@hangar/core';
 import { listarCredenciais } from './credenciais';
 import type { OrqGrupo, OrqPolitica } from '@hangar/core';
-import type { ChatEvent, CostReport, OrqExecucao } from '@hangar/core';
+import type { ChatEvent, CostReport, OrqExecucao, UsoReport } from '@hangar/core';
 
 export const clienteQuery = new QueryClient({
   defaultOptions: {
@@ -93,6 +93,14 @@ export const motores = (alvo: Server | null) => queryOptions({
 export const custos = (s: Server, periodo: string) => queryOptions({
   queryKey: ['custos', s.id, periodo],
   queryFn: (): Promise<Partial<CostReport>> => fetchCostsForServer(s, periodo),
+  staleTime: 5 * 60_000,
+});
+
+// Uso de skills/tools/hooks de UMA máquina: mesma chave (máquina, período) e mesmo TTL do custo —
+// sai do mesmo cache de transcript no backend.
+export const uso = (s: Server, periodo: string) => queryOptions({
+  queryKey: ['uso', s.id, periodo],
+  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo),
   staleTime: 5 * 60_000,
 });
 

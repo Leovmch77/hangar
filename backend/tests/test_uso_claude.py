@@ -124,6 +124,7 @@ def test_skill_conta_pelo_tool_e_pela_barra_e_o_custo_vai_ate_a_troca_de_prompt(
     assert (c.input, c.output) == (50, 5)
     plugins = {b.key: b for b in r.by_plugin}
     assert plugins["acme"].chamadas == 1 and plugins["ecc"].chamadas == 1
+    assert (plugins["acme"].input, plugins["acme"].cost) == (200, pytest.approx(k.cost))
     assert r.totals.cost == pytest.approx(k.cost + c.cost)
 
 

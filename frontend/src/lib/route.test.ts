@@ -22,6 +22,10 @@ describe('parseHash ignora o eixo do painel de configuracoes', () => {
   it('#/costs com painel aberto continua sendo custos', () => {
     expect(parseHash('#/costs?config=avancado')).toEqual({ name: 'costs' });
   });
+  it('#/uso é a tela de uso de skills e tools', () => {
+    expect(parseHash('#/uso')).toEqual({ name: 'uso' });
+    expect(parseHash('#/uso?config=avancado')).toEqual({ name: 'uso' });
+  });
 });
 
 describe('parseHash sem painel segue como era', () => {

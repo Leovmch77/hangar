@@ -103,6 +103,10 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
             p["chamadas"] += l.chamadas
             p["ctx_chars"] += l.ctx_chars
             if l.tipo == "skill":
+                p["input"] += l.input
+                p["output"] += l.output
+                p["cache_write"] += l.cache_write
+                p["cache_read"] += l.cache_read
                 p["cost"] += _custo_skill(l)
         total["sessions"].add(l.session_id)
         # O total conta cada chamada uma vez: `bash`/`mcp` repetem a chamada de `tool`.

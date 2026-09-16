@@ -552,6 +552,14 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         run: () => (window.location.hash = '#/costs'),
       },
       {
+        id: 'uso',
+        title: m.nav_uso(),
+        detail: m.lista_uso_skills(),
+        keywords: ['uso', 'skills', 'tools', 'hooks', 'plugins', 'mcp'],
+        group: m.lista_ferramentas(),
+        run: () => (window.location.hash = '#/uso'),
+      },
+      {
         id: 'compare',
         title: m.lista_comparar_sessoes(),
         detail: m.lista_selecione_2(),
@@ -1064,6 +1072,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     <button type="button" role="menuitem" class="kebab-item" onclick={() => { closeKebab(); window.location.hash = '#/costs'; }}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>
       {m.nav_custos()}
+    </button>
+    <button type="button" role="menuitem" class="kebab-item" onclick={() => { closeKebab(); window.location.hash = '#/uso'; }}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16"/><path d="M6 16V9"/><path d="M11 16V4"/><path d="M16 16v-6"/></svg>
+      {m.nav_uso()}
     </button>
     <button type="button" role="menuitem" class="kebab-item" onclick={() => { toggleCompact(); closeKebab(); }}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>

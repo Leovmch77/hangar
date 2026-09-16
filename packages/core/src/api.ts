@@ -8,6 +8,7 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 import { registrar as registrarDiag, novoReq } from './diag';
 import { estaDesligado, registrarFalha, registrarSucesso } from './esfriamento';
 import type { CotaContaResumo } from './cotaResumo';
+import type { UsoReport } from './uso';
 import type {
   Atualizacao,
   SessionInfo,
@@ -387,7 +388,17 @@ export async function fetchCostsForServer(s: Server, period: string): Promise<Pa
   return res.json() as Promise<Partial<CostReport>>;
 }
 
-// 202 do /api/costs: a primeira leitura do histórico daquela máquina ainda está rodando no
+// Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
+export async function fetchUsoForServer(s: Server, period: string): Promise<Partial<UsoReport>> {
+  const res = await apiFetchRes(`/api/uso?period=${encodeURIComponent(period)}`, {
+    signal: AbortSignal.timeout(20000),
+  }, s);
+  if (res.status === 202) throw await Aquecendo.de(res);
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json() as Promise<Partial<UsoReport>>;
+}
+
+// 202 do /api/costs e /api/uso: a primeira leitura do histórico daquela máquina ainda está rodando no
 // backend (máquina nova varre 1 GB+ de transcript). Não é falha: a tela mostra o progresso e
 // pergunta de novo em alguns segundos.
 export class Aquecendo extends Error {
@@ -397,10 +408,11 @@ export class Aquecendo extends Error {
   }
 
   static async de(res: Response): Promise<Aquecendo> {
-    let j: { lidos?: unknown; total?: unknown } = {};
+    let j: unknown = {};
     try { j = await res.json(); } catch { /* corpo vazio ou não-JSON: progresso desconhecido */ }
+    const o = (j && typeof j === 'object' ? j : {}) as { lidos?: unknown; total?: unknown };
     const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-    return new Aquecendo(n(j.lidos), n(j.total));
+    return new Aquecendo(n(o.lidos), n(o.total));
   }
 }
 

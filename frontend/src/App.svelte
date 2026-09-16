@@ -17,6 +17,7 @@
   import SessionList from './screens/SessionList.svelte';
   import Orq from './screens/Orq.svelte';
   import Costs from './screens/Costs.svelte';
+  import Uso from './screens/Uso.svelte';
   import Archive from './screens/Archive.svelte';
   import Chat from './screens/Chat.svelte';
   import Compare from './screens/Compare.svelte';
@@ -516,6 +517,8 @@
     <Login {onLogin} onSyncLogin={onSyncLogin} />
   {:else if route.name === 'costs'}
     <Costs onBack={() => navigateTo('#/')} />
+  {:else if route.name === 'uso'}
+    <Uso onBack={() => navigateTo('#/')} />
   {:else if route.name === 'archive'}
     <!-- Remonta ao trocar de deep-link (busca -> outra conversa): reabre com o novo alvo. -->
     {#key route.deepLink ? `${route.deepLink.serverId}/${route.deepLink.project}/${route.deepLink.sessionId}` : ''}

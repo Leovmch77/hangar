@@ -6,6 +6,8 @@ export type Route =
   | { name: 'login' }
   | { name: 'sessions' }
   | { name: 'costs' }
+  // Uso (#/uso): irmã da tela de custos — skills, tools, hooks e agentes mais chamados.
+  | { name: 'uso' }
   | { name: 'archive'; deepLink?: { serverId: string; project: string; sessionId: string } }
   | { name: 'chat'; sessionName: string; serverId: string | null }
   // Quadro: sessionName/serverId preenchidos = overlay do card aberto por cima dele (#/board puro
@@ -52,6 +54,7 @@ export function parseHash(hash: string): Route {
   const compareMatch = path.match(/^\/compare\/(.+)$/);
   if (compareMatch) return { name: 'compare', ids: parseCompareIds(compareMatch[1]) };
   if (path === '/costs') return { name: 'costs' };
+  if (path === '/uso') return { name: 'uso' };
   // Deep-link da busca (feature #10): #/archive/<serverId>/<project>/<sid> abre a conversa arquivada
   // direto no servidor dono. #/archive puro segue no browser normal de pastas.
   const archiveDeep = path.match(/^\/archive\/([^/]+)\/([^/]+)\/([^/]+)$/);

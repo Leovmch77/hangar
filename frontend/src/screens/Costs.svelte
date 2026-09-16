@@ -152,7 +152,7 @@
   // progresso que elas reportaram. Não é falha: a faixa mostra a barra e a busca repete sozinha.
   let aquecendo = $state<Record<string, { label: string; lidos: number; total: number }>>({});
   const AQUECENDO_INTERVALO_MS = 3000;
-  const AQUECENDO_TENTATIVAS = 100; // ~5 min: acima disso vira "não respondeu", que já tem botão
+  const AQUECENDO_TENTATIVAS = 100; // ~5 min: acima disso cai no aviso de máquina sem resposta, que já tem botão
   const esperar = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
   async function buscarEsperandoAquecer(s: Server, p: Periodo, meu: number): Promise<Partial<CostReport>> {
@@ -698,7 +698,11 @@
 <div class="costs">
  <div class="inner">
   <div class="page-intro">
-    <div><h1>{m.custos_consumo_estimativa()}</h1><p>{m.custos_aviso_estimativa()}</p></div>
+    <div>
+      <h1>{m.custos_consumo_estimativa()}</h1>
+      <p>{m.custos_aviso_estimativa()}</p>
+      <a class="link-uso" href="#/uso">{m.custos_ir_uso()}</a>
+    </div>
     <button class="clear" disabled={loading || pendingServers > 0} onclick={() => load(period, servidoresAtivos, true)}>{m.custos_atualizar()}</button>
   </div>
   <div class="period-toolbar">
@@ -1412,6 +1416,7 @@
   .page-intro h1 { font-size: var(--text-xl); font-weight: 650; margin-bottom: var(--space-1); }
   .page-intro p { font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.5; max-width: 70ch; }
   .page-intro .clear { flex: none; }
+  .link-uso { font-size: var(--text-sm); color: var(--accent); }
   .period-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
   .filter-details { margin-bottom: var(--space-4); }
   .filter-details > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-sm); padding-block: var(--space-3); }
