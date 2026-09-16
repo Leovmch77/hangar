@@ -12,7 +12,7 @@ import { getActiveId, listServers, onServersChanged, type Server } from './auth'
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
-import { definirArmazem, definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
+import { avisarSemArmazem, definirArmazem, definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -71,8 +71,9 @@ function createSessionsStore() {
   // entra por aqui. Indisponível (modo privado), fica só em memória — o core avisa no diário.
   try {
     definirArmazem(globalThis.localStorage ?? null);
-  } catch {
+  } catch (e) {
     definirArmazem(null);
+    avisarSemArmazem(e);
   }
 
   function scheduleRetry(id: string) {

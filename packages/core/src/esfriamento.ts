@@ -45,6 +45,12 @@ let armazemAtual: ArmazemEsfriamento | null = null;
 export function definirArmazem(a: ArmazemEsfriamento | null): void {
   armazemAtual = a;
   carregado = false;   // armazém novo, estado gravado novo
+  // Marca feita ANTES da injeção (só em memória) não pode se perder: funde com o que está
+  // gravado e persiste — `registrarFalha` só grava na transição, não gravaria de novo.
+  if ([...estados.values()].some((e) => e.desligado)) {
+    carregar();
+    gravar();
+  }
 }
 
 function armazem(): ArmazemEsfriamento | null {
@@ -54,9 +60,16 @@ function armazem(): ArmazemEsfriamento | null {
 function carregar(): void {
   if (carregado) return;
   carregado = true;
+  let bruto: string | null | undefined;
   try {
-    const bruto = armazem()?.getItem(CHAVE);
-    if (!bruto) return;
+    bruto = armazem()?.getItem(CHAVE);
+  } catch (e) {
+    // Armazém que existe mas não responde (modo privado): é "sem armazém", não conteúdo inválido.
+    avisarSemArmazem(e);
+    return;
+  }
+  if (!bruto) return;
+  try {
     const ids: unknown = JSON.parse(bruto);
     if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') estados.set(id, { desligado: true });
   } catch (e) {
@@ -75,11 +88,15 @@ function gravar(): void {
     // Cota cheia ou modo privado: o estado segue valendo em memória nesta sessão, e NÃO sobrevive
     // ao recarregamento — no iPhone é exatamente o caso que a feature existe pra cobrir. Uma vez
     // por sessão no diário, pra a volta das tentativas ter causa.
-    if (!avisouArmazem) {
-      avisouArmazem = true;
-      registrarDiag({ evento: 'esfriamento.sem_armazem', nivel: 'aviso', detalhe: e instanceof Error ? e.message : String(e) });
-    }
+    avisarSemArmazem(e);
   }
+}
+
+/** Uma vez por sessão: o armazém está indisponível e a marca não sobrevive ao recarregamento. */
+export function avisarSemArmazem(e: unknown): void {
+  if (avisouArmazem) return;
+  avisouArmazem = true;
+  registrarDiag({ evento: 'esfriamento.sem_armazem', nivel: 'aviso', detalhe: e instanceof Error ? e.message : String(e) });
 }
 
 /** Este servidor está marcado como desligado (e portanto não deve ser procurado)? */

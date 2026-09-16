@@ -46,6 +46,22 @@ describe('servidor desligado', () => {
     expect(estaDesligado('a')).toBe(false);
   });
 
+  it('marca feita antes de o armazém chegar é gravada na injeção', () => {
+    const guardado = new Map<string, string>();
+    registrarFalha('pc');   // ainda sem armazém
+    definirArmazem({
+      getItem: (k: string) => guardado.get(k) ?? null,
+      setItem: (k: string, v: string) => void guardado.set(k, v),
+      removeItem: (k: string) => void guardado.delete(k),
+    });
+    try {
+      expect(guardado.get('hangar_servidores_desligados')).toContain('pc');
+      expect(estaDesligado('pc')).toBe(true);
+    } finally {
+      definirArmazem(null);
+    }
+  });
+
   it('a marca sobrevive ao recarregamento do app', () => {
     // O iOS descarrega e recarrega o PWA sozinho; com o estado só em memória, cada retomada
     // recomeçava a varredura — foi o que impediu as tentativas de chegarem a zero.
