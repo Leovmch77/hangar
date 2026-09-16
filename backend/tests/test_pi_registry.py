@@ -447,15 +447,18 @@ def test_create_claude_still_seeds_the_same_path(tmp_path, monkeypatch):
     from unittest.mock import patch
     reg = registry.SessionRegistry(projects_dir=tmp_path)
     registry.SessionRegistry._jsonl_cache.pop("cc", None)
+    # O modo de permissão entra na criação (modo da conta, ou o padrão do app quando ela não
+    # define): fixado aqui pra não depender do settings.json de quem roda a suíte.
     with patch.object(registry.tmux, "has_session", return_value=False), \
          patch.object(registry.tmux, "new_session", return_value=True) as ns, \
          patch.object(registry, "_pretrust_cwd") as pt, \
+         patch.object(registry.modo_permissao, "modo_da_conta", return_value="bypassPermissions"), \
          patch.object(registry.uuid, "uuid4", return_value=_UUID_PI):
         info = reg.create("cc", "/home/u/p")
     esperado = str(tmp_path / registry.sanitize_cwd("/home/u/p") / f"{_UUID_PI}.jsonl")
     assert info.jsonl == esperado
     assert registry.SessionRegistry._jsonl_cache["cc"] == esperado
-    assert ns.call_args[0][2] == f"claude --session-id {_UUID_PI}"
+    assert ns.call_args[0][2] == f"claude --session-id {_UUID_PI} --permission-mode bypassPermissions"
     pt.assert_called_once_with("/home/u/p", None)
 
 

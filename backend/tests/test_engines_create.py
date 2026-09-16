@@ -186,11 +186,13 @@ def test_resume_do_arquivo_aceita_motor(tmp_path, monkeypatch):
 
 
 def test_create_com_escolha_poe_modelo_e_esforco_no_comando(tmp_path, monkeypatch):
-    # A flag do modelo chega ao claude; o uuid é aleatório, então confere por prefixo.
+    # A flag do modelo chega ao claude; o uuid é aleatório, então confere por prefixo. O modo de
+    # permissão vem da conta na criação (fixado aqui pra não ler o settings.json de quem roda).
     visto = {}
+    monkeypatch.setattr(reg.modo_permissao, "modo_da_conta", lambda cfg: "acceptEdits")
     _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), model="k3-256k", effort="high")
-    assert visto["command"].startswith(
-        "claude --session-id ") and visto["command"].endswith("--model k3-256k --effort high")
+    assert visto["command"].startswith("claude --session-id ")
+    assert visto["command"].endswith("--model k3-256k --effort high --permission-mode acceptEdits")
 
 
 def test_create_com_motor_e_escolha_remonta_o_prefixo_com_modelo_e_janela(tmp_path, monkeypatch):
