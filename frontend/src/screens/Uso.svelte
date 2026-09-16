@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import NavBar from '../components/NavBar.svelte';
+  import Select from '../components/Select.svelte';
   import { listServers, onServersChanged, type Server } from '../lib/auth';
   import { clienteQuery, uso } from '../lib/queries';
   import { mergeUso, Aquecendo, type UsoServerResult, type MergedUso, type UsoBucket, type UsoReport } from '@hangar/core';
@@ -56,10 +57,18 @@
   const AQUECENDO_INTERVALO_MS = 3000;
   const AQUECENDO_TENTATIVAS = 100;
   const esperar = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-  async function buscarEsperandoAquecer(s: Server, p: Periodo, meu: number): Promise<Partial<UsoReport>> {
+  // Filtro por conta é do SERVIDOR (`?conta=`): a lista de contas vem no próprio relatório
+  // (`by_conta`, sempre inteira), e trocar a conta refaz a busca com outra chave de cache.
+  let conta = $state('');
+  // Última lista de contas vista: some do relatório filtrado? Não — o backend manda inteira;
+  // mas uma máquina antiga da malha não manda, e o seletor não pode sumir enquanto se filtra.
+  let contasVistas = $state<UsoBucket[]>([]);
+  const rotuloConta = (b: UsoBucket) => b.label ?? b.key;
+
+  async function buscarEsperandoAquecer(s: Server, p: Periodo, c: string, meu: number): Promise<Partial<UsoReport>> {
     for (let tentativa = 0; ; tentativa++) {
       try {
-        const r = await clienteQuery.fetchQuery(uso(s, p));
+        const r = await clienteQuery.fetchQuery(uso(s, p, c));
         const { [s.id]: _, ...resto } = aquecendo;
         aquecendo = resto;
         return r;
@@ -76,30 +85,34 @@
   }
 
   let geracao = 0;
-  async function load(p: Periodo, alvo: Server[], forcar = false) {
+  async function load(p: Periodo, c: string, alvo: Server[], forcar = false) {
     const meu = ++geracao;
     loading = true;
     pendingServers = alvo.length;
     if (forcar) await clienteQuery.invalidateQueries({ queryKey: ['uso'] });
     const results: UsoServerResult[] = [];
+    const aplicar = () => {
+      merged = mergeUso(results, p);
+      if (merged.report.by_conta.length) contasVistas = merged.report.by_conta;
+    };
     await Promise.all(
       alvo.map(async (s) => {
         let result: UsoServerResult;
-        try { result = { report: await buscarEsperandoAquecer(s, p, meu), label: s.label, id: s.id }; }
+        try { result = { report: await buscarEsperandoAquecer(s, p, c, meu), label: s.label, id: s.id }; }
         catch { result = { report: null, label: s.label, id: s.id }; }
         if (meu !== geracao) return;
         results.push(result);
         pendingServers -= 1;
-        merged = mergeUso(results, p);
+        aplicar();
         if (result.report || pendingServers === 0) loading = false;
       }),
     );
     if (meu !== geracao) return;
-    merged = mergeUso(results, p);
+    aplicar();
     loading = false;
   }
   const chaveAtivos = $derived(servidoresAtivos.map((s) => `${s.id}|${s.baseUrl}|${s.token}`).join('\n'));
-  $effect(() => { const p = period; chaveAtivos; load(p, untrack(() => servidoresAtivos)); });
+  $effect(() => { const p = period; const c = conta; chaveAtivos; load(p, c, untrack(() => servidoresAtivos)); });
 
   const report = $derived(merged.report);
   const rate = $derived(report.usd_brl ?? null);
@@ -144,7 +157,7 @@
       <p>{m.uso_aviso()}</p>
       <a class="link" href="#/costs">{m.uso_ir_custos()}</a>
     </div>
-    <button class="clear" disabled={loading || pendingServers > 0} onclick={() => load(period, servidoresAtivos, true)}>{m.custos_atualizar()}</button>
+    <button class="clear" disabled={loading || pendingServers > 0} onclick={() => load(period, conta, servidoresAtivos, true)}>{m.custos_atualizar()}</button>
   </div>
   <div class="period-toolbar">
     <span class="seg" role="group" aria-label={m.custos_periodo()}>
@@ -157,6 +170,14 @@
       <button aria-pressed={currency === 'BRL'} onclick={() => setCurrency('BRL')}
         disabled={!rate} title={rate ? undefined : m.custos_cotacao_indisponivel()}>R$</button>
     </span>
+    {#if contasVistas.length > 1 || conta}
+      <span class="conta">
+        <Select ariaLabel={m.uso_conta()} value={conta}
+          opcoes={[{ value: '', label: m.custos_todas_n({ n: contasVistas.length }) },
+                   ...contasVistas.map((b) => ({ value: b.key, label: rotuloConta(b), title: b.key, hint: dec(b.chamadas, 0) }))]}
+          onchange={(v) => (conta = v)} />
+      </span>
+    {/if}
     {#if servidores.length > 1}
       <button class="chip" aria-expanded={mostrarServidores} onclick={() => (mostrarServidores = !mostrarServidores)}>
         {m.custos_servidores()}: {m.custos_de_servidores({ n: servidoresAtivos.length, m: servidores.length })}
@@ -187,7 +208,7 @@
         {merged.mismatched.length === 1 ? m.custos_fora_periodo_1() : m.custos_fora_periodo({ n: merged.mismatched.length })}
         ({merged.mismatched.join(', ')}).
       {/if}
-      <button class="retry" onclick={() => load(period, servidoresAtivos, true)}>{m.config_server_tentar_de_novo()}</button>
+      <button class="retry" onclick={() => load(period, conta, servidoresAtivos, true)}>{m.config_server_tentar_de_novo()}</button>
     </p>
   {/if}
 
@@ -279,6 +300,7 @@
   .page-intro .clear { flex: none; }
   .link { font-size: var(--text-sm); color: var(--accent); }
   .period-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); align-items: center; }
+  .conta { min-width: 220px; }
   .seg { display: inline-flex; border: 1px solid var(--border-default); border-radius: var(--radius-sm); overflow: hidden; }
   .seg button {
     background: transparent; border: 0; border-right: 1px solid var(--border-default);

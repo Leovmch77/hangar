@@ -3185,6 +3185,7 @@
   "uso_col_media": "≈ tok / session",
   "uso_col_tokens": "real tokens",
   "uso_col_custo": "cost",
+  "uso_conta": "account",
   "uso_vazio": "No usage in this period.",
   "uso_vazio_secao": "nothing here in this period",
   "uso_mostrar_mais": "show more ({n})",

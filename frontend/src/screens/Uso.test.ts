@@ -8,7 +8,7 @@ import Uso from './Uso.svelte';
 
 vi.mock('../components/NavBar.svelte', () => ({ default: createRawSnippet(() => ({ render: () => '<nav></nav>' })) }));
 vi.mock('../lib/queries', () => ({
-  uso: (server: { id: string }, period: string) => ({ id: server.id, period }),
+  uso: (server: { id: string }, period: string, conta = '') => ({ id: server.id, period, conta }),
   clienteQuery: { fetchQuery: vi.fn(), invalidateQueries: vi.fn(async () => {}) },
 }));
 
@@ -73,6 +73,37 @@ it('202 "aquecendo" mostra o progresso e repergunta até o dado chegar', async (
     expect(target.querySelector('.aquecendo')).toBeNull();
     expect(target.querySelector('.overview')?.textContent).toContain('120');
   } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
+});
+
+it('escolher uma conta refaz a busca com a conta e mantém a lista inteira no seletor', async () => {
+  localStorage.clear();
+  localStorage.setItem('cp_servers', JSON.stringify([{ id: 'a', label: 'A', baseUrl: 'https://a.test', token: 't' }]));
+  const contas = [
+    { ...zeroUso('anthropic:1'), label: 'um@x', sessions: 2, chamadas: 50 },
+    { ...zeroUso('anthropic:2'), label: 'dois@x', sessions: 1, chamadas: 10 },
+  ];
+  const pedidos: string[] = [];
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    const { conta } = query as unknown as { conta: string };
+    pedidos.push(conta);
+    return Promise.resolve({ ...report('30d'), by_conta: contas, conta: conta || null }) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Uso, { target, props: { onBack: vi.fn() } });
+  try {
+    await settle();
+    // O gatilho do Select é o próprio combobox; a lista de opções sai por portal no body.
+    const select = target.querySelector(`button[aria-label="${m.uso_conta()}"]`) as HTMLButtonElement;
+    expect(select).not.toBeNull();
+    expect(select.textContent).toContain(m.custos_todas_n({ n: 2 }));
+    select.click();
+    await settle();
+    const opcao = [...document.querySelectorAll('[role="option"]')].find((b) => b.textContent?.includes('dois@x')) as HTMLElement;
+    opcao.click();
+    await settle();
+    expect(pedidos.at(-1)).toBe('anthropic:2');
+    expect(select.textContent).toContain('dois@x');
+  } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 
 it('sem uso no período mostra o vazio, não a tabela', async () => {

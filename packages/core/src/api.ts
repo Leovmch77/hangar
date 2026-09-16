@@ -389,8 +389,9 @@ export async function fetchCostsForServer(s: Server, period: string): Promise<Pa
 }
 
 // Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
-export async function fetchUsoForServer(s: Server, period: string): Promise<Partial<UsoReport>> {
-  const res = await apiFetchRes(`/api/uso?period=${encodeURIComponent(period)}`, {
+export async function fetchUsoForServer(s: Server, period: string, conta = ''): Promise<Partial<UsoReport>> {
+  const q = `period=${encodeURIComponent(period)}` + (conta ? `&conta=${encodeURIComponent(conta)}` : '');
+  const res = await apiFetchRes(`/api/uso?${q}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);

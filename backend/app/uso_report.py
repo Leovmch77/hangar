@@ -9,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from app import costs
-from app.costs_sources import LOCAL, UsageRow, coletar_uso
+from app.costs_sources import LOCAL, UsageRow, coletar_uso, rotulo_de_provedor
 from app.models import Applied, UsoBucket, UsoReport
 from app.uso_claude import UsoLinha
 
@@ -66,14 +66,38 @@ def _ordenar(agg: dict[str, dict]) -> list[UsoBucket]:
                   key=lambda b: (-b.cost, -b.ctx_chars, -b.chamadas, b.key))
 
 
+def _por_conta(uso: list[UsoLinha]) -> list[UsoBucket]:
+    """Totais por conta, do PERÍODO inteiro e sem o filtro de conta: é a lista do seletor, e
+    a conta filtrada precisa continuar aparecendo nela."""
+    agg: dict[str, dict] = defaultdict(_zero)
+    for l in uso:
+        b = agg[l.conta]
+        b["sessions"].add(l.session_id)
+        if l.tipo in ("tool", "skill", "agente", "contexto"):
+            b["chamadas"] += l.chamadas
+            b["ctx_chars"] += l.ctx_chars
+        if l.tipo == "skill":
+            b["cost"] += _custo_skill(l)
+    out = []
+    for k, v in agg.items():
+        b = _bucket(k, v)
+        b.label = rotulo_de_provedor(k)
+        out.append(b)
+    return sorted(out, key=lambda b: (-b.chamadas, b.key))
+
+
 def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
-           now: datetime | None = None) -> UsoReport:
+           now: datetime | None = None, conta: str | None = None) -> UsoReport:
     now = now or datetime.now(LOCAL)
     dias = costs.PERIODOS.get(period)
     if dias:
         corte = (now - timedelta(days=dias - 1)).date()
         uso = [l for l in uso if l.dia and datetime.fromisoformat(l.dia).date() >= corte]
         tokens = [r for r in tokens if r.ts.date() >= corte]
+    por_conta = _por_conta(uso)
+    if conta:
+        uso = [l for l in uso if l.conta == conta]
+        tokens = [r for r in tokens if r.account_id == conta]
     agentes = _custo_dos_agentes(tokens)
 
     por_tipo: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_zero))
@@ -125,12 +149,15 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         by_agente=_ordenar(por_tipo["agente"]),
         by_contexto=_ordenar(por_tipo["contexto"]),
         by_plugin=_ordenar(plugins),
+        by_conta=por_conta,
         applied=Applied(period=period),
+        conta=conta or None,
         usd_brl=costs.usd_brl(),
     )
 
 
-def report(period: str = "all", now: datetime | None = None) -> UsoReport:
+def report(period: str = "all", now: datetime | None = None,
+           conta: str | None = None) -> UsoReport:
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou."""
     uso, tokens = coletar_uso()
-    return montar(uso, tokens, period=period, now=now)
+    return montar(uso, tokens, period=period, now=now, conta=conta)

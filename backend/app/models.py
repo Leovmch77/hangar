@@ -458,6 +458,10 @@ class UsoReport(BaseModel):
     by_agente: list[UsoBucket] = []
     by_contexto: list[UsoBucket] = []
     by_plugin: list[UsoBucket] = []
+    # Contas (anthropic:<uuid>, label = e-mail) do período, SEM o filtro de conta: é a lista do
+    # seletor. `conta` ecoa o filtro aplicado (None = todas).
+    by_conta: list[UsoBucket] = []
+    conta: Optional[str] = None
     applied: Optional[Applied] = None
     usd_brl: Optional[float] = None
 

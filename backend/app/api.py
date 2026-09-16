@@ -1822,12 +1822,13 @@ def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
 
 
 @app.get("/api/uso", dependencies=[Depends(require_auth)], response_model=UsoReport)
-def uso_endpoint(period: str = "all"):
-    """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs."""
+def uso_endpoint(period: str = "all", conta: str = ""):
+    """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs.
+    `conta` = identidade `anthropic:<uuid>` de `by_conta`; vazio = todas."""
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
     try:
-        return uso_report.report(period=period)
+        return uso_report.report(period=period, conta=conta or None)
     except costs_sources.Aquecendo as e:
         return _aquecendo(e)
 

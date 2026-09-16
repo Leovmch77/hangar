@@ -21,8 +21,8 @@ export interface UsoBucket {
   cost: number;
 }
 
-export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_plugin';
-export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_plugin'];
+export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_plugin' | 'by_conta';
+export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_plugin', 'by_conta'];
 
 export interface UsoReport {
   totals: UsoBucket;
@@ -33,6 +33,9 @@ export interface UsoReport {
   by_agente: UsoBucket[];
   by_contexto: UsoBucket[];
   by_plugin: UsoBucket[];
+  // Contas do período SEM o filtro de conta (lista do seletor); `conta` ecoa o filtro aplicado.
+  by_conta: UsoBucket[];
+  conta?: string | null;
   applied?: Applied | null;
   usd_brl?: number | null;
 }
@@ -119,6 +122,7 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       by_agente: ordenar(dims.by_agente),
       by_contexto: ordenar(dims.by_contexto),
       by_plugin: ordenar(dims.by_plugin),
+      by_conta: [...dims.by_conta.values()].sort((a, b) => b.chamadas - a.chamadas || a.key.localeCompare(b.key)),
       by_servidor: servidores.sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas),
       applied: { period },
       usd_brl: usdBrl,

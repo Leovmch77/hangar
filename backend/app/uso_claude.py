@@ -43,6 +43,7 @@ class UsoLinha:
     cache_write_1h: int = 0
     fast: bool = False
     session_id: str = ""
+    conta: str = ""     # identidade da conta (anthropic:<uuid>), aplicada depois do cache
 
     def para_dict(self) -> dict:
         return asdict(self)

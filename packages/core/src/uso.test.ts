@@ -20,6 +20,14 @@ describe('mergeUso', () => {
     expect(m.report.usd_brl).toBe(5);
   });
 
+  it('by_conta soma por identidade e guarda o e-mail do primeiro que souber', () => {
+    const m = mergeUso([
+      { label: 'A', report: { totals: b('totals'), by_conta: [b('anthropic:1', { label: null, chamadas: 3 })], applied: { period: 'all' } } },
+      { label: 'B', report: { totals: b('totals'), by_conta: [b('anthropic:1', { label: 'x@y', chamadas: 4 }), b('anthropic:2', { chamadas: 1 })], applied: { period: 'all' } } },
+    ], 'all');
+    expect(m.report.by_conta.map((c) => [c.key, c.label, c.chamadas])).toEqual([['anthropic:1', 'x@y', 7], ['anthropic:2', null, 1]]);
+  });
+
   it('servidor antigo sem campo não vira NaN; sem eco do período fica fora da soma; offline é failed', () => {
     const m = mergeUso([
       { label: 'Nova', report: { totals: { key: 'totals', chamadas: 5 } as UsoBucket, by_mcp: [{ key: 'hangar' } as UsoBucket], applied: { period: '7d' } } },

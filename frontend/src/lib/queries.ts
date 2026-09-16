@@ -98,9 +98,9 @@ export const custos = (s: Server, periodo: string) => queryOptions({
 
 // Uso de skills/tools/hooks de UMA máquina: mesma chave (máquina, período) e mesmo TTL do custo —
 // sai do mesmo cache de transcript no backend.
-export const uso = (s: Server, periodo: string) => queryOptions({
-  queryKey: ['uso', s.id, periodo],
-  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo),
+export const uso = (s: Server, periodo: string, conta = '') => queryOptions({
+  queryKey: ['uso', s.id, periodo, conta],
+  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo, conta),
   staleTime: 5 * 60_000,
 });
 

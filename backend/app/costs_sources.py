@@ -548,8 +548,12 @@ def coletar_uso(esperar: float | None = 3.0) -> tuple[list[UsoLinha], list[Usage
         tokens: list[UsageRow] = []
         for caminho, account_id in _config_dirs():
             raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
-            uso.extend(costs_claude_transcript.varrer_uso(raiz))
-            tokens.extend(linhas_claude(Path(caminho), account_id))
+            uso.extend(replace(l, conta=account_id)
+                       for l in costs_claude_transcript.varrer_uso(raiz))
+            # `account_id` carimbado aqui (o custo usa `provider`, que em sessão de motor é o
+            # provedor do modelo, não a conta): o filtro por conta precisa da conta.
+            tokens.extend(replace(r, account_id=account_id)
+                          for r in linhas_claude(Path(caminho), account_id))
         return uso, tokens
     finally:
         _cache_lock.release()

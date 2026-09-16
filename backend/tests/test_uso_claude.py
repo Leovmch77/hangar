@@ -196,6 +196,43 @@ def test_periodo_corta_pelo_dia_local_e_o_eco_volta(tmp_path):
     assert uso_report.montar(ct.varrer_uso(tmp_path), [], "all", now=agora).by_tool[0].chamadas == 2
 
 
+def test_filtro_por_conta_corta_tudo_menos_a_lista_de_contas(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from app import costs_sources as cs
+    monkeypatch.setattr(pricing, "rate_for", lambda m: pricing.Rate(
+        provider="anthropic", input=1.0, output=10.0, cache_read=0.1, cache_write=1.25, origin="teste",
+        cache_estimado=False))
+    monkeypatch.setitem(cs._ROTULOS, "anthropic:a", "a@x.com")
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("x", "p1"),
+        _assistant([_tool_use("Skill", {"skill": "orquestrar"}, "t1")], "m1"),
+        _user([_tool_result("t1", "k")], "p1"),
+        _assistant([{"type": "text", "text": "ok"}], "m2", _usage(i=100, o=0)),
+        _assistant([_tool_use("Agent", {"subagent_type": "Explore", "prompt": "x"}, "t2")], "m3"),
+        _user([_tool_result("t2", "l")], "p1", toolUseResult={"agentId": "ag1"}),
+    ])
+    _escrever(tmp_path / "p" / "s1" / "subagents" / "agent-ag1.jsonl", [
+        _assistant([{"type": "text", "text": "achei"}], "a1", _usage(i=1000, o=0)),
+    ])
+    linhas = ct.varrer_uso(tmp_path)
+    uso = [replace(l, conta="anthropic:a") for l in linhas] + [replace(l, conta="anthropic:b") for l in linhas]
+    tokens = []
+    for conta in ("anthropic:a", "anthropic:b"):
+        tokens += [cs.UsageRow(ts=u.ts, source="claude", provider=conta, model=u.model, project=u.cwd,
+                               session_id=u.session_id, input=u.input, output=u.output,
+                               cache_write=u.cache_write, cache_read=u.cache_read,
+                               subagente=u.subagente, account_id=conta) for u in ct.varrer(tmp_path)]
+    tudo = uso_report.montar(uso, tokens, "all")
+    assert {b.key: b.label for b in tudo.by_conta} == {"anthropic:a": "a@x.com", "anthropic:b": None}
+    assert tudo.by_skill[0].chamadas == 2 and tudo.by_agente[0].chamadas == 2
+    assert tudo.conta is None
+    so_a = uso_report.montar(uso, tokens, "all", conta="anthropic:a")
+    assert so_a.conta == "anthropic:a"
+    assert so_a.by_skill[0].chamadas == 1 and so_a.by_skill[0].input == 110   # m2 + m3, uma conta
+    assert so_a.by_agente[0].chamadas == 1 and so_a.by_agente[0].input == 1000   # filho da conta certa
+    assert [b.key for b in so_a.by_conta] == [b.key for b in tudo.by_conta]        # seletor inteiro
+
+
 def test_uso_sobrevive_ao_cache_em_disco(tmp_path):
     _escrever(tmp_path / "p" / "s1.jsonl", [
         _assistant([_tool_use("Read", {"file_path": "/a"}, "t1")], "m1"),

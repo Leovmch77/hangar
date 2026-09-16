@@ -22,7 +22,7 @@ def h():
 def test_period_invalido_cai_em_all_e_o_eco_volta(client, h, monkeypatch):
     visto = {}
 
-    def falso(period="all"):
+    def falso(period="all", conta=None):
         visto["p"] = period
         return UsoReport(applied={"period": period})
 
@@ -36,12 +36,25 @@ def test_period_invalido_cai_em_all_e_o_eco_volta(client, h, monkeypatch):
 @pytest.mark.parametrize("period", list(PERIODOS))
 def test_todo_periodo_e_aceito(client, h, monkeypatch, period):
     monkeypatch.setattr("app.uso_report.report",
-                        lambda period="all": UsoReport(applied={"period": period}))
+                        lambda period="all", conta=None: UsoReport(applied={"period": period}))
     assert client.get(f"/api/uso?period={period}", headers=h).json()["applied"]["period"] == period
 
 
+def test_conta_vai_pro_relatorio_e_vazio_e_todas(client, h, monkeypatch):
+    visto = {}
+
+    def falso(period="all", conta=None):
+        visto["c"] = conta
+        return UsoReport(applied={"period": period}, conta=conta)
+
+    monkeypatch.setattr("app.uso_report.report", falso)
+    assert client.get("/api/uso?conta=anthropic:x", headers=h).json()["conta"] == "anthropic:x"
+    assert client.get("/api/uso?conta=", headers=h).json()["conta"] is None
+    assert visto["c"] is None
+
+
 def test_aquecendo_responde_202(client, h, monkeypatch):
-    def falso(period="all"):
+    def falso(period="all", conta=None):
         raise costs_sources.Aquecendo(10, 20)
 
     monkeypatch.setattr("app.uso_report.report", falso)
