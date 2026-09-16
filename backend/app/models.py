@@ -464,6 +464,10 @@ class UsoReport(BaseModel):
     # Imagens: `enviada` (você, no prompt) e `lida:<tool>` (Read num PNG, print). Tokens pelos
     # pixels (largura×altura÷750), não por chars.
     by_imagem: list[UsoBucket] = []
+    # Área do código (front/back/banco/…/conversa): custo REAL do turno dividido pelas tools de
+    # arquivo de cada área (`uso_areas`). A série é por dia × área, key `YYYY-MM-DD|área`.
+    by_area: list[UsoBucket] = []
+    by_area_dia: list[UsoBucket] = []
     # Listas dos seletores (conta = anthropic:<uuid> com label e-mail; projeto; modelo canônico),
     # do período inteiro e SEM os filtros de dimensão. Os campos soltos ecoam o filtro aplicado.
     by_conta: list[UsoBucket] = []

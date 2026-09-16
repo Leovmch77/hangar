@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import base64
 import re
+from collections import defaultdict
 import struct
 from dataclasses import asdict, dataclass, replace
+
+from app import uso_areas
 
 # Um tool_use `Bash` vira `bash:<comando>`; estes prefixos não são o comando.
 _PREFIXOS_BASH = {"sudo", "env", "time", "timeout", "rtk", "command", "exec", "nohup", "nice"}
 _ROTULO_HOOK_CHARS = 60
+_CAMPOS_USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                 "cache_read_input_tokens", "cache_1h")
 
 
 @dataclass(frozen=True)
@@ -32,7 +37,7 @@ class UsoLinha:
     dia: str            # YYYY-MM-DD no fuso local
     cwd: str
     model: str
-    tipo: str           # tool | bash | mcp | skill | agente | contexto
+    tipo: str           # tool | bash | mcp | skill | agente | contexto | imagem | area
     nome: str
     plugin: str = ""    # prefixo de skill/hook (ecc, superpowers…) quando há
     detalhe: str = ""   # mcp: tool completo; agente: agentId (liga ao transcript filho)
@@ -183,6 +188,9 @@ class Acumulador:
         self._dia = ""
         self._cwd = ""
         self._model = ""
+        # Áreas: tools por área de cada turno (um promptId) e, por resposta, (turno, grupo, usage).
+        self._turnos: list[dict[str, int]] = [{}]
+        self._respostas: dict[tuple, tuple[int, tuple, dict]] = {}
 
     def _somar(self, tipo: str, nome: str, *, plugin: str = "", detalhe: str = "",
                origem: str = "", chamadas: int = 0, ctx_chars: int = 0, tokens_est: int = 0,
@@ -228,8 +236,10 @@ class Acumulador:
         usage = msg.get("usage") if isinstance(msg.get("usage"), dict) else None
         # Blocos da mesma resposta repetem o usage: só a primeira linha soma na skill.
         ident = (d.get("requestId"), msg.get("id")) if msg.get("id") else None
+        if usage:
+            self._turno_somar(usage, ident)
         if usage and self._skill is not None and ident not in self._respostas_vistas:
-            self._somar(*self._skill[3:5], plugin=self._skill[5], origem=self._skill[7],usage=usage)
+            self._somar(*self._skill[3:5], plugin=self._skill[5], origem=self._skill[7], usage=usage)
         if ident:
             self._respostas_vistas.add(ident)
         for b in msg.get("content") or []:
@@ -241,6 +251,7 @@ class Acumulador:
             entrada = b.get("input") if isinstance(b.get("input"), dict) else {}
             if isinstance(b.get("id"), str):
                 self._tools[b["id"]] = (nome, entrada)
+            self._turno_tool(nome, entrada)
             if nome == "Skill" and isinstance(entrada.get("skill"), str):
                 skill = entrada["skill"]
                 self._skill = self._somar("skill", skill, plugin=plugin_de(skill),
@@ -262,6 +273,7 @@ class Acumulador:
         conteudo = msg.get("content") if isinstance(msg, dict) else None
         prompt_id = d.get("promptId")
         if prompt_id and prompt_id != self._prompt_id:
+            self._turnos.append({})
             self._prompt_id = prompt_id
             self._skill = None
         if isinstance(conteudo, str):
@@ -355,5 +367,67 @@ class Acumulador:
             nome = tipo
         self._somar("contexto", nome, plugin=plugin, chamadas=1, ctx_chars=chars)
 
+    def _turno_somar(self, u: dict, ident) -> None:
+        """Linhas da mesma resposta repetem o usage CRESCENDO (streaming): vale a última, como
+        no leitor de custos. A resposta fica no turno em que apareceu primeiro — um tool_result
+        com promptId novo pode chegar no meio dela. Sem identidade, cada linha é uma resposta."""
+        chave = ident if ident else ("linha", len(self._respostas))
+        turno = self._respostas[chave][0] if chave in self._respostas else len(self._turnos) - 1
+        self._respostas[chave] = (turno, (self._dia, self._cwd, self._model,
+                                          u.get("speed") == "fast"), u)
+
+    def _turno_tool(self, nome: str, entrada: dict) -> None:
+        """Cada tool conta 1 em cada área distinta que tocou."""
+        regras = uso_areas.regras_de(self._cwd)
+        areas: set[str] = set()
+        if nome in ("Read", "Edit", "Write", "NotebookEdit", "Grep", "Glob"):
+            caminho = entrada.get("file_path") or entrada.get("notebook_path") or entrada.get("path")
+            if isinstance(caminho, str) and caminho:
+                areas.add(uso_areas.area_do_caminho(caminho, self._cwd, regras))
+        elif nome == "Bash" and isinstance(entrada.get("command"), str):
+            areas = uso_areas.areas_do_comando(entrada["command"], self._cwd, regras)
+        elif nome == "Skill" and isinstance(entrada.get("skill"), str):
+            a = uso_areas.area_do_alvo(f"skill:{entrada['skill']}", regras)
+            if a:
+                areas.add(a)
+        for a in areas:
+            self._turnos[-1][a] = self._turnos[-1].get(a, 0) + 1
+
+    def _areas(self) -> None:
+        """O uso REAL de cada turno vai às áreas na proporção das tools; sem tool de arquivo, à
+        conversa. Tokens por maior resto: a soma das áreas fecha com o turno, sem sobra."""
+        somas: dict[int, dict[tuple, dict]] = defaultdict(dict)
+        for turno, grupo, u in self._respostas.values():
+            t = somas[turno].setdefault(grupo, dict.fromkeys(_CAMPOS_USAGE, 0))
+            cw = _int(u.get("cache_creation_input_tokens"))
+            t["input_tokens"] += _int(u.get("input_tokens"))
+            t["output_tokens"] += _int(u.get("output_tokens"))
+            t["cache_creation_input_tokens"] += cw
+            t["cache_read_input_tokens"] += _int(u.get("cache_read_input_tokens"))
+            criacao = u.get("cache_creation")
+            if isinstance(criacao, dict):
+                t["cache_1h"] += min(max(0, _int(criacao.get("ephemeral_1h_input_tokens"))), cw)
+        for turno, grupos in somas.items():
+            contadas = self._turnos[turno]
+            pesos = contadas or {uso_areas.CONVERSA: 1}
+            total = sum(pesos.values())
+            for i, ((dia, cwd, model, fast), u) in enumerate(grupos.items()):
+                self._dia, self._cwd, self._model = dia, cwd, model
+                partes: dict[str, dict] = {a: {} for a in pesos}
+                for campo, valor in u.items():
+                    exatos = {a: valor * n / total for a, n in pesos.items()}
+                    inteiros = {a: int(x) for a, x in exatos.items()}
+                    sobra = valor - sum(inteiros.values())
+                    for a in sorted(exatos, key=lambda a: inteiros[a] - exatos[a])[:sobra]:
+                        inteiros[a] += 1
+                    for a, v in inteiros.items():
+                        partes[a][campo] = v
+                for a, p in partes.items():
+                    usage = {**p, "cache_creation": {"ephemeral_1h_input_tokens": p["cache_1h"]},
+                             "speed": "fast" if fast else ""}
+                    # Turno que atravessa dia/modelo: as tools contam só no primeiro grupo.
+                    self._somar("area", a, chamadas=contadas.get(a, 0) if i == 0 else 0, usage=usage)
+
     def resultado(self) -> list[UsoLinha]:
+        self._areas()
         return sorted(self._linhas.values(), key=lambda l: (l.dia, l.tipo, l.nome, l.detalhe))

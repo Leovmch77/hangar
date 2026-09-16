@@ -27,7 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import costs_cache, pricing, uso_claude
+from app import costs_cache, pricing, uso_areas, uso_claude
 from app.uso_claude import UsoLinha
 
 # `LOCAL` é cópia proposital: `costs_sources` vai importar ESTE módulo, então importar de lá
@@ -35,7 +35,7 @@ from app.uso_claude import UsoLinha
 LOCAL = timezone(timedelta(hours=-3))
 
 # Suba isto ao mudar o formato do resumo, senão o cache velho é servido pra sempre.
-CACHE_VERSAO = 7
+CACHE_VERSAO = 8
 
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
@@ -204,7 +204,9 @@ def _varrer(raiz: Path) -> list[tuple[str, Leitura]]:
     # nome no módulo e contando chamadas.
     pares = costs_cache.varrer_cacheado(
         "transcripts", raiz, raiz.rglob("*.jsonl"), lambda p: [ler_completo(p)],
-        _serializar_leitura, _desserializar_leitura, CACHE_VERSAO)
+        # O mapa de áreas entra na versão: a área é gravada no cache junto com a leitura.
+        _serializar_leitura, _desserializar_leitura,
+        f"{CACHE_VERSAO}:{uso_areas.assinatura()}")
     # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
     # (medido: 168 de 446 ids repetidos entre arquivos).
     return [(str(p.relative_to(raiz).with_suffix("")), le) for p, leituras in pares

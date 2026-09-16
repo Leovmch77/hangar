@@ -46,7 +46,7 @@ def caminho_cache(nome: str, raiz: Path) -> Path:
     return _CACHE_DIR / f"{nome}-{h}.json"
 
 
-def _ler(nome: str, raiz: Path, versao: int) -> _Estado:
+def _ler(nome: str, raiz: Path, versao: int | str) -> _Estado:
     chave = f"{nome}:{raiz}"
     if chave in _mem:
         return _mem[chave]
@@ -73,7 +73,7 @@ def _ler(nome: str, raiz: Path, versao: int) -> _Estado:
     return out
 
 
-def _gravar(nome: str, raiz: Path, estado: _Estado, versao: int) -> None:
+def _gravar(nome: str, raiz: Path, estado: _Estado, versao: int | str) -> None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"versao": versao,
                "itens": {k: {"sig": [s[0], s[1]], "uso": u} for k, (s, u) in estado.items()}}
@@ -89,7 +89,7 @@ def varrer_cacheado(nome: str, raiz: Path, arquivos: Iterable[Path],
                     ler: Callable[[Path], list[T]],
                     para_dict: Callable[[T], dict],
                     de_dict: Callable[[dict], T | None],
-                    versao: int) -> list[tuple[Path, list[T]]]:
+                    versao: int | str) -> list[tuple[Path, list[T]]]:
     """Linhas de cada arquivo, lendo só os que mudaram desde a última vez. Nunca vai à rede.
 
     Devolve pares (arquivo, linhas) porque a identidade da sessão costuma vir do caminho

@@ -26,7 +26,7 @@ def _zero() -> dict:
             "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": ""}
 
 
-def _custo_skill(l: UsoLinha) -> float:
+def _custo_real(l: UsoLinha) -> float:
     if not (l.input or l.output or l.cache_write or l.cache_read):
         return 0.0
     c = costs._custo_da_linha(UsageRow(
@@ -58,7 +58,7 @@ def _custo_dos_agentes(tokens: list[UsageRow]) -> dict[str, dict]:
 
 def _custo_linha(l: UsoLinha, agentes: dict[str, dict]) -> float:
     if l.tipo == "skill":
-        return _custo_skill(l)
+        return _custo_real(l)
     if l.tipo == "agente" and l.detalhe:
         a = agentes.get(l.detalhe)
         return a["cost"] if a else 0.0
@@ -88,6 +88,8 @@ def _conta_no_total(l: UsoLinha) -> bool:
 
 def _somar_em(b: dict, l: UsoLinha, agentes: dict[str, dict]) -> None:
     b["sessions"].add(l.session_id)
+    if l.tipo == "area":
+        return
     if _conta_no_total(l):
         b["chamadas"] += l.chamadas
         b["ctx_chars"] += l.ctx_chars
@@ -117,6 +119,26 @@ def _por_dia(uso: list[UsoLinha], agentes: dict[str, dict]) -> list[UsoBucket]:
         if l.dia:
             _somar_em(agg[l.dia], l, agentes)
     return sorted((_bucket(k, v) for k, v in agg.items()), key=lambda b: b.key)
+
+
+def _somar_area(b: dict, l: UsoLinha) -> None:
+    b["sessions"].add(l.session_id)
+    b["chamadas"] += l.chamadas
+    for k in ("input", "output", "cache_write", "cache_read"):
+        b[k] += getattr(l, k)
+    b["cost"] += _custo_real(l)
+
+
+def _por_area_dia(uso: list[UsoLinha]) -> list[UsoBucket]:
+    """key = `YYYY-MM-DD|área` (chave única pra mescla da malha), label = área."""
+    agg: dict[str, dict] = defaultdict(_zero)
+    for l in uso:
+        if l.tipo == "area" and l.dia:
+            _somar_area(agg[f"{l.dia}|{l.nome}"], l)
+    out = sorted((_bucket(k, v) for k, v in agg.items()), key=lambda b: b.key)
+    for b in out:
+        b.label = b.key.split("|", 1)[1]
+    return out
 
 
 Filtro = str | list[str] | None
@@ -172,12 +194,12 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         b["tokens_est"] += l.tokens_est
         if l.origem in ("voce", "pedido"):
             b["pedidas"] += l.chamadas
-        if l.tipo == "skill":
+        if l.tipo in ("skill", "area"):
             b["input"] += l.input
             b["output"] += l.output
             b["cache_write"] += l.cache_write
             b["cache_read"] += l.cache_read
-            b["cost"] += _custo_skill(l)
+            b["cost"] += _custo_real(l)
         elif l.tipo == "agente" and l.detalhe:
             a = agentes.get(l.detalhe)
             if a:
@@ -194,12 +216,20 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
                 p["output"] += l.output
                 p["cache_write"] += l.cache_write
                 p["cache_read"] += l.cache_read
-                p["cost"] += _custo_skill(l)
+                p["cost"] += _custo_real(l)
         _somar_em(total, l, agentes)
 
     # Série diária: sob todos os filtros e, com `foco`, só do item de nome igual (qualquer
     # tipo) — é o clique numa linha da tabela.
     serie = [l for l in uso if l.nome == foco] if foco else uso
+    if foco and por_tipo["area"].get(foco):
+        por_dia: dict[str, dict] = defaultdict(_zero)
+        for l in serie:
+            if l.tipo == "area" and l.dia:
+                _somar_area(por_dia[l.dia], l)
+        by_day = sorted((_bucket(k, v) for k, v in por_dia.items()), key=lambda b: b.key)
+    else:
+        by_day = _por_dia(serie, agentes)
 
     return UsoReport(
         totals=_bucket("totals", total),
@@ -214,7 +244,9 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         by_conta=por_conta,
         by_projeto=por_projeto,
         by_modelo=por_modelo,
-        by_day=_por_dia(serie, agentes),
+        by_area=_ordenar(por_tipo["area"]),
+        by_area_dia=_por_area_dia(uso),
+        by_day=by_day,
         applied=Applied(period=period),
         conta=contas, projeto=projetos, modelo=modelos, plugin=plugins_f, foco=foco or None,
         usd_brl=costs.usd_brl(),

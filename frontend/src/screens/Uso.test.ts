@@ -159,6 +159,45 @@ it('202 "aquecendo" mostra o progresso e repergunta até o dado chegar', async (
   } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
 });
 
+it('onde vai o dinheiro: pilha por área em ordem fixa, série por dia e aba de áreas por custo', async () => {
+  localStorage.clear(); servidor();
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    const { period } = query as unknown as { period: string };
+    return Promise.resolve({
+      ...report(period),
+      by_area: [
+        { ...zeroUso('back'), chamadas: 20, cost: 60 },
+        { ...zeroUso('conversa'), cost: 10 },
+        { ...zeroUso('front'), chamadas: 9, cost: 30 },
+      ],
+      by_area_dia: [
+        { ...zeroUso('2026-09-09|back'), label: 'back', cost: 40 },
+        { ...zeroUso('2026-09-10|back'), label: 'back', cost: 20 },
+        { ...zeroUso('2026-09-10|front'), label: 'front', cost: 30 },
+        { ...zeroUso('2026-09-10|conversa'), label: 'conversa', cost: 10 },
+      ],
+    }) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Uso, { target, props: { onBack: vi.fn() } });
+  try {
+    await settle();
+    const bloco = target.querySelector('.areas')!;
+    // Ordem fixa por área (front, back, …, conversa), não por valor: a cor segue a área.
+    expect([...bloco.querySelectorAll('.legenda .lab')].map((e) => e.textContent)).toEqual(
+      [m.uso_area_front(), m.uso_area_back(), m.uso_area_conversa()]);
+    expect(bloco.querySelectorAll('.pilha .seg-pilha')).toHaveLength(3);
+    expect(bloco.textContent).toContain('60%');
+    // Dia 09: um segmento; dia 10: três.
+    expect(bloco.querySelectorAll('svg rect[rx="2"]')).toHaveLength(4);
+    ([...target.querySelectorAll('[role="tab"]')].find((b) => b.textContent?.includes(m.uso_aba_areas())) as HTMLButtonElement).click();
+    await settle();
+    expect([...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim()))
+      .toEqual([m.uso_area_back(), m.uso_area_front(), m.uso_area_conversa()]);
+    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_custo());
+  } finally { await unmount(component); target.remove(); localStorage.clear(); }
+});
+
 it('sem uso no período mostra o vazio, não o painel', async () => {
   localStorage.clear(); servidor();
   vi.mocked(clienteQuery.fetchQuery).mockResolvedValue({ totals: zeroUso('totals'), applied: { period: '30d' } });

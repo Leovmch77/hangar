@@ -24,8 +24,9 @@ export interface UsoBucket {
 }
 
 export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_imagem'
-  | 'by_plugin' | 'by_conta' | 'by_projeto' | 'by_modelo';
+  | 'by_area' | 'by_area_dia' | 'by_plugin' | 'by_conta' | 'by_projeto' | 'by_modelo';
 export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_imagem',
+  'by_area', 'by_area_dia',
   'by_plugin', 'by_conta', 'by_projeto', 'by_modelo'];
 
 // Filtros que vão ao servidor, repetíveis (`?conta=a&conta=b&projeto=…&foco=`); lista vazia =
@@ -48,6 +49,10 @@ export interface UsoReport {
   by_contexto: UsoBucket[];
   // `enviada` (imagem no prompt) e `lida:<tool>` (Read num PNG, print); tokens pelos pixels.
   by_imagem: UsoBucket[];
+  // Área do código (front/back/banco/…/conversa): custo REAL do turno dividido pelas tools de
+  // arquivo. A série é dia × área: key `YYYY-MM-DD|área`, label = área. Servidor antigo: vazio.
+  by_area: UsoBucket[];
+  by_area_dia: UsoBucket[];
   by_plugin: UsoBucket[];
   // Listas dos seletores, do período inteiro SEM os filtros de dimensão; os campos soltos ecoam
   // o filtro aplicado.
@@ -153,6 +158,8 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       by_agente: ordenar(dims.by_agente),
       by_contexto: ordenar(dims.by_contexto),
       by_imagem: ordenar(dims.by_imagem),
+      by_area: porUso(dims.by_area),
+      by_area_dia: [...dims.by_area_dia.values()].sort((a, b) => a.key.localeCompare(b.key)),
       by_plugin: ordenar(dims.by_plugin),
       by_conta: porUso(dims.by_conta),
       by_projeto: porUso(dims.by_projeto),

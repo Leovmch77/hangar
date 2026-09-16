@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app import costs_cache as cc, costs_claude_transcript as ct, pricing, uso_report
+from app import costs_cache as cc, costs_claude_transcript as ct, pricing, uso_areas, uso_report
 from app.uso_claude import comando_bash
 
 T0 = "2026-09-10T12:00:00Z"
@@ -14,9 +14,13 @@ T0 = "2026-09-10T12:00:00Z"
 def _limpo(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "_CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(pricing, "_CACHE_DIR", tmp_path / "pricing")
+    # O mapa real da máquina (~/.hangar/uso-areas.json) não pode mudar o resultado do teste.
+    monkeypatch.setattr(uso_areas, "_arquivo", lambda: tmp_path / "uso-areas.json")
+    uso_areas.recarregar()
     ct.invalidar_cache()
     yield
     ct.invalidar_cache()
+    uso_areas.recarregar()
 
 
 def _escrever(p: Path, linhas: list[dict]) -> None:
@@ -314,3 +318,94 @@ def test_uso_sobrevive_ao_cache_em_disco(tmp_path):
     ct.invalidar_cache()
     assert ct.varrer_uso(tmp_path) == antes
     assert antes[0].session_id == "p/s1"
+
+
+def _areas(uso) -> dict[str, tuple]:
+    out: dict[str, list] = {}
+    for l in uso:
+        if l.tipo == "area":
+            a = out.setdefault(l.nome, [0, 0, 0, 0])
+            for i, v in enumerate((l.chamadas, l.input, l.output, l.cache_write)):
+                a[i] += v
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def test_turno_divide_o_uso_real_pelas_areas_das_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(pricing, "rate_for", lambda m: pricing.Rate(
+        provider="anthropic", input=1.0, output=10.0, cache_read=0.1, cache_write=1.25, origin="teste",
+        cache_estimado=False))
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("mexe no front e no back", "p1"),
+        _assistant([_tool_use("Read", {"file_path": "/repo/frontend/src/A.svelte"}, "t1")], "m1",
+                   _usage(i=100, o=10)),
+        _assistant([_tool_use("Edit", {"file_path": "/repo/backend/app/x.py"}, "t2")], "m2",
+                   _usage(i=200, o=20)),
+        # Caminho relativo ao cwd; `/dev/null` fora do repositório não é área.
+        _assistant([_tool_use("Bash", {"command": "uv run pytest backend/tests/test_x.py 2>/dev/null"}, "t3")],
+                   "m3", _usage(i=300, o=30, cw=10)),
+        # Mesma resposta, usage CRESCENDO (streaming): vale a última linha, como no leitor de custos.
+        _assistant([{"type": "text", "text": "..."}], "m3", _usage(i=300, o=50, cw=10)),
+        # Fora do repositório: outros.
+        _assistant([_tool_use("Read", {"file_path": "/tmp/print.png"}, "t4")], "m4", _usage(i=0, o=0)),
+        _user("e aí?", "p2"),
+        _assistant([{"type": "text", "text": "só conversa"}], "m5", _usage(i=50, o=5)),
+        _user("olha o banco", "p3"),
+        _assistant([_tool_use("Skill", {"skill": "acme:database"}, "t6")], "m6", _usage(i=70, o=7)),
+    ])
+    uso = ct.varrer_uso(tmp_path)
+    areas = _areas(uso)
+    # p1: front 1, back 2 (Edit + Bash), outros 1 → 600 de input em quartos; o cache write (10)
+    # não divide exato e o maior resto fecha a soma.
+    assert areas["front"][:3] == (1, 150, 20) and areas["back"][:3] == (2, 300, 40)
+    assert areas["outros"][:3] == (1, 150, 20)
+    assert areas["front"][3] + areas["back"][3] + areas["outros"][3] == 10 and areas["back"][3] == 5
+    assert areas["conversa"] == (0, 50, 5, 0)
+    assert areas["banco"] == (1, 70, 7, 0)
+    assert sum(a[1] for a in areas.values()) == 100 + 200 + 300 + 50 + 70
+
+    r = uso_report.montar(uso, [], "all")
+    por_area = {b.key: b for b in r.by_area}
+    assert por_area["back"].cost == pytest.approx(300 / 1e6 + 40 / 1e6 * 10 + 5 / 1e6 * 1.25)
+    # A área não soma no total do relatório: o custo dela já é o das skills/agentes/conversa.
+    assert r.totals.cost == pytest.approx(sum(b.cost for b in r.by_skill))
+    assert {(b.key, b.label) for b in r.by_area_dia} >= {("2026-09-10|front", "front")}
+    foco = uso_report.montar(uso, [], "all", foco="back")
+    assert [(b.key, b.chamadas) for b in foco.by_day] == [("2026-09-10", 2)]
+    assert foco.by_day[0].cost == pytest.approx(por_area["back"].cost)
+
+
+def test_mapa_por_projeto_vence_o_padrao_e_troca_de_mapa_rele_o_cache(tmp_path):
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("x", "p1"),
+        _assistant([_tool_use("Read", {"file_path": "/repo/src/app/page.ts"}, "t1")], "m1"),
+    ])
+    assert set(_areas(ct.varrer_uso(tmp_path))) == {"outros"}
+    (tmp_path / "uso-areas.json").write_text(json.dumps(
+        {"projetos": {"repo": [["front", ["src/app/*"]]]}}), encoding="utf-8")
+    # Reinício do backend: mapa relido, memória do cache vazia, disco com a assinatura antiga.
+    uso_areas.recarregar()
+    ct.invalidar_cache()
+    assert set(_areas(ct.varrer_uso(tmp_path))) == {"front"}
+
+
+def test_arquivo_de_outro_repositorio_usa_a_raiz_dele(tmp_path):
+    (tmp_path / "hangar" / ".git").mkdir(parents=True)
+    (tmp_path / "wt" / "hangar-t1" / ".git").mkdir(parents=True)
+    cwd = str(tmp_path / "hangar")
+    # Worktree fora do cwd: `frontend/` é relativo à raiz DELE, não "fora do projeto".
+    fora = str(tmp_path / "wt" / "hangar-t1" / "frontend" / "x.ts")
+    assert uso_areas.area_do_caminho(fora, cwd, uso_areas.regras_de(cwd)) == "front"
+    assert uso_areas.area_do_caminho(str(tmp_path / "solto" / "a.md"), cwd, uso_areas.regras_de(cwd)) == "outros"
+
+
+@pytest.mark.parametrize("caminho,esperado", [
+    ("/r/backend/migrations/001.sql", "banco"),
+    ("/r/backend/app/api.py", "back"),
+    ("/r/frontend/README.md", "docs"),
+    ("/r/scripts/instalar.py", "infra"),
+    ("/r/deploy/Dockerfile", "infra"),
+    ("/r/packages/core/src/uso.ts", "front"),
+    ("/r/qualquer.txt", "outros"),
+])
+def test_area_padrao_por_pasta_e_extensao(caminho, esperado):
+    assert uso_areas.area_do_caminho(caminho, "/r", uso_areas.PADRAO) == esperado
