@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app import costs_sources
 from app.api import app
 from app.config import settings
 from app.costs import PERIODOS
@@ -56,6 +57,18 @@ def test_resposta_ecoa_o_filtro_aplicado(client, h, monkeypatch):
                         lambda period="all": CostReport(applied={"period": period}))
     r = client.get("/api/costs?period=7d", headers=h)
     assert r.json()["applied"]["period"] == "7d"
+
+
+def test_primeira_leitura_em_andamento_responde_202_com_progresso(client, h, monkeypatch):
+    # Máquina nova: a varredura fria leva mais que o prazo do cliente. A rota responde na
+    # hora com o progresso; a tela mostra a barra e pergunta de novo.
+    def falso(period="all"):
+        raise costs_sources.Aquecendo(312, 690)
+
+    monkeypatch.setattr("app.api.costs_report", falso)
+    r = client.get("/api/costs?period=7d", headers=h)
+    assert r.status_code == 202
+    assert r.json() == {"aquecendo": True, "lidos": 312, "total": 690}
 
 
 @pytest.mark.parametrize("period", list(PERIODOS))

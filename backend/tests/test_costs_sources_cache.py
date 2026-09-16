@@ -63,6 +63,53 @@ def test_pi_sobrevive_ao_restart_e_rele_so_o_arquivo_que_mudou(tmp_path, monkeyp
     assert sum(r.input for r in cs.linhas_pi(raiz)) == 10
 
 
+def test_pedido_antes_da_primeira_coleta_dispara_aquecimento_e_responde_aquecendo(monkeypatch):
+    """O pedido nunca paga a varredura fria: dispara a thread e devolve `Aquecendo`; depois
+    que ela termina, o mesmo pedido coleta (incremental) e responde."""
+    import threading
+
+    monkeypatch.setattr(cs, "_aquecido", threading.Event())
+    monkeypatch.setattr(cs, "_aquecedor", None)
+    segurar = threading.Event()
+    chamadas = []
+
+    def coletar_lento(esperar=None):
+        chamadas.append(esperar)
+        segurar.wait(5)
+        return []
+
+    monkeypatch.setattr(cs, "coletar", coletar_lento)
+    with pytest.raises(cs.Aquecendo):
+        cs.coletar_ou_aquecendo()
+    assert cs._aquecedor is not None and cs._aquecedor.is_alive()
+    with pytest.raises(cs.Aquecendo):
+        cs.coletar_ou_aquecendo()   # segunda chamada não abre outra thread
+    assert chamadas == [None]
+    segurar.set()
+    cs._aquecedor.join(5)
+    assert cs._aquecido.is_set()
+    assert cs.coletar_ou_aquecendo(esperar=1.0) == []
+    assert chamadas == [None, 1.0]
+
+
+def test_aquecimento_que_falha_nao_prende_a_tela_em_aquecendo(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(cs, "_aquecido", threading.Event())
+    monkeypatch.setattr(cs, "_aquecedor", None)
+
+    def explode(esperar=None):
+        raise OSError("disco")
+
+    monkeypatch.setattr(cs, "coletar", explode)
+    with pytest.raises(cs.Aquecendo):
+        cs.coletar_ou_aquecendo()
+    cs._aquecedor.join(5)
+    assert cs._aquecido.is_set()
+    with pytest.raises(OSError):
+        cs.coletar_ou_aquecendo()   # o erro aparece no pedido, não some
+
+
 def test_kimi_projeto_vem_do_indice_mesmo_com_linha_cacheada(tmp_path, monkeypatch):
     home = tmp_path / ".kimi-code"
     wire = home / "sessions" / "wd" / "session_x" / "agents" / "main" / "wire.jsonl"

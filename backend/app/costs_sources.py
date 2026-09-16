@@ -472,6 +472,64 @@ def invalidar_cache() -> None:
         costs_cache.invalidar()
 
 
+# Primeira coleta desta subida do backend. Máquina nova paga a varredura inteira (1 GB+) uma
+# vez; enquanto ela roda, o endpoint devolve "aquecendo" com progresso em vez de estourar o
+# prazo do cliente. Depois disso, cada coleta só relê o que mudou.
+_aquecido = threading.Event()
+_aquecedor: threading.Thread | None = None
+_agendado: threading.Timer | None = None
+_aquecer_lock = threading.Lock()
+
+
+def _aquecer() -> None:
+    try:
+        coletar()
+    except Exception:
+        _log.warning("aquecimento dos custos falhou", exc_info=True)
+    finally:
+        # Mesmo falhando: senão a tela ficaria em "aquecendo" pra sempre. A próxima coleta
+        # roda no pedido e o erro aparece lá.
+        _aquecido.set()
+
+
+def aquecer_em_background() -> None:
+    """Dispara a primeira coleta numa thread, se ainda não rodou nem está rodando."""
+    global _aquecedor
+    with _aquecer_lock:
+        if _aquecido.is_set() or (_aquecedor is not None and _aquecedor.is_alive()):
+            return
+        _aquecedor = threading.Thread(target=_aquecer, name="custos-warm", daemon=True)
+        _aquecedor.start()
+
+
+def agendar_aquecimento(atraso_s: float) -> None:
+    """Boot: espera o backend estabilizar (registry, app-server do Codex e hooks disputam o
+    disco nos primeiros segundos) antes de varrer."""
+    global _agendado
+    cancelar_aquecimento()
+    _agendado = threading.Timer(atraso_s, aquecer_em_background)
+    _agendado.daemon = True
+    _agendado.name = "custos-warm-timer"
+    _agendado.start()
+
+
+def cancelar_aquecimento() -> None:
+    """Shutdown: um Timer pendente varreria o `~/.claude` real depois de a suíte subir o app."""
+    global _agendado
+    if _agendado is not None:
+        _agendado.cancel()
+        _agendado = None
+
+
+def coletar_ou_aquecendo(esperar: float = 3.0) -> list[UsageRow]:
+    """O que o endpoint chama: antes da primeira coleta terminar, dispara o aquecimento e
+    responde `Aquecendo` na hora — o pedido nunca paga a varredura fria."""
+    if not _aquecido.is_set():
+        aquecer_em_background()
+        raise Aquecendo(*costs_cache.progresso_total())
+    return coletar(esperar)
+
+
 def account_info(config_dir: Path, fallback_label: str) -> tuple[str, str | None, str]:
     """(uuid, email, label) da conta Anthropic. Era costs._account_info e MUDOU DE MÓDULO:
     ler o config dir é trabalho de leitor de fonte, não de agregador — e deixá-la no costs.py
@@ -567,6 +625,7 @@ def coletar(esperar: float | None = None) -> list[UsageRow]:
 
 def _coletar() -> list[UsageRow]:
     out: list[UsageRow] = []
+    costs_cache.zerar_progresso()
     # Cada fonte cacheia por RAIZ e por ARQUIVO no costs_cache; aqui só se junta.
     for caminho, account_id in _config_dirs():
         out.extend(linhas_claude(Path(caminho), account_id))

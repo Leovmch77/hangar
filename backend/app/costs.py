@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 from app import pricing
-from app.costs_sources import LOCAL, UsageRow, coletar, rotulo_de_provedor
+from app.costs_sources import LOCAL, UsageRow, coletar_ou_aquecendo, rotulo_de_provedor
 from app.models import Applied, ComboRow, CostReport, DimBucket, KindBucket, RateInfo
 
 TIPOS = ("input", "output", "cache_write", "cache_read")
@@ -203,7 +203,8 @@ def montar(linhas: list[UsageRow], period: str = "all",
 
 
 def report(period: str = "all", now: datetime | None = None) -> CostReport:
-    return montar(coletar(), period=period, now=now)
+    """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou."""
+    return montar(coletar_ou_aquecendo(), period=period, now=now)
 
 
 # Cotação USD/BRL: cache em memória de 1h. Falha também "conta" como tentativa (atualiza o

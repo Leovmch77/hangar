@@ -3152,6 +3152,8 @@
   "codex_ui_nao_herdada": "Ainda sem as configurações da padrão",
   "codex_ui_herdar_botao": "Herdar configurações",
   "custos_carregando_maquinas": "Total provisório. Aguardando {n} máquina(s).",
+  "custos_aquecendo": "{maquina}: primeira leitura do histórico desta máquina em andamento — pode levar alguns minutos.",
+  "custos_aquecendo_progresso": "{maquina}: primeira leitura do histórico — {lidos} de {total} transcrições. Pode levar alguns minutos.",
   "custos_claude_code": "Claude Code",
   "select_filtrar_campo": "Filtrar {campo}",
   "custos_mostrar_menos": "Mostrar menos",

@@ -77,7 +77,7 @@ from app.tts_text import preparar as tts_preparar
 from app import narrar
 from app import contas, default_model, engine_probe, engines, procinfo
 from app.costs import report as costs_report, usd_brl as _usd_brl, PERIODOS as _COST_PERIODOS
-from app import pricing
+from app import costs_sources, pricing
 from app.git_ops import (
     list_branches, switch_branch, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
 )
@@ -395,6 +395,9 @@ async def _lifespan(app: FastAPI):
     # montar(). Sem aquecer aqui, o primeiro /api/costs depois de todo restart paga a coleta fria
     # (657ms medidos) MAIS até 3s de câmbio, contra o AbortSignal.timeout(4000) do cliente.
     threading.Thread(target=_usd_brl, name="usd-brl-warm", daemon=True).start()
+    # Primeira coleta de custos/uso desta subida, em background e só depois de o boot assentar:
+    # máquina nova varre 1 GB+ de transcript sem ninguém ter clicado, e a tela já abre pronta.
+    costs_sources.agendar_aquecimento(30)
     # A linha vive no loop do servidor, mas o send_prompt roda em thread — ver pi_inbox.entregar_sync.
     INBOX.ligar_loop(asyncio.get_running_loop())
     # Mesmo motivo, outro caminho: o drain do Codex e assincrono (app-server) e quem o chama sao
@@ -426,6 +429,7 @@ async def _lifespan(app: FastAPI):
             yield
     finally:
         diag.registrar("backend.encerrando")
+        costs_sources.cancelar_aquecimento()
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
@@ -1804,7 +1808,12 @@ def costs_endpoint(period: str = "all"):
     # não tem número de dias, então entra à parte aqui.
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
-    return costs_report(period=period)
+    try:
+        return costs_report(period=period)
+    except costs_sources.Aquecendo as e:
+        # Primeira leitura do histórico desta subida ainda rodando: a tela mostra o progresso e
+        # pergunta de novo, em vez de esperar 20s e dar a máquina como "não respondeu".
+        return JSONResponse({"aquecendo": True, "lidos": e.lidos, "total": e.total}, status_code=202)
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)

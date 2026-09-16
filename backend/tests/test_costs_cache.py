@@ -60,7 +60,7 @@ def test_item_que_nao_desserializa_e_relido(tmp_path):
     assert chamadas == [a]
 
 
-def test_progresso_aparece_durante_e_some_depois(tmp_path):
+def test_progresso_acumula_entre_fontes_da_mesma_coleta(tmp_path):
     for i in range(3):
         (tmp_path / f"{i}.txt").write_text("x", encoding="utf-8")
     visto: list[tuple[int, int]] = []
@@ -69,7 +69,17 @@ def test_progresso_aparece_durante_e_some_depois(tmp_path):
         visto.append(cc.progresso_total())
         return [1]
 
+    cc.zerar_progresso()
     cc.varrer_cacheado("t", tmp_path, sorted(tmp_path.glob("*.txt")), ler,
                        lambda n: {"n": n}, lambda d: d.get("n"), V)
     assert visto == [(0, 3), (1, 3), (2, 3)]
+    assert cc.progresso_total() == (3, 3)
+    # Segunda fonte da mesma coleta: a barra continua de onde parou, nunca volta a zero.
+    visto.clear()
+    (tmp_path / "u").mkdir()
+    (tmp_path / "u" / "a.txt").write_text("x", encoding="utf-8")
+    cc.varrer_cacheado("u", tmp_path / "u", [tmp_path / "u" / "a.txt"], ler,
+                       lambda n: {"n": n}, lambda d: d.get("n"), V)
+    assert visto == [(3, 4)]
+    cc.zerar_progresso()
     assert cc.progresso_total() == (0, 0)

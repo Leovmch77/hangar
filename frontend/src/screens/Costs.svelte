@@ -7,8 +7,8 @@
   import { clienteQuery, custos } from '../lib/queries';
   import {
     mergeReports, fillDayGaps, tarifasPorModelo, custoDesconhecido, precoParcial, partirOcultos,
-    custoSemCacheDe, equivalenteDe, isFree,
-    type ServerResult, type MergedReport,
+    custoSemCacheDe, equivalenteDe, isFree, Aquecendo,
+    type ServerResult, type MergedReport, type CostReport,
   } from '@hangar/core';
   import { agruparPor, aplicar, filtrar, somar, type Filtro } from '../lib/cubo';
   import {
@@ -148,6 +148,32 @@
     localStorage.setItem('cp_costs_currency', c);
   }
 
+  // Máquinas cuja primeira leitura do histórico ainda roda no backend (202 `Aquecendo`), com o
+  // progresso que elas reportaram. Não é falha: a faixa mostra a barra e a busca repete sozinha.
+  let aquecendo = $state<Record<string, { label: string; lidos: number; total: number }>>({});
+  const AQUECENDO_INTERVALO_MS = 3000;
+  const AQUECENDO_TENTATIVAS = 100; // ~5 min: acima disso vira "não respondeu", que já tem botão
+  const esperar = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  async function buscarEsperandoAquecer(s: Server, p: Periodo, meu: number): Promise<Partial<CostReport>> {
+    for (let tentativa = 0; ; tentativa++) {
+      try {
+        const r = await clienteQuery.fetchQuery(custos(s, p));
+        const { [s.id]: _, ...resto } = aquecendo;
+        aquecendo = resto;
+        return r;
+      } catch (e) {
+        if (!(e instanceof Aquecendo) || tentativa >= AQUECENDO_TENTATIVAS || meu !== geracao) {
+          const { [s.id]: _, ...resto } = aquecendo;
+          aquecendo = resto;
+          throw e;
+        }
+        aquecendo = { ...aquecendo, [s.id]: { label: s.label, lidos: e.lidos, total: e.total } };
+        await esperar(AQUECENDO_INTERVALO_MS);
+      }
+    }
+  }
+
   // Só o PERÍODO vai ao servidor — é o único corte que o backend aplica (`?period=`).
   let geracao = 0;
   async function load(p: Periodo, alvo: Server[], forcar = false) {
@@ -161,7 +187,7 @@
     await Promise.all(
       alvo.map(async (s) => {
         let result: ServerResult;
-        try { result = { report: await clienteQuery.fetchQuery(custos(s, p)), label: s.label, id: s.id }; }
+        try { result = { report: await buscarEsperandoAquecer(s, p, meu), label: s.label, id: s.id }; }
         catch { result = { report: null, label: s.label, id: s.id }; }
         if (meu !== geracao) return;
         results.push(result);
@@ -819,6 +845,16 @@
     </p>
   {/if}
 
+  {#each Object.values(aquecendo) as a (a.label)}
+    <div class="aquecendo" role="status">
+      <p>
+        {a.total > 0
+          ? m.custos_aquecendo_progresso({ maquina: a.label, lidos: a.lidos, total: a.total })
+          : m.custos_aquecendo({ maquina: a.label })}
+      </p>
+      <progress max={a.total || undefined} value={a.total ? a.lidos : undefined}></progress>
+    </div>
+  {/each}
   {#if pendingServers > 0}
     <p class="loading-status" role="status">{m.custos_carregando_maquinas({ n: pendingServers })}</p>
   {/if}
@@ -1394,6 +1430,9 @@
   .overview .kpi dd.hero { color: var(--text-primary); font-size: 30px; }
   .muted { color: var(--text-secondary); }
   .loading-status { color: var(--text-secondary); font-size: var(--text-sm); margin-bottom: var(--space-3); }
+  .aquecendo { margin-bottom: var(--space-3); font-size: var(--text-sm); color: var(--text-secondary); }
+  .aquecendo p { margin: 0 0 var(--space-1); }
+  .aquecendo progress { width: min(100%, 420px); height: 6px; accent-color: var(--accent); }
   .dim { color: var(--text-secondary); }
 
   /* ── barra de filtro: uma linha, vale pra tudo abaixo ── */

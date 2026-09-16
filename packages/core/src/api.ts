@@ -382,8 +382,26 @@ export async function fetchCostsForServer(s: Server, period: string): Promise<Pa
   const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
+  if (res.status === 202) throw await Aquecendo.de(res);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<Partial<CostReport>>;
+}
+
+// 202 do /api/costs: a primeira leitura do histórico daquela máquina ainda está rodando no
+// backend (máquina nova varre 1 GB+ de transcript). Não é falha: a tela mostra o progresso e
+// pergunta de novo em alguns segundos.
+export class Aquecendo extends Error {
+  constructor(public readonly lidos: number, public readonly total: number) {
+    super(`aquecendo ${lidos}/${total}`);
+    this.name = 'Aquecendo';
+  }
+
+  static async de(res: Response): Promise<Aquecendo> {
+    let j: { lidos?: unknown; total?: unknown } = {};
+    try { j = await res.json(); } catch { /* corpo vazio ou não-JSON: progresso desconhecido */ }
+    const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    return new Aquecendo(n(j.lidos), n(j.total));
+  }
 }
 
 // Execuções de orquestração de UM servidor (baseUrl+token explícitos), sem mexer no ativo — a tela

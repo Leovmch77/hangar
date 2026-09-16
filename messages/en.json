@@ -3152,6 +3152,8 @@
   "codex_ui_nao_herdada": "Default settings not inherited yet",
   "codex_ui_herdar_botao": "Inherit settings",
   "custos_carregando_maquinas": "Provisional total. Waiting for {n} machine(s).",
+  "custos_aquecendo": "{maquina}: first read of this machine's history in progress — this can take a few minutes.",
+  "custos_aquecendo_progresso": "{maquina}: first read of the history — {lidos} of {total} transcripts. This can take a few minutes.",
   "custos_claude_code": "Claude Code",
   "select_filtrar_campo": "Filter {campo}",
   "custos_mostrar_menos": "Show less",

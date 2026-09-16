@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { expect, it, vi } from 'vitest';
 import { createRawSnippet, mount, tick, unmount } from 'svelte';
-import type { CostReport } from '@hangar/core';
+import { Aquecendo, type CostReport } from '@hangar/core';
 import { clienteQuery } from '../lib/queries';
 import * as m from '../paraglide/messages';
 import Costs from './Costs.svelte';
@@ -87,4 +87,36 @@ it('distingue contas de mesmo nome no Claude e Codex ao comparar', async () => {
     expect(cards).toEqual(buttons.map((button) => button.textContent?.trim()));
     expect(target.querySelectorAll('.cmpvalor')).toHaveLength(2);
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
+});
+
+it('202 "aquecendo" mostra o progresso da primeira leitura e pergunta de novo até o dado chegar', async () => {
+  vi.useFakeTimers();
+  localStorage.clear();
+  localStorage.setItem('cp_servers', JSON.stringify([{ id: 'novo', label: 'Novo', baseUrl: 'https://novo.test', token: 'test' }]));
+  const bucket = { key: 'totals', sessions: 1, input: 100, output: 20, cache_read: 80, cache_write: 0,
+    cost: 2, cost_input: 1, cost_output: 0.8, cost_cache_read: 0.2, cost_cache_write: 0 };
+  let chamadas = 0;
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation(() => {
+    chamadas += 1;
+    if (chamadas < 3) return Promise.reject(new Aquecendo(chamadas * 100, 690));
+    return Promise.resolve({ totals: bucket, applied: { period: '30d' }, by_day: [{ ...bucket, key: '2026-09-10' }] }) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Costs, { target, props: { onBack: vi.fn() } });
+  const settle = async () => { for (let i = 0; i < 12; i++) await tick(); };
+  try {
+    await settle();
+    expect(target.textContent).toContain(m.custos_aquecendo_progresso({ maquina: 'Novo', lidos: 100, total: 690 }));
+    expect(target.querySelector('progress')?.getAttribute('value')).toBe('100');
+    // Não é falha: nada de "não respondeu" nem botão de tentar de novo.
+    expect(target.querySelector('.retry')).toBeNull();
+    await vi.advanceTimersByTimeAsync(3000);
+    await settle();
+    expect(target.textContent).toContain(m.custos_aquecendo_progresso({ maquina: 'Novo', lidos: 200, total: 690 }));
+    await vi.advanceTimersByTimeAsync(3000);
+    await settle();
+    expect(target.querySelector('.aquecendo')).toBeNull();
+    expect(target.querySelector('.overview')?.textContent).toContain('200');
+    expect(chamadas).toBe(3);
+  } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
 });

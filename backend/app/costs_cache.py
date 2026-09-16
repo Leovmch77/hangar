@@ -24,8 +24,13 @@ _CACHE_DIR = Path.home() / ".claude" / ".hangar-custos"
 _lock = threading.RLock()
 _Estado = dict[str, tuple[tuple[int, int], list[dict]]]
 _mem: dict[str, _Estado] = {}
-# nome -> (lidos, total) enquanto uma varredura roda; é o que o 202 "aquecendo" mostra.
+# nome -> (lidos, total) de cada varredura da coleta corrente; é o que o 202 "aquecendo" mostra.
+# Quem começa uma coleta chama `zerar_progresso()`.
 progresso: dict[str, tuple[int, int]] = {}
+
+
+def zerar_progresso() -> None:
+    progresso.clear()
 
 T = TypeVar("T")
 
@@ -96,10 +101,13 @@ def varrer_cacheado(nome: str, raiz: Path, arquivos: Iterable[Path],
         novo: _Estado = {}
         out: list[tuple[Path, list[T]]] = []
         mudou = False
-        progresso[nome] = (0, len(lista))
+        # Chave com a raiz: as contas Claude compartilham o nome "transcripts", e uma
+        # sobrescrevendo a outra fazia a barra andar pra trás.
+        chave_progresso = f"{nome}:{raiz}"
+        progresso[chave_progresso] = (0, len(lista))
         try:
             for i, p in enumerate(lista):
-                progresso[nome] = (i, len(lista))
+                progresso[chave_progresso] = (i, len(lista))
                 try:
                     st = p.stat()
                 except OSError:
@@ -122,7 +130,9 @@ def varrer_cacheado(nome: str, raiz: Path, arquivos: Iterable[Path],
                     novo[chave] = hit
                 out.append((p, linhas))
         finally:
-            progresso.pop(nome, None)
+            # Fica marcado como concluído (não some): a coleta varre várias fontes em sequência
+            # e a barra da tela soma todas — zerar aqui faria ela andar pra trás.
+            progresso[chave_progresso] = (len(lista), len(lista))
         if len(novo) != len(cache):
             mudou = True
         if mudou:
