@@ -15,12 +15,23 @@
 // Daí as duas decisões: UMA falha de rede basta (não três), e não há retomada por tempo — some o
 // relógio. E o estado é gravado, para o recarregamento do app não apagar o que já foi aprendido.
 
+import { registrar as registrarDiag } from './diag';
+
 const CHAVE = 'hangar_servidores_desligados';
 
 type Estado = { desligado: boolean };
 
 const estados = new Map<string, Estado>();
 let carregado = false;
+let avisouArmazem = false;
+// Servidor que nunca pode ser marcado (o ativo, o que serve esta página): a regra mora AQUI, não
+// em quem chama — `registrarFalha` também é chamado pelo apiFetch, e ali não há como saber.
+let protegido: (id: string) => boolean = () => false;
+
+/** Quem decide se um servidor é intocável (o app web registra o ativo e o dono da página). */
+export function definirProtegido(fn: (id: string) => boolean): void {
+  protegido = fn;
+}
 
 function armazem(): Storage | null {
   // `localStorage` existe no web; no app nativo e nos testes de nó, não. Sem ele o estado é só de
@@ -40,8 +51,10 @@ function carregar(): void {
   try {
     const ids: unknown = JSON.parse(bruto);
     if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') estados.set(id, { desligado: true });
-  } catch {
-    // Conteúdo estragado não pode impedir o app de subir: começa limpo.
+  } catch (e) {
+    // Conteúdo estragado não pode impedir o app de subir: começa limpo — mas fica no diário,
+    // senão "voltou a procurar todo mundo" não tem explicação.
+    registrarDiag({ evento: 'esfriamento.estado_invalido', nivel: 'aviso', detalhe: e instanceof Error ? e.message : String(e) });
   }
 }
 
@@ -50,8 +63,14 @@ function gravar(): void {
   try {
     if (ids.length) armazem()?.setItem(CHAVE, JSON.stringify(ids));
     else armazem()?.removeItem(CHAVE);
-  } catch {
-    // Cota cheia ou modo privado: o estado segue valendo em memória nesta sessão.
+  } catch (e) {
+    // Cota cheia ou modo privado: o estado segue valendo em memória nesta sessão, e NÃO sobrevive
+    // ao recarregamento — no iPhone é exatamente o caso que a feature existe pra cobrir. Uma vez
+    // por sessão no diário, pra a volta das tentativas ter causa.
+    if (!avisouArmazem) {
+      avisouArmazem = true;
+      registrarDiag({ evento: 'esfriamento.sem_armazem', nivel: 'aviso', detalhe: e instanceof Error ? e.message : String(e) });
+    }
   }
 }
 
@@ -64,7 +83,7 @@ export function estaDesligado(id: string): boolean {
 /** Falha de REDE (nenhuma resposta): marca como desligado na primeira vez. */
 export function registrarFalha(id: string): void {
   carregar();
-  if (estados.get(id)?.desligado) return;
+  if (protegido(id) || estados.get(id)?.desligado) return;
   estados.set(id, { desligado: true });
   gravar();
 }

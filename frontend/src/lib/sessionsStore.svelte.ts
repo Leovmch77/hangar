@@ -12,7 +12,7 @@ import { getActiveId, listServers, onServersChanged, type Server } from './auth'
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
-import { estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
+import { definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -61,6 +61,12 @@ function createSessionsStore() {
       return false;
     }
   }
+  // A regra vale pra TODO `registrarFalha`, inclusive o do apiFetch (criar sessão, trocar conta):
+  // só aqui não bastava — o servidor ativo podia ser marcado por outro caminho.
+  definirProtegido((id) => {
+    const s = servers.find((x) => x.id === id);
+    return s ? intocavel(s) : id === getActiveId();
+  });
 
   function scheduleRetry(id: string) {
     // Marcado como desligado: não reagenda nada. O retry daqui tinha teto de 60s, e pra máquina
@@ -249,7 +255,10 @@ function createSessionsStore() {
       // Refresher do backend falhou (achado do hunter): sem isto, lista vazia por erro interno era
       // indistinguível de zero sessões. Mantém a última lista boa; o erro aparece distinto de offline.
       es.addEventListener('list_error', () => {
-        falhou('produtor_falhou');
+        // A máquina RESPONDEU (o SSE está aberto): não é falha de rede, então não esfria — marcar
+        // desligado aqui confundia bug do refresher com máquina fora do ar.
+        registrarDiag({ evento: 'lista.falhou', nivel: 'aviso', tela: 'lista', req,
+          codigo: 'produtor_falhou', tentativa }, s.baseUrl);
         arm();   // conexão está viva — só o produtor de dados falhou
         slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: m.sessao_erro_servidor() });
         recompute();

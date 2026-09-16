@@ -10,8 +10,10 @@ function arquivo(userDataDir) {
 function ler(userDataDir) {
   try {
     return JSON.parse(fs.readFileSync(arquivo(userDataDir), 'utf8'));
-  } catch {
-    // Ausente ou ilegível: começa do zero. Não é erro — é a primeira execução.
+  } catch (e) {
+    // Ausente: primeira execução, começa do zero. Ilegível (JSON quebrado, permissão) também
+    // começa do zero, mas vai pro shell.log — geometria e URL sumindo sem pista já custou caro.
+    if (!e || e.code !== 'ENOENT') console.warn('[settings] settings.json ilegível, começando do zero:', e && e.message);
     return {};
   }
 }

@@ -1,12 +1,20 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora,
+  definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora,
   _limparEsfriamentoParaTestes,
 } from './esfriamento';
 
-beforeEach(() => _limparEsfriamentoParaTestes());
+beforeEach(() => { _limparEsfriamentoParaTestes(); definirProtegido(() => false); });
 
 describe('servidor desligado', () => {
+  it('servidor protegido (o ativo) nunca é marcado, venha a falha de onde vier', () => {
+    definirProtegido((id) => id === 'ativo');
+    registrarFalha('ativo');
+    registrarFalha('outro');
+    expect(estaDesligado('ativo')).toBe(false);
+    expect(estaDesligado('outro')).toBe(true);
+  });
+
   it('uma falha de rede já marca; ninguém mais procura por ele', () => {
     expect(estaDesligado('pc')).toBe(false);
     registrarFalha('pc');

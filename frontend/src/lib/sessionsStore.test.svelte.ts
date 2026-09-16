@@ -1,14 +1,16 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from 'vitest';
 import { sessionsStore } from './sessionsStore.svelte';
-import { configureDiag } from '@hangar/core';
+import { configureDiag, estaDesligado, retentarAgora, _limparEsfriamentoParaTestes } from '@hangar/core';
 
 const streams = vi.hoisted(() => new Map<string, Map<string, (event: { data: string }) => void>>());
+const objetos = vi.hoisted(() => new Map<string, { onerror?: () => void; close: unknown; addEventListener: unknown }>());
 const connectionIds = vi.hoisted(() => new Map<string, string | undefined>());
 const navListener = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn() }));
 vi.mock('./auth', () => ({
   listServers: () => ['lan', 'vpn'].map(id => ({ id, label: id, baseUrl: `http://${id}`, token: 'test' })),
   onServersChanged: () => () => {},
+  getActiveId: () => 'lan',
 }));
 vi.mock('./navPelaLista', () => ({ navPelaLista: vi.fn() }));
 vi.mock('./navegadorPanel.svelte', () => ({
@@ -21,11 +23,25 @@ vi.mock('@hangar/core', async original => ({
     connectionIds.set(server.id, req);
     const handlers = new Map();
     streams.set(server.id, handlers);
-    return { close: vi.fn(), addEventListener: (name: string, fn: unknown) => handlers.set(name, fn) };
+    const obj = { close: vi.fn(), addEventListener: (name: string, fn: unknown) => handlers.set(name, fn) };
+    objetos.set(server.id, obj);
+    return obj;
   },
 }));
-afterEach(() => { sessionsStore.release(); streams.clear(); connectionIds.clear(); vi.clearAllTimers(); vi.useRealTimers();
-  configureDiag({ registrar: () => {}, novoReq: () => '' }); });
+afterEach(() => { sessionsStore.release(); streams.clear(); objetos.clear(); connectionIds.clear(); vi.clearAllTimers(); vi.useRealTimers();
+  configureDiag({ registrar: () => {}, novoReq: () => '' }); _limparEsfriamentoParaTestes(); });
+
+it('falha de rede marca só o servidor que não é o ativo; erro do produtor não marca ninguém', () => {
+  vi.useFakeTimers();
+  sessionsStore.retain();
+  objetos.get('lan')!.onerror!();
+  objetos.get('vpn')!.onerror!();
+  expect(estaDesligado('lan')).toBe(false);   // ativo: intocável, continua sendo tentado
+  expect(estaDesligado('vpn')).toBe(true);
+  retentarAgora('vpn');
+  streams.get('vpn')!.get('list_error')!({ data: '' });
+  expect(estaDesligado('vpn')).toBe(false);   // a máquina respondeu: não é rede
+});
 
 it('passa à abertura da lista o mesmo ID registrado em cada servidor', () => {
   vi.useFakeTimers();
