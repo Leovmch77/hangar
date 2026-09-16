@@ -15,6 +15,7 @@ export type NavEstado = {
   /** Viewport numérico pedido pelo agente; o painel cresce até o espaço disponível da janela. */
   layoutWidth?: number | null;
   layoutHeight?: number | null;
+  layoutError?: string | null;
   /** Abas do shell novo; shell antigo não manda (a faixa não monta). */
   ativa?: number | null;
   abas?: NavAba[];

@@ -6,6 +6,7 @@
 import { navegadorNativo } from './navegadorNativo';
 
 const CHAVE = 'cp_nav_w';
+let viewportPedido: number | null = null;
 
 // Abaixo do MIN um browser não serve pra nada; o teto deixa uma coluna de chat legível mais o
 // trilho da sidebar (que o navegador força ao abrir, via sidebarPin.setForced no Chat).
@@ -157,7 +158,12 @@ export function arrastarNav(clientX: number, bordaDireita: number): void {
 /** Faz a coluna acompanhar o viewport pedido pelo agente, limitada ao espaço real da janela. */
 export function ajustarNavAoViewport(width: number): void {
   if (!Number.isFinite(width) || width <= 0) return;
+  viewportPedido = width;
   navegadorPanel.largura = clampLargura(width);
+}
+
+export function reajustarNavAoViewport(): void {
+  if (viewportPedido != null) navegadorPanel.largura = clampLargura(viewportPedido);
 }
 
 export function salvarNav(): void {

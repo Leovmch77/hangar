@@ -355,13 +355,16 @@ test('layout personalizado publica as dimensoes para o painel da direita crescer
   const chave = 'srv::layout-painel';
   await handlers.get('hangar:nav-open')(a.ev, { chave, url: 'https://um.test', bounds: {} });
   const ctl = criadas.at(-1);
-  Object.assign(ctl.opcoes.layoutEstado, { modo: 'custom', width: 1366, height: 768, versao: 1 });
+  Object.assign(ctl.opcoes.layoutEstado, {
+    modo: 'custom', width: 1366, height: 768, versao: 1, erro: 'layout nao aplicado: renderer trocou',
+  });
 
   ctl.opcoes.aoLayout();
 
   const estado = a.win.webContents.enviados.filter((e) => e.canal === 'hangar:nav-estado').at(-1);
   assert.equal(estado.payload.layoutWidth, 1366);
   assert.equal(estado.payload.layoutHeight, 768);
+  assert.equal(estado.payload.layoutError, 'layout nao aplicado: renderer trocou');
 });
 
 test('trocar de aba mantem visivel o que estava visivel, e esconde a anterior', async () => {

@@ -392,7 +392,7 @@ function regDe(chave) {
   let r = registros.get(chave);
   if (!r) {
     r = { proximoId: 1, ativa: null, abas: new Map(),
-      layoutEstado: { modo: 'desktop', width: null, height: null, versao: 0 } };
+      layoutEstado: { modo: 'desktop', width: null, height: null, versao: 0, erro: null } };
     registros.set(chave, r);
   }
   return r;
@@ -649,6 +649,7 @@ function publicarEstado(win, chave) {
     chave, ativa: reg.ativa, abas,
     layoutWidth: reg.layoutEstado.modo === 'custom' ? reg.layoutEstado.width : null,
     layoutHeight: reg.layoutEstado.modo === 'custom' ? reg.layoutEstado.height : null,
+    layoutError: reg.layoutEstado.erro,
     url: viva ? ativa.getURL() : '',
     carregando: viva ? ativa.isLoading() : false,
     voltar: viva ? ativa.navigationHistory.canGoBack() : false,

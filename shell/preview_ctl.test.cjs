@@ -330,7 +330,10 @@ test('visivel: navegar NAO manda emulacao de tamanho nenhuma', async () => {
 
 test('layout personalizado reaplica o viewport ao navegar e tira shot no tamanho pedido', async () => {
   const png = Buffer.from('png-personalizado');
-  const dbg = dubleDbg({ 'Page.captureScreenshot': { data: png.toString('base64') } });
+  const dbg = dubleDbg({
+    'Page.getLayoutMetrics': { cssVisualViewport: { pageX: 17, pageY: 43 } },
+    'Page.captureScreenshot': { data: png.toString('base64') },
+  });
   let renavegar = null;
   let nativas = 0;
   const ctl = criarControlador({
@@ -361,7 +364,7 @@ test('layout personalizado reaplica o viewport ao navegar e tira shot no tamanho
   const shot = dbg.chamadas.find(([m]) => m === 'Page.captureScreenshot');
   assert.deepEqual(shot[1], {
     format: 'png', captureBeyondViewport: true,
-    clip: { x: 0, y: 0, width: 1366, height: 768, scale: 1 },
+    clip: { x: 17, y: 43, width: 1366, height: 768, scale: 1 },
   });
 });
 
@@ -388,6 +391,78 @@ test('layout mantem os atalhos e recusa dimensoes invalidas', async () => {
   assert.match(await ctl.layout('1366'), /^erro:/);
   assert.match(await ctl.layout('0', '768'), /^erro:/);
   assert.match(await ctl.layout('1366', '768', 'extra'), /^erro:/);
+});
+
+test('layout recusado restaura o anterior e desktop consegue recuperar', async () => {
+  const dbg = dubleDbg({
+    'Emulation.setDeviceMetricsOverride': (p) => {
+      if (p.width === 7000) throw new Error('dimensao recusada');
+      return {};
+    },
+  });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });
+  await ctl.enfileirar(() => ctl.layout('1366', '768'));
+
+  assert.match(await ctl.enfileirar(() => ctl.layout('7000', '7000')), /^erro: .*dimensao recusada/);
+  assert.equal(ctl.layoutAtual(), '1366x768', 'estado compartilhado so muda depois de o CDP aceitar');
+  assert.equal(await ctl.enfileirar(() => ctl.layout('desktop')), 'layout: desktop');
+});
+
+test('layouts simultaneos entre abas nao carimbam como aplicado o viewport errado', async () => {
+  const layoutEstado = { modo: 'desktop', width: null, height: null, versao: 0 };
+  let liberar;
+  let primeira = true;
+  const gate = new Promise((r) => { liberar = r; });
+  const dbgA = dubleDbg({
+    'Emulation.setTouchEmulationEnabled': async (p) => {
+      if (primeira && p.enabled === false) { primeira = false; await gate; }
+      return {};
+    },
+    'Runtime.evaluate': { result: { value: '' } },
+  });
+  const dbgB = dubleDbg();
+  const a = criarControlador({ dbg: dbgA, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {}, layoutEstado });
+  const b = criarControlador({ dbg: dbgB, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {}, layoutEstado });
+
+  const custom = a.layout('1366', '768');
+  await Promise.resolve();
+  const mobile = b.layout('mobile');
+  liberar();
+  await Promise.all([custom, mobile]);
+  await a.enfileirar(() => a.texto());
+
+  const metricasA = dbgA.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride');
+  assert.equal(metricasA.at(-1)[1].width, 390, 'a aba A reaplica o estado mobile que venceu por ultimo');
+  assert.equal(a.layoutAtual(), 'mobile');
+});
+
+test('reaplicacao que falha ao navegar e tentada de novo no proximo comando', async () => {
+  let falhar = false;
+  let tentativas = 0;
+  const dbg = dubleDbg({
+    'Emulation.setDeviceMetricsOverride': () => {
+      tentativas++;
+      if (falhar) throw new Error('renderer trocou');
+      return {};
+    },
+    'Runtime.evaluate': { result: { value: '' } },
+  });
+  let renavegar;
+  const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: (cb) => (renavegar = cb) });
+  await ctl.layout('1366', '768');
+  falhar = true;
+  await renavegar();
+  falhar = false;
+  await ctl.enfileirar(() => ctl.texto());
+
+  assert.equal(tentativas, 3, 'aplicacao inicial, falha na navegacao e nova tentativa');
+});
+
+test('erro real do screenshot e propagado em vez de culpar janela minimizada', async () => {
+  const dbg = dubleDbg({ 'Page.captureScreenshot': () => { throw new Error('clip recusado'); } });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => ({ isEmpty: () => true }), aoNavegar: () => {} });
+  await ctl.layout('1366', '768');
+  await assert.rejects(ctl.capturarPagina(), /captureScreenshot falhou: clip recusado/);
 });
 
 test('escondido: print que pendura devolve imagem vazia dentro do teto, sem travar o agente', async () => {

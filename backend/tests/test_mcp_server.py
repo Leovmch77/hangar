@@ -122,7 +122,7 @@ async def test_nav_layout_encaminha_tamanho_personalizado(identidade, monkeypatc
 
     monkeypatch.setattr(mcp_server.navshell, "verbo", verbo)
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
-        res = await s.call_tool("nav", {"verbo": "layout", "args": ["1366", "768"]})
+        res = await s.call_tool("nav", {"verbo": "layout", "args": [1366, 768]})
 
     assert not res.is_error and res.content[0].text == "layout: 1366x768"
     assert chamadas == [("eu", "layout", ["1366", "768"], None)]

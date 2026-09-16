@@ -199,10 +199,10 @@ async def nav_abrir(ctx: Context, url: str) -> dict[str, Any]:
                       "do PNG), layout [mobile|desktop|<largura> <altura>], close, tab-list, "
                       "tab-new <url>, tab-switch <id>, tab-close [id]. "
                       "`aba` age numa aba sem trocar a que o usuário vê.")
-async def nav(ctx: Context, verbo: str, args: list[str] | None = None, aba: int | None = None) -> str:
+async def nav(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None) -> str:
     eu = await _eu(ctx)
     async with _travas_nav.setdefault(eu, asyncio.Lock()):
-        return await _verbo_nav(eu, verbo, list(args or []), aba)
+        return await _verbo_nav(eu, verbo, [str(a) for a in args or []], aba)
 
 
 @mcp.tool(description="Vários verbos do navegador em sequência, como `hangar-preview batch`: para no "

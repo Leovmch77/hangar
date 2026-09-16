@@ -11,7 +11,7 @@
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import { navegadorNativo, type NavAba } from '../lib/navegadorNativo';
-  import { navegadorPanel, ajustarNavAoViewport, atualizarNavUrl, fecharNav } from '../lib/navegadorPanel.svelte';
+  import { navegadorPanel, ajustarNavAoViewport, reajustarNavAoViewport, atualizarNavUrl, fecharNav } from '../lib/navegadorPanel.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
 
@@ -56,6 +56,7 @@
       podeVoltar = p.voltar;
       podeAvancar = p.avancar;
       if (typeof p.layoutWidth === 'number') ajustarNavAoViewport(p.layoutWidth);
+      if (p.layoutError) avisar(p.layoutError);
       if (p.abas) {
         abas = p.abas;
         // Trocou de aba ativa: um "nova aba" que ficou pendente no campo perde a vez.
@@ -237,6 +238,7 @@
 
   onMount(() => {
     if (!nativo) return;
+    window.addEventListener('resize', reajustarNavAoViewport);
     // Reenvia o retângulo a cada mudança de layout (resize da janela, drag da coluna, sidebar) —
     // o view nativo não acompanha o DOM sozinho.
     const sync = () => {
@@ -256,6 +258,7 @@
     return () => {
       ro.disconnect();
       mo.disconnect();
+      window.removeEventListener('resize', reajustarNavAoViewport);
       nativo.hide(navKey);   // desmontou (troca de aba/sessão): ESCONDE, não fecha — o × é o close
     };
   });

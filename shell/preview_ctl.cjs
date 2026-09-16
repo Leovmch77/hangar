@@ -22,6 +22,14 @@ const UA_MOVEL = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWe
 // (janela minimizada?)" — culpa trocada, porque o quadro estava lá. Alinhado ao `tetoEspera`
 // dos outros verbos: melhor um print que demora do que um print que mente.
 const TETO_SHOT_CDP = 15000;
+const FILAS_LAYOUT = new WeakMap();
+
+function serializarLayout(estado, fn) {
+  const anterior = FILAS_LAYOUT.get(estado) || Promise.resolve();
+  const resultado = anterior.then(fn);
+  FILAS_LAYOUT.set(estado, resultado.then(() => {}, () => {}));
+  return resultado;
+}
 
 // Tecla nomeada precisa de `code` + virtual key code pra o Chromium reconhecer, e Enter precisa
 // do caractere: keyDown sem `text: "\r"` não gera char e o form não submete.
@@ -63,7 +71,7 @@ const FOCO = `(()=>{const a=document.activeElement;if(!a||a===document.body)retu
 // tetoEspera vale pra TODO comando que pode não voltar (wait e eval): view escondido suspende
 // requestAnimationFrame, e um comando pendurado trava o agente sem erro nenhum.
 function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}, aoLayout = () => {}, tetoEspera = 15000,
-  layoutEstado = { modo: 'desktop', width: null, height: null, versao: 0 } }) {
+  layoutEstado = { modo: 'desktop', width: null, height: null, versao: 0, erro: null } }) {
   let fila = Promise.resolve();
   let emVoo = 0;
   let refs = new Map();
@@ -117,8 +125,16 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
 
   // Emular tamanho numa página que ainda não carregou (o `about:blank` de um view recém-criado)
   // derruba o processo com SIGSEGV. Quem chama espera o load.
-  async function aplicarViewport() {
-    if (layoutEstado.modo === 'mobile') {
+  const copiarLayout = () => ({ modo: layoutEstado.modo, width: layoutEstado.width,
+    height: layoutEstado.height, versao: layoutEstado.versao });
+  const textoErro = (err) => (err && err.message ? err.message : String(err));
+  const publicarErroLayout = (err) => {
+    layoutEstado.erro = `layout nao aplicado: ${textoErro(err)}`;
+    aoLayout();
+  };
+
+  async function aplicarViewport(pedido) {
+    if (pedido.modo === 'mobile') {
       // Layout de celular pedido por quem está olhando de fora (acesso remoto). Vale MAIS que o
       // `oculto`: quem escolheu ver em celular quer o site servindo mobile, com ou sem painel.
       // Sem a emulação de toque a página não recebe touchstart e um carrossel que só escuta toque
@@ -126,18 +142,32 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_MOVEL);
       await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
       await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: UA_MOVEL });
-      layoutVersaoAplicada = layoutEstado.versao;
+      layoutVersaoAplicada = pedido.versao;
       return;
     }
     await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: false });
     await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: '' });
-    if (layoutEstado.modo === 'custom') {
+    if (pedido.modo === 'custom') {
       await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
-        width: layoutEstado.width, height: layoutEstado.height, deviceScaleFactor: 1, mobile: false,
+        width: pedido.width, height: pedido.height, deviceScaleFactor: 1, mobile: false,
       });
     } else if (oculto) await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_OCULTO);
     else await dbg.sendCommand('Emulation.clearDeviceMetricsOverride');
-    layoutVersaoAplicada = layoutEstado.versao;
+    layoutVersaoAplicada = pedido.versao;
+  }
+
+  function sincronizarLayout(forcar = false) {
+    return serializarLayout(layoutEstado, async () => {
+      if (!forcar && layoutVersaoAplicada === layoutEstado.versao) return;
+      layoutVersaoAplicada = -1;
+      try {
+        await aplicarViewport(copiarLayout());
+        if (layoutEstado.erro) { layoutEstado.erro = null; aoLayout(); }
+      } catch (err) {
+        publicarErroLayout(err);
+        throw err;
+      }
+    });
   }
 
   async function aplicarTema() {
@@ -150,6 +180,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   // refs apontam pra nós que já não existem. Os dois se resolvem no mesmo gancho.
   aoNavegar(async () => {
     refs = new Map();
+    layoutVersaoAplicada = -1;
     // Requisição cancelada pela navegação nem sempre vira loadingFailed; sem zerar, o --idle
     // ficaria preso até o teto na página nova.
     requisicoesEmVoo = 0;
@@ -160,7 +191,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // ele foi PEDIDO por alguém que está olhando, e se a emulação não voltar depois de navegar a
     // página vira desktop com a pill ainda marcando celular.
     if (oculto || layoutEstado.modo !== 'desktop') {
-      await aplicarViewport().catch((err) => {
+      await sincronizarLayout(true).catch((err) => {
         if (layoutEstado.modo !== 'desktop') console.error(`[nav] layout pedido nao voltou apos navegar: ${err && err.message ? err.message : err}`);
       });
     }
@@ -216,7 +247,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     emVoo++;
     const resultado = fila.then(async () => {
       if (!(await economia())) throw new Error('a aba escondida nao descongelou; tente de novo');
-      if (layoutVersaoAplicada !== layoutEstado.versao) await aplicarViewport();
+      await sincronizarLayout();
       return fn();
     });
     fila = resultado.then(() => {}, () => {}).then(() => { emVoo--; return economia(); });
@@ -245,9 +276,9 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // dois são emulação que `aplicarViewport`/`aoNavegar` precisam repor depois de navegar.
     async layout(...args) {
       const [modo, altura] = args;
-      const anterior = { modo: layoutEstado.modo, width: layoutEstado.width, height: layoutEstado.height };
+      let desejado;
       if (args.length === 1 && (modo === 'mobile' || modo === 'desktop')) {
-        Object.assign(layoutEstado, { modo, width: null, height: null, versao: layoutEstado.versao + 1 });
+        desejado = { modo, width: null, height: null };
       } else {
         const width = Number(modo);
         const height = Number(altura);
@@ -258,17 +289,26 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
             || !Number.isInteger(height) || height <= 0 || height > MAX) {
           return `erro: layout precisa ser mobile, desktop ou dois inteiros entre 1 e ${MAX}: ${modo ?? ''} ${altura ?? ''}`.trimEnd();
         }
-        Object.assign(layoutEstado, { modo: 'custom', width, height, versao: layoutEstado.versao + 1 });
+        desejado = { modo: 'custom', width, height };
       }
-      try {
-        await aplicarViewport();
-      } catch (e) {
-        // O CDP recusou: o estado compartilhado não pode ficar dizendo um tamanho que não vale.
-        Object.assign(layoutEstado, anterior, { versao: layoutEstado.versao + 1 });
-        return `erro: layout ${args.join(' ')}: ${e && e.message ? e.message : e}`;
-      }
-      aoLayout();
-      return `layout: ${this.layoutAtual()}`;
+      return serializarLayout(layoutEstado, async () => {
+        const anterior = copiarLayout();
+        const proximo = { ...desejado, versao: layoutEstado.versao + 1 };
+        layoutVersaoAplicada = -1;
+        try {
+          await aplicarViewport(proximo);
+        } catch (err) {
+          try { await aplicarViewport(anterior); } catch (restaurar) {
+            console.error(`[nav] layout anterior nao voltou: ${textoErro(restaurar)}`);
+            layoutVersaoAplicada = -1;
+          }
+          publicarErroLayout(err);
+          return `erro: layout ${args.join(' ')}: ${textoErro(err)}`;
+        }
+        Object.assign(layoutEstado, proximo, { erro: null });
+        aoLayout();
+        return `layout: ${this.layoutAtual()}`;
+      });
     },
     layoutAtual: () => (layoutEstado.modo === 'custom'
       ? `${layoutEstado.width}x${layoutEstado.height}` : layoutEstado.modo),
@@ -288,7 +328,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // porque é o mesmo lugar que já sabe reaplicar emulação depois de navegar.
     async definirOculto(valor) {
       oculto = !!valor;
-      await aplicarViewport();
+      await sincronizarLayout(true);
       await economia();
     },
     // Documento novo nasce ativo (o congelamento é do documento, não do view): o main chama no
@@ -308,23 +348,30 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
         const img = await capturarPagina().catch(() => null);
         if (img && !img.isEmpty()) return img;
       }
-      const parametros = personalizado
-        ? { format: 'png', captureBeyondViewport: true,
-          clip: { x: 0, y: 0, width: layoutEstado.width, height: layoutEstado.height, scale: 1 } }
-        : { format: 'png' };
+      let parametros = { format: 'png' };
+      if (personalizado) {
+        const metricas = await dbg.sendCommand('Page.getLayoutMetrics');
+        const viewport = metricas.cssVisualViewport || metricas.visualViewport || {};
+        parametros = { format: 'png', captureBeyondViewport: true,
+          clip: { x: Number(viewport.pageX) || 0, y: Number(viewport.pageY) || 0,
+            width: layoutEstado.width, height: layoutEstado.height, scale: 1 } };
+      }
       const pedido = dbg.sendCommand('Page.captureScreenshot', parametros);
       pedido.catch(() => {});   // rejeição atrasada não pode virar rejeição solta no processo
+      let timer;
       const r = await Promise.race([
-        pedido.catch(() => null),
-        new Promise((res) => setTimeout(() => res(null), TETO_SHOT_CDP)),
+        pedido.then((valor) => ({ tipo: 'ok', valor }), (erro) => ({ tipo: 'erro', erro })),
+        new Promise((res) => { timer = setTimeout(() => res({ tipo: 'teto' }), TETO_SHOT_CDP); }),
       ]);
-      if (!r || !r.data) {
+      clearTimeout(timer);
+      if (r.tipo === 'erro') throw new Error(`captureScreenshot falhou: ${textoErro(r.erro)}`);
+      if (r.tipo === 'teto' || !r.valor || !r.valor.data) {
         // Distinguir no LOG o que o retorno não distingue: o preview_srv só vê "imagem vazia" e
         // atribui à janela minimizada. Quem for investigar precisa saber se foi o teto.
         console.error(`[nav] captureScreenshot sem dado apos ${TETO_SHOT_CDP}ms (oculto=${oculto})`);
         return { isEmpty: () => true, toPNG: () => Buffer.alloc(0) };
       }
-      const png = Buffer.from(r.data, 'base64');
+      const png = Buffer.from(r.valor.data, 'base64');
       return { isEmpty: () => png.length === 0, toPNG: () => png };
     },
     fechar() { fechado = true; console_.length = 0; rede.length = 0; refs = new Map(); },

@@ -48,6 +48,9 @@ describe('navegadorPanel — largura redimensionável', () => {
     expect(mod.navegadorPanel.largura).toBe(800);
     mod.ajustarNavAoViewport(1366);
     expect(mod.navegadorPanel.largura).toBe(1028);
+    fixarJanela(1400);
+    mod.reajustarNavAoViewport();
+    expect(mod.navegadorPanel.largura).toBe(828);
   });
 
   it('guarda ao soltar e restaura ao remontar', async () => {
