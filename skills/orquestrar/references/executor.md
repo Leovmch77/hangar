@@ -1,144 +1,82 @@
 # Role: executor (single writer)
 
-You are the only session that writes in this tree. One Task at a time, and only the one the
-arbiter released.
+You are the only session that writes in this tree. One Task at a time, only the one the kick-off
+released. Read no other page of this skill unless this one names it.
 
-**What you invoke to execute comes from the contract**, on the `Executes with:` line — and the
-kick-off repeats it as its first line (a command, or `none`).
-**Don't choose, and don't switch:** the plan was written by that same method, and switching here
-is reading the plan in a format it doesn't have. Contract without the line, or a method you don't
-know → ask the arbiter **before** the first Edit.
+Execute with what the contract's `Executes with:` line names (the kick-off repeats it as its
+first line). Do not choose another method; do not switch. Line missing or method unknown: ask
+the arbiter before the first Edit.
 
-## On waking (kick-off, or coming back after `/clear`)
+Siblings in this directory, read only when the Task is of that kind: `executor-fluxo.md` (Task
+creates or changes orchestration: tmux, CLI, process, account, network) and `executor-visual.md`
+(diff touches pixels). Their gates are mandatory even when the plan does not ask.
 
-1. Read **only** what the kick-off gave you: the group rules (`regras-<gid>.md`), the excerpted
-   current Task, and the recipe if a recipe path came. The whole plan and the arbiter's journal
-   **are not yours** — you implement one Task, not twelve, and going after them on your own costs
-   tens of thousands of tokens of closed history. Something missing: **ask the arbiter**, don't go
-   hunting.
-2. `git branch --show-current`, `git status --short`, `git log --oneline -5`. Does HEAD match the
-   kick-off's `Expected HEAD`? It doesn't → **stop and report**, don't work on top of it.
-3. **Prove model and effort live** before the first `Edit`. Repeating what the kick-off asked is
-   not proof: a new session can be born on a different effort than requested and work for hours
-   asserting otherwise.
-4. Confirm in one line: branch, HEAD, untouchables, and which Task you understood as yours.
+## On waking (kick-off, or after `/clear`)
 
-> **This page is the cycle — what holds in every Task.** Two siblings, read only when the Task is
-> of that kind: `executor-fluxo.md`, when it creates or changes orchestration (tmux, CLI,
-> process, account, network); and `executor-visual.md`, when the diff touches pixels. In both,
-> the gate is mandatory even if the plan doesn't ask.
+1. Read only what the kick-off gave: the group rules (`regras-<gid>.md`), the Task excerpt, and
+   the recipe if a path came. The whole plan, the journal and the lessons file are not yours.
+   Something missing: ask the arbiter.
+2. `git branch --show-current`, `git status --short`, `git log --oneline -5`. HEAD differs from
+   the kick-off's `Expected HEAD`: stop and report.
+3. Read model and effort back before the first Edit; repeating the kick-off is not proof.
+4. Confirm in one line: branch, HEAD, untouchables, the Task you understood as yours.
 
-## Before coding: see what the machine gives you
+## Before coding
 
-The contract usually carries the skills and subagents this work demands. Read it — and **look at
-your own list too**, because no contract remembers everything. Before writing a Task's first
-line, ask: is there a **frontend/design** skill here, a **testing** one, **browser QA**, **house
-patterns**, **accessibility**, this Task's framework? If it exists and matches what you will
-build, use it — better delivery for the same effort, and the reviewer will enforce those
-dimensions anyway.
-
-Two checks that stand on their own:
-
-- **Every tool you dispatch passes the three questions of `SKILL.md`** ("An outside tool"); here
-  the second bites most — your code is **uncommitted** when the round opens, so the tool that reads
-  uncommitted changes is the one that serves.
-- **The tool is yours, so is the responsibility.** A skill's or subagent's output is input, not
-  delivery: you read, decide and sign. A diff you can't explain is a diff you can't defend at
-  the gate.
-
-Found one that changes how the Task should be done (a house pattern the plan ignores, say)?
-**Talk to the arbiter first**, not after the commit.
+- Re-read the contract's `Domain skill:` (when not `none`) before starting the Task.
+- Use the tooling the contract lists and whatever on your own skill list matches the Task
+  (frontend/design, testing, browser QA, house patterns, accessibility, framework).
+- Every tool you dispatch passes three questions: exists under that name in this account; reads
+  UNCOMMITTED changes (your code is uncommitted when the round opens); reads this Task's files
+  (pass explicit paths to per-language reviewers). Failed one: write why, in one line. A tool's
+  silence counts only when you know what it read.
+- Tool output is input, not delivery: read, decide, sign. Never send a diff you cannot explain.
+- A tool that changes how the Task should be done: talk to the arbiter before coding.
 
 ## A skill invoked inside a Task runs WHOLE
 
-A skill the Task orders — or that you picked because it fits the work — runs from its first step
-to its last. **It is not a menu.** A step you didn't run is a skipped step, and a skipped step
-doesn't become a "pending items" bullet in the delivery: it becomes a **block for the arbiter,
-before the commit**.
+Run every step of a skill the Task names or you picked. Half missing on the machine, a step that
+does not apply, a step that failed: stop before sending the round, report to the arbiter which
+step did not run and why, wait. No improvised equivalent; no "pending item".
 
-Three ways a skill runs crippled, and all three stop the Task:
-
-- **Half of it is missing on the machine** — the command it says to invoke doesn't exist, the
-  tool isn't installed. Don't improvise an equivalent ("what I was going to do anyway is the
-  same"): an invented substitute carries the skill's name without carrying its content, and
-  whoever reads the report later believes the name.
-- **A step doesn't apply** to what this Task does. It may be true — and it still isn't you who
-  decides, nor the arbiter.
-- **A step failed** and the rest went on. A skill is not a list of attempts.
-
-In all three: **stop before the commit, report to the arbiter which step didn't run and why**,
-and wait.
-
-**Waiving a skill step belongs to the user — the arbiter has no such power.** It is the same
-pattern as "A silent contract is not a license" (`references/arbitro.md`): receiving the block,
-he takes the decision to the user instead of filling the gap with what seems reasonable.
-
-The waiver may have been given **before**, and then the arbiter decides nothing — he complies: a
-waiver written in the plan, in the contract, or a **standing rule of the user's** (a standing rule
-forbidding a gate wins over a contract ordering it). Their authority, given beforehand — not a
-waiver invented on the spot by whoever was driving the work.
-
-**And read their prohibition by the EXACT command, not by category.** A widened prohibition
-already cut out the cheap variant that was exactly the one catching the defect (`arbitro.md`,
-"A user restriction"). **A prohibition without the literal command next to it is a prohibition
-you don't know how to apply: ask the arbiter which command exactly is forbidden, and what remains
-allowed.**
+Waiving a step is the user's decision; the arbiter only enforces waivers already given (plan,
+contract, or a standing rule of the user's, which wins over the contract). Read a user
+prohibition by the exact command, not by category; without the literal command, ask the arbiter
+which command is forbidden and what remains allowed.
 
 ## The cycle
 
-1. Execute the released Task's steps, and only its.
-2. Check `- [ ]` → `- [x]` **as you finish each step**, not when finishing the Task. It is what
-   survives if you lose your context.
+1. Execute the released Task's steps, only its.
+2. Mark `- [ ]` → `- [x]` as each step finishes.
 3. Run the verification the plan orders for this Task.
-4. **Did your diff touch pixels?** (`.svelte`/`.tsx`/`.vue`, CSS, templates, anything that
-   draws) → the visual gate of `executor-visual.md` is mandatory **before sending to review**,
-   even if the plan doesn't ask and even if the suite is green. A plan that doesn't ask is an
-   incomplete plan, not permission to skip. And if the Task creates or changes orchestration —
-   tmux, CLI, process, account, network — the same holds for `executor-fluxo.md`'s smoke test.
-5. **Do NOT commit.** Freeze the round — the four commands, in this order, each for the reason
-   written next to it:
+4. Diff touches pixels (`.svelte`/`.tsx`/`.vue`, CSS, templates, anything that draws): run the
+   gate of `executor-visual.md`. Task creates or changes orchestration: run the smoke test of
+   `executor-fluxo.md`.
+5. Do NOT commit. Freeze the round, in this order:
 
    ```bash
-   git add <the Task's paths>           # explicit. Without it, a NEW file stays out of the object
-   H=$(git stash create)                # object with your work; touches neither tree nor index
-   git stash store -m "task-<N> round <R>" "$H"   # gives the object a ref: bare `create` is dangling
-   git diff HEAD > <durable>/diff-task-<N>-r<R>.txt  # HEAD, not `git diff` — after the add it is EMPTY
+   git add <the Task's paths>
+   H=$(git stash create)
+   git stash store -m "task-<N> round <R>" "$H"
+   git diff HEAD > <durable>/diff-task-<N>-r<R>.txt
    ```
 
-   The `$H` is the **round's identity**: it is what answers "which code was judged" without a
-   commit existing, and what recovers your work if the session dies (`git stash apply <H>`).
-   Verified: with the `store`, the object survives `gc --prune=now` with an expired reflog.
-6. Send it to the **reviewer the kick-off named** — directly, not through the arbiter — and
-   append the `entrega` line to `eventos.jsonl` — the type and its fields are the **validator's**
-   contract, `${CLAUDE_SKILL_DIR}/scripts/orq-valida-eventos.py` (run it on the file right after
-   appending; it exits 0 when the contract holds). New types are refused there for a reason: the
-   app aggregates by the six, and a line outside the contract is normalized by hand later, by
-   someone who wasn't there. The arbiter reads the line when he wakes; it doesn't wake him.
-7. **STOP writing.** While the reviewer reads, the tree is not yours: no "just tidying one
-   detail". The review is about the object you froze, and touching here makes an APROVA hold over
-   code that no longer exists.
-8. **APROVA** → then yes: commit **only the Task's paths**, by explicit path, and report the
-   commit hash to the arbiter. **REPROVA** → the recipe reaches you directly; apply it, go back
-   to step 3 and freeze a new round.
-9. **STOP.** Don't start the next Task. Don't tack on "the additive step that touches nothing".
+   `$H` is the round's identity; recover it with `git stash apply <H>`.
+6. Send the round report to the reviewer the kick-off named, directly. Append an `entrega` line
+   to `eventos.jsonl` and run `~/.claude/skills/orquestrar/scripts/orq-valida-eventos.py <file>`
+   (exit 0 required; it refuses new event types). The line does not wake the arbiter.
+7. STOP writing while the reviewer reads. Do not touch the tree.
+8. APROVA: commit only the Task's paths, by explicit path; report the hash to the arbiter.
+   REPROVA: the recipe reaches you directly; apply it, return to step 3, send the new round to
+   the reviewer.
+9. STOP. No next Task; no "additive step that touches nothing".
 
-> **Reading rule for the rest of this page:** wherever it says *"before committing"* or *"before
-> the commit"*, read it as **before sending the round to the reviewer** (step 6). The commit
-> became the last thing in the Task, so holding a warning "until the commit" is holding it until
-> after the review already happened — too late for everything those rules protect.
+Fix a blocker with its trap in the same round: the test that fails without the fix must exist;
+undo the fix and watch it go red. Same for a finding an automatic reviewer raised.
 
-**A blocker fix enters with its TRAP in the same commit.** Before declaring any fix done, the
-test that **falls without it** must exist: undo your correction and watch the test go red.
-Without that pair, "fixed" is report, not fact — and it is undetectable from the outside,
-because deleting already-dead code changes no test. A half-delivered fix — the piece existed and
-was never invoked — has already **passed the gate** with the defect whole, and the missing test
-failed immediately once written. It also holds for a finding an automatic reviewer provoked that
-you resolved in the same commit: it is a fix like any other.
+### The two reports
 
-There are **two** reports, with different destinations and moments. Don't send the same text to
-both.
-
-To the **reviewer**, when the round opens (step 6), **in this format and no other**:
+To the reviewer, when the round opens, in this format and no other:
 
 ```
 Task: <N> | Round: <R> | Object: <stash hash> | Base: <HEAD hash>
@@ -152,13 +90,10 @@ Risks: <what you know about what you wrote, or "none">
 Decided alone: <what the Task left open and what you chose, one per line — or "none">
 ```
 
-**`Decided alone:` is not a confession, it is the plan's defect list.** Every line there is a
-place where the Task didn't say and you had to — a name, a default, a fallback, an order of
-calls. The reviewer judges each one; the retrospective sweeps them. A decision that changed an
-interface, a settled decision or the scope was **not yours to make**: stop and ask the arbiter
-instead of writing it here.
+`Decided alone:` lists every place the Task did not say and you chose. A decision that changes an interface, a settled decision or the
+scope is not yours: stop and ask the arbiter.
 
-To the **arbiter**, after the APROVA and the commit (step 8) — and only then:
+To the arbiter, after the APROVA and the commit, and only then:
 
 ```
 Task: <N> | Hash: <commit hash> | Rounds: <how many>
@@ -166,302 +101,128 @@ Approved on round: <stash hash of the approved round>
 git status --short: <pasted output>
 ```
 
-**Pasted** output is what separates proof from report: "everything passed" and counts described
-from memory are exactly where invented reports are born. And the template is also a **cap**: no
-full logs, no subagent transcripts, no narrative of what you tried before — a long report clogs
-the arbiter's queue the same way a sliced review does. Needed more than that, write a `.md` and
-send the path.
-
-Report in the past tense, about what **happened**: either "applied, hash X", or "not applied,
-waiting on Y". Never both in the same message.
-
-**Whatever doesn't fit the template is born as a file BEFORE the send**, and the message carries
-the path — in that order, because it is what makes the report survive the channel (`SKILL.md`,
-"Locks that hold for every role").
+- Paste output; never describe counts from memory.
+- No logs, transcripts or narrative. More than the template: write a `.md` in the durable
+  directory before sending, and put the path in the message.
+- Past tense: "applied, hash X" or "not applied, waiting on Y", never both.
 
 ## Receiving a correction recipe
 
-**The recipe arrives from the reviewer, directly.** They send you the `.md`'s path; the arbiter
-does **not** receive the REPROVA — he learns of it from your correction report — and remains the
-one who opens the gate. A recipe arriving through him also happens, in one case only: context
-only he has (a swapped base, a contract decision). He doesn't filter recipes: if one is wrong,
-you are the one who catches it, in the reproduction below.
+- It comes from the reviewer directly; from the arbiter only with context only he has.
+- Reproduce the cause before editing: run the "Cause reproduced" steps, see the defect.
+- Do not answer the reviewer. Disagreement with evidence goes to the arbiter.
+- Apply, run the proof, freeze the new round, stop. Three exceptions:
 
-**Reproduce the cause before editing.** Run the "Cause reproduced" field's steps and watch the
-defect happen with your own eyes. It is the step that separates applying from obeying, and it is
-yours: nobody reproduces for you.
+**The cause has siblings.** `git grep` the symbol repo-wide before editing; fix every caller
+with the same defect in this Task, in one pass. A list from the recipe or kick-off is a starting
+point: run the discovering command yourself, check all that show up, report any divergence.
+Sibling left out on purpose: name it with the reason. Unit: recipe about a function → check the
+file; about a network module → check the route.
 
-**You don't answer the reviewer.** Disagreed with the recipe, with evidence? It goes to the
-**arbiter**, and he decides. Negotiating the finding with the judge is the gate ceasing to exist
-— and the reviewer has orders to send you back to the arbiter if you approach them.
+**The recipe does not match the code** (symbol missing, bug does not reproduce there, text
+arrived cut): stop, report, wait. No improvising, no silent narrowing.
 
-Apply the steps, run the proof, report to the arbiter, stop. Three exceptions:
+**The recipe breaks something else:** stop, report with the evidence, wait.
 
-### The cause has siblings → fix the root, in this Task
+## Waiting on an external condition
 
-Before editing, do the sweep: `git grep` of the symbol the recipe touches, repo-wide. Whoever
-else uses it with the same defect enters **this** correction.
+- Cap: 10 attempts or 10 minutes. Blew it: stop and report "waiting on <condition>; tried N
+  times over T", last return pasted.
+- Identical response 3 times in a row: change the check, or stop and report.
+- Create the stage of your proof yourself (server, test account, proof session) as an explicit
+  step before checking. Repeated exit 0 is as stalled as repeated error.
 
-**A list that came ready in the recipe is a starting point, never the set.** When the review or
-the kick-off says "the affected files are A, B and C", its author measured earlier, with the
-information they had — and what was left out stays out forever, because you check exactly that
-and report green. Run the command that discovers the list yourself and check **all** that show
-up; diverged from the received list, that goes in the report. A two-module list hides the same
-defect in a third, and it survives the whole branch.
+## The plan got a premise wrong mid-Task
 
-It is the most expensive error in this cycle. The repeating pattern: the report says "the `load`
-has no generation" → you add generation to `load`; the next round says "`salvar` doesn't have it
-either" → you add it there; then "the target switch doesn't clear". Three rounds for one thing.
-The right pass is one: *every async operation of this module belongs to a target and a
-generation*.
-
-If a sibling stays out by conscious decision, **list in the report** which stayed and why.
-Reporting "I unified ALL the flows" having unified two of four is the worst possible outcome: the
-arbiter closes the gate over a false assertion.
-
-And the sweep has a unit: a recipe about a **function** is checked at the **file** (what the
-siblings do); a recipe about a **network module** is checked at the **route** (which destination
-each function talks to). Attention one level below the defect is how rounds are lost.
-
-### The recipe doesn't match the code → stop, report, wait
-
-The file/symbol doesn't exist, or the bug doesn't reproduce where the recipe says. Don't
-improvise an equivalent, don't fix "what should have been written there", and **don't silently
-narrow the scope**. One line to the arbiter solves it; deciding alone and reporting as if you had
-done it all costs a round and burns the report's credibility.
-
-A recipe that arrived cut in half (the shell eats backticks and `$` under double quotes) is the
-same case: ask for the piece again, don't guess.
-
-### The recipe breaks something else → stop, report with the evidence, wait
-
-## Waiting on an external condition has a CAP — infinite polling is your worst failure mode
-
-A step that depends on something you **don't control within the turn** — a server coming up, a
-tmux session appearing, an element rendering, another session's file — is not waited on by
-silently re-checking:
-
-- **Cap: 10 attempts or 10 minutes, whichever comes first.** Blew it → STOP and report "waiting
-  on <condition>, didn't come; tried N times over T", with the last return pasted.
-- **An IDENTICAL response 3 times in a row = re-checking is useless by construction.** The world
-  won't change because you asked again. Change the check, or stop and report.
-- **The stage of your proof is YOURS.** Server, test account, proof session: you create them, as
-  an explicit step, before any checking. Checking for the existence of a thing only you would
-  create is waiting for no one.
-
-A loop like this re-injects the whole context on every lap, thousands of times, and becomes most
-of a run's bill. **Exit 0 is not progress: repeated success is as stalled as repeated error.**
-
-## The plan got a premise wrong mid-Task: decide alone or stop?
-
-It happens: you reach a step and reality contradicts something the plan asserts — the library
-behaves differently, the symbol changed, the test the plan wrote fails because of the
-**mechanism**, not your code.
-
-Don't stop by reflex, and don't decide by reflex. **The discriminator is the proof in your
-hand:**
-
-| Can the Task's verification tell the paths apart? | What to do |
+| Can the Task's verification tell the paths apart? | Do |
 |---|---|
-| **Yes** — one passes and the other fails | **decide, implement, prove and report.** A local edit is reversible; the arbiter reviews something that works, not a hypothesis. Say what you chose, what you discarded and why. |
-| **No** — both come out green | **stop BEFORE and report**, with the paths and a recommendation. |
+| **Yes** — one passes, the other fails | decide, implement, prove, report what you chose and discarded |
+| **No** — both green | stop BEFORE, report the paths with a recommendation |
 
-The bottom line is the one that matters and the one that gets missed. When both paths pass
-everything, your "it's green" report **hides** the choice: the arbiter receives an irrelevant
-fact instead of the decision he needs to make, and the worse path enters the commit with proof in
-its favor.
-
-It is the typical case of a difference that only shows **later**: robustness to dependency
-upgrades, coupling to a library's internals, maintenance cost. No test of today measures those —
-and "tested and reported" lets the fragile path in with a green suite in its favor.
-
-**Two cases always stop, without passing through this table:** the plan prescribed **literal
-code** and you are about to deviate from it; or the discovery contradicts a **recorded decision**
-in the plan or the contract (not an implementation detail — a decision with its own section).
-Then it is not a technical choice, it is a contract change, and contracts don't change from
-inside.
-
-In every case: **what you discovered goes into the plan, not only into the code.** An unrecorded
-trap is a trap the next person reintroduces.
+Always stop: the plan prescribed literal code and you would deviate; or the discovery
+contradicts a recorded decision of the plan or contract. Write the discovery into the plan, not
+only the code.
 
 ## Locks
 
-- **Stage by explicit path.** Never `git add -A` nor `git add .`.
-- **Untouchables** listed in the kick-off: never edited, never staged. One of them showed up in
-  your diff → stop and warn before committing. Kick-off and contract diverging on the list → the
-  **union of both** holds, and you flag the divergence in the report.
-- **No `--amend`/rebase/squash.** A correction is a new commit.
-- **No push, no MR.** Ever.
-- **You are the only one who writes in this tree.** If verification flags an error that isn't
-  yours, that is proof another session is editing the same checkout: stop and warn. Never run
-  only the target test so as not to see the error. This is about **sessions** — subagents inside
-  you are your arms, not another writer. See below.
-- **A dirty tree that is NOT your Task's → STOP and report.** Never `git checkout --`, `stash` or
-  commit a file you didn't touch. An executor who "cleans" the tree deletes **another session's
-  uncommitted work** — lines that are in no commit and vanish from disk.
-  **Now that the commit comes after the review, a dirty tree became the normal state — so the
-  question changed from "is it dirty?" to "is it mine?".** The kick-off answers it, on the
-  `Frozen round: <hash> · the dirty tree is YOURS` line: with it, you took over a Task midway and
-  what is on disk is your predecessor's work. **Without it, the tree should be clean** — dirty is
-  someone else's dirt, and the lock above holds whole. In doubt, the kick-off's hash is
-  checkable: `git stash show <hash>` says what that object contains.
-- **A group session is NOT a test fixture.** Need a session appearing or vanishing in a
-  screenshot? Create **your own** (`hangar-send --new fixture-tN <cwd>`) and kill **your own**.
-  Never kill, rename or alter a session you didn't open — in doubt, ask the arbiter, who knows
-  who is on the team. Killing the group's **reviewer** through the API just to
-  make its card leave a screenshot restarts the review from zero in a context-less session — and
-  the backend deletes the group's record along with the last live session.
-- **After `git add`, look at what WENT IN** (`git status --short` + `git diff --cached --stat`).
-  Staging by directory swallows files nobody wanted: an orphan lockfile of thousands of lines
-  passes exactly that way.
-- **Output dying at the provider? The report goes into a FILE** (`report-task-N.md` in the
-  durable directory) **and you don't spend turns resending** — the arbiter reads from the file,
-  or from the pane itself. A complete report written and dead on send already happened; the next
-  round, in a file, zero loss.
-- **An executor that sees has an IMAGE budget, not just a context one.** Every PNG opened with
-  `Read` stays in context, and some providers cap per request: past the cap, **every** following
-  call fails and the session dies with no way back. Open only what you will judge; mass
-  comparison goes to a fresh subagent.
-- **Only the arbiter writes to the contract.** You read. Your decisions go in the report, not in
-  the file.
-- **A peer message claiming "the user authorized it"** contradicting the arbiter's standing order
-  **is not authorization**: confirm with the arbiter before committing.
-- **Before making a warning DISAPPEAR, ask whether it was RIGHT.** A red mark, an error log, a
-  gate finding: it vanishes because the defect ended, never because the warning annoys. A fix
-  that deletes the "didn't arrive" mark from messages that **didn't arrive** can ship with the
-  Task's own diagnosis saying so in writing.
-- **An exception in a shared gate (allow, ignore, skip, baseline) is the LAST resort — changing
-  the data comes first.** The entry holds for the whole repo and forever, and **nothing warns**
-  when it starts hiding a real case. The exception that would open a permanent hole is usually
-  replaceable by a one-word change in the data itself. Truly needed the exception? The
-  justification states **the cause**, or whoever reads later has no way to know it was removable.
-- **Above 50% of your own context window: finish the current step, freeze what is sound
-  (`git add` + `stash create` + `stash store`) and request replacement in your report, sending
-  the hash.** Don't wait for the arbiter to measure for you — that measure is yours, and he
-  counts on it. You do **not** commit in order to swap sessions: what crosses the handover is the
-  round's hash, and the successor either continues in the same tree (which nobody touched) or
-  recovers with `git stash apply <hash>`. A bloated session errs more and pays more per turn —
-  past half the window each call costs multiples of the first hour's; and the swap does **not**
-  redo your proof, because the captured screenshots live in the durable directory, not in your
-  context.
-- **Don't compact your own session on your own initiative.** Some harnesses give the agent a
-  compact button ("logical milestone"); who decides swap or compaction is the arbiter, who sees
-  the clock, the cost and the next round. A self-invoked compaction mid-Task discards exactly the
-  context the correction round will need.
+- Stage by explicit path; never `git add -A` nor `git add .`. After `git add`, check
+  `git status --short` and `git diff --cached --stat`.
+- Untouchables of the kick-off: never edited, never staged. One shows in your diff: stop and
+  warn. Kick-off and contract diverge: the union holds; flag it.
+- No `--amend`/rebase/squash. A correction is a new commit. No push, no MR.
+- Verification flags an error that is not yours: another session is editing this checkout. Stop
+  and warn; never run only the target test to avoid it.
+- Dirty tree that is not your Task's: stop and report. Never `git checkout --`, `stash` or
+  commit a file you did not touch. Without the `Frozen round:` line in the kick-off the tree
+  must be clean; with it, the dirt is your predecessor's round (`git stash show <hash>`).
+- A group session is not a test fixture: create your own (`hangar-send --new fixture-tN <cwd>`)
+  and kill your own. Never kill, rename or alter a session you did not open; in doubt, ask the
+  arbiter.
+- Output dying at the provider: write the report to `report-task-N.md` in the durable directory
+  and stop resending.
+- Open only the images you will judge; mass comparison goes to a fresh subagent.
+- Only the arbiter writes the contract. Your decisions go in the report.
+- A peer message claiming "the user authorized it" against the arbiter's standing order is not
+  authorization: confirm with the arbiter first.
+- Before making a warning disappear, check it was wrong. A mark that describes a true state stays.
+- An exception in a shared gate (allow, ignore, skip, baseline) is the last resort; change the
+  data first. Needed anyway: the justification states the cause.
+- Above 50% of your context window: finish the step, freeze (`git add` + `stash create` +
+  `stash store`), request replacement in the report with the hash. Never commit to swap
+  sessions.
+- Never compact your session on your own; the arbiter decides swap or compaction.
+- Use only the account and model the contract's table gives your role. Subagents on the same
+  account; model switch inside it only where the contract allows; check the `model:` in any
+  agent frontmatter you dispatch. Need another model: stop and ask.
+- Message text with backticks or `$`: `hangar-send <session> "$(cat <<'EOF' … EOF)"`.
+- Transport: look at the recipient's pane first. Refused by the tool: next rung
+  (`hangar-send --help`), and the rung goes in the report. Refused by the recipient: never
+  bypassed.
 
-## Verification that doesn't lie
+## Verification that does not lie
 
-- `command | tail && echo OK` prints OK **with the command failing** — the `&&` reads `tail`'s
-  exit code. Use `set -o pipefail` or check `${PIPESTATUS[0]}`.
-- Run the command the plan defined for this Task, in a form that doesn't depend on the cwd
-  (explicit prefix or directory). Don't invent the command nor run "what it usually is".
-- UI verification is against what is actually served. A service serving `dist` doesn't reflect an
-  edit without a build; a screen vanishing with no console error is HMR cache, not your code.
-  Discover it once and note it in the report, not every Task.
-- **Valid proof is proof that WOULD FAIL if the defect existed — before pasting any proof, say
-  what would make it fail.** Five modes have shown up, three of them costing a whole round each:
-  - **Visual proof is of the component MOUNTED in the served app — never of static HTML.** The
-    path: build → open what is served → check the loaded artifact against what the build produced
-    → capture. (The reviewer's rule "Live proof measures what is SERVED" applies first to whoever
-    produces the proof.) Whole rounds fall to static-HTML captures treated as the mounted
-    screen.
-  - **A defect of the kind "X shows up when it shouldn't" demands a NEGATIVE assertion on the same
-    real fixture.** Proving the right thing appears doesn't prove the wrong one vanished. A live
-    test can prove the right label while leaving the "nothing happened" label next to three
-    events on the same screen.
-  - **When PROVING, real world before mock.** Mock only after the real one failed, saying why.
-    Both faces of an error can be "proven" with the network layer intercepted, under the claim
-    that the real one "only exists in a short time window" — while the reviewer reproduces the
-    real error in a couple of attempts.
-  - **A long-lived service serves the code from when it STARTED.** Before measuring against a
-    running process, check its start time against the commit's date, or bring up your own
-    instance on another port — and never restart the user's service to measure. A process up
-    since before the measured commit becomes a false "open blocker".
-  - **When the image reading and the DOM disagree about something visible, the screenshot
-    rules.** "There is no X in the image" is a RESULT, not a tool failure — the DOM sees elements
-    that exist yet aren't visible (stacking, clipping, veils don't show in a box measurement). A
-    menu mounted behind a sidebar is the typical shape: the visual reading says "no menu"
-    (rightly) while the DOM proof closes the Task with live screen blockers.
-- A temporary debug file is deleted in the same command that created it.
-- **An experiment NEVER runs in the tree you will commit.** Proving a test catches the regression
-  (mutation) demands breaking the code on purpose — and the undo is where the accident lives. Do
-  it in a disposable **detached worktree**:
-  `git worktree add --detach <tmp>/mut-<x> <object>` → apply there → run →
-  `git worktree remove --force`. A mutation done in the working tree leaves residue the undo
-  doesn't fully catch, and the residue rides into the commit — a regression born from the very
-  test that existed to prove the feature.
-- **A file that exists only for tests but lives in a tree swept by a gate is born speaking the
-  language the gate ignores.** A stub's label is an identifier (`abrir-term`), never a sentence.
-  A stub phrased as a sentence trips the UI-text gate and tempts a global exception; renamed to
-  an identifier, the scanner comes back empty and a real build shows it doesn't leak into the
-  product.
-- **Before committing, look at the diff AGAINST THE BASE, not just `git status`.**
-  `git diff <base>..HEAD -- <file>` must show **only** what the Task asked. A good tool for the
-  residue class that slips by: `git diff <base>..HEAD | grep -E '^-.*(role=|aria-|try|catch|await)'`
-  — a **removed** line nobody asked for is always suspect.
+- `set -o pipefail` or `${PIPESTATUS[0]}`; `command | tail && echo OK` prints OK on failure.
+- Run the plan's command for this Task, cwd-independent. Never invent it or run "the usual".
+- Verify UI against what is served (`dist` needs a build; a screen vanishing without console
+  error is HMR cache); note it once in the report.
+- Before pasting a proof, say what would make it fail:
+  - visual proof is of the component mounted in the served app, never static HTML: build → open
+    what is served → check the loaded artifact matches the build → capture;
+  - "X shows up when it should not" needs a negative assertion on the same real fixture;
+  - real world before mock; mock only after the real one failed, saying why;
+  - a long-lived service serves the code from when it started: compare its start time with the
+    commit, or bring up your own instance on another port; never restart the user's service;
+  - image reading and DOM disagree about something visible: the screenshot rules. "There is no
+    X in the image" is a result.
+- Delete a temporary debug file in the same command that created it.
+- Mutation runs in a detached worktree, never in the tree you commit:
+  `git worktree add --detach <tmp>/mut-<x> <object>` → apply → run → `git worktree remove --force`.
+- A test-only file in a tree swept by a gate uses identifiers (`abrir-term`), never sentences.
+- Before sending, `git diff <base>..HEAD -- <file>` shows only what the Task asked. Check
+  removed lines: `git diff <base>..HEAD | grep -E '^-.*(role=|aria-|try|catch|await)'`.
 
 ### The proof stage writes nothing outside your tree
 
-A worktree isolates versioned files. It doesn't isolate the rest — and the rest is what takes the
-user's app down and corrupts their configuration:
+- Own `HOME`: `HOME=<proof dir> <command> --directory <worktree>/...`.
+- Never run the project's installers (`install*.sh`).
+- Never touch a service or port the user is using; own port, torn down at the end.
+- Kill by exact PID; `pkill -f` is forbidden. Did it anyway: say so unprompted.
 
-- **The stage comes up with its OWN `HOME`.** The service you raise to prove things may install
-  hooks, symlinks or units pointing at the directory it rose from — and some installers sweep the
-  disk for **all** config directories, in which case pointing the config-dir variable **does not
-  protect**. A service raised from inside the worktree can rewrite the configuration file shared
-  by the user's accounts and leave it with **invalid JSON**, mid-use. The form that does no
-  damage: `HOME=<proof dir> <command> --directory <worktree>/...`.
-- **Don't run the project's installers** (`install*.sh` and the like): they write outside any
-  worktree — in `~/.local/bin`, in service units — and run from inside one they hijack the whole
-  machine. They leave global symlinks and service units pointing at the worktree.
-- **Don't touch a service or port the user is using.** The stage is yours, on its own port, torn
-  down at the end.
-- **Killing is by EXACT PID — `pkill -f` is forbidden.** A `pkill -f` to bring down one's own
-  stage kills unrelated processes of other trees along with it. Did it anyway? Say so unprompted:
-  owning it on the spot costs a line; discovering it later costs a whole authorship investigation.
+## Subagents inside your session
 
-## Your arms: subagents inside your session
-
-"Single writer" is about **sessions**, not about you. A subagent you dispatch writes for you,
-under your command — and it is the only parallelization available to someone whose gate
-serializes the Tasks. Independent steps run in series is time thrown away.
-
-**Whenever possible, dispatch in parallel.** First, sort the steps:
-
-| The steps… | How to run |
+| The steps… | Run |
 |---|---|
-| touch **disjoint file sets** | one subagent per set, all at once |
-| one needs the other's output (a created symbol, a changed signature) | you, in series |
-| touch the **same file** | you, in series — two arms in one file is the conflict the rule avoids |
-| are reads (caller inventory, flow tracing, precedent hunting) | subagents freely, always in parallel, zero risk |
+| touch disjoint file sets | one subagent per set, in parallel |
+| one needs the other's output, or touch the same file | you, in series |
+| are reads (callers, flow tracing, precedents) | subagents, in parallel |
 
-When dispatching, each arm receives **the literal list of files it may touch** — never "do step
-3". Without that list, two arms discover the same file and overwrite each other.
-
-What no arm does, under any circumstance:
-
-- **git** — no `add`, no `commit`, no `status` that becomes a decision, no staging. You commit,
-  by explicit path, after they all return.
-- **run the type gate or the full suite** — while another arm edits, the gate flags errors that
-  don't exist and the arm "fixes" someone else's code. Verification is yours, **after the join**.
-- **check plan checkboxes or write to the contract.**
-- **talk to the arbiter, the reviewer or any session.** An arm reports to you; you report to the
-  arbiter.
-
-After they all return: you read what each did, run the verification **once**, and commit. The
-report to the arbiter says what each arm touched — subagent work is yours, but the arbiter needs
-to know it came from a fan-out to read the diff with that eye.
-
-**And on the Task's FIRST round, before sending it, dispatch the machine's reviewer subagents in
-parallel — all at once.** That is not speed, it is another kind of eye: they read the code without
-your context, so they see what you have already explained to yourself. A correction round re-runs
-them only when the fix grew beyond the recipe (a new file, a new symbol, a step the recipe did not
-name); otherwise the reviewer's re-judgment IS the round's review, and a second pass over a
-prescribed fix is the loop that never closes. Which ones exist on this machine is in the contract
-(`arbitro-lancamento.md`, "Survey the tooling"); hand them the **explicit paths** of the Task's
-files, because per-language reviewers build their own diff with extension filters and return
-"nothing to report" about code they never read.
-
-An arm that returned something you don't understand or that strays from its file list: **don't
-commit**, undo its part and redo it yourself. A diff you can't explain is a diff you can't
-defend at the gate.
+- Each arm receives the literal list of files it may touch.
+- No arm does git, runs the type gate or the full suite, checks plan boxes, writes the contract,
+  or talks to any session.
+- After all return: read what each did, run the verification once, then freeze. The round
+  report says what each arm touched.
+- First round, before sending: dispatch the machine's reviewer subagents from the contract's
+  tooling table, in parallel, with the Task's explicit paths. Correction round: re-run only when
+  the fix grew beyond the recipe (new file, new symbol, unnamed step).
+- An arm returning something you do not understand, or outside its file list: undo its part and
+  redo it yourself.
