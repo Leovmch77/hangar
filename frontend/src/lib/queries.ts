@@ -90,17 +90,19 @@ export const motores = (alvo: Server | null) => queryOptions({
 // backend frio (0,28s quente). Cacheia por (máquina, período) e não o merge: o merge é código puro
 // e barato, e é a TROCA DE PERÍODO que o usuário faz o tempo todo — 7d → 30d → 7d pagava tudo de
 // novo na volta. 5 min porque o período corrente inclui HOJE, e o custo de hoje ainda sobe.
-export const custos = (s: Server, periodo: string) => queryOptions({
+// `fresco` fica FORA da chave de propósito: é o "Atualizar dados", que invalida a chave e pede
+// ao servidor uma coleta agora; o resultado substitui a mesma entrada, não abre outra.
+export const custos = (s: Server, periodo: string, fresco = false) => queryOptions({
   queryKey: ['custos', s.id, periodo],
-  queryFn: (): Promise<Partial<CostReport>> => fetchCostsForServer(s, periodo),
+  queryFn: (): Promise<Partial<CostReport>> => fetchCostsForServer(s, periodo, fresco),
   staleTime: 5 * 60_000,
 });
 
 // Uso de skills/tools/hooks de UMA máquina: mesma chave (máquina, período) e mesmo TTL do custo —
 // sai do mesmo cache de transcript no backend.
-export const uso = (s: Server, periodo: string, conta = '') => queryOptions({
+export const uso = (s: Server, periodo: string, conta = '', fresco = false) => queryOptions({
   queryKey: ['uso', s.id, periodo, conta],
-  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo, conta),
+  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo, conta, fresco),
   staleTime: 5 * 60_000,
 });
 

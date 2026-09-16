@@ -65,10 +65,10 @@
   let contasVistas = $state<UsoBucket[]>([]);
   const rotuloConta = (b: UsoBucket) => b.label ?? b.key;
 
-  async function buscarEsperandoAquecer(s: Server, p: Periodo, c: string, meu: number): Promise<Partial<UsoReport>> {
+  async function buscarEsperandoAquecer(s: Server, p: Periodo, c: string, meu: number, fresco: boolean): Promise<Partial<UsoReport>> {
     for (let tentativa = 0; ; tentativa++) {
       try {
-        const r = await clienteQuery.fetchQuery(uso(s, p, c));
+        const r = await clienteQuery.fetchQuery(uso(s, p, c, fresco));
         const { [s.id]: _, ...resto } = aquecendo;
         aquecendo = resto;
         return r;
@@ -98,7 +98,7 @@
     await Promise.all(
       alvo.map(async (s) => {
         let result: UsoServerResult;
-        try { result = { report: await buscarEsperandoAquecer(s, p, c, meu), label: s.label, id: s.id }; }
+        try { result = { report: await buscarEsperandoAquecer(s, p, c, meu, forcar), label: s.label, id: s.id }; }
         catch { result = { report: null, label: s.label, id: s.id }; }
         if (meu !== geracao) return;
         results.push(result);

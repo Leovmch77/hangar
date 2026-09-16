@@ -1802,15 +1802,16 @@ def desktop_wallpaper_get():
 
 
 @app.get("/api/costs", dependencies=[Depends(require_auth)], response_model=CostReport)
-def costs_endpoint(period: str = "all"):
+def costs_endpoint(period: str = "all", fresco: bool = False):
     # Período inválido cai em "all" em vez de 422: um cliente antigo da malha mandando qualquer
     # coisa não pode derrubar o custo daquela máquina inteira da soma.
     # Lista vem de costs.PERIODOS (fonte única com o montar()); "all" fica de fora do dict porque
     # não tem número de dias, então entra à parte aqui.
+    # `fresco` = botão "Atualizar dados": coleta agora em vez de servir a última leitura.
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
     try:
-        return costs_report(period=period)
+        return costs_report(period=period, fresco=fresco)
     except costs_sources.Aquecendo as e:
         return _aquecendo(e)
 
@@ -1822,13 +1823,13 @@ def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
 
 
 @app.get("/api/uso", dependencies=[Depends(require_auth)], response_model=UsoReport)
-def uso_endpoint(period: str = "all", conta: str = ""):
+def uso_endpoint(period: str = "all", conta: str = "", fresco: bool = False):
     """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs.
     `conta` = identidade `anthropic:<uuid>` de `by_conta`; vazio = todas."""
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
     try:
-        return uso_report.report(period=period, conta=conta or None)
+        return uso_report.report(period=period, conta=conta or None, fresco=fresco)
     except costs_sources.Aquecendo as e:
         return _aquecendo(e)
 

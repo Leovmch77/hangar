@@ -159,7 +159,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
 
 
 def report(period: str = "all", now: datetime | None = None,
-           conta: str | None = None) -> UsoReport:
+           conta: str | None = None, fresco: bool = False) -> UsoReport:
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou."""
-    uso, tokens = coletar_uso()
+    uso, tokens = coletar_uso(fresco=fresco)
     return montar(uso, tokens, period=period, now=now, conta=conta)

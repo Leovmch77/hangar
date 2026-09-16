@@ -17,6 +17,18 @@ def _limpo(tmp_path, monkeypatch):
     cs.invalidar_cache()
 
 
+def _isolar(monkeypatch) -> None:
+    """Estado do aquecimento/última leitura zerado, e a coleta de uso falsa — a real varreria o
+    `~/.claude` da máquina de dentro da thread e o teste esperaria minutos."""
+    import threading
+    monkeypatch.setattr(cs, "_aquecido", threading.Event())
+    monkeypatch.setattr(cs, "_aquecedor", None)
+    monkeypatch.setattr(cs, "_refrescador", None)
+    monkeypatch.setattr(cs, "_ultimo_custos", None)
+    monkeypatch.setattr(cs, "_ultimo_uso", None)
+    monkeypatch.setattr(cs, "_coletar_uso", lambda: ([], []))
+
+
 def _escrever(p: Path, linhas: list[dict]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("\n".join(json.dumps(x) for x in linhas) + "\n", encoding="utf-8")
@@ -68,8 +80,7 @@ def test_pedido_antes_da_primeira_coleta_dispara_aquecimento_e_responde_aquecend
     que ela termina, o mesmo pedido coleta (incremental) e responde."""
     import threading
 
-    monkeypatch.setattr(cs, "_aquecido", threading.Event())
-    monkeypatch.setattr(cs, "_aquecedor", None)
+    _isolar(monkeypatch)
     segurar = threading.Event()
     chamadas = []
 
@@ -89,14 +100,46 @@ def test_pedido_antes_da_primeira_coleta_dispara_aquecimento_e_responde_aquecend
     cs._aquecedor.join(5)
     assert cs._aquecido.is_set()
     assert cs.coletar_ou_aquecendo(esperar=1.0) == []
+    assert chamadas == [None]                       # aquecida: serve a leitura do aquecimento
+    assert cs.coletar_ou_aquecendo(esperar=1.0, fresco=True) == []
     assert chamadas == [None, 1.0]
 
 
-def test_aquecimento_que_falha_nao_prende_a_tela_em_aquecendo(monkeypatch):
+def test_depois_de_aquecido_o_pedido_recebe_a_ultima_leitura_e_atualiza_atras(monkeypatch):
+    """Tela abre na hora com a leitura anterior; passado o frescor, o pedido ainda recebe a
+    anterior e uma coleta nova roda em thread. `fresco` (Atualizar dados) coleta no pedido."""
     import threading
 
-    monkeypatch.setattr(cs, "_aquecido", threading.Event())
-    monkeypatch.setattr(cs, "_aquecedor", None)
+    _isolar(monkeypatch)
+    import threading
+    n = {"v": 0}
+    segurar = threading.Event()
+
+    def coletar_contado(esperar=None):
+        n["v"] += 1
+        if n["v"] == 2:
+            segurar.wait(5)   # a coleta de fundo demora: o pedido não pode esperar por ela
+        return [n["v"]]
+
+    monkeypatch.setattr(cs, "coletar", coletar_contado)
+    with pytest.raises(cs.Aquecendo):
+        cs.coletar_ou_aquecendo()
+    cs._aquecedor.join(5)
+    assert cs.coletar_ou_aquecendo() == [1]          # fresca: serve sem coletar
+    assert cs.coletar_ou_aquecendo() == [1]
+    assert n["v"] == 1
+    monkeypatch.setattr(cs, "_FRESCOR_S", 0.0)       # envelheceu
+    assert cs.coletar_ou_aquecendo() == [1]          # ainda responde a anterior na hora…
+    assert cs._refrescador is not None and cs._refrescador.is_alive()
+    segurar.set()
+    cs._refrescador.join(5)
+    assert n["v"] == 2                               # …e a nova rodou atrás
+    assert cs.coletar_ou_aquecendo(fresco=True) == [3]
+    assert n["v"] == 3
+
+
+def test_aquecimento_que_falha_nao_prende_a_tela_em_aquecendo(monkeypatch):
+    _isolar(monkeypatch)
 
     def explode(esperar=None):
         raise OSError("disco")

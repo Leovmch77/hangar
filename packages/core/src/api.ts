@@ -379,8 +379,9 @@ export async function confirmarNavForServer(s: Server, name: string): Promise<vo
 // de custos estourava sempre, e a máquina aparecia na tela como "não respondeu". Servidor offline
 // não paga este tempo: conexão recusada volta em milissegundos. Quem espera são os lentos de
 // verdade, e é exatamente por eles que este número existe.
-export async function fetchCostsForServer(s: Server, period: string): Promise<Partial<CostReport>> {
-  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}`, {
+// `fresco` = botão "Atualizar dados": o servidor coleta agora em vez de servir a última leitura.
+export async function fetchCostsForServer(s: Server, period: string, fresco = false): Promise<Partial<CostReport>> {
+  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
@@ -389,8 +390,9 @@ export async function fetchCostsForServer(s: Server, period: string): Promise<Pa
 }
 
 // Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
-export async function fetchUsoForServer(s: Server, period: string, conta = ''): Promise<Partial<UsoReport>> {
-  const q = `period=${encodeURIComponent(period)}` + (conta ? `&conta=${encodeURIComponent(conta)}` : '');
+export async function fetchUsoForServer(s: Server, period: string, conta = '', fresco = false): Promise<Partial<UsoReport>> {
+  const q = `period=${encodeURIComponent(period)}` + (conta ? `&conta=${encodeURIComponent(conta)}` : '')
+    + (fresco ? '&fresco=1' : '');
   const res = await apiFetchRes(`/api/uso?${q}`, {
     signal: AbortSignal.timeout(20000),
   }, s);

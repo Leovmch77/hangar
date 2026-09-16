@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -481,10 +482,27 @@ _aquecedor: threading.Thread | None = None
 _agendado: threading.Timer | None = None
 _aquecer_lock = threading.Lock()
 
+# Última leitura pronta, servida na hora. Sessões vivas reescrevem transcripts de dezenas de MB
+# a cada turno, e reler tudo no pedido custava 1,7–2,6 s por abertura mesmo com cache. A tela
+# abre com o que já existe (no máximo `_FRESCOR_S` de idade); passou disso, o pedido ainda
+# recebe a última e uma coleta nova roda atrás. "Atualizar dados" pede `fresco=True`.
+_FRESCOR_S = 30.0
+_ultimo_custos: tuple[float, list[UsageRow]] | None = None
+_ultimo_uso: tuple[float, tuple[list[UsoLinha], list[UsageRow]]] | None = None
+_refrescador: threading.Thread | None = None
+
+
+def _coletar_tudo() -> None:
+    """Custos e uso, nesta ordem: a primeira já deixa o cache do transcript pronto pra segunda."""
+    global _ultimo_custos, _ultimo_uso
+    linhas = coletar()
+    _ultimo_custos = (time.monotonic(), linhas)
+    _ultimo_uso = (time.monotonic(), _coletar_uso())
+
 
 def _aquecer() -> None:
     try:
-        coletar()
+        _coletar_tudo()
     except Exception:
         _log.warning("aquecimento dos custos falhou", exc_info=True)
     finally:
@@ -501,6 +519,27 @@ def aquecer_em_background() -> None:
             return
         _aquecedor = threading.Thread(target=_aquecer, name="custos-warm", daemon=True)
         _aquecedor.start()
+
+
+def _refrescar_em_background() -> None:
+    """Uma coleta nova atrás do pedido que já foi respondido com a leitura anterior."""
+    global _refrescador
+    with _aquecer_lock:
+        if _refrescador is not None and _refrescador.is_alive():
+            return
+        _refrescador = threading.Thread(target=_refrescar, name="custos-refresh", daemon=True)
+        _refrescador.start()
+
+
+def _refrescar() -> None:
+    try:
+        _coletar_tudo()
+    except Exception:
+        _log.warning("atualização dos custos em segundo plano falhou", exc_info=True)
+
+
+def _fresco(t: float | None) -> bool:
+    return t is not None and time.monotonic() - t < _FRESCOR_S
 
 
 def agendar_aquecimento(atraso_s: float) -> None:
@@ -522,41 +561,65 @@ def cancelar_aquecimento() -> None:
         _agendado = None
 
 
-def coletar_ou_aquecendo(esperar: float = 3.0) -> list[UsageRow]:
+def coletar_ou_aquecendo(esperar: float = 3.0, *, fresco: bool = False) -> list[UsageRow]:
     """O que o endpoint chama: antes da primeira coleta terminar, dispara o aquecimento e
-    responde `Aquecendo` na hora — o pedido nunca paga a varredura fria."""
+    responde `Aquecendo` na hora — o pedido nunca paga a varredura fria. Depois, responde com
+    a última leitura e atualiza atrás; `fresco` (botão Atualizar) coleta agora."""
+    global _ultimo_custos
     if not _aquecido.is_set():
         aquecer_em_background()
         raise Aquecendo(*costs_cache.progresso_total())
-    return coletar(esperar)
+    if not fresco and _ultimo_custos is not None:
+        if not _fresco(_ultimo_custos[0]):
+            _refrescar_em_background()
+        return _ultimo_custos[1]
+    linhas = coletar(esperar)
+    _ultimo_custos = (time.monotonic(), linhas)
+    return linhas
 
 
-def coletar_uso(esperar: float | None = 3.0) -> tuple[list[UsoLinha], list[UsageRow]]:
+def coletar_uso(esperar: float | None = 3.0, *, fresco: bool = False) -> tuple[list[UsoLinha], list[UsageRow]]:
     """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas.
 
     As de tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe
-    nas linhas de tokens. Mesma trava e mesma regra de aquecimento do `coletar()`: o cache é o
-    mesmo arquivo — a primeira coleta de custos já deixou o uso pronto.
+    nas linhas de tokens. Mesma trava, mesmo aquecimento e mesma última-leitura do `coletar()`:
+    o cache é o mesmo arquivo — a primeira coleta de custos já deixou o uso pronto.
     """
+    global _ultimo_uso
     if not _aquecido.is_set():
         aquecer_em_background()
         raise Aquecendo(*costs_cache.progresso_total())
+    if not fresco and _ultimo_uso is not None:
+        if not _fresco(_ultimo_uso[0]):
+            _refrescar_em_background()
+        return _ultimo_uso[1]
     if not _cache_lock.acquire(timeout=-1 if esperar is None else esperar):
         raise Aquecendo(*costs_cache.progresso_total())
     try:
-        uso: list[UsoLinha] = []
-        tokens: list[UsageRow] = []
-        for caminho, account_id in _config_dirs():
-            raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
-            uso.extend(replace(l, conta=account_id)
-                       for l in costs_claude_transcript.varrer_uso(raiz))
-            # `account_id` carimbado aqui (o custo usa `provider`, que em sessão de motor é o
-            # provedor do modelo, não a conta): o filtro por conta precisa da conta.
-            tokens.extend(replace(r, account_id=account_id)
-                          for r in linhas_claude(Path(caminho), account_id))
-        return uso, tokens
+        resultado = _coletar_uso_sem_trava()
     finally:
         _cache_lock.release()
+    _ultimo_uso = (time.monotonic(), resultado)
+    return resultado
+
+
+def _coletar_uso() -> tuple[list[UsoLinha], list[UsageRow]]:
+    with _cache_lock:
+        return _coletar_uso_sem_trava()
+
+
+def _coletar_uso_sem_trava() -> tuple[list[UsoLinha], list[UsageRow]]:
+    uso: list[UsoLinha] = []
+    tokens: list[UsageRow] = []
+    for caminho, account_id in _config_dirs():
+        raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
+        uso.extend(replace(l, conta=account_id)
+                   for l in costs_claude_transcript.varrer_uso(raiz))
+        # `account_id` carimbado aqui (o custo usa `provider`, que em sessão de motor é o
+        # provedor do modelo, não a conta): o filtro por conta precisa da conta.
+        tokens.extend(replace(r, account_id=account_id)
+                      for r in linhas_claude(Path(caminho), account_id))
+    return uso, tokens
 
 
 def account_info(config_dir: Path, fallback_label: str) -> tuple[str, str | None, str]:

@@ -202,9 +202,9 @@ def montar(linhas: list[UsageRow], period: str = "all",
     )
 
 
-def report(period: str = "all", now: datetime | None = None) -> CostReport:
+def report(period: str = "all", now: datetime | None = None, fresco: bool = False) -> CostReport:
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou."""
-    return montar(coletar_ou_aquecendo(), period=period, now=now)
+    return montar(coletar_ou_aquecendo(fresco=fresco), period=period, now=now)
 
 
 # Cotação USD/BRL: cache em memória de 1h. Falha também "conta" como tentativa (atualiza o

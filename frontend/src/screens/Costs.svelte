@@ -155,10 +155,10 @@
   const AQUECENDO_TENTATIVAS = 100; // ~5 min: acima disso cai no aviso de máquina sem resposta, que já tem botão
   const esperar = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-  async function buscarEsperandoAquecer(s: Server, p: Periodo, meu: number): Promise<Partial<CostReport>> {
+  async function buscarEsperandoAquecer(s: Server, p: Periodo, meu: number, fresco: boolean): Promise<Partial<CostReport>> {
     for (let tentativa = 0; ; tentativa++) {
       try {
-        const r = await clienteQuery.fetchQuery(custos(s, p));
+        const r = await clienteQuery.fetchQuery(custos(s, p, fresco));
         const { [s.id]: _, ...resto } = aquecendo;
         aquecendo = resto;
         return r;
@@ -187,7 +187,7 @@
     await Promise.all(
       alvo.map(async (s) => {
         let result: ServerResult;
-        try { result = { report: await buscarEsperandoAquecer(s, p, meu), label: s.label, id: s.id }; }
+        try { result = { report: await buscarEsperandoAquecer(s, p, meu, forcar), label: s.label, id: s.id }; }
         catch { result = { report: null, label: s.label, id: s.id }; }
         if (meu !== geracao) return;
         results.push(result);
