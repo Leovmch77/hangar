@@ -9,11 +9,13 @@ Mecanismo medido em 2026-08-20 (docs/superpowers/specs/2026-08-19-medicao-permis
 Este módulo é stdlib + tmux, no padrão de model_picker.py.
 """
 
+import json
 import re
 import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Callable, TypeVar
 
 from app import tmux
@@ -42,6 +44,26 @@ _CANON = {
 
 # Ordem canônica dos modos como aparecem no help (não é ordem do ciclo; ciclo é descoberto ao vivo).
 ORDEM_CANONICA = ("plan", "auto", "manual", "acceptEdits", "bypassPermissions", "dontAsk")
+
+# Modo de quem criou a sessão sem escolher um na tela. Sem isto o valor fica nulo, a flag não vai
+# no comando e a sessão nasce no que a máquina tiver — numa sem `defaultMode` isso é pedir
+# permissão a cada ferramenta. Acesso total é o que o app já dá aos outros agentes.
+PADRAO_DO_APP = "bypassPermissions"
+
+
+def modo_da_conta(config_dir: str | None) -> str:
+    """`permissions.defaultMode` da conta, ou o padrão do app quando ela não define nenhum."""
+    from app import model_args
+
+    base = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    try:
+        dados = json.loads((base / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return PADRAO_DO_APP
+    modo = ((dados.get("permissions") or {}) if isinstance(dados, dict) else {}).get("defaultMode")
+    if modo == "default":
+        return "manual"   # o nome que a CLI aceita na flag; "default" só existe no settings.json
+    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE else PADRAO_DO_APP
 
 # Leituras durante uma sequência de BTab preservam o último retrato confirmado da sessão.
 _ultimos_nao_plan: OrderedDict[str, str] = OrderedDict()

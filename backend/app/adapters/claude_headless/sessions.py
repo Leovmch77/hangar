@@ -42,7 +42,7 @@ def _write(name: str, meta: dict) -> None:
 def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          engine: str | None = None, model: str | None = None, effort: str | None = None,
          context_window: int | None = None, permission_mode: str | None = None,
-         subagent_model: str | None = None) -> dict:
+         previous_non_plan: str | None = None, subagent_model: str | None = None) -> dict:
     meta = {
         "name": name, "provider": "claude", "headless": True,
         # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
@@ -52,7 +52,8 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
         "cwd": cwd, "session_id": session_id,
         "config_dir": config_dir, "engine": engine,
         "model": model, "effort": effort, "context_window": context_window,
-        "permission_mode": permission_mode, "subagent_model": subagent_model,
+        "permission_mode": permission_mode, "previous_non_plan": previous_non_plan,
+        "subagent_model": subagent_model,
     }
     _write(name, meta)
     return meta

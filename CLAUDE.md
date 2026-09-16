@@ -277,6 +277,13 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
   trabalhando" existe para o `/model`, que é texto.
+- **"Padrão" na tela de criação vira o modo da conta AINDA na criação**, e `bypassPermissions`
+  quando a conta não define nenhum: campo nulo virava flag ausente, e a sessão nascia no que a
+  máquina tivesse. **Em plano, sessão cuja base é bypass não pergunta por ferramenta** — só o
+  `ExitPlanMode`, que é o cartão do plano. Quem nasce no plano grava a base.
+- **Codex sem terminal: `thread/start` leva o modelo, o esforço não** — não existe campo pra ele
+  ali. Sem um `thread/settings/update` depois, o nível escolhido some no `model_reasoning_effort`
+  do `config.toml`.
 - **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** `cano.py` é stdlib, um
   por sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
   snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no

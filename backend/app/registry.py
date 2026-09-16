@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from app import atomico, diag, tmux
 from app import agentpane
+from app import permission_mode as modo_permissao
 from app.config import settings
 from app import runtime_config
 from app.names import sanitize_session_name
@@ -1694,6 +1695,10 @@ class SessionRegistry:
             if provider != "claude" or engine:
                 raise ValueError("modelo dos subagentes so vale para claude sem motor")
             model_args.validar("claude", subagent_model, None)
+        if provider == "claude" and permission_mode is None:
+            # "padrão" na tela vira o modo da conta AQUI, não lá no arranque: assim a sessão nasce
+            # no modo que o app mostra, na máquina que define `defaultMode` e na que não define.
+            permission_mode = modo_permissao.modo_da_conta(config_dir)
         if headless:
             if provider not in ("claude", "codex"):
                 raise ValueError("sessao sem terminal so vale para provider claude ou codex")
@@ -1965,9 +1970,13 @@ class SessionRegistry:
         diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
         _pretrust_cwd(cwd, config_dir)
         self._forget(name)
+        # Nascer JÁ no plano deixaria a sessão sem modo de base: é ele que diz pra onde
+        # "Implementar o plano" volta e se o plano precisa perguntar por ferramenta.
+        anterior = modo_permissao.modo_da_conta(config_dir) if permission_mode == "plan" else None
         meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
                                       model=model, effort=effort, context_window=context_window,
-                                      permission_mode=permission_mode, subagent_model=subagent_model)
+                                      permission_mode=permission_mode, previous_non_plan=anterior,
+                                      subagent_model=subagent_model)
         PromptQueue(name).clear()
         ThenLink(name).clear()
         self._clear_pair(name)
@@ -2111,7 +2120,9 @@ class SessionRegistry:
             meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
                                           engine=motor, model=modelo, effort=esforco,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
-                                          permission_mode=permission_mode, subagent_model=subagente)
+                                          permission_mode=permission_mode, subagent_model=subagente,
+                                          previous_non_plan=(modo_permissao.ultimo_nao_plan(name)
+                                                             if permission_mode == "plan" else None))
         except OSError:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}

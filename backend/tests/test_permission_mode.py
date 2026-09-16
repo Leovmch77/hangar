@@ -78,6 +78,20 @@ def test_listar_modos_dontask_nao_manda_tecla(monkeypatch):
     assert modos == []
 
 
+def test_modo_da_conta_le_settings_e_cai_no_padrao_do_app(tmp_path):
+    """Sem `defaultMode` na conta a sessão nasceria pedindo permissão por ferramenta."""
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    assert pm.modo_da_conta(str(conta)) == pm.PADRAO_DO_APP
+    (conta / "settings.json").write_text('{"permissions": {"defaultMode": "plan"}}', encoding="utf-8")
+    assert pm.modo_da_conta(str(conta)) == "plan"
+    # "default" é o nome no settings.json; a flag da CLI só conhece "manual".
+    (conta / "settings.json").write_text('{"permissions": {"defaultMode": "default"}}', encoding="utf-8")
+    assert pm.modo_da_conta(str(conta)) == "manual"
+    (conta / "settings.json").write_text("{ nao e json", encoding="utf-8")
+    assert pm.modo_da_conta(str(conta)) == pm.PADRAO_DO_APP
+
+
 def test_listar_modos_devolve_ficou_nao_orig(monkeypatch):
     """Bloqueador 3: GET devolve o que FICOU, não o de antes (plan -> auto -> manual -> preso)."""
     # orig = plan, ciclo descobre auto, manual, depois repete manual (sub-ciclo) -> cur=manual

@@ -808,6 +808,14 @@ class CodexAdapter:
                     if meta.get("model"):
                         params["model"] = meta["model"]
                     result = await client.request("thread/start", params)
+                if meta.get("effort"):
+                    # `thread/start` aceita `model`, mas não tem campo de esforço: sem este update
+                    # o nível escolhido na tela cai calado no `model_reasoning_effort` do
+                    # config.toml. Sem TUI, ninguém mais aplica a escolha.
+                    await client.request("thread/settings/update", {
+                        "threadId": (result.get("thread") or {}).get("id") or meta.get("thread_id"),
+                        "model": meta.get("model") or result.get("model"),
+                        "effort": meta["effort"]})
             except Exception:
                 await client.close()
                 raise

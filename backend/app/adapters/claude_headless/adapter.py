@@ -1309,9 +1309,14 @@ class ClaudeHeadlessAdapter:
                 sess.tipos_desconhecidos.add(str(sub))
                 await self._nota_local(sess, f"⚙️ A CLI pediu `{sub}`; respondi vazio")
             return
-        if req.get("tool_name") == "AskUserQuestion":
+        tool = req.get("tool_name")
+        if tool == "AskUserQuestion":
             perguntas = (req.get("input") or {}).get("questions") or []
             sess.question = {"provider": "claude", "request_id": rid, "questions": perguntas}
+        elif _plano_sem_perguntar(sess, tool):
+            await self._responder(sess, rid, {"behavior": "allow",
+                                              "updatedInput": req.get("input") or {}})
+            return
         else:
             sess.pending[rid] = req
         self._recalcular_estado(sess)
@@ -1700,6 +1705,17 @@ def _rotulo_tool(nome: str | None, inp) -> str:
     if len(alvo) > 80:
         alvo = alvo[:80] + "…"
     return f"{nome}: {alvo}"
+
+
+def _plano_sem_perguntar(sess: _Sessao, tool: str | None) -> bool:
+    """Em plano, sessão cujo modo de base é bypass não pergunta por ferramenta.
+
+    O modo da CLI é um só: entrar no plano tira o bypass e cada ferramenta que o plano não libera
+    sozinha volta a pedir. Quem abriu em bypass não pediu isso — pediu o plano. O `ExitPlanMode`
+    fica de fora porque é o cartão do plano em si, não uma permissão de ferramenta.
+    """
+    return (sess.permission_mode == "plan" and sess.modo_nao_plan == "bypassPermissions"
+            and tool != "ExitPlanMode")
 
 
 def _modo_do_app(modo: str) -> str:

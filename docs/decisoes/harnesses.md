@@ -242,6 +242,42 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   Ciclo: sessão nascida em bypass tem 5 posições (bypass → auto → manual → acceptEdits → plan);
   as outras, 4 — bypass nunca é alcançável de fora, e `dontAsk` não tem volta.
 
+## Plano sem terminal: a permissão vem do modo de BASE, não do plano
+
+(`claude_headless/adapter._plano_sem_perguntar`, `permission_mode.modo_da_conta`,
+  `registry.create`, medido 15/09/2026): o modo da CLI é um só — entrar no plano tira o bypass.
+  Medido numa sessão sem terminal criada com `--permission-mode plan`, com prompt que pedia pra
+  ler um arquivo e gravar outro: o `Read` passou sem cartão, a gravação fora da pasta de planos a
+  própria CLI barrou (nem chegou a perguntar) e o único `can_use_tool` do turno foi o
+  `ExitPlanMode`. Ou seja, o cartão por ferramenta que aparecia não era do plano: era do modo de
+  base. Nesta máquina `~/.claude/settings.json` traz `permissions.defaultMode:
+  "bypassPermissions"`; numa que não define nada, a sessão criada com **Permissão: padrão** nascia
+  sem a flag (o campo ia nulo) e caía no manual da CLI — aí cada ferramenta pede, em plano ou fora
+  dele. Foi o que apareceu no Windows.
+
+  Duas decisões, e elas se sustentam juntas: (1) "padrão" na tela vira o modo da conta AINDA na
+  criação, lido do `settings.json` dela, com `bypassPermissions` quando a conta não define nenhum —
+  é o que o app já dá aos outros agentes (`lancador.SANDBOX`); (2) em plano, sessão cujo modo de
+  base é bypass tem todo `can_use_tool` respondido com `allow` na hora, menos o `ExitPlanMode`,
+  que é o cartão do plano e continua sendo a sua conferência. Sessão que nasce JÁ no plano grava o
+  modo de base em `previous_non_plan` — sem isso ela não teria base nenhuma e a regra (2) nunca
+  valeria justamente pra quem abre no plano.
+
+  Conferido ao vivo depois da mudança: mesmo prompt, `awaiting_input` com "Permitir ExitPlanMode?"
+  e nenhum cartão de ferramenta.
+
+## Codex sem terminal: `thread/start` leva o modelo, o esforço precisa de outro pedido
+
+(`codex/adapter._subir_sem_terminal`, medido 15/09/2026): o `ThreadStartParams` do app-server tem
+  `model` e **não** tem campo de esforço — quem tem é o `TurnStartParams`, e o `send_prompt` não
+  manda escolha nenhuma de propósito (com TUI, reenviar sobrescreveria uma troca feita no
+  terminal). Resultado: o nível escolhido na tela de criação era descartado calado e a thread
+  ficava no `model_reasoning_effort` do `config.toml`. Sonda contra o app-server: `thread/start`
+  com `model=gpt-5.6-luna` aplicou o modelo e devolveu `reasoningEffort: medium`, o do config.
+  Conserto: um `thread/settings/update` logo depois do start/resume, com modelo e nível do
+  sidecar. Ao vivo, sessão criada com `gpt-5.6-luna`/`xhigh` gravou
+  `turn_context: gpt-5.6-luna xhigh` no rollout.
+
 ## Modelo de uma sessão Claude Code: a lista NUNCA é constante
 
 (`app/model_picker.py` +

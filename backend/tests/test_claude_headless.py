@@ -549,6 +549,34 @@ def test_sempre_permitir_so_com_sugestao_e_leva_as_regras(adapter):
     assert r2["behavior"] == "deny"
 
 
+def test_plano_com_base_bypass_nao_pergunta_por_ferramenta(adapter):
+    """Quem abriu em bypass e entrou no plano não volta a ver cartão de ferramenta — só o do plano."""
+    sess = adapter._sessions["s1"]
+    sess.permission_mode = "plan"
+    sess.modo_nao_plan = "bypassPermissions"
+
+    async def fluxo():
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r1",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                                                   "input": {"command": "ls"}}})
+        assert sess.pending == {}
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r2",
+                                       "request": {"subtype": "can_use_tool",
+                                                   "tool_name": "ExitPlanMode",
+                                                   "input": {"plan": "passos"}}})
+        assert list(sess.pending) == ["r2"]
+        # Fora do plano (ou com base que não é bypass) o cartão continua aparecendo.
+        sess.modo_nao_plan = "manual"
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r3",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                                                   "input": {"command": "ls"}}})
+        assert list(sess.pending) == ["r2", "r3"]
+    _run(fluxo())
+    respostas = [e["response"] for e in adapter.escritos if e["type"] == "control_response"]
+    assert [r["request_id"] for r in respostas] == ["r1"]
+    assert respostas[0]["response"] == {"behavior": "allow", "updatedInput": {"command": "ls"}}
+
+
 def test_steer_queue_so_com_turno_em_voo_e_sem_pendencia(adapter, tmp_path, monkeypatch):
     from app import pqueue
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
@@ -645,6 +673,27 @@ def test_registry_cria_lista_e_mata_sem_tmux(tmp_path, monkeypatch):
     assert len(listadas) == 1 and listadas[0].headless and listadas[0].tracked
     reg.kill("hl")
     assert not S.exists("hl")
+
+
+def test_criar_resolve_o_modo_da_conta_em_vez_de_deixar_nulo(tmp_path, monkeypatch):
+    """Modo nulo virava a flag ausente: a sessão nascia no que a MÁQUINA tivesse no settings.json."""
+    from app import registry as R
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    (conta / "settings.json").write_text('{"permissions": {"defaultMode": "acceptEdits"}}', encoding="utf-8")
+    monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
+    monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
+    monkeypatch.setattr(R, "_pretrust_cwd", lambda cwd, cfg: None)
+    reg = R.SessionRegistry(str(tmp_path / "projects"))
+
+    reg.create("sem-escolha", str(tmp_path), config_dir=str(conta), provider="claude", headless=True)
+    assert S.load("sem-escolha")["permission_mode"] == "acceptEdits"
+
+    # Nascendo no plano, o modo de base fica gravado — é o que o plano usa pra não perguntar.
+    reg.create("no-plano", str(tmp_path), config_dir=str(conta), provider="claude", headless=True,
+               permission_mode="plan")
+    meta = S.load("no-plano")
+    assert meta["permission_mode"] == "plan" and meta["previous_non_plan"] == "acceptEdits"
 
 
 def test_turno_com_erro_vira_problema_e_sucesso_limpa(adapter):

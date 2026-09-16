@@ -41,6 +41,10 @@ for linha in sys.stdin:
         with open("resume.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
+    elif m == "thread/settings/update":
+        with open("settings.txt", "w") as f:
+            f.write(json.dumps(ev["params"]))
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
     elif m == "thread/read":
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
@@ -86,10 +90,22 @@ def ambiente(tmp_path, monkeypatch):
         yield tmp_path
 
 
-def _sidecar(nome: str, cwd: Path) -> dict:
+def _sidecar(nome: str, cwd: Path, **escolha) -> dict:
     codex_sessions.save(nome, None, "", str(cwd), headless=True, key=sem_terminal.nova_chave(),
-                        permission_mode="Ask for approval")
+                        permission_mode="Ask for approval", **escolha)
     return codex_sessions.load(nome)
+
+
+def test_esforco_escolhido_chega_na_thread(ambiente):
+    """`thread/start` leva o modelo mas não tem campo de esforço; sem terminal ninguém mais aplica."""
+    async def corpo():
+        ad = CodexAdapter()
+        _sidecar("cx-esforco", ambiente, model="gpt-6-astra", effort="high")
+        assert await ad.ensure_running("cx-esforco") is not None
+        ajuste = json.loads((ambiente / "settings.txt").read_text())
+        assert ajuste == {"threadId": "th-1", "model": "gpt-6-astra", "effort": "high"}
+        ad.close_sync("cx-esforco")
+    asyncio.run(corpo())
 
 
 def test_ambiente_identifica_a_sessao_headless_para_os_scripts(ambiente, monkeypatch):
