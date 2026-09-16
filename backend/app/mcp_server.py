@@ -22,6 +22,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
+from app import auth as auth_mod
 from app import navshell, peers, quem_chama
 from app.config import settings
 
@@ -61,7 +62,7 @@ async def quem_sou(ctx: Context) -> dict[str, str]:
 async def sessoes() -> list[dict[str, Any]]:
     from app import api
     infos = await api.list_sessions()
-    return [{"name": s.name, "state": getattr(s, "state", None), "cwd": s.cwd,
+    return [{"name": s.name, "state": s.state, "cwd": s.cwd,
              "provider": s.provider, "headless": s.headless} for s in infos]
 
 
@@ -232,9 +233,15 @@ async def asgi(scope, receive, send):
     """Sub-app com o bearer conferido na porta: mount não passa pelo `require_auth` das rotas."""
     if scope["type"] != "http":
         return
+    # Só sessões desta máquina falam com o MCP (mesma regra do `require_loopback`): o celular e
+    # os peers usam a API normal.
+    cliente = scope.get("client")
+    if not cliente or cliente[0] not in auth_mod._LOOPBACK:
+        await _responder(send, 403, b'{"detail":"so na maquina do backend"}')
+        return
     auth = dict(scope["headers"]).get(b"authorization", b"")
     token = auth[7:] if auth.startswith(b"Bearer ") else b""
-    if not secrets.compare_digest(token, settings.auth_token.encode()):
+    if not token or not settings.auth_token or not secrets.compare_digest(token, settings.auth_token.encode()):
         await _responder(send, 401, b'{"detail":"unauthorized"}')
         return
     if _sub is None:

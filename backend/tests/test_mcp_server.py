@@ -31,12 +31,20 @@ def identidade(monkeypatch):
                         (_ for _ in ()).throw(quem_chama.SessaoDesconhecida(quem_chama.DICA)))
 
 
-async def test_sem_token_401():
+async def test_sem_token_401_e_fora_da_maquina_403():
     settings.auth_token = "secret"
     async with mcp_server.lifespan():
         async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=mcp_server.asgi),
                                       base_url="http://127.0.0.1") as hc:
             assert (await hc.post("/", json={})).status_code == 401
+        settings.auth_token = ""
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=mcp_server.asgi),
+                                      base_url="http://127.0.0.1", headers={"Authorization": "Bearer "}) as hc:
+            assert (await hc.post("/", json={})).status_code == 401
+        settings.auth_token = "secret"
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=mcp_server.asgi, client=("10.0.0.5", 1)),
+                                      base_url="http://127.0.0.1", headers={"Authorization": "Bearer secret"}) as hc:
+            assert (await hc.post("/", json={})).status_code == 403
 
 
 async def test_lista_tools_e_quem_sou(identidade):

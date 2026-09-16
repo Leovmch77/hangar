@@ -4,6 +4,7 @@
 set -euo pipefail
 ENV_FILE="$(dirname "$(realpath "$0")")/../backend/.env"
 TOKEN=$(grep '^CP_AUTH_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
+[ -n "$TOKEN" ] || { echo "hangar-mcp-headers: CP_AUTH_TOKEN ausente em $ENV_FILE" >&2; exit 1; }
 python3 - "$TOKEN" <<'PYEOF'
 import json, os, sys
 h = {"Authorization": f"Bearer {sys.argv[1]}"}
