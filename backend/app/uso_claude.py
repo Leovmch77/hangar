@@ -17,7 +17,9 @@ O que é medido de verdade e o que é estimado:
 """
 from __future__ import annotations
 
+import base64
 import re
+import struct
 from dataclasses import asdict, dataclass, replace
 
 # Um tool_use `Bash` vira `bash:<comando>`; estes prefixos não são o comando.
@@ -39,6 +41,9 @@ class UsoLinha:
     origem: str = ""
     chamadas: int = 0
     ctx_chars: int = 0
+    # Tokens já estimados por outra régua que não chars/4: imagem = largura×altura÷750 (regra
+    # da Anthropic), lida do cabeçalho do PNG. Soma ao chars/4 no agregador.
+    tokens_est: int = 0
     input: int = 0
     output: int = 0
     cache_write: int = 0
@@ -131,6 +136,23 @@ def _pede_agente(prompt: str) -> bool:
     return bool(_PEDE_AGENTE.search(prompt))
 
 
+def tokens_de_imagem(bloco: dict) -> tuple[int, int]:
+    """(chars de base64, tokens estimados) de um bloco `image`. PNG tem largura e altura nos
+    bytes 16–24 do cabeçalho; outros formatos ficam sem estimativa (0), só contam."""
+    src = bloco.get("source") if isinstance(bloco.get("source"), dict) else {}
+    dados = src.get("data") if isinstance(src.get("data"), str) else ""
+    tokens = 0
+    if src.get("media_type") == "image/png" and len(dados) >= 32:
+        try:
+            cabecalho = base64.b64decode(dados[:32])
+            if cabecalho[:8] == b"\x89PNG\r\n\x1a\n":
+                largura, altura = struct.unpack(">II", cabecalho[16:24])
+                tokens = largura * altura // 750
+        except (ValueError, struct.error):
+            tokens = 0
+    return len(dados), tokens
+
+
 def plugin_de(nome: str) -> str:
     return nome.split(":", 1)[0] if ":" in nome else ""
 
@@ -163,7 +185,7 @@ class Acumulador:
         self._model = ""
 
     def _somar(self, tipo: str, nome: str, *, plugin: str = "", detalhe: str = "",
-               origem: str = "", chamadas: int = 0, ctx_chars: int = 0,
+               origem: str = "", chamadas: int = 0, ctx_chars: int = 0, tokens_est: int = 0,
                usage: dict | None = None) -> tuple:
         chave = (self._dia, self._cwd, self._model, tipo, nome, plugin, detalhe, origem)
         antes = self._linhas.get(chave) or UsoLinha(
@@ -174,6 +196,7 @@ class Acumulador:
         cache_1h = _int(criacao.get("ephemeral_1h_input_tokens")) if isinstance(criacao, dict) else 0
         self._linhas[chave] = replace(
             antes, chamadas=antes.chamadas + chamadas, ctx_chars=antes.ctx_chars + ctx_chars,
+            tokens_est=antes.tokens_est + tokens_est,
             input=antes.input + _int(u.get("input_tokens")),
             output=antes.output + _int(u.get("output_tokens")),
             cache_write=antes.cache_write + _int(u.get("cache_creation_input_tokens")),
@@ -256,10 +279,19 @@ class Acumulador:
         for b in conteudo:
             if not isinstance(b, dict):
                 continue
+            if b.get("type") == "image":
+                # ctx_chars fica 0: base64 não é texto, e chars/4 inflaria o que os pixels já medem.
+                _, tokens = tokens_de_imagem(b)
+                self._somar("imagem", "enviada", chamadas=1, tokens_est=tokens)
             if b.get("type") == "tool_result":
                 nome, entrada = self._tools.get(b.get("tool_use_id"), ("?", {}))
                 chars = _texto(b.get("content"))
                 self._somar("tool", nome, ctx_chars=chars)
+                if isinstance(b.get("content"), list):
+                    for x in b["content"]:
+                        if isinstance(x, dict) and x.get("type") == "image":
+                            _, it = tokens_de_imagem(x)
+                            self._somar("imagem", f"lida:{nome}", chamadas=1, tokens_est=it)
                 if nome == "Bash" and isinstance(entrada.get("command"), str):
                     self._somar("bash", comando_bash(entrada["command"]), ctx_chars=chars)
                 elif nome.startswith("mcp__"):

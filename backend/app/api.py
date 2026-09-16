@@ -1823,13 +1823,17 @@ def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
 
 
 @app.get("/api/uso", dependencies=[Depends(require_auth)], response_model=UsoReport)
-def uso_endpoint(period: str = "all", conta: str = "", fresco: bool = False):
+def uso_endpoint(period: str = "all", conta: str = "", projeto: str = "", modelo: str = "",
+                 plugin: str = "", foco: str = "", fresco: bool = False):
     """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs.
-    `conta` = identidade `anthropic:<uuid>` de `by_conta`; vazio = todas."""
+    Filtros vazios = tudo; as chaves são as de `by_conta`/`by_projeto`/`by_modelo`/`by_plugin`.
+    `foco` = nome de um item: só a série diária (`by_day`) recorta por ele."""
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
     try:
-        return uso_report.report(period=period, conta=conta or None, fresco=fresco)
+        return uso_report.report(period=period, fresco=fresco, conta=conta or None,
+                                 projeto=projeto or None, modelo=modelo or None,
+                                 plugin=plugin or None, foco=foco or None)
     except costs_sources.Aquecendo as e:
         return _aquecendo(e)
 

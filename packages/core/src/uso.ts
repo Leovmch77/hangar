@@ -23,8 +23,20 @@ export interface UsoBucket {
   cost: number;
 }
 
-export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_plugin' | 'by_conta';
-export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_plugin', 'by_conta'];
+export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_imagem'
+  | 'by_plugin' | 'by_conta' | 'by_projeto' | 'by_modelo';
+export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_imagem',
+  'by_plugin', 'by_conta', 'by_projeto', 'by_modelo'];
+
+// Filtros que vão ao servidor (`?conta=&projeto=&modelo=&plugin=&foco=`). `foco` só recorta a
+// série diária: é o clique numa linha da tabela.
+export interface UsoFiltros {
+  conta?: string;
+  projeto?: string;
+  modelo?: string;
+  plugin?: string;
+  foco?: string;
+}
 
 export interface UsoReport {
   totals: UsoBucket;
@@ -34,10 +46,21 @@ export interface UsoReport {
   by_mcp: UsoBucket[];
   by_agente: UsoBucket[];
   by_contexto: UsoBucket[];
+  // `enviada` (imagem no prompt) e `lida:<tool>` (Read num PNG, print); tokens pelos pixels.
+  by_imagem: UsoBucket[];
   by_plugin: UsoBucket[];
-  // Contas do período SEM o filtro de conta (lista do seletor); `conta` ecoa o filtro aplicado.
+  // Listas dos seletores, do período inteiro SEM os filtros de dimensão; os campos soltos ecoam
+  // o filtro aplicado.
   by_conta: UsoBucket[];
+  by_projeto: UsoBucket[];
+  by_modelo: UsoBucket[];
+  // Série diária (key = YYYY-MM-DD) sob os filtros (e sob `foco`, se houver).
+  by_day: UsoBucket[];
   conta?: string | null;
+  projeto?: string | null;
+  modelo?: string | null;
+  plugin?: string | null;
+  foco?: string | null;
   applied?: Applied | null;
   usd_brl?: number | null;
 }
@@ -92,6 +115,7 @@ const ordenar = (m: Map<string, UsoBucket>) =>
 export function mergeUso(results: UsoServerResult[], period: string): MergedUso {
   const totals = zeroUso('totals');
   const dims = Object.fromEntries(USO_DIMS.map((d) => [d, new Map<string, UsoBucket>()])) as Record<UsoDim, Map<string, UsoBucket>>;
+  const dias = new Map<string, UsoBucket>();
   const servidores: UsoBucket[] = [];
   const mismatched: string[] = [];
   const failed: string[] = [];
@@ -113,7 +137,11 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
     somar(bs, r.totals ?? {});
     servidores.push(bs);
     for (const d of USO_DIMS) juntar(dims[d], r[d]);
+    juntar(dias, r.by_day);
   });
+  const primeiro = results.find((r) => r.report && (r.report.applied?.period ?? null) === period)?.report;
+  const porUso = (m: Map<string, UsoBucket>) =>
+    [...m.values()].sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas || a.key.localeCompare(b.key));
 
   return {
     report: {
@@ -124,9 +152,16 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       by_mcp: ordenar(dims.by_mcp),
       by_agente: ordenar(dims.by_agente),
       by_contexto: ordenar(dims.by_contexto),
+      by_imagem: ordenar(dims.by_imagem),
       by_plugin: ordenar(dims.by_plugin),
-      by_conta: [...dims.by_conta.values()].sort((a, b) => b.chamadas - a.chamadas || a.key.localeCompare(b.key)),
+      by_conta: porUso(dims.by_conta),
+      by_projeto: porUso(dims.by_projeto),
+      by_modelo: porUso(dims.by_modelo),
+      by_day: [...dias.values()].sort((a, b) => a.key.localeCompare(b.key)),
       by_servidor: servidores.sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas),
+      // Os filtros são os mesmos pra malha inteira: o eco de qualquer servidor que entrou serve.
+      conta: primeiro?.conta ?? null, projeto: primeiro?.projeto ?? null, modelo: primeiro?.modelo ?? null,
+      plugin: primeiro?.plugin ?? null, foco: primeiro?.foco ?? null,
       applied: { period },
       usd_brl: usdBrl,
     },

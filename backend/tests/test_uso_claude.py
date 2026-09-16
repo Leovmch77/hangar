@@ -254,6 +254,55 @@ def test_filtro_por_conta_corta_tudo_menos_a_lista_de_contas(tmp_path, monkeypat
     assert [b.key for b in so_a.by_conta] == [b.key for b in tudo.by_conta]        # seletor inteiro
 
 
+def _png_b64(largura: int, altura: int) -> str:
+    import base64, struct
+    cabecalho = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", largura, altura)
+    return base64.b64encode(cabecalho + b"\x08\x06\x00\x00\x00" + b"x" * 40).decode()
+
+
+def test_imagens_enviadas_e_lidas_com_tokens_pelos_pixels(tmp_path):
+    img = lambda w, h: {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _png_b64(w, h)}}
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user([{"type": "text", "text": "olha"}, img(1500, 750)], "p1"),
+        _assistant([_tool_use("Read", {"file_path": "/x.png"}, "t1")], "m1"),
+        _user([{"type": "tool_result", "tool_use_id": "t1", "content": [img(750, 750)]}], "p1"),
+        _user([{"type": "text", "text": "e essa"}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "abcd"}}], "p2"),
+    ])
+    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all")
+    im = {b.key: b for b in r.by_imagem}
+    assert im["enviada"].chamadas == 2
+    assert im["enviada"].ctx_tokens_est == 1500 * 750 // 750 + 0     # jpeg conta, sem estimativa
+    assert im["lida:Read"].chamadas == 1 and im["lida:Read"].ctx_tokens_est == 750
+    assert r.totals.chamadas == 4                                     # Read + 3 imagens
+
+
+def test_filtros_projeto_modelo_plugin_e_serie_diaria_com_foco(tmp_path):
+    def linha(dia, cwd, model, skill):
+        return [
+            {**_user("x", f"p-{dia}-{skill}", ts=f"{dia}T12:00:00Z"), "cwd": cwd},
+            {**_assistant([_tool_use("Skill", {"skill": skill}, f"t-{dia}-{skill}")], f"m-{dia}-{skill}",
+                          ts=f"{dia}T12:00:01Z", model=model), "cwd": cwd},
+        ]
+    _escrever(tmp_path / "p" / "s1.jsonl",
+              linha("2026-09-01", "/a", "claude-opus-5", "ecc:x")
+              + linha("2026-09-02", "/b", "claude-sonnet-5", "acme:y")
+              + linha("2026-09-02", "/a", "claude-opus-5", "acme:y"))
+    uso = ct.varrer_uso(tmp_path)
+    tudo = uso_report.montar(uso, [], "all")
+    assert [b.key for b in tudo.by_projeto] == ["/a", "/b"] or {b.key for b in tudo.by_projeto} == {"/a", "/b"}
+    assert {b.key for b in tudo.by_modelo} == {"claude-opus-5", "claude-sonnet-5"}
+    assert [(b.key, b.chamadas) for b in tudo.by_day] == [("2026-09-01", 1), ("2026-09-02", 2)]
+    so_a = uso_report.montar(uso, [], "all", projeto="/a")
+    assert so_a.totals.chamadas == 2 and {b.key for b in so_a.by_projeto} == {"/a", "/b"}
+    so_sonnet = uso_report.montar(uso, [], "all", modelo="claude-sonnet-5")
+    assert [b.key for b in so_sonnet.by_skill] == ["acme:y"] and so_sonnet.totals.chamadas == 1
+    so_acme = uso_report.montar(uso, [], "all", plugin="acme")
+    assert {b.key for b in so_acme.by_skill} == {"acme:y"} and so_acme.plugin == "acme"
+    foco = uso_report.montar(uso, [], "all", foco="ecc:x")
+    assert [(b.key, b.chamadas) for b in foco.by_day] == [("2026-09-01", 1)]
+    assert len(foco.by_skill) == 2                                   # foco só recorta a série
+
+
 def test_uso_sobrevive_ao_cache_em_disco(tmp_path):
     _escrever(tmp_path / "p" / "s1.jsonl", [
         _assistant([_tool_use("Read", {"file_path": "/a"}, "t1")], "m1"),

@@ -461,10 +461,21 @@ class UsoReport(BaseModel):
     by_agente: list[UsoBucket] = []
     by_contexto: list[UsoBucket] = []
     by_plugin: list[UsoBucket] = []
-    # Contas (anthropic:<uuid>, label = e-mail) do período, SEM o filtro de conta: é a lista do
-    # seletor. `conta` ecoa o filtro aplicado (None = todas).
+    # Imagens: `enviada` (você, no prompt) e `lida:<tool>` (Read num PNG, print). Tokens pelos
+    # pixels (largura×altura÷750), não por chars.
+    by_imagem: list[UsoBucket] = []
+    # Listas dos seletores (conta = anthropic:<uuid> com label e-mail; projeto; modelo canônico),
+    # do período inteiro e SEM os filtros de dimensão. Os campos soltos ecoam o filtro aplicado.
     by_conta: list[UsoBucket] = []
+    by_projeto: list[UsoBucket] = []
+    by_modelo: list[UsoBucket] = []
+    # Série diária (key = YYYY-MM-DD) sob os filtros; com `foco`, só do item de nome igual.
+    by_day: list[UsoBucket] = []
     conta: Optional[str] = None
+    projeto: Optional[str] = None
+    modelo: Optional[str] = None
+    plugin: Optional[str] = None
+    foco: Optional[str] = None
     applied: Optional[Applied] = None
     usd_brl: Optional[float] = None
 

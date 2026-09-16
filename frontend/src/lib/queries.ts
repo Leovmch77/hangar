@@ -14,7 +14,7 @@ import {
 } from '@hangar/core';
 import { listarCredenciais } from './credenciais';
 import type { OrqGrupo, OrqPolitica } from '@hangar/core';
-import type { ChatEvent, CostReport, OrqExecucao, UsoReport } from '@hangar/core';
+import type { ChatEvent, CostReport, OrqExecucao, UsoFiltros, UsoReport } from '@hangar/core';
 
 export const clienteQuery = new QueryClient({
   defaultOptions: {
@@ -100,9 +100,10 @@ export const custos = (s: Server, periodo: string, fresco = false) => queryOptio
 
 // Uso de skills/tools/hooks de UMA máquina: mesma chave (máquina, período) e mesmo TTL do custo —
 // sai do mesmo cache de transcript no backend.
-export const uso = (s: Server, periodo: string, conta = '', fresco = false) => queryOptions({
-  queryKey: ['uso', s.id, periodo, conta],
-  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo, conta, fresco),
+export const uso = (s: Server, periodo: string, filtros: UsoFiltros = {}, fresco = false) => queryOptions({
+  queryKey: ['uso', s.id, periodo, filtros.conta ?? '', filtros.projeto ?? '', filtros.modelo ?? '',
+    filtros.plugin ?? '', filtros.foco ?? ''],
+  queryFn: (): Promise<Partial<UsoReport>> => fetchUsoForServer(s, periodo, filtros, fresco),
   staleTime: 5 * 60_000,
 });
 

@@ -8,7 +8,7 @@ import Uso from './Uso.svelte';
 
 vi.mock('../components/NavBar.svelte', () => ({ default: createRawSnippet(() => ({ render: () => '<nav></nav>' })) }));
 vi.mock('../lib/queries', () => ({
-  uso: (server: { id: string }, period: string, conta = '') => ({ id: server.id, period, conta }),
+  uso: (server: { id: string }, period: string, filtros: Record<string, string> = {}) => ({ id: server.id, period, conta: '', ...filtros }),
   clienteQuery: { fetchQuery: vi.fn(), invalidateQueries: vi.fn(async () => {}) },
 }));
 
@@ -44,10 +44,12 @@ it('mostra as seções, corta a tabela longa em 15 e preserva o período', async
     expect(target.textContent).toContain(m.uso_col_origem_agente());
     // 17 tools: 15 visíveis + botão de mostrar mais 2.
     expect(target.textContent).toContain(m.uso_mostrar_mais({ n: 2 }));
-    expect(target.textContent).not.toContain('Tool16');
+    // Empate no critério padrão (≈ tok/chamada = 0 em todas): desempata pela chave, e "Tool9"
+    // é a última das 17 em ordem alfabética.
+    expect(target.textContent).not.toContain('Tool9');
     button(m.uso_mostrar_mais({ n: 2 })).click();
     await settle();
-    expect(target.textContent).toContain('Tool16');
+    expect(target.textContent).toContain('Tool9');
     // Contexto: média por sessão = 2000 / 2.
     expect(target.textContent).toContain('instructions');
     expect(target.textContent).toContain('≈ 1 mil');
@@ -109,6 +111,46 @@ it('escolher uma conta refaz a busca com a conta e mantém a lista inteira no se
     await settle();
     expect(pedidos.at(-1)).toBe('anthropic:2');
     expect(select.textContent).toContain('dois@x');
+  } finally { await unmount(component); target.remove(); localStorage.clear(); }
+});
+
+it('skills ordenam por custo/chamada por padrão e o cabeçalho reordena; a linha vira foco', async () => {
+  localStorage.clear();
+  localStorage.setItem('cp_servers', JSON.stringify([{ id: 'a', label: 'A', baseUrl: 'https://a.test', token: 't' }]));
+  const pedidos: Record<string, string>[] = [];
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    pedidos.push(query as unknown as Record<string, string>);
+    return Promise.resolve({
+      totals: { ...zeroUso('totals'), sessions: 1, chamadas: 13, cost: 130 },
+      // "muitas" custa mais no total; "cara" custa mais por chamada.
+      by_skill: [
+        { ...zeroUso('muitas'), sessions: 1, chamadas: 10, cost: 100 },
+        { ...zeroUso('cara'), sessions: 1, chamadas: 3, cost: 30 * 1.5 },
+      ],
+      by_day: [{ ...zeroUso('2026-09-10'), chamadas: 13, cost: 130 }],
+      applied: { period: '30d' },
+    }) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Uso, { target, props: { onBack: vi.fn() } });
+  const nomes = () => [...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim());
+  try {
+    await settle();
+    expect(nomes().slice(0, 2)).toEqual(['cara', 'muitas']);          // 15/chamada antes de 10/chamada
+    const cab = [...target.querySelectorAll('th .th')].find((b) => b.textContent?.includes(m.uso_col_custo()))! as HTMLButtonElement;
+    cab.click();
+    await settle();
+    expect(nomes().slice(0, 2)).toEqual(['muitas', 'cara']);          // custo total, decrescente
+    cab.click();
+    await settle();
+    expect(nomes().slice(0, 2)).toEqual(['cara', 'muitas']);          // mesma coluna de novo: crescente
+    (target.querySelector('table.data tr.click') as HTMLElement).click();
+    await settle();
+    expect(pedidos.at(-1)?.foco).toBe('cara');
+    expect(target.querySelector('.foco')?.textContent).toContain('cara');
+    // Gráficos montaram: dois SVGs por dia e a pilha de contexto.
+    expect(target.querySelectorAll('.duplo svg')).toHaveLength(2);
+    expect(target.querySelector('.pilha')).not.toBeNull();
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 

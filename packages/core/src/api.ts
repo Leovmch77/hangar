@@ -8,7 +8,7 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 import { registrar as registrarDiag, novoReq } from './diag';
 import { estaDesligado, registrarFalha, registrarSucesso } from './esfriamento';
 import type { CotaContaResumo } from './cotaResumo';
-import type { UsoReport } from './uso';
+import type { UsoFiltros, UsoReport } from './uso';
 import type {
   Atualizacao,
   SessionInfo,
@@ -390,9 +390,11 @@ export async function fetchCostsForServer(s: Server, period: string, fresco = fa
 }
 
 // Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
-export async function fetchUsoForServer(s: Server, period: string, conta = '', fresco = false): Promise<Partial<UsoReport>> {
-  const q = `period=${encodeURIComponent(period)}` + (conta ? `&conta=${encodeURIComponent(conta)}` : '')
-    + (fresco ? '&fresco=1' : '');
+export async function fetchUsoForServer(s: Server, period: string, filtros: UsoFiltros = {}, fresco = false): Promise<Partial<UsoReport>> {
+  const partes = [`period=${encodeURIComponent(period)}`];
+  for (const [k, v] of Object.entries(filtros)) if (v) partes.push(`${k}=${encodeURIComponent(v)}`);
+  if (fresco) partes.push('fresco=1');
+  const q = partes.join('&');
   const res = await apiFetchRes(`/api/uso?${q}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
