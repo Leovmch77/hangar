@@ -317,6 +317,10 @@
         try {
           const d = await getAtualizacao();
           if (!vivo) return;
+          // O estado é o que liga o ramo `rodando` (etapa, barra, relógio, log). Sem guardá-lo a
+          // caixa ficava em "Tudo em dia" com o botão em "Reiniciando…" por minutos, sem dizer
+          // que estava compilando a tela.
+          dados = d;
           if (d.versoes.backend === d.versoes.repo) {
             concluir();
             return;

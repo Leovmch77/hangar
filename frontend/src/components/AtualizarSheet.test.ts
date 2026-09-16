@@ -95,6 +95,36 @@ describe('em dia', () => {
     expect(rei).toHaveBeenCalled();
   });
 
+  it('durante o reinício a caixa mostra a etapa que o servidor grava, não o botão parado', async () => {
+    // O reinício avulso tem etapas próprias (trocar a tela, reiniciar) e o backend as grava; a
+    // caixa ficava em "Tudo em dia" com "Reiniciando…" porque o laço da espera só comparava
+    // versões e nunca guardava o estado.
+    vi.useFakeTimers();
+    try {
+      const spy = vi.spyOn(api, 'getAtualizacao').mockResolvedValue(
+        base({ versoes: { repo: 'v2-novo', backend: 'v1-velho' },
+               pre_voo: { pode: true, faltando: [], topologia: 'systemd' } }),
+      );
+      vi.spyOn(api, 'reiniciarServidor').mockResolvedValue({ ok: true, pid: 1 });
+      montar();
+      await vi.advanceTimersByTimeAsync(0);
+      spy.mockResolvedValue(base({
+        versoes: { repo: 'v2-novo', backend: 'v1-velho' },
+        pre_voo: { pode: true, faltando: [], topologia: 'systemd' },
+        estado: { fase: 'rodando', passo: 1, total: 2, texto: 'Trocando a tela pelo build publicado' },
+      }));
+      [...document.querySelectorAll('button')]
+        .find((b) => b.textContent?.includes(m.atualizar_reiniciar_botao()))!.click();
+      await vi.advanceTimersByTimeAsync(2100);
+      const txt = document.body.textContent ?? '';
+      expect(txt).toContain(m.atualizar_rodando_titulo());
+      expect(txt).toContain(m.atualizar_rodando_sub({ passo: 1, total: 2 }));
+      expect(txt).toContain('Trocando a tela pelo build publicado');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('desmontar no meio da espera do restart não recarrega a tela de quem saiu', async () => {
     // O laço da espera é solto (não é um $effect), então a destruição do DesktopShell o deixava
     // rodando: ao ver as versões baterem ele chamava location.reload() em quem já tinha navegado.
