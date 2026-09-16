@@ -246,9 +246,12 @@ def test_filtro_por_conta_corta_tudo_menos_a_lista_de_contas(tmp_path, monkeypat
     tudo = uso_report.montar(uso, tokens, "all")
     assert {b.key: b.label for b in tudo.by_conta} == {"anthropic:a": "a@x.com", "anthropic:b": None}
     assert tudo.by_skill[0].chamadas == 2 and tudo.by_agente[0].chamadas == 2
-    assert tudo.conta is None
+    assert tudo.conta == []
     so_a = uso_report.montar(uso, tokens, "all", conta="anthropic:a")
-    assert so_a.conta == "anthropic:a"
+    assert so_a.conta == ["anthropic:a"]
+    # Várias contas de uma vez: soma das duas, sem duplicar o seletor.
+    duas = uso_report.montar(uso, tokens, "all", conta=["anthropic:a", "anthropic:b"])
+    assert duas.by_skill[0].chamadas == 2 and len(duas.by_conta) == 2
     assert so_a.by_skill[0].chamadas == 1 and so_a.by_skill[0].input == 110   # m2 + m3, uma conta
     assert so_a.by_agente[0].chamadas == 1 and so_a.by_agente[0].input == 1000   # filho da conta certa
     assert [b.key for b in so_a.by_conta] == [b.key for b in tudo.by_conta]        # seletor inteiro
@@ -297,7 +300,7 @@ def test_filtros_projeto_modelo_plugin_e_serie_diaria_com_foco(tmp_path):
     so_sonnet = uso_report.montar(uso, [], "all", modelo="claude-sonnet-5")
     assert [b.key for b in so_sonnet.by_skill] == ["acme:y"] and so_sonnet.totals.chamadas == 1
     so_acme = uso_report.montar(uso, [], "all", plugin="acme")
-    assert {b.key for b in so_acme.by_skill} == {"acme:y"} and so_acme.plugin == "acme"
+    assert {b.key for b in so_acme.by_skill} == {"acme:y"} and so_acme.plugin == ["acme"]
     foco = uso_report.montar(uso, [], "all", foco="ecc:x")
     assert [(b.key, b.chamadas) for b in foco.by_day] == [("2026-09-01", 1)]
     assert len(foco.by_skill) == 2                                   # foco só recorta a série

@@ -27,11 +27,21 @@
     filtroAcimaDe?: number;
     id?: string;
     class?: string;
+    // Múltipla escolha: `values` são os marcados, `onchangeMulti` recebe a lista nova a cada
+    // clique e a lista fica ABERTA (fechar a cada marcação obrigaria a reabrir pra cada conta).
+    // A opção de `value === ''` é o "todos": clicá-la limpa a seleção. O gatilho mostra o rótulo
+    // de `rotuloMulti(values)` (a tela sabe dizer "conta: 2 de 5").
+    values?: string[];
+    onchangeMulti?: (v: string[]) => void;
+    rotuloMulti?: (v: string[]) => string;
   }
   let {
     value, opcoes, onchange, ariaLabel = undefined, disabled = false,
     filtroAcimaDe = 8, id = undefined, class: klass = '',
+    values = undefined, onchangeMulti = undefined, rotuloMulti = undefined,
   }: Props = $props();
+  const multi = $derived(values !== undefined && onchangeMulti !== undefined);
+  const marcado = (v: string) => (multi ? (v === '' ? (values ?? []).length === 0 : (values ?? []).includes(v)) : v === value);
 
   let aberto = $state(false);
   let filtro = $state('');
@@ -47,7 +57,9 @@
   const uid = $props.id();
   const idLista = `sel-${uid}`;
 
-  const rotuloAtual = $derived(opcoes.find((o) => o.value === value)?.label ?? value ?? '');
+  const rotuloAtual = $derived(multi && rotuloMulti
+    ? rotuloMulti(values ?? [])
+    : (opcoes.find((o) => o.value === value)?.label ?? value ?? ''));
   const comFiltro = $derived(opcoes.length > filtroAcimaDe);
   const visiveis = $derived(
     filtro.trim()
@@ -109,6 +121,11 @@
   }
 
   function escolher(v: string) {
+    if (multi && onchangeMulti) {
+      const atual = values ?? [];
+      onchangeMulti(v === '' ? [] : atual.includes(v) ? atual.filter((x) => x !== v) : [...atual, v]);
+      return; // fica aberto: marcar várias é o ponto
+    }
     onchange(v);
     fechar();
   }
@@ -216,14 +233,15 @@
           class="sel-item"
           id="{idLista}-{i}"
           tabindex="-1"
-          class:atual={o.value === value}
+          class:atual={marcado(o.value)}
           data-ativo={i === ativo}
           title={o.title}
           role="option"
-          aria-selected={o.value === value}
+          aria-selected={marcado(o.value)}
           onclick={() => escolher(o.value)}
           onmouseenter={() => (ativo = i)}
         >
+          {#if multi}<span class="sel-check" aria-hidden="true">{marcado(o.value) ? '☑' : '☐'}</span>{/if}
           <span class="sel-item-label">{o.label}</span>
           {#if o.hint}<span class="sel-item-hint">{o.hint}</span>{/if}
         </button>
@@ -290,6 +308,8 @@
   /* Label quebra linha em vez de truncar: id de modelo (muse-spark-1.2-contributor-free) não cabe
      numa linha nem com a lista larga, e cortado o usuário não distingue um modelo do irmão. */
   .sel-item-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .sel-check { flex: none; width: 1.2em; color: var(--text-secondary); }
+  .sel-item.atual .sel-check { color: var(--accent); }
   .sel-item-hint { flex: 0 1 auto; max-width: 45%; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 12px; text-align: right; }
   /* Alvo de toque: 7px de padding vertical dá ~30px de item, abaixo dos ~44px de dedo. */
   @media (pointer: coarse) {

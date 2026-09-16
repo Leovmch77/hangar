@@ -28,13 +28,13 @@ export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente'
 export const USO_DIMS: UsoDim[] = ['by_skill', 'by_tool', 'by_bash', 'by_mcp', 'by_agente', 'by_contexto', 'by_imagem',
   'by_plugin', 'by_conta', 'by_projeto', 'by_modelo'];
 
-// Filtros que vão ao servidor (`?conta=&projeto=&modelo=&plugin=&foco=`). `foco` só recorta a
-// série diária: é o clique numa linha da tabela.
+// Filtros que vão ao servidor, repetíveis (`?conta=a&conta=b&projeto=…&foco=`); lista vazia =
+// todos. `foco` só recorta a série diária: é o clique numa linha da tabela.
 export interface UsoFiltros {
-  conta?: string;
-  projeto?: string;
-  modelo?: string;
-  plugin?: string;
+  conta?: string[];
+  projeto?: string[];
+  modelo?: string[];
+  plugin?: string[];
   foco?: string;
 }
 
@@ -56,10 +56,10 @@ export interface UsoReport {
   by_modelo: UsoBucket[];
   // Série diária (key = YYYY-MM-DD) sob os filtros (e sob `foco`, se houver).
   by_day: UsoBucket[];
-  conta?: string | null;
-  projeto?: string | null;
-  modelo?: string | null;
-  plugin?: string | null;
+  conta?: string[];
+  projeto?: string[];
+  modelo?: string[];
+  plugin?: string[];
   foco?: string | null;
   applied?: Applied | null;
   usd_brl?: number | null;
@@ -160,8 +160,8 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       by_day: [...dias.values()].sort((a, b) => a.key.localeCompare(b.key)),
       by_servidor: servidores.sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas),
       // Os filtros são os mesmos pra malha inteira: o eco de qualquer servidor que entrou serve.
-      conta: primeiro?.conta ?? null, projeto: primeiro?.projeto ?? null, modelo: primeiro?.modelo ?? null,
-      plugin: primeiro?.plugin ?? null, foco: primeiro?.foco ?? null,
+      conta: primeiro?.conta ?? [], projeto: primeiro?.projeto ?? [], modelo: primeiro?.modelo ?? [],
+      plugin: primeiro?.plugin ?? [], foco: primeiro?.foco ?? null,
       applied: { period },
       usd_brl: usdBrl,
     },

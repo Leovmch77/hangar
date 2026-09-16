@@ -392,7 +392,10 @@ export async function fetchCostsForServer(s: Server, period: string, fresco = fa
 // Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
 export async function fetchUsoForServer(s: Server, period: string, filtros: UsoFiltros = {}, fresco = false): Promise<Partial<UsoReport>> {
   const partes = [`period=${encodeURIComponent(period)}`];
-  for (const [k, v] of Object.entries(filtros)) if (v) partes.push(`${k}=${encodeURIComponent(v)}`);
+  // Filtros de lista vão repetidos (`conta=a&conta=b`): o backend lê `list[str]`.
+  for (const [k, v] of Object.entries(filtros)) {
+    for (const x of Array.isArray(v) ? v : v ? [v] : []) partes.push(`${k}=${encodeURIComponent(x)}`);
+  }
   if (fresco) partes.push('fresco=1');
   const q = partes.join('&');
   const res = await apiFetchRes(`/api/uso?${q}`, {

@@ -471,10 +471,11 @@ class UsoReport(BaseModel):
     by_modelo: list[UsoBucket] = []
     # Série diária (key = YYYY-MM-DD) sob os filtros; com `foco`, só do item de nome igual.
     by_day: list[UsoBucket] = []
-    conta: Optional[str] = None
-    projeto: Optional[str] = None
-    modelo: Optional[str] = None
-    plugin: Optional[str] = None
+    # Filtros aplicados (vários por dimensão; vazio = todos).
+    conta: list[str] = []
+    projeto: list[str] = []
+    modelo: list[str] = []
+    plugin: list[str] = []
     foco: Optional[str] = None
     applied: Optional[Applied] = None
     usd_brl: Optional[float] = None

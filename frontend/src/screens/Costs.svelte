@@ -10,7 +10,7 @@
     custoSemCacheDe, equivalenteDe, isFree, Aquecendo,
     type ServerResult, type MergedReport, type CostReport,
   } from '@hangar/core';
-  import { agruparPor, aplicar, filtrar, somar, type Filtro } from '../lib/cubo';
+  import { agruparPor, aplicar, filtrar, somar, valores, type Filtro } from '../lib/cubo';
   import {
     brutos, contaInflada, serieComparada, totaisComparados, valorDe, type Metrica,
   } from '../lib/comparar';
@@ -251,10 +251,17 @@
   // porque ele era cruzado contra o projeto morto que ainda morava no filtro cru).
   const existe = (d: Dim, v: string) =>
     temCombos ? base.some((c) => c[d] === v) : listaCrua(d).some((b) => b.key === v);
-  const manter = (d: Dim) => {
-    const v = filtro[d];
-    return v && existe(d, v) ? v : undefined;
+  // Multi-seleção: cada dimensão é uma lista; só sobrevive o que ainda existe no período.
+  const manter = (d: Dim): string[] | undefined => {
+    const v = valores(filtro[d]).filter((x) => existe(d, x));
+    return v.length ? v : undefined;
   };
+  // Leitura por dimensão: a lista marcada (vazia = todos) e "está marcado?".
+  const sel = (d: Dim): string[] => valores(filtroAtivo[d]);
+  const marcado = (d: Dim, key: string) => sel(d).includes(key);
+  // Rótulo do seletor fechado: "todos (N)", o nome do único marcado, ou "2 de N".
+  const rotuloMulti = (v: string[], todos: string, total: number, nome: (k: string) => string) =>
+    v.length === 0 ? todos : v.length === 1 ? nome(v[0]) : m.uso_n_de_m({ n: v.length, m: total });
   const filtroAtivo = $derived.by<Filtro>(() => ({
     provider: manter('provider'), source: manter('source'),
     project: manter('project'), model: manter('model'),
@@ -311,9 +318,10 @@
     // existia no outro modo): anexa um balde zerado pra o `<select value=...>` nunca ficar em
     // branco — o recorte vazio é sinalizado como "sem dados" no KPI, não como estado sumindo da
     // UI. Nunca afeta os painéis (eles usam `listaDa`, não `opcoesDa`).
-    const sel = filtroAtivo[d];
-    if (sel && !cruzado.some((b) => b.key === sel) && base.some((c) => c[d] === sel)) {
-      cruzado.push({ ...vazio(), key: sel });
+    for (const s of sel(d)) {
+      if (!cruzado.some((b) => b.key === s) && base.some((c) => c[d] === s)) {
+        cruzado.push({ ...vazio(), key: s });
+      }
     }
     return cruzado;
   };
@@ -331,16 +339,16 @@
   // recorte ainda anunciando as duas.
   const foco = $derived.by(() => {
     if (temCombos) return somar(recorte);
-    const d = DIMS.find((x) => filtroAtivo[x]);
+    const d = DIMS.find((x) => sel(x).length);
     if (!d) return report.totals;
-    return listaCrua(d).find((b) => b.key === filtroAtivo[d]) ?? report.totals;
+    return listaCrua(d).find((b) => b.key === sel(d)[0]) ?? report.totals;
   });
 
   // O recorte também se lê pelo rótulo: com um provedor de conta selecionado, o aviso dizia
-  // "Recorte: provedor anthropic:758a9521-…".
+  // "Recorte: provedor anthropic:758a9521-…". Vários valores saem separados por vírgula.
   const descricaoFiltro = $derived([
-    ...DIMS.filter((d) => filtroAtivo[d])
-      .map((d) => `${NOME_DIM[d]} ${nomeDa(d, filtroAtivo[d] as string)}`),
+    ...DIMS.filter((d) => sel(d).length)
+      .map((d) => `${NOME_DIM[d]} ${sel(d).map((k) => nomeDa(d, k)).join(', ')}`),
     ...(filtroAtivo.subagente === undefined
       ? [] : [filtroAtivo.subagente ? m.custos_so_subagente() : m.custos_so_conversa()]),
   ].join(' · '));
@@ -348,11 +356,13 @@
   // As duas escritas passam pelo `aplicar`, que é quem sabe se o recorte pode CRUZAR: sem
   // detalhamento ele volta a ser de uma dimensão só, senão o rótulo diria "provedor X · projeto Y"
   // enquanto `foco` (que só acha um balde nos `by_*`) mostraria o número de X sozinho.
+  // Clique numa linha/aba ALTERNA a chave dentro da lista da dimensão (marca ou desmarca).
   function alternar(dim: Dim, key: string) {
-    filtro = aplicar(filtro, dim, filtro[dim] === key ? undefined : key, temCombos);
+    const atual = valores(filtro[dim]);
+    filtro = aplicar(filtro, dim, atual.includes(key) ? atual.filter((k) => k !== key) : [...atual, key], temCombos);
   }
-  function setFiltro(dim: Dim, valor: string) {
-    filtro = aplicar(filtro, dim, valor || undefined, temCombos);
+  function setFiltro(dim: Dim, valor: string[]) {
+    filtro = aplicar(filtro, dim, valor, temCombos);
   }
   function limpar() {
     filtro = {};
@@ -722,18 +732,20 @@
     <div class="filtros">
     <span class="fgroup">
       <span class="flabel" id="lbl-prov">{m.custos_dim_provedor()}</span>
-      <Select ariaLabel={m.custos_dim_provedor()} value={filtroAtivo.provider ?? ''}
+      <Select ariaLabel={m.custos_dim_provedor()} value="" onchange={() => {}} values={sel('provider')} onchangeMulti={(v) => setFiltro('provider', v)}
+        rotuloMulti={(v) => rotuloMulti(v, m.custos_todos_n({ n: opcoesProvedor.length }), opcoesProvedor.length, (k) => providerName(k))}
         opcoes={[{ value: '', label: m.custos_todos_n({ n: opcoesProvedor.length }) },
                  ...opcoesProvedor.map((b) => ({ value: b.key, label: rot(b), hint: custoDesconhecido(b) ? '—' : moeda(b.cost) }))]}
-        onchange={(v) => setFiltro('provider', v)} />
+        />
     </span>
 
     <span class="fgroup">
       <span class="flabel" id="lbl-fonte">{m.custos_dim_fonte()}</span>
-      <Select ariaLabel={m.custos_dim_fonte()} value={filtroAtivo.source ?? ''}
+      <Select ariaLabel={m.custos_dim_fonte()} value="" onchange={() => {}} values={sel('source')} onchangeMulti={(v) => setFiltro('source', v)}
+        rotuloMulti={(v) => rotuloMulti(v, m.custos_todas_n({ n: opcoesFonte.length }), opcoesFonte.length, sourceName)}
         opcoes={[{ value: '', label: m.custos_todas_n({ n: opcoesFonte.length }) },
                  ...opcoesFonte.map((b) => ({ value: b.key, label: sourceName(b.key), hint: custoDesconhecido(b) ? '—' : moeda(b.cost) }))]}
-        onchange={(v) => setFiltro('source', v)} />
+        />
     </span>
 
     <span class="fgroup">
@@ -741,32 +753,35 @@
       <!-- title: dois projetos com o mesmo basename (raro, mas possível) ficam distinguíveis por
            hover; no celular não há hover, então o painel e o chip mostram o basename e o estado
            sempre usa a chave cheia. O filtro por digitação da lista também busca na chave. -->
-      <Select ariaLabel={m.custos_dim_projeto()} value={filtroAtivo.project ?? ''}
+      <Select ariaLabel={m.custos_dim_projeto()} value="" onchange={() => {}} values={sel('project')} onchangeMulti={(v) => setFiltro('project', v)}
+        rotuloMulti={(v) => rotuloMulti(v, m.custos_todos_n({ n: opcoesProjeto.length }), opcoesProjeto.length, projectLabel)}
         opcoes={[{ value: '', label: m.custos_todos_n({ n: opcoesProjeto.length }) },
                  ...opcoesProjeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key,
                                                 hint: custoDesconhecido(b) ? '—' : moeda(b.cost) }))]}
-        onchange={(v) => setFiltro('project', v)} />
+        />
     </span>
 
     <span class="fgroup">
       <span class="flabel" id="lbl-mod">{m.custos_dim_modelo()}</span>
       <!-- Mesma regra da tabela: modelo sem tarifa não vale "US$ 0,00" nem aqui. -->
-      <Select ariaLabel={m.custos_dim_modelo()} value={filtroAtivo.model ?? ''}
+      <Select ariaLabel={m.custos_dim_modelo()} value="" onchange={() => {}} values={sel('model')} onchangeMulti={(v) => setFiltro('model', v)}
+        rotuloMulti={(v) => rotuloMulti(v, m.custos_todos_n({ n: opcoesModelo.length }), opcoesModelo.length, (k) => k)}
         opcoes={[{ value: '', label: m.custos_todos_n({ n: opcoesModelo.length }) },
                  ...opcoesModelo.map((b) => ({ value: b.key, label: b.key,
                    hint: tarifas.has(b.key) ? moeda(b.cost) : isFree(b.key) ? m.custos_gratis() : m.custos_sem_tarifa() }))]}
-        onchange={(v) => setFiltro('model', v)} />
+        />
     </span>
 
     <!-- Só com malha: com uma máquina só, "quais máquinas" não é escolha. -->
     {#if servidores.length > 1}
       <span class="fgroup">
         <span class="flabel">{m.custos_dim_maquina()}</span>
-        <Select ariaLabel={m.custos_dim_maquina()} value={filtroAtivo.servidor ?? ''}
+        <Select ariaLabel={m.custos_dim_maquina()} value="" onchange={() => {}} values={sel('servidor')} onchangeMulti={(v) => setFiltro('servidor', v)}
+          rotuloMulti={(v) => rotuloMulti(v, m.custos_todas_n({ n: opcoesServidor.length }), opcoesServidor.length, nomeServidor)}
           opcoes={[{ value: '', label: m.custos_todas_n({ n: opcoesServidor.length }) },
                    ...opcoesServidor.map((b) => ({ value: b.key, label: nomeServidor(b.key),
                      hint: custoDesconhecido(b) ? '—' : moeda(b.cost) }))]}
-          onchange={(v) => setFiltro('servidor', v)} />
+          />
       </span>
     {/if}
 
@@ -868,9 +883,9 @@
     <p class="muted">{m.custos_sem_dados_periodo()}</p>
   {:else}
     <div class="source-tabs" role="group" aria-label={m.custos_dim_fonte()}>
-      <button aria-pressed={!filtroAtivo.source} onclick={() => setFiltro('source', '')}>{m.custos_todas_fontes()}</button>
+      <button aria-pressed={!sel('source').length} onclick={() => setFiltro('source', [])}>{m.custos_todas_fontes()}</button>
       {#each opcoesFonte as source (source.key)}
-        <button aria-pressed={filtroAtivo.source === source.key} onclick={() => alternar('source', source.key)}>
+        <button aria-pressed={marcado('source', source.key)} onclick={() => alternar('source', source.key)}>
           <span class="swatch" style="background: var({corDaFonte(source.key)})"></span>
           {sourceName(source.key)} <span class="dim">{tok(brutos(source))}</span>
         </button>
@@ -1078,7 +1093,7 @@
         <div class="rank">
           {#each provedores as b}
             <div class="row">
-              <button aria-pressed={filtroAtivo.provider === b.key}
+              <button aria-pressed={marcado('provider', b.key)}
                 onclick={() => alternar('provider', b.key)}>
                 <span class="nm">{rot(b)}</span><span class="vl">{custoDesconhecido(b) ? '—' : m2(b.cost)}</span>
                 <span class="track" style="width: {Math.max(1.5, (b.cost / picoProvedor) * 100)}%">
@@ -1098,7 +1113,7 @@
         <div class="rank">
           {#each fontes as b}
             <div class="row">
-              <button aria-pressed={filtroAtivo.source === b.key}
+              <button aria-pressed={marcado('source', b.key)}
                 onclick={() => alternar('source', b.key)}>
                 <span class="nm">{sourceName(b.key)}</span><span class="vl">{custoDesconhecido(b) ? '—' : m2(b.cost)}</span>
                 <span class="track" style="width: {Math.max(1.5, (b.cost / picoFonte) * 100)}%">
@@ -1122,7 +1137,7 @@
         <div class="rank">
           {#each report.by_servidor as b (b.key)}
             <div class="row">
-              <button aria-pressed={filtroAtivo.servidor === b.key}
+              <button aria-pressed={marcado('servidor', b.key)}
                 onclick={() => alternar('servidor', b.key)}>
                 <span class="nm">{nomeServidor(b.key)}</span>
                 <span class="vl">{custoDesconhecido(b) ? '—' : m2(b.cost)}</span>
@@ -1146,7 +1161,7 @@
       <div class="rank">
         {#each shownProjects as b (b.key)}
           <div class="row">
-            <button aria-pressed={filtroAtivo.project === b.key}
+            <button aria-pressed={marcado('project', b.key)}
               title={m.custos_clique_recortar()} onclick={() => alternar('project', b.key)}>
               <span class="nm" title={b.key}>{projectLabel(b.key)}</span><span class="vl">{custoDesconhecido(b) ? '—' : m2(b.cost)}</span>
               <span class="track" style="width: {Math.max(1.5, (b.cost / picoProjeto) * 100)}%">
@@ -1212,7 +1227,7 @@
                    sai com o volume dos DOIS e o custo de UM, e sem marca isso lê como preço
                    completo. Só acontece na mescla — dentro de um servidor é impossível. -->
               {@const parcial = precoParcial(b.key, comPreco, report.sem_tarifa)}
-              <tr class="click" aria-selected={filtroAtivo.model === b.key}
+              <tr class="click" aria-selected={marcado('model', b.key)}
                 onclick={() => alternar('model', b.key)}>
                 <td>{b.key}{#if !comPreco}<span class="tag">{isFree(b.key) ? m.custos_gratis() : m.custos_sem_tarifa()}</span>{:else if parcial}<span
                   class="tag" title={m.custos_servidor_malha()}>{m.custos_preco_parcial()}</span>{/if}</td>

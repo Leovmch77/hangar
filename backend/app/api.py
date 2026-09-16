@@ -17,7 +17,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal, Optional
-from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1823,17 +1823,20 @@ def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
 
 
 @app.get("/api/uso", dependencies=[Depends(require_auth)], response_model=UsoReport)
-def uso_endpoint(period: str = "all", conta: str = "", projeto: str = "", modelo: str = "",
-                 plugin: str = "", foco: str = "", fresco: bool = False):
+def uso_endpoint(period: str = "all", conta: list[str] = Query([]), projeto: list[str] = Query([]),
+                 modelo: list[str] = Query([]), plugin: list[str] = Query([]), foco: str = "",
+                 fresco: bool = False):
     """Uso de skills/tools/hooks/MCP/agentes do Claude Code, do mesmo cache que o /api/costs.
-    Filtros vazios = tudo; as chaves são as de `by_conta`/`by_projeto`/`by_modelo`/`by_plugin`.
-    `foco` = nome de um item: só a série diária (`by_day`) recorta por ele."""
+    Filtros repetíveis (`?conta=a&conta=b`); vazio = tudo; as chaves são as de
+    `by_conta`/`by_projeto`/`by_modelo`/`by_plugin`. `foco` = nome de um item: só a série diária
+    (`by_day`) recorta por ele."""
     if period not in _COST_PERIODOS and period != "all":
         period = "all"
+    limpo = lambda xs: [x for x in xs if x]  # `?conta=` (vazio) é "todas", não a conta ""
     try:
-        return uso_report.report(period=period, fresco=fresco, conta=conta or None,
-                                 projeto=projeto or None, modelo=modelo or None,
-                                 plugin=plugin or None, foco=foco or None)
+        return uso_report.report(period=period, fresco=fresco, conta=limpo(conta),
+                                 projeto=limpo(projeto), modelo=limpo(modelo),
+                                 plugin=limpo(plugin), foco=foco or None)
     except costs_sources.Aquecendo as e:
         return _aquecendo(e)
 

@@ -7,14 +7,19 @@ import type { ComboLocal, DimBucket } from '@hangar/core';
 
 export type Dim = 'dia' | 'provider' | 'source' | 'project' | 'model' | 'servidor';
 
+// Cada dimensão aceita UM valor ou VÁRIOS (multi-seleção): vazio/ausente = todos.
+export type ValorFiltro = string | string[] | undefined;
 export interface Filtro {
-  provider?: string;
-  source?: string;
-  project?: string;
-  model?: string;
-  servidor?: string;
+  provider?: ValorFiltro;
+  source?: ValorFiltro;
+  project?: ValorFiltro;
+  model?: ValorFiltro;
+  servidor?: ValorFiltro;
   subagente?: boolean;
 }
+
+export const valores = (v: ValorFiltro): string[] => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+const casa = (v: ValorFiltro, x: string) => { const l = valores(v); return l.length === 0 || l.includes(x); };
 
 // As quatro dimensões que viram um filtro na tela. 'dia' é do eixo do gráfico, não do recorte.
 export type DimFiltro = Exclude<Dim, 'dia'>;
@@ -25,19 +30,21 @@ export type DimFiltro = Exclude<Dim, 'dia'>;
 // debaixo do rótulo das duas ("Recorte: provedor X · projeto Y" com o gasto só do provedor X).
 // O último clique vence, que é como a tela se comportava antes de haver cruzamento.
 export function aplicar(
-  f: Filtro, dim: DimFiltro, valor: string | undefined, cruza: boolean,
+  f: Filtro, dim: DimFiltro, valor: ValorFiltro, cruza: boolean,
 ): Filtro {
-  return { ...(cruza ? f : {}), [dim]: valor };
+  const v = valores(valor);
+  // Sem detalhamento (`cruza` falso) só UMA dimensão e UM valor: é o que os `by_*` sabem somar.
+  return { ...(cruza ? f : {}), [dim]: v.length === 0 ? undefined : cruza ? v : v[0] };
 }
 
 export function filtrar(combos: ComboLocal[], f: Filtro): ComboLocal[] {
   return combos.filter(
     (c) =>
-      (!f.provider || c.provider === f.provider) &&
-      (!f.source || c.source === f.source) &&
-      (!f.project || c.project === f.project) &&
-      (!f.model || c.model === f.model) &&
-      (!f.servidor || c.servidor === f.servidor) &&
+      casa(f.provider, c.provider) &&
+      casa(f.source, c.source) &&
+      casa(f.project, c.project) &&
+      casa(f.model, c.model) &&
+      casa(f.servidor, c.servidor) &&
       (f.subagente === undefined || Boolean(c.subagente) === f.subagente),
   );
 }

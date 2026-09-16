@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agruparPor, aplicar, filtrar, somar } from './cubo';
+import { agruparPor, aplicar, filtrar, somar, valores } from './cubo';
 import type { ComboLocal } from '@hangar/core';
 
 const c = (o: Partial<ComboLocal>): ComboLocal => ({
@@ -94,7 +94,15 @@ describe('cubo', () => {
   it('com detalhamento os cortes combinam', () => {
     const f = aplicar(aplicar({}, 'provider', 'anthropic:u', true), 'project', '/web', true);
     expect(somar(filtrar(dados, f)).cost).toBe(113); // 100 da conversa + 13 do subagente
-    expect(f.provider).toBe('anthropic:u');
+    expect(valores(f.provider)).toEqual(['anthropic:u']);
+  });
+
+  it('multi-seleção: vários valores na mesma dimensão SOMAM', () => {
+    const f = aplicar({}, 'source', ['pi', 'codex'], true);
+    expect(somar(filtrar(dados, f)).cost).toBe(somar(filtrar(dados, { source: 'pi' })).cost + somar(filtrar(dados, { source: 'codex' })).cost);
+    // Sem detalhamento só cabe UM valor: fica o primeiro.
+    expect(aplicar({}, 'source', ['pi', 'codex'], false).source).toBe('pi');
+    expect(aplicar({}, 'source', [], true).source).toBeUndefined();
   });
 
   it('campo ausente de servidor antigo não vira NaN', () => {

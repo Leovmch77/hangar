@@ -58,12 +58,19 @@
   // de detalhe, pra clicar numa linha não refazer a tela inteira.
   let filtros = $state<UsoFiltros>({});
   let busca = $state('');
-  const temFiltro = $derived(Boolean(filtros.conta || filtros.projeto || filtros.modelo || filtros.plugin));
+  type DimF = 'conta' | 'projeto' | 'modelo' | 'plugin';
+  const DIMS_F: DimF[] = ['conta', 'projeto', 'modelo', 'plugin'];
+  const temFiltro = $derived(DIMS_F.some((d) => (filtros[d]?.length ?? 0) > 0));
   let listas = $state<{ conta: UsoBucket[]; projeto: UsoBucket[]; modelo: UsoBucket[]; plugin: UsoBucket[] }>({
     conta: [], projeto: [], modelo: [], plugin: [],
   });
-  function setFiltro(k: keyof UsoFiltros, v: string) { filtros = { ...filtros, [k]: v || undefined }; }
+  function setFiltro(k: DimF, v: string[]) { filtros = { ...filtros, [k]: v.length ? v : undefined }; }
   function limpar() { filtros = {}; busca = ''; }
+  // Rótulo do chip: "conta: todas", "conta: um@x" ou "conta: 2 de 5".
+  function rotuloFiltro(d: DimF, todos: string, nome: (k: string) => string): (v: string[]) => string {
+    const texto = { conta: m.uso_filtro_conta, projeto: m.uso_filtro_projeto, modelo: m.uso_filtro_modelo, plugin: m.uso_filtro_plugin }[d];
+    return (v) => texto({ v: v.length === 0 ? todos : v.length === 1 ? nome(v[0]) : m.uso_n_de_m({ n: v.length, m: listas[d].length }) });
+  }
 
   let desktop = $state(window.matchMedia('(min-width: 820px)').matches);
   $effect(() => {
@@ -111,7 +118,7 @@
         conta: r.by_conta.length ? r.by_conta : listas.conta,
         projeto: r.by_projeto.length ? r.by_projeto : listas.projeto,
         modelo: r.by_modelo.length ? r.by_modelo : listas.modelo,
-        plugin: !f.plugin && r.by_plugin.length ? r.by_plugin : listas.plugin,
+        plugin: !f.plugin?.length && r.by_plugin.length ? r.by_plugin : listas.plugin,
       };
     };
     await Promise.all(
@@ -143,6 +150,8 @@
   const ctxPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.ctx_tokens_est / b.chamadas : 0);
   const porSessao = (b: UsoBucket) => (b.sessions > 0 ? b.ctx_tokens_est / b.sessions : 0);
   const totalImagens = $derived((report?.by_imagem ?? []).reduce((n, b) => n + b.chamadas, 0));
+  const custoAgentes = $derived((report?.by_agente ?? []).reduce((n, b) => n + b.cost, 0));
+  const ctxSkills = $derived((report?.by_skill ?? []).reduce((n, b) => n + b.ctx_tokens_est, 0));
   const ctxPorSessaoTotal = $derived(report && report.totals.sessions > 0
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
 
@@ -177,15 +186,18 @@
   });
 
   // ── Tabela com abas ──────────────────────────────────────────────────────────
-  const ABAS: { id: Aba; label: string; custo: boolean }[] = [
-    { id: 'skill', label: m.uso_aba_skills(), custo: true },
-    { id: 'agente', label: m.uso_aba_agentes(), custo: true },
-    { id: 'plugin', label: m.uso_aba_plugins(), custo: true },
-    { id: 'tool', label: m.uso_aba_tools(), custo: false },
-    { id: 'bash', label: m.uso_aba_bash(), custo: false },
-    { id: 'mcp', label: m.uso_aba_mcp(), custo: false },
-    { id: 'contexto', label: m.uso_aba_contexto(), custo: false },
-    { id: 'imagem', label: m.uso_aba_imagens(), custo: false },
+  // `custo`: só AGENTES têm custo real (o transcript do subagente). Skill e plugin carregam
+  // `turno`: o gasto do turno inteiro em que rodaram, que inclui o trabalho que veio depois; a
+  // medida de peso de uma skill é o CONTEXTO que ela injeta (tamanho × vezes), exato.
+  const ABAS: { id: Aba; label: string; custo: boolean; turno: boolean }[] = [
+    { id: 'skill', label: m.uso_aba_skills(), custo: false, turno: true },
+    { id: 'agente', label: m.uso_aba_agentes(), custo: true, turno: false },
+    { id: 'plugin', label: m.uso_aba_plugins(), custo: false, turno: true },
+    { id: 'tool', label: m.uso_aba_tools(), custo: false, turno: false },
+    { id: 'bash', label: m.uso_aba_bash(), custo: false, turno: false },
+    { id: 'mcp', label: m.uso_aba_mcp(), custo: false, turno: false },
+    { id: 'contexto', label: m.uso_aba_contexto(), custo: false, turno: false },
+    { id: 'imagem', label: m.uso_aba_imagens(), custo: false, turno: false },
   ];
   function listaDa(a: Aba): UsoBucket[] {
     if (!report) return [];
@@ -226,13 +238,19 @@
     return v.length ? v[Math.floor(v.length / 2)] : 0;
   });
   const foraDaCurva = (b: UsoBucket) => medianaChamada > 0 && b.chamadas >= 1 && porChamada(b) >= 3 * medianaChamada;
-  const cols = $derived<{ col: Col; rotulo: string; n?: boolean }[]>([
+  const medianaCtxChamada = $derived.by(() => {
+    const v = linhas.map(ctxPorChamada).filter((x) => x > 0).sort((a, b) => a - b);
+    return v.length ? v[Math.floor(v.length / 2)] : 0;
+  });
+  const foraDaCurvaCtx = (b: UsoBucket) => medianaCtxChamada > 0 && ctxPorChamada(b) >= 3 * medianaCtxChamada;
+  const cols = $derived<{ col: Col; rotulo: string; n?: boolean; titulo?: string }[]>([
     { col: 'nome', rotulo: m.uso_col_nome() },
     { col: 'chamadas', rotulo: m.uso_col_chamadas(), n: true },
     ...(abaAtual.custo
       ? [{ col: 'cost' as Col, rotulo: m.uso_col_custo(), n: true }, { col: 'custoChamada' as Col, rotulo: m.uso_col_custo_chamada(), n: true }]
       : [{ col: 'ctx' as Col, rotulo: m.uso_col_ctx(), n: true },
          aba === 'contexto' ? { col: 'porSessao' as Col, rotulo: m.uso_col_media(), n: true } : { col: 'ctxChamada' as Col, rotulo: m.uso_col_ctx_chamada(), n: true }]),
+    ...(abaAtual.turno ? [{ col: 'cost' as Col, rotulo: m.uso_col_custo_turno(), n: true, titulo: m.uso_custo_turno_nota() }] : []),
     { col: 'sessions', rotulo: m.uso_col_sessoes(), n: true },
   ]);
   const TOPO = 20;
@@ -242,35 +260,42 @@
   // ── Gráfico principal: chamadas × custo (bolhas, log-log) ────────────────────
   let larguraBolhas = $state(0);
   let hoverBolha = $state<string | null>(null);
+  // Dois modos, uma medida cada (nunca custo e contexto no mesmo eixo): skills pesam pelo
+  // contexto que injetam; agentes, pelo custo real do transcript filho.
+  let modoBolhas = $state<'skills' | 'agentes'>('skills');
+  const medidaBolha = (b: UsoBucket) => (modoBolhas === 'skills' ? b.ctx_tokens_est : b.cost);
+  const medidaPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? medidaBolha(b) / b.chamadas : 0);
+  const fmtMedida = (v: number) => (modoBolhas === 'skills' ? `≈ ${tok(v)}` : m2(v));
   const bolhas = $derived.by(() => {
     if (!report) return null;
-    const itens = [
-      ...report.by_skill.map((b) => ({ b, tipo: 'skill' as Aba })),
-      ...report.by_agente.map((b) => ({ b, tipo: 'agente' as Aba })),
-    ].filter(({ b }) => b.chamadas > 0 && b.cost > 0);
+    const tipo: Aba = modoBolhas === 'skills' ? 'skill' : 'agente';
+    const itens = (modoBolhas === 'skills' ? report.by_skill : report.by_agente)
+      .filter((b) => b.chamadas > 0 && medidaBolha(b) > 0).map((b) => ({ b, tipo }));
     if (!itens.length) return null;
     const W = Math.max(larguraBolhas, 320), H = desktop ? 380 : 300;
     const padL = 66, padR = 16, padT = 22, padB = 30;
     const plotW = W - padL - padR, plotH = H - padT - padB;
+    // Eixo Y na moeda/unidade que a tela mostra, senão os ticks "redondos" saem R$ 5,15.
+    const fatorY = modoBolhas === 'agentes' && currency === 'BRL' && rate ? rate : 1;
     const lx = itens.map(({ b }) => Math.log10(b.chamadas));
-    const ly = itens.map(({ b }) => Math.log10(b.cost));
+    const ly = itens.map(({ b }) => Math.log10(medidaBolha(b) * fatorY));
     const x0 = Math.min(...lx) - 0.15, x1 = Math.max(...lx) + 0.15;
     const y0 = Math.min(...ly) - 0.15, y1 = Math.max(...ly) + 0.15;
     const sx = (v: number) => padL + ((v - x0) / (x1 - x0 || 1)) * plotW;
     const sy = (v: number) => padT + plotH - ((v - y0) / (y1 - y0 || 1)) * plotH;
-    const pcMax = Math.max(...itens.map(({ b }) => porChamada(b)));
+    const pcMax = Math.max(...itens.map(({ b }) => medidaPorChamada(b)));
     const med = (a: number[]) => { const s = [...a].sort((p, q) => p - q); return s[Math.floor(s.length / 2)]; };
     const mx = sx(med(lx)), my = sy(med(ly));
     const pontos = itens.map(({ b, tipo }, i) => ({
       b, tipo, x: sx(lx[i]), y: sy(ly[i]),
-      r: 4 + 14 * Math.sqrt(porChamada(b) / (pcMax || 1)),
+      r: 4 + 14 * Math.sqrt(medidaPorChamada(b) / (pcMax || 1)),
     }));
-    // Rótulo direto só nos que importam (3 mais caros no total, 3 mais caros por chamada), e
-    // nunca dois rótulos em cima um do outro: o segundo que cair a menos de 14px do primeiro
-    // fica só no tooltip. Perto da borda direita o texto vai pra esquerda da bolha.
+    // Rótulo direto só nos que importam (3 maiores no total, 3 maiores por chamada), e nunca
+    // dois rótulos em cima um do outro: o segundo que cair a menos de 14px do primeiro fica só
+    // no tooltip. Perto da borda direita o texto vai pra esquerda da bolha.
     const candidatos = [
-      ...[...pontos].sort((p, q) => q.b.cost - p.b.cost).slice(0, 3),
-      ...[...pontos].sort((p, q) => porChamada(q.b) - porChamada(p.b)).slice(0, 3),
+      ...[...pontos].sort((p, q) => medidaBolha(q.b) - medidaBolha(p.b)).slice(0, 3),
+      ...[...pontos].sort((p, q) => medidaPorChamada(q.b) - medidaPorChamada(p.b)).slice(0, 3),
     ];
     const rotulados = new Map<string, { x: number; y: number; fim: boolean; texto: string }>();
     const maxRotulos = desktop ? 6 : 3;
@@ -288,7 +313,7 @@
       for (let e = Math.ceil(v0); e <= Math.floor(v1); e++) out.push(e);
       return out;
     };
-    return { W, H, padL, padT, plotW, plotH, mx, my, pontos, rotulados, xt: ticks(x0, x1).map((e) => ({ x: sx(e), v: 10 ** e })), yt: ticks(y0, y1).map((e) => ({ y: sy(e), v: 10 ** e })) };
+    return { W, H, padL, padT, plotW, plotH, mx, my, pontos, rotulados, fatorY, xt: ticks(x0, x1).map((e) => ({ x: sx(e), v: 10 ** e })), yt: ticks(y0, y1).map((e) => ({ y: sy(e), v: 10 ** e })) };
   });
   const bolhaHover = $derived(bolhas?.pontos.find((p) => p.b.key === hoverBolha) ?? null);
 
@@ -373,22 +398,27 @@
 
   <!-- Filtros como uma linha de seletores, sem caixa: cada um mostra o valor atual no próprio botão. -->
   <div class="filtros" role="group" aria-label={m.uso_filtros()}>
-    <span class="fsel" class:ativo={!!filtros.conta}><Select ariaLabel={m.uso_conta()} value={filtros.conta ?? ''} class="chipsel"
-      opcoes={[{ value: '', label: m.uso_filtro_conta({ v: m.uso_todas() }) },
-               ...listas.conta.map((b) => ({ value: b.key, label: m.uso_filtro_conta({ v: b.label ?? b.key }), title: b.key, hint: moeda(b.cost) }))]}
-      onchange={(v) => setFiltro('conta', v)} /></span>
-    <span class="fsel" class:ativo={!!filtros.projeto}><Select ariaLabel={m.uso_projeto()} value={filtros.projeto ?? ''} class="chipsel"
-      opcoes={[{ value: '', label: m.uso_filtro_projeto({ v: m.uso_todos() }) },
-               ...listas.projeto.map((b) => ({ value: b.key, label: m.uso_filtro_projeto({ v: projectLabel(b.key) }), title: b.key, hint: moeda(b.cost) }))]}
-      onchange={(v) => setFiltro('projeto', v)} /></span>
-    <span class="fsel" class:ativo={!!filtros.modelo}><Select ariaLabel={m.uso_modelo()} value={filtros.modelo ?? ''} class="chipsel"
-      opcoes={[{ value: '', label: m.uso_filtro_modelo({ v: m.uso_todos() }) },
-               ...listas.modelo.map((b) => ({ value: b.key, label: m.uso_filtro_modelo({ v: b.key }), hint: moeda(b.cost) }))]}
-      onchange={(v) => setFiltro('modelo', v)} /></span>
-    <span class="fsel" class:ativo={!!filtros.plugin}><Select ariaLabel={m.uso_plugin()} value={filtros.plugin ?? ''} class="chipsel"
-      opcoes={[{ value: '', label: m.uso_filtro_plugin({ v: m.uso_todos() }) },
-               ...listas.plugin.map((b) => ({ value: b.key, label: m.uso_filtro_plugin({ v: b.key }), hint: dec(b.chamadas, 0) }))]}
-      onchange={(v) => setFiltro('plugin', v)} /></span>
+    <!-- Múltipla escolha: a opção vazia é "todas"; marcar várias soma as contas/projetos/… -->
+    <span class="fsel" class:ativo={!!filtros.conta?.length}><Select ariaLabel={m.uso_conta()} value="" onchange={() => {}} class="chipsel"
+      values={filtros.conta ?? []} onchangeMulti={(v) => setFiltro('conta', v)}
+      rotuloMulti={rotuloFiltro('conta', m.uso_todas(), (k) => listas.conta.find((b) => b.key === k)?.label ?? k)}
+      opcoes={[{ value: '', label: m.uso_todas() },
+               ...listas.conta.map((b) => ({ value: b.key, label: b.label ?? b.key, title: b.key, hint: moeda(b.cost) }))]} /></span>
+    <span class="fsel" class:ativo={!!filtros.projeto?.length}><Select ariaLabel={m.uso_projeto()} value="" onchange={() => {}} class="chipsel"
+      values={filtros.projeto ?? []} onchangeMulti={(v) => setFiltro('projeto', v)}
+      rotuloMulti={rotuloFiltro('projeto', m.uso_todos(), projectLabel)}
+      opcoes={[{ value: '', label: m.uso_todos() },
+               ...listas.projeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key, hint: moeda(b.cost) }))]} /></span>
+    <span class="fsel" class:ativo={!!filtros.modelo?.length}><Select ariaLabel={m.uso_modelo()} value="" onchange={() => {}} class="chipsel"
+      values={filtros.modelo ?? []} onchangeMulti={(v) => setFiltro('modelo', v)}
+      rotuloMulti={rotuloFiltro('modelo', m.uso_todos(), (k) => k)}
+      opcoes={[{ value: '', label: m.uso_todos() },
+               ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: moeda(b.cost) }))]} /></span>
+    <span class="fsel" class:ativo={!!filtros.plugin?.length}><Select ariaLabel={m.uso_plugin()} value="" onchange={() => {}} class="chipsel"
+      values={filtros.plugin ?? []} onchangeMulti={(v) => setFiltro('plugin', v)}
+      rotuloMulti={rotuloFiltro('plugin', m.uso_todos(), (k) => k)}
+      opcoes={[{ value: '', label: m.uso_todos() },
+               ...listas.plugin.map((b) => ({ value: b.key, label: b.key, hint: dec(b.chamadas, 0) }))]} /></span>
     <input class="busca" type="search" placeholder={m.uso_busca()} bind:value={busca} aria-label={m.uso_busca()} />
     {#if servidores.length > 1}
       <button class="chip" aria-expanded={mostrarServidores} onclick={() => (mostrarServidores = !mostrarServidores)}>
@@ -444,7 +474,8 @@
     <p class="muted vazio">{m.uso_vazio()}</p>
   {:else}
     <dl class="numeros">
-      <div><dt>{m.uso_kpi_custo()}</dt><dd>{moeda(report.totals.cost)}</dd></div>
+      <div><dt>{m.uso_kpi_custo_agentes()}</dt><dd>{moeda(custoAgentes)}</dd></div>
+      <div><dt>{m.uso_kpi_ctx_skills()}</dt><dd>≈ {tok(ctxSkills)}</dd></div>
       <div><dt>{m.uso_kpi_chamadas()}</dt><dd>{tok(report.totals.chamadas)}</dd></div>
       <div><dt>{m.uso_graf_ctx()}</dt><dd>≈ {tok(ctxPorSessaoTotal)}</dd></div>
       <div><dt>{m.uso_kpi_imagens()}</dt><dd>{dec(totalImagens, 0)}</dd></div>
@@ -455,11 +486,14 @@
       <div class="principal">
         <section class="bloco-graf hero">
           <div class="cab">
-            <div><h2>{m.uso_graf_bolhas()}</h2><p class="hint">{m.uso_graf_bolhas_nota()}</p></div>
-            <ul class="legenda inline">
-              <li><span class="swatch" style="background: var(--chart-1)"></span>{m.uso_leg_skills()}</li>
-              <li><span class="swatch" style="background: var(--chart-2)"></span>{m.uso_leg_agentes()}</li>
-            </ul>
+            <div>
+              <h2>{m.uso_graf_bolhas()}</h2>
+              <p class="hint">{modoBolhas === 'skills' ? m.uso_graf_bolhas_nota_skills() : m.uso_graf_bolhas_nota_agentes()}</p>
+            </div>
+            <span class="seg" role="group" aria-label={m.uso_graf_bolhas()}>
+              <button aria-pressed={modoBolhas === 'skills'} onclick={() => (modoBolhas = 'skills')}>{m.uso_modo_skills()}</button>
+              <button aria-pressed={modoBolhas === 'agentes'} onclick={() => (modoBolhas = 'agentes')}>{m.uso_modo_agentes()}</button>
+            </span>
           </div>
           <div class="svgbox" bind:clientWidth={larguraBolhas}>
             {#if bolhas}
@@ -469,17 +503,16 @@
                 <line x1={bolhas.mx} x2={bolhas.mx} y1={bolhas.padT} y2={bolhas.padT + bolhas.plotH} class="mediana" />
                 <line x1={bolhas.padL} x2={bolhas.padL + bolhas.plotW} y1={bolhas.my} y2={bolhas.my} class="mediana" />
                 <!-- rótulos de cima ficam ACIMA da área das bolhas, pra não brigar com o nome de um item no canto -->
-                <text x={bolhas.padL + 6} y={12} class="quad">{m.uso_quad_raras_caras()}</text>
-                <text x={bolhas.padL + bolhas.plotW - 6} y={12} text-anchor="end" class="quad">{m.uso_quad_freq_caras()}</text>
-                <text x={bolhas.padL + 6} y={bolhas.padT + bolhas.plotH - 6} class="quad">{m.uso_quad_raras_baratas()}</text>
-                <text x={bolhas.padL + bolhas.plotW - 6} y={bolhas.padT + bolhas.plotH - 6} text-anchor="end" class="quad">{m.uso_quad_freq_baratas()}</text>
-                {#each bolhas.xt as t (t.v)}
+                <text x={bolhas.padL + 6} y={12} class="quad">{m.uso_quad_raras_pesadas()}</text>
+                <text x={bolhas.padL + bolhas.plotW - 6} y={12} text-anchor="end" class="quad">{m.uso_quad_freq_pesadas()}</text>
+                <text x={bolhas.padL + 6} y={bolhas.padT + bolhas.plotH - 6} class="quad">{m.uso_quad_raras_leves()}</text>
+                <text x={bolhas.padL + bolhas.plotW - 6} y={bolhas.padT + bolhas.plotH - 6} text-anchor="end" class="quad">{m.uso_quad_freq_leves()}</text>                {#each bolhas.xt as t (t.v)}
                   {#if t.x < bolhas.padL + bolhas.plotW - 90}
                     <text x={t.x} y={bolhas.H - 8} text-anchor="middle" class="tick">{dec(t.v, 0)}</text>
                   {/if}
                 {/each}
                 {#each bolhas.yt as t (t.v)}
-                  <text x={bolhas.padL - 6} y={t.y + 3} text-anchor="end" class="tick">{money(t.v, currency, rate)}</text>
+                  <text x={bolhas.padL - 6} y={t.y + 3} text-anchor="end" class="tick">{modoBolhas === 'skills' ? tok(t.v) : money(t.v / bolhas.fatorY, currency, rate)}</text>
                 {/each}
                 <text x={bolhas.padL + bolhas.plotW} y={bolhas.H - 8} text-anchor="end" class="eixo-nome">{m.uso_eixo_chamadas()}</text>
                 {#each bolhas.pontos as p (p.b.key)}
@@ -498,7 +531,7 @@
               {#if bolhaHover}
                 <div class="tip" style="left: {Math.min(Math.max(bolhaHover.x, 90), bolhas.W - 90)}px; top: {Math.max(bolhaHover.y - bolhaHover.r - 54, 0)}px">
                   <b>{bolhaHover.b.label ?? bolhaHover.b.key}</b>
-                  <span>{dec(bolhaHover.b.chamadas, 0)} {m.uso_graf_chamadas()} · {m2(bolhaHover.b.cost)} · {m2(porChamada(bolhaHover.b))}/{m.uso_graf_chamadas().slice(0, 7)}</span>
+                  <span>{dec(bolhaHover.b.chamadas, 0)} {m.uso_graf_chamadas()} · {fmtMedida(medidaBolha(bolhaHover.b))} · {fmtMedida(medidaPorChamada(bolhaHover.b))} {m.uso_por_chamada()}</span>
                 </div>
               {/if}
             {:else}
@@ -607,8 +640,12 @@
                         </td>
                       {:else}
                         <td class="n"><span class="ibar"><i style="width: {(b.ctx_tokens_est / maxCtx) * 100}%"></i></span>≈ {tok(b.ctx_tokens_est)}</td>
-                        <td class="n">≈ {tok(aba === 'contexto' ? porSessao(b) : ctxPorChamada(b))}</td>
+                        <td class="n">
+                          {#if aba !== 'contexto' && foraDaCurvaCtx(b)}<span class="marca" title={m.uso_pesada_por_chamada({ x: dec(ctxPorChamada(b) / medianaCtxChamada, 0) })}>●</span>{/if}
+                          ≈ {tok(aba === 'contexto' ? porSessao(b) : ctxPorChamada(b))}
+                        </td>
                       {/if}
+                      {#if abaAtual.turno}<td class="n dim" title={m.uso_custo_turno_nota()}>{b.cost > 0 ? m2(b.cost) : '—'}</td>{/if}
                       <td class="n">{dec(b.sessions, 0)}</td>
                     </tr>
                   {/each}
@@ -653,6 +690,10 @@
       {#if abaAtual.custo}
         <div><dt>{m.uso_col_custo()}</dt><dd>{m2(b.cost)}</dd></div>
         <div><dt>{m.uso_detalhe_custo_chamada()}</dt><dd>{m2(porChamada(b))}</dd></div>
+        <div><dt>{m.uso_detalhe_tokens()}</dt><dd>{tok(tokensReais(b))}</dd></div>
+      {/if}
+      {#if abaAtual.turno}
+        <div title={m.uso_custo_turno_nota()}><dt>{m.uso_col_custo_turno()}</dt><dd>{m2(b.cost)}</dd></div>
         <div><dt>{m.uso_detalhe_tokens()}</dt><dd>{tok(tokensReais(b))}</dd></div>
       {/if}
       <div><dt>{m.uso_col_ctx()}</dt><dd>≈ {tok(b.ctx_tokens_est)}</dd></div>
@@ -735,12 +776,14 @@
   .principal { min-width: 0; }
   .lateral { position: sticky; top: 0; }
 
-  .bloco-graf { min-width: 0; margin-bottom: var(--space-5); }
+  /* Sobre papel de parede, gráfico e tabela precisam de material próprio pra ler: --surface-card
+     acompanha o slider de solidez do app (nunca --bg-* cru). */
+  .bloco-graf, .ranking { min-width: 0; margin-bottom: var(--space-5); background: var(--surface-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-4); }
   .cab { display: flex; justify-content: space-between; align-items: start; gap: var(--space-3); margin-bottom: var(--space-2); }
   .cab h2 { font-size: var(--text-base); font-weight: 650; }
   .cab .hint { font-size: var(--text-xs); color: var(--text-secondary); max-width: 80ch; margin-top: 2px; }
   .cab .total { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-  .hero .svgbox { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-inset); }
+  .hero .svgbox { border-radius: var(--radius-sm); background: var(--surface-inset); }
   .linha-graf { display: grid; grid-template-columns: 3fr 2fr; gap: var(--space-5); }
   .svgbox { position: relative; }
   .svgbox svg { display: block; max-width: 100%; height: auto; }
@@ -770,7 +813,6 @@
   .legenda .lab { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .legenda b { font-variant-numeric: tabular-nums; }
 
-  .ranking { min-width: 0; }
   .abas { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border-subtle); margin-bottom: var(--space-2); scrollbar-width: none; }
   .abas button { background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-sm); padding: 8px 12px; cursor: pointer; white-space: nowrap; margin-bottom: -1px; }
   .abas button[aria-selected='true'] { color: var(--text-primary); border-bottom-color: var(--accent); }

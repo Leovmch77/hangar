@@ -48,9 +48,10 @@ def test_conta_vai_pro_relatorio_e_vazio_e_todas(client, h, monkeypatch):
         return UsoReport(applied={"period": period}, conta=conta)
 
     monkeypatch.setattr("app.uso_report.report", falso)
-    assert client.get("/api/uso?conta=anthropic:x", headers=h).json()["conta"] == "anthropic:x"
-    assert client.get("/api/uso?conta=", headers=h).json()["conta"] is None
-    assert visto["c"] is None
+    # Repetível: `?conta=a&conta=b` chega como lista; vazio = todas (lista vazia).
+    assert client.get("/api/uso?conta=anthropic:x&conta=anthropic:y", headers=h).json()["conta"] == ["anthropic:x", "anthropic:y"]
+    assert client.get("/api/uso?conta=", headers=h).json()["conta"] == []
+    assert visto["c"] == []
 
 
 def test_aquecendo_responde_202(client, h, monkeypatch):

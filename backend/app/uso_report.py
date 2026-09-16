@@ -119,10 +119,21 @@ def _por_dia(uso: list[UsoLinha], agentes: dict[str, dict]) -> list[UsoBucket]:
     return sorted((_bucket(k, v) for k, v in agg.items()), key=lambda b: b.key)
 
 
+Filtro = str | list[str] | None
+
+
+def _lista(v: Filtro) -> list[str]:
+    """Um filtro aceita um valor ou vários; vazio = todos."""
+    if not v:
+        return []
+    return [v] if isinstance(v, str) else [x for x in v if x]
+
+
 def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
-           now: datetime | None = None, conta: str | None = None,
-           projeto: str | None = None, modelo: str | None = None,
-           plugin: str | None = None, foco: str | None = None) -> UsoReport:
+           now: datetime | None = None, conta: Filtro = None,
+           projeto: Filtro = None, modelo: Filtro = None,
+           plugin: Filtro = None, foco: str | None = None) -> UsoReport:
+    contas, projetos, modelos, plugins_f = _lista(conta), _lista(projeto), _lista(modelo), _lista(plugin)
     now = now or datetime.now(LOCAL)
     dias = costs.PERIODOS.get(period)
     if dias:
@@ -133,20 +144,20 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
     por_conta = _por_dimensao(uso, agentes, lambda l: l.conta, rotulo_de_provedor)
     por_projeto = _por_dimensao(uso, agentes, lambda l: l.cwd or PROJETO_DESCONHECIDO)
     por_modelo = _por_dimensao(uso, agentes, lambda l: pricing.canonizar(l.model) or "?")
-    if conta:
-        uso = [l for l in uso if l.conta == conta]
-    if projeto:
-        uso = [l for l in uso if (l.cwd or PROJETO_DESCONHECIDO) == projeto]
-    if modelo:
-        uso = [l for l in uso if (pricing.canonizar(l.model) or "?") == modelo]
-    if plugin:
-        uso = [l for l in uso if l.plugin == plugin]
+    if contas:
+        uso = [l for l in uso if l.conta in contas]
+    if projetos:
+        uso = [l for l in uso if (l.cwd or PROJETO_DESCONHECIDO) in projetos]
+    if modelos:
+        uso = [l for l in uso if (pricing.canonizar(l.model) or "?") in modelos]
+    if plugins_f:
+        uso = [l for l in uso if l.plugin in plugins_f]
     # O custo do agente vem do transcript filho, que tem conta e projeto próprios: o filtro
     # vale pra ele também (o filho de outra conta não entra na soma desta).
-    if conta or projeto:
+    if contas or projetos:
         tokens = [r for r in tokens
-                  if (not conta or r.account_id == conta)
-                  and (not projeto or (r.project or PROJETO_DESCONHECIDO) == projeto)]
+                  if (not contas or r.account_id in contas)
+                  and (not projetos or (r.project or PROJETO_DESCONHECIDO) in projetos)]
         agentes = _custo_dos_agentes(tokens)
 
     por_tipo: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(_zero))
@@ -205,8 +216,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         by_modelo=por_modelo,
         by_day=_por_dia(serie, agentes),
         applied=Applied(period=period),
-        conta=conta or None, projeto=projeto or None, modelo=modelo or None,
-        plugin=plugin or None, foco=foco or None,
+        conta=contas, projeto=projetos, modelo=modelos, plugin=plugins_f, foco=foco or None,
         usd_brl=costs.usd_brl(),
     )
 
