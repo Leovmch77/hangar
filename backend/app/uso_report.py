@@ -19,8 +19,8 @@ _MARCA_SUBAGENTE = "/subagents/agent-"
 
 
 def _zero() -> dict:
-    return {"sessions": set(), "chamadas": 0, "ctx_chars": 0, "input": 0, "output": 0,
-            "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": ""}
+    return {"sessions": set(), "chamadas": 0, "pedidas": 0, "ctx_chars": 0, "input": 0,
+            "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": ""}
 
 
 def _custo_skill(l: UsoLinha) -> float:
@@ -55,7 +55,7 @@ def _custo_dos_agentes(tokens: list[UsageRow]) -> dict[str, dict]:
 
 def _bucket(key: str, v: dict) -> UsoBucket:
     return UsoBucket(key=key, plugin=v["plugin"], sessions=len(v["sessions"]),
-                     chamadas=v["chamadas"], ctx_chars=v["ctx_chars"],
+                     chamadas=v["chamadas"], pedidas=v["pedidas"], ctx_chars=v["ctx_chars"],
                      ctx_tokens_est=v["ctx_chars"] // _CHARS_POR_TOKEN,
                      input=v["input"], output=v["output"], cache_write=v["cache_write"],
                      cache_read=v["cache_read"], cost=v["cost"])
@@ -109,6 +109,8 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         b["sessions"].add(l.session_id)
         b["chamadas"] += l.chamadas
         b["ctx_chars"] += l.ctx_chars
+        if l.origem in ("voce", "pedido"):
+            b["pedidas"] += l.chamadas
         if l.tipo == "skill":
             b["input"] += l.input
             b["output"] += l.output

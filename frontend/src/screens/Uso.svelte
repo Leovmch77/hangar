@@ -135,10 +135,12 @@
   // Só a tabela de contexto tem "≈ tok / sessão"; só skills, agentes e plugins têm custo/tokens
   // reais; agente não injeta contexto (o custo dele é o transcript filho).
   type Sec = { id: string; titulo: string; nota?: string; colNome: string; lista: UsoBucket[];
-    custo: boolean; media: boolean; plugin: boolean; ctx: boolean };
+    custo: boolean; media: boolean; plugin: boolean; ctx: boolean; origem?: string };
   const secoes = $derived<Sec[]>([
-    { id: 'skill', titulo: m.uso_sec_skills(), nota: m.uso_sec_skills_nota(), colNome: m.uso_col_nome(), lista: report.by_skill, custo: true, media: false, plugin: true, ctx: true },
-    { id: 'agente', titulo: m.uso_sec_agentes(), nota: m.uso_sec_agentes_nota(), colNome: m.uso_col_tipo(), lista: report.by_agente, custo: true, media: false, plugin: false, ctx: false },
+    // `origem`: título da coluna "quem pediu". Skill é exata (barra × ferramenta); agente é
+    // heurística pelo prompt do turno — o "≈" no cabeçalho vem da chave i18n.
+    { id: 'skill', titulo: m.uso_sec_skills(), nota: m.uso_sec_skills_nota(), colNome: m.uso_col_nome(), lista: report.by_skill, custo: true, media: false, plugin: true, ctx: true, origem: m.uso_col_origem_skill() },
+    { id: 'agente', titulo: m.uso_sec_agentes(), nota: m.uso_sec_agentes_nota(), colNome: m.uso_col_tipo(), lista: report.by_agente, custo: true, media: false, plugin: false, ctx: false, origem: m.uso_col_origem_agente() },
     { id: 'plugin', titulo: m.uso_sec_plugins(), nota: m.uso_sec_plugins_nota(), colNome: m.uso_col_plugin(), lista: report.by_plugin, custo: true, media: false, plugin: false, ctx: true },
     { id: 'contexto', titulo: m.uso_sec_contexto(), nota: m.uso_sec_contexto_nota(), colNome: m.uso_col_nome(), lista: report.by_contexto, custo: false, media: true, plugin: true, ctx: true },
     { id: 'tool', titulo: m.uso_sec_tools(), colNome: m.uso_col_nome(), lista: report.by_tool, custo: false, media: false, plugin: false, ctx: true },
@@ -252,6 +254,7 @@
                   <th>{sec.colNome}</th>
                   {#if sec.plugin}<th>{m.uso_col_plugin()}</th>{/if}
                   <th class="n">{m.uso_col_chamadas()}</th>
+                  {#if sec.origem}<th class="n">{sec.origem}</th>{/if}
                   <th class="n">{m.uso_col_sessoes()}</th>
                   {#if sec.ctx}<th class="n">{m.uso_col_ctx()}</th>{/if}
                   {#if sec.media}<th class="n">{m.uso_col_media()}</th>{/if}
@@ -264,6 +267,7 @@
                     <td class="nome" title={b.key}>{b.label ?? b.key}</td>
                     {#if sec.plugin}<td class="dim">{b.plugin || '—'}</td>{/if}
                     <td class="n">{dec(b.chamadas, 0)}</td>
+                    {#if sec.origem}<td class="n">{dec(b.pedidas, 0)} <span class="dim">/ {dec(b.chamadas - b.pedidas, 0)}</span></td>{/if}
                     <td class="n">{dec(b.sessions, 0)}</td>
                     {#if sec.ctx}<td class="n">≈ {tok(b.ctx_tokens_est)}</td>{/if}
                     {#if sec.media}<td class="n">≈ {tok(media(b))}</td>{/if}

@@ -10,6 +10,8 @@ export interface UsoBucket {
   plugin?: string;
   sessions: number;
   chamadas: number;
+  // Das chamadas, quantas o usuário pediu (skill por barra: exato; agente: heurística do prompt).
+  pedidas: number;
   ctx_chars: number;
   // Estimativa (chars/4) do que entrou no contexto. Nunca vira dólar; a tela rotula "≈".
   ctx_tokens_est: number;
@@ -54,7 +56,7 @@ export interface MergedUso {
 }
 
 export const zeroUso = (key: string): UsoBucket => ({
-  key, label: null, plugin: '', sessions: 0, chamadas: 0, ctx_chars: 0, ctx_tokens_est: 0,
+  key, label: null, plugin: '', sessions: 0, chamadas: 0, pedidas: 0, ctx_chars: 0, ctx_tokens_est: 0,
   input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0,
 });
 
@@ -62,6 +64,7 @@ export const zeroUso = (key: string): UsoBucket => ({
 function somar(alvo: UsoBucket, b: Partial<UsoBucket>): void {
   alvo.sessions += b.sessions ?? 0;
   alvo.chamadas += b.chamadas ?? 0;
+  alvo.pedidas += b.pedidas ?? 0;
   alvo.ctx_chars += b.ctx_chars ?? 0;
   alvo.ctx_tokens_est += b.ctx_tokens_est ?? 0;
   alvo.input += b.input ?? 0;

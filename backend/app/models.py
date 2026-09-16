@@ -440,6 +440,9 @@ class UsoBucket(BaseModel):
     plugin: str = ""
     sessions: int = 0
     chamadas: int = 0
+    # Das chamadas, quantas o USUÁRIO pediu: skill por barra (exato) ou agente com o prompt do
+    # turno falando em agente (heurística). O resto foi o modelo sozinho.
+    pedidas: int = 0
     ctx_chars: int = 0
     ctx_tokens_est: int = 0
     input: int = 0

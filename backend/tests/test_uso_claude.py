@@ -122,6 +122,9 @@ def test_skill_conta_pelo_tool_e_pela_barra_e_o_custo_vai_ate_a_troca_de_prompt(
     c = skills["ecc:cost-report"]
     assert c.chamadas == 1 and c.plugin == "ecc" and c.ctx_chars == 300
     assert (c.input, c.output) == (50, 5)
+    # Origem exata: a ferramenta Skill é o modelo; a barra é o usuário.
+    assert (k.chamadas, k.pedidas) == (1, 0)
+    assert (c.chamadas, c.pedidas) == (1, 1)
     plugins = {b.key: b for b in r.by_plugin}
     assert plugins["acme"].chamadas == 1 and plugins["ecc"].chamadas == 1
     assert (plugins["acme"].input, plugins["acme"].cost) == (200, pytest.approx(k.cost))
@@ -153,6 +156,24 @@ def test_agente_liga_ao_transcript_filho_pelo_agentId(tmp_path, monkeypatch):
     assert (ag["Explore"].input, ag["Explore"].output) == (1000, 100)
     assert ag["Explore"].cost == pytest.approx(1000 / 1e6 + 100 / 1e6 * 10)
     assert ag["general-purpose"].chamadas == 1 and ag["general-purpose"].cost == 0
+
+
+def test_agente_pedido_ou_sozinho_pela_heuristica_do_prompt(tmp_path):
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("dispara um subagente pra mapear isso", "p1"),
+        _assistant([_tool_use("Agent", {"subagent_type": "Explore", "prompt": "x"}, "t1")], "m1"),
+        _user([_tool_result("t1", "ok")], "p1", toolUseResult={"agentId": "a1"}),
+        _user("conserta o bug do login", "p2"),
+        _assistant([_tool_use("Agent", {"subagent_type": "Explore", "prompt": "y"}, "t2")], "m2"),
+        _user([_tool_result("t2", "ok")], "p2", toolUseResult={"agentId": "a2"}),
+        # Prompt em blocos (imagem + texto) também conta; o texto expandido (isMeta) não.
+        _user([{"type": "text", "text": "roda os agents em paralelo"}], "p3"),
+        _user([{"type": "text", "text": "sem agente nenhum aqui"}], "p3", isMeta=True),
+        _assistant([_tool_use("Agent", {"subagent_type": "Explore", "prompt": "z"}, "t3")], "m3"),
+    ])
+    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all")
+    ag = {b.key: b for b in r.by_agente}
+    assert (ag["Explore"].chamadas, ag["Explore"].pedidas) == (3, 2)
 
 
 def test_contexto_mede_rendered_ou_content_e_ignora_stdout_de_hook(tmp_path):

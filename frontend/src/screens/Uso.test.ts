@@ -14,7 +14,8 @@ vi.mock('../lib/queries', () => ({
 
 const report = (period: string): Partial<UsoReport> => ({
   totals: { ...zeroUso('totals'), sessions: 3, chamadas: 120, ctx_chars: 4000, ctx_tokens_est: 1000, cost: 2.5 },
-  by_skill: [{ ...zeroUso('orquestrar'), sessions: 2, chamadas: 5, ctx_chars: 400, ctx_tokens_est: 100, input: 10, output: 5, cost: 2 }],
+  by_skill: [{ ...zeroUso('orquestrar'), sessions: 2, chamadas: 5, pedidas: 2, ctx_chars: 400, ctx_tokens_est: 100, input: 10, output: 5, cost: 2 }],
+  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, cost: 1 }],
   by_tool: Array.from({ length: 17 }, (_, i) => ({ ...zeroUso(`Tool${i}`), sessions: 1, chamadas: 17 - i })),
   by_contexto: [{ ...zeroUso('instructions'), sessions: 2, chamadas: 2, ctx_chars: 8000, ctx_tokens_est: 2000 }],
   applied: { period },
@@ -36,6 +37,11 @@ it('mostra as seções, corta a tabela longa em 15 e preserva o período', async
     await settle();
     expect(target.querySelector('.overview')?.textContent).toContain('120');
     expect(target.textContent).toContain('orquestrar');
+    // Quem pediu: skill 2 por barra / 3 pelo modelo; agente 3 pedidos / 4 sozinho.
+    const linha = (nome: string) => [...target.querySelectorAll('tr')].find((tr) => tr.textContent?.includes(nome))!;
+    expect(linha('orquestrar').textContent?.replace(/\s+/g, ' ')).toContain('2 / 3');
+    expect(linha('Explore').textContent?.replace(/\s+/g, ' ')).toContain('3 / 4');
+    expect(target.textContent).toContain(m.uso_col_origem_agente());
     // 17 tools: 15 visíveis + botão de mostrar mais 2.
     expect(target.textContent).toContain(m.uso_mostrar_mais({ n: 2 }));
     expect(target.textContent).not.toContain('Tool16');

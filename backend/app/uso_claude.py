@@ -17,7 +17,7 @@ O que é medido de verdade e o que é estimado:
 """
 from __future__ import annotations
 
-import json
+import re
 from dataclasses import asdict, dataclass, replace
 
 # Um tool_use `Bash` vira `bash:<comando>`; estes prefixos não são o comando.
@@ -34,6 +34,9 @@ class UsoLinha:
     nome: str
     plugin: str = ""    # prefixo de skill/hook (ecc, superpowers…) quando há
     detalhe: str = ""   # mcp: tool completo; agente: agentId (liga ao transcript filho)
+    # Quem pediu. skill: "voce" (/skill digitado) ou "modelo" (ferramenta Skill) — exato.
+    # agente: "pedido" ou "sozinho" — HEURÍSTICA pelo prompt do turno (ver `_pede_agente`).
+    origem: str = ""
     chamadas: int = 0
     ctx_chars: int = 0
     input: int = 0
@@ -117,6 +120,17 @@ def _segmentos(cmd: str) -> list[str]:
     return [s for s in out if s.strip()]
 
 
+# Palavras no prompt do usuário que indicam que ELE pediu subagente. É heurística: quem pede
+# de forma indireta ("pesquisa isso em paralelo") pode cair em "sozinho".
+_PEDE_AGENTE = re.compile(
+    r"\b(sub-?agentes?|agentes?|agents?|explore|paralelo|parallel|dispara|delega|"
+    r"workflow|fan-?out|subagent-driven)\b", re.IGNORECASE)
+
+
+def _pede_agente(prompt: str) -> bool:
+    return bool(_PEDE_AGENTE.search(prompt))
+
+
 def plugin_de(nome: str) -> str:
     return nome.split(":", 1)[0] if ":" in nome else ""
 
@@ -143,16 +157,18 @@ class Acumulador:
         self._respostas_vistas: set = set()
         self._skill: tuple | None = None                    # chave da linha da skill em curso
         self._prompt_id = None
+        self._pediu_agente = False                          # o prompt em curso fala em agente?
         self._dia = ""
         self._cwd = ""
         self._model = ""
 
     def _somar(self, tipo: str, nome: str, *, plugin: str = "", detalhe: str = "",
-               chamadas: int = 0, ctx_chars: int = 0, usage: dict | None = None) -> tuple:
-        chave = (self._dia, self._cwd, self._model, tipo, nome, plugin, detalhe)
+               origem: str = "", chamadas: int = 0, ctx_chars: int = 0,
+               usage: dict | None = None) -> tuple:
+        chave = (self._dia, self._cwd, self._model, tipo, nome, plugin, detalhe, origem)
         antes = self._linhas.get(chave) or UsoLinha(
             dia=self._dia, cwd=self._cwd, model=self._model, tipo=tipo, nome=nome,
-            plugin=plugin, detalhe=detalhe)
+            plugin=plugin, detalhe=detalhe, origem=origem)
         u = usage or {}
         criacao = u.get("cache_creation")
         cache_1h = _int(criacao.get("ephemeral_1h_input_tokens")) if isinstance(criacao, dict) else 0
@@ -190,7 +206,7 @@ class Acumulador:
         # Blocos da mesma resposta repetem o usage: só a primeira linha soma na skill.
         ident = (d.get("requestId"), msg.get("id")) if msg.get("id") else None
         if usage and self._skill is not None and ident not in self._respostas_vistas:
-            self._somar(*self._skill[3:5], plugin=self._skill[5], usage=usage)
+            self._somar(*self._skill[3:5], plugin=self._skill[5], origem=self._skill[7],usage=usage)
         if ident:
             self._respostas_vistas.add(ident)
         for b in msg.get("content") or []:
@@ -204,10 +220,12 @@ class Acumulador:
                 self._tools[b["id"]] = (nome, entrada)
             if nome == "Skill" and isinstance(entrada.get("skill"), str):
                 skill = entrada["skill"]
-                self._skill = self._somar("skill", skill, plugin=plugin_de(skill), chamadas=1)
+                self._skill = self._somar("skill", skill, plugin=plugin_de(skill),
+                                          origem="modelo", chamadas=1)
             elif nome == "Agent":
                 tipo_ag = entrada.get("subagent_type") or "general-purpose"
-                self._somar("agente", str(tipo_ag), chamadas=1)
+                self._somar("agente", str(tipo_ag), chamadas=1,
+                            origem="pedido" if self._pediu_agente else "sozinho")
             elif nome == "Bash" and isinstance(entrada.get("command"), str):
                 self._somar("bash", comando_bash(entrada["command"]), chamadas=1)
             elif nome.startswith("mcp__"):
@@ -224,10 +242,17 @@ class Acumulador:
             self._prompt_id = prompt_id
             self._skill = None
         if isinstance(conteudo, str):
+            self._pediu_agente = _pede_agente(conteudo)
             self._comando(conteudo)
             return
         if not isinstance(conteudo, list):
             return
+        if not d.get("isMeta"):
+            texto = " ".join(b["text"] for b in conteudo
+                             if isinstance(b, dict) and b.get("type") == "text"
+                             and isinstance(b.get("text"), str))
+            if texto:
+                self._pediu_agente = _pede_agente(texto)
         for b in conteudo:
             if not isinstance(b, dict):
                 continue
@@ -242,7 +267,8 @@ class Acumulador:
                     self._somar("mcp", partes[1] if len(partes) > 1 else nome, detalhe=nome,
                                 ctx_chars=chars)
                 elif nome == "Skill" and self._skill is not None:
-                    self._somar(*self._skill[3:5], plugin=self._skill[5], ctx_chars=chars)
+                    self._somar(*self._skill[3:5], plugin=self._skill[5], origem=self._skill[7],
+                                ctx_chars=chars)
                 elif nome == "Agent":
                     r = d.get("toolUseResult")
                     agent_id = r.get("agentId") if isinstance(r, dict) else None
@@ -254,7 +280,8 @@ class Acumulador:
                     self._comando(b["text"])
                 elif d.get("isMeta") and self._skill is not None:
                     # Texto expandido de uma skill chamada por barra: é o que entrou no contexto.
-                    self._somar(*self._skill[3:5], plugin=self._skill[5], ctx_chars=len(b["text"]))
+                    self._somar(*self._skill[3:5], plugin=self._skill[5], origem=self._skill[7],
+                                ctx_chars=len(b["text"]))
 
     def _comando(self, texto: str) -> None:
         ini = texto.find("<command-name>")
@@ -265,7 +292,7 @@ class Acumulador:
         if not nome:
             return
         nome = nome.lstrip("/")
-        self._skill = self._somar("skill", nome, plugin=plugin_de(nome), chamadas=1)
+        self._skill = self._somar("skill", nome, plugin=plugin_de(nome), origem="voce", chamadas=1)
 
     def _attachment(self, d: dict) -> None:
         a = d.get("attachment")
