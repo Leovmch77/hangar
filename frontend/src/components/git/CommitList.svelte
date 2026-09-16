@@ -83,14 +83,10 @@
 </div>
 
 <style>
-  /* Sem max-height proprio: quem limita altura e o painel do empilhado que hospeda a lista. Com o
-     teto de 52vh/68vh que havia aqui, eram dois `overflow: auto` aninhados pro mesmo conteudo e a
-     lista nunca usava o espaco que o painel dava. */
-  .git-scroll {
-    overflow-y: auto; min-height: 0;
-    overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
-    display: flex; flex-direction: column; gap: var(--space-1);
-  }
+  /* Sem overflow nem max-height próprios: quem rola é o hospedeiro (.grafo na coluna, .ht-pane na
+     aba). Um `overflow: auto` aqui, mesmo sem nada pra rolar, ainda é scroller no Chromium — e com
+     `overscroll-behavior: contain` ele engolia a roda do mouse em vez de encadear pro pai. */
+  .git-scroll { display: flex; flex-direction: column; gap: var(--space-1); }
   .git-muted { margin: 0; font-size: var(--text-sm); color: var(--text-muted); }
 
   /* ── log: uma linha por commit (sem wrap; assunto com ellipsis) ── */
