@@ -21,9 +21,15 @@ _MARCA_SUBAGENTE = "/subagents/agent-"
 _TIPOS_CONTADOS = ("tool", "skill", "agente", "contexto", "imagem")
 
 
+# Texto de skill: medido contra o cache write real das respostas (regressão em 196 cargas,
+# correlação 0,996). chars/4 subestimava 60%. Os demais contextos seguem chars/4 (não medidos).
+_CHARS_POR_TOKEN_SKILL = 2.5
+
+
 def _zero() -> dict:
     return {"sessions": set(), "chamadas": 0, "pedidas": 0, "ctx_chars": 0, "tokens_est": 0,
-            "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": ""}
+            "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": "",
+            "ocupados": 0, "respostas": 0, "regua": _CHARS_POR_TOKEN}
 
 
 def _custo_real(l: UsoLinha) -> float:
@@ -68,14 +74,16 @@ def _custo_linha(l: UsoLinha, agentes: dict[str, dict]) -> float:
 def _bucket(key: str, v: dict) -> UsoBucket:
     return UsoBucket(key=key, plugin=v["plugin"], sessions=len(v["sessions"]),
                      chamadas=v["chamadas"], pedidas=v["pedidas"], ctx_chars=v["ctx_chars"],
-                     ctx_tokens_est=v["ctx_chars"] // _CHARS_POR_TOKEN + v["tokens_est"],
+                     ctx_tokens_est=int(v["ctx_chars"] / v["regua"]) + v["tokens_est"],
                      input=v["input"], output=v["output"], cache_write=v["cache_write"],
-                     cache_read=v["cache_read"], cost=v["cost"])
+                     cache_read=v["cache_read"], cost=v["cost"],
+                     ocupados_tokens_est=int(v["ocupados"] / _CHARS_POR_TOKEN_SKILL),
+                     respostas=v["respostas"])
 
 
 def _ordenar(agg: dict[str, dict]) -> list[UsoBucket]:
     return sorted((_bucket(k, v) for k, v in agg.items()),
-                  key=lambda b: (-b.cost, -b.ctx_chars, -b.chamadas, b.key))
+                  key=lambda b: (-b.ocupados_tokens_est, -b.cost, -b.ctx_chars, -b.chamadas, b.key))
 
 
 def _conta_no_total(l: UsoLinha) -> bool:
@@ -86,15 +94,30 @@ def _conta_no_total(l: UsoLinha) -> bool:
     return l.tipo in _TIPOS_CONTADOS
 
 
-def _somar_em(b: dict, l: UsoLinha, agentes: dict[str, dict]) -> None:
+_CAMPOS_TOKENS = ("input", "output", "cache_write", "cache_read")
+
+
+def _somar_em(b: dict, l: UsoLinha, agentes: dict[str, dict], do_item: bool = False) -> None:
+    """Tokens reais do conjunto vêm das linhas de ÁREA, que somadas dão todo o uso do Claude
+    sem repetição; `do_item` (série de uma skill/agente) soma os tokens do próprio item."""
     b["sessions"].add(l.session_id)
     if l.tipo == "area":
+        if not do_item:
+            for k in _CAMPOS_TOKENS:
+                b[k] += getattr(l, k)
         return
     if _conta_no_total(l):
         b["chamadas"] += l.chamadas
         b["ctx_chars"] += l.ctx_chars
         b["tokens_est"] += l.tokens_est
     b["cost"] += _custo_linha(l, agentes)
+    if do_item:
+        b["ocupados"] += l.ocupados
+        b["respostas"] += l.respostas
+        fonte =(agentes.get(l.detalhe) if l.tipo == "agente" and l.detalhe
+                 else {k: getattr(l, k) for k in _CAMPOS_TOKENS} if l.tipo == "skill" else None)
+        for k in _CAMPOS_TOKENS if fonte else ():
+            b[k] += fonte[k]
 
 
 def _por_dimensao(uso: list[UsoLinha], agentes: dict[str, dict], chave,
@@ -110,14 +133,18 @@ def _por_dimensao(uso: list[UsoLinha], agentes: dict[str, dict], chave,
         if rotulo:
             b.label = rotulo(k)
         out.append(b)
-    return sorted(out, key=lambda b: (-b.cost, -b.chamadas, b.key))
+    return sorted(out, key=lambda b: (-_tokens(b), -b.chamadas, b.key))
 
 
-def _por_dia(uso: list[UsoLinha], agentes: dict[str, dict]) -> list[UsoBucket]:
+def _tokens(b: UsoBucket) -> int:
+    return b.input + b.output + b.cache_write + b.cache_read
+
+
+def _por_dia(uso: list[UsoLinha], agentes: dict[str, dict], do_item: bool = False) -> list[UsoBucket]:
     agg: dict[str, dict] = defaultdict(_zero)
     for l in uso:
         if l.dia:
-            _somar_em(agg[l.dia], l, agentes)
+            _somar_em(agg[l.dia], l, agentes, do_item)
     return sorted((_bucket(k, v) for k, v in agg.items()), key=lambda b: b.key)
 
 
@@ -194,6 +221,10 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
         b["tokens_est"] += l.tokens_est
         if l.origem in ("voce", "pedido"):
             b["pedidas"] += l.chamadas
+        if l.tipo == "skill":
+            b["regua"] = _CHARS_POR_TOKEN_SKILL
+            b["ocupados"] += l.ocupados
+            b["respostas"] += l.respostas
         if l.tipo in ("skill", "area"):
             b["input"] += l.input
             b["output"] += l.output
@@ -211,6 +242,8 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
             p["sessions"].add(l.session_id)
             p["chamadas"] += l.chamadas
             p["ctx_chars"] += l.ctx_chars
+            p["ocupados"] += l.ocupados
+            p["respostas"] += l.respostas
             if l.tipo == "skill":
                 p["input"] += l.input
                 p["output"] += l.output
@@ -229,7 +262,7 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
                 _somar_area(por_dia[l.dia], l)
         by_day = sorted((_bucket(k, v) for k, v in por_dia.items()), key=lambda b: b.key)
     else:
-        by_day = _por_dia(serie, agentes)
+        by_day = _por_dia(serie, agentes, do_item=bool(foco))
 
     return UsoReport(
         totals=_bucket("totals", total),

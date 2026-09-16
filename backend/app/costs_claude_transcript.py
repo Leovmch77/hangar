@@ -35,7 +35,7 @@ from app.uso_claude import UsoLinha
 LOCAL = timezone(timedelta(hours=-3))
 
 # Suba isto ao mudar o formato do resumo, senão o cache velho é servido pra sempre.
-CACHE_VERSAO = 8
+CACHE_VERSAO = 9
 
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
@@ -112,7 +112,8 @@ def ler_completo(path: Path) -> Leitura:
         for numero, linha in enumerate(f):
             # Pré-filtro barato: a maior parte das linhas (progresso, fila, títulos) não tem
             # nem uso nem tool nem attachment; sem isto o json.loads roda em tudo.
-            if '"usage"' not in linha and '"user"' not in linha and '"attachment"' not in linha:
+            if ('"usage"' not in linha and '"user"' not in linha and '"attachment"' not in linha
+                    and '"compact_boundary"' not in linha):
                 continue
             try:
                 d = json.loads(linha)

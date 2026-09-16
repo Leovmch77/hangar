@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app import costs_cache as cc, costs_claude_transcript as ct, pricing, uso_areas, uso_report
-from app.uso_claude import comando_bash
+from app.uso_claude import comando_bash, skill_do_caminho
 
 T0 = "2026-09-10T12:00:00Z"
 
@@ -94,45 +94,103 @@ def test_comando_bash(cmd, esperado):
     assert comando_bash(cmd) == esperado
 
 
-def test_skill_conta_pelo_tool_e_pela_barra_e_o_custo_vai_ate_a_troca_de_prompt(tmp_path, monkeypatch):
-    monkeypatch.setattr(pricing, "rate_for", lambda m: pricing.Rate(
-        provider="anthropic", input=1.0, output=10.0, cache_read=0.1, cache_write=1.25, origin="teste",
-        cache_estimado=False))
+def _texto_user(texto, prompt_id, **extra):
+    return _user([{"type": "text", "text": texto}], prompt_id, **extra)
+
+
+def _resposta(mid):
+    return _assistant([{"type": "text", "text": "."}], mid)
+
+
+def test_skill_ocupa_o_contexto_ate_o_fim_ou_a_compactacao(tmp_path):
+    meta = "Base directory for this skill: /x\n" + "k" * 1000
     _escrever(tmp_path / "p" / "s1.jsonl", [
         _user("usa a skill", "p1"),
-        # Resposta ANTES da skill: não é dela.
-        _assistant([{"type": "text", "text": "vou"}], "m0", _usage(i=1000)),
-        _assistant([_tool_use("Skill", {"skill": "acme:kubectl"}, "t1")], "m1", _usage(i=100, o=10)),
-        # Bloco repetido da MESMA resposta: usage não soma de novo.
-        _assistant([{"type": "text", "text": "..."}], "m1", _usage(i=100, o=10)),
-        _user([_tool_result("t1", "# SKILL\n" + "k" * 992)], "p1"),
-        _assistant([{"type": "text", "text": "feito"}], "m2", _usage(i=200, o=20)),
-        # Prompt novo: a janela da skill fechou.
+        _resposta("m0"),                                              # antes da carga
+        _assistant([_tool_use("Skill", {"skill": "acme:kubectl"}, "t1")], "m1"),
+        _resposta("m1"),                                              # mesma resposta
+        _user([_tool_result("t1", "Launching skill: acme:kubectl")], "p1"),
+        _texto_user(meta, "p1", isMeta=True),
+        _resposta("m2"),
         _user("outra coisa", "p2"),
-        _assistant([{"type": "text", "text": "ok"}], "m3", _usage(i=5000)),
-        # Skill por barra: <command-name> + texto expandido (isMeta, mesmo promptId).
-        _user("<command-message>x</command-message>\n<command-name>/ecc:cost-report</command-name>", "p3"),
-        _user([{"type": "text", "text": "e" * 300}], "p3", isMeta=True),
-        _assistant([{"type": "text", "text": "relatório"}], "m4", _usage(i=50, o=5)),
+        _resposta("m3"),                                              # prompt novo: continua lá
+        # Comando embutido não expande texto: não é skill.
+        _user("<command-message>model</command-message>\n<command-name>/model</command-name>", "p3"),
+        _resposta("m4"),
+        _user("<command-message>x</command-message>\n<command-name>/ecc:cost-report</command-name>", "p4"),
+        _texto_user("e" * 300, "p4", isMeta=True),
+        _resposta("m5"),
+        {"type": "system", "subtype": "compact_boundary", "timestamp": T0, "cwd": "/repo"},
+        _resposta("m6"),                                              # compactou: saiu tudo
+        {"type": "attachment", "timestamp": T0, "cwd": "/repo",
+         "attachment": {"type": "invoked_skills", "skills": [{"name": "acme:kubectl", "content": "k" * 500}]}},
+        _resposta("m7"),
     ])
     r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all")
     skills = {b.key: b for b in r.by_skill}
-    k = skills["acme:kubectl"]
-    assert k.chamadas == 1 and k.plugin == "acme"
-    assert k.ctx_chars == 1000
-    # Só m2: m0 é antes, m1 é a resposta que DECIDE chamar (não é execução) e m3 é outro prompt.
-    assert (k.input, k.output) == (200, 20)
-    assert k.cost == pytest.approx(200 / 1e6 * 1.0 + 20 / 1e6 * 10.0)
-    c = skills["ecc:cost-report"]
-    assert c.chamadas == 1 and c.plugin == "ecc" and c.ctx_chars == 300
-    assert (c.input, c.output) == (50, 5)
-    # Origem exata: a ferramenta Skill é o modelo; a barra é o usuário.
-    assert (k.chamadas, k.pedidas) == (1, 0)
-    assert (c.chamadas, c.pedidas) == (1, 1)
-    plugins = {b.key: b for b in r.by_plugin}
-    assert plugins["acme"].chamadas == 1 and plugins["ecc"].chamadas == 1
-    assert (plugins["acme"].input, plugins["acme"].cost) == (200, pytest.approx(k.cost))
-    assert r.totals.cost == pytest.approx(k.cost + c.cost)
+    assert set(skills) == {"acme:kubectl", "ecc:cost-report"}
+    k, c = skills["acme:kubectl"], skills["ecc:cost-report"]
+    # m2..m5 com o texto inteiro; depois da compactação, só a reinjeção em m7.
+    assert (k.chamadas, k.pedidas, k.plugin) == (1, 0, "acme")
+    assert k.respostas == 5
+    assert k.ocupados_tokens_est == int((len(meta) * 4 + 500) / 2.5)
+    assert k.ctx_tokens_est == int((len(meta) + 500) / 2.5)
+    assert (c.chamadas, c.pedidas, c.respostas) == (1, 1, 1)
+    assert c.ocupados_tokens_est == int(300 / 2.5)
+    assert {b.key: b.ocupados_tokens_est for b in r.by_plugin}["acme"] == k.ocupados_tokens_est
+
+
+def test_skill_lida_como_arquivo_ou_colada_por_hook_conta_como_carga(tmp_path):
+    sp = "/h/.claude/plugins/cache/mkt/superpowers/6.3.0/skills/writing-plans/SKILL.md"
+    hook = ["<EXTREMELY_IMPORTANT>\nYou have superpowers.\n\n**Below is the full content of your "
+            "'superpowers:using-superpowers' skill**\n" + "u" * 800]
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("x", "p1"),
+        {"type": "attachment", "timestamp": T0, "cwd": "/repo",
+         "attachment": {"type": "hook_additional_context", "hookName": "SessionStart", "content": hook}},
+        {"type": "attachment", "timestamp": T0, "cwd": "/repo",
+         "attachment": {"type": "hook_success", "hookName": "SessionStart:startup",
+                        "content": "/last30days: Ready\nLast run: superpowers skill"}},
+        _assistant([_tool_use("Read", {"file_path": sp}, "t1")], "m1"),
+        _user([_tool_result("t1", "w" * 700)], "p1"),
+        # Referência de skill ainda não carregada: é alguém mexendo na skill, fica no Bash.
+        _assistant([_tool_use("Bash", {"command": "cat /h/p/skills/orquestrar/references/executor.md"}, "t2")], "m2"),
+        _user([_tool_result("t2", "r" * 400)], "p1"),
+        _assistant([_tool_use("Bash", {"command": "sed -n 1,200p /h/p/skills/orquestrar/SKILL.md"}, "t3")], "m3"),
+        _user([_tool_result("t3", "o" * 900)], "p1"),
+        _assistant([_tool_use("Read", {"file_path": "/h/p/skills/orquestrar/references/executor.md"}, "t4")], "m4"),
+        _user([_tool_result("t4", "e" * 600)], "p1"),
+        _resposta("m5"),
+    ])
+    uso = ct.varrer_uso(tmp_path)
+    r = uso_report.montar(uso, [], "all")
+    skills = {b.key: b for b in r.by_skill}
+    wp = skills["superpowers:writing-plans"]
+    assert (wp.chamadas, wp.plugin, wp.respostas) == (1, "superpowers", 4)
+    assert wp.ocupados_tokens_est == int(700 * 4 / 2.5)
+    using = skills["superpowers:using-superpowers"]
+    assert (using.chamadas, using.respostas) == (1, 5)
+    orq = skills["orquestrar"]
+    # SKILL.md em m4 e m5; a referência (lida com a skill já carregada) só em m5.
+    assert (orq.chamadas, orq.respostas) == (1, 2)
+    assert orq.ocupados_tokens_est == int((900 * 2 + 600) / 2.5)
+    tools = {b.key: b for b in r.by_tool}
+    assert tools["Read"].ctx_chars == 0 and tools["Bash"].ctx_chars == 400
+    ctx = {b.key: b for b in r.by_contexto}
+    assert all(b.plugin == "" for b in ctx.values())                  # last30days não é superpowers
+    assert not any("EXTREMELY" in k for k in ctx)                      # hook de skill não é contexto solto
+
+
+@pytest.mark.parametrize("caminho,esperado", [
+    ("/h/.claude/plugins/cache/mkt/superpowers/6.3.0/skills/brainstorming/SKILL.md", ("superpowers:brainstorming", True)),
+    ("/h/.claude/plugins/marketplaces/acme-marketplace/skills/kubectl/SKILL.md", ("acme:kubectl", True)),
+    ("/h/.claude/plugins/cache/mkt/mattpocock-skills/1.0.0/skills/eng/implement/SKILL.md", ("mattpocock-skills:implement", True)),
+    ("/h/p/skills/orquestrar/references/executor.md", ("orquestrar", False)),
+    ("/h/.agents/skills/svelte-code-writer/SKILL.md", ("svelte-code-writer", True)),
+    ("/h/p/docs/skills.md", None),
+])
+def test_skill_do_caminho(caminho, esperado):
+    assert skill_do_caminho(caminho) == esperado
 
 
 def test_agente_liga_ao_transcript_filho_pelo_agentId(tmp_path, monkeypatch):
@@ -256,7 +314,7 @@ def test_filtro_por_conta_corta_tudo_menos_a_lista_de_contas(tmp_path, monkeypat
     # Várias contas de uma vez: soma das duas, sem duplicar o seletor.
     duas = uso_report.montar(uso, tokens, "all", conta=["anthropic:a", "anthropic:b"])
     assert duas.by_skill[0].chamadas == 2 and len(duas.by_conta) == 2
-    assert so_a.by_skill[0].chamadas == 1 and so_a.by_skill[0].input == 110   # m2 + m3, uma conta
+    assert so_a.by_skill[0].chamadas == 1                                        # uma conta
     assert so_a.by_agente[0].chamadas == 1 and so_a.by_agente[0].input == 1000   # filho da conta certa
     assert [b.key for b in so_a.by_conta] == [b.key for b in tudo.by_conta]        # seletor inteiro
 
@@ -372,6 +430,15 @@ def test_turno_divide_o_uso_real_pelas_areas_das_tools(tmp_path, monkeypatch):
     foco = uso_report.montar(uso, [], "all", foco="back")
     assert [(b.key, b.chamadas) for b in foco.by_day] == [("2026-09-10", 2)]
     assert foco.by_day[0].cost == pytest.approx(por_area["back"].cost)
+    # Tokens do total, do dia e do projeto: o uso inteiro, uma vez só (as áreas não se repetem).
+    tokens = lambda b: b.input + b.output + b.cache_write + b.cache_read
+    todos = sum(a[1] + a[2] + a[3] for a in areas.values())
+    assert tokens(r.totals) == todos
+    assert [tokens(b) for b in r.by_day] == [todos]
+    assert [(b.key, tokens(b)) for b in r.by_projeto] == [("/repo", todos)]
+    # Série de uma skill: só ela, não os tokens do dia inteiro.
+    skill = uso_report.montar(uso, [], "all", foco="acme:database")
+    assert [tokens(b) for b in skill.by_day] == [0]
 
 
 def test_mapa_por_projeto_vence_o_padrao_e_troca_de_mapa_rele_o_cache(tmp_path):
