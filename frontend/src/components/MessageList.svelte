@@ -61,6 +61,8 @@
       discoveryLoading?: boolean;
       discoveryError?: string;
       onRetryDiscovery?: () => void;
+      aprovacaoPendente?: boolean;
+      caminho?: string | null;
     } | null;
     footer?: Snippet;
     preview?: string;
@@ -123,6 +125,8 @@
     discoveryLoading?: boolean;
     discoveryError?: string;
     onRetryDiscovery?: () => void;
+    aprovacaoPendente?: boolean;
+    caminho?: string | null;
   };
 
   function planoProps(): PlanComponentProps {
@@ -140,6 +144,8 @@
       discoveryLoading: plan.discoveryLoading,
       discoveryError: plan.discoveryError,
       onRetryDiscovery: plan.onRetryDiscovery,
+      aprovacaoPendente: plan.aprovacaoPendente,
+      caminho: plan.caminho,
     };
   }
 
