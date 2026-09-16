@@ -40,6 +40,16 @@ PADRAO: list[tuple[str, list[str]]] = [
 ]
 
 
+def repartir(valor: int, pesos: dict[str, int]) -> dict[str, int]:
+    """Divide `valor` na proporção dos pesos por maior resto: a soma fecha exata, sem sobra."""
+    total = sum(pesos.values())
+    exatos = {a: valor * n / total for a, n in pesos.items()}
+    inteiros = {a: int(x) for a, x in exatos.items()}
+    for a in sorted(exatos, key=lambda a: inteiros[a] - exatos[a])[:valor - sum(inteiros.values())]:
+        inteiros[a] += 1
+    return inteiros
+
+
 def _arquivo() -> Path:
     return Path.home() / ".hangar" / "uso-areas.json"
 

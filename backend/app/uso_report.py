@@ -36,8 +36,9 @@ def _custo_real(l: UsoLinha) -> float:
     if not (l.input or l.output or l.cache_write or l.cache_read):
         return 0.0
     c = costs._custo_da_linha(UsageRow(
-        ts=datetime.fromisoformat(l.dia).replace(tzinfo=LOCAL), source="claude",
-        provider="anthropic", model=l.model, project=l.cwd, session_id=l.session_id,
+        ts=datetime.fromisoformat(l.dia).replace(tzinfo=LOCAL), source=l.fonte,
+        provider="openai" if l.fonte == "codex" else "anthropic", model=l.model, project=l.cwd,
+        session_id=l.session_id,
         input=l.input, output=l.output, cache_write=l.cache_write, cache_read=l.cache_read,
         cache_write_1h=l.cache_write_1h, fast=l.fast))
     return sum(c.values()) if c else 0.0

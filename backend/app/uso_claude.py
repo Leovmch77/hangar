@@ -61,6 +61,7 @@ class UsoLinha:
     # skill: chars × respostas com o texto no contexto, e quantas respostas foram.
     ocupados: int = 0
     respostas: int = 0
+    fonte: str = "claude"   # claude | codex — decide a tarifa no custo
     session_id: str = ""
     conta: str = ""     # identidade da conta (anthropic:<uuid>), aplicada depois do cache
 
@@ -415,6 +416,9 @@ class Acumulador:
             caminho = m.group(0) if m else None
         else:
             return False
+        return self._ler_arquivo_de_skill(caminho, chars)
+
+    def _ler_arquivo_de_skill(self, caminho, chars: int) -> bool:
         achado = skill_do_caminho(caminho) if isinstance(caminho, str) else None
         if not achado or chars < _MIN_CHARS_LEITURA:
             return False
@@ -520,17 +524,11 @@ class Acumulador:
         for turno, grupos in somas.items():
             contadas = self._turnos[turno]
             pesos = contadas or {uso_areas.CONVERSA: 1}
-            total = sum(pesos.values())
             for i, ((dia, cwd, model, fast), u) in enumerate(grupos.items()):
                 self._dia, self._cwd, self._model = dia, cwd, model
                 partes: dict[str, dict] = {a: {} for a in pesos}
                 for campo, valor in u.items():
-                    exatos = {a: valor * n / total for a, n in pesos.items()}
-                    inteiros = {a: int(x) for a, x in exatos.items()}
-                    sobra = valor - sum(inteiros.values())
-                    for a in sorted(exatos, key=lambda a: inteiros[a] - exatos[a])[:sobra]:
-                        inteiros[a] += 1
-                    for a, v in inteiros.items():
+                    for a, v in uso_areas.repartir(valor, pesos).items():
                         partes[a][campo] = v
                 for a, p in partes.items():
                     usage = {**p, "cache_creation": {"ephemeral_1h_input_tokens": p["cache_1h"]},

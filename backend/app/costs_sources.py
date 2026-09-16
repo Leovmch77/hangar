@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import codex_contas, costs_cache, costs_claude_transcript, pricing
+from app import codex_contas, costs_cache, costs_claude_transcript, pricing, uso_areas, uso_codex
 from app.uso_claude import UsoLinha
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
@@ -27,6 +27,8 @@ from app.config import list_config_dirs
 
 LOCAL = timezone(timedelta(hours=-3))
 PROJETO_DESCONHECIDO = "desconhecido"
+# Suba ao mudar o que `uso_codex` grava por rollout.
+_USO_CODEX_VERSAO = 1
 _log = logging.getLogger("hangar.costs")
 # Raízes já avisadas: `coletar()` roda a cada abertura da tela de custos, e o aviso é um só.
 _AVISOU_RAIZ_UNICA: set[str] = set()
@@ -169,7 +171,8 @@ def linhas_codex(home: Path | str | None = None, account_id: str | None = None,
     return out
 
 
-def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
+def respostas_por_turno_codex(arq: Path, account_id: str) -> dict[str, list[UsageRow]]:
+    """Uso de cada resposta do rollout, por turn_id, já sem o que veio herdado de um fork."""
     cwd = prov = modelo = turno = ""
     sid = arq.stem
     inicio = None
@@ -256,9 +259,10 @@ def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
     def assinatura(r: UsageRow) -> tuple:
         return (r.model, *(getattr(r, campo) for campo in campos))
 
-    linhas = []
+    por_turno: dict[str, list[UsageRow]] = {}
     for key in legado.keys() | respostas.keys():
         modernos = respostas.get(key, [])
+        linhas = por_turno.setdefault(key, [])
         linhas.extend(modernos)
         if key in respostas and not modernos:
             continue
@@ -284,8 +288,12 @@ def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
                 valores[campo] = getattr(r, campo) - abatido
             if any(valores.values()):
                 linhas.append(replace(r, **valores))
+    return por_turno
+
+
+def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
     agrupadas: dict[tuple, UsageRow] = {}
-    for r in linhas:
+    for r in (r for linhas in respostas_por_turno_codex(arq, account_id).values() for r in linhas):
         key = (r.ts.date(), r.model, r.codex_long_context)
         antes = agrupadas.get(key)
         agrupadas[key] = r if antes is None else replace(
@@ -619,6 +627,18 @@ def _coletar_uso_sem_trava() -> tuple[list[UsoLinha], list[UsageRow]]:
         # provedor do modelo, não a conta): o filtro por conta precisa da conta.
         tokens.extend(replace(r, account_id=account_id)
                       for r in linhas_claude(Path(caminho), account_id))
+    for owner, caminhos in _rollouts_codex_por_conta(_contas_codex()).values():
+        home = owner.home.expanduser().absolute().resolve(strict=False)
+        identidade = f"codex:{home}"
+        _ROTULOS[identidade] = f"Codex · {owner.id}"
+
+        def ler(path: Path, identidade: str = identidade) -> list[UsoLinha]:
+            return uso_codex.ler_rollout(path, respostas_por_turno_codex(path, identidade))
+
+        pares = costs_cache.varrer_cacheado(
+            f"codex-uso-{owner.id}", home, sorted(caminhos), ler, UsoLinha.para_dict,
+            UsoLinha.de_dict, f"{_USO_CODEX_VERSAO}:{uso_areas.assinatura()}")
+        uso.extend(replace(l, conta=identidade) for _, linhas in pares for l in linhas)
     return uso, tokens
 
 
