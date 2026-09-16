@@ -3581,6 +3581,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+    width: max-content;
     max-width: calc(100% - var(--space-6));
     padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
     border: 1px solid var(--border-subtle, var(--border));
@@ -3590,7 +3591,15 @@
     font-size: var(--text-sm);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   }
-  .recarga-pill-text { min-width: 0; }
+  .recarga-pill-text {
+    flex: 1;
+    min-width: 0;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
   .recarga-pill-btn {
     flex-shrink: 0;
     padding: var(--space-1) var(--space-3);
