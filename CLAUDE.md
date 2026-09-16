@@ -403,6 +403,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Cota tem cache em disco e respeita 429**: restart do backend não relê todas as contas, e
   fonte que levou 429 espera 10 min antes de insistir.
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
+- **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
+  vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O
+  bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
+  ambiente do pane: Claude via `headersHelper`, Codex via `http_headers`. Tool mapeia 1:1 num
+  endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o

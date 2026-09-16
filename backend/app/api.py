@@ -25,7 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
-                 migracao_sidecars, pensamento_pt, procinfo, tmux)
+                 migracao_sidecars, pensamento_pt, procinfo, quem_chama, tmux)
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -420,8 +420,10 @@ async def _lifespan(app: FastAPI):
     )
     app.state.omp_plugin_sync = omp_sync
     await omp_sync.start()
+    from app import mcp_server
     try:
-        yield
+        async with mcp_server.lifespan():
+            yield
     finally:
         diag.registrar("backend.encerrando")
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
@@ -1598,6 +1600,17 @@ class ModelEffortBody(_StrictBody):
     model: str | None = None
     effort: str | None = None
     scope: Literal["session", "default"] = "session"
+
+
+@app.get("/api/whoami", dependencies=[Depends(require_auth)])
+async def whoami(request: Request):
+    """Qual sessão está chamando, pelos cabeçalhos X-Hangar-* (ver quem_chama). Diagnóstico e
+    teste da resolução que o MCP usa; o CLI continua resolvendo localmente."""
+    try:
+        nome, origem = await asyncio.to_thread(quem_chama.resolver, request.headers)
+    except quem_chama.SessaoDesconhecida as e:
+        raise HTTPException(404, detail=erro("erro_sessao_desconhecida", str(e)))
+    return {"name": nome, "origem": origem}
 
 
 @app.get("/api/sessions", dependencies=[Depends(require_auth)], response_model=list[SessionInfo])
@@ -7219,6 +7232,10 @@ class _UIStatic(StaticFiles):
             resp.headers["cache-control"] = "public, max-age=31536000, immutable"
         return resp
 
+
+from app import mcp_server
+# Antes do estático em "/": mount é resolvido na ordem de registro.
+app.mount("/mcp", mcp_server.asgi, name="mcp")
 
 _DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if _DIST.is_dir():

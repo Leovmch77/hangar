@@ -326,3 +326,25 @@ real da máquina.
   parse inteiro por parse do último bloco (Markdown novo muda a leitura do anterior). No celular
   não foi medido — a sonda é `PerformanceObserver('longtask')` + `requestAnimationFrame` na
   página do chat, e teria que rodar no iPhone.
+
+## MCP do Hangar: identidade no cabeçalho, o backend resolve; token nunca no pane
+
+(`app/mcp_server.py`, `app/quem_chama.py`, `scripts/registrar-mcp.py`, 16/09/2026). As tools
+`quem_sou`/`sessoes`/`enviar` são o `hangar-send` como tool tipada, servidas pelo backend em
+`/mcp` com o SDK oficial `mcp` 2.2.0 (provado em Python 3.14.6 antes de decidir: a primeira
+versão da spec propunha JSON-RPC à mão por duas dúvidas não verificadas, e a prova de cinco
+minutos derrubou as duas). `app.mount()` passa por fora do `Depends(require_auth)`, então o
+bearer é conferido num embrulho ASGI antes do sub-app; o gerenciador de sessões do SDK só roda
+uma vez por instância, então o sub-app nasce no lifespan, não no import. A proteção contra DNS
+rebinding do SDK fica ligada com `127.0.0.1`/`localhost` com e sem porta (o padrão só aceita
+com porta e o teste em ASGI não manda porta). Erro esperado é `ToolError`, senão o modelo vê só
+`Error executing tool`.
+**Identidade**: quem chama manda `X-Hangar-Key` (sessão sem terminal), `X-Hangar-Pane` e
+`X-Hangar-Session`; chave vence pane (o filho sem terminal pode herdar `TMUX_PANE` do pai),
+pane vence nome (rename não reescreve o env do processo), pane em mais de uma sessão (psmux)
+não resolve, e nada resolvido é erro — nunca `cli`. Mesma regra do `me()` do CLI, que continua
+resolvendo localmente porque funciona com o backend caído. **Token**: Claude Code recebe pelo
+`headersHelper` (script que lê o `backend/.env` a cada conexão); Codex por `http_headers` no
+`config.toml` (0600). Nunca exportado no pane: `printenv` num turno mandaria o token pro
+transcript. Prova ponta a ponta: `enviar` de `hangar-2` pra `cx-pergunta` entregou
+`[de: hangar-2] …` e a resposta `ok` voltou pelo caminho de sempre.
