@@ -941,7 +941,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     {/each}
     {#if expanded && offlineGroups.length > 0}
       <!-- Resumo dos offline (uma linha em vez de N headers): expande pra ver/gerenciar. -->
-      <button class="grp-offline-sum" onclick={() => (showOffline = !showOffline)} aria-expanded={showOffline}>
+      <!-- Abrir a lista dos offline é dizer "quero ver essas máquinas agora": fura a espera do
+           esfriamento, senão a que acabou de ligar só apareceria no fim dela. -->
+      <button class="grp-offline-sum" onclick={() => { showOffline = !showOffline; if (showOffline) sessionsStore.buscarAgora(); }} aria-expanded={showOffline}>
         <span class="grp-chevron" class:collapsed={!showOffline} aria-hidden="true">▾</span>
         ⚠ {offlineGroups.length === 1 ? m.sessao_offline_1() : m.sessao_offline({ n: offlineGroups.length })}
         {#if !showOffline}<span class="grp-offline-names">({offlineGroups.map((g) => g.label).join(', ')})</span>{/if}

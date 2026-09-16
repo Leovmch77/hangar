@@ -6,6 +6,7 @@ import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
+import { estaEsfriando, esperaDe, registrarFalha, registrarSucesso } from './esfriamento';
 import type { CotaContaResumo } from './cotaResumo';
 import type {
   Atualizacao,
@@ -224,6 +225,13 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server): P
   // Id do pedido: vai no cabeçalho e na linha do diário dos DOIS lados, pra quem analisa seguir a
   // cadeia (o toque na tela -> o que o servidor fez) sem depender de comparar horário.
   const req = novoReq();
+  // Servidor esfriando: recusa aqui, sem abrir socket. Só vale pra chamada a OUTRO servidor — o
+  // local não tem rede no meio, e barrar a própria máquina deixaria o app mudo por engano.
+  if (server && estaEsfriando(server.id)) {
+    const espera = Math.ceil(esperaDe(server.id) / 1000);
+    throw Object.assign(new Error(`${server.label} não respondeu; nova tentativa em ${espera}s`),
+                        { esfriando: true });
+  }
   let res: Response;
   try {
     res = await fetch(url, {
@@ -255,9 +263,13 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server): P
           codigo: e instanceof Error && e.name === 'TimeoutError' ? 'timeout' : 'rede' }, base);
       }
       if (poll) _semRede.add(`${base}|${rota}`);
+      // Só falha de REDE esfria (o `isAbortError` acima já tirou o cancelamento de quem chamou).
+      if (server) registrarFalha(server.id);
     }
     throw e;
   }
+  // Respondeu — inclusive com erro HTTP: a máquina está de pé, e é isso que o esfriamento mede.
+  if (server) registrarSucesso(server.id);
   {
     const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
     if (_semRede.delete(`${base}|${rota}`)) {

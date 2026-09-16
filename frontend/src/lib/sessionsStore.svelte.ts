@@ -12,6 +12,7 @@ import { listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
+import { esperaDe, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -50,6 +51,19 @@ function createSessionsStore() {
   // watchdog reconectando na hora deixava servidor PENDURADO (tailscale pra nó morto não recusa,
   // trava o socket) ciclando 25s/25s pra sempre e afogando os sockets do servidor bom no iOS.
   function scheduleRetry(id: string) {
+    // O teto daqui é 60s, e pra máquina desligada há um dia isso ainda é uma tentativa por minuto,
+    // cada uma pendurando até o prazo. Passado o terceiro tropeço o esfriamento assume e a espera
+    // vira minutos — quem quiser antes usa `retentarAgora()`.
+    registrarFalha(id);
+    const espera = esperaDe(id);
+    if (espera > 0) {
+      clearTimeout(retryTimers.get(id));
+      retryTimers.set(id, setTimeout(() => {
+        retryTimers.delete(id);
+        if (refs > 0 && servers.some((x) => x.id === id)) connect(servers);
+      }, espera));
+      return;
+    }
     const delay = retryDelays.get(id) ?? RETRY_MIN_MS;
     const servidor = servers.find((s) => s.id === id);
     if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista',
@@ -184,6 +198,7 @@ function createSessionsStore() {
       es.addEventListener('sessions', (e) => {
         arm();
         retryDelays.delete(s.id);   // sinal de vida: proximo erro recomeca do backoff minimo
+        registrarSucesso(s.id);     // e o esfriamento sai de cena inteiro
         try {
           slots.set(s.id, { sessions: JSON.parse(e.data), error: null });
           const caiuEm = quedas.get(s.id);
@@ -295,6 +310,14 @@ function createSessionsStore() {
     // Guarda contra consumidor futuro desbalanceado: um release a mais deixaria refs negativo e o
     // singleton nunca mais reconectaria (nenhum retain voltaria a bater 1). Piso em 0.
     release() { if (refs > 0 && --refs === 0) stop(); },
+    /** "Buscar agora": quem abriu a lista dos offline quer ver aqueles servidores JÁ. Libera a
+     *  espera de todos e reconecta o que estiver fora. */
+    buscarAgora() {
+      retentarAgora();
+      if (refs === 0) return;
+      for (const [id, t] of retryTimers) { clearTimeout(t); retryTimers.delete(id); }
+      connect(servers);
+    },
     reconnect() {
       // Resgata streams meio-abertos sem recarregar a página (o "Atualizar" dos menus).
       // refs=0 => ninguém consome o store (ex: Configurações aberta sobre Archive/Costs, onde a
