@@ -6,7 +6,7 @@ import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
-import { estaEsfriando, esperaDe, registrarFalha, registrarSucesso } from './esfriamento';
+import { estaDesligado, registrarFalha, registrarSucesso } from './esfriamento';
 import type { CotaContaResumo } from './cotaResumo';
 import type {
   Atualizacao,
@@ -227,10 +227,9 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server): P
   const req = novoReq();
   // Servidor esfriando: recusa aqui, sem abrir socket. Só vale pra chamada a OUTRO servidor — o
   // local não tem rede no meio, e barrar a própria máquina deixaria o app mudo por engano.
-  if (server && estaEsfriando(server.id)) {
-    throw new Error(m.esfriamento_servidor_esperando({
-      servidor: server.label, segundos: Math.ceil(esperaDe(server.id) / 1000),
-    }, { locale: localeAtual() }));
+  if (server && estaDesligado(server.id)) {
+    throw new Error(m.esfriamento_servidor_desligado({ servidor: server.label },
+                                                     { locale: localeAtual() }));
   }
   let res: Response;
   try {

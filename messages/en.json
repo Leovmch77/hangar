@@ -1795,7 +1795,7 @@
   "loop_estado_parado": "stopped",
   "loop_estado_esgotou": "ran out of iterations",
   "loop_servidor_nao_respondeu": "server did not respond",
-  "esfriamento_servidor_esperando": "{servidor} did not respond; retrying in {segundos}s",
+  "esfriamento_servidor_desligado": "{servidor} is marked as offline; open the offline list to look again",
   "loop_objetivo": "Goal",
   "loop_tentar_de_novo": "try again",
   "loop_desfazer": "undo",

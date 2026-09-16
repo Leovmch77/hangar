@@ -1,83 +1,101 @@
-// Esfriamento por servidor: máquina que não responde para de ser procurada por um tempo, e volta
-// a ser tentada sozinha quando esse tempo vence.
+// Servidor que não responde é marcado como DESLIGADO e para de ser procurado. Volta a ser tentado
+// quando a pessoa mandar — não sozinho, por relógio.
 //
-// O que existia antes eram duas coisas incompletas: o backoff do stream de lista (só o SSE, teto de
-// 60s) e o `enabled: false` do peers.json, que é interruptor MANUAL — a máquina sumia do painel e
-// só voltava quando alguém editava o arquivo. Medido em 16/09/2026 com um PC desligado há um dia:
-// 87 tentativas em 15 min, uma a cada 10s, todas pendurando até o prazo porque VPN pra nó morto não
-// recusa conexão, ela engole.
+// A primeira versão disto tinha escala de espera (3 falhas, 1/2/5/15 min, retomada automática).
+// Medido no iPhone em 16/09/2026: não bastou. No iOS o sistema descarrega e recarrega o PWA em
+// segundo plano o tempo todo, e cada retomada zerava o contador em memória — o aparelho voltava a
+// tentar três vezes por servidor, de novo e de novo. As tentativas caíram de 24/min para 7–15/min
+// e nunca chegaram a zero.
 //
-// A regra é sempre tentar de novo — só mais devagar. Nada aqui desiste de uma máquina: o teto é
-// espera longa, nunca "nunca mais". E quem está olhando a tela fura a espera pelo `retentarAgora`.
+// Por que zero importa: cada tentativa para máquina morta é uma conexão TCP pendurada até o prazo
+// (VPN não recusa, engole), e no iPhone isso mora dentro da extensão de rede do Tailscale, que tem
+// teto de 50 MB. Medida subindo de 35 para 45 MB enquanto a varredura corria; passando de certo
+// ponto, o laço de rede da extensão para, a VPN "cai" e só religando volta.
 //
-// Falha de REDE conta (não chegou a haver resposta). Um 500 ou um 401 não: o servidor respondeu,
-// está vivo, e o problema é outro — esfriá-lo esconderia justamente o erro que precisa aparecer.
+// Daí as duas decisões: UMA falha de rede basta (não três), e não há retomada por tempo — some o
+// relógio. E o estado é gravado, para o recarregamento do app não apagar o que já foi aprendido.
 
-const FALHAS_PARA_ESFRIAR = 3;
-// Esperas em ms, uma por rodada; a última vale para sempre daí em diante.
-const ESPERAS = [60_000, 120_000, 300_000, 900_000];
+const CHAVE = 'hangar_servidores_desligados';
 
-type Estado = { falhas: number; rodada: number; ate: number; ultima: number; liberadoNaMao: boolean };
+type Estado = { desligado: boolean };
 
 const estados = new Map<string, Estado>();
+let carregado = false;
 
-function estado(id: string): Estado {
-  let e = estados.get(id);
-  if (!e) {
-    e = { falhas: 0, rodada: 0, ate: 0, ultima: 0, liberadoNaMao: false };
-    estados.set(id, e);
+function armazem(): Storage | null {
+  // `localStorage` existe no web; no app nativo e nos testes de nó, não. Sem ele o estado é só de
+  // memória — degrada, não quebra.
+  try {
+    return typeof globalThis !== 'undefined' && globalThis.localStorage ? globalThis.localStorage : null;
+  } catch {
+    return null;
   }
-  return e;
 }
 
-/** Quanto falta (ms) para este servidor voltar a ser procurado; 0 = pode ir agora. */
-export function esperaDe(id: string, agora = Date.now()): number {
-  const e = estados.get(id);
-  return e && e.ate > agora ? e.ate - agora : 0;
-}
-
-export function estaEsfriando(id: string, agora = Date.now()): boolean {
-  return esperaDe(id, agora) > 0;
-}
-
-/** Falha de rede: sem resposta nenhuma. Na terceira seguida, começa a esfriar. */
-export function registrarFalha(id: string, agora = Date.now()): void {
-  const e = estado(id);
-  e.falhas += 1;
-  if (e.falhas < FALHAS_PARA_ESFRIAR) return;
-  if (e.liberadoNaMao) {
-    // A tentativa que veio de um "buscar agora" repete a espera em vez de subir: quem toca no
-    // botão três vezes numa máquina morta estaria se punindo com 15 min de espera.
-    e.liberadoNaMao = false;
-    e.ate = agora + e.ultima;
-    return;
+function carregar(): void {
+  if (carregado) return;
+  carregado = true;
+  const bruto = armazem()?.getItem(CHAVE);
+  if (!bruto) return;
+  try {
+    const ids: unknown = JSON.parse(bruto);
+    if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') estados.set(id, { desligado: true });
+  } catch {
+    // Conteúdo estragado não pode impedir o app de subir: começa limpo.
   }
-  e.ultima = ESPERAS[Math.min(e.rodada, ESPERAS.length - 1)];
-  e.ate = agora + e.ultima;
-  e.rodada += 1;
 }
 
-/** Respondeu: zera tudo. Uma resposta boa apaga o histórico de falhas, não só a espera atual. */
+function gravar(): void {
+  const ids = [...estados.entries()].filter(([, e]) => e.desligado).map(([id]) => id);
+  try {
+    if (ids.length) armazem()?.setItem(CHAVE, JSON.stringify(ids));
+    else armazem()?.removeItem(CHAVE);
+  } catch {
+    // Cota cheia ou modo privado: o estado segue valendo em memória nesta sessão.
+  }
+}
+
+/** Este servidor está marcado como desligado (e portanto não deve ser procurado)? */
+export function estaDesligado(id: string): boolean {
+  carregar();
+  return estados.get(id)?.desligado === true;
+}
+
+/** Falha de REDE (nenhuma resposta): marca como desligado na primeira vez. */
+export function registrarFalha(id: string): void {
+  carregar();
+  if (estados.get(id)?.desligado) return;
+  estados.set(id, { desligado: true });
+  gravar();
+}
+
+/** Respondeu: está de pé. */
 export function registrarSucesso(id: string): void {
-  estados.delete(id);
+  carregar();
+  if (!estados.delete(id)) return;
+  gravar();
 }
 
-/** "Buscar agora": libera a espera sem apagar o histórico — continuando morta, a espera volta a ser
- *  a MESMA (não recomeça do primeiro minuto nem sobe de degrau por causa do toque). */
+/** "Buscar agora": a pessoa mandou procurar. É o ÚNICO jeito de um servidor desligado voltar. */
 export function retentarAgora(id?: string): void {
-  const alvos = id === undefined ? [...estados.values()]
-                                 : [estados.get(id)].filter((e) => e !== undefined);
-  for (const e of alvos) {
-    e.ate = 0;
-    e.liberadoNaMao = true;
-  }
+  carregar();
+  if (id === undefined) estados.clear();
+  else estados.delete(id);
+  gravar();
 }
 
-/** Servidor saiu da lista: some com o estado dele. Sem isto o mapa só cresce. */
+/** Servidor saiu da lista: some com o estado dele. */
 export function esquecerServidor(id: string): void {
-  estados.delete(id);
+  carregar();
+  if (estados.delete(id)) gravar();
 }
 
 export function _limparEsfriamentoParaTestes(): void {
   estados.clear();
+  carregado = false;
+  try {
+    armazem()?.removeItem(CHAVE);
+  } catch {
+    /* sem armazém nos testes de nó */
+  }
 }

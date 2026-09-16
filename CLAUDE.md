@@ -406,6 +406,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   é a pill que a pessoa leu antes de falar, não a config.
 - **Cota tem cache em disco e respeita 429**: restart do backend não relê todas as contas, e
   fonte que levou 429 espera 10 min antes de insistir.
+- **Servidor que não responde é marcado como DESLIGADO na primeira falha de rede, e só volta a ser
+  procurado quando a pessoa mandar** — sem retomada por tempo, e a marca é gravada (o iOS recarrega
+  o PWA sozinho e apagaria um contador em memória). Erro HTTP não conta: a máquina respondeu.
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
 - **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
   vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O

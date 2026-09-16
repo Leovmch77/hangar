@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureDiag, _resetDiagForTests } from './diag';
+import { _limparEsfriamentoParaTestes } from './esfriamento';
 afterEach(_resetDiagForTests);
 import { overwriteGetLocale as overwriteFront } from './paraglide/runtime';
 import { configureLocale } from './i18n';
@@ -47,6 +48,9 @@ function stubEventSource() {
 }
 beforeEach(() => {
   vi.restoreAllMocks();
+  // Uma falha de rede marca o servidor como desligado, e a marca é do módulo: sem limpar, o
+  // primeiro caso que simula queda faz os seguintes receberem "está marcado como desligado".
+  _limparEsfriamentoParaTestes();
   onUnauthorizedSpy = vi.fn<() => void>();
   configureApi({
     getBaseUrl: () => 'https://a.test',

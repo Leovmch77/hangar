@@ -305,6 +305,49 @@ depois de `_ESPERA_429_S` (10 min) — insistir no próximo poll só renova o 42
 fica fora, pelo mesmo motivo do `_avisar_sessoes`: a suíte gravaria fontes de mentira no arquivo
 real da máquina.
 
+## Servidor que não responde esfria; o interruptor manual não bastava
+
+(`packages/core/src/esfriamento.ts`, `api.ts`, `frontend/src/lib/sessionsStore.svelte.ts`,
+16/09/2026.) Máquina desligada era procurada para sempre. Medido com dois PCs Windows fora do ar
+havia um dia: **87 tentativas em 15 minutos, mediana de 10 s entre elas**, cada uma pendurando até
+o prazo inteiro — VPN para nó morto não recusa conexão, ela engole. Quem abria os sockets era o
+app (Electron, pelo `ss -tnp state syn-sent`), por fora do backoff de 60 s que o stream de lista já
+tinha. O único jeito de calar era `"enabled": false` no `peers.json`, que é interruptor MANUAL: a
+máquina sumia do painel e só voltava quando alguém editava o arquivo.
+
+**A primeira regra escrita não bastou, e o porquê importa.** Ela era uma escala de espera: três
+falhas, 1/2/5/15 min, retomada automática. Medido no iPhone depois de publicada: as tentativas
+caíram de 24/min para 7–15/min e **nunca chegaram a zero**, com silêncios de 101 s no meio (a
+espera de 1 min funcionando). A causa é o iOS, que descarrega e recarrega o PWA em segundo plano o
+tempo todo: cada retomada zerava o contador em memória e o aparelho recomeçava as três tentativas
+por servidor.
+
+A regra que valeu é a do usuário: **uma falha de REDE já marca o servidor como desligado, e ele só
+volta a ser procurado quando a pessoa mandar** — não há retomada por tempo. O estado vai para o
+`localStorage`, senão o recarregamento do app apaga o que já foi aprendido. Erro HTTP não conta: a
+máquina respondeu, e marcá-la esconderia o erro que precisa aparecer. Abrir a lista dos offline na
+barra lateral é o "buscar agora" e libera todos. `enabled: false` no `peers.json` continua
+existindo para a máquina que se quer fora de propósito.
+
+**O custo real não era bateria, era a VPN do iPhone.** Com o cabo USB e o `idevicesyslog`, o log de
+dentro do aparelho mostrou a mesma varredura acontecendo na extensão de rede do Tailscale
+(`IPNExtension`), a 13–24 tentativas por minuto, cada uma um `open-conn-track: timeout opening ...
+online=no`. O Tailscale iOS carimba o uso de memória nas linhas dele: a extensão ia de 26,6 MB para
+31,9 MB num processo e de 35,1 MB para 44,9 MB no seguinte, contra o teto de 50 MB que o iOS dá a
+uma Network Extension. Nas quedas a extensão **não morria** (seguia escrevendo no log), mas parava
+de responder pelo caminho direto e pelo DERP ao mesmo tempo — que é o aviso `MagicSock Function
+ReceiveDERP is not running` na tela, e o motivo de só religar a VPN resolver: processo novo,
+memória zerada.
+
+Duas hipóteses descartadas com medição pelo caminho, para não voltarem: não é o `AskUserQuestion`
+(em toda a janela de queda, `app_pergunta_aberta` = 0, e o push nem está configurado nesta
+máquina), e não é o IPv6 — a correlação era forte (1495 amostras boas em IPv4 contra 72 falhas em
+74 amostras IPv6), mas com o IPv6 desligado na interface a queda voltou a acontecer em IPv4.
+
+As sondas que produziram isso ficam em `~/.hangar/diag/` (da máquina, fora do repositório):
+`sonda-iphone.py` amostra rede + estado do app a cada 2 s, e um coletor do `idevicesyslog` guarda o
+lado de dentro do iPhone.
+
 ## Compartilhado por sessão, não por conexão
 
 (`app/difusor.py`, `stats.Accumulator.

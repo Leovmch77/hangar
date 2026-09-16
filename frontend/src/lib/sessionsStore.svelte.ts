@@ -12,7 +12,7 @@ import { listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
-import { esperaDe, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
+import { estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -50,24 +50,11 @@ function createSessionsStore() {
   // Agenda a re-tentativa de UM servidor com backoff. Usado pelo onerror E pelo watchdog — o
   // watchdog reconectando na hora deixava servidor PENDURADO (tailscale pra nó morto não recusa,
   // trava o socket) ciclando 25s/25s pra sempre e afogando os sockets do servidor bom no iOS.
-  /** Reabre este servidor quando a espera do esfriamento vencer. */
-  function agendarPelaEspera(id: string, espera: number) {
-    clearTimeout(retryTimers.get(id));
-    retryTimers.set(id, setTimeout(() => {
-      retryTimers.delete(id);
-      if (refs > 0 && servers.some((x) => x.id === id)) connect(servers);
-    }, espera));
-  }
-
   function scheduleRetry(id: string) {
-    // O teto daqui é 60s, e pra máquina desligada há um dia isso ainda é uma tentativa por minuto,
-    // cada uma pendurando até o prazo. Passado o terceiro tropeço o esfriamento assume e a espera
-    // vira minutos — quem quiser antes usa `buscarAgora()`.
-    const espera = esperaDe(id);
-    if (espera > 0) {
-      agendarPelaEspera(id, espera);
-      return;
-    }
+    // Marcado como desligado: não reagenda nada. O retry daqui tinha teto de 60s, e pra máquina
+    // que está fora há um dia isso é uma tentativa por minuto, para sempre — no iPhone, dentro da
+    // extensão de rede do Tailscale, é isso que empurra a memória até o teto e derruba a VPN.
+    if (estaDesligado(id)) return;
     const delay = retryDelays.get(id) ?? RETRY_MIN_MS;
     const servidor = servers.find((s) => s.id === id);
     if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista',
@@ -116,10 +103,9 @@ function createSessionsStore() {
     }
     for (const s of list) {
       if (streams.has(s.id)) continue;
-      // Esfriando: nem abre. Sem isto o esfriamento só valia pros fetches, e o stream continuava
+      // Desligado: nem abre. Sem isto a regra só valia pros fetches, e o stream continuava
       // martelando a mesma máquina morta.
-      const esperando = esperaDe(s.id);
-      if (esperando > 0) { agendarPelaEspera(s.id, esperando); continue; }
+      if (estaDesligado(s.id)) continue;
       const req = novoReqDiag();
       const es = openSessionsStream(s, req);
       const tentativa = (tentativas.get(s.id) ?? 0) + 1;
@@ -171,13 +157,11 @@ function createSessionsStore() {
         recompute();
         // Conexão que nunca entregou quadro é o caso da máquina morta atrás da VPN: o socket fica
         // pendurado, o `onerror` nunca vem, e o EventSource reabre sozinho a cada ~3s pra sempre.
-        // Entrou em esfriamento, fecha — senão ele seguiria martelando por fora do relógio.
-        const espera = esperaDe(s.id);
-        if (espera > 0) {
+        // O `falhou` acima já marcou como desligado; aqui só se fecha o que ficou aberto.
+        if (estaDesligado(s.id)) {
           es.close();
           streams.delete(s.id);
           clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
-          agendarPelaEspera(s.id, espera);
         }
       }, PRIMEIRO_QUADRO_MS);
       primeiros.set(s.id, tPrimeiro);
