@@ -8,7 +8,7 @@
 import * as m from '../paraglide/messages';
 import type { EventSourceLike } from '@hangar/core';
 import { openSessionsStream, registrarDiag, novoReqDiag } from '@hangar/core';
-import { listServers, onServersChanged, type Server } from './auth';
+import { getActiveId, listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
@@ -50,6 +50,18 @@ function createSessionsStore() {
   // Agenda a re-tentativa de UM servidor com backoff. Usado pelo onerror E pelo watchdog — o
   // watchdog reconectando na hora deixava servidor PENDURADO (tailscale pra nó morto não recusa,
   // trava o socket) ciclando 25s/25s pra sempre e afogando os sockets do servidor bom no iOS.
+  /** Servidor que NÃO pode ser marcado como desligado: o ativo e o dono da URL que serve esta
+   *  página. Parar de procurá-los deixa o app carregando para sempre — e sem lista não há de onde
+   *  clicar em "buscar agora". */
+  function intocavel(s: Server): boolean {
+    if (s.id === getActiveId()) return true;
+    try {
+      return !!s.baseUrl && new URL(s.baseUrl).origin === globalThis.location?.origin;
+    } catch {
+      return false;
+    }
+  }
+
   function scheduleRetry(id: string) {
     // Marcado como desligado: não reagenda nada. O retry daqui tinha teto de 60s, e pra máquina
     // que está fora há um dia isso é uma tentativa por minuto, para sempre — no iPhone, dentro da
@@ -104,8 +116,10 @@ function createSessionsStore() {
     for (const s of list) {
       if (streams.has(s.id)) continue;
       // Desligado: nem abre. Sem isto a regra só valia pros fetches, e o stream continuava
-      // martelando a mesma máquina morta.
-      if (estaDesligado(s.id)) continue;
+      // martelando a mesma máquina morta. O ATIVO nunca entra nisso: é o servidor que a pessoa
+      // está usando, e pará-lo deixa o app carregando para sempre — sem lista, não há de onde
+      // clicar em "buscar agora".
+      if (estaDesligado(s.id) && !intocavel(s)) continue;
       const req = novoReqDiag();
       const es = openSessionsStream(s, req);
       const tentativa = (tentativas.get(s.id) ?? 0) + 1;
@@ -119,7 +133,9 @@ function createSessionsStore() {
         if (!quedas.has(s.id)) quedas.set(s.id, Date.now());
         registrarDiag({ evento: 'lista.falhou', nivel: 'aviso', tela: 'lista', req,
           codigo, tentativa, espera_ms }, s.baseUrl);
-        if (!jaContou) { jaContou = true; registrarFalha(s.id); }
+        // O ativo não é marcado: ele tem que continuar sendo tentado (é a máquina que a pessoa
+        // abriu), e quem cuida de não martelar ali é o backoff de 5→60s logo abaixo.
+        if (!jaContou && !intocavel(s)) { jaContou = true; registrarFalha(s.id); }
       };
       const arm = () => {
         clearTimeout(watchdogs.get(s.id));
