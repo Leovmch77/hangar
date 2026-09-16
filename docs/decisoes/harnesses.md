@@ -272,6 +272,28 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   Conferido ao vivo depois da mudança: mesmo prompt, `awaiting_input` com "Permitir ExitPlanMode?"
   e nenhum cartão de ferramenta.
 
+  "Cartão do plano", porém, era só o nome: o `can_use_tool` do `ExitPlanMode` virava a permissão
+  genérica, e o card do front só existia com a sessão `idle`. Resultado medido em 14/09 e 16/09
+  (sessões sem terminal do `promedico-web`, contas diferentes): a pessoa aprovou "Permitir
+  ExitPlanMode?" sem ver plano nenhum e só depois perguntou onde ele estava. A pasta de planos
+  não era a causa — `plano_claude.descobrir` achou o arquivo nas duas contas. O pedido da CLI
+  (2.1.273) já traz `input.plan`, `input.planFilePath` e `tool_use_id`; agora o estado publica
+  isso em `claude_plan_pending`, a pergunta vira "Aprovar o plano?" com "Aprovar plano" /
+  "Continuar planejando" (negar pede pra seguir planejando), e o card ancora na chamada do
+  `ExitPlanMode` só com "Ver plano" — aprovar continua sendo o seletor, um caminho só.
+
+  Aprovar também não devolvia a base. Na CLI 2.1.273 o `ExitPlanMode` sai para
+  `prePlanMode ?? "default"`, e sessão que NASCEU no plano não tem `prePlanMode`: caía em
+  `default` e pedia cada `Edit`, mesmo aberta em bypass (medido ao vivo, 16/09). Duas tentativas
+  que não bastaram, medidas: `updatedPermissions: setMode` na resposta da permissão é ignorado
+  (a ferramenta roda depois e sobrescreve); `set_permission_mode bypassPermissions` depois da
+  saída é recusado — *"the session was not launched with --dangerously-skip-permissions"*.
+  O que funciona: base bypass sobe com `--allow-dangerously-skip-permissions` (só essa base,
+  e só quando o modo de nascença não é o próprio bypass), e o `select` que aprova guarda a base;
+  quando o `system/status` anuncia a saída do plano, o adapter reaplica a base por
+  `set_permission_mode` (grava o sidecar). Conferido ao vivo: aprovou, "Modo: Bypass", o README
+  editado sem nenhum cartão de permissão.
+
 ## Codex sem terminal: `thread/start` leva o modelo, o esforço precisa de outro pedido
 
 (`codex/adapter._subir_sem_terminal`, medido 15/09/2026): o `ThreadStartParams` do app-server tem

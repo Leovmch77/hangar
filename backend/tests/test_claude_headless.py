@@ -270,6 +270,17 @@ def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monke
     assert "--thinking-display" not in adapter._argv("sid", resume=False)
 
 
+def test_plano_com_base_bypass_sobe_podendo_voltar_ao_bypass(adapter):
+    """Sem a flag, a CLI que nasceu no plano recusa `set_permission_mode bypassPermissions` pelo
+    resto do processo: aprovar o plano ficava pedindo cada edição."""
+    flag = "--allow-dangerously-skip-permissions"
+    argv = adapter._argv("sid", resume=False, permission_mode="plan", permitir_bypass=True)
+    assert flag in argv and argv[argv.index("--permission-mode") + 1] == "plan"
+    # Já em bypass a própria --permission-mode basta; base que não é bypass não ganha a flag.
+    assert flag not in adapter._argv("sid", resume=False, permission_mode="bypassPermissions", permitir_bypass=True)
+    assert flag not in adapter._argv("sid", resume=False, permission_mode="plan")
+
+
 def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypatch):
     # O POST não pode esperar os hooks de SessionStart: parada = fila + acordar, sem bloquear.
     ad = ClaudeHeadlessAdapter()
@@ -565,6 +576,104 @@ def test_sempre_permitir_so_com_sugestao_e_leva_as_regras(adapter):
     r1, r2 = [e["response"]["response"] for e in adapter.escritos if e["type"] == "control_response"]
     assert r1["behavior"] == "allow" and r1["updatedPermissions"] == regras
     assert r2["behavior"] == "deny"
+
+
+def test_exit_plan_mode_pendente_publica_o_plano(adapter):
+    """A aprovação do plano leva o texto dele no estado: sem isso a tela só pedia "Permitir
+    ExitPlanMode?" e a pessoa aprovava sem ver o plano."""
+    sess = adapter._sessions["s1"]
+    plano = {"plan": "# Plano\n\n- passo", "planFilePath": "C:\\Users\\x\\.claude-b\\plans\\p.md"}
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r1",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "ExitPlanMode",
+                                                   "input": plano, "tool_use_id": "toolu_1",
+                                                   "permission_suggestions": [{"type": "setMode"}]}})
+        ev = adapter._evento(sess)
+        assert ev.state == "awaiting_input"
+        assert ev.question == "Aprovar o plano?"
+        assert ev.options == ["Aprovar plano", "Continuar planejando"]
+        assert ev.claude_plan_pending == {"plan": "# Plano\n\n- passo",
+                                          "path": "C:\\Users\\x\\.claude-b\\plans\\p.md",
+                                          "tool_use_id": "toolu_1"}
+        assert await adapter.select("s1", 2) is True
+        assert adapter._evento(sess).claude_plan_pending is None
+
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r2",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "ExitPlanMode",
+                                                   "input": plano}})
+        assert adapter._evento(sess).claude_plan_pending["tool_use_id"] is None
+        assert await adapter.select("s1", 1) is True
+
+        # Outra ferramenta continua no cartão genérico, sem plano.
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r3",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                                                   "input": {"command": "ls"}}})
+        ev = adapter._evento(sess)
+        assert ev.claude_plan_pending is None and ev.options == ["Permitir", "Negar"]
+    _run(fluxo())
+    r1, r2 = [e["response"]["response"] for e in adapter.escritos if e["type"] == "control_response"]
+    assert r1["behavior"] == "deny" and "modo plano" in r1["message"]
+    assert r2["behavior"] == "allow" and r2["updatedInput"] == plano
+
+
+def test_aprovar_plano_volta_ao_modo_de_base(adapter):
+    """Sessão que nasceu no plano não tem `prePlanMode` na CLI: aprovar cai em `default` e cada
+    edição voltaria a pedir permissão, mesmo aberta em bypass. Quando a CLI anuncia a saída do
+    plano, o adapter reaplica a base."""
+    sess = adapter._sessions["s1"]
+    ctrl_calls = []
+
+    async def ctrl(s, subtype, **req):
+        ctrl_calls.append((subtype, req))
+        return {"mode": req.get("mode")}
+    adapter._ctrl = ctrl   # type: ignore[method-assign]
+
+    async def propor(rid):
+        await adapter._on_event(sess, {"type": "control_request", "request_id": rid,
+                                       "request": {"subtype": "can_use_tool", "tool_name": "ExitPlanMode",
+                                                   "input": {"plan": "p"}}})
+
+    async def cli_sai_do_plano():
+        await adapter._on_event(sess, {"type": "system", "subtype": "status", "permissionMode": "default"})
+        await asyncio.gather(*adapter._tarefas)
+
+    async def fluxo():
+        sess.in_progress = True
+        sess.permission_mode, sess.modo_nao_plan = "plan", "bypassPermissions"
+        await propor("r1")
+        assert await adapter.select("s1", 1) is True
+        # Enquanto a ferramenta não roda, nada muda: a CLI ainda está no plano.
+        await adapter._on_event(sess, {"type": "system", "subtype": "status", "permissionMode": "plan"})
+        assert ctrl_calls == []
+        await cli_sai_do_plano()
+        assert ctrl_calls == [("set_permission_mode", {"mode": "bypassPermissions"})]
+        assert adapter._evento(sess).claude_permission_mode == "bypassPermissions"
+        # Durável: a sessão religada sobe na base, não de volta no plano.
+        assert S.load("s1")["permission_mode"] == "bypassPermissions"
+        # Só uma vez: outra troca de modo depois não é reaplicada.
+        await cli_sai_do_plano()
+        assert len(ctrl_calls) == 1
+
+        # Continuar planejando não agenda nada.
+        sess.permission_mode, sess.modo_nao_plan = "plan", "acceptEdits"
+        await propor("r2")
+        assert await adapter.select("s1", 2) is True
+        await cli_sai_do_plano()
+        # Base "manual" já é o `default` da CLI.
+        sess.permission_mode, sess.modo_nao_plan = "plan", "manual"
+        await propor("r3")
+        assert await adapter.select("s1", 1) is True
+        await cli_sai_do_plano()
+        # Turno que termina antes de a CLI sair do plano leva a marca junto.
+        sess.permission_mode, sess.modo_nao_plan = "plan", "acceptEdits"
+        await propor("r4")
+        assert await adapter.select("s1", 1) is True
+        await adapter._on_event(sess, {"type": "result", "subtype": "success"})
+        await cli_sai_do_plano()
+    _run(fluxo())
+    assert len(ctrl_calls) == 1
 
 
 def test_plano_com_base_bypass_nao_pergunta_por_ferramenta(adapter):

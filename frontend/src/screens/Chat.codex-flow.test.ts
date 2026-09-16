@@ -482,3 +482,33 @@ it('Claude retira a proposta quando a resposta humana chega, sem esperar outro t
   await emit('message', { id: 'aceite', kind: 'user_msg', text: 'Pode implementar.' });
   expect(document.querySelector('.plan-preview')).toBeNull();
 });
+
+it('Claude sem terminal mostra o plano enquanto o ExitPlanMode espera aprovação', async () => {
+  harness.provider = 'claude';
+  await montarClaude();
+  await emit('state', { session: 'codex-flow', state: 'working', headless: true, claude_permission_mode: 'plan' });
+  await emit('message', {
+    id: 'a-exit:1', kind: 'tool_use', tool_name: 'ExitPlanMode', tool_use_id: 'toolu_plano',
+    tool_input: { plan: '# Plano do teste\n\n- passo', planFilePath: 'C:\conta\plans\p.md' }, ts: 1,
+  });
+  expect(document.querySelector('.plan-preview')).toBeNull();
+
+  await emit('state', {
+    session: 'codex-flow', state: 'awaiting_input', headless: true, claude_permission_mode: 'plan',
+    question: 'Aprovar o plano?', options: ['Aprovar plano', 'Continuar planejando'],
+    claude_plan_pending: { plan: '# Plano do teste\n\n- passo', path: 'C:\conta\plans\p.md', tool_use_id: 'toolu_plano' },
+  });
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Plano do teste');
+  // Aprovar é o seletor da sessão; o card não oferece um segundo caminho.
+  expect(document.querySelector('.plan-preview .plan-actions')).toBeNull();
+  expect([...document.querySelectorAll('.option-btn .opt-text')].map((el) => el.textContent))
+    .toEqual(expect.arrayContaining(['Aprovar plano', 'Continuar planejando']));
+
+  document.querySelector<HTMLButtonElement>('.plan-open')!.click(); await flush();
+  expect(document.body.textContent).toContain('C:\conta\plans\p.md');
+  expect(document.querySelector('.prose')?.textContent).toContain('passo');
+  expect(api.getSessionPlanPreview).not.toHaveBeenCalledWith('codex-flow');
+
+  await emit('state', { session: 'codex-flow', state: 'working', headless: true, claude_permission_mode: 'default' });
+  expect(document.querySelector('.plan-preview')).toBeNull();
+});
