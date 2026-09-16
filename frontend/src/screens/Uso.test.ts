@@ -13,18 +13,18 @@ vi.mock('../lib/queries', () => ({
 }));
 
 const report = (period: string): Partial<UsoReport> => ({
-  totals: { ...zeroUso('totals'), sessions: 3, chamadas: 120, ctx_chars: 4000, ctx_tokens_est: 1000, cost: 130 },
-  // Skills pesam pelo CONTEXTO injetado: "muitas" injeta mais no total; "pesada" injeta mais por
-  // chamada (15 × a mediana). `cost` aqui é o custo do turno, secundário.
+  totals: { ...zeroUso('totals'), sessions: 3, chamadas: 120, ctx_chars: 4000, ctx_tokens_est: 1000, input:130 },
+  // Skills pesam pelos tokens que OCUPARAM: "muitas" ocupa mais no total; "pesada" é maior por
+  // carga (15 × a mediana).
   by_skill: [
-    { ...zeroUso('muitas'), sessions: 2, chamadas: 10, pedidas: 2, ctx_tokens_est: 10000, cost: 100 },
-    { ...zeroUso('pesada'), sessions: 1, chamadas: 3, ctx_tokens_est: 4500, cost: 45 },
-    ...Array.from({ length: 20 }, (_, i) => ({ ...zeroUso(`s${String(i).padStart(2, '0')}`), sessions: 1, chamadas: 5, ctx_tokens_est: 500, cost: 1 })),
+    { ...zeroUso('muitas'), sessions: 2, chamadas: 10, pedidas: 2, ctx_tokens_est: 10000, ocupados_tokens_est: 100000, respostas: 40 },
+    { ...zeroUso('pesada'), sessions: 1, chamadas: 3, ctx_tokens_est: 4500, ocupados_tokens_est: 45000, respostas: 10 },
+    ...Array.from({ length: 20 }, (_, i) => ({ ...zeroUso(`s${String(i).padStart(2, '0')}`), sessions: 1, chamadas: 5, ctx_tokens_est: 500, ocupados_tokens_est: 500, respostas: 1 })),
   ],
-  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, cost: 21 }],
+  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000 }],
   by_tool: [{ ...zeroUso('Bash'), sessions: 3, chamadas: 100, ctx_chars: 4000, ctx_tokens_est: 1000 }],
   by_contexto: [{ ...zeroUso('instructions'), sessions: 2, chamadas: 2, ctx_chars: 8000, ctx_tokens_est: 2000 }],
-  by_day: [{ ...zeroUso('2026-09-10'), chamadas: 120, cost: 130 }],
+  by_day: [{ ...zeroUso('2026-09-10'), chamadas: 120, input:130 }],
   by_conta: [{ ...zeroUso('anthropic:1'), label: 'um@x', sessions: 2, chamadas: 50 }, { ...zeroUso('anthropic:2'), label: 'dois@x', sessions: 1, chamadas: 10 }],
   applied: { period },
 });
@@ -49,15 +49,17 @@ it('monta o painel: números, bolhas, por dia, contexto e a tabela com abas orde
     expect(target.querySelectorAll('.hero circle.bolha')).toHaveLength(1);    // modo agentes: só o Explore
     expect(target.querySelectorAll('.duplo svg')).toHaveLength(2);
     expect(target.querySelector('.pilha')).not.toBeNull();
-    expect(nomes().slice(0, 2)).toEqual(['muitas', 'pesada']);                // contexto total, decrescente
-    // "pesada" está fora da curva por chamada: leva a marca. O custo do turno aparece, mas apagado.
+    expect(nomes().slice(0, 2)).toEqual(['muitas', 'pesada']);                // tokens ocupados, decrescente
+    // "pesada" está fora da curva por carga: leva a marca. Skill mostra cargas e respostas, não custo.
     const linhaPesada = [...target.querySelectorAll('tr.click')].find((tr) => tr.textContent?.includes('pesada'))!;
     expect(linhaPesada.querySelector('.marca')).not.toBeNull();
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_custo_turno());
+    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_respostas());
+    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_cargas());
+    expect(target.textContent).not.toContain('R$');
     // 22 skills: 20 visíveis + mostrar mais 2.
     expect(target.textContent).toContain(m.uso_mostrar_mais({ n: 2 }));
-    // Cabeçalho reordena por contexto/chamada.
-    ([...target.querySelectorAll('th .th')].find((b) => b.textContent?.includes(m.uso_col_ctx_chamada())) as HTMLButtonElement).click();
+    // Cabeçalho reordena por tamanho da carga.
+    ([...target.querySelectorAll('th .th')].find((b) => b.textContent?.includes(m.uso_col_tamanho())) as HTMLButtonElement).click();
     await settle();
     expect(nomes()[0]).toBe('pesada');
     // Aba de tools: coluna de contexto no lugar de custo.
@@ -75,7 +77,7 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
     const q = query as unknown as Record<string, string>;
     pedidos.push(q);
     return Promise.resolve(q.foco
-      ? { by_day: [{ ...zeroUso('2026-09-10'), chamadas: 3, cost: 45 }], applied: { period: q.period } }
+      ? { by_day: [{ ...zeroUso('2026-09-10'), chamadas: 3, input:45 }], applied: { period: q.period } }
       : report(q.period)) as ReturnType<typeof clienteQuery.fetchQuery>;
   });
   const target = document.body.appendChild(document.createElement('div'));
@@ -89,7 +91,7 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
     expect(pedidos.at(-1)?.foco).toBe('pesada');
     const det = target.querySelector('.detalhe')!;
     expect(det.textContent).toContain('pesada');
-    expect(det.textContent).toContain(m.uso_col_custo_turno());               // rotulado como turno, não custo da skill
+    expect(det.textContent).toContain(m.uso_col_ocupados());                  // skill pesa pelo que ocupou
     expect(det.querySelector('svg.serie')).not.toBeNull();
     // Números da tela continuam lá (nada foi apagado durante o detalhe).
     expect(target.querySelector('.numeros')?.textContent).toContain('120');
@@ -166,15 +168,15 @@ it('onde vai o dinheiro: pilha por área em ordem fixa, série por dia e aba de 
     return Promise.resolve({
       ...report(period),
       by_area: [
-        { ...zeroUso('back'), chamadas: 20, cost: 60 },
-        { ...zeroUso('conversa'), cost: 10 },
-        { ...zeroUso('front'), chamadas: 9, cost: 30 },
+        { ...zeroUso('back'), chamadas: 20, input:60 },
+        { ...zeroUso('conversa'), input:10 },
+        { ...zeroUso('front'), chamadas: 9, input:30 },
       ],
       by_area_dia: [
-        { ...zeroUso('2026-09-09|back'), label: 'back', cost: 40 },
-        { ...zeroUso('2026-09-10|back'), label: 'back', cost: 20 },
-        { ...zeroUso('2026-09-10|front'), label: 'front', cost: 30 },
-        { ...zeroUso('2026-09-10|conversa'), label: 'conversa', cost: 10 },
+        { ...zeroUso('2026-09-09|back'), label: 'back', input:40 },
+        { ...zeroUso('2026-09-10|back'), label: 'back', input:20 },
+        { ...zeroUso('2026-09-10|front'), label: 'front', input:30 },
+        { ...zeroUso('2026-09-10|conversa'), label: 'conversa', input:10 },
       ],
     }) as ReturnType<typeof clienteQuery.fetchQuery>;
   });
@@ -194,7 +196,7 @@ it('onde vai o dinheiro: pilha por área em ordem fixa, série por dia e aba de 
     await settle();
     expect([...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim()))
       .toEqual([m.uso_area_back(), m.uso_area_front(), m.uso_area_conversa()]);
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_custo());
+    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_tokens());
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 

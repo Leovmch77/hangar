@@ -9,7 +9,7 @@
     mergeUso, Aquecendo, projectLabel,
     type UsoServerResult, type MergedUso, type UsoBucket, type UsoReport, type UsoFiltros,
   } from '@hangar/core';
-  import { dec, tok, money, money2, type Cur } from '../lib/fmt';
+  import { dec, tok } from '../lib/fmt';
 
   interface Props { onBack: () => void; }
   let { onBack }: Props = $props();
@@ -29,8 +29,6 @@
   let atualizando = $state(false);
   let pendingServers = $state(0);
   let period = $state<Periodo>('30d');
-  let currency = $state<Cur>(localStorage.getItem('cp_costs_currency') === 'BRL' ? 'BRL' : 'USD');
-  function setCurrency(c: Cur) { currency = c; localStorage.setItem('cp_costs_currency', c); }
 
   // Mesmas máquinas desmarcadas da tela de custos (cp_costs_servers_off).
   const SERVERS_OFF_KEY = 'cp_costs_servers_off';
@@ -141,17 +139,12 @@
   $effect(() => { const p = period; chaveFiltros; chaveAtivos; load(p, untrack(() => filtros), untrack(() => servidoresAtivos)); });
 
   const report = $derived(merged?.report ?? null);
-  const rate = $derived(report?.usd_brl ?? null);
-  const moeda = (n: number) => money(n, currency, rate);
-  const m2 = (n: number) => money2(n, currency, rate);
   const vazioNoPeriodo = $derived(!!report && !atualizando && report.totals.chamadas === 0 && report.totals.ctx_chars === 0);
   const tokensReais = (b: UsoBucket) => b.input + b.output + b.cache_write + b.cache_read;
-  const porChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.cost / b.chamadas : 0);
   const ctxPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.ctx_tokens_est / b.chamadas : 0);
   const porSessao = (b: UsoBucket) => (b.sessions > 0 ? b.ctx_tokens_est / b.sessions : 0);
   const totalImagens = $derived((report?.by_imagem ?? []).reduce((n, b) => n + b.chamadas, 0));
-  const custoAgentes = $derived((report?.by_agente ?? []).reduce((n, b) => n + b.cost, 0));
-  const ctxSkills = $derived((report?.by_skill ?? []).reduce((n, b) => n + b.ctx_tokens_est, 0));
+  const ocupadosSkills = $derived((report?.by_skill ?? []).reduce((n, b) => n + (b.ocupados_tokens_est ?? 0), 0));
   const ctxPorSessaoTotal = $derived(report && report.totals.sessions > 0
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
 
@@ -186,20 +179,28 @@
   });
 
   // ── Tabela com abas ──────────────────────────────────────────────────────────
-  // `custo`: só AGENTES têm custo real (o transcript do subagente). Skill e plugin carregam
-  // `turno`: o gasto do turno inteiro em que rodaram, que inclui o trabalho que veio depois; a
-  // medida de peso de uma skill é o CONTEXTO que ela injeta (tamanho × vezes), exato.
-  const ABAS: { id: Aba; label: string; custo: boolean; turno: boolean }[] = [
-    { id: 'skill', label: m.uso_aba_skills(), custo: false, turno: true },
-    { id: 'agente', label: m.uso_aba_agentes(), custo: true, turno: false },
-    { id: 'area', label: m.uso_aba_areas(), custo: true, turno: false },
-    { id: 'plugin', label: m.uso_aba_plugins(), custo: false, turno: true },
-    { id: 'tool', label: m.uso_aba_tools(), custo: false, turno: false },
-    { id: 'bash', label: m.uso_aba_bash(), custo: false, turno: false },
-    { id: 'mcp', label: m.uso_aba_mcp(), custo: false, turno: false },
-    { id: 'contexto', label: m.uso_aba_contexto(), custo: false, turno: false },
-    { id: 'imagem', label: m.uso_aba_imagens(), custo: false, turno: false },
+  // Uma medida por aba, sempre em tokens (a conta é por assinatura, não por dólar):
+  // `ocupados` — skill/plugin: tamanho do texto × respostas em que ele ficou no contexto;
+  // `tokens` — agente/área: tokens reais das respostas (transcript filho / turno dividido);
+  // `ctx` — o resto: o que o resultado ou a injeção colocou no contexto.
+  type Medida = 'ocupados' | 'tokens' | 'ctx';
+  const ABAS: { id: Aba; label: string; medida: Medida }[] = [
+    { id: 'skill', label: m.uso_aba_skills(), medida: 'ocupados' },
+    { id: 'agente', label: m.uso_aba_agentes(), medida: 'tokens' },
+    { id: 'area', label: m.uso_aba_areas(), medida: 'tokens' },
+    { id: 'plugin', label: m.uso_aba_plugins(), medida: 'ocupados' },
+    { id: 'tool', label: m.uso_aba_tools(), medida: 'ctx' },
+    { id: 'bash', label: m.uso_aba_bash(), medida: 'ctx' },
+    { id: 'mcp', label: m.uso_aba_mcp(), medida: 'ctx' },
+    { id: 'contexto', label: m.uso_aba_contexto(), medida: 'ctx' },
+    { id: 'imagem', label: m.uso_aba_imagens(), medida: 'ctx' },
   ];
+  const principal = (b: UsoBucket, md: Medida) =>
+    md === 'ocupados' ? (b.ocupados_tokens_est ?? 0) : md === 'tokens' ? tokensReais(b) : b.ctx_tokens_est;
+  // Por chamada: skill mostra o TAMANHO de cada carga; contexto, a média por sessão.
+  const porChamadaDe = (b: UsoBucket, a: Aba, md: Medida) =>
+    a === 'contexto' ? porSessao(b) : md === 'ocupados' ? ctxPorChamada(b) : b.chamadas > 0 ? principal(b, md) / b.chamadas : 0;
+  const rotuloMedida = (md: Medida) => (md === 'ocupados' ? m.uso_col_ocupados() : md === 'tokens' ? m.uso_col_tokens() : m.uso_col_ctx());
   function listaDa(a: Aba): UsoBucket[] {
     if (!report) return [];
     return ({ skill: report.by_skill, agente: report.by_agente, area: report.by_area, plugin: report.by_plugin, tool: report.by_tool,
@@ -209,7 +210,7 @@
     a === 'imagem' ? (b.key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: b.key.replace(/^lida:/, '') }))
       : a === 'area' ? nomeArea(b.key) : (b.label ?? b.key);
 
-  // ── Onde vai o dinheiro: custo real por área ─────────────────────────────────
+  // ── Onde vão os tokens: tokens reais por área ────────────────────────────────
   // A cor segue a área, nunca a posição. Só há 4 cores de gráfico: vão pras áreas de código; a
   // conversa é cinza e o resto (docs, outros, áreas do mapa pessoal) um cinza claro — quem separa
   // esses é a legenda, que nomeia cada área com o valor.
@@ -226,10 +227,10 @@
   const posArea = (a: string) => { const i = ORDEM_AREA.indexOf(a); return i < 0 ? ORDEM_AREA.length : i; };
   let hoverArea = $state<string | null>(null);
   const areas = $derived.by(() => {
-    const itens = [...(report?.by_area ?? [])].filter((b) => b.cost > 0)
-      .sort((a, b) => posArea(a.key) - posArea(b.key) || b.cost - a.cost);
-    const total = itens.reduce((n, b) => n + b.cost, 0);
-    return { total, itens: itens.map((b) => ({ b, frac: total ? b.cost / total : 0, cor: corArea(b.key) })) };
+    const itens = [...(report?.by_area ?? [])].filter((b) => tokensReais(b) > 0)
+      .sort((a, b) => posArea(a.key) - posArea(b.key) || tokensReais(b) - tokensReais(a));
+    const total = itens.reduce((n, b) => n + tokensReais(b), 0);
+    return { total, itens: itens.map((b) => ({ b, frac: total ? tokensReais(b) / total : 0, cor: corArea(b.key) })) };
   });
   let larguraAreaDia = $state(0);
   let hoverAreaDia = $state<number | null>(null);
@@ -238,7 +239,7 @@
     for (const b of report?.by_area_dia ?? []) {
       const dia = b.key.slice(0, 10), area = b.label ?? b.key.slice(11);
       const d = porDia.get(dia) ?? new Map<string, number>();
-      d.set(area, (d.get(area) ?? 0) + b.cost);
+      d.set(area, (d.get(area) ?? 0) + tokensReais(b));
       porDia.set(dia, d);
     }
     const ordem = areas.itens.map((i) => i.b.key);
@@ -268,15 +269,14 @@
       rotulos: lista.length ? [0, Math.floor((lista.length - 1) / 2), lista.length - 1].filter((v, i, a) => a.indexOf(v) === i).map((i) => ({ i, x: padL + i * passo + passo / 2 })) : [],
     };
   });
-  type Col = 'nome' | 'chamadas' | 'cost' | 'custoChamada' | 'ctx' | 'ctxChamada' | 'sessions' | 'porSessao';
+  type Col = 'nome' | 'chamadas' | 'principal' | 'porChamada' | 'respostas' | 'sessions';
   const valorDe = (b: UsoBucket, c: Col): number | string => ({
-    nome: b.label ?? b.key, chamadas: b.chamadas, cost: b.cost, custoChamada: porChamada(b),
-    ctx: b.ctx_tokens_est, ctxChamada: ctxPorChamada(b), sessions: b.sessions, porSessao: porSessao(b),
+    nome: b.label ?? b.key, chamadas: b.chamadas, principal: principal(b, abaAtual.medida),
+    porChamada: porChamadaDe(b, aba, abaAtual.medida), respostas: b.respostas ?? 0, sessions: b.sessions,
   })[c];
   let ordem = $state<Partial<Record<Aba, { col: Col; desc: boolean }>>>({});
   const abaAtual = $derived(ABAS.find((a) => a.id === aba)!);
-  const padrao = $derived<Col>(abaAtual.custo ? 'cost' : 'ctx');
-  const ordemAtual = $derived(ordem[aba] ?? { col: padrao, desc: true });
+  const ordemAtual = $derived(ordem[aba] ?? { col: 'principal' as Col, desc: true });
   function ordenar(col: Col) {
     const o = ordemAtual;
     ordem = { ...ordem, [aba]: o.col === col ? { col, desc: !o.desc } : { col, desc: col !== 'nome' } };
@@ -292,27 +292,22 @@
     });
   });
   const maxChamadas = $derived(Math.max(...linhas.map((b) => b.chamadas), 1));
-  const maxCusto = $derived(Math.max(...linhas.map((b) => b.cost), 0.000001));
-  const maxCtx = $derived(Math.max(...linhas.map((b) => b.ctx_tokens_est), 1));
-  // Fora da curva: custo/chamada ≥ 3× a mediana da aba — é a linha "chamei 3 vezes e gastou 1M".
+  const maxPrincipal = $derived(Math.max(...linhas.map((b) => principal(b, abaAtual.medida)), 1));
+  // Fora da curva: por chamada ≥ 3× a mediana da aba — a linha "chamei 3 vezes e pesou 1M".
   const medianaChamada = $derived.by(() => {
-    const v = linhas.map(porChamada).filter((x) => x > 0).sort((a, b) => a - b);
+    const v = linhas.map((b) => porChamadaDe(b, aba, abaAtual.medida)).filter((x) => x > 0).sort((a, b) => a - b);
     return v.length ? v[Math.floor(v.length / 2)] : 0;
   });
-  const foraDaCurva = (b: UsoBucket) => medianaChamada > 0 && b.chamadas >= 1 && porChamada(b) >= 3 * medianaChamada;
-  const medianaCtxChamada = $derived.by(() => {
-    const v = linhas.map(ctxPorChamada).filter((x) => x > 0).sort((a, b) => a - b);
-    return v.length ? v[Math.floor(v.length / 2)] : 0;
-  });
-  const foraDaCurvaCtx = (b: UsoBucket) => medianaCtxChamada > 0 && ctxPorChamada(b) >= 3 * medianaCtxChamada;
+  const foraDaCurva = (b: UsoBucket) =>
+    aba !== 'contexto' && medianaChamada > 0 && b.chamadas >= 1 && porChamadaDe(b, aba, abaAtual.medida) >= 3 * medianaChamada;
   const cols = $derived<{ col: Col; rotulo: string; n?: boolean; titulo?: string }[]>([
     { col: 'nome', rotulo: m.uso_col_nome() },
-    { col: 'chamadas', rotulo: m.uso_col_chamadas(), n: true },
-    ...(abaAtual.custo
-      ? [{ col: 'cost' as Col, rotulo: m.uso_col_custo(), n: true }, { col: 'custoChamada' as Col, rotulo: m.uso_col_custo_chamada(), n: true }]
-      : [{ col: 'ctx' as Col, rotulo: m.uso_col_ctx(), n: true },
-         aba === 'contexto' ? { col: 'porSessao' as Col, rotulo: m.uso_col_media(), n: true } : { col: 'ctxChamada' as Col, rotulo: m.uso_col_ctx_chamada(), n: true }]),
-    ...(abaAtual.turno ? [{ col: 'cost' as Col, rotulo: m.uso_col_custo_turno(), n: true, titulo: m.uso_custo_turno_nota() }] : []),
+    { col: 'chamadas', rotulo: abaAtual.medida === 'ocupados' ? m.uso_col_cargas() : m.uso_col_chamadas(), n: true },
+    { col: 'principal', rotulo: rotuloMedida(abaAtual.medida), n: true,
+      titulo: abaAtual.medida === 'ocupados' ? m.uso_ocupados_nota() : undefined },
+    { col: 'porChamada', n: true, rotulo: aba === 'contexto' ? m.uso_col_media()
+      : abaAtual.medida === 'ocupados' ? m.uso_col_tamanho() : abaAtual.medida === 'tokens' ? m.uso_col_tok_chamada() : m.uso_col_ctx_chamada() },
+    ...(abaAtual.medida === 'ocupados' ? [{ col: 'respostas' as Col, rotulo: m.uso_col_respostas(), n: true }] : []),
     { col: 'sessions', rotulo: m.uso_col_sessoes(), n: true },
   ]);
   const TOPO = 20;
@@ -322,12 +317,12 @@
   // ── Gráfico principal: chamadas × custo (bolhas, log-log) ────────────────────
   let larguraBolhas = $state(0);
   let hoverBolha = $state<string | null>(null);
-  // Dois modos, uma medida cada (nunca custo e contexto no mesmo eixo): skills pesam pelo
-  // contexto que injetam; agentes, pelo custo real do transcript filho.
+  // Dois modos, uma medida cada: skills pelos tokens que ocuparam; agentes pelos tokens reais
+  // do transcript filho.
   let modoBolhas = $state<'skills' | 'agentes'>('skills');
-  const medidaBolha = (b: UsoBucket) => (modoBolhas === 'skills' ? b.ctx_tokens_est : b.cost);
+  const medidaBolha = (b: UsoBucket) => (modoBolhas === 'skills' ? (b.ocupados_tokens_est ?? 0) : tokensReais(b));
   const medidaPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? medidaBolha(b) / b.chamadas : 0);
-  const fmtMedida = (v: number) => (modoBolhas === 'skills' ? `≈ ${tok(v)}` : m2(v));
+  const fmtMedida = (v: number) => (modoBolhas === 'skills' ? `≈ ${tok(v)}` : tok(v));
   const bolhas = $derived.by(() => {
     if (!report) return null;
     const tipo: Aba = modoBolhas === 'skills' ? 'skill' : 'agente';
@@ -337,10 +332,8 @@
     const W = Math.max(larguraBolhas, 320), H = desktop ? 380 : 300;
     const padL = 66, padR = 16, padT = 22, padB = 30;
     const plotW = W - padL - padR, plotH = H - padT - padB;
-    // Eixo Y na moeda/unidade que a tela mostra, senão os ticks "redondos" saem R$ 5,15.
-    const fatorY = modoBolhas === 'agentes' && currency === 'BRL' && rate ? rate : 1;
     const lx = itens.map(({ b }) => Math.log10(b.chamadas));
-    const ly = itens.map(({ b }) => Math.log10(medidaBolha(b) * fatorY));
+    const ly = itens.map(({ b }) => Math.log10(medidaBolha(b)));
     const x0 = Math.min(...lx) - 0.15, x1 = Math.max(...lx) + 0.15;
     const y0 = Math.min(...ly) - 0.15, y1 = Math.max(...ly) + 0.15;
     const sx = (v: number) => padL + ((v - x0) / (x1 - x0 || 1)) * plotW;
@@ -375,7 +368,7 @@
       for (let e = Math.ceil(v0); e <= Math.floor(v1); e++) out.push(e);
       return out;
     };
-    return { W, H, padL, padT, plotW, plotH, mx, my, pontos, rotulados, fatorY, xt: ticks(x0, x1).map((e) => ({ x: sx(e), v: 10 ** e })), yt: ticks(y0, y1).map((e) => ({ y: sy(e), v: 10 ** e })) };
+    return { W, H, padL, padT, plotW, plotH, mx, my, pontos, rotulados, xt: ticks(x0, x1).map((e) => ({ x: sx(e), v: 10 ** e })), yt: ticks(y0, y1).map((e) => ({ y: sy(e), v: 10 ** e })) };
   });
   const bolhaHover = $derived(bolhas?.pontos.find((p) => p.b.key === hoverBolha) ?? null);
 
@@ -404,8 +397,8 @@
     };
   }
   const grafChamadas = $derived(colunas(dias, (b) => b.chamadas, larguraDia));
-  const grafCusto = $derived(colunas(dias, (b) => b.cost, larguraDia));
-  const grafSerie = $derived(colunas(serie, (b) => (abaAtual.custo ? b.cost : b.ctx_tokens_est), 300, 90));
+  const grafTokens = $derived(colunas(dias, tokensReais, larguraDia));
+  const grafSerie = $derived(colunas(serie, (b) => principal(b, abaAtual.medida), 300, 90));
   const diaCurto = (k: string) => k.slice(5).replace('-', '/');
 
   type Cat = 'instrucoes' | 'catalogo' | 'hooks' | 'lembretes' | 'outros';
@@ -449,11 +442,6 @@
           <button aria-pressed={period === p.id} onclick={() => (period = p.id)}>{p.label}</button>
         {/each}
       </span>
-      <span class="seg" role="group" aria-label={m.custos_moeda()}>
-        <button aria-pressed={currency === 'USD'} onclick={() => setCurrency('USD')}>US$</button>
-        <button aria-pressed={currency === 'BRL'} onclick={() => setCurrency('BRL')}
-          disabled={!rate} title={rate ? undefined : m.custos_cotacao_indisponivel()}>R$</button>
-      </span>
       <button class="clear" disabled={atualizando} onclick={() => load(period, filtros, servidoresAtivos, true)}>{m.custos_atualizar()}</button>
     </div>
   </header>
@@ -465,17 +453,17 @@
       values={filtros.conta ?? []} onchangeMulti={(v) => setFiltro('conta', v)}
       rotuloMulti={rotuloFiltro('conta', m.uso_todas(), (k) => listas.conta.find((b) => b.key === k)?.label ?? k)}
       opcoes={[{ value: '', label: m.uso_todas() },
-               ...listas.conta.map((b) => ({ value: b.key, label: b.label ?? b.key, title: b.key, hint: moeda(b.cost) }))]} /></span>
+               ...listas.conta.map((b) => ({ value: b.key, label: b.label ?? b.key, title: b.key, hint: tok(tokensReais(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.projeto?.length}><Select ariaLabel={m.uso_projeto()} value="" onchange={() => {}} class="chipsel"
       values={filtros.projeto ?? []} onchangeMulti={(v) => setFiltro('projeto', v)}
       rotuloMulti={rotuloFiltro('projeto', m.uso_todos(), projectLabel)}
       opcoes={[{ value: '', label: m.uso_todos() },
-               ...listas.projeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key, hint: moeda(b.cost) }))]} /></span>
+               ...listas.projeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key, hint: tok(tokensReais(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.modelo?.length}><Select ariaLabel={m.uso_modelo()} value="" onchange={() => {}} class="chipsel"
       values={filtros.modelo ?? []} onchangeMulti={(v) => setFiltro('modelo', v)}
       rotuloMulti={rotuloFiltro('modelo', m.uso_todos(), (k) => k)}
       opcoes={[{ value: '', label: m.uso_todos() },
-               ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: moeda(b.cost) }))]} /></span>
+               ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: tok(tokensReais(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.plugin?.length}><Select ariaLabel={m.uso_plugin()} value="" onchange={() => {}} class="chipsel"
       values={filtros.plugin ?? []} onchangeMulti={(v) => setFiltro('plugin', v)}
       rotuloMulti={rotuloFiltro('plugin', m.uso_todos(), (k) => k)}
@@ -536,8 +524,8 @@
     <p class="muted vazio">{m.uso_vazio()}</p>
   {:else}
     <dl class="numeros">
-      <div><dt>{m.uso_kpi_custo_agentes()}</dt><dd>{moeda(custoAgentes)}</dd></div>
-      <div><dt>{m.uso_kpi_ctx_skills()}</dt><dd>≈ {tok(ctxSkills)}</dd></div>
+      <div><dt>{m.uso_kpi_tokens()}</dt><dd>{tok(tokensReais(report.totals))}</dd></div>
+      <div title={m.uso_ocupados_nota()}><dt>{m.uso_kpi_ocupados_skills()}</dt><dd>≈ {tok(ocupadosSkills)}</dd></div>
       <div><dt>{m.uso_kpi_chamadas()}</dt><dd>{tok(report.totals.chamadas)}</dd></div>
       <div><dt>{m.uso_graf_ctx()}</dt><dd>≈ {tok(ctxPorSessaoTotal)}</dd></div>
       <div><dt>{m.uso_kpi_imagens()}</dt><dd>{dec(totalImagens, 0)}</dd></div>
@@ -552,7 +540,7 @@
               <h2>{m.uso_graf_areas()}</h2>
               <p class="hint">{m.uso_graf_areas_nota()}</p>
             </div>
-            <span class="total">{m2(areas.total)}</span>
+            <span class="total">{tok(areas.total)}</span>
           </div>
           {#if !areas.itens.length}
             <p class="muted">{m.uso_vazio_secao()}</p>
@@ -562,7 +550,7 @@
                 <div class="pilha" role="img" aria-label={m.uso_graf_areas()} onmouseleave={() => (hoverArea = null)}>
                   {#each areas.itens as s (s.b.key)}
                     <span class="seg-pilha" style="width: {s.frac * 100}%; background: {s.cor}" class:apagada={hoverArea !== null && hoverArea !== s.b.key}
-                          title="{nomeArea(s.b.key)}: {m2(s.b.cost)}" onmouseenter={() => (hoverArea = s.b.key)} role="presentation"></span>
+                          title="{nomeArea(s.b.key)}: {tok(tokensReais(s.b))}" onmouseenter={() => (hoverArea = s.b.key)} role="presentation"></span>
                   {/each}
                 </div>
                 <ul class="legenda">
@@ -570,7 +558,7 @@
                     <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
                       <span class="swatch" style="background: {s.cor}"></span>
                       <span class="lab">{nomeArea(s.b.key)}</span>
-                      <b>{m2(s.b.cost)}</b><span class="dim">{dec(s.frac * 100, 0)}%</span>
+                      <b>{tok(tokensReais(s.b))}</b><span class="dim">{dec(s.frac * 100, 0)}%</span>
                     </li>
                   {/each}
                 </ul>
@@ -596,8 +584,8 @@
                   {#if hoverAreaDia !== null && areaDias.colunas[hoverAreaDia]}
                     {@const c = areaDias.colunas[hoverAreaDia]}
                     <div class="tip" style="left: {Math.min(Math.max(c.cx, 80), areaDias.W - 80)}px; top: 0">
-                      <b>{c.dia} · {m2(c.total)}</b>
-                      {#each [...c.partes].reverse() as p (p.area)}<span>{nomeArea(p.area)}: {m2(p.v)}</span>{/each}
+                      <b>{c.dia} · {tok(c.total)}</b>
+                      {#each [...c.partes].reverse() as p (p.area)}<span>{nomeArea(p.area)}: {tok(p.v)}</span>{/each}
                     </div>
                   {/if}
                 </div>
@@ -634,7 +622,7 @@
                   {/if}
                 {/each}
                 {#each bolhas.yt as t (t.v)}
-                  <text x={bolhas.padL - 6} y={t.y + 3} text-anchor="end" class="tick">{modoBolhas === 'skills' ? tok(t.v) : money(t.v / bolhas.fatorY, currency, rate)}</text>
+                  <text x={bolhas.padL - 6} y={t.y + 3} text-anchor="end" class="tick">{tok(t.v)}</text>
                 {/each}
                 <text x={bolhas.padL + bolhas.plotW} y={bolhas.H - 8} text-anchor="end" class="eixo-nome">{m.uso_eixo_chamadas()}</text>
                 {#each bolhas.pontos as p (p.b.key)}
@@ -670,7 +658,7 @@
             {:else}
               <div class="duplo" bind:clientWidth={larguraDia}>
                 {#each [{ g: grafChamadas, titulo: m.uso_graf_chamadas(), fmt: (v: number) => tok(v), cor: 'var(--chart-1)' },
-                        { g: grafCusto, titulo: m.uso_graf_custo(), fmt: (v: number) => m2(v), cor: 'var(--chart-2)' }] as p (p.titulo)}
+                        { g: grafTokens, titulo: m.uso_graf_tokens(), fmt: (v: number) => tok(v), cor: 'var(--chart-2)' }] as p (p.titulo)}
                   <div class="mini">
                     <h3>{p.titulo}</h3>
                     <div class="svgbox">
@@ -748,26 +736,21 @@
                 </thead>
                 <tbody>
                   {#each (expandida ? linhas : linhas.slice(0, TOPO)) as b (b.key)}
+                    {@const est = abaAtual.medida === 'tokens' ? '' : '≈ '}
+                    {@const v = principal(b, abaAtual.medida)}
+                    {@const pc = porChamadaDe(b, aba, abaAtual.medida)}
                     <tr class="click" aria-selected={selecionado?.key === b.key && selecionado.aba === aba} onclick={() => selecionar(aba, b.key)}>
                       <td class="nome" title={b.key}>
                         {rotulo(aba, b)}
                         {#if b.plugin && aba !== 'plugin'}<span class="tag">{b.plugin}</span>{/if}
                       </td>
                       <td class="n"><span class="ibar"><i style="width: {(b.chamadas / maxChamadas) * 100}%"></i></span>{dec(b.chamadas, 0)}</td>
-                      {#if abaAtual.custo}
-                        <td class="n"><span class="ibar custo"><i style="width: {(b.cost / maxCusto) * 100}%"></i></span>{b.cost > 0 ? m2(b.cost) : '—'}</td>
-                        <td class="n">
-                          {#if foraDaCurva(b)}<span class="marca" title={m.uso_caro_por_chamada({ x: dec(porChamada(b) / medianaChamada, 0) })}>●</span>{/if}
-                          {b.cost > 0 && b.chamadas > 0 ? m2(porChamada(b)) : '—'}
-                        </td>
-                      {:else}
-                        <td class="n"><span class="ibar"><i style="width: {(b.ctx_tokens_est / maxCtx) * 100}%"></i></span>≈ {tok(b.ctx_tokens_est)}</td>
-                        <td class="n">
-                          {#if aba !== 'contexto' && foraDaCurvaCtx(b)}<span class="marca" title={m.uso_pesada_por_chamada({ x: dec(ctxPorChamada(b) / medianaCtxChamada, 0) })}>●</span>{/if}
-                          ≈ {tok(aba === 'contexto' ? porSessao(b) : ctxPorChamada(b))}
-                        </td>
-                      {/if}
-                      {#if abaAtual.turno}<td class="n dim" title={m.uso_custo_turno_nota()}>{b.cost > 0 ? m2(b.cost) : '—'}</td>{/if}
+                      <td class="n"><span class="ibar custo"><i style="width: {(v / maxPrincipal) * 100}%"></i></span>{v > 0 ? est + tok(v) : '—'}</td>
+                      <td class="n">
+                        {#if foraDaCurva(b)}<span class="marca" title={m.uso_pesada_por_chamada({ x: dec(pc / medianaChamada, 0) })}>●</span>{/if}
+                        {pc > 0 ? est + tok(pc) : '—'}
+                      </td>
+                      {#if abaAtual.medida === 'ocupados'}<td class="n">{dec(b.respostas ?? 0, 0)}</td>{/if}
                       <td class="n">{dec(b.sessions, 0)}</td>
                     </tr>
                   {/each}
@@ -809,20 +792,19 @@
       {#if selecionado!.aba === 'skill' || selecionado!.aba === 'agente'}
         <div><dt>{selecionado!.aba === 'skill' ? m.uso_col_origem_skill() : m.uso_col_origem_agente()}</dt><dd>{dec(b.pedidas, 0)} / {dec(b.chamadas - b.pedidas, 0)}</dd></div>
       {/if}
-      {#if abaAtual.custo}
-        <div><dt>{m.uso_col_custo()}</dt><dd>{m2(b.cost)}</dd></div>
-        <div><dt>{m.uso_detalhe_custo_chamada()}</dt><dd>{m2(porChamada(b))}</dd></div>
+      {#if abaAtual.medida === 'tokens'}
         <div><dt>{m.uso_detalhe_tokens()}</dt><dd>{tok(tokensReais(b))}</dd></div>
+        <div><dt>{m.uso_col_tok_chamada()}</dt><dd>{tok(porChamadaDe(b, selecionado!.aba, 'tokens'))}</dd></div>
       {/if}
-      {#if abaAtual.turno}
-        <div title={m.uso_custo_turno_nota()}><dt>{m.uso_col_custo_turno()}</dt><dd>{m2(b.cost)}</dd></div>
-        <div><dt>{m.uso_detalhe_tokens()}</dt><dd>{tok(tokensReais(b))}</dd></div>
+      {#if abaAtual.medida === 'ocupados'}
+        <div title={m.uso_ocupados_nota()}><dt>{m.uso_col_ocupados()}</dt><dd>≈ {tok(b.ocupados_tokens_est ?? 0)}</dd></div>
+        <div><dt>{m.uso_col_respostas()}</dt><dd>{dec(b.respostas ?? 0, 0)}</dd></div>
       {/if}
       <div><dt>{m.uso_col_ctx()}</dt><dd>≈ {tok(b.ctx_tokens_est)}</dd></div>
       <div><dt>{m.uso_detalhe_ctx_chamada()}</dt><dd>≈ {tok(ctxPorChamada(b))}</dd></div>
       <div><dt>{m.uso_detalhe_media_sessao()}</dt><dd>≈ {tok(porSessao(b))}</dd></div>
     </dl>
-    <h4>{m.uso_detalhe_por_dia()} <span class="dim">({abaAtual.custo ? m.uso_graf_custo() : m.uso_col_ctx()})</span></h4>
+    <h4>{m.uso_detalhe_por_dia()} <span class="dim">({rotuloMedida(abaAtual.medida)})</span></h4>
     {#if serieCarregando}
       <div class="bloco medio sk-serie"></div>
     {:else if !serie.length}
@@ -831,7 +813,7 @@
       <svg viewBox="0 0 {grafSerie.W} {grafSerie.H}" class="serie" role="img" aria-label={m.uso_detalhe_por_dia()}>
         <line x1="0" x2={grafSerie.W} y1={grafSerie.base} y2={grafSerie.base} class="eixo" />
         {#each grafSerie.barras as c (c.b.key)}
-          <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="2" fill="var(--chart-1)"><title>{c.b.key}: {abaAtual.custo ? m2(c.v) : tok(c.v)}</title></rect>
+          <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="2" fill="var(--chart-1)"><title>{c.b.key}: {tok(c.v)}</title></rect>
         {/each}
         {#each grafSerie.rotulos as r (r.i)}
           <text x={r.x} y={grafSerie.H - 5} text-anchor="middle" class="tick">{diaCurto(serie[r.i].key)}</text>

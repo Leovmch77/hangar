@@ -21,6 +21,10 @@ export interface UsoBucket {
   cache_write: number;
   cache_read: number;
   cost: number;
+  // Skill/plugin: tokens que o texto ocupou (tamanho × respostas no contexto) e quantas respostas.
+  // Opcionais: servidor antigo da malha não manda.
+  ocupados_tokens_est?: number;
+  respostas?: number;
 }
 
 export type UsoDim = 'by_skill' | 'by_tool' | 'by_bash' | 'by_mcp' | 'by_agente' | 'by_contexto' | 'by_imagem'
@@ -85,7 +89,7 @@ export interface MergedUso {
 
 export const zeroUso = (key: string): UsoBucket => ({
   key, label: null, plugin: '', sessions: 0, chamadas: 0, pedidas: 0, ctx_chars: 0, ctx_tokens_est: 0,
-  input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0,
+  input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0, ocupados_tokens_est: 0, respostas: 0,
 });
 
 // `?? 0` em tudo: servidor antigo da malha sem um campo não pode virar NaN na coluna inteira.
@@ -100,6 +104,8 @@ function somar(alvo: UsoBucket, b: Partial<UsoBucket>): void {
   alvo.cache_write += b.cache_write ?? 0;
   alvo.cache_read += b.cache_read ?? 0;
   alvo.cost += b.cost ?? 0;
+  alvo.ocupados_tokens_est = (alvo.ocupados_tokens_est ?? 0) + (b.ocupados_tokens_est ?? 0);
+  alvo.respostas = (alvo.respostas ?? 0) + (b.respostas ?? 0);
 }
 
 function juntar(destino: Map<string, UsoBucket>, lista: UsoBucket[] | undefined): void {
