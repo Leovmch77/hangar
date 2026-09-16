@@ -1096,7 +1096,7 @@ class ClaudeHeadlessAdapter:
                 # há pouco continua com o reconcile normal (confirmado só quando cair no .jsonl).
                 await asyncio.to_thread(PromptQueue(sess.name).confirm_delivered,
                                         lambda r: str(r.get("text") or "").lstrip().startswith("/"))
-            if ev.get("is_error") or (sub.startswith("error") and sub != "error_during_execution"):
+            if sub != "error_during_execution" and (ev.get("is_error") or sub.startswith("error")):
                 # `error_during_execution` é o interrupt (medido); o resto é falha de verdade
                 # (limite de turnos, credencial, API) e some calado se não for dito aqui.
                 detalhe = str(ev.get("result") or "")

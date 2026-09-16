@@ -658,13 +658,20 @@ def test_turno_com_erro_vira_problema_e_sucesso_limpa(adapter):
         assert ev.state == "idle" and ev.problema == "headless_turno_erro"
         assert "Reached max turns" in (ev.problema_detalhe or "")
         assert adapter.problema_de("s1") == (ev.problema, ev.problema_detalhe)
-        # Interrupt não é erro: nada muda.
+        problema_anterior = adapter.problema_de("s1")
+        # A CLI marca o interrupt como is_error=true, mas ele não é uma falha da sessão e não pode
+        # criar nem substituir o problema que a tela mostra.
         sess.in_progress = True
-        await adapter._on_event(sess, {"type": "result", "subtype": "error_during_execution", "usage": {}})
-        assert adapter._evento(sess).problema == "headless_turno_erro"
+        await adapter._on_event(sess, {"type": "result", "subtype": "error_during_execution",
+                                       "is_error": True, "usage": {}})
+        assert adapter.problema_de("s1") == problema_anterior
         sess.in_progress = True
         await adapter._on_event(sess, {"type": "result", "subtype": "success", "usage": {"input_tokens": 1}})
         assert adapter._evento(sess).problema is None and adapter.problema_de("s1") is None
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "result", "subtype": "error_during_execution",
+                                       "is_error": True, "usage": {}})
+        assert adapter.problema_de("s1") is None
     _run(fluxo())
 
 
