@@ -361,10 +361,9 @@ def test_cache_relê_quando_o_arquivo_muda(tmp_path, monkeypatch):
 
 
 def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
-    """O Pi continua com entrada própria em `_cache` (parser roda 1x sem tocar arquivo). O
-    Claude NÃO tem mais entrada nesse cache (Step 4 desta tarefa): `linhas_claude` é chamado a
-    cada `coletar()` — quem evita reler o mesmo transcript é o cache em disco de
-    `costs_claude_transcript` (Task 1), não este módulo."""
+    """Os leitores de árvore (`linhas_claude`, `linhas_pi`) rodam a cada `coletar()`; quem
+    evita reler é o cache por arquivo do `costs_cache`: o parser de UM arquivo do Pi roda uma
+    vez só enquanto o arquivo não muda."""
     cfg = tmp_path / ".claude"
     _transcript_claude(cfg, "s", "claude-opus-5", "/r", i=1, o=0)
     _escrever(tmp_path / "sessions" / "--r--" / "s.jsonl", [
@@ -380,8 +379,9 @@ def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "_config_dirs", lambda: [(str(cfg), "c")])
     cs.invalidar_cache()   # senão o estado de um teste anterior contamina a contagem
 
-    chamadas = {"claude": 0, "pi": 0}
+    chamadas = {"claude": 0, "pi": 0, "pi_arquivo": 0}
     claude_original, pi_original = cs.linhas_claude, cs.linhas_pi
+    pi_arquivo_original = cs._linhas_arquivo_pi
 
     def claude_contado(*a, **kw):
         chamadas["claude"] += 1
@@ -391,12 +391,19 @@ def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
         chamadas["pi"] += 1
         return pi_original(*a, **kw)
 
+    def pi_arquivo_contado(*a, **kw):
+        chamadas["pi_arquivo"] += 1
+        return pi_arquivo_original(*a, **kw)
+
     monkeypatch.setattr(cs, "linhas_claude", claude_contado)
     monkeypatch.setattr(cs, "linhas_pi", pi_contado)
+    monkeypatch.setattr(cs, "_linhas_arquivo_pi", pi_arquivo_contado)
 
     cs.coletar()
     cs.coletar()
-    assert chamadas == {"claude": 2, "pi": 1}, "pi cacheia por assinatura; claude roda a cada coletar()"
+    # `pi` conta 4: `linhas_omp` passa por `linhas_pi` também (raiz do omp ausente → vazio).
+    assert chamadas == {"claude": 2, "pi": 4, "pi_arquivo": 1}, \
+        "árvore roda a cada coletar(); o arquivo do Pi é lido uma vez enquanto não muda"
 
 
 def test_linhas_omp_le_a_raiz_do_omp_com_source_omp_e_model_change_novo(tmp_path, monkeypatch):

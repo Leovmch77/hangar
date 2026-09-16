@@ -14,11 +14,11 @@ import json
 import logging
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import codex_contas, costs_claude_transcript, pricing
+from app import codex_contas, costs_cache, costs_claude_transcript, pricing
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
 from app.config import list_config_dirs
@@ -47,6 +47,18 @@ class UsageRow:
     codex_long_context: bool = False
     cache_write_1h: int = 0
     fast: bool = False        # modo rápido do Claude: a mesma resposta custa o dobro
+
+    def para_dict(self) -> dict:
+        d = asdict(self)
+        d["ts"] = self.ts.isoformat()
+        return d
+
+    @classmethod
+    def de_dict(cls, d: dict) -> "UsageRow | None":
+        try:
+            return cls(**{**d, "ts": datetime.fromisoformat(d["ts"])})
+        except (KeyError, TypeError, ValueError):
+            return None
 
 
 def _ler_jsonl(path: Path) -> Iterator[dict]:
@@ -306,46 +318,50 @@ def linhas_pi(raiz: Path | None = None, source: str = "pi") -> list[UsageRow]:
     raiz = raiz if raiz is not None else raiz_pi()
     if not raiz.is_dir():
         return []
-    out: list[UsageRow] = []
-    for arq in raiz.rglob("*.jsonl"):
-        cwd = modelo = prov = ""
-        ts = None
-        acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-        viu = False
-        for d in _ler_jsonl(arq):
-            t = d.get("type")
-            if t == "session":
-                cwd = d.get("cwd") or cwd
-                ts = _quando(d.get("timestamp")) or ts
-            elif t == "model_change":
-                # Pi: provider + modelId separados. omp: um campo só, "provider/id".
-                if d.get("model") and "/" in str(d["model"]):
-                    prov, modelo = str(d["model"]).split("/", 1)
-                else:
-                    prov = d.get("provider") or prov
-                    modelo = d.get("modelId") or modelo
-            elif t == "message":
-                msg = d.get("message")
-                u = msg.get("usage") if isinstance(msg, dict) else None
-                if isinstance(u, dict):
-                    viu = True
-                    for k in acc:
-                        acc[k] += _int(u.get(k))
-        if not viu or ts is None:
-            continue
-        # session_id pelo caminho RELATIVO, não pelo `arq.stem`: todo subagente se chama
-        # `session.jsonl`, então o stem seria a string "session" para TODOS eles, de todas as
-        # sessões — indistinguíveis. Hoje não corrompe soma (não há dedup entre linhas do Pi),
-        # mas deixaria o campo inútil pra qualquer drill-down.
-        sid = str(arq.relative_to(raiz).with_suffix(""))
-        out.append(UsageRow(
-            ts=ts, source=source, provider=pricing.canonizar_provedor(prov) or "?",
-            model=modelo or "?",
-            project=cwd or PROJETO_DESCONHECIDO, session_id=sid,
-            input=acc["input"], output=acc["output"],
-            cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
-        ))
-    return out
+    pares = costs_cache.varrer_cacheado(
+        source, raiz, raiz.rglob("*.jsonl"), lambda arq: _linhas_arquivo_pi(arq, raiz, source),
+        UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
+    return [r for _, linhas in pares for r in linhas]
+
+
+def _linhas_arquivo_pi(arq: Path, raiz: Path, source: str) -> list[UsageRow]:
+    cwd = modelo = prov = ""
+    ts = None
+    acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+    viu = False
+    for d in _ler_jsonl(arq):
+        t = d.get("type")
+        if t == "session":
+            cwd = d.get("cwd") or cwd
+            ts = _quando(d.get("timestamp")) or ts
+        elif t == "model_change":
+            # Pi: provider + modelId separados. omp: um campo só, "provider/id".
+            if d.get("model") and "/" in str(d["model"]):
+                prov, modelo = str(d["model"]).split("/", 1)
+            else:
+                prov = d.get("provider") or prov
+                modelo = d.get("modelId") or modelo
+        elif t == "message":
+            msg = d.get("message")
+            u = msg.get("usage") if isinstance(msg, dict) else None
+            if isinstance(u, dict):
+                viu = True
+                for k in acc:
+                    acc[k] += _int(u.get(k))
+    if not viu or ts is None:
+        return []
+    # session_id pelo caminho RELATIVO, não pelo `arq.stem`: todo subagente se chama
+    # `session.jsonl`, então o stem seria a string "session" para TODOS eles, de todas as
+    # sessões — indistinguíveis. Hoje não corrompe soma (não há dedup entre linhas do Pi),
+    # mas deixaria o campo inútil pra qualquer drill-down.
+    sid = str(arq.relative_to(raiz).with_suffix(""))
+    return [UsageRow(
+        ts=ts, source=source, provider=pricing.canonizar_provedor(prov) or "?",
+        model=modelo or "?",
+        project=cwd or PROJETO_DESCONHECIDO, session_id=sid,
+        input=acc["input"], output=acc["output"],
+        cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
+    )]
 
 
 def linhas_omp() -> list[UsageRow]:
@@ -384,49 +400,55 @@ def linhas_kimi() -> list[UsageRow]:
     raiz = raiz_kimi()
     if not raiz.is_dir():
         return []
+    pares = costs_cache.varrer_cacheado(
+        "kimi", raiz, raiz.rglob("wire.jsonl"), _linhas_wire_kimi,
+        UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
+    # O projeto vem do session_index, não do wire — aplicado DEPOIS do cache, senão uma linha
+    # gravada antes de o índice conhecer a sessão ficaria "desconhecido" até o wire mudar.
     index = _kimi_index()
-    out: list[UsageRow] = []
-    for arq in raiz.rglob("wire.jsonl"):
-        acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-        modelo = ""
-        ts = None
-        viu = False
-        for d in _ler_jsonl(arq):
-            if d.get("type") != "usage.record":
-                continue
-            u = d.get("usage")
-            if not isinstance(u, dict):
-                continue
-            viu = True
-            modelo = d.get("model") or modelo
-            t = d.get("time")
-            if isinstance(t, (int, float)):
-                ts = datetime.fromtimestamp(t / 1000.0, LOCAL)
-            acc["input"] += _int(u.get("inputOther"))
-            acc["output"] += _int(u.get("output"))
-            acc["cacheRead"] += _int(u.get("inputCacheRead"))
-            acc["cacheWrite"] += _int(u.get("inputCacheCreation"))
-        if not viu or ts is None:
+    return [replace(r, project=index.get(r.session_id) or PROJETO_DESCONHECIDO)
+            for _, linhas in pares for r in linhas]
+
+
+def _linhas_wire_kimi(arq: Path) -> list[UsageRow]:
+    acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+    modelo = ""
+    ts = None
+    viu = False
+    for d in _ler_jsonl(arq):
+        if d.get("type") != "usage.record":
             continue
-        # session_id = nome do sessionDir (session_<uuid>) — o stem seria "wire" pra TODOS
-        # (mesmo caso do session.jsonl do Pi, ver linhas_pi).
-        sid = arq.parent.parent.parent.name
-        # Modelo vem como ALIAS ("apikey/k3"); o provedor e o prefixo. Canoniza como os demais.
-        prov = modelo.split("/", 1)[0] if "/" in modelo else ""
-        out.append(UsageRow(
-            ts=ts, source="kimi", provider=pricing.canonizar_provedor(prov) or prov or "?",
-            model=modelo or "?",
-            project=index.get(sid) or PROJETO_DESCONHECIDO, session_id=sid,
-            input=acc["input"], output=acc["output"],
-            cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
-            subagente=kimi_sessions.is_subagent_wire(str(arq)),
-        ))
-    return out
+        u = d.get("usage")
+        if not isinstance(u, dict):
+            continue
+        viu = True
+        modelo = d.get("model") or modelo
+        t = d.get("time")
+        if isinstance(t, (int, float)):
+            ts = datetime.fromtimestamp(t / 1000.0, LOCAL)
+        acc["input"] += _int(u.get("inputOther"))
+        acc["output"] += _int(u.get("output"))
+        acc["cacheRead"] += _int(u.get("inputCacheRead"))
+        acc["cacheWrite"] += _int(u.get("inputCacheCreation"))
+    if not viu or ts is None:
+        return []
+    # session_id = nome do sessionDir (session_<uuid>) — o stem seria "wire" pra TODOS
+    # (mesmo caso do session.jsonl do Pi, ver linhas_pi).
+    sid = arq.parent.parent.parent.name
+    # Modelo vem como ALIAS ("apikey/k3"); o provedor e o prefixo. Canoniza como os demais.
+    prov = modelo.split("/", 1)[0] if "/" in modelo else ""
+    return [UsageRow(
+        ts=ts, source="kimi", provider=pricing.canonizar_provedor(prov) or prov or "?",
+        model=modelo or "?",
+        project=PROJETO_DESCONHECIDO, session_id=sid,
+        input=acc["input"], output=acc["output"],
+        cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
+        subagente=kimi_sessions.is_subagent_wire(str(arq)),
+    )]
 
 
-# Pi/OMP/Kimi invalidam por árvore; Codex por arquivo, para um turno novo não reler a conta inteira.
-_cache: dict[str, tuple[tuple, list[UsageRow]]] = {}
-_cache_codex: dict[tuple[str, Path], tuple[tuple[int, int], list[UsageRow]]] = {}
+# Suba ao mudar o UsageRow ou a regra de um leitor, senão o cache velho é servido pra sempre.
+CACHE_VERSAO = 1
 # O endpoint é `def` e roda no threadpool: celular + desktop + peer batendo juntos com cache frio
 # fariam N parses simultâneos do mesmo arquivo. Precedente: engines.py:58.
 # ponytail: a trava cobre o CORPO INTEIRO de coletar() (walk de Codex/Pi + parse das três
@@ -435,18 +457,19 @@ _cache_codex: dict[tuple[str, Path], tuple[tuple[int, int], list[UsageRow]]] = {
 _cache_lock = threading.Lock()
 
 
+class Aquecendo(Exception):
+    """A coleta está ocupada com uma varredura longa (primeira leitura) e o chamador não quis
+    esperar. Carrega (lidos, total) pra tela mostrar progresso em vez de 'não respondeu'."""
+
+    def __init__(self, lidos: int, total: int):
+        super().__init__(f"aquecendo {lidos}/{total}")
+        self.lidos = lidos
+        self.total = total
+
+
 def invalidar_cache() -> None:
     with _cache_lock:
-        _cache.clear()
-        _cache_codex.clear()
-
-
-def _assinatura(p: Path) -> tuple[int, int] | None:
-    try:
-        st = p.stat()
-    except OSError:
-        return None
-    return (st.st_mtime_ns, st.st_size)
+        costs_cache.invalidar()
 
 
 def account_info(config_dir: Path, fallback_label: str) -> tuple[str, str | None, str]:
@@ -527,62 +550,52 @@ def _rollouts_codex_por_conta(accounts: list[codex_contas.Account]) \
     return result
 
 
-def coletar() -> list[UsageRow]:
-    """Todas as linhas das três fontes. NUNCA vai à rede."""
+def coletar(esperar: float | None = None) -> list[UsageRow]:
+    """Todas as linhas das quatro fontes. NUNCA vai à rede.
+
+    `esperar` é quanto tempo aceitar ficar na fila atrás de outra coleta: o endpoint passa uns
+    segundos e recebe `Aquecendo` se a primeira varredura (máquina nova) ainda estiver rodando;
+    o aquecimento de boot passa None e espera o que precisar.
+    """
+    if not _cache_lock.acquire(timeout=-1 if esperar is None else esperar):
+        raise Aquecendo(*costs_cache.progresso_total())
+    try:
+        return _coletar()
+    finally:
+        _cache_lock.release()
+
+
+def _coletar() -> list[UsageRow]:
     out: list[UsageRow] = []
-    with _cache_lock:
-        # O Claude não tem entrada própria aqui (era `_assinatura` do costs.jsonl): quem
-        # cacheia agora é o costs_claude_transcript, por RAIZ e por ARQUIVO (Task 1) — uma
-        # segunda camada de cache aqui só duplicaria a invalidação sem ganhar nada.
-        for caminho, account_id in _config_dirs():
-            out.extend(linhas_claude(Path(caminho), account_id))
+    # Cada fonte cacheia por RAIZ e por ARQUIVO no costs_cache; aqui só se junta.
+    for caminho, account_id in _config_dirs():
+        out.extend(linhas_claude(Path(caminho), account_id))
 
-        por_conta = _rollouts_codex_por_conta(_contas_codex())
-        presentes: set[tuple[str, Path]] = set()
-        for owner, caminhos in por_conta.values():
-            home = owner.home.expanduser().absolute().resolve(strict=False)
-            identidade = f"codex:{home}"
-            _ROTULOS[identidade] = f"Codex · {owner.id}"
-            for path in sorted(caminhos):
-                sig = _assinatura(path)
-                if sig is None:
-                    continue
-                chave = (identidade, path)
-                presentes.add(chave)
-                hit = _cache_codex.get(chave)
-                if hit is None or hit[0] != sig:
-                    linhas = [replace(r, provider=identidade) if r.provider == "openai" else r
-                              for r in _linhas_rollout_codex(path, identidade)]
-                    hit = (sig, linhas)
-                    _cache_codex[chave] = hit
-                out.extend(hit[1])
-        for chave in _cache_codex.keys() - presentes:
-            del _cache_codex[chave]
+    por_conta = _rollouts_codex_por_conta(_contas_codex())
+    for owner, caminhos in por_conta.values():
+        home = owner.home.expanduser().absolute().resolve(strict=False)
+        identidade = f"codex:{home}"
+        _ROTULOS[identidade] = f"Codex · {owner.id}"
 
-        for nome, raiz, leitor in (("pi", raiz_pi(), linhas_pi),
-                                   ("omp", raiz_omp(), linhas_omp),
-                                   ("kimi", raiz_kimi(), linhas_kimi)):
-            if nome == "omp" and raiz == raiz_pi():
-                # PI_CODING_AGENT_DIR aponta pra árvore do pi-coding-agent: os dois caem na
-                # MESMA pasta, e contar de novo como "omp" dobraria o gasto. Avisa uma vez:
-                # "omp sem gasto" no relatório precisa ter causa no log, não parecer zero real.
-                if not _AVISOU_RAIZ_UNICA:
-                    _AVISOU_RAIZ_UNICA.add(str(raiz))
-                    _log.warning("custos: omp e pi na mesma raiz (%s) — gasto do omp somado como pi", raiz)
-                _cache.pop(nome, None)
-                continue
-            if not raiz.is_dir():
-                _cache.pop(nome, None)
-                continue
-            # O caro do Codex e do Pi é o walk, e é preciso andar pra descobrir os mtimes — então
-            # a chave é o conjunto de (arquivo, mtime, tamanho), calculado no próprio walk.
-            padrao = "rollout-*.jsonl" if nome == "codex" else ("wire.jsonl" if nome == "kimi"
-                                                                else "*.jsonl")
-            sig_dir = tuple(sorted(
-                (str(p), *(_assinatura(p) or (0, 0))) for p in raiz.rglob(padrao)))
-            hit = _cache.get(nome)
-            if hit is None or hit[0] != sig_dir:
-                hit = (sig_dir, leitor())
-                _cache[nome] = hit
-            out.extend(hit[1])
+        def ler(path: Path, identidade: str = identidade) -> list[UsageRow]:
+            return [replace(r, provider=identidade) if r.provider == "openai" else r
+                    for r in _linhas_rollout_codex(path, identidade)]
+
+        pares = costs_cache.varrer_cacheado(
+            f"codex-{owner.id}", home, sorted(caminhos), ler,
+            UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
+        out.extend(r for _, linhas in pares for r in linhas)
+
+    for nome, raiz, leitor in (("pi", raiz_pi(), linhas_pi),
+                               ("omp", raiz_omp(), linhas_omp),
+                               ("kimi", raiz_kimi(), linhas_kimi)):
+        if nome == "omp" and raiz == raiz_pi():
+            # PI_CODING_AGENT_DIR aponta pra árvore do pi-coding-agent: os dois caem na
+            # MESMA pasta, e contar de novo como "omp" dobraria o gasto. Avisa uma vez:
+            # "omp sem gasto" no relatório precisa ter causa no log, não parecer zero real.
+            if not _AVISOU_RAIZ_UNICA:
+                _AVISOU_RAIZ_UNICA.add(str(raiz))
+                _log.warning("custos: omp e pi na mesma raiz (%s) — gasto do omp somado como pi", raiz)
+            continue
+        out.extend(leitor())
     return out
