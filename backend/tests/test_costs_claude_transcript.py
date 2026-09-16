@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import costs_claude_transcript as ct
+from app import costs_cache as cc, costs_claude_transcript as ct
 
 
 def _escrever(p: Path, linhas: list[dict]) -> None:
@@ -22,7 +22,7 @@ def _turno(model: str, i: int, o: int, cw: int, cr: int, ts: str, sid: str = "s1
 
 @pytest.fixture(autouse=True)
 def _limpo(tmp_path, monkeypatch):
-    monkeypatch.setattr(ct, "_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(cc, "_CACHE_DIR", tmp_path / "cache")
     ct.invalidar_cache()
     yield
     ct.invalidar_cache()
@@ -163,7 +163,7 @@ def test_cache_de_versao_antiga_e_RELIDO(tmp_path, monkeypatch):
     o resultado seria o mesmo e o teste passaria sem provar nada."""
     _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 3, 0, 0, 0, "2026-07-01T10:00:00Z")])
     ct.varrer(tmp_path)
-    p = ct._caminho_cache(tmp_path)
+    p = cc.caminho_cache("transcripts", tmp_path)
     d = json.loads(p.read_text(encoding="utf-8"))
     d["versao"] = ct.CACHE_VERSAO - 1
     p.write_text(json.dumps(d), encoding="utf-8")
@@ -178,7 +178,7 @@ def test_cache_corrompido_nao_derruba(tmp_path):
     levantar — o pior caso aceitável é reler."""
     _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 4, 0, 0, 0, "2026-07-01T10:00:00Z")])
     ct.varrer(tmp_path)
-    p = ct._caminho_cache(tmp_path)
+    p = cc.caminho_cache("transcripts", tmp_path)
     for lixo in ("null", "[1,2]", '{"versao": 1, "itens": {"x": {"sig": ["abc", 1]}}}'):
         p.write_text(lixo, encoding="utf-8")
         ct.invalidar_cache()
@@ -191,7 +191,7 @@ def test_cache_com_bytes_invalidos_nao_derruba(tmp_path):
     propagava por `varrer()` até o chamador em vez de virar releitura."""
     _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 4, 0, 0, 0, "2026-07-01T10:00:00Z")])
     ct.varrer(tmp_path)
-    p = ct._caminho_cache(tmp_path)
+    p = cc.caminho_cache("transcripts", tmp_path)
     p.write_bytes(b"\xff\xfe\x00lixo")
     ct.invalidar_cache()
     assert len(ct.varrer(tmp_path)) == 1
@@ -205,7 +205,7 @@ def test_falha_ao_gravar_cache_nao_derruba(tmp_path, monkeypatch):
     def explode(*a, **kw):
         raise OSError("disco cheio")
 
-    monkeypatch.setattr(ct, "_gravar_cache", explode)
+    monkeypatch.setattr(cc, "_gravar", explode)
     assert len(ct.varrer(tmp_path)) == 1
 
 

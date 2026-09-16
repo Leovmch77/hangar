@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from app import costs_cache as cc
 from app import costs_claude_transcript as ct
-from app import codex_contas
 from app import codex_contas
 from app import costs_sources as cs
 from app import pricing
@@ -16,11 +16,11 @@ def _pricing_isolado(tmp_path, monkeypatch):
     ~/.claude/.hangar-pricing/ e passa ou falha conforme o estado da máquina — não do
     código. Mesma fixture do test_pricing.py.
 
-    `ct._CACHE_DIR` também precisa de isolamento agora que `linhas_claude` delega pro transcript
+    `cc._CACHE_DIR` também precisa de isolamento agora que `linhas_claude` delega pro transcript
     (Task 2): sem isto, cada teste grava um arquivo de cache real em
     ~/.claude/.hangar-custos/ — lixo que se acumula a cada rodada da suíte."""
     monkeypatch.setattr(pricing, "_CACHE_DIR", tmp_path / "pricing")
-    monkeypatch.setattr(ct, "_CACHE_DIR", tmp_path / "custos")
+    monkeypatch.setattr(cc, "_CACHE_DIR", tmp_path / "custos")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
     # getattr: `cs.invalidar_cache` só nasce na Task 6; até lá o no-op mantém a fixture válida

@@ -15,24 +15,19 @@ constante; refazer a medição do Step 6 da Task 2 antes de confiar neles de nov
 REGRA DE ACUMULAÇÃO: aqui é SOMA por turno. O `costs.jsonl` era cumulativo (última linha
 vence). Trocar a regra entre as fontes não quebra nada e devolve número plausível e errado.
 
-CACHE EM DISCO, e POR RAIZ: a varredura fria mede 13,6s sobre 3.202 arquivos e 5,2 GB, contra
-o `AbortSignal.timeout(4000)` do cliente. Cache só em memória pagaria isso a cada restart; um
-cache global de raiz única seria apagado pela segunda conta configurada.
+CACHE EM DISCO, e POR RAIZ (`costs_cache`): a varredura fria mede 13,6s sobre 3.202 arquivos e
+5,2 GB, contra o `AbortSignal.timeout(4000)` do cliente. Cache só em memória pagaria isso a cada
+restart; um cache global de raiz única seria apagado pela segunda conta configurada.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import logging
 import os
-import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import atomico, pricing
-
-_log = logging.getLogger(__name__)
+from app import costs_cache, pricing
 
 # `LOCAL` é cópia proposital: `costs_sources` vai importar ESTE módulo, então importar de lá
 # fecharia ciclo. Não "arrume" unificando — quebra o import.
@@ -44,10 +39,6 @@ CACHE_VERSAO = 3
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
 _DIR_SUBAGENTE = "subagents"
-
-_CACHE_DIR = Path.home() / ".claude" / ".hangar-custos"
-_lock = threading.Lock()
-_mem: dict[str, dict[str, tuple[tuple[int, int], list[dict]]]] = {}
 
 
 @dataclass(frozen=True)
@@ -146,55 +137,7 @@ def ler_transcript(path: Path) -> list[UsoSessao]:
 
 
 def invalidar_cache() -> None:
-    global _mem
-    with _lock:
-        _mem = {}
-
-
-def _caminho_cache(raiz: Path) -> Path:
-    """Um arquivo por RAIZ. Cache único seria apagado pela segunda conta configurada."""
-    h = hashlib.sha256(str(raiz.resolve()).encode()).hexdigest()[:16]
-    return _CACHE_DIR / f"transcripts-{h}.json"
-
-
-def _ler_cache(raiz: Path) -> dict[str, tuple[tuple[int, int], list[dict]]]:
-    chave = str(raiz)
-    if chave in _mem:
-        return _mem[chave]
-    bruto = None
-    try:
-        bruto = json.loads(_caminho_cache(raiz).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        bruto = None
-    # Exigir dict: JSON válido do tipo errado (null, lista) não levanta ValueError.
-    if not isinstance(bruto, dict) or bruto.get("versao") != CACHE_VERSAO:
-        _mem[chave] = {}
-        return _mem[chave]
-    itens = bruto.get("itens")
-    out: dict[str, tuple[tuple[int, int], list[dict]]] = {}
-    if isinstance(itens, dict):
-        for k, v in itens.items():
-            # try por ITEM: `{"sig": ["abc", 1]}` é JSON válido e levantaria ValueError aqui,
-            # fora do try do json.loads — mesmo formato de acidente do statusline.read().
-            try:
-                sig = v["sig"]
-                out[k] = ((int(sig[0]), int(sig[1])), v.get("uso"))
-            except (KeyError, TypeError, ValueError, IndexError):
-                continue
-    _mem[chave] = out
-    return out
-
-
-def _gravar_cache(raiz: Path, estado: dict) -> None:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    payload = {"versao": CACHE_VERSAO,
-               "itens": {k: {"sig": [s[0], s[1]], "uso": u} for k, (s, u) in estado.items()}}
-    destino = _caminho_cache(raiz)
-    # pid no tmp: dois processos gravando com nome fixo fariam o rename promover bytes
-    # entrelaçados — mesmo furo que o hangar_panel_common.py já corrigiu.
-    tmp = destino.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    atomico.substituir(tmp, destino)
+    costs_cache.invalidar()
 
 
 def _serializar(u: UsoSessao) -> dict:
@@ -221,43 +164,15 @@ def varrer(raiz: Path) -> list[UsoSessao]:
     """Todas as sessões de UMA raiz de projetos. Nunca vai à rede."""
     if not raiz.is_dir():
         return []
-    with _lock:
-        cache = _ler_cache(raiz)
-        novo: dict[str, tuple[tuple[int, int], list[dict]]] = {}
-        out: list[UsoSessao] = []
-        mudou = False
-        for p in raiz.rglob("*.jsonl"):
-            try:
-                st = p.stat()
-            except OSError:
-                continue
-            chave = str(p)
-            sig = (st.st_mtime_ns, st.st_size)
-            hit = cache.get(chave)
-            usos = []
-            if hit is not None and hit[0] == sig:
-                usos = [_desserializar(item) for item in hit[1]] if isinstance(hit[1], list) else [None]
-                # entrada gravada que não desserializa é MISS: mantê-la faria a sessão sumir
-                # da conta e nunca ser relida, porque o sig continua batendo.
-                if any(uso is None for uso in usos):
-                    hit = None
-            if hit is None or hit[0] != sig:
-                mudou = True
-                usos = ler_transcript(p)
-                novo[chave] = (sig, [_serializar(uso) for uso in usos])
-            else:
-                novo[chave] = hit
-            for uso in usos:
-                # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
-                # (medido: 168 de 446 ids repetidos entre arquivos).
-                out.append(replace(uso, session_id=str(p.relative_to(raiz).with_suffix(""))))
-        if len(novo) != len(cache):
-            mudou = True
-        if mudou:
-            # Cache é otimização: falha aqui vira log, nunca 500 no /api/costs.
-            try:
-                _gravar_cache(raiz, novo)
-            except OSError as e:
-                _log.warning("cache de transcript não pôde ser gravado: %r", e)
-        _mem[str(raiz)] = novo
+    out: list[UsoSessao] = []
+    # `ler_transcript` resolvido na chamada, não capturado: o teste prova o cache trocando o
+    # nome no módulo e contando chamadas.
+    pares = costs_cache.varrer_cacheado(
+        "transcripts", raiz, raiz.rglob("*.jsonl"), lambda p: ler_transcript(p),
+        _serializar, _desserializar, CACHE_VERSAO)
+    for p, usos in pares:
+        for uso in usos:
+            # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
+            # (medido: 168 de 446 ids repetidos entre arquivos).
+            out.append(replace(uso, session_id=str(p.relative_to(raiz).with_suffix(""))))
     return out
