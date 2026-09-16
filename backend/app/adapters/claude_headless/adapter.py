@@ -548,6 +548,38 @@ class ClaudeHeadlessAdapter:
         await self._encerrar(sess)
         await self.ensure_running(sess.name)
 
+    def motivo_recarga(self, sess: _Sessao) -> str | None:
+        """Por que o processo desta sessão está desatualizado, ou None. Hoje um motivo só: a
+        config da conta (`.claude.json` com os MCP, `settings.json`) mudou depois de ele subir —
+        o `claude -p` só relê isso quando nasce, e sem terminal não existe `/mcp reconnect`."""
+        subiu = ((sess.meta or {}).get("cano") or {}).get("ts")
+        if not subiu:
+            return None
+        agora = time.monotonic()
+        cache = getattr(sess, "_recarga_cache", None)
+        if cache and agora - cache[0] < 10:
+            return cache[1]
+        raiz = Path(sess.meta.get("config_dir") or (Path.home() / ".claude")).expanduser()
+        mudou = False
+        for arq in (raiz / ".claude.json", raiz / "settings.json"):
+            try:
+                mudou = mudou or arq.stat().st_mtime > float(subiu)
+            except OSError:
+                continue
+        motivo = "config" if mudou else None
+        sess._recarga_cache = (agora, motivo)   # type: ignore[attr-defined]
+        return motivo
+
+    async def recarregar(self, name: str) -> None:
+        """Encerra o processo e sobe outro com `--resume`, na mesma conversa. Quem chama já
+        garantiu sessão ociosa e nada em aberto (a rota); parada, só acorda."""
+        sess = self._sessions.get(name)
+        if sess is not None and sess.vivo:
+            pid = ((sess.meta or {}).get("cano") or {}).get("pid")
+            await self._encerrar(sess)
+            _esquecer_cano(name, pid)
+        self.acordar(name)
+
     async def _encerrar(self, sess: _Sessao) -> None:
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
         sem o pop ela seguiria "viva" e o próximo prompt não subiria outro processo."""
@@ -1468,6 +1500,7 @@ class ClaudeHeadlessAdapter:
             label = f"{label or 'Trabalhando…'} {contas}"
         return StateEvent(session=sess.name, state=state, label=label, headless=True,
                           question=question, options=options,
+                          recarregar_motivo=self.motivo_recarga(sess),
                           status_line=self.status_line(sess),
                           claude_permission_mode=sess.permission_mode,
                           claude_previous_non_plan=sess.modo_nao_plan,
@@ -1954,7 +1987,7 @@ async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str,
     if tarefas is not None:
         tarefas.add(ceifador)
         ceifador.add_done_callback(tarefas.discard)
-    return {"pid": proc.pid, "escuta": escuta, "token": token}, proc
+    return {"pid": proc.pid, "escuta": escuta, "token": token, "ts": time.time()}, proc
 
 
 def _escuta_nova(key: str, pasta: Path | None = None) -> tuple[str, str | None]:

@@ -292,6 +292,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Claude sem terminal estaciona depois de `_OCIOSA_S` (65 min) parado** e sem nada em aberto: o
   processo sai, o sidecar fica, o próximo prompt sobe com `--resume`. Quem encerra por dentro tira
   a sessão da memória (`_encerrar`) — saída nossa não marca `returncode`.
+- **Claude sem terminal só relê MCP/hooks/settings quando o processo nasce**: não há `/mcp
+  reconnect` em `-p`. Recarregar = `_encerrar` + `acordar` (sobe com `--resume`), só ociosa. O
+  motivo vai no `state` (`recarregar_motivo`, mtime da config da conta > `cano.ts`) e a tela só
+  oferece o botão com motivo; no menu ele fica sempre.
 - **Claude sem terminal que não sobe para em `_TETO_SUBIDAS`**, com espera sob a trava de spawn
   (todo gatilho de drain passa por ela). A mensagem fica `desistiu` e o problema na faixa; só ação
   do usuário (`acordar`) abre outra rodada. Sessão com processo morto não é entregável.

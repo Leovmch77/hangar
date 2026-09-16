@@ -34,7 +34,9 @@ export const LARGURA_TRILHO = 36;
 // --recuo-esq do Chat roubando largura do cartão; o item A (recuo zero) resolveu e o teto de 440
 // em 1280 passou a caber com folga. Medido na rodada 2.)
 export const LARGURA_MIN = 240;
-export const LARGURA_MAX = 560;
+// 560 limitava demais: subagente, diff e atividade cabem melhor largos. O teto real continua
+// sendo a tela menos a reserva da conversa e da barra lateral (`tetoLargura`).
+export const LARGURA_MAX = 960;
 export const RESERVA_VISOR = 560;
 export const RESERVA_NAV = 280;
 

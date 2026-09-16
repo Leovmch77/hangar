@@ -268,6 +268,9 @@ class StateEvent(BaseModel):
     # consulta é a do servidor ATIVO: sessão de outro servidor (ou lista que ainda não chegou)
     # não diria que não há terminal, e o botão dele aparecia.
     headless: bool = False
+    # Sem terminal: o processo está desatualizado por este motivo ("config" = MCP/settings da conta
+    # mudaram depois de ele subir) e a tela oferece Recarregar. None = nada a fazer.
+    recarregar_motivo: Optional[str] = None
     # Comandos de background que a sessao deixou rodando com o turno JA encerrado (a TUI do Claude
     # chama de "N shells still running"). Lista vazia no caso normal. Existe porque uma sessao
     # parada com um comando pendurado nao e uma sessao trabalhando: o estado e `idle` e o chip diz

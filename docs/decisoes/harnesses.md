@@ -1244,6 +1244,20 @@ seguinte encontrava a sessão morta, `deliverable` dava falso e nada subia. `_en
 `_reabrir` já fazia) mata e tira da memória. Com isso: estacionou aos 21s, sidecar sem `cano`, o
 prompt seguinte subiu com `resume=True` e respondeu a palavra combinada no primeiro turno.
 
+## Claude sem terminal: Recarregar recicla o processo pra reler a config (16/09/2026)
+
+Registrado o MCP `hangar` na conta, a sessão `hangar-2` (processo de 05:57) continuou sem as
+tools: `/mcp` respondia "No MCP servers are configured", porque em `-p` a CLI lê `.claude.json`
+só ao nascer e não tem reconexão. O único caminho que já existia era o `estacionar` dos 65 min.
+`recarregar` faz o mesmo par (`_encerrar` + `acordar`, subida com `--resume`) na hora, atrás da
+mesma guarda de ociosa da troca de modo. O motivo é calculado, não adivinhado: o cano ganhou
+`ts` na subida, e `motivo_recarga` compara com o mtime de `.claude.json`/`settings.json` da
+conta (cache de 10s por sessão, porque o `state` sai a cada evento). Prova numa sessão
+descartável: motivo `None` ao nascer; `touch` no `.claude.json` → `config`; `POST /recarregar`
+trocou o pid (633974 → 637293) e o motivo voltou a `None`; o prompt seguinte chamou
+`mcp__hangar__quem_sou` e respondeu o próprio nome. Na tela o botão só aparece com motivo (pill
+acima do composer); no menu "⋯" e na paleta ele fica sempre, bloqueado fora de ociosa.
+
 ## Claude sem terminal que não sobe: teto de subidas (13/09/2026, Windows)
 
 Sessão com `engine` inexistente e prompt na fila gerou 179 quedas `rc=1` em cerca de 1 minuto. O

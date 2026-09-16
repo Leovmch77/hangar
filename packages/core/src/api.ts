@@ -2373,6 +2373,11 @@ export function setModoExecucao(name: string, terminal: boolean): Promise<{ ok: 
   });
 }
 
+/** Recicla o processo da sessão Claude sem terminal na mesma conversa (relê MCP/hooks/settings). Só ociosa (409 com o motivo). */
+export function recarregarSessao(name: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' });
+}
+
 export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-mode`, {

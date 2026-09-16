@@ -47,6 +47,7 @@
     sendInput,
     setPermissionMode,
     setModoExecucao,
+    recarregarSessao,
     steerSession,
     broadcast,
     selectOption,
@@ -908,6 +909,22 @@
       trocandoModo = false;
     }
   }
+  // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra ele reler MCP,
+  // hooks e settings. O motivo vem do backend no `state`; sem motivo a ação fica só no menu.
+  const recarregavel = $derived(sessionProvider === 'claude' && sessionHeadless);
+  const recarregarMotivo = $derived(recarregavel ? (stateEvent?.recarregar_motivo ?? null) : null);
+  let recarregando = $state(false);
+  async function recarregar() {
+    if (recarregando || currentState !== 'idle') return;
+    recarregando = true;
+    try {
+      await recarregarSessao(sessionName);
+    } catch (err) {
+      mostrarAviso(err);
+    } finally {
+      recarregando = false;
+    }
+  }
   // Motor da sessão (null = conta Anthropic) — o Composer usa no placeholder ("Mensagem para …").
   const sessionEngine = $derived(allSessions.find((s) => s.name === sessionName)?.engine ?? null);
   // Transcript desta sessão: a chave da cauda em cache (ver queries.ts). Nulo enquanto a lista não
@@ -1354,12 +1371,18 @@
         keywords: ['terminal', 'headless', 'tui', m.modo_continuar_sem_terminal()],
         group: m.lista_ferramentas(),
       },
+      recarregar: {
+        detail: currentState !== 'idle' ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe(),
+        keywords: ['recarregar', 'reload', 'mcp', 'hooks', 'reiniciar'],
+        group: m.lista_ferramentas(),
+      },
     };
     return {
       id,
       title,
       ...metadata[id],
-      disabled: (id === 'terminal' && currentState === 'dead') || (id === 'modo' && (!modoLivre || trocandoModo)),
+      disabled: (id === 'terminal' && currentState === 'dead') || (id === 'modo' && (!modoLivre || trocandoModo))
+        || (id === 'recarregar' && (currentState !== 'idle' || recarregando)),
       run,
     };
   }
@@ -1374,6 +1397,7 @@
       action('run', m.chat_executar_workflow(), () => (runOpen = true)),
       ...(sessionHeadless ? [] : [action('terminal', m.ctx_terminal(), abrirTerminalReal)]),
       ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
+      ...(recarregavel ? [action('recarregar', m.recarregar_sessao(), recarregar)] : []),
       action('navegador', m.ctx_navegador(), alternarNavegador),
     ]);
     // Ao trocar a key servidor-aware ou desmontar este Chat, nenhum callback pode sobreviver.
@@ -2697,8 +2721,6 @@
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
       onOpenActivity={hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined}
-      {activityBadge}
-      {activityRunning}
       {activity}
       processos={shellsVivos}
       abrirAgente={agenteAberto}
@@ -2889,6 +2911,18 @@
     </button>
   {/if}
 
+  {#if recarregarMotivo && !avisoErr}
+    <!-- O processo desta sessão está desatualizado (config da conta mudou depois de ele subir).
+         Discreto e só enquanto há motivo: some sozinho depois do recarregar. -->
+    <div class="recarga-pill" style:bottom={`calc(${dockH}px + 10px + var(--cp-tts-h, 0px))`} role="status">
+      <span class="recarga-pill-text">{m.recarregar_aviso_config()}</span>
+      <button class="recarga-pill-btn" onclick={recarregar} disabled={currentState !== 'idle' || recarregando}
+              title={currentState !== 'idle' ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe()}>
+        {m.recarregar_agora()}
+      </button>
+    </div>
+  {/if}
+
   {#if avisoErr}
     <!-- Recusa ao responder — opção do picker ou pergunta do stepper (409 do painel de terminal,
          sessão morta, tmux travado). No centro, acima do dock — é sobre o toque que acabou de
@@ -3036,6 +3070,8 @@
              onTrocarModo={modoTrocavel ? trocarModo : undefined}
              modoDestinoTerminal={sessionHeadless}
              modoBloqueado={!modoLivre || trocandoModo}
+             onRecarregar={recarregavel ? recarregar : undefined}
+             recarregarBloqueado={currentState !== 'idle' || recarregando}
              {activityRunning} {activityBadge} />
   <AttachmentsSheet open={anexosOpen} {sessionName} onClose={() => (anexosOpen = false)}
                     onUsarNoDitado={usarAnexoNoDitado} />
@@ -3522,6 +3558,39 @@
      sobre o toque que acabou de acontecer) e em tom de aviso. `--surface-raised` e não
      `--bg-elevated` cru: com papel de parede ligado, superfície dentro do app acompanha o véu de
      transparência em vez de virar retângulo chapado (regra de vidro do CLAUDE.md). */
+  /* Aviso "processo desatualizado": mesmo lugar do tui-pill, sem pulsar — é sugestão, não urgência.
+     Menu flutuante sobre a conversa leva fundo sólido (regra do repo), não vidro. */
+  .recarga-pill {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 21;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    max-width: calc(100% - var(--space-6));
+    padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+    border: 1px solid var(--border-subtle, var(--border));
+    border-radius: var(--radius-full, 999px);
+    background: var(--bg-elevated, var(--bg-base));
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  }
+  .recarga-pill-text { min-width: 0; }
+  .recarga-pill-btn {
+    flex-shrink: 0;
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-full, 999px);
+    background: transparent;
+    color: var(--accent);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .recarga-pill-btn:disabled { opacity: 0.5; cursor: default; }
+
   .aviso-err {
     position: absolute;
     left: 50%;

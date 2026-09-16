@@ -2106,6 +2106,25 @@ async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     return None
 
 
+@app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth)])
+async def recarregar_sessao(name: str):
+    """Recicla o processo de uma sessão Claude sem terminal na mesma conversa (`--resume`): é o
+    jeito de ela reler MCP, hooks e settings da conta. Só ociosa e sem nada em aberto."""
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider != "claude" or not _headless(name):
+        raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
+                                             "recarregar só vale para sessão Claude sem terminal"))
+    hl = get_adapter(CLAUDE_HEADLESS)
+    async with hl.delivery_lock(name):
+        motivo = await _motivo_ocupada(name, True)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        await hl.recarregar(name)
+    return {"ok": True}
+
+
 @app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth)])
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão Claude entre terminal (pane tmux) e sem terminal, na mesma conversa.

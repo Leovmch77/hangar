@@ -68,8 +68,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     runRunning?: boolean;
     onOpenAttachments?: () => void;
     onOpenActivity?: () => void;
-    activityBadge?: number;
-    activityRunning?: boolean;
     // Atividade como ABA daqui (desktop): é estado ao vivo, como o Navegador, e no modal central
     // ela nascia espremida — o conteúdo é do celular, onde a caixa é a tela toda.
     activity?: Activity | null;
@@ -118,7 +116,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenNavegador = undefined,
     onOpenRun = undefined, runRunning = false,
     onOpenAttachments = undefined,
-    onOpenActivity = undefined, activityBadge = 0, activityRunning = false,
+    onOpenActivity = undefined,
     activity = null, processos = [], abrirAgente = null,
     onExpandUsage = undefined, limited = false, limitReset = null,
     working = false,
@@ -129,7 +127,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     toggleExterno = false,
   }: Props = $props();
 
-  const hasActions = $derived(onOpenTerminal || onTrocarModo || onOpenNavegador || onOpenRun || onOpenAttachments || onOpenActivity);
+  const hasActions = $derived(onOpenTerminal || onTrocarModo || onOpenNavegador || onOpenRun || onOpenAttachments);
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
@@ -358,19 +356,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             <path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L16 6"/>
           </svg>
           <span>{m.ctx_anexos()}</span>
-        </button>
-      {/if}
-      {#if onOpenActivity}
-        <button class="ctx-action activity-btn" class:running={activityRunning} onclick={onOpenActivity} aria-label={m.ctx_atividade()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="3 5 4.5 6.5 7 4"/>
-            <polyline points="3 11.5 4.5 13 7 10.5"/>
-            <line x1="10" y1="5.5" x2="20" y2="5.5"/>
-            <line x1="10" y1="12" x2="20" y2="12"/>
-            <line x1="10" y1="18.5" x2="20" y2="18.5"/>
-          </svg>
-          <span>{m.ctx_atividade()}</span>
-          {#if activityBadge > 0}<span class="activity-badge">{activityBadge}</span>{/if}
         </button>
       {/if}
     </div>
@@ -800,7 +785,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .ctx-action:active { background: var(--bg-hover); }
   .ctx-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .ctx-action svg { flex-shrink: 0; width: 18px; height: 18px; }
-  .ctx-action span:not(.activity-badge) {
+  .ctx-action span {
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -819,31 +804,12 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     border-radius: 50%; background: var(--success); animation: pulse-scale 1.6s var(--ease-out) infinite;
   }
 
-  .activity-btn { position: relative; color: var(--text-secondary); }
-  .activity-btn.running { color: var(--accent); }
-  .activity-btn.running svg { animation: breathe 1.5s ease-in-out infinite; }
   @keyframes breathe {
     0%, 100% { opacity: 0.55; transform: scale(0.92); }
     50%      { opacity: 1;    transform: scale(1.05); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .terminal-btn.alert svg, .activity-btn.running svg { animation: none; }
-  }
-
-  .activity-badge {
-    position: absolute;
-    top: 5px;
-    right: 5px;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    border-radius: var(--radius-full);
-    background: var(--accent);
-    color: var(--bg-base);   /* nunca #fff: o neutro do tema ja e quente e tem contraste no indigo */
-    font-size: var(--text-3xs);
-    font-weight: 600;
-    line-height: 16px;
-    text-align: center;
+    .terminal-btn.alert svg { animation: none; }
   }
 
   /* Turno ativo: hairline accent varrendo o TOPO do painel (a irma da work-sweep da NavBar).

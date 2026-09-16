@@ -11,6 +11,8 @@ interface Props {
   onClose: () => void;
   serverId: string;
   name: string;
+  /** Recicla o processo da sessão Claude sem terminal (relê MCP/hooks/settings). Ausente = não se aplica. */
+  recarregar?: { bloqueado: boolean; onPress: () => void };
 }
 
 type Item = {
@@ -18,13 +20,23 @@ type Item = {
   label: string;
   sub?: string;
   route: string;
+  onPress?: () => void;
+  disabled?: boolean;
 };
 
-export function MoreSheet({ open, onClose, serverId, name }: Props) {
+export function MoreSheet({ open, onClose, serverId, name, recarregar }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
 
   const items: Item[] = [
+    ...(recarregar ? [{
+      icon: 'RefreshCw' as IconName,
+      label: m.recarregar_sessao(),
+      sub: recarregar.bloqueado ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe(),
+      route: 'recarregar',
+      onPress: recarregar.onPress,
+      disabled: recarregar.bloqueado,
+    }] : []),
     { icon: 'CircleHelp', label: m.askq_sua_resposta(), route: 'ask' },
     { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
     { icon: 'Repeat', label: m.loop_titulo(), sub: m.loop_objetivo(), route: 'loop' },
@@ -36,9 +48,10 @@ export function MoreSheet({ open, onClose, serverId, name }: Props) {
     { icon: 'Flag', label: m.bastao_dossie_titulo(), sub: m.bastao_dossie_sub(), route: 'bastao' },
   ];
 
-  const go = (route: string) => {
+  const go = (it: Item) => {
     onClose();
-    router.push(`/s/${serverId}/${name}/${route}` as never);
+    if (it.onPress) it.onPress();
+    else router.push(`/s/${serverId}/${name}/${it.route}` as never);
   };
 
   return (
@@ -48,10 +61,12 @@ export function MoreSheet({ open, onClose, serverId, name }: Props) {
         {items.map((it) => (
           <Pressable
             key={it.route}
-            onPress={() => go(it.route)}
-            style={styles.item}
+            onPress={() => go(it)}
+            disabled={it.disabled}
+            style={[styles.item, it.disabled ? { opacity: 0.5 } : null]}
             accessibilityRole="button"
             accessibilityLabel={it.label}
+            accessibilityState={{ disabled: !!it.disabled }}
           >
             <View style={[styles.ico, { backgroundColor: superficie(theme, 0.8) }]}>
               <Icon name={it.icon} size={20} color={theme.tokens.text.secondary} />

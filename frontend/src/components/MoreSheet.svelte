@@ -20,6 +20,9 @@
     onTrocarModo?: () => void;
     modoDestinoTerminal?: boolean;
     modoBloqueado?: boolean;
+    /** Recicla o processo da sessão sem terminal (relê MCP/hooks/settings). Ausente = não é Claude sem terminal. */
+    onRecarregar?: () => void;
+    recarregarBloqueado?: boolean;
     activityRunning?: boolean;
     activityBadge?: number;
   }
@@ -27,6 +30,7 @@
     open, onClose, onRun, runRunning = false,
     onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
+    onRecarregar, recarregarBloqueado = false,
   }: Props = $props();
 
   function pick(fn: () => void) {
@@ -108,6 +112,21 @@
           <span class="label">{modoDestinoTerminal ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}</span>
           <span class="sub">{modoBloqueado ? m.modo_so_ociosa()
             : modoDestinoTerminal ? m.modo_abrir_no_terminal_detalhe() : m.modo_continuar_sem_terminal_detalhe()}</span>
+        </span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+    {/if}
+
+    {#if onRecarregar}
+      <button class="item" onclick={() => pick(onRecarregar)} disabled={recarregarBloqueado}>
+        <span class="ico" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-2.6-6.4" /><path d="M21 3v6h-6" />
+          </svg>
+        </span>
+        <span class="txt">
+          <span class="label">{m.recarregar_sessao()}</span>
+          <span class="sub">{recarregarBloqueado ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe()}</span>
         </span>
         <span class="chev" aria-hidden="true">›</span>
       </button>

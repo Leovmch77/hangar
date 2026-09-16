@@ -14,11 +14,12 @@ import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
 import { TuiPill } from '../../../../src/chat/TuiPill';
+import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
 import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, parseStatusLine, selectOption, interrupt } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, parseStatusLine, selectOption, interrupt, recarregarSessao } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -169,6 +170,11 @@ export default function ChatScreen() {
   const handleSelectOption = (n: number) => {
     void selectOption(name, n).catch((e) => mostrarAviso(e));
   };
+  // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra reler MCP/hooks/
+  // settings. O motivo vem do backend no `state`; sem motivo a ação fica só no "⋯".
+  const recarregavel = currentSession?.provider === 'claude' && !!(stateEvent?.headless ?? currentSession?.headless);
+  const recarregarBloqueado = stateEvent?.state !== 'idle';
+  const recarregar = () => { void recarregarSessao(name).catch((e) => mostrarAviso(e)); };
   const handleCancelOptions = () => {
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
@@ -214,7 +220,8 @@ export default function ChatScreen() {
           ) : null
         }
       />
-      <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} />
+      <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name}
+                 recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
       <KeyboardAvoidingView behavior="padding" style={styles.body}>
@@ -306,6 +313,7 @@ export default function ChatScreen() {
           </Text>
         ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
+        {!servidorSumiu && recarregavel ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
         {!servidorSumiu && !codexPreThread && fetchedSession !== null ? <Composer serverId={serverId} name={name} draft={draft} sessionProvider={provider} /> : null}
       </KeyboardAvoidingView>
     </Screen>
