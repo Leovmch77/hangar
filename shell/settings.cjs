@@ -42,10 +42,12 @@ function urlSemConfig(url) {
   }
 }
 
+// Rota da tela fica; só a query do hash (?config=…, ?srv=… e afins) sai. Recarregar não muda de
+// sessão.
 function urlInicial(url) {
   try {
-    const u = new URL(urlSemConfig(url));
-    u.hash = '#/';
+    const u = new URL(url);
+    u.hash = u.hash.split('?')[0];
     return u.toString();
   } catch {
     return url;

@@ -326,7 +326,7 @@ async function criarJanela() {
         .then(() => console.log('[recarregar] cache do service worker limpo'))
         .catch((err) => console.error('[recarregar] limpeza falhou:', err))
         // `loadURL` não tem o bypass de cache do reloadIgnoringCache; apaga também o cache HTTP
-        // antes de ir para a raiz. Cookies e localStorage continuam preservados.
+        // antes de recarregar a mesma rota, sem a query do hash. Cookies e localStorage continuam preservados.
         .then(() => win.webContents.session.clearCache())
         .catch((err) => console.error('[recarregar] cache HTTP falhou:', err))
         .finally(() => win.loadURL(inicio));

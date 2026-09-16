@@ -14,11 +14,12 @@ test('urlSemConfig preserva servidor e tela de trás, mas não reabre Configura�
   assert.equal(urlSemConfig('https://pc.test/#/chat/sessao'), 'https://pc.test/#/chat/sessao');
 });
 
-test('urlInicial preserva servidor e token, mas volta para a raiz sem Configurações', () => {
+test('urlInicial preserva servidor, token e sessão; só a query do hash sai', () => {
   assert.equal(
     urlInicial('https://pc.test/?token=abc#/chat/local/sessao?config=sobre&srv=local'),
-    'https://pc.test/?token=abc#/',
+    'https://pc.test/?token=abc#/chat/local/sessao',
   );
+  assert.equal(urlInicial('https://pc.test/#/'), 'https://pc.test/#/');
 });
 
 test('ler() em diretório inexistente devolve {}', () => {
