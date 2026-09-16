@@ -5,6 +5,7 @@ import HarnessSettings from './HarnessSettings.svelte';
 import type { Server } from '../../lib/auth';
 import type { IntegracaoCodex } from '../../lib/credenciais';
 import * as m from '../../paraglide/messages';
+import { _limparEsfriamentoParaTestes } from '@hangar/core';
 
 const A: Server = { id: 'a', label: 'A', baseUrl: 'http://a.local', token: 'token-a' };
 const B: Server = { id: 'b', label: 'B', baseUrl: 'http://b.local', token: 'token-b' };
@@ -103,6 +104,9 @@ afterEach(async () => {
   for (const comp of componentes) await unmount(comp);
   vi.useRealTimers(); vi.restoreAllMocks();
   localStorage.clear(); document.body.innerHTML = '';
+  // Um teste que derruba a rede marca o servidor como desligado no core (mapa em memória, não
+  // só no localStorage): sem limpar, todo fetch dos testes seguintes é recusado antes de sair.
+  _limparEsfriamentoParaTestes();
 });
 
 describe('integração do Codex em Harnesses', () => {

@@ -39,8 +39,9 @@ describe('ctxPanel — largura redimensionável (task 17)', () => {
   it('respeita o máximo', async () => {
     const mod = await importarFresco();
     mod.arrastarLargura(0, window.innerWidth); // painel = janela inteira -> clampa no teto
+    // Com o teto absoluto em 960, numa janela de 1600 quem manda é a reserva da conversa e da nav.
     expect(mod.ctxPanel.largura).toBe(Math.min(LARGURA_MAX, 1600 - RESERVA_VISOR - RESERVA_NAV));
-    expect(mod.ctxPanel.largura).toBe(LARGURA_MAX);
+    expect(mod.ctxPanel.largura).toBe(1600 - RESERVA_VISOR - RESERVA_NAV);
   });
 
   it('respeita o mínimo', async () => {
