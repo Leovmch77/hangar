@@ -33,22 +33,30 @@ export function definirProtegido(fn: (id: string) => boolean): void {
   protegido = fn;
 }
 
-function armazem(): Storage | null {
-  // `localStorage` existe no web; no app nativo e nos testes de nó, não. Sem ele o estado é só de
-  // memória — degrada, não quebra.
-  try {
-    return typeof globalThis !== 'undefined' && globalThis.localStorage ? globalThis.localStorage : null;
-  } catch {
-    return null;
-  }
+/** O pedaço de `Storage` que este módulo usa. O core não toca DOM: quem tem `localStorage` (o web)
+ *  entrega por `definirArmazem`; no app nativo e nos testes o estado é só de memória. */
+export interface ArmazemEsfriamento {
+  getItem(chave: string): string | null;
+  setItem(chave: string, valor: string): void;
+  removeItem(chave: string): void;
+}
+let armazemAtual: ArmazemEsfriamento | null = null;
+
+export function definirArmazem(a: ArmazemEsfriamento | null): void {
+  armazemAtual = a;
+  carregado = false;   // armazém novo, estado gravado novo
+}
+
+function armazem(): ArmazemEsfriamento | null {
+  return armazemAtual;
 }
 
 function carregar(): void {
   if (carregado) return;
   carregado = true;
-  const bruto = armazem()?.getItem(CHAVE);
-  if (!bruto) return;
   try {
+    const bruto = armazem()?.getItem(CHAVE);
+    if (!bruto) return;
     const ids: unknown = JSON.parse(bruto);
     if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') estados.set(id, { desligado: true });
   } catch (e) {

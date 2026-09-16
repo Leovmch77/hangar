@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora,
+  definirArmazem, definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora,
   _limparEsfriamentoParaTestes,
 } from './esfriamento';
 
@@ -50,23 +50,21 @@ describe('servidor desligado', () => {
     // O iOS descarrega e recarrega o PWA sozinho; com o estado só em memória, cada retomada
     // recomeçava a varredura — foi o que impediu as tentativas de chegarem a zero.
     const guardado = new Map<string, string>();
+    // O core não toca `localStorage`: quem o tem (o web) entrega por `definirArmazem`.
     const falso = {
       getItem: (k: string) => guardado.get(k) ?? null,
       setItem: (k: string, v: string) => void guardado.set(k, v),
       removeItem: (k: string) => void guardado.delete(k),
-    } as unknown as Storage;
-    const antes = globalThis.localStorage;
-    Object.defineProperty(globalThis, 'localStorage', { value: falso, configurable: true });
+    };
+    definirArmazem(falso);
     try {
-      _limparEsfriamentoParaTestes();
       registrarFalha('pc');
       expect(guardado.get('hangar_servidores_desligados')).toContain('pc');
       _limparEsfriamentoParaTestes();          // simula o app subindo de novo…
       guardado.set('hangar_servidores_desligados', JSON.stringify(['pc']));
       expect(estaDesligado('pc')).toBe(true);  // …e a marca continua lá
     } finally {
-      if (antes === undefined) delete (globalThis as { localStorage?: Storage }).localStorage;
-      else Object.defineProperty(globalThis, 'localStorage', { value: antes, configurable: true });
+      definirArmazem(null);
     }
   });
 });

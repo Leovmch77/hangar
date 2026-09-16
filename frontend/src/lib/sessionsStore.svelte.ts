@@ -12,7 +12,7 @@ import { getActiveId, listServers, onServersChanged, type Server } from './auth'
 import { navPelaLista } from './navPelaLista';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
-import { definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
+import { definirArmazem, definirProtegido, estaDesligado, esquecerServidor, registrarFalha, registrarSucesso, retentarAgora } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -67,6 +67,13 @@ function createSessionsStore() {
     const s = servers.find((x) => x.id === id);
     return s ? intocavel(s) : id === getActiveId();
   });
+  // O core não toca DOM: o `localStorage` (que faz a marca sobreviver ao recarregamento do PWA)
+  // entra por aqui. Indisponível (modo privado), fica só em memória — o core avisa no diário.
+  try {
+    definirArmazem(globalThis.localStorage ?? null);
+  } catch {
+    definirArmazem(null);
+  }
 
   function scheduleRetry(id: string) {
     // Marcado como desligado: não reagenda nada. O retry daqui tinha teto de 60s, e pra máquina
