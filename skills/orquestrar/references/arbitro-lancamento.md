@@ -1,180 +1,165 @@
-# Arbiter — the launch (phase 2)
+# Arbiter — launch, sessions and kick-offs
 
-This page belongs to the **moment the team is born**: picking accounts, checking tooling and
-opening the sessions. You read it **once**, before Task 1, and don't come back to it — except to
-open a new session midway (rotation, replacement).
+Read once before Task 1, and again when opening any session or releasing a Task. Back to
+`arbitro.md` once the team stands.
 
-Return to `arbitro.md` as soon as the team is standing.
+## Contract lines you write
 
-## The `Method:`, `Executes with:`, `Domain skill:` and `Route:` lines are yours to write
+- `Method:`, `Executes with:`, `Domain skill:`, `Route:` — mandatory in `regras-<gid>.md`, written before the first session, repeated in every kick-off.
+- No `Method:` → ask the user; write the line with its `Executes with:` before proceeding.
+- `Route:` comes from phase 1 and only escalates, `audit` → `full`, via `replanejar.md`. `audit` has no arbiter: this page is not read.
+- Nobody switches method midway; a switch the user asks for is `replanejar.md`.
+- A user restriction: copy the exact command, the reason with its number, and what remains allowed. Never widen it; in doubt about extent, ask.
 
-All four are mandatory in `regras-<gid>.md`, written at launch, before the first session — and
-**every kick-off repeats them**, because the contract is read once and a kick-off arrives fresh. A
-contract without the `Method:` line has no default to fall back on: **ask the user** and write the
-line (with its `Executes with:`) before proceeding. `Route:` was decided in phase 1 and only
-escalates (`audit` → `full`, via `replanejar.md`) — a contract that says `audit` has no arbiter
-and this page is not read at all. A plan born in one method and executed in another reads
-the work in a format it doesn't have (Task with steps on one side, ticket with criteria on the
-other), so nobody switches midway — a switch the user asks for is `replanejar.md`.
+```markdown
+Forbidden: `<heavy checker>` in this repo — <reason, measured>.
+Allowed: `<cheap variant>` — <what it catches>.
+```
 
-## Before the team: read the machine's account policy
+- Permission to touch an untouchable enters the contract before the dispatch, on the untouchable's line, with scope and date; the kick-off carries the list with the exception inside.
 
-**The policy lives in `~/.hangar/orquestracao-contas.md`, not here.** Read it before opening the
-first session and **copy into the contract only what this work will use**, in the rules'
-`## Quem é quem` table. Don't relay the whole file: sessions choose by what is in the contract.
+```markdown
+Untouchables: <path/to/file>, <other/path>
+  - EXCEPTION: `<file>` released for Task 7, only function `<name>` — user, <date>.
+```
 
-Three reading rules, all three protecting the same thing — the invoice of whoever trusted you:
+- Off-plan Task (finding promoted to work, fresh user request, finishing touch) has no row in `## Quem é quem`: ask one question with a proposal and the measured why, from the cards in `~/.hangar/orq/modelos/` and this journal: "New Task: <what, nature>. I propose <role: session/model/account>, because <history, number>. Keep the plan's team, or switch?" Record the answer as its own row, dated.
 
-- **The table rules, not the prose.** The file has a table of enabled accounts, written by the
-  panel when the user turns an account on or off from the screen. **An account outside the table
-  is forbidden**, even if a paragraph below seems to allow it: prose ages, the table is what they
-  touched last.
-- **An account that charges per token is forbidden.** You discover that an account exists; only
-  the user knows whether it debits. Discovery lists provider, model and address — none of that
-  says whose account it is or whether they want to spend there. A new provider that appeared since
-  the last review **does not enter on its own** — most of a catalog can belong to a per-token
-  provider.
-- **File missing or stale → build the inventory and ask ONE question** (which are allowed, which
-  are subscriptions, which charge), write the answer there with the date, and **open no session**
-  until it arrives — not even "just to test". The survey recipe is inside the file itself.
+## Account policy
 
-**The message "the group's model configuration changed in the panel"** comes from the screen, not
-from a session: the row is already in `regras-<gid>.md`. Re-read the file and apply — switching
-account or model **is** closing and reopening; Claude doesn't switch with the session open:
+- Read `~/.hangar/orquestracao-contas.md` before the first session. Copy into `## Quem é quem` only what this work uses; don't relay the file.
+- The table rules, not the prose. An account outside the table is forbidden.
+- An account that charges per token is forbidden. A newly discovered provider does not enter on its own.
+- File missing or stale → build the inventory (recipe inside the file), ask ONE question (allowed / subscription / charges), write the answer there with the date, open no session until it arrives.
+- Message "the group's model configuration changed in the panel" → re-read the file and apply. Switching account or model = close and reopen. Answer only if the message asks.
 
-| That role's session is… | What to do |
+| That role's session is… | Do |
 |---|---|
-| idle | close it and open another already on the new configuration |
-| working | let it finish; the **next** one is born on the new one. Its context is worth more than the model |
-| you (the arbiter) | finish the task at hand and pass the baton via the "Arbiter succession" rite |
+| idle | close; open another on the new configuration |
+| working | let it finish; the next one is born on the new configuration |
+| you | finish the task at hand; "Arbiter succession" in `arbitro-encerramento.md` |
 
-Answer the message only if it asks for an answer.
+## Locks on model and tools
 
-## Survey the tooling BEFORE opening the team
+- The model is the user's decision. The contract carries the account↔model table per role; a model outside it is not used even to test; the model comes from the ROLE, including bug worktrees and one-off tasks. Need one outside the table → stop and ask.
+- Before creating any session: re-read its row and state in the message which engine/model you use and where it came from.
+- A new session is born on the harness default → switch, read the model back, only then send work.
+- Subagents: same account always; a model switch inside it only where the contract allows; an agent frontmatter `model:` overrides yours.
+- Outside tool (skill, subagent, command), three questions: exists under that name in this account; reads where this round's code is (uncommitted); reads this Task's files (pass paths explicitly). Failed → record why, one line. A tool's silence counts only if you know what it read.
+- Tooling survey, once at launch: subagents (per-language and per-dimension reviewers), skills (click-path audit, security review, production readiness, browser QA, house patterns), marketplace commands. Write into the contract a table per work type: what the reviewer dispatches, what helps the executor.
 
-A new session doesn't know what the machine has. If you don't say, each one reviews and builds by
-whatever method it invents — a reviewer with that part of the contract left blank finds real
-blockers **using none** of the installed review subagents, and the lost coverage is invisible.
+## Launch (phase 2)
 
-One sweep, once, at the start. Then **write into the contract a table per work type** — which
-subagents and skills the reviewer dispatches, and which help the executor deliver. Every new
-session receives it ready, instead of discovering alone (or not discovering).
+Pre-flight:
 
-Look at the three shelves: **subagents** (per-language and per-dimension reviewers — silent
-failure, security, accessibility, test coverage), **skills** (click-path audit, security review,
-production readiness, browser QA, house patterns) and marketplace **commands**.
+```bash
+git status --short                  # dirty tree → the paths become untouchables, one by one
+git branch --show-current
+hangar-send --list                  # who else is alive in this cwd
+tmux display -p '#{session_name}'   # which of those is you
+```
 
-Every tool passes the **three questions** of `SKILL.md` ("An outside tool"); a tool that fails
-them is recorded in the contract with **why it doesn't serve**, one line — worth as much as the
-list of what to use, because it saves the next session a turn of trying.
+- Another session writing in this checkout blocks the launch: resolve it with that session;
+  unresolved → the user decides.
+- Ask where the work runs, at every launch, recommendation first: "Where does this work run?
+  (a) **new branch off `main`** — recommended; (b) directly on `<current branch>`. Proposed
+  name: `<work>`." Never create or switch branches on your own. The answer goes in the contract
+  (`Branch:`, with the date). Pull requested → recheck the plan's numbers afterwards.
+- Green baseline: run every verification command once on the base, before any session. Record
+  `baseline: <command> → <result>, <date>`. Red → the user decides before launch: fix first, or
+  record a known failure the review ignores.
 
-## Opening a session — a recipe, not a decision
+Create, in order: `--new` (five steps below) → `--pair` → read the `gid` in your own sidecar →
+write the contract (skeleton in `planejamento.md`) → kick-offs.
 
-**Exceção: a sessão verificadora é conduzida pelo revisor.** Ele abre, envia o roteiro, registra
-os snapshots de consumo (`consumo.md`) e encerra; você recebe só o parecer de revisão.
-A configuração vem da linha opcional `verificador` do contrato. Sem essa linha, o revisor
-verifica na própria sessão. Não crie nem gerencie o verificador por ele.
+```bash
+hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract"   # one call per session
+```
 
-### A rotating role: which table row holds for this Task
+- Never put a role in the `--pair` string; roles live in the kick-off and in the table, and the
+  contract says the table wins over any group notice. Wrong string already sent → rewrite
+  `task` in `<config>/.hangar-pair/<session>.json` (tmp+rename).
 
-The `## Quem é quem` table gains a seventh column, `vez`, **only** when some role rotates between
-accounts. Without rotation, it doesn't exist and nothing here changes.
+## Who you open
 
-A role with a numeric `vez` has more than one row, one per account, and **Task N belongs to that
-role's row of index `(N-1) % total`**, in table order. Nobody decides whose turn it is — it is
-arithmetic over the Task number, and that is why two sessions doing the math separately reach the
-same result without coordinating. The two easy mistakes: it is `(N-1)`, not `N` (Task 1 uses the
-**first** row), and the cycle restarts — with 3 accounts, Task 4 belongs to the first again, not
-to a continuation of 3.
+- The cast is the contract's table, never `hangar-send --list`.
+- The verifier session is the reviewer's: they open it, send the script, record `consumo.md` snapshots and close it, from the optional `verificador` line. You receive only the review report. Don't create or manage it.
 
-**The other selector is risk**: `vez` = `low` | `high`, one row each, and Task N belongs to the
-row named by its `Risk:` line in the orchestration plan — no arithmetic, no judgment of yours; the
-line was decided in phase 1. A Task whose line **rises** mid-work (`arbitro.md`, "Autonomy —
-triggers") lands on the `high` row from the next session on. A role uses one selector or the
-other, never both.
+## A rotating role
 
-Rotation is **not** parallelism: within a Task there is **one** session of that role, on the
-turn's account. Running Tasks at the same time is another mechanism — a worktree per Task,
-declared in the PLAN, in `paralelo-worktree.md` — and the "one round, ONE reviewer" rule holds
-whole in both cases.
+- The `vez` column exists only when a role rotates between accounts.
+- Numeric `vez`: Task N uses that role's row of index `(N-1) % total`, in table order.
+- Risk `vez` (`low` | `high`): Task N uses the row named by its `Risk:` line in the orchestration plan. A line raised mid-work lands on `high` from the next session on.
+- One selector per role, never both. Rotation is not parallelism: one session of the role per Task.
 
-This holds for every session you create. The five steps are **one unit**: the turn doesn't close
-in their middle.
+## Opening a session — five steps, one unit
 
-1. **Create on the agent's default account:** `hangar-send --new <name> <cwd>`, **without**
-   `--engine`. A provider engine enters **only** when the plan named one: `--engine <engine>`.
-   *"An <agent> session"* means that agent's default account. That vendor's model reachable
-   through a gateway, router or API is **not** a session of that agent — it is another provider
-   serving a similar model, with another account and other behavior.
-
-   **Model, effort and permission go ON the `hangar-send --new` itself**:
-   `--model <id>`, `--effort <level>` and `--permissao <mode>`. A contract that names model and
-   thinking (the normal case when the team runs on Pi) fits in the command — the session is
-   already born on it:
+1. Create on the agent's default account: `hangar-send --new <name> <cwd>`. "An <agent> session" = that agent's default account; the same model through a gateway or router is another provider. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). A 400 = session not born. Never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
 
    ```bash
    hangar-send --new <name> <repo> --provider pi --model <provider>/<id> --effort <level>
    ```
 
-   On Pi the `--effort` becomes `--thinking` (also accepts `off|minimal`); on Kimi only
-   `--model`; `--permissao` is Claude-only. The backend validates **before** any effect on disk: a
-   model outside the regex, a level outside the closed list or an unknown provider return 400 and
-   the session is **not born** — never a session that looks like it's on the right model and
-   isn't. The alternative path (create without the flags and switch later via `/cp-model` +
-   `/cp-think`) works, but leaves the session alive for an interval on the wrong model, and
-   contradicts step 2 below. (An install with an old `hangar-send`, without the flags: the direct
-   POST to the API with `model`/`effort`/`permission_mode` in the body remains plan B.)
+   Research, review, final review, verification: add `--read-only` and prove the protection (`protecao.md`). Record the initial `consumo.md` snapshot before the first request and the final one at close or replacement — also for the executor and for your own period.
 
-2. **Prove what was born**, reading the session's **real** engine/model, never what you asked
-   for. Diverged from the plan → delete and recreate. The wrong session receiving the request is a
-   whole work in the wrong place, and the datum that exposes it appears before any error.
+2. Prove what was born: the real engine, model and harness, never the request. Diverged → delete and recreate.
+   - `tmux display -p -t "=<name>:" '#{pane_start_command}'`: the request became a command, and the harness (`claude` × `pi`) plus the API's `provider` match the row.
+   - Live proof from the session (statusline or `/cp-think` return) on its first turn, before its first `Edit`. Echoing the kick-off is not proof.
+   - Don't read `/proc/<pid>/cmdline`. A sidecar proof must match the live session's `session-id`.
+   - A proof belongs to the session it was taken from: another row = another session = another proof.
+   - A model's capability (images) is proven in the session, one `Read` on a PNG; never copied from another work's contract.
+3. Write the request in a file; deliver with `hangar-send <name> "$(cat <file>)"`.
+4. Check the return: `entregue -> <name>` is delivery; anything else → resend. Then check engagement: ctx left zero within a minute. On a resend, point only at the kick-off's path.
+5. Only then the turn closes.
 
-   Two proofs, and you want both — they fail for different reasons:
+## Kick-off — the message points, it doesn't copy
 
-   ```bash
-   tmux display -p -t "=<name>:" '#{pane_start_command}'   # the real argv the pane started with
-   ```
+```
+Read ~/.claude/skills/orquestrar/references/<executor|revisor|revisao-final|retrospectiva>.md — your role's page, plus the sibling pages it names; nothing else of that skill.
+Role: <executor | reviewer | branch review | retrospective>.
+Method: <name | none — the plan is the user's>.   Executes with: <command | none>.
+Domain skill: <name | none>.   Route: <audit | full>.
+Repo/branch: <path> / <branch>.   Expected HEAD: <hash>.
+Baseline (<hash>): backend N · check N · front N + <named known red>.
+Group rules: <path to regras-<gid>.md>.
+Durable dir: <~/.hangar/orq/<date>-<gid>/ with {pareceres,tasks,kickoffs,visual}/ — reports, diffs and screenshots go here, never /tmp>.
+The current Task: <path to its file>.
+Untouchables: <paths, one by one, exceptions inside — not "the ones in the contract">.
+Lessons that apply to this Task: <pasted here, 3 or 4, not the file path>.
+Reviewer for this Task: <session>.        ← executor kick-offs only
+Frozen round: <hash> · the dirty tree is YOURS.   ← only when you replace an executor midway
+Your turn now: <Task N | wait for the first round>.
+When done, send the round to <reviewer-session> and STOP.
 
-   That shows `exec pi --session-id … --model <provider>/<id> --thinking <level>` and proves the
-   **request** became a command. It doesn't prove what the agent **accepted**: Pi truncates the
-   level to what the model supports, so also demand the **live** proof from the session itself
-   (statusline, or `/cp-think`'s return) on its first turn, before its first `Edit`. Repeating
-   what the kick-off asked is not proof.
+Read ONLY these files. The whole plan, the journal and the lessons file are NOT yours.
+```
 
-   Don't read `/proc/<pid>/cmdline` expecting the flags: Pi rewrites its own argv and the cmdline
-   shows only `pi` — which looks, for a minute, like a session created with no model at all.
+- Lessons go pasted, never as a path. Every visual Task kick-off also pastes the visual-proof invalidators (`executor-visual.md`), even when in the contract.
+- The same text re-sent puts a `/clear`-ed session back. No line carries turn state; "Task 2 already passed" belongs to the contract.
+- Sending someone to check a set → the command that discovers the list, never the list (`arbitro.md`, "A Task's cycle").
 
-   **And a model proof proves the model, not the HARNESS.** A Claude Code session with an engine
-   pointed at provider X and a Pi session running model X show **the same status line**. What
-   distinguishes them is the `pane_start_command` (`claude` × `pi`) and the `provider` the API
-   returns — check both. An executor born in the wrong shape can still prove model and effort
-   correctly — the harness check is what catches it, and it is cheap only while the tree is still
-   clean.
+### Tightened criterion (reviewer kick-off, spiral with the user unavailable)
 
-   Also: **proof via status sidecar must match the `session-id` of the live session** — the
-   directory keeps one file per id and doesn't delete them when a session dies. Two of those
-   three read the sidecar of the dead session that previously occupied the pane, and the value
-   came out right by coincidence.
+Write it in the kick-off; it loosens nothing:
 
-   **A proof belongs to the session that was born, and to nothing else.** A Task that lands on
-   another row of the table is another session and another proof; a proof from the previous
-   session, or from a check made before the row changed, is not carried over. The check costs
-   seconds; a session working on an unproven row is the whole Task on the wrong model.
+- a blocker is what a real user reaches, and the report writes how to get there;
+- a case that exists only by fabricating a race in a test is a NOTE;
+- still full blockers: screen that doesn't mount, focus trapped/lost outside the modal, dead contract, wrong text on screen, gate regression, untouchable in the commit;
+- declare the family limit: "another variation of this same defect is a note".
 
-   Para pesquisa, revisão, revisão final e verificação, crie com `--read-only` e comprove a
-   proteção de `protecao.md`. Antes do primeiro pedido, registre o snapshot inicial de
-   `consumo.md`; ao encerrar ou substituir a sessão, registre o final. A mesma regra vale para
-   o executor e para seu próprio período como árbitro, sem lhes acrescentar `--read-only`.
-3. **Write the request into a file** and deliver with `hangar-send <name> "$(cat <file>)"`. A
-   long request typed straight on the line breaks: `|`, `$`, backticks and the `|` of "YES | NO"
-   become commands, and the message goes out mutilated or not at all.
-4. **Check the return.** `entregue -> <name>` is delivery. Anything else — `404`, a usage error,
-   silence — is **not delivered**: resend, don't move on.
-   **And `entregue` proves delivery, not EXECUTION.** Before recording (or reporting) that the
-   session is working, check engagement: its ctx left zero on the statusline, or the pane is
-   processing. A session that received the kick-off and died on a provider timeout sits `idle`
-   with the same face as an idle session — ctx frozen near zero with a retry error in the pane,
-   while the Task gets reported as "running". On the resend, point only at the kick-off's PATH;
-   the ctx leaving zero within a minute is the cheap proof.
-5. Only then does the turn close. **A session opened with an undelivered request is a session
-   nobody will use** and that you will believe is working.
+## One Task per executor, never the whole plan
+
+- Monolithic plan → excerpt that Task's section plus the short header (goal/architecture) into `~/.hangar/orq/<date>-<gid>/tasks/task-<N>.md`; send that path.
+- One file per unit (tickets) → point at the user's file, no copy; paste the context the ticket lacks into the kick-off, 3–4 lines.
+
+## Visual Task without a bar
+
+- Ask before releasing, with 2–3 verified candidates plus `no bar` (`planejamento.md`, "The bar"). No conservative default here.
+- Record on the Task's line either way. A recorded `none` counts as a bar for a NEW surface.
+
+```markdown
+Task 3 — Bar: `EnginesSheet.svelte`, desktop 1440px, centered modal
+Task 5 — Bar: none — user's decision
+```
+
+- A Task that REPLACES a surface: the bar is the thing replaced; `none` is not an answer; nothing to ask. The Task enters with an inventory of the old surface: one line per thing a person can do or read (field, toggle, hint, warning, button, empty text), per mode (create × edit, empty × filled), with where each is now. Visible counts; behind an unannounced click doesn't. Method: interface keys of `git show <base>:<file>` minus the new files' keys. The inventory goes into the ready criterion; the reviewer checks item by item.

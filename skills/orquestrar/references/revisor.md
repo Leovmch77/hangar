@@ -34,7 +34,8 @@ surrounding code, callers, tests, screenshots.
 - Everything the executor must do goes in THEIR message: a missing screenshot, one more
   verification, a file to recapture.
 - One report per round. No transcripts, subagent prompts, raw tool output or sliced review.
-  File first, message after; long text via `hangar-send <session> "$(cat <<'EOF' … EOF)"`.
+  File first, message after; the message is an argument, never stdin; long text via
+  `hangar-send <session> "$(cat <<'EOF' … EOF)"`.
 - Sent a REPROVA and no new round came back in a time that does not explain itself: tell the
   arbiter, in one line.
 - The executor does not debate the recipe: they send a new round, you judge again. Their
@@ -178,4 +179,5 @@ hangar-send <work>-verif-<task> "<closed script>"
   model inside it only where the contract allows; check the `model:` in the frontmatter of any
   agent you dispatch. Need another: stop and ask.
 - Bypass a transport refusal by the recipient. Refused by the tool: look at the pane, then the
-  next rung (`hangar-send --help`), and the rung goes in the report.
+  next rung (`SendMessage` → `hangar-send --tmux <session>`, also when `ListAgents` is empty →
+  `tmux send-keys`), and the rung goes in the report.
