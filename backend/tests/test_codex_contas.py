@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -50,6 +51,19 @@ def test_delete_removes_managed_account_only(isolated_home):
         accounts.delete_account(accounts.Account("alheia", alheia, False))
     assert sem_marcador.value.code == "codex_account_invalid_marker"
     assert alheia.exists()
+
+
+def test_delete_removes_read_only_git_pack(isolated_home):
+    # O Codex clona marketplaces em .tmp/ e o git grava os packs somente-leitura.
+    work = accounts.create_account("work")
+    pack = work.home / ".tmp" / "marketplaces" / "clone" / ".git" / "objects" / "pack" / "pack-1.idx"
+    pack.parent.mkdir(parents=True)
+    pack.write_bytes(b"x")
+    pack.chmod(stat.S_IREAD)
+
+    accounts.delete_account(work)
+
+    assert not work.home.exists()
 
 
 @pytest.mark.parametrize("name", ["default", "../other", "a/b", "a\n", "", "a" * 33])

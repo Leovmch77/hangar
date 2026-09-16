@@ -348,6 +348,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   aplicou. Em teste que faz isso, use `os.path`.
 - **Código de retorno no Windows não se lê como falha** (`taskkill` sem processo devolve 128).
   Separe "comando não existe" de "comando falhou"; stderr vem na codepage do console.
+- **`shutil.rmtree` em pasta onde o git escreveu precisa de `onexc`** que tira o somente-leitura:
+  o git grava packs read-only e o Windows recusa o unlink (WinError 5); no POSIX passa.
 - **Encoding é por interpretador**: `.cmd` em OEM, `.vbs` em UTF-16LE com BOM, `.sh` em UTF-8 sem
   BOM, `.env`/`settings.json` sem BOM, perfil do PowerShell com BOM.
 - **Instalação Windows mantém o nível de permissão**: iniciada como admin, registra tarefas
