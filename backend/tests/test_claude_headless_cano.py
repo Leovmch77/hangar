@@ -25,6 +25,10 @@ for linha in sys.stdin:
         sub = ev["request"]["subtype"]
         if sub == "initialize":
             out({"type": "system", "subtype": "init", "session_id": "sid-1", "model": "haiku", "permissionMode": "default"})
+        elif sub == "emit_peer":
+            out({"type": "command_lifecycle", "command_uuid": "peer-1", "state": "started"})
+        elif sub == "finish_peer":
+            out({"type": "result", "subtype": "success", "usage": {"input_tokens": 1}})
         out({"type": "control_response", "response": {"subtype": "success", "request_id": ev["request_id"], "response": {}}})
     elif t == "user":
         if ev["message"]["content"][0]["text"] == "sair":
@@ -114,6 +118,29 @@ def test_snapshot_reconstroi_turno_aberto_e_permissao_pendente(cano):
     snap = c.le()
     assert snap["aberto"] is False and snap["pendentes"] == []
     assert json.loads(snap["ultimo_result"])["type"] == "result"
+    c.fecha()
+
+
+def test_snapshot_preserva_turno_iniciado_por_mensagem_de_outra_sessao(cano):
+    sock, proc, log = cano
+    a = _Cliente(sock)
+    a.le()
+    a.manda({"type": "control_request", "request_id": "peer", "request": {"subtype": "emit_peer"}})
+    assert a.le_ate("command_lifecycle")["state"] == "started"
+    a.le_ate("control_response")
+    a.fecha()
+    time.sleep(0.2)
+
+    b = _Cliente(sock)
+    assert b.le()["aberto"] is True
+    b.manda({"type": "control_request", "request_id": "fim", "request": {"subtype": "finish_peer"}})
+    assert b.le_ate("result")["subtype"] == "success"
+    b.le_ate("control_response")
+    b.fecha()
+    time.sleep(0.2)
+
+    c = _Cliente(sock)
+    assert c.le()["aberto"] is False
     c.fecha()
 
 

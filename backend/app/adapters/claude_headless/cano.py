@@ -7,7 +7,7 @@ a conversa; só observa os dois sentidos o bastante pra dizer, a quem conectar, 
 aberto (snapshot):
 
   - a última linha `system/init` (sid, modelo, modo);
-  - se há turno aberto (viu `user` do cliente sem `result` depois);
+  - se há turno aberto (viu `user` do cliente ou `command_lifecycle/started` sem `result` depois);
   - os `control_request` do claude ainda sem `control_response` (a permissão pendente, literal);
   - o último `result` e o último `rate_limit_event`;
   - a cauda do stderr e, se o claude já saiu, o código de saída.
@@ -110,6 +110,8 @@ class Cano:
         t = ev.get("type")
         if t == "system" and ev.get("subtype") == "init":
             self.init = linha
+        elif t == "command_lifecycle" and ev.get("state") == "started":
+            self.aberto = True
         elif t in ("control_request", "sdk_control_request"):
             self.pendentes[str(ev.get("request_id"))] = linha
         elif t == "control_cancel_request":
