@@ -5,9 +5,11 @@ import { configureApi } from './apiEnv';
 import { configureLocale } from './i18n';
 import { overwriteGetLocale } from './paraglide/runtime';
 import { formataErro } from './errosApi';
+import { _limparEsfriamentoParaTestes } from './esfriamento';
 import { getCredentialsForServer, listarCredenciais, getCodexAccountsForServer, createCodexAccountForServer,
   prepareCodexAccountForServer, getCodexPreparationForServer, startCodexAccountLoginForServer,
-  getCodexAccountLoginForServer, cancelCodexAccountLoginForServer, createSessionForServer, createSession,
+  getCodexAccountLoginForServer, cancelCodexAccountLoginForServer, deleteCodexAccountForServer,
+  createSessionForServer, createSession,
   modelOptionsForServer, modelOptions, getArchiveHistory, getArchivePorCwd, resumeArchivedConversation,
   passarBastao, errorDetail } from './api';
 
@@ -20,7 +22,11 @@ beforeEach(() => {
   overwriteGetLocale(() => 'pt');
   configureLocale({ getLocale: () => 'pt' });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  // Timeout simulado esfria o servidor B e contaminaria os testes seguintes.
+  _limparEsfriamentoParaTestes();
+});
 
 describe('Codex não instalado', () => {
   it('é lido da credencial e da conta, que chegam por rotas diferentes', () => {
@@ -89,6 +95,23 @@ describe('contas e servidor explícito', () => {
     expect(signal?.aborted).toBe(true);
     expect(signal?.reason).toBe('changed');
     expect(timeout).toHaveBeenCalledWith(8000);
+  });
+
+  it('apagar conta Codex espera a remoção da pasta, que passa de 8s', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ ok: true }));
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    await deleteCodexAccountForServer(server, 'work');
+    expect(fetcher.mock.calls[0][0]).toBe('https://b.test/api/codex-contas/work');
+    expect(fetcher.mock.calls[0][1]?.method).toBe('DELETE');
+    expect(timeout).toHaveBeenCalledWith(120_000);
+    expect(timeout).not.toHaveBeenCalledWith(8000);
+  });
+
+  it('prazo estourado cita o prazo que valeu, não 8s fixo', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'));
+    await expect(deleteCodexAccountForServer(server, 'work')).rejects.toThrow('B não respondeu em 120s');
+    _limparEsfriamentoParaTestes();
+    await expect(getCodexAccountsForServer(server)).rejects.toThrow('B não respondeu em 8s');
   });
 
   it('401 de B não desloga A; null conserva servidor ativo', async () => {

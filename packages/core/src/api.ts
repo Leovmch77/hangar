@@ -311,7 +311,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server): P
 // Configurações abertas a partir da visão agregada precisam continuar no servidor capturado, sem
 // trocar o servidor global. Um 401 aqui é erro local da sheet: nunca remove a credencial ativa,
 // que pode pertencer a outra máquina.
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit): Promise<T> {
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
   let res: Response;
   try {
     res = await apiFetchRes(path, {
@@ -320,14 +320,14 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit)
       // getSessions ja registrava isso pro poll). Sem prazo, abrir Configuracoes de um servidor
       // desligado prendia a folha em "Carregando..." pra sempre, sem erro nenhum na tela.
       // Antes do spread do `init`: quem precisar de outro prazo (ou de nenhum) passa o proprio sinal.
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(prazoMs),
       ...init,
     }, s);
   } catch (e) {
     // "signal timed out" (o texto que o navegador poe no TimeoutError) nao diz nada pra quem le a
     // tela. Abort pedido POR QUEM CHAMOU continua passando cru — quem cancela sabe que cancelou.
     if (e instanceof DOMException && e.name === 'TimeoutError') {
-      throw new Error(`${s.label} não respondeu em 8s — servidor fora do ar?`);
+      throw new Error(`${s.label} não respondeu em ${Math.round(prazoMs / 1000)}s — servidor fora do ar?`);
     }
     throw e;
   }
@@ -734,7 +734,8 @@ export function createCodexAccountForServer(server: Server, name: string): Promi
   return apiFetchForServer(server, '/api/codex-contas', { method: 'POST', body: JSON.stringify({ name }) });
 }
 export function deleteCodexAccountForServer(server: Server, id: string): Promise<void> {
-  return apiFetchForServer(server, `/api/codex-contas/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  // Apagar a pasta leva segundos: os clones de marketplace do Codex somam milhares de arquivos.
+  return apiFetchForServer(server, `/api/codex-contas/${encodeURIComponent(id)}`, { method: 'DELETE' }, 120_000);
 }
 function codexAccountPath(id: string, action: string): string {
   return `/api/codex-contas/${encodeURIComponent(id)}/${action}`;
