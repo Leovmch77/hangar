@@ -341,6 +341,15 @@ test('layout personalizado reaplica o viewport ao navegar e tira shot no tamanho
 
   assert.equal(await ctl.layout('1366', '768'), 'layout: 1366x768');
   assert.equal(ctl.layoutAtual(), '1366x768');
+  // Fora do teto não chega ao Chromium: resposta "erro:" e o layout fica o que era.
+  assert.match(await ctl.layout('999999999', '768'), /^erro: layout/);
+  assert.match(await ctl.layout('0', '768'), /^erro: layout/);
+  assert.equal(ctl.layoutAtual(), '1366x768');
+  // CDP recusou: a resposta diz qual layout falhou e o estado volta ao que valia.
+  const recusa = dubleDbg({ 'Emulation.setDeviceMetricsOverride': () => { throw new Error('recusado'); } });
+  const ctl2 = criarControlador({ dbg: recusa, aoNavegar: () => {}, capturarPagina: async () => ({ isEmpty: () => false }) });
+  assert.match(await ctl2.layout('800', '600'), /^erro: layout 800 600: recusado/);
+  assert.equal(ctl2.layoutAtual(), 'desktop');
   await renavegar();
   const metricas = dbg.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride');
   assert.equal(metricas.length, 2, 'o override volta depois da navegacao');
@@ -393,7 +402,8 @@ test('escondido: print que pendura devolve imagem vazia dentro do teto, sem trav
   const inicio = Date.now();
   const img = await ctl.capturarPagina();
   assert.equal(img.isEmpty(), true, 'o servidor e quem traduz vazio em erro');
-  assert.ok(Date.now() - inicio < 5000, 'volta pelo teto, nao fica pendurado');
+  // Teto real do shot no CDP é 15 s (TETO_SHOT_CDP): volta logo depois dele, não fica pendurado.
+  assert.ok(Date.now() - inicio < 16000, 'volta pelo teto, nao fica pendurado');
 });
 
 test('pairar manda mouseMoved no centro da caixa e nada quando ref nao existe', async () => {

@@ -245,18 +245,28 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     // dois são emulação que `aplicarViewport`/`aoNavegar` precisam repor depois de navegar.
     async layout(...args) {
       const [modo, altura] = args;
+      const anterior = { modo: layoutEstado.modo, width: layoutEstado.width, height: layoutEstado.height };
       if (args.length === 1 && (modo === 'mobile' || modo === 'desktop')) {
         Object.assign(layoutEstado, { modo, width: null, height: null, versao: layoutEstado.versao + 1 });
       } else {
         const width = Number(modo);
         const height = Number(altura);
-        if (args.length !== 2 || !Number.isInteger(width) || width <= 0
-            || !Number.isInteger(height) || height <= 0) {
-          return `erro: layout precisa ser mobile, desktop ou dois inteiros positivos: ${modo ?? ''} ${altura ?? ''}`.trimEnd();
+        // Teto: sem ele um `layout 999999999 999999999` ia direto pro Chromium (viewport + clip do
+        // print desse tamanho) e derrubava o renderer. 8192 cobre qualquer tela real.
+        const MAX = 8192;
+        if (args.length !== 2 || !Number.isInteger(width) || width <= 0 || width > MAX
+            || !Number.isInteger(height) || height <= 0 || height > MAX) {
+          return `erro: layout precisa ser mobile, desktop ou dois inteiros entre 1 e ${MAX}: ${modo ?? ''} ${altura ?? ''}`.trimEnd();
         }
         Object.assign(layoutEstado, { modo: 'custom', width, height, versao: layoutEstado.versao + 1 });
       }
-      await aplicarViewport();
+      try {
+        await aplicarViewport();
+      } catch (e) {
+        // O CDP recusou: o estado compartilhado não pode ficar dizendo um tamanho que não vale.
+        Object.assign(layoutEstado, anterior, { versao: layoutEstado.versao + 1 });
+        return `erro: layout ${args.join(' ')}: ${e && e.message ? e.message : e}`;
+      }
       aoLayout();
       return `layout: ${this.layoutAtual()}`;
     },
