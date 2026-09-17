@@ -232,7 +232,7 @@ async def test_new_session_sem_conta_herda_a_de_quem_chama(identidade, monkeypat
         return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
 
     monkeypatch.setattr(api, "create_session", create_session)
-    monkeypatch.setattr(api, "_session_config_dir_strict",
+    monkeypatch.setattr(api, "_caller_config_dir",
                         lambda nome: (Path("/home/x/.claude-jefferson"), True))
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
@@ -254,7 +254,7 @@ async def test_new_session_recusa_quando_nao_da_pra_ler_a_conta(identidade, monk
         return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
 
     monkeypatch.setattr(api, "create_session", create_session)
-    monkeypatch.setattr(api, "_session_config_dir_strict", lambda nome: (None, False))
+    monkeypatch.setattr(api, "_caller_config_dir", lambda nome: (None, False))
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
     assert res.is_error and "não consegui confirmar a conta" in res.content[0].text

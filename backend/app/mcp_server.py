@@ -188,7 +188,7 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
     # herdado. Gasta a cota de quem ninguém escolheu e só aparece quando alguém confere.
     config_dir = conta
     if config_dir is None:
-        cfg, confiavel = await asyncio.to_thread(api._session_config_dir_strict, eu)
+        cfg, confiavel = await asyncio.to_thread(api._caller_config_dir, eu)
         if not confiavel:
             # Não deu pra ler a conta de quem chama. Criar assim mesmo repetiria o bug de cima,
             # só que calado; quem quiser seguir escolhe a conta no parâmetro.

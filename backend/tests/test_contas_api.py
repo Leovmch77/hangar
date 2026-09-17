@@ -462,3 +462,19 @@ def test_apagar_recusa_quando_a_varredura_de_processos_falha(casa, monkeypatch):
     assert r.status_code == 409
     assert "varrer os processos" in r.json()["detail"]["msg"]
     assert (casa / ".claude-conta2").is_dir(), "apagou mesmo sem conseguir varrer os processos"
+
+
+def test_conta_de_quem_pede_sessao_nova_recusa_pane_sem_processo(monkeypatch):
+    """Pane sem processo: para o DELETE libera ("ninguém usando"), para CRIAR recusa.
+
+    Confiar aqui criaria a sessão nova na conta padrão sem ninguém escolher — a cobrança errada e
+    calada que a tool `new_session` existe pra não repetir."""
+    from app import tmux
+
+    monkeypatch.setattr(api_mod.headless_sessions, "exists", lambda name: False)
+    monkeypatch.setattr(tmux, "pane_pid", lambda name: None)
+    assert api_mod._session_config_dir_strict("morta") == (None, True)
+    assert api_mod._caller_config_dir("morta") == (None, False)
+
+    monkeypatch.setattr(tmux, "pane_pid", lambda name: (_ for _ in ()).throw(RuntimeError("tmux fora")))
+    assert api_mod._caller_config_dir("morta") == (None, False)

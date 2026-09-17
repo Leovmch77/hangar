@@ -6150,14 +6150,16 @@ def ask_history(body: AskHistoryBody):
 _CACHE_ARQUIVO = "max-age=60"
 
 
-@app.get("/api/sessions/{name}/file", dependencies=[Depends(require_auth)])
-def serve_file(name: str, path: str, request: Request):
-    # Serve QUALQUER arquivo referenciado na conversa (video/html/codigo/pdf/...). TRAVA de seguranca:
-    # so serve se o `path` aparece no transcript desta sessao (citado por voce ou pelo Claude =
-    # consentido) E existe E e arquivo regular -> bloqueia leitura arbitraria de disco / path-traversal.
-    # FileResponse trata Range -> <video> faz seek/streaming.
-    # Path RELATIVO (ex "./mock.png", "sub/x.png") resolve contra o CWD DA SESSAO (onde o Claude criou
-    # o arquivo), nao o cwd do processo backend; guard extra: o resolvido nao pode ESCAPAR do cwd.
+def _resolver_citado(name: str, path: str) -> str:
+    """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
+
+    TRAVA de seguranca compartilhada por quem le e por quem grava fora da raiz da sessao: so
+    resolve se o `path` aparece no transcript (citado por voce ou pelo agente = consentido) E
+    existe E e arquivo regular -> bloqueia leitura/escrita arbitraria de disco e path-traversal.
+    Path RELATIVO (ex "./mock.png", "sub/x.png") resolve contra o CWD DA SESSAO (onde o agente
+    criou o arquivo), nao o cwd do processo backend; guard extra: o resolvido nao pode ESCAPAR
+    do cwd.
+    """
     info = _cached_info_sync(name)
     if info is None or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
@@ -6187,6 +6189,17 @@ def serve_file(name: str, path: str, request: Request):
             raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
     if not os.path.isfile(real):
         raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
+    # Mesma regra do filetree para a arvore da sessao: nenhum caminho que passe por uma pasta
+    # `.git` e servido. Comparada sobre o realpath, entao `atalho -> .git` tambem nao escapa.
+    if ".git" in Path(real).parts:
+        raise HTTPException(403, detail=erro("erro_arq_area_do_git", "area interna do git"))
+    return real
+
+
+@app.get("/api/sessions/{name}/file", dependencies=[Depends(require_auth)])
+def serve_file(name: str, path: str, request: Request):
+    # FileResponse trata Range -> <video> faz seek/streaming.
+    real = _resolver_citado(name, path)
     media = mimetypes.guess_type(real)[0] or "application/octet-stream"
     st = os.stat(real)
     etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
@@ -6196,6 +6209,27 @@ def serve_file(name: str, path: str, request: Request):
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cabecalhos)
     return FileResponse(real, media_type=media, headers=cabecalhos)
+
+
+# Arquivo CITADO na conversa, como texto editavel. O par com `/files/read` e `/files/write` da
+# arvore: mesma mecanica do filetree (teto, binario, digest, escrita atomica), outra politica de
+# caminho — a raiz da sessao la, a citacao no transcript aqui.
+@app.get("/api/sessions/{name}/file/text", dependencies=[Depends(require_auth)])
+def serve_file_text(name: str, path: str):
+    try:
+        return filetree.read_at(Path(_resolver_citado(name, path)), path)
+    except FileError as e:
+        raise _erro_arq(e)
+
+
+@app.post("/api/sessions/{name}/file/text", dependencies=[Depends(require_auth)])
+def write_file_text(name: str, body: FileWriteBody):
+    try:
+        return filetree.write_at(
+            Path(_resolver_citado(name, body.path)), body.path, body.text, body.digest
+        )
+    except FileError as e:
+        raise _erro_arq(e)
 
 
 class AnswerItem(_StrictBody):
@@ -6973,6 +7007,24 @@ def _session_config_dir_strict(name: str) -> tuple[Path | None, bool]:
     if not pid:
         return None, True   # sem processo vivo: ninguém está usando nada
     return procinfo._config_dir_of_strict(pid)
+
+
+def _caller_config_dir(name: str) -> tuple[Path | None, bool]:
+    """CLAUDE_CONFIG_DIR de quem PEDE uma sessão nova: (Path | None, confiável).
+
+    Difere da irmã do DELETE num ponto só: pane sem processo. Lá "ninguém está usando" libera o
+    apagar; aqui a conta de quem chama ficou desconhecida, e criar assim nasce na conta padrão —
+    a falha calada que cobra a conta errada. Sem terminal e processo vivo sem a var seguem como
+    lá: os dois sabem a conta (a do sidecar, a padrão).
+    """
+    from app import tmux
+    if not headless_sessions.exists(name):
+        try:
+            if not tmux.pane_pid(name):
+                return None, False
+        except Exception:
+            return None, False
+    return _session_config_dir_strict(name)
 
 
 async def _pi_catalog(name: str) -> tuple[dict, str]:
