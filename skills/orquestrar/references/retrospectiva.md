@@ -96,6 +96,12 @@ or more becomes a short checklist or its own file, never fatter.
 
 - Imperative sentence saying what to do. No reason, case, incident, example, date or
   measurement in the skill text; those go in the evidence field.
+- Positive form: name the action to take ("stage by explicit path"), and keep a prohibition
+  only as a hard guardrail beside its positive action.
+- A role page is a `## Process`: numbered steps in the order the role acts, each ending in
+  `Done when <checkable criterion>`. Reference (templates, tables, checklists, rules for one
+  branch) lives in a sibling file named by the step that uses it, read only when that branch
+  fires. A proposal adds a rule to the step it belongs to, or to that step's sibling.
 - Written as a PRINCIPLE: where the CONDITION should be, no name of a skill, tool, file or date.
   Test: "and when it is not that case?" Two incidents under one condition are ONE entry with
   two measurements. Group by condition, never by the name of what broke.

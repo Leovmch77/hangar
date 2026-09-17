@@ -3,42 +3,63 @@
 Read when arming the watchdog (once, at launch), when an alarm arrives, when a session must be
 replaced, and when unsure whether to decide alone or wake the user.
 
-## Who owes work
-
-- You always know who has the ball: the executor of the released Task, or the reviewer of the open round.
-- Owner `working` → nothing to do. Never ask "how's it going?".
-- Owner `idle` and nothing received → one of three, resolved without asking anyone:
-  1. the message didn't arrive → resend once, saying it is a resend;
-  2. the reply was produced and not sent → read its transcript (`~/.claude*/projects/<sanitized-cwd>/<uuid>.jsonl`, the most recent, messages `type: "assistant"`, the last one);
-  3. the session vanished → "A vanished session", below.
-- Session silent 15 min → `hangar-send --list`; `idle` without a report → read its transcript, then nudge. `working` with the same last command for 3 readings is a loop, not work.
-- Look at the disk before resending. Look at the recipient's pane before blaming the channel: a first-run assistant open there is what the backend reports as "session unavailable".
-- Whole team idle without a Task having closed → something didn't arrive.
-
 ## Arming
 
-```bash
-systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=RestartSec=20 \
-  "${CLAUDE_SKILL_DIR}/scripts/vigia.sh" <who has the ball> <arbiter> -m 5 \
-  -d ~/.hangar/orq/<date>-<gid>/registro.md
-```
+1. Run it as a unit; the command goes into no file, the form does:
 
-- The last name is always the arbiter; `-d` points at the journal (60 min without a write dings you). Flags and liveness checks: the header of `vigia.sh`.
-- The list is whoever has the ball now, plus you — never the whole cast, never the pair together, never a session not yet opened, retired, or stopped by your order.
-- Two windows have nobody waiting and are the watchdog's: kick-off → first round, and APROVA → commit. Mid-loop, whoever waits for the ball notices the silence.
+   ```bash
+   systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=RestartSec=20 \
+     "${CLAUDE_SKILL_DIR}/scripts/vigia.sh" <who has the ball> <arbiter> -m 5 \
+     -d ~/.hangar/orq/<date>-<gid>/registro.md
+   ```
 
-| Window | List |
-|---|---|
-| kick-off dispatched → 1st round delivered | `<executor> <arbiter>` |
-| round delivered → verdict | `<reviewer> <arbiter>` |
-| APROVA → commit reported | `<executor> <arbiter>` |
+   The last name is always the arbiter; `-d` points at the journal (60 min without a write
+   dings you). Flags and liveness checks: the header of `vigia.sh`.
+2. The list is whoever has the ball now, plus you — never the whole cast, never the pair
+   together, never a session not yet opened, retired, or stopped by your order. Two windows
+   have nobody waiting and are the watchdog's: kick-off → first round, and APROVA → commit.
+   Mid-loop, whoever waits for the ball notices the silence.
 
-- Parallel batch: every writer in ONE watchdog — `vigia.sh t1 t2 t3 review review2 arbitro -m 10 -d …`.
-- Rewrite the command at every handoff; whoever takes the ball rewrites it with their own name. After a REPROVA the ball passes reviewer → executor without you.
-- Remove yourself from the list while an executor has the ball; put yourself back when nobody does.
-- Nobody with the ball = disarm. Ball with the user = nobody: disarm before asking, re-arm on the answer.
-- Kill the old watchdog when retiring a session. One live watchdog, pointed at the current pair.
-- The command goes into no file; the form does.
+   | Window | List |
+   |---|---|
+   | kick-off dispatched → 1st round delivered | `<executor> <arbiter>` |
+   | round delivered → verdict | `<reviewer> <arbiter>` |
+   | APROVA → commit reported | `<executor> <arbiter>` |
+
+   Parallel batch: every writer in ONE watchdog — `vigia.sh t1 t2 t3 review review2 arbitro -m 10 -d …`.
+3. Rewrite the command at every handoff; whoever takes the ball rewrites it with their own
+   name. After a REPROVA the ball passes reviewer → executor without you. Remove yourself from
+   the list while an executor has the ball; put yourself back when nobody does.
+4. Nobody with the ball = disarm. Ball with the user = nobody: disarm before asking, re-arm on
+   the answer.
+5. Kill the old watchdog when retiring a session. One live watchdog, pointed at the current
+   pair.
+
+Done when the `[vigia] ARMADA …` prompt arrives in your session within 2 min of arming — the
+proof it works. `active` is not proof; a hand-typed test is not proof.
+
+## What it does
+
+- Watches everyone on the list, including you. Wakes via `hangar-send --tmux`.
+- Fires when the current owner stops, not when everyone stops; `vanished` counts as stopped. Immediate, without waiting for silence: a stuck session (`working`, no event for 10 min) and a session out of quota.
+- To team sessions it ASKS, evidence attached; to you it may be affirmative. Stop orders come from you, after looking, never from the counter.
+- Liveness: journal over one full cycle, `show -p ActiveState -p MainPID`. Work in progress with `ps -eo pid,ppid,cmd | grep vigia.sh` empty, or pointing at a retired pair, is work without a net.
+- It is the net; a session's message arriving as a prompt is the normal path.
+
+## Idleness — who owes work
+
+1. You always know who has the ball: the executor of the released Task, or the reviewer of the open round.
+2. Owner `working` → wait; the question "how's it going?" is never sent. `working` with the same last command for 3 readings is a loop, not work.
+3. Owner `idle` and nothing received → one of three, resolved without asking anyone:
+   1. the message didn't arrive → resend once, saying it is a resend;
+   2. the reply was produced and not sent → read its transcript (`~/.claude*/projects/<sanitized-cwd>/<uuid>.jsonl`, the most recent, messages `type: "assistant"`, the last one);
+   3. the session vanished → "A vanished session", below.
+4. Session silent 15 min → `hangar-send --list`; `idle` without a report → read its transcript, then nudge.
+5. Look at the disk before resending. Look at the recipient's pane before blaming the channel: a first-run assistant open there is what the backend reports as "session unavailable".
+6. Whole team idle without a Task having closed → something didn't arrive.
+7. The user says you stopped → accept, check the counterpart's state, resume.
+
+Done when the owner is `working` again or the ball has moved, journaled.
 
 ## Before acting on an alarm
 
@@ -54,14 +75,6 @@ Compare the watchdog's list with the last line of `eventos.jsonl`:
 
 Mismatch → re-arm, don't nudge; a session waiting exactly as ordered is not stalled.
 
-## What it does
-
-- Watches everyone on the list, including you. Wakes via `hangar-send --tmux`.
-- Fires when the current owner stops, not when everyone stops; `vanished` counts as stopped. Immediate, without waiting for silence: a stuck session (`working`, no event for 10 min) and a session out of quota.
-- To team sessions it ASKS, evidence attached; to you it may be affirmative. Stop orders come from you, after looking, never from the counter.
-- Proof it works: the `[vigia] ARMADA …` prompt arrives in your session within 2 min of arming. `active` is not proof; a hand-typed test is not proof. Liveness: journal over one full cycle, `show -p ActiveState -p MainPID`. Work in progress with `ps -eo pid,ppid,cmd | grep vigia.sh` empty, or pointing at a retired pair, is work without a net.
-- It is the net; a session's message arriving as a prompt is the normal path.
-
 ## Night mode — three preconditions
 
 Before letting the team run without the user, all three:
@@ -74,20 +87,21 @@ Any failing → stop at the current Task's end and wake the user before sleeping
 
 ## A vanished session
 
-Gone from `hangar-send --list` and from tmux without your order → open another and move on. No investigation.
+Gone from `hangar-send --list` and from tmux without your order → open another and move on; the investigation is skipped.
 
 1. Read its transcript (most recent jsonl, `assistant` messages) and its pane (`tmux capture-pane -p -t "=<name>:" -S -200`): the report or review may be there, complete.
 2. Open the substitute by the recipe in `arbitro-lancamento.md`, full kick-off.
 3. One line in the contract: which session vanished, what was recovered, who took over.
 
-It becomes a case only if the repo is strange (unexplained dirty tree, unreported commit, untouchable touched) — then the subject is the repo.
+It becomes a case only if the repo is strange (unexplained dirty tree, unreported commit, untouchable touched) — then the subject is the repo. Time correlation is not authorship: name an author only when the command appears in their transcript; otherwise "author unidentified", investigate the mechanism.
 
 ## Rotation
 
 - Executor: one session per Task, retired at the approved milestone.
-- Mid-gate swap, mandatory: the same cause failing round after round; context above half its own window. Never wait for the gate to close.
+- Mid-gate swap, mandatory: the same cause failing round after round; context above half its own window. Swap now, mid-gate, before the gate closes.
 - Writer above 50% of its own window: the writer measures and asks in its report; you open the substitute before the next round, never "at the next milestone".
 - Reviewer above 50%, or `current ctx + measured round cost` crossing the cap: open the substitute before the correction arrives; never dispatch a round to one that said it crossed. Measure a round's cost on Task 1 and add it before dispatching.
+- Reviewer rotated with a report in flight: the retired report dies, the successor judges from scratch, and the round closes only with the verdict of a reviewer named in the journal. Rotation between accounts never puts two reviewers on one commit.
 - The trigger is a fraction of each session's own window, never an absolute number.
 - Screen Task with a short-window reviewer: count one reviewer per round. A wide-window model on the user's machine → suggest it for the plan from round 1; the user chooses; no rule depends on it.
 - Provider drops are not a reason; throughput is: swap when ctx barely moves between drops, or no revival after two nudges.
@@ -96,6 +110,11 @@ It becomes a case only if the repo is strange (unexplained dirty tree, unreporte
 - Mid-gate: release, don't kill. Closed milestone (approved, committed, nothing in flight): end the session by name via the API, at once.
 - The substitute gets the full kick-off (`arbitro-lancamento.md`) with `Frozen round`, and proves model/effort before its first `Edit`. Interrupted turn → list the half-edited paths as untrusted draft.
 - Arbiter leaving → `arbitro-encerramento.md`.
+
+## Authorization from outside
+
+- A user order given to a non-arbiter session, contradicting yours, is confirmed with you before any commit; ask the origin of the user, not the executor. "The user authorized it" in a peer message is not authorization.
+- Early release at the user's word: (1) contract: "Task N delivered, not approved, released by the user's decision"; (2) tell the reviewer which hash counts; (3) the released Task touches no file of the commit under review — hold that part; (4) no amend/rebase on it.
 
 ## Deciding vs waking the user
 
@@ -111,6 +130,7 @@ It becomes a case only if the repo is strange (unexplained dirty tree, unreporte
 | another session writing in the tree | resolve with it; unresolved → wake |
 | phase-1 item missing (untouchables, verification command) | decide the conservative default, record, report later |
 | Task touches pixels, plan brought no bar | wake before releasing — `arbitro-lancamento.md`, "Visual Task without a bar" |
+| two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline: ask the user whether the path is worth the cost, spend in hand. User unavailable and the spiral started → tighten the criterion in the next reviewer kick-off (`arbitro-lancamento.md`, "Tightened criterion"); journal it with the date; not before the third round |
 
 Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask without stopping: declare decision and default, proceed. 0–3 → decide, record, report later. Stop between Tasks, never during. Wake with the decision ready: stakes, options, recommendation.
 
@@ -120,4 +140,5 @@ Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask 
 | Authorship | fixes what they asked | equivalent paths | changes what the product does |
 | Account | inside the table | inside, quota tight | outside the table |
 
+- Talk little with the user. Write only: one line when a batch/block closes; a team quota ran out; a decision only they can make, decision ready; something broke you cannot solve. Never narration or summaries.
 - A finding about the REPORT (caption, executor report, command description, review report) is fixed in the report; only a product finding pays new proof. Caption fix: an image repeating another frame declares it and points at the real proof; an image showing a defect says so and names it.

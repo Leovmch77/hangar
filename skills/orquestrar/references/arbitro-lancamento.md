@@ -1,15 +1,53 @@
 # Arbiter — launch, sessions and kick-offs
 
-Read once before Task 1, and again when opening any session or releasing a Task. Back to
-`arbitro.md` once the team stands.
+Read whole at step 1 of `arbitro.md`; "Opening a session" and "Kick-off" again whenever a
+session is opened or a Task released. Back to `arbitro.md` once the team stands.
+
+## Launch (phase 2)
+
+1. Pre-flight:
+
+   ```bash
+   git status --short                  # dirty tree → the paths become untouchables, one by one
+   git branch --show-current
+   hangar-send --list                  # who else is alive in this cwd
+   tmux display -p '#{session_name}'   # which of those is you
+   ```
+
+   Another session writing in this checkout → resolve it with that session; unresolved → the
+   user decides; the launch waits.
+2. Ask where the work runs, at every launch, recommendation first: "Where does this work run?
+   (a) **new branch off `main`** — recommended; (b) directly on `<current branch>`. Proposed
+   name: `<work>`." The user creates or switches the branch, never you. The answer goes in the
+   contract (`Branch:`, with the date). Pull requested → recheck the plan's numbers afterwards.
+3. Green baseline: run every verification command once on the base, before any session.
+   Record `baseline: <command> → <result>, <date>`. Red → the user decides before launch: fix
+   first, or record a known failure the review ignores.
+4. Read the account policy and write the contract lines ("Account policy", "Contract lines you
+   write", below) and the closing items (`arbitro-encerramento.md`); write the a-priori
+   estimate: time and rounds per Task.
+5. Survey the tooling (below), once.
+6. Create, in order: `--new` ("Opening a session", below) → `--pair` → read the `gid` in your
+   own sidecar → write the contract (skeleton in `planejamento-equipe.md`) → arm the watchdog
+   and prove it (`arbitro-vigia.md`, "Arming") → kick-offs ("Kick-off", below).
+
+   ```bash
+   hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract"   # one call per session
+   ```
+
+   The `--pair` string names the work and the contract, nothing more; roles live in the
+   kick-off and in the table, and the contract says the table wins over any group notice. Wrong
+   string already sent → rewrite `task` in `<config>/.hangar-pair/<session>.json` (tmp+rename).
+
+Done when the five items of `arbitro.md`, step 1, stand.
 
 ## Contract lines you write
 
 - `Method:`, `Executes with:`, `Domain skill:`, `Route:` — mandatory in `regras-<gid>.md`, written before the first session, repeated in every kick-off.
 - No `Method:` → ask the user; write the line with its `Executes with:` before proceeding.
 - `Route:` comes from phase 1 and only escalates, `audit` → `full`, via `replanejar.md`. `audit` has no arbiter: this page is not read.
-- Nobody switches method midway; a switch the user asks for is `replanejar.md`.
-- A user restriction: copy the exact command, the reason with its number, and what remains allowed. Never widen it; in doubt about extent, ask.
+- The method holds to the end for everyone; a switch the user asks for is `replanejar.md`.
+- A user restriction: copy the exact command, the reason with its number, and what remains allowed, at the extent given. Never widen it; in doubt about extent, ask.
 
 ```markdown
 Forbidden: `<heavy checker>` in this repo — <reason, measured>.
@@ -27,9 +65,9 @@ Untouchables: <path/to/file>, <other/path>
 
 ## Account policy
 
-- Read `~/.hangar/orquestracao-contas.md` before the first session. Copy into `## Quem é quem` only what this work uses; don't relay the file.
+- Read `~/.hangar/orquestracao-contas.md` before the first session. Copy into `## Quem é quem` only what this work uses; the file itself stays with you.
 - The table rules, not the prose. An account outside the table is forbidden.
-- An account that charges per token is forbidden. A newly discovered provider does not enter on its own.
+- An account that charges per token is forbidden. A newly discovered provider enters only by the user's hand.
 - File missing or stale → build the inventory (recipe inside the file), ask ONE question (allowed / subscription / charges), write the answer there with the date, open no session until it arrives.
 - Message "the group's model configuration changed in the panel" → re-read the file and apply. Switching account or model = close and reopen. Answer only if the message asks.
 
@@ -39,51 +77,23 @@ Untouchables: <path/to/file>, <other/path>
 | working | let it finish; the next one is born on the new configuration |
 | you | finish the task at hand; "Arbiter succession" in `arbitro-encerramento.md` |
 
+## Survey the tooling
+
+Once at launch: subagents (per-language and per-dimension reviewers), skills (click-path audit, security review, production readiness, browser QA, house patterns), marketplace commands. Write into the contract a table per work type: what the reviewer dispatches, what helps the executor.
+
+Outside tool (skill, subagent, command), three questions: exists under that name in this account; reads where this round's code is (uncommitted); reads this Task's files (pass paths explicitly). Failed → record why, one line. A tool's silence counts only if you know what it read.
+
 ## Locks on model and tools
 
 - The model is the user's decision. The contract carries the account↔model table per role; a model outside it is not used even to test; the model comes from the ROLE, including bug worktrees and one-off tasks. Need one outside the table → stop and ask.
 - Before creating any session: re-read its row and state in the message which engine/model you use and where it came from.
 - A new session is born on the harness default → switch, read the model back, only then send work.
 - Subagents: same account always; a model switch inside it only where the contract allows; an agent frontmatter `model:` overrides yours.
-- Outside tool (skill, subagent, command), three questions: exists under that name in this account; reads where this round's code is (uncommitted); reads this Task's files (pass paths explicitly). Failed → record why, one line. A tool's silence counts only if you know what it read.
-- Tooling survey, once at launch: subagents (per-language and per-dimension reviewers), skills (click-path audit, security review, production readiness, browser QA, house patterns), marketplace commands. Write into the contract a table per work type: what the reviewer dispatches, what helps the executor.
-
-## Launch (phase 2)
-
-Pre-flight:
-
-```bash
-git status --short                  # dirty tree → the paths become untouchables, one by one
-git branch --show-current
-hangar-send --list                  # who else is alive in this cwd
-tmux display -p '#{session_name}'   # which of those is you
-```
-
-- Another session writing in this checkout blocks the launch: resolve it with that session;
-  unresolved → the user decides.
-- Ask where the work runs, at every launch, recommendation first: "Where does this work run?
-  (a) **new branch off `main`** — recommended; (b) directly on `<current branch>`. Proposed
-  name: `<work>`." Never create or switch branches on your own. The answer goes in the contract
-  (`Branch:`, with the date). Pull requested → recheck the plan's numbers afterwards.
-- Green baseline: run every verification command once on the base, before any session. Record
-  `baseline: <command> → <result>, <date>`. Red → the user decides before launch: fix first, or
-  record a known failure the review ignores.
-
-Create, in order: `--new` (five steps below) → `--pair` → read the `gid` in your own sidecar →
-write the contract (skeleton in `planejamento-equipe.md`) → kick-offs.
-
-```bash
-hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract"   # one call per session
-```
-
-- Never put a role in the `--pair` string; roles live in the kick-off and in the table, and the
-  contract says the table wins over any group notice. Wrong string already sent → rewrite
-  `task` in `<config>/.hangar-pair/<session>.json` (tmp+rename).
 
 ## Who you open
 
 - The cast is the contract's table, never `hangar-send --list`.
-- The verifier session is the reviewer's: they open it, send the script, record `consumo.md` snapshots and close it, from the optional `verificador` line. You receive only the review report. Don't create or manage it.
+- The verifier session is the reviewer's: they open it, send the script, record `consumo.md` snapshots and close it, from the optional `verificador` line. You open neither; you receive only the review report.
 
 ## A rotating role
 
@@ -94,7 +104,7 @@ hangar-send --pair <session> "<work> — each session's role is in the regras-<g
 
 ## Opening a session — five steps, one unit
 
-1. Create on the agent's default account: `hangar-send --new <name> <cwd>`. "An <agent> session" = that agent's default account; the same model through a gateway or router is another provider. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). A 400 = session not born. Never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
+1. Create on the agent's default account: `hangar-send --new <name> <cwd>`. "An <agent> session" = that agent's default account; the same model through a gateway or router is another provider. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). A 400 = session not born: recreate with the flags right, never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
 
    ```bash
    hangar-send --new <name> <repo> --provider pi --model <provider>/<id> --effort <level>
@@ -102,15 +112,22 @@ hangar-send --pair <session> "<work> — each session's role is in the regras-<g
 
    Research, review, final review, verification: add `--read-only` and prove the protection (`protecao.md`). Record the initial `consumo.md` snapshot before the first request and the final one at close or replacement — also for the executor and for your own period.
 
-2. Prove what was born: the real engine, model and harness, never the request. Diverged → delete and recreate.
-   - `tmux display -p -t "=<name>:" '#{pane_start_command}'`: the request became a command, and the harness (`claude` × `pi`) plus the API's `provider` match the row.
-   - Live proof from the session (statusline or `/cp-think` return) on its first turn, before its first `Edit`. Echoing the kick-off is not proof.
-   - Don't read `/proc/<pid>/cmdline`. A sidecar proof must match the live session's `session-id`.
-   - A proof belongs to the session it was taken from: another row = another session = another proof.
-   - A model's capability (images) is proven in the session, one `Read` on a PNG; never copied from another work's contract.
+2. Prove what was born (below). Diverged → delete and recreate.
 3. Write the request in a file; deliver with `hangar-send <name> "$(cat <file>)"`.
 4. Check the return: `entregue -> <name>` is delivery; anything else → resend. Then check engagement: ctx left zero within a minute. On a resend, point only at the kick-off's path.
 5. Only then the turn closes.
+
+Done when the proof is taken, the kick-off engaged, and the row's model read back from the live session.
+
+### Prove what was born
+
+The real engine, model and harness, never the request:
+
+- `tmux display -p -t "=<name>:" '#{pane_start_command}'`: the request became a command, and the harness (`claude` × `pi`) plus the API's `provider` match the row.
+- Live proof from the session (statusline or `/cp-think` return) on its first turn, before its first `Edit`. Echoing the kick-off is not proof.
+- The proof comes from the pane and the live session; `/proc/<pid>/cmdline` stays unread. A sidecar proof must match the live session's `session-id`.
+- A proof belongs to the session it was taken from: another row = another session = another proof.
+- A model's capability (images) is proven in the session, one `Read` on a PNG; never copied from another work's contract.
 
 ## Kick-off — the message points, it doesn't copy
 
@@ -136,7 +153,7 @@ Read ONLY these files. The whole plan, the journal and the lessons file are NOT 
 
 - Lessons go pasted, never as a path. Every visual Task kick-off also pastes the visual-proof invalidators (`executor-visual.md`), even when in the contract.
 - The same text re-sent puts a `/clear`-ed session back. No line carries turn state; "Task 2 already passed" belongs to the contract.
-- Sending someone to check a set → the command that discovers the list, never the list (`arbitro.md`, "A Task's cycle").
+- Sending someone to check a set → the command that discovers the list, never the list (`arbitro.md`, "Release one Task", handoff checklist).
 
 ### Tightened criterion (reviewer kick-off, spiral with the user unavailable)
 
