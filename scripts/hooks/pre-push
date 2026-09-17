@@ -125,8 +125,9 @@ if (( total == 0 )); then
     exit 0
 fi
 # PERGUNTA, não roda sozinho: rodar em todo push cobrava minutos de quem só queria enviar. Sem
-# terminal pra perguntar (sessão de agente, script), a resposta é NÃO e o push segue — quem julga
-# tudo é o ci.yml.
+# terminal pra perguntar — sessão de agente, script, CI, e também cliente gráfico de git, que sobe
+# o hook sem pty — a resposta é NÃO e o push segue; quem julga tudo é o ci.yml. Querendo os testes
+# nesse caso, rode `scripts/ci-gates.sh` à mão.
 resposta=""
 if { exec 3</dev/tty; } 2>/dev/null; then
     read -r -t 60 -u 3 -p \
@@ -134,7 +135,7 @@ if { exec 3</dev/tty; } 2>/dev/null; then
     exec 3<&-
     echo >&2
 else
-    echo "pre-push: sem terminal pra perguntar — testes pulados, o ci.yml julga" >&2
+    echo "pre-push: sem terminal pra perguntar (agente, script ou cliente gráfico) — testes dos ${total} arquivo(s) PULADOS; o ci.yml julga, ou rode scripts/ci-gates.sh" >&2
 fi
 case "${resposta:-n}" in
     s|S|y|Y) ;;
