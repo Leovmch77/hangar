@@ -220,6 +220,8 @@
   // quando este host existe — a MESMA condicao do visorAberto (incluindo a faixa de 1280px em
   // que o painel e display:none). Derivada aqui e passada ao Git, nunca recalculada no modal.
   const filesInContext = $derived(desktop && isDesktopLargo && showContextPanel && !ctxPanel.recolhido);
+  // Painel de contexto REALMENTE na tela: quem tem um aviso pra dar escolhe entre ele e a pill.
+  const painelCtxAberto = $derived(desktop && showContextPanel && !ctxPanel.recolhido);
 
   // O visor segue o painel de contexto: some quando o painel fecha ou recolhe — e abaixo de
   // 1280px, largura em que os dois sao display:none — e o estado fica no store; reabrir o
@@ -2763,6 +2765,10 @@
       onOpenOrq={() => (orqOpen = true)}
       onOpenPeerChat={nested ? undefined : (peer) => (peerChat = peer)}
       onOpenGit={() => (gitOpen = true)}
+      recarregarMotivo={avisoErr ? null : recarregarMotivo}
+      onRecarregar={recarregar}
+      recarregarBloqueado={currentState !== 'idle' || recarregando}
+      onAbrirArquivo={nested ? undefined : (p) => void filesStore.abrir(p)}
       session={planSession}
       {planDetail}
       {planLoading}
@@ -2938,7 +2944,9 @@
     </button>
   {/if}
 
-  {#if recarregarMotivo && !avisoErr}
+  <!-- Com o painel de contexto aberto o aviso vive LÁ (faixa acionável junto do resto do estado da
+       sessão), e a pill flutuante daqui seria o mesmo recado duas vezes na mesma tela. -->
+  {#if recarregarMotivo && !avisoErr && !painelCtxAberto}
     <!-- O processo desta sessão está desatualizado (config da conta mudou depois de ele subir).
          Discreto e só enquanto há motivo: some sozinho depois do recarregar. -->
     <div class="recarga-pill" style:bottom={`calc(${dockH}px + 10px + var(--cp-tts-h, 0px))`} role="status">

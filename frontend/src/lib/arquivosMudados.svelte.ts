@@ -1,0 +1,53 @@
+import { getChangedFiles } from '@hangar/core';
+
+export interface ArquivoMudado {
+  path: string;
+  added: number;
+  total: number;
+}
+
+// As maiores mudanças do working tree, pro bloco "Mais alterados" do painel de contexto.
+//
+// Mora aqui, e não dentro do componente, por dois motivos. O DesktopSessionContext tem uma prop
+// `state`, e o rune `$state` colide com ela. E o valor precisa SOBREVIVER ao recarregamento: com
+// a promessa direto num `{#await}` a lista sumia e voltava a cada poll do git, piscando na tela.
+export function criarArquivosMudados(quantos = 3) {
+  let itens = $state<ArquivoMudado[]>([]);
+  let ultima = '';
+  let geracao = 0;
+
+  return {
+    get itens() {
+      return itens;
+    },
+    // `chave` identifica esta versão do repositório (sessão + contadores do git): mesma chave,
+    // nenhuma chamada. Mudou, busca de novo — e o que já está na tela fica até a resposta chegar.
+    //
+    // Chave VAZIA não limpa nada: ela só quer dizer "agora não dá pra perguntar" (a listagem
+    // ainda não trouxe os contadores, por exemplo). Limpar aqui matava a carga em voo e o bloco
+    // nunca aparecia. Quem decide não mostrar é o componente, pelo estado do repositório.
+    async carregar(sessionName: string, chave: string): Promise<void> {
+      if (!sessionName) {
+        itens = [];
+        ultima = '';
+        return;
+      }
+      if (!chave || chave === ultima) return;
+      ultima = chave;
+      const minha = ++geracao;
+      try {
+        const r = await getChangedFiles(sessionName);
+        if (minha !== geracao) return;   // outra carga passou na frente
+        itens = r.files
+          .map((f) => ({ path: f.path, added: f.added ?? 0, total: (f.added ?? 0) + (f.removed ?? 0) }))
+          .filter((f) => f.total > 0)
+          .sort((a, b) => b.total - a.total)
+          .slice(0, quantos);
+      } catch {
+        // Bloco acessório: o painel inteiro não pode cair porque o git não respondeu. O erro de
+        // git aparece no painel de git, que é quem fala disso.
+        if (minha === geracao) itens = [];
+      }
+    },
+  };
+}

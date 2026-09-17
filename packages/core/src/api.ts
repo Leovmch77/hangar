@@ -389,6 +389,19 @@ export async function fetchCostsForServer(s: Server, period: string, fresco = fa
   return res.json() as Promise<Partial<CostReport>>;
 }
 
+// Só a cotação USD/BRL do servidor ativo (cache de 1h no backend). Existe à parte do /api/costs
+// porque quem mostra o custo de UMA sessão — painel, card do quadro, folha de uso — não pode
+// esperar a varredura de transcript do relatório só pra saber a taxa. null = sem cotação; quem
+// formata cai pro dólar em vez de converter por um número que não tem.
+export async function fetchCotacao(): Promise<number | null> {
+  try {
+    const r = await apiFetch<{ usd_brl: number | null }>('/api/cotacao');
+    return typeof r.usd_brl === 'number' ? r.usd_brl : null;
+  } catch {
+    return null;
+  }
+}
+
 // Uso de skills/tools/hooks de UMA máquina: mesmo cache e mesmo 202 "aquecendo" do /api/costs.
 export async function fetchUsoForServer(s: Server, period: string, filtros: UsoFiltros = {}, fresco = false): Promise<Partial<UsoReport>> {
   const partes = [`period=${encodeURIComponent(period)}`];

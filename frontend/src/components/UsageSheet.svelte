@@ -1,6 +1,8 @@
 <script lang="ts">
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
+  import { money2 } from '../lib/fmt';
+  import { moeda } from '../lib/moeda.svelte';
   import * as m from '../paraglide/messages';
 import { intlLocale } from '../lib/locale';
   import type { StatusFields } from '@hangar/core';
@@ -25,7 +27,7 @@ import { intlLocale } from '../lib/locale';
     if (typeof s.ctxUsed === 'number')
       out.push({ label: m.ctx_contexto(), value: `${s.ctxUsed.toLocaleString(intlLocale())}${s.ctxTotal ? ' / ' + s.ctxTotal.toLocaleString(intlLocale()) : ''}${typeof s.ctxPct === 'number' ? ` (${Math.round(s.ctxPct)}%)` : ''}` });
     if (typeof s.costUsd === 'number')
-      out.push({ label: m.uso_custo(), value: `$${s.costUsd.toFixed(2)}` });
+      out.push({ label: m.uso_custo(), value: money2(s.costUsd, moeda.cur, moeda.rate) });
     if (s.sessionTime)
       out.push({ label: m.uso_tempo_sessao(), value: s.sessionTime });
     if (s.model)

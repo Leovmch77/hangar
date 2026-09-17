@@ -15,6 +15,8 @@
     brutos, contaInflada, serieComparada, totaisComparados, valorDe, type Metrica,
   } from '../lib/comparar';
   import { dec, tok, money, money2, type Cur } from '../lib/fmt';
+  // Alias: `moeda` já é o formatador local desta tela (money com a taxa aplicada).
+  import { moeda as moedaApp } from '../lib/moeda.svelte';
   import { projectLabel } from '@hangar/core';
   import type { ComboLocal, DimBucket } from '@hangar/core';
 
@@ -82,7 +84,10 @@
   let pendingServers = $state(0);
   let merged = $state<MergedReport>(relatorioVazio());
   let period = $state<Periodo>('30d');
-  let currency = $state<Cur>(localStorage.getItem('cp_costs_currency') === 'BRL' ? 'BRL' : 'USD');
+  // A escolha é do APP inteiro (lib/moeda), não desta tela: o mesmo custo aparece no painel de
+  // contexto, no card do quadro e na folha de uso, e mostrar em real aqui e em dólar lá era a
+  // mesma sessão com dois preços.
+  const currency = $derived(moedaApp.cur);
   // Recorte do cliente, agora CRUZADO: provedor, fonte, projeto, modelo e subagente valem ao mesmo
   // tempo. Antes era uma dimensão por vez porque o servidor mandava só o total de CADA dimensão
   // (marginais) e "projeto X E fonte Codex" não era derivável do fio; agora ele manda o
@@ -144,8 +149,7 @@
   }
 
   function setCurrency(c: Cur) {
-    currency = c;
-    localStorage.setItem('cp_costs_currency', c);
+    moedaApp.escolher(c);
   }
 
   // Máquinas cuja primeira leitura do histórico ainda roda no backend (202 `Aquecendo`), com o

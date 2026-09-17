@@ -18,6 +18,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import PlanBar from './PlanBar.svelte';
   import StateChip from './StateChip.svelte';
   import type { Server } from '../lib/auth';
+  import { money2 } from '../lib/fmt';
+  import { moeda } from '../lib/moeda.svelte';
   import type { BoardRow, PendingMsg } from '../screens/Board.svelte';
 
   interface Props {
@@ -457,7 +459,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
                 title={m.board_pareada_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} /> {session.pair_peers.join(', ')}</span>
         {/if}
       {/if}
-      {#if meta?.costUsd != null}<span title={m.board_custo_sessao()}>💵 ${meta.costUsd.toFixed(2)}</span>{/if}
+      {#if meta?.costUsd != null}<span title={m.board_custo_sessao()}>💵 {money2(meta.costUsd, moeda.cur, moeda.rate)}</span>{/if}
       {#if meta?.sessionTime}<span title={m.board_tempo_sessao()}>⏱ {meta.sessionTime}</span>{/if}
     </div>
   {/if}

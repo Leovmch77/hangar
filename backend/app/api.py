@@ -1816,6 +1816,14 @@ def costs_endpoint(period: str = "all", fresco: bool = False):
         return _aquecendo(e)
 
 
+@app.get("/api/cotacao", dependencies=[Depends(require_auth)])
+def cotacao_endpoint() -> dict:
+    # Só a cotação, sem o relatório de custos junto: o custo por sessão aparece no painel, no card
+    # do quadro e na folha de uso, e nenhum deles precisa varrer transcript pra saber a taxa.
+    # A coleta em si tem cache de 1h e nunca levanta (costs.usd_brl).
+    return {"usd_brl": _usd_brl()}
+
+
 def _aquecendo(e: costs_sources.Aquecendo) -> JSONResponse:
     # Primeira leitura do histórico desta subida ainda rodando: a tela mostra o progresso e
     # pergunta de novo, em vez de esperar 20s e dar a máquina como "não respondeu".

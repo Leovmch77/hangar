@@ -2,6 +2,8 @@
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import * as m from '../../paraglide/messages';
   import { preferenciaSalva, aplicarPreferencia, type Preferencia } from '../../lib/locale';
+  import { moeda } from '../../lib/moeda.svelte';
+  import { dec, type Cur } from '../../lib/fmt';
 
   // Tela Geral: opcoes gerais do app. Hoje so tem o idioma; as proximas opcoes soltas do backlog
   // caem aqui como mais uma linha, no mesmo formato (rotulo + descricao + controle).
@@ -22,6 +24,15 @@
     { v: 'pt', label: m.config_idioma_pt(), aria: m.config_idioma_pt(), lang: 'pt-BR' },
     { v: 'en', label: m.config_idioma_en(), aria: m.config_idioma_en(), lang: 'en' },
   ];
+
+  // Moeda de todo custo do app. Símbolos em vez de nomes: "US$"/"R$" é o que aparece no número,
+  // e o aria-label diz por extenso pra quem ouve.
+  const moedas: { v: Cur; label: string; aria: string }[] = [
+    { v: 'USD', label: 'US$', aria: m.config_moeda_dolar() },
+    { v: 'BRL', label: 'R$', aria: m.config_moeda_real() },
+  ];
+  // A cotação só é buscada por quem vai mostrar preço; esta tela é um desses lugares.
+  moeda.garantirCotacao();
 </script>
 
 <div class="gs">
@@ -35,6 +46,24 @@
     <SegmentedPicker value={preferencia} options={opcoes} ariaLabel={m.config_idioma_rotulo()}
                      describedBy="idioma-nota-reload"
                      onPick={(v) => aplicarPreferencia(v)} />
+  </div>
+
+  <div class="gs-row">
+    <div class="gs-label">
+      <strong>{m.config_moeda_rotulo()}</strong>
+      <span id="moeda-nota">
+        {#if moeda.temCotacao}
+          {m.config_moeda_cotacao({ taxa: dec(moeda.rate ?? 0, 2) })}
+        {:else}
+          {m.config_moeda_sem_cotacao()}
+        {/if}
+      </span>
+    </div>
+    <!-- Real fica travado sem cotação: converter por uma taxa que não temos daria um número
+         inventado com cara de exato. -->
+    <SegmentedPicker value={moeda.cur} options={moedas} ariaLabel={m.config_moeda_rotulo()}
+                     describedBy="moeda-nota" disabled={!moeda.temCotacao}
+                     onPick={(v) => moeda.escolher(v)} />
   </div>
 </div>
 

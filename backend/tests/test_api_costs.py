@@ -71,6 +71,25 @@ def test_primeira_leitura_em_andamento_responde_202_com_progresso(client, h, mon
     assert r.json() == {"aquecendo": True, "lidos": 312, "total": 690}
 
 
+def test_cotacao_e_so_a_taxa_sem_varrer_transcript(client, h, monkeypatch):
+    # O custo por sessão (painel, card do quadro, folha de uso) precisa da taxa, não do relatório:
+    # esta rota não pode acabar chamando a coleta de custos.
+    monkeypatch.setattr("app.api._usd_brl", lambda: 5.14)
+    monkeypatch.setattr("app.api.costs_report",
+                        lambda *a, **k: pytest.fail("cotação não varre transcript"))
+    r = client.get("/api/cotacao", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {"usd_brl": 5.14}
+
+
+def test_cotacao_indisponivel_responde_null_em_vez_de_erro(client, h, monkeypatch):
+    # Sem cotação o app cai pro dólar. Um 500 aqui faria a tela tratar como falha de servidor.
+    monkeypatch.setattr("app.api._usd_brl", lambda: None)
+    r = client.get("/api/cotacao", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {"usd_brl": None}
+
+
 @pytest.mark.parametrize("period", list(PERIODOS))
 def test_todo_periodo_de_costs_py_e_aceito_pela_rota(client, h, monkeypatch, period):
     # Amarra a lista da rota à fonte única (costs.PERIODOS): período novo lá sem ajuste aqui

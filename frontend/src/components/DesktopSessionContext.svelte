@@ -29,6 +29,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields } from '@hangar/core';
   import { ctxWindow, providerName } from '@hangar/core';
+  import { money2 } from '../lib/fmt';
+  import { moeda } from '../lib/moeda.svelte';
+  import { criarArquivosMudados } from '../lib/arquivosMudados.svelte';
+  import FileIcon from './files/FileIcon.svelte';
   import { planBadge } from '@hangar/core';
 
   interface Props {
@@ -96,6 +100,14 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenOrq?: () => void;
     // Repositorio -> modal de git do cwd. Mesmo caso: dado sem porta.
     onOpenGit?: () => void;
+    // Claude sem terminal com MCP/hooks/settings mudados depois da subida: o aviso é ACIONÁVEL e
+    // é estado da sessão, então mora aqui. Com o painel aberto o Chat esconde a pill flutuante.
+    recarregarMotivo?: string | null;
+    onRecarregar?: () => void;
+    recarregarBloqueado?: boolean;
+    // Clique num arquivo de "Mais alterados" -> abre no editor do app. Sem handler a linha fica
+    // só informativa (o modal do Chat não empilha editor dentro de modal).
+    onAbrirArquivo?: (path: string) => void;
     // Abre a sessao do MEMBRO num modal (PairChatModal). So com UM par: com 2+ nao da pra escolher
     // por quem clicou, entao a secao segue abrindo a PairSheet, que tem o botao por membro.
     // `undefined` quando o Chat esta `nested` (dentro de um modal) — a guarda que evita modal
@@ -122,6 +134,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     working = false,
     loopLabel = null, loopColor = undefined, onLoopTap = undefined,
     onProviderTap = undefined, onOpenPair = undefined, onOpenOrq = undefined, onOpenGit = undefined,
+    recarregarMotivo = null, onRecarregar = undefined, recarregarBloqueado = false,
+    onAbrirArquivo = undefined,
     onOpenPeerChat = undefined,
     session = null, planDetail = null, planLoading = false, planError = false,
     toggleExterno = false,
@@ -201,6 +215,66 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // contagens pequenas do turno).
   function tokenShort(n: number): string {
     return n < 1000 ? String(Math.round(n)) : ctxWindow(n);
+  }
+
+  // Custo acumulado da sessao: so a statusline mede, e ate agora ele so aparecia la embaixo no
+  // terminal. Moeda e cotacao sao as do app inteiro (lib/moeda) — sem cotacao o fmt cai pro dolar.
+  const custoLabel = $derived(
+    typeof status?.costUsd === 'number' && isFinite(status.costUsd)
+      ? money2(status.costUsd, moeda.cur, moeda.rate)
+      : null,
+  );
+  $effect(() => {
+    if (status?.costUsd != null) moeda.garantirCotacao();
+  });
+  // Duracao CRUA ("12min", "3h", "2d"), nao o relativeTime do core: ele ja embute o "atras", e a
+  // frase daqui e "trabalhando ha {t}" — as duas juntas davam "trabalhando ha 12 min atras".
+  // Os sufixos sao os mesmos nos dois idiomas, entao nao viram chave.
+  function duracaoCurta(desde: number): string {
+    const s = Math.max(0, Date.now() / 1000 - desde);
+    if (s < 60) return '<1min';
+    if (s < 3600) return `${Math.floor(s / 60)}min`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+  // Há quanto tempo a sessão está PARADA — o que a tela não dizia em lugar nenhum.
+  //
+  // Trabalhando não entra aqui de propósito: o próprio agente já publica a duração do turno no
+  // detalhe do estado, no header deste painel ("Boogieing… (46m 15s)"). Um segundo relógio contado
+  // daqui discordava dele na mesma tela (contava do último prompt, não do começo do turno).
+  const tempoNoEstado = $derived.by(() => {
+    if (state === 'working') return null;
+    const ts = session?.last_activity;
+    return ts ? m.ctx_parada_ha({ t: duracaoCurta(ts) }) : null;
+  });
+  // Fila: as bolhas `queued-` que ainda nao foram confirmadas pelo transcript. O painel ja recebe
+  // os eventos do Chat, entao a contagem nao custa uma rota nova.
+  const naFila = $derived(
+    events?.filter((e) => e.id.startsWith('queued-') && !e.queued_confirmed).length ?? 0,
+  );
+  // Diff do working tree vs HEAD: o backend ja calcula (git_ops.git_diffstat) e manda na lista.
+  // "alteracoes locais" dizia que havia algo; isto diz quanto.
+  const diffRepo = $derived.by(() => {
+    const a = session?.git_added, r = session?.git_removed;
+    if (typeof a !== 'number' && typeof r !== 'number') return null;
+    return { added: a ?? 0, removed: r ?? 0, files: session?.git_dirty ?? 0 };
+  });
+
+  // QUAIS arquivos mudaram, nao so quantos: as tres maiores mudancas, direto no Contexto. A lista
+  // inteira continua a um clique (o painel de git). A chave carrega os contadores do git que a
+  // listagem ja traz — mexeu no repo, muda a chave, recarrega; parado, nenhuma chamada.
+  const arqMudados = criarArquivosMudados();
+  $effect(() => {
+    const chave = sessionName && status?.repo && session?.git_dirty
+      ? `${sessionName}:${session.git_dirty}:${session.git_added ?? 0}:${session.git_removed ?? 0}`
+      : '';
+    void arqMudados.carregar(sessionName, chave);
+  });
+  // "src/components/X.svelte" -> ".../X.svelte": o nome do arquivo é o que se reconhece, e a
+  // coluna não comporta o caminho inteiro.
+  function caminhoCurto(p: string): string {
+    const partes = p.split('/');
+    return partes.length <= 2 ? p : `…/${partes.slice(-2).join('/')}`;
   }
   // ── Largura redimensionavel (drag na divisória da esquerda), persistida ─────────────
   // Mesma pegada da Sidebar (cp_sidebar_w): pointer capture no handle, largura clampsa no
@@ -337,7 +411,18 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
           <span>{m.ctx_navegador()}</span>
         </button>
       {/if}
+      {#if onOpenAttachments}
+        <button class="ctx-action" onclick={onOpenAttachments} aria-label={m.ctx_anexos_da_sessao()}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L16 6"/>
+          </svg>
+          <span>{m.ctx_anexos()}</span>
+        </button>
+      {/if}
+      <!-- Rodar por ÚLTIMO e atrás de um divisor: os outros abrem um painel, este dispara um
+           processo no projeto. Na fileira plana ele tinha o mesmo peso de "Anexos". -->
       {#if onOpenRun}
+        <span class="acao-divisor" aria-hidden="true"></span>
         <button class="ctx-action run-btn" class:running={runRunning} onclick={onOpenRun}
                 aria-label={runRunning ? m.ctx_rodando_abrir() : m.ctx_rodar_projeto()}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -348,14 +433,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             {/if}
           </svg>
           <span>{runRunning ? m.ctx_rodando() : m.ctx_rodar()}</span>
-        </button>
-      {/if}
-      {#if onOpenAttachments}
-        <button class="ctx-action" onclick={onOpenAttachments} aria-label={m.ctx_anexos_da_sessao()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L16 6"/>
-          </svg>
-          <span>{m.ctx_anexos()}</span>
         </button>
       {/if}
     </div>
@@ -431,34 +508,67 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
        cor. O detalhe e o chip do loop subiram pro header, que ja era o lugar do estado. -->
 
   <div class="ctx-scroll">
-  <!-- SAUDE: Contexto + Limites num bloco so (eram duas secoes irmaos com a mesma cara).
-       Vem primeiro: responde "esta tudo bem?" antes de qualquer detalhe. -->
-  <section class="sec-metric">
-    <span class="section-label">{m.ctx_saude()}</span>
-    {#if status?.ctxPct != null}
-      <div class="metric-row">
-        <span>
-          {m.ctx_contexto()} · {#if status.ctxUsed != null && status.ctxTotal}{m.ctx_usado_de_total({ usado: ctxWindow(status.ctxUsed), total: ctxWindow(status.ctxTotal) })}{:else}{status.ctxTotal ? `${ctxWindow(status.ctxTotal)} ${m.ctx_tokens()}` : m.ctx_janela()}{/if}
+  <!-- AGORA: o que muda sozinho enquanto a sessao trabalha — contexto, custo, tempo e turno —
+       num bloco so, com o numero grande. Antes eram cinco rotulos de secao de peso igual e o
+       dado mais importante saia em corpo 11px; aqui ele e a primeira coisa que o olho pega.
+       Sem rotulo de secao de proposito: e o topo, nao concorre com os rotulos da lista abaixo. -->
+  <section class="sec-agora">
+    <div class="agora-topo">
+      <span class="agora-ctx">
+        <strong class="agora-num tone-{ctxTone}" class:vazio={status?.ctxPct == null}>{status?.ctxPct != null ? `${Math.round(status.ctxPct)}%` : '—'}</strong>
+        <span class="agora-cap">
+          {m.ctx_do_contexto()}{#if status?.ctxUsed != null && status.ctxTotal}<span class="mono">&nbsp;· {m.ctx_usado_de_total({ usado: ctxWindow(status.ctxUsed), total: ctxWindow(status.ctxTotal) })}</span>{:else if status?.ctxTotal}<span class="mono">&nbsp;· {ctxWindow(status.ctxTotal)}</span>{/if}
         </span>
-        <strong>{Math.round(status.ctxPct)}%</strong>
-      </div>
+      </span>
+      {#if custoLabel}
+        <span class="agora-custo">
+          <strong>{custoLabel}</strong>
+          <span>{m.ctx_nesta_sessao()}</span>
+        </span>
+      {/if}
+    </div>
+
+    {#if status?.ctxPct != null}
       <div class="progress tone-{ctxTone}" aria-label={m.ctx_pct_usado({ n: Math.round(status.ctxPct) })}>
         <span style:width={`${status.ctxPct}%`}></span>
       </div>
-      {#if status.turnIn != null || status.turnOut != null}
-        <p class="turn-tokens">
-          {m.ctx_ultimo_turno()} {ctxWindow(status.turnIn ?? 0)} {m.ctx_entrada()} · {status.turnOut != null ? tokenShort(status.turnOut) : '—'} {m.ctx_saida()}
-        </p>
-      {/if}
     {:else}
-      <p>{m.ctx_medicao_indisponivel()}</p>
+      <!-- Vazio EXPLICADO: "medicao indisponivel" sozinho lia como bug do painel. -->
+      <p>{m.ctx_medicao_depois_turno()}</p>
     {/if}
+
+    {#if tempoNoEstado || status?.turnIn != null || status?.turnOut != null}
+      <p class="agora-linha">
+        {#if tempoNoEstado}<span>{tempoNoEstado}</span>{/if}
+        {#if status?.turnIn != null || status?.turnOut != null}
+          <span class="mono">{m.ctx_ultimo_turno()} {ctxWindow(status.turnIn ?? 0)} {m.ctx_entrada()} · {status.turnOut != null ? tokenShort(status.turnOut) : '—'} {m.ctx_saida()}</span>
+        {/if}
+      </p>
+    {/if}
+
     {#if hasRate}
       <div class="saude-limites">
         <RateChips {status} onExpand={onExpandUsage} {limited} {limitReset} variant="bars" />
       </div>
     {/if}
   </section>
+
+  {#if recarregarMotivo && onRecarregar}
+    <!-- Único aviso ACIONÁVEL do painel: o processo está rodando com MCP/hooks velhos e o conserto
+         é um clique. Fica logo abaixo do estado porque é sobre o estado, não sobre o repositório. -->
+    <div class="ctx-aviso" role="status">
+      <span class="ctx-aviso-texto">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" /><path d="M12 8v4.5" /><path d="M12 16h.01" />
+        </svg>
+        {m.recarregar_aviso_config()}
+      </span>
+      <button type="button" class="ctx-aviso-btn" onclick={onRecarregar} disabled={recarregarBloqueado}
+              title={recarregarBloqueado ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe()}>
+        {m.recarregar_agora()}
+      </button>
+    </div>
+  {/if}
 
   {#if session?.plan_name || session?.plan_hidden}
     <!-- Só quando ha plano ativo nesta sessao (Task 5b) — sem gate a secao apareceria vazia pra
@@ -476,6 +586,20 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     </section>
   {/if}
 
+  <!-- "alteracoes locais" dizia que HAVIA algo e parava ali; o tamanho da mudanca so aparecia
+       abrindo o modal de git. O backend ja manda o numstat na listagem (git_ops.git_diffstat). -->
+  {#snippet repoEstado()}
+    {#if diffRepo && (diffRepo.added || diffRepo.removed)}
+      <p class="repo-diff mono">
+        <span class="diff-add">+{diffRepo.added}</span>
+        <span class="diff-del">−{diffRepo.removed}</span>
+        {#if diffRepo.files}<span class="diff-files">{m.ctx_arquivos_n({ n: diffRepo.files })}</span>{/if}
+      </p>
+    {:else if status?.dirty}
+      <p class="mono">{m.ctx_alteracoes_locais()}</p>
+    {/if}
+  {/snippet}
+
   {#if status?.repo}
   <section class="sec-break">
     <span class="section-label">{m.ctx_repositorio()}</span>
@@ -483,13 +607,37 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
       <button type="button" class="sec-open" onclick={onOpenGit} aria-label={m.ctx_abrir_git({ n: status.repo })}>
         <span class="sec-open-body">
           <strong class="mono">{status.repo} · {status.branch ?? m.ctx_sem_branch()}</strong>
-          {#if status.dirty}<p class="mono">{m.ctx_alteracoes_locais()}</p>{/if}
+          {@render repoEstado()}
         </span>
         <span class="sec-open-arrow" aria-hidden="true">›</span>
       </button>
     {:else}
       <strong class="mono">{status.repo} · {status.branch ?? m.ctx_sem_branch()}</strong>
-      {#if status.dirty}<p class="mono">{m.ctx_alteracoes_locais()}</p>{/if}
+      {@render repoEstado()}
+    {/if}
+
+    <!-- QUAIS arquivos mudaram. Fica dentro de Repositório (é sobre ele) e não vira seção nova:
+         a lista inteira é o painel de git, aqui são só as três maiores. -->
+    {#if diffRepo && arqMudados.itens.length}
+      <div class="arq-topo">
+        <span class="arq-titulo">{m.ctx_mais_alterados()}</span>
+        {#if onOpenGit}
+          <button type="button" class="arq-todos" onclick={onOpenGit}>{m.ctx_ver_todos()}</button>
+        {/if}
+      </div>
+      <ul class="arq-lista">
+        {#each arqMudados.itens as arq (arq.path)}
+          <li>
+            <button type="button" class="arq-linha" onclick={() => onAbrirArquivo?.(arq.path)}
+                    disabled={!onAbrirArquivo} title={arq.path}
+                    aria-label={m.ctx_abrir_arquivo({ n: arq.path })}>
+              <FileIcon nome={arq.path} />
+              <span class="mono arq-path">{caminhoCurto(arq.path)}</span>
+              <span class="mono diff-add">+{arq.added}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </section>
   {/if}
@@ -541,19 +689,24 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   </section>
   {/if}
 
-  <!-- EXECUÇÃO sem modelo/esforço: isso já está nas pills do composer (onde se troca). Aqui fica
-       o que não está em mais nenhum lugar — provider e máquina. -->
-  <section class="sec-break">
-    <span class="section-label">{m.ctx_execucao()}</span>
+  </div>
+
+  <!-- EXECUÇÃO no RODAPÉ, fora do scroller: provider e máquina não mudam na vida da sessão, e
+       como seção irmã das outras gastavam o mesmo rótulo e o mesmo respiro que o que muda.
+       Modelo/esforço continuam fora (estão nas pills do composer, onde se troca). A fila entra
+       aqui do lado: é do turno, aparece só quando há algo esperando. -->
+  <footer class="ctx-rodape">
     {#if onProviderTap}
       <button type="button" class="provider-tap" onclick={onProviderTap} aria-label={m.ctx_limites_provider()}>
         {providerName(provider)}{serverLabel ? ` · ${serverLabel}` : ''}
       </button>
     {:else}
-      <strong>{providerName(provider)}{serverLabel ? ` · ${serverLabel}` : ''}</strong>
+      <span class="rodape-exec">{providerName(provider)}{serverLabel ? ` · ${serverLabel}` : ''}</span>
     {/if}
-  </section>
-  </div>
+    {#if naFila > 0}
+      <span class="rodape-fila">{m.ctx_na_fila({ n: naFila })}</span>
+    {/if}
+  </footer>
   </div>
   {:else if ctxPanel.aba === 'arquivos'}
   <div id="painel-ctx-arquivos" role="tabpanel" aria-labelledby="aba-ctx-arquivos" class="ctx-tab">
@@ -750,15 +903,25 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   /* Barra de acoes: uma linha so, um bloco por acao (icone em cima, rotulo curto embaixo), dentro
      de uma unica superficie — le como toolbar do painel, nao como quatro cards. Quantas couberem
      (o Atividade so existe as vezes): auto-fit divide a linha por igual. */
+  /* Flex, não grid de colunas iguais: o divisor antes do Rodar é um item de 1px, e num
+     `repeat(auto-fit, 1fr)` ele ganharia a largura de um botão. */
   .ctx-actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    display: flex;
+    align-items: stretch;
     gap: 2px;
     margin: 0 var(--space-4) var(--space-3);
     padding: 2px;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     background: var(--surface-inset);
+  }
+  .ctx-actions > .ctx-action { flex: 1 1 0; min-width: 0; }
+  .acao-divisor {
+    flex: 0 0 1px;
+    align-self: center;
+    height: 22px;
+    margin: 0 var(--space-1);
+    background: var(--border-default);
   }
 
   .ctx-action {
@@ -877,10 +1040,69 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     padding: var(--space-4) 0 var(--space-3);
   }
 
-  .sec-metric + .sec-metric { padding-top: var(--space-3); }
-  /* Limites dentro da seção Saúde: respiro entre a barra de contexto e as de cota, sem régua
+  /* O topo vivo: mesma sangria das seções, mais respiro embaixo — é ele que separa "o que está
+     acontecendo" da lista de portas que vem depois. */
+  .sec-agora { padding-bottom: var(--space-4); }
+  .agora-topo {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+  }
+  .agora-ctx { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+  .agora-num {
+    display: inline;
+    color: var(--text-primary);
+    font-size: 44px;
+    font-weight: var(--fw-semibold);
+    line-height: 1;
+    letter-spacing: -0.02em;
+    /* O percentual redesenha a cada turno — sem tabular o número dança na largura. */
+    font-variant-numeric: tabular-nums;
+  }
+  .agora-num.tone-warn { color: var(--warning); }
+  .agora-num.tone-hot { color: var(--error); }
+  /* Sem medição o traço não pode ter o peso de um número real. */
+  .agora-num.vazio { color: var(--text-muted); }
+  .agora-cap {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agora-custo { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+  .agora-custo strong {
+    display: inline;
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: var(--fw-semibold);
+    font-variant-numeric: tabular-nums;
+  }
+  .agora-custo span { color: var(--text-muted); font-size: var(--text-2xs); }
+  .agora-linha {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    font-size: var(--text-2xs);
+  }
+  .agora-linha span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Limites dentro do topo vivo: respiro entre a barra de contexto e as de cota, sem régua
      (continuam sendo o mesmo assunto). */
-  .saude-limites { margin-top: var(--space-3); }
+  .saude-limites { margin-top: var(--space-4); }
+  /* 5h e 7d LADO A LADO: empilhadas gastavam quatro linhas do bloco mais importante do painel.
+     `auto-fit` devolve o empilhamento sozinho quando a pessoa estreita a coluna. O override é
+     local (o RateChips serve outras telas, onde a coluna é a do celular). */
+  .saude-limites :global(.bars) {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: var(--space-3);
+  }
   .sec-break {
     padding-top: var(--space-4);
     border-top: 1px solid var(--border-subtle);
@@ -951,6 +1173,131 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
   .mono { font-family: var(--font-mono); }
 
+  /* Faixa de aviso acionável: âmbar de atenção, não de erro — nada quebrou, só está velho. */
+  .ctx-aviso {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin: 0 var(--space-4) var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid color-mix(in srgb, var(--warning) 32%, transparent);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+  }
+  .ctx-aviso-texto {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-2xs);
+    line-height: 1.35;
+  }
+  .ctx-aviso-texto svg { flex-shrink: 0; color: var(--warning); }
+  .ctx-aviso-btn {
+    flex-shrink: 0;
+    min-height: 0;
+    padding: 4px 10px;
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    border-radius: var(--radius-full);
+    color: var(--warning);
+    font-size: var(--text-2xs);
+    font-weight: var(--fw-semibold);
+  }
+  .ctx-aviso-btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* Diff do working tree: verde/vermelho são os mesmos do resto do app (tokens de estado), e o
+     contador de arquivos fica muted — ele é o contexto dos dois números, não um terceiro. */
+  .repo-diff { display: flex; align-items: baseline; gap: var(--space-2); }
+  .diff-add { color: var(--success); font-variant-numeric: tabular-nums; }
+  .diff-del { color: var(--error); font-variant-numeric: tabular-nums; }
+  .diff-files { color: var(--text-muted); }
+
+  .arq-topo {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
+  .arq-titulo {
+    color: var(--text-muted);
+    font-size: var(--label-size);
+    font-weight: var(--label-weight);
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+  }
+  .arq-todos {
+    min-height: 0;
+    padding: 0;
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+  }
+  .arq-todos:hover { color: var(--text-secondary); }
+  .arq-lista {
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .arq-lista li { display: flex; }
+  /* Linha inteira clicável (abre no editor), com o realce sangrando pras bordas do painel — mesma
+     receita do .sec-open, pra não virar um card dentro do card. */
+  .arq-linha {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: var(--space-2);
+    width: calc(100% + var(--space-4));
+    min-height: 0;
+    margin: 0 calc(var(--space-2) * -1);
+    padding: 3px var(--space-2);
+    border-radius: var(--radius-sm);
+    text-align: left;
+    transition: background 160ms var(--ease-out);
+  }
+  .arq-linha:hover:not(:disabled) { background: var(--bg-hover); }
+  .arq-linha:disabled { cursor: default; }
+  .arq-linha .diff-add { margin-left: auto; }
+  .arq-path {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: var(--text-2xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .arq-lista .diff-add { flex-shrink: 0; font-size: var(--text-2xs); }
+
+  /* Rodapé ancorado (fora do scroller): o que não muda na vida da sessão. */
+  .ctx-rodape {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex-shrink: 0;
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .rodape-exec {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--text-2xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ctx-rodape .provider-tap { font-size: var(--text-2xs); }
+  .rodape-fila {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+  }
+
   /* Secao que ABRE alguma coisa: o conteudo fica igual ao das secoes mudas (mesma tipografia, mesmo
      alinhamento) e o que muda e o alvo inteiro ficar clicavel, com um chevron discreto na direita.
      Sem caixa nem borda: virariam cards aninhados dentro do painel. */
@@ -991,23 +1338,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     font-size: var(--text-base);
     line-height: 1;
     transition: color 160ms var(--ease-out), transform 160ms var(--ease-out);
-  }
-
-  .metric-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--space-2);
-    color: var(--text-muted);
-    font-size: var(--text-xs);
-  }
-
-  .metric-row strong {
-    display: inline;
-    color: var(--text-primary);
-    font-weight: var(--fw-semibold);
-    /* Percentual de limite/contexto muda com o turno — digito tabular nao danca. */
-    font-variant-numeric: tabular-nums;
   }
 
   .progress {

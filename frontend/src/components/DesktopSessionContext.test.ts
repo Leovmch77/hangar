@@ -7,7 +7,7 @@ import { mount, unmount, tick } from 'svelte';
 import DesktopSessionContext from './DesktopSessionContext.svelte';
 import { ctxPanel, LARGURA_MIN, LARGURA_ABERTO } from '../lib/ctxPanel.svelte';
 import { overwriteGetLocale } from '../paraglide/runtime';
-import { listFiles } from '@hangar/core';
+import { listFiles, configureLocale } from '@hangar/core';
 
 // Stubs dos componentes internos pesados (PlanRing/PlanPanel renderizam SVG/estado de plano).
 vi.mock('./PlanRing.svelte', () => ({ default: class { $destroy() {} } }));
@@ -22,6 +22,15 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   isTimeoutError: vi.fn(() => false),
   isAbortError: vi.fn(() => false),
   listFiles: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
+  getChangedFiles: vi.fn().mockResolvedValue({
+    files: [
+      { path: 'src/a.ts', code: ' M', staged: false, added: 5, removed: 1 },
+      { path: 'src/components/Grande.svelte', code: ' M', staged: false, added: 90, removed: 4 },
+      { path: 'docs/meio.md', code: ' M', staged: false, added: 20, removed: 0 },
+      { path: 'bin/blob.png', code: ' M', staged: false, added: null, removed: null },
+    ],
+    sequencer: null,
+  }),
   readFile: vi.fn(),
   searchFiles: vi.fn(),
   pathDiff: vi.fn(),
@@ -225,5 +234,153 @@ describe('DesktopSessionContext — divisória redimensionável (task 17)', () =
     await tick();
     expect(ctxPanel.resizing).toBe(false);
     unmount(t.comp);
+  });
+});
+
+// O topo vivo (contexto/custo/tempo/turno) e o rodapé: o que o painel passou a dizer e que antes
+// só existia na statusline do terminal ou dentro do modal de git.
+describe('DesktopSessionContext — topo vivo e rodapé', () => {
+  // A locale do CORE é outro runtime do paraglide (packages/core tem o seu): o overwriteGetLocale
+  // do beforeEach só alcança o do frontend, e sem isto o Intl daqui formatava em en-US.
+  beforeEach(() => configureLocale({ getLocale: () => 'pt' }));
+
+  // Nome novo por teste: a aba escolhida vive num Map de MÓDULO por sessão (ABA_POR_SESSAO) e o
+  // painel não remonta na troca — reusar o nome de outro teste herdava a aba dele.
+  let n = 0;
+  function montarCom(props: Record<string, unknown>) {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(DesktopSessionContext, {
+      target: el,
+      props: { state: 'idle', sessionName: `topo-${++n}`, serverId: 'srv-test', toggleExterno: true, ...props },
+    });
+    return comp as never;
+  }
+  const txt = (sel: string) => (document.querySelector(sel)?.textContent ?? '').replace(/\s+/g, ' ').trim();
+
+  it('sem medição de contexto: traço em vez de porcentagem, e o porquê escrito', async () => {
+    const c = montarCom({ status: { raw: '' } });
+    await tick();
+    expect(txt('.agora-num')).toBe('—');
+    expect(document.querySelector('.agora-num')?.classList.contains('vazio')).toBe(true);
+    expect(txt('.sec-agora')).toContain('depois do primeiro turno');
+    unmount(c);
+  });
+
+  it('custo sai na moeda da locale (pt-BR usa vírgula decimal, não ponto)', async () => {
+    const c = montarCom({ status: { raw: '', costUsd: 16.37 } });
+    await tick();
+    expect(txt('.agora-custo')).toContain('16,37');
+    unmount(c);
+  });
+
+  it('parada: conta desde o último evento (last_activity é quando ela parou)', async () => {
+    const c = montarCom({ state: 'idle', session: { name: 's', state: 'idle', last_activity: Date.now() / 1000 - 600 } });
+    await tick();
+    expect(txt('.agora-linha')).toContain('parada há 10min');
+    unmount(c);
+  });
+
+  it('trabalhando não ganha relógio próprio: a duração do turno já está no header', async () => {
+    const c = montarCom({
+      state: 'working',
+      session: { name: 's', state: 'working', last_activity: Date.now() / 1000 - 600 },
+    });
+    await tick();
+    expect(txt('.agora-linha')).not.toContain('parada');
+    expect(txt('.agora-linha')).not.toContain('10min');
+    unmount(c);
+  });
+
+  it('repositório mostra o tamanho do diff, não só que ele existe', async () => {
+    const c = montarCom({
+      status: { raw: '', repo: 'hangar', branch: 'main', dirty: true },
+      session: { name: 's', state: 'idle', git_added: 980, git_removed: 84, git_dirty: 28 },
+    });
+    await tick();
+    expect(txt('.repo-diff')).toBe('+980 −84 28 arq.');
+    unmount(c);
+  });
+
+  it('sem numstat (repo sem commit) cai no texto antigo em vez de "+0 −0"', async () => {
+    const c = montarCom({
+      status: { raw: '', repo: 'hangar', branch: 'main', dirty: true },
+      session: { name: 's', state: 'idle' },
+    });
+    await tick();
+    expect(document.querySelector('.repo-diff')).toBeNull();
+    expect(txt('.sec-break')).toContain('alterações locais');
+    unmount(c);
+  });
+
+  it('fila só aparece com prompt pendente, e não conta o que o transcript já confirmou', async () => {
+    const semFila = montarCom({ events: [{ kind: 'user_msg', id: 'queued-1', queued_confirmed: true }] });
+    await tick();
+    expect(document.querySelector('.rodape-fila')).toBeNull();
+    unmount(semFila);
+
+    document.body.innerHTML = '';
+    const comFila = montarCom({
+      events: [
+        { kind: 'user_msg', id: 'queued-1', queued_confirmed: true },
+        { kind: 'user_msg', id: 'queued-2' },
+        { kind: 'user_msg', id: 'queued-3' },
+      ],
+    });
+    await tick();
+    expect(txt('.rodape-fila')).toBe('2 na fila');
+    unmount(comFila);
+  });
+
+  it('aviso de recarregar: faixa com botão, e só com motivo E handler', async () => {
+    const semMotivo = montarCom({ onRecarregar: () => {} });
+    await tick();
+    expect(document.querySelector('.ctx-aviso')).toBeNull();
+    unmount(semMotivo);
+
+    document.body.innerHTML = '';
+    let chamou = 0;
+    const comMotivo = montarCom({ recarregarMotivo: 'config', onRecarregar: () => (chamou += 1) });
+    await tick();
+    const btn = document.querySelector<HTMLButtonElement>('.ctx-aviso-btn');
+    expect(btn).not.toBeNull();
+    btn!.click();
+    expect(chamou).toBe(1);
+    unmount(comMotivo);
+  });
+
+  it('aviso de recarregar não é clicável fora de ociosa', async () => {
+    const c = montarCom({ recarregarMotivo: 'config', onRecarregar: () => {}, recarregarBloqueado: true });
+    await tick();
+    expect(document.querySelector<HTMLButtonElement>('.ctx-aviso-btn')!.disabled).toBe(true);
+    unmount(c);
+  });
+
+  it('mais alterados: três maiores primeiro, binário de fora, e a linha abre o arquivo', async () => {
+    const abertos: string[] = [];
+    const c = montarCom({
+      status: { raw: '', repo: 'hangar', branch: 'main', dirty: true },
+      session: { name: 's', state: 'idle', git_added: 115, git_removed: 5, git_dirty: 4 },
+      onOpenGit: () => {},
+      onAbrirArquivo: (p: string) => abertos.push(p),
+    });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const linhas = [...document.querySelectorAll('.arq-linha')];
+    expect(linhas.map((l) => l.querySelector('.arq-path')!.textContent)).toEqual([
+      '…/components/Grande.svelte', 'docs/meio.md', 'src/a.ts',
+    ]);
+    (linhas[0] as HTMLButtonElement).click();
+    expect(abertos).toEqual(['src/components/Grande.svelte']);
+    unmount(c);
+  });
+
+  it('execução fica no rodapé, fora do scroller', async () => {
+    const c = montarCom({ provider: 'claude', serverLabel: 'Notebook' });
+    await tick();
+    expect(txt('.ctx-rodape')).toContain('Claude · Notebook');
+    expect(document.querySelector('.ctx-scroll .ctx-rodape')).toBeNull();
+    unmount(c);
   });
 });
