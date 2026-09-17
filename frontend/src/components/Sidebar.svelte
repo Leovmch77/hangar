@@ -1397,6 +1397,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   /* A lista so rola quando bate no teto: com 2 sessoes o dock e curto e sem barra. */
   .sidebar.floating .sess-list { flex: 0 1 auto; }
+  /* Colado na borda o dock ja vai ate embaixo: encolher a lista deixava metade do painel vazio. */
+  :global(html[data-panels='edge']) .sidebar.floating .sess-list { flex: 1; }
 
   /* ── Vocabulario do trilho (desenho ORIGINAL, restaurado de 0d9ffc5) ─────
      Um item, uma medida: 36px de lado pra TUDO que e acao (recolher, ⋯, sessao, nova sessao) e o
