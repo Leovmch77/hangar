@@ -99,6 +99,12 @@ def _sidecar(nome: str, cwd: Path, **escolha) -> dict:
     return codex_sessions.load(nome)
 
 
+def test_modo_padrao_e_full_access():
+    assert sem_terminal.MODO_PADRAO == "Full Access"
+    assert sem_terminal.politica(None) == ("never", "danger-full-access")
+    assert sem_terminal.modos_para_tela(None)["current"] == "Full Access"
+
+
 def test_esforco_escolhido_chega_na_thread(ambiente):
     """`thread/start` leva o modelo mas não tem campo de esforço; sem terminal ninguém mais aplica."""
     async def corpo():
@@ -360,7 +366,7 @@ def test_binario_ausente_para_no_teto_de_subidas(ambiente, monkeypatch):
 def test_politica_por_modo():
     assert sem_terminal.politica("Ask for approval") == ("on-request", "read-only")
     assert sem_terminal.politica("Full Access") == ("never", "danger-full-access")
-    assert sem_terminal.politica(None) == ("on-request", "workspace-write")
+    assert sem_terminal.politica(None) == ("never", "danger-full-access")
     assert sem_terminal.politica("qualquer coisa") == sem_terminal.politica(sem_terminal.MODO_PADRAO)
     assert '-c' in sem_terminal.argv({"permission_mode": "Full Access"})
     assert 'approval_policy="never"' in sem_terminal.argv({"permission_mode": "Full Access"})

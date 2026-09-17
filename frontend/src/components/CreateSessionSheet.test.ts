@@ -1026,6 +1026,35 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
+  it('Codex sem terminal nasce visivelmente e é criado em Full Access', async () => {
+    const { comp } = await abrirNoCodex();
+    const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
+      .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
+    headless!.click();
+    await tick();
+    expect(document.querySelector('#perm-pick')!.textContent).toContain('Full Access');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
+      expect.objectContaining({ provider: 'codex', headless: true, permission_mode: 'Full Access' }));
+    unmount(comp);
+  });
+
+  it('Codex sem terminal não apaga a escolha manual durante a abertura', async () => {
+    const { comp } = await abrirNoCodex();
+    const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
+      .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
+    headless!.click();
+    await tick();
+    await escolherNoCombo('#perm-pick', 'Ask for approval');
+    headless!.click();
+    await tick();
+    headless!.click();
+    await tick();
+    expect(document.querySelector('#perm-pick')!.textContent).toContain('Ask for approval');
+    unmount(comp);
+  });
+
   it('fechar durante a criação não navega quando a resposta chega', async () => {
     const { comp } = await abrirNoCodex();
     let resolve!: (value: api.SessionInfo) => void;

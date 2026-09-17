@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict
+import asyncio
+import threading
+import time
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
+
+from app import codex_appserver, cotas
 from app import codex_contas as accounts
 from app.auth import require_auth
 from app.mensagens import erro
@@ -12,10 +18,68 @@ from app.mensagens import erro
 
 codex_contas_router = APIRouter(prefix="/api/codex-contas")
 
+_RESET_ATTEMPT_TTL_S = 86400
+_reset_attempts: dict[tuple[str, str], float] = {}
+_reset_attempts_lock = threading.Lock()
+
 
 class CreateAccountBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
+
+
+class ConsumeResetBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    credit_id: str | None = Field(default=None, max_length=256)
+    idempotency_key: UUID
+
+
+class _ResetError(RuntimeError):
+    def __init__(self, status: int, code: str, message: str, **params):
+        super().__init__(message)
+        self.status, self.code, self.message, self.params = status, code, message, params
+
+
+def _tentativa_anterior(account_id: str, key: str) -> bool:
+    agora = time.monotonic()
+    with _reset_attempts_lock:
+        for tentativa, ts in list(_reset_attempts.items()):
+            if agora - ts > _RESET_ATTEMPT_TTL_S:
+                _reset_attempts.pop(tentativa, None)
+        return (account_id, key) in _reset_attempts
+
+
+def _guardar_tentativa(account_id: str, key: str) -> None:
+    with _reset_attempts_lock:
+        _reset_attempts[(account_id, key)] = time.monotonic()
+
+
+def _consume_reset(account: accounts.Account, body: ConsumeResetBody) -> dict:
+    atual = codex_appserver.perguntar("account/rateLimits/read", codex_home=account.home)
+    semanal = cotas.codex_weekly_used(atual)
+    chave = str(body.idempotency_key)
+    repeticao = _tentativa_anterior(account.id, chave)
+    if semanal is None:
+        raise _ResetError(409, "codex_reset_weekly_unavailable",
+                          "não foi possível confirmar a cota semanal")
+    if semanal < 100 and not repeticao:
+        raise _ResetError(409, "codex_reset_weekly_not_exhausted",
+                          "a cota semanal ainda não acabou", pct=round(semanal))
+    redefinicoes = cotas.codex_reset_credits(atual)
+    if not repeticao and (redefinicoes is None or redefinicoes.available_count < 1):
+        return {"outcome": "noCredit"}
+    if not repeticao:
+        _guardar_tentativa(account.id, chave)
+    params = {"idempotencyKey": chave}
+    if body.credit_id:
+        params["creditId"] = body.credit_id
+    resposta = codex_appserver.perguntar(
+        "account/rateLimitResetCredit/consume", codex_home=account.home, params=params)
+    outcome = resposta.get("outcome")
+    if outcome not in ("reset", "nothingToReset", "noCredit", "alreadyRedeemed"):
+        raise _ResetError(502, "codex_reset_invalid_response",
+                          "o Codex devolveu uma resposta inválida ao redefinir a cota")
+    return {"outcome": outcome}
 
 
 def _service(request: Request):
@@ -79,6 +143,19 @@ async def delete_codex_account(account_id: str, request: Request) -> dict:
         raise _account_error(exc) from None
     # Corpo JSON, nao 204: o apiFetchForServer do core sempre faz res.json().
     return {"ok": True}
+
+
+@codex_contas_router.post("/{account_id}/rate-limit-reset", dependencies=[Depends(require_auth)])
+async def consume_rate_limit_reset(account_id: str, body: ConsumeResetBody) -> dict:
+    account = _account(account_id)
+    try:
+        return await asyncio.to_thread(_consume_reset, account, body)
+    except _ResetError as exc:
+        raise HTTPException(exc.status, detail=erro(exc.code, exc.message, **exc.params)) from None
+    except (codex_appserver.CodexIndisponivel, codex_appserver.CodexRecusado,
+            codex_appserver.CodexRespostaInvalida) as exc:
+        raise HTTPException(502, detail=erro("codex_reset_failed",
+                                             "não foi possível redefinir a cota do Codex")) from exc
 
 
 @codex_contas_router.post("/{account_id}/prepare", status_code=202,

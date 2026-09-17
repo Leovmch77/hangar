@@ -108,7 +108,7 @@ export function janelaLonga(resetTs: number | null, agora: number): boolean {
   return resetTs != null && isFinite(resetTs) && resetTs - agora > 86400;
 }
 
-// Dia e hora do reset, curto. Vazio quando não há reset ou ele já passou.
+// Dia da semana, data e hora do reset. Vazio quando não há reset ou ele já passou.
 // É data formatada, não texto de interface — por isso sai do Intl no idioma do app, e não de uma
 // chave de tradução (nome de dia da semana não se escreve à mão em duas línguas).
 //
@@ -121,7 +121,8 @@ export function diaDoReset(resetTs: number | null, agora: number): string {
   const dia = new Intl.DateTimeFormat(intlLocale(), { weekday: 'short' })
     .format(d)
     .replace(/\.$/, '');
-  return `${dia} ${d.getHours()}h`;
+  const data = new Intl.DateTimeFormat(intlLocale(), { day: '2-digit', month: '2-digit' }).format(d);
+  return `${dia} ${data} ${d.getHours()}h`;
 }
 
 /** Texto de uma conta SEM número, escolhido pelo motivo que o backend mandou.

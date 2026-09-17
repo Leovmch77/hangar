@@ -14,11 +14,13 @@
   import { onDestroy, tick, untrack } from 'svelte';
 import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, deleteCodexAccountForServer, isAbortError, isTimeoutError, type Motor, type EnginesResponse } from '@hangar/core';
   import { formatarIntervalo } from '../../lib/contaEstado';
-  import { listarCredenciais, definirApelido, definirCookie, type Credencial } from '../../lib/credenciais';
+  import { listarCredenciais, definirApelido, definirCookie, consumirRedefinicaoCodex,
+    novaChaveIdempotente, type Credencial } from '../../lib/credenciais';
   import { iniciarLogin, passoLogin, confirmarLogin, cancelarLogin, type PassoLogin, type ResultadoLogin } from '../../lib/loginConta';
   import { copyText } from '../../lib/clipboard';
   import { initials } from '@hangar/core';
-  import { nivelDePct, VELHA_APOS_S, motivoParado, motivoSessaoViva } from '../../lib/cota';
+  import { diaDoReset, faltaPara, janelaLonga, nivelDePct, VELHA_APOS_S, motivoParado,
+    motivoSessaoViva } from '../../lib/cota';
   import NovaCredencialSheet from './NovaCredencialSheet.svelte';
   import CodexContaLogin from './CodexContaLogin.svelte';
   import { credentialAuth, credentialGroup, codexCliAusente } from '@hangar/core';
@@ -134,6 +136,11 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   let apagando = $state(false);
   let aviso = $state('');
   let avisoErro = $state(false);
+  let resetConfirmando = $state<string | null>(null);
+  let resetTentativa = $state<{
+    conta: string; credito: string | null; chave: string;
+  } | null>(null);
+  let resetConsumindo = $state(false);
 
   // Densidade da lista: completa (cards com e-mail, disco e barras) ou compacta (uma linha por
   // credencial, % de cota sem barra). Preferência do aparelho, não do servidor — como o tema.
@@ -153,6 +160,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   // manual. 0 = ainda não há dado.
   const atualizadoEm = $derived(qContas.dataUpdatedAt || null);
   let agora = $state(Date.now());
+  const agoraCota = $derived(agora / 1000);
   const relogio = setInterval(() => { agora = Date.now(); }, 30_000);
   const idadeAtualizacao = $derived(
     atualizadoEm == null ? '' : formatarIntervalo(Math.max(0, (agora - atualizadoEm) / 1000)),
@@ -237,6 +245,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     loginErro = ''; loginEnviando = false; loginIniciando = false; loginParado = false;
     aviso = ''; avisoErro = false;
     confirmando = null;
+    resetConfirmando = null; resetTentativa = null; resetConsumindo = false;
     renomeando = null; apelidoTexto = ''; salvandoApelido = false;
     cookieDe = null; cookieWs = ''; cookieValor = ''; salvandoCookie = false;
     motorAberto = null;
@@ -260,6 +269,79 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   // coluna inteira nasceria esmaecida em toda montagem da tela.
   const leituraFresca = (c: Credencial) =>
     c.cota?.estado === 'lida' && (c.cota.idade_s == null || c.cota.idade_s <= VELHA_APOS_S);
+  const resetDaJanela = (resetTs?: number | null) => {
+    const texto = janelaLonga(resetTs ?? null, agoraCota)
+      ? diaDoReset(resetTs ?? null, agoraCota)
+      : faltaPara(resetTs ?? null, agoraCota);
+    return texto ? m.cota_reinicia({ n: texto }) : '';
+  };
+  const semanalDe = (c: Credencial) => c.cota?.janelas.find((j) => j.rotulo === '7d');
+  const creditoDe = (c: Credencial) =>
+    c.cota?.reset_credits?.credits?.find((credito) => credito.status === 'available') ?? null;
+  const expiracaoDosCreditos = (c: Credencial) => {
+    const datas = (c.cota?.reset_credits?.credits ?? [])
+      .filter((credito) => credito.status === 'available' && credito.expires_at != null)
+      .map((credito) => credito.expires_at as number);
+    if (!datas.length) return '';
+    const expira = Math.min(...datas);
+    return janelaLonga(expira, agoraCota) ? diaDoReset(expira, agoraCota) : faltaPara(expira, agoraCota);
+  };
+
+  function abrirRedefinicao(c: Credencial) {
+    if (!c.codex_account || (semanalDe(c)?.pct ?? -1) < 100) return;
+    resetConfirmando = c.id;
+    resetTentativa = {
+      conta: c.codex_account,
+      credito: creditoDe(c)?.id ?? null,
+      chave: novaChaveIdempotente(),
+    };
+    aviso = '';
+    avisoErro = false;
+  }
+
+  async function consumirRedefinicao(c: Credencial) {
+    if (!resetTentativa || resetTentativa.conta !== c.codex_account || resetConsumindo) return;
+    const g = geracao;
+    const alvo = apiTarget;
+    resetConsumindo = true;
+    aviso = '';
+    avisoErro = false;
+    try {
+      const resultado = await consumirRedefinicaoCodex(
+        alvo, resetTentativa.conta, resetTentativa.credito, resetTentativa.chave);
+      if (g !== geracao) return;
+      if (resultado.outcome === 'reset') {
+        aviso = m.codex_reset_success();
+      } else if (resultado.outcome === 'alreadyRedeemed') {
+        aviso = m.codex_reset_already();
+      } else {
+        aviso = resultado.outcome === 'nothingToReset'
+          ? m.codex_reset_nothing() : m.codex_reset_no_credit();
+        avisoErro = true;
+      }
+      resetConfirmando = null;
+      resetTentativa = null;
+      try {
+        const lista = await listarCredenciais(alvo, true);
+        if (g === geracao) {
+          clienteQuery.setQueryData(credenciais(alvo).queryKey, lista);
+          agora = Date.now();
+        }
+      } catch {
+        if (g === geracao) {
+          aviso = `${aviso} ${m.codex_reset_refresh_failed()}`;
+          avisoErro = true;
+        }
+      }
+    } catch (e) {
+      if (g !== geracao) return;
+      aviso = e instanceof Error && e.message ? e.message : String(e);
+      avisoErro = true;
+      // A confirmação e a chave ficam: repetir é a mesma tentativa idempotente.
+    } finally {
+      if (g === geracao) resetConsumindo = false;
+    }
+  }
 
   async function salvarApelido(c: Credencial) {
     if (salvandoApelido) return;
@@ -888,7 +970,9 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
           {#if compacta && conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length}
             <span class="ct-mini-cotas" class:velha={!leituraFresca(conta)}>
               {#each conta.cota.janelas as j (j.rotulo)}
-                <span class="ct-mini-jan">{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b></span>
+                <span class="ct-mini-jan">{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
+                  {#if resetDaJanela(j.reset_ts)}<small class="ct-mini-reset">{resetDaJanela(j.reset_ts)}</small>{/if}
+                </span>
               {/each}
               <!-- Dado velho com sinal TEXTUAL também: opacidade sozinha não chega a leitor de
                    tela e some em tela clara (achado da revisão do commit). -->
@@ -959,6 +1043,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
               {#each conta.cota.janelas as j (j.rotulo)}
                 <span class="ct-jan">
                   <span class="ct-jan-rot">{j.rotulo}</span>
+                  {#if resetDaJanela(j.reset_ts)}<span class="ct-jan-reset">{resetDaJanela(j.reset_ts)}</span>{/if}
                   <span class="ct-barra" aria-hidden="true">
                     <i class={nivelDePct(j.pct)} style="width:{Math.min(100, Math.max(0, j.pct))}%"></i>
                   </span>
@@ -980,6 +1065,42 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                   : motivoParado(conta.cota.motivo) ? m.cota_conta_parada() : m.cota_precisa_entrar()}</span>
             {:else}
               <span class="ct-semleitura">{m.contas_sem_cota()}</span>
+            {/if}
+          {/if}
+
+          {#if conta.tipo === 'codex' && conta.codex_account
+            && (conta.cota?.reset_credits?.available_count ?? 0) > 0}
+            {@const quantidade = conta.cota?.reset_credits?.available_count ?? 0}
+            {@const semanal = semanalDe(conta)}
+            {@const expira = expiracaoDosCreditos(conta)}
+            <div class="ct-reset">
+              <span class="ct-reset-info">
+                {quantidade === 1 ? m.codex_reset_one() : m.codex_reset_many({ n: quantidade })}
+                {#if expira}<small>{m.codex_reset_expires({ n: expira })}</small>{/if}
+              </span>
+              <button type="button" class="ct-acao ct-reset-btn"
+                disabled={!semanal || semanal.pct < 100 || resetConsumindo}
+                onclick={() => abrirRedefinicao(conta)}>{m.codex_reset_use()}</button>
+              {#if !semanal}
+                <span class="ct-reset-reason">{m.codex_reset_weekly_unavailable()}</span>
+              {:else if semanal.pct < 100}
+                <span class="ct-reset-reason">{m.codex_reset_weekly_remaining({ pct: Math.round(semanal.pct) })}</span>
+              {/if}
+            </div>
+            {#if resetConfirmando === conta.id}
+              <div class="ct-reset-confirm">
+                <p>{m.codex_reset_confirm()}</p>
+                <div>
+                  <button type="button" class="ct-confirma-btn primario"
+                    disabled={resetConsumindo} onclick={() => consumirRedefinicao(conta)}>
+                    {resetConsumindo ? '…' : m.codex_reset_confirm_action()}
+                  </button>
+                  <button type="button" class="ct-confirma-btn" disabled={resetConsumindo}
+                    onclick={() => { resetConfirmando = null; resetTentativa = null; }}>
+                    {m.comum_cancelar()}
+                  </button>
+                </div>
+              </div>
             {/if}
           {/if}
 
@@ -1205,6 +1326,8 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   /* Cheio: cor E sublinhado — no compacto não há barra como segundo canal. */
   .ct-mini-jan b.cheio { color: var(--error); text-decoration: underline; }
   .ct-mini-idade { font-size: var(--text-3xs); color: var(--text-muted); }
+  .ct-mini-jan { display: inline-flex; align-items: baseline; gap: 4px; }
+  .ct-mini-reset { font-size: var(--text-3xs); font-weight: 400; color: var(--text-muted); }
   .ct-sub { flex-shrink: 0; color: var(--text-secondary); font-size: var(--text-xs); }
   .ct-sub.fraco { color: var(--text-muted); }
   /* O modelo é um id de máquina (`kimi-k3`), como o caminho no disco: monoespaçado. */
@@ -1263,6 +1386,8 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                      color: var(--text-primary); font-size: var(--text-xs); font-family: inherit;
                      cursor: pointer; }
   .ct-confirma-btn.perigo { color: var(--error); border-color: var(--border-default); }
+  .ct-confirma-btn.primario { color: var(--text-inverse); background: var(--accent);
+                             border-color: var(--accent); }
   /* Linha inteira própria (o `.ct-confirma` embrulha): o aviso é ressalva, não parte da pergunta. */
   .ct-confirma-aviso { flex-basis: 100%; font-size: var(--text-2xs); color: var(--text-muted); }
 
@@ -1412,6 +1537,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   .ct-jan { display: flex; align-items: center; gap: var(--space-2);
             font-variant-numeric: tabular-nums; }
   .ct-jan-rot { color: var(--text-muted); font-size: 10px; }
+  .ct-jan-reset { color: var(--text-muted); font-size: var(--text-3xs); white-space: nowrap; }
   .ct-jan b { min-width: 4ch; text-align: right; font-weight: var(--fw-semibold);
               color: var(--text-secondary); font-size: var(--text-xs); }
   .ct-jan b.alerta { color: var(--warning); }
@@ -1425,6 +1551,18 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                 background: var(--accent); }
   .ct-barra i.alerta { background: var(--warning); }
   .ct-barra i.cheio { background: var(--error); }
+  .ct-reset { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+              margin-top: var(--space-3); padding-top: var(--space-3);
+              border-top: 1px solid var(--border-subtle); }
+  .ct-reset-info { flex: 1; min-width: 16ch; color: var(--text-secondary); font-size: var(--text-xs); }
+  .ct-reset-info small { display: block; margin-top: 2px; color: var(--text-muted); }
+  .ct-reset-reason { flex-basis: 100%; color: var(--text-muted); font-size: var(--text-2xs); }
+  .ct-reset-confirm { margin-top: var(--space-3); padding: var(--space-3);
+                      border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+                      background: var(--surface-inset); }
+  .ct-reset-confirm p { margin: 0 0 var(--space-3); color: var(--text-secondary);
+                        font-size: var(--text-xs); line-height: 1.45; }
+  .ct-reset-confirm > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .ct-escolha-txt { color: var(--text-secondary); font-size: 12px; align-self: center; }
   /* Formulário da chave: superfície própria (é área de entrada), por isso --surface-inset e não
      --bg-base cru — com papel de parede ligado, o cru vira retângulo chapado sobre a foto. */

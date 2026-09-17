@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -98,6 +99,119 @@ def test_post_prepare_manual_forca_a_cadeia_completa(painel):
     assert client.post("/api/codex-contas/work/prepare?forcar=true", headers=AUTH).status_code == 202
     service.prepare.assert_awaited_once()
     assert service.prepare.await_args.kwargs == {"forcar": True}
+
+
+def test_redefinicao_recusa_enquanto_a_cota_semanal_ainda_existe(painel, monkeypatch):
+    client, _ = painel
+    chamadas = []
+
+    def perguntar(metodo, **kwargs):
+        chamadas.append((metodo, kwargs))
+        return {
+            "rateLimits": {
+                "primary": {"usedPercent": 100, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 74, "windowDurationMins": 10080},
+            },
+            "rateLimitResetCredits": {"availableCount": 2, "credits": []},
+        }
+
+    monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
+    response = client.post(
+        "/api/codex-contas/work/rate-limit-reset", headers=AUTH,
+        json={"credit_id": "reset-1", "idempotency_key": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "codex_reset_weekly_not_exhausted"
+    assert [c[0] for c in chamadas] == ["account/rateLimits/read"]
+
+
+def test_redefinicao_exige_uuid_idempotente(painel):
+    client, _ = painel
+    response = client.post(
+        "/api/codex-contas/work/rate-limit-reset", headers=AUTH,
+        json={"credit_id": "reset-1", "idempotency_key": "nao-e-uuid"},
+    )
+    assert response.status_code == 422
+
+
+def test_redefinicao_revalida_e_consumo_recebe_credito_e_uuid(painel, monkeypatch):
+    client, _ = painel
+    chave = str(uuid.uuid4())
+    chamadas = []
+
+    def perguntar(metodo, **kwargs):
+        chamadas.append((metodo, kwargs))
+        if metodo == "account/rateLimits/read":
+            return {
+                "rateLimits": {
+                    "primary": {"usedPercent": 100, "windowDurationMins": 300},
+                    "secondary": {"usedPercent": 100, "windowDurationMins": 10080},
+                },
+                "rateLimitResetCredits": {"availableCount": 1, "credits": []},
+            }
+        return {"outcome": "reset"}
+
+    monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
+    response = client.post(
+        "/api/codex-contas/work/rate-limit-reset", headers=AUTH,
+        json={"credit_id": "reset-1", "idempotency_key": chave},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "reset"}
+    assert chamadas[1] == (
+        "account/rateLimitResetCredit/consume",
+        {"codex_home": accounts.resolve_account("work").home,
+         "params": {"creditId": "reset-1", "idempotencyKey": chave}},
+    )
+
+
+def test_redefinicao_sem_credito_na_revalidacao_nao_chama_consume(painel, monkeypatch):
+    client, _ = painel
+    chamadas = []
+
+    def perguntar(metodo, **kwargs):
+        chamadas.append(metodo)
+        return {
+            "rateLimits": {"secondary": {
+                "usedPercent": 100, "windowDurationMins": 10080}},
+            "rateLimitResetCredits": {"availableCount": 0, "credits": []},
+        }
+
+    monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
+    response = client.post(
+        "/api/codex-contas/work/rate-limit-reset", headers=AUTH,
+        json={"credit_id": None, "idempotency_key": str(uuid.uuid4())},
+    )
+
+    assert response.json() == {"outcome": "noCredit"}
+    assert chamadas == ["account/rateLimits/read"]
+
+
+def test_retry_da_mesma_tentativa_chega_em_already_redeemed_apos_o_reset(painel, monkeypatch):
+    client, _ = painel
+    chave = str(uuid.uuid4())
+    semana = iter((100, 12))
+    outcomes = iter(("reset", "alreadyRedeemed"))
+
+    def perguntar(metodo, **kwargs):
+        if metodo == "account/rateLimits/read":
+            return {
+                "rateLimits": {"secondary": {
+                    "usedPercent": next(semana), "windowDurationMins": 10080}},
+                "rateLimitResetCredits": {"availableCount": 1, "credits": []},
+            }
+        return {"outcome": next(outcomes)}
+
+    monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
+    corpo = {"credit_id": "reset-1", "idempotency_key": chave}
+
+    primeira = client.post("/api/codex-contas/work/rate-limit-reset", headers=AUTH, json=corpo)
+    segunda = client.post("/api/codex-contas/work/rate-limit-reset", headers=AUTH, json=corpo)
+
+    assert primeira.json() == {"outcome": "reset"}
+    assert segunda.json() == {"outcome": "alreadyRedeemed"}
 
 
 def test_get_prepare_concluido_confia_cwd_antes_de_liberar_lancador(painel, monkeypatch):

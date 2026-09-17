@@ -39,7 +39,7 @@ MODOS: list[tuple[str, str, str, str]] = [
     ("Full Access", "never", "danger-full-access",
      "Codex faz tudo sem perguntar."),
 ]
-MODO_PADRAO = "Approve for me"
+MODO_PADRAO = "Full Access"
 
 
 # Pedidos do servidor que viram o cartão Permitir/Negar do app. Os demais com `id`

@@ -33,7 +33,20 @@ export type TipoCredencial = 'claude' | 'chave' | 'codex';
 export interface CotaResumo extends Omit<CotaContaResumo, 'id'> {
   ts?: number | null;
   idade_s?: number | null;
+  reset_credits?: CodexResetCredits | null;
 }
+export interface CodexResetCredit {
+  id: string;
+  expires_at: number | null;
+  title: string | null;
+  description: string | null;
+  status: 'available' | 'redeeming' | 'redeemed' | 'unknown';
+}
+export interface CodexResetCredits {
+  available_count: number;
+  credits: CodexResetCredit[] | null;
+}
+export type CodexResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
 export interface Credencial {
   id: string;
   tipo: TipoCredencial;

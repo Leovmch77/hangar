@@ -258,6 +258,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
+- **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
+  `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
 - **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
   `~/.hangar/claude-headless/`, Codex em `~/.hangar/codex-sessions/`; tmux só identifica sessões com
   terminal. Rename e `/clear` preservam a chave; `HANGAR_CANO_KEY` cobre sessões Codex já abertas
@@ -419,6 +421,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   o LLM padrão, e controles de voz só aparecem dentro do provedor que os oferece.
 - **Cota tem cache em disco e respeita 429**: restart do backend não relê todas as contas, e
   fonte que levou 429 espera 10 min antes de insistir.
+- **Redefinição guardada do Codex só vale com a janela de 7 dias em 100%.** O backend relê a cota
+  antes de consumir, usa UUID idempotente por tentativa e força nova leitura após resultado definitivo.
 - **Servidor que não responde é marcado como DESLIGADO na primeira falha de rede, e só volta a ser
   procurado quando a pessoa mandar** — sem retomada por tempo, e a marca é gravada (o iOS recarrega
   o PWA sozinho e apagaria um contador em memória). Erro HTTP não conta: a máquina respondeu.

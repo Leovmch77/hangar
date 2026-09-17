@@ -1,6 +1,6 @@
 import { apiEnv, type EventSourceLike } from './apiEnv';
 import type { Server } from './servers';
-import type { CodexAccount, CodexIntegracaoEstado, CodexLoginAttempt, Credencial } from './credenciais';
+import type { CodexAccount, CodexIntegracaoEstado, CodexLoginAttempt, CodexResetOutcome, Credencial } from './credenciais';
 import * as m from './paraglide/messages';
 import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
@@ -793,6 +793,22 @@ export function getCodexAccountLoginForServer(server: Server, id: string, signal
 }
 export function cancelCodexAccountLoginForServer(server: Server, id: string, attemptId: string): Promise<CodexLoginAttempt> {
   return apiFetchForServer(server, `${codexAccountPath(id, 'login')}?attempt_id=${encodeURIComponent(attemptId)}`, { method: 'DELETE' });
+}
+export function consumeCodexRateLimitResetForServer(
+  server: Server, id: string, creditId: string | null, idempotencyKey: string,
+): Promise<{ outcome: CodexResetOutcome }> {
+  return apiFetchForServer(server, codexAccountPath(id, 'rate-limit-reset'), {
+    method: 'POST',
+    body: JSON.stringify({ credit_id: creditId, idempotency_key: idempotencyKey }),
+  });
+}
+export function consumeCodexRateLimitReset(
+  id: string, creditId: string | null, idempotencyKey: string,
+): Promise<{ outcome: CodexResetOutcome }> {
+  return apiFetch(codexAccountPath(id, 'rate-limit-reset'), {
+    method: 'POST',
+    body: JSON.stringify({ credit_id: creditId, idempotency_key: idempotencyKey }),
+  });
 }
 export function getRootsForServer(server: Server, signal?: AbortSignal): Promise<FsRoot[]> {
   return apiFetchForServer(server, '/api/fs/roots', { signal: comTeto(signal, 8000) });

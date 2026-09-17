@@ -109,14 +109,14 @@ describe('janela longa — que dia volta', () => {
     expect(janelaLonga(agora + 6 * 3600, agora)).toBe(false);
     expect(janelaLonga(null, agora)).toBe(false);
   });
-  it('mostra dia da semana e hora, no idioma do app', () => {
-    // sábado, 18h — o formato que responde "que dia a semana vira".
+  it('mostra dia da semana, data e hora, no idioma do app', () => {
+    // sábado 22/08, 18h: não deixa "sábado" ambíguo entre semanas diferentes.
     const sabado = Date.parse('2026-08-22T18:00:00-03:00') / 1000;
-    expect(diaDoReset(sabado, agora)).toBe('sáb 18h');
+    expect(diaDoReset(sabado, agora)).toBe('sáb 22/08 18h');
   });
   it('em inglês o dia sai em inglês — é data formatada, não chave de tradução', () => {
     overwriteGetLocale(() => 'en');
-    expect(diaDoReset(Date.parse('2026-08-22T18:00:00-03:00') / 1000, agora)).toBe('Sat 18h');
+    expect(diaDoReset(Date.parse('2026-08-22T18:00:00-03:00') / 1000, agora)).toBe('Sat 08/22 18h');
   });
   it('reset ausente ou já passado não desenha nada', () => {
     expect(diaDoReset(null, agora)).toBe('');

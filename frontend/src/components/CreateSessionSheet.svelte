@@ -1006,7 +1006,10 @@
               aria-pressed={provider === p}
               disabled={providers[p] ? !providers[p].disponivel : false}
               onclick={() => {
-                if (p !== provider) { semTerminal = false; permissao = ''; }
+                if (p !== provider) {
+                  semTerminal = false;
+                  permissao = p === 'codex' ? 'Full Access' : '';
+                }
                 provider = p;
                 carregarModelos();
               }}

@@ -80,8 +80,8 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT, *,
               codex_home: str | Path | None = None, params: dict | None = None) -> dict:
     """Sobe um app-server em stdio, chama `metodo` e devolve o `result`.
 
-    Sem parâmetros de chamada: os dois métodos que este caminho usa (`model/list` e
-    `account/rateLimits/read`) não os têm. Um `params` opcional que ninguém passa seria peso morto.
+    `params` fica vazio nas leituras e leva `creditId`/`idempotencyKey` no consumo de uma
+    redefinição de cota.
 
     `timeout` existe porque os dois chamadores esperam coisas diferentes: o catálogo é uma tela que
     alguém abriu e pode esperar, o poll de cota tem que caber no teto das outras fontes (8s no

@@ -149,6 +149,24 @@ def test_credencial_do_codex_tambem_aparece(casa, monkeypatch, method, status, w
         assert (row.login.email, row.login.plano) == ("user@example.test", "pro")
 
 
+def test_credencial_codex_leva_as_redefinicoes_da_cota(casa, monkeypatch):
+    cid = f"codex:{casa / '.codex'}"
+    cota = _cota(cid).model_copy(update={
+        "reset_credits": cotas.ResetCredits(
+            available_count=2,
+            credits=[cotas.ResetCredit(id="r1", expires_at=1789600000, status="available")],
+        ),
+    })
+    _monta(monkeypatch, cotas_lista=[cota])
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [
+        codex_contas.Account("default", casa / ".codex", True)])
+
+    row = credenciais.listar()[0]
+
+    assert row.cota.reset_credits.available_count == 2
+    assert row.cota.reset_credits.credits[0].expires_at == 1789600000
+
+
 def test_lista_usa_so_as_contas_codex_visiveis(casa, monkeypatch):
     _monta(monkeypatch)
     monkeypatch.setattr(codex_contas, "list_accounts", lambda: [codex_contas.Account("default", casa / ".codex", True)])

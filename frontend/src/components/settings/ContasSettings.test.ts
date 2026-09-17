@@ -28,6 +28,7 @@ vi.mock('../../lib/credenciais', async (importOriginal) => {
     listarCredenciais: vi.fn(),
     definirApelido: vi.fn(async () => ({ id: 'x', apelido: null })),
     definirCookie: vi.fn(async () => ({ id: 'x', cookie_definido: false })),
+    consumirRedefinicaoCodex: vi.fn(async () => ({ outcome: 'reset' as const })),
     sincronizarNosAgentes: vi.fn(async () => ({ resultado: { pi: { ok: true, motivo: '' } } })),
   };
 });
@@ -82,6 +83,17 @@ function chave(over: Partial<Credencial> = {}): Credencial {
     ...over,
   };
 }
+function codex(over: Partial<Credencial> = {}): Credencial {
+  return {
+    id: 'codex:/home/u/.codex-work', tipo: 'codex', auth_method: 'oauth',
+    codex_account: 'work', nome: 'work', nome_natural: 'work', ativa: false,
+    path: '/home/u/.codex-work', usos: ['codex_cli'],
+    login: { estado: 'ok', loggedIn: true, email: 'codex@exemplo.com', plano: 'plus' },
+    cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 83 }],
+      ts: 1, idade_s: 5 },
+    ...over,
+  };
+}
 const LOGADA: Credencial = claude();
 const DESLOGADA: Credencial = claude({
   id: 'claude:/home/u/.claude-testes', path: '/home/u/.claude-testes',
@@ -112,7 +124,11 @@ function botaoNomeado(escopo: ParentNode, texto: string) {
 // O cache das queries é um singleton de módulo e sobrevive à desmontagem — de propósito, é o que
 // faz reabrir a tela ser instantâneo. Num teste isso vaza: sem limpar, o caso seguinte monta e
 // recebe a lista do ANTERIOR em vez de chamar o mock dele.
-beforeEach(() => { vi.clearAllMocks(); clienteQuery.clear(); });
+beforeEach(() => {
+  vi.clearAllMocks();
+  clienteQuery.clear();
+  localStorage.removeItem('cp_contas_compacta');
+});
 
 describe('ContasSettings — a lista', () => {
   it('mostra conta com em uso e e-mail (a frase do plano ficou de fora por decisão do árbitro — Task de ajuste serial quando o Lote A mergear)', async () => {
@@ -126,6 +142,118 @@ describe('ContasSettings — a lista', () => {
     // fonte da faixa do rodapé (/api/cotas), uma leitura por credencial.
     expect(linha.querySelector('.ct-cota')!.textContent).toContain('64%');
     expect(linha.querySelector('.ct-cota')!.textContent).toContain('83%');
+    unmount(t.comp);
+  });
+
+  it('mostra quando as janelas reiniciam nos modos completo e compacto', async () => {
+    const agora = Math.floor(Date.now() / 1000);
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [
+        { rotulo: '5h', pct: 100, reset_ts: agora + 7200 },
+        { rotulo: '7d', pct: 100, reset_ts: agora + 3 * 86400 },
+      ],
+    } });
+    const t = montar([conta]);
+    await tick(); await tick();
+    const completos = t.el.querySelectorAll<HTMLElement>('.ct-jan-reset');
+    expect(completos).toHaveLength(2);
+    expect(completos[0].textContent).toMatch(/1h5\d|2h/);
+    expect(completos[1].textContent).toMatch(/\d{1,2}h/);
+
+    t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_ver_compacta()}"]`)!.click();
+    await tick();
+    expect(t.el.querySelectorAll('.ct-mini-reset')).toHaveLength(2);
+    unmount(t.comp);
+  });
+
+  it('mostra redefinições guardadas e desabilita o uso enquanto ainda há cota semanal', async () => {
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 83 }],
+      reset_credits: { available_count: 2, credits: [
+        { id: 'reset-1', expires_at: Math.floor(Date.now() / 1000) + 86400,
+          title: 'Reset', description: null, status: 'available' },
+      ] },
+    } } as Credencial);
+    const t = montar([conta]);
+    await tick(); await tick();
+    const botao = t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!;
+    expect(botao.disabled).toBe(true);
+    expect(t.el.querySelector('.ct-reset-info')?.textContent).toContain('2');
+    expect(t.el.querySelector('.ct-reset-reason')?.textContent).toContain('83%');
+    unmount(t.comp);
+  });
+
+  it('confirma, reutiliza a chave idempotente no retry e força releitura após sucesso', async () => {
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 100 }],
+      reset_credits: { available_count: 1, credits: [
+        { id: 'reset-1', expires_at: null, title: null, description: null, status: 'available' },
+      ] },
+    } } as Credencial);
+    credMock.consumirRedefinicaoCodex
+      .mockRejectedValueOnce(new Error('rede caiu'))
+      .mockResolvedValueOnce({ outcome: 'reset' });
+    const t = montar([conta]);
+    await tick(); await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!.click();
+    await tick();
+    expect(t.el.querySelector('.ct-reset-confirm')?.textContent).toContain(m.codex_reset_confirm());
+
+    const confirmar = t.el.querySelector<HTMLButtonElement>('.ct-reset-confirm .primario')!;
+    confirmar.click();
+    await vi.waitFor(() => expect(credMock.consumirRedefinicaoCodex).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(confirmar.disabled).toBe(false));
+    const primeira = credMock.consumirRedefinicaoCodex.mock.calls[0];
+    confirmar.click();
+    await vi.waitFor(() => expect(credMock.consumirRedefinicaoCodex).toHaveBeenCalledTimes(2));
+    expect(credMock.consumirRedefinicaoCodex.mock.calls[1][3]).toBe(primeira[3]);
+    await vi.waitFor(() => expect(credMock.listarCredenciais).toHaveBeenCalledWith(ALVO, true));
+    unmount(t.comp);
+  });
+
+  it.each([
+    ['nothingToReset', true, () => m.codex_reset_nothing()],
+    ['noCredit', true, () => m.codex_reset_no_credit()],
+    ['alreadyRedeemed', false, () => m.codex_reset_already()],
+  ] as const)('trata %s sem fingir um novo sucesso', async (outcome, erro, mensagem) => {
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 100 }],
+      reset_credits: { available_count: 1, credits: null },
+    } } as Credencial);
+    credMock.consumirRedefinicaoCodex.mockResolvedValueOnce({ outcome });
+    const t = montar([conta]);
+    await tick(); await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!.click();
+    await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-confirm .primario')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.ct-aviso')?.textContent).toContain(mensagem()));
+    expect(t.el.querySelector('.ct-aviso')?.classList.contains('erro')).toBe(erro);
+    expect(credMock.listarCredenciais).toHaveBeenCalledWith(ALVO, true);
+    unmount(t.comp);
+  });
+
+  it('preserva o resultado já aplicado quando a releitura falha', async () => {
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 100 }],
+      reset_credits: { available_count: 1, credits: null },
+    } } as Credencial);
+    credMock.listarCredenciais
+      .mockResolvedValueOnce([conta])
+      .mockRejectedValueOnce(new Error('offline'));
+    credMock.consumirRedefinicaoCodex.mockResolvedValueOnce({ outcome: 'alreadyRedeemed' });
+    const t = montar([conta]);
+    await tick(); await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!.click();
+    await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-confirm .primario')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.ct-aviso')?.textContent)
+      .toContain(m.codex_reset_already()));
+    expect(t.el.querySelector('.ct-aviso')?.textContent).toContain(m.codex_reset_refresh_failed());
     unmount(t.comp);
   });
 

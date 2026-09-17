@@ -9,6 +9,7 @@ import { _limparEsfriamentoParaTestes } from './esfriamento';
 import { getCredentialsForServer, listarCredenciais, getCodexAccountsForServer, createCodexAccountForServer,
   prepareCodexAccountForServer, getCodexPreparationForServer, startCodexAccountLoginForServer,
   getCodexAccountLoginForServer, cancelCodexAccountLoginForServer, deleteCodexAccountForServer,
+  consumeCodexRateLimitResetForServer,
   createSessionForServer, createSession,
   modelOptionsForServer, modelOptions, getArchiveHistory, getArchivePorCwd, resumeArchivedConversation,
   passarBastao, errorDetail } from './api';
@@ -105,6 +106,21 @@ describe('contas e servidor explícito', () => {
     expect(fetcher.mock.calls[0][1]?.method).toBe('DELETE');
     expect(timeout).toHaveBeenCalledWith(120_000);
     expect(timeout).not.toHaveBeenCalledWith(8000);
+  });
+
+  it('consome uma redefinição Codex com id e chave idempotente', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      Response.json({ outcome: 'reset' }));
+    const key = '123e4567-e89b-12d3-a456-426614174000';
+
+    await consumeCodexRateLimitResetForServer(server, 'work /', 'credit /', key);
+
+    expect(fetcher.mock.calls[0][0]).toBe(
+      'https://b.test/api/codex-contas/work%20%2F/rate-limit-reset');
+    expect(fetcher.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ credit_id: 'credit /', idempotency_key: key }),
+    });
   });
 
   it('prazo estourado cita o prazo que valeu, não 8s fixo', async () => {

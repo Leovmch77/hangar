@@ -79,6 +79,33 @@ def test_le_as_duas_janelas(monkeypatch, com_credencial):
     assert janelas[0].reset_ts == 1788107727
 
 
+def test_le_redefinicoes_guardadas_com_expiracao(monkeypatch, com_credencial):
+    resposta = {
+        **_RATE_LIMITS,
+        "rateLimitResetCredits": {
+            "availableCount": 2,
+            "credits": [
+                {"id": "reset-1", "grantedAt": 1789000000, "expiresAt": 1789600000,
+                 "resetType": "codexRateLimits", "status": "available",
+                 "title": "Reset", "description": "Restaura os limites"},
+                {"id": "reset-2", "grantedAt": 1789000100, "expiresAt": None,
+                 "resetType": "codexRateLimits", "status": "available",
+                 "title": None, "description": None},
+            ],
+        },
+    }
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar", lambda m, **kw: resposta)
+
+    estado, _janelas, motivo, redefinicoes = cotas._ler_codex_detalhada()
+
+    assert (estado, motivo) == ("lida", None)
+    assert redefinicoes.available_count == 2
+    assert redefinicoes.credits[0].model_dump() == {
+        "id": "reset-1", "expires_at": 1789600000, "title": "Reset",
+        "description": "Restaura os limites", "status": "available",
+    }
+
+
 def test_pergunta_o_metodo_de_cota(monkeypatch, com_credencial):
     vistos = []
     monkeypatch.setattr(cotas.codex_appserver, "perguntar",

@@ -50,6 +50,7 @@ class CotaResumo(BaseModel):
     # Kimi, o OAuth do Codex): sem ele o nome sai do id, e `codex:/home/u/.codex` viraria um
     # caminho cru na tela onde a fonte já dizia "Codex".
     label: str | None = None
+    reset_credits: cotas.ResetCredits | None = None
 
 
 class Credencial(BaseModel):
@@ -102,7 +103,8 @@ def _cota_por_id(forcar: bool = False) -> dict[str, CotaResumo]:
     # posicional escorregaria pra ele em silêncio (achado da revisão).
     for c in cotas.listar_cotas(forcar=forcar):
         fora[c.id] = CotaResumo(estado=c.estado, janelas=c.janelas, ts=c.ts,
-                                idade_s=c.idade_s, motivo=c.motivo, label=c.label)
+                                idade_s=c.idade_s, motivo=c.motivo, label=c.label,
+                                reset_credits=c.reset_credits)
     return fora
 
 

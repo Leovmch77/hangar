@@ -152,7 +152,7 @@ describe('QuotaStrip — cor, reset e idade', () => {
     const resets = [...conta.querySelectorAll('.quota-reset')].map((r) => r.textContent);
     expect(resets).toHaveLength(2);
     expect(resets[0]).toBe('↺1h20');                  // 5h -> quanto falta
-    expect(resets[1]).toMatch(/^↺\p{L}+ \d+h$/u);     // 7d -> dia da semana + hora
+    expect(resets[1]).toMatch(/^↺\p{L}+ \d{2}\/\d{2} \d+h$/u); // 7d -> dia, data e hora
     unmount(t.comp);
   });
 

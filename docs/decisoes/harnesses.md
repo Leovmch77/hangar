@@ -1385,7 +1385,7 @@ aceitam `HANGAR_CANO_KEY` para as sessões abertas antes da atualização. Os te
 temporários e confirmam que rename/ausência de tmux não muda o nome resolvido.
 
 O modo de permissão do Codex sem terminal é o `permission_mode` do sidecar; ausente significa
-`Approve for me`. A leitura é segura durante um turno porque não dirige `/permissions` nem reinicia
+`Full Access`, igual à sessão Codex com terminal. A leitura é segura durante um turno porque não dirige `/permissions` nem reinicia
 o app-server. A troca continua recusada durante o turno, pois mudar o sandbox exige reabrir o cano.
 O formulário agora oferece os três modos e envia a escolha na criação; o Composer carrega o valor
 na montagem e o mostra também no layout compacto do PWA.

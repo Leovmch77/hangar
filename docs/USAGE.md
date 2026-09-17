@@ -204,7 +204,7 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   (processo do Hangar)**. Pelo terminal, use `hangar-send --new <nome> [cwd] --headless`; acrescente
   `--provider codex` para Codex. Combina com `--model`, `--effort` e `--permissao`. O agente roda
   fora do tmux: permissões e perguntas chegam direto no chat, e reiniciar o Hangar não corta o turno.
-  Para abrir Codex sem confirmações nem sandbox, use `--permissao "Full Access"`.
+  Codex nasce em **Full Access**; use `--permissao` para escolher outro modo.
   - Não há painel de terminal nem espelho; `/btw` e os comandos que só existem na TUI
     (`/color`, `/doctor`, `/reload-plugins`) ficam fora.
   - O histórico continua no `.jsonl` do Claude ou no rollout do Codex e pode ser retomado depois.
@@ -344,6 +344,11 @@ padrão vem marcada quando está disponível, mas a seleção é explícita e ac
 processo do Codex. O formulário bloqueia uma conta sem login confirmado ou sem preparação pronta.
 OAuth e chave de API aparecem apenas como método de autenticação; a origem da conversa é a conta
 Codex selecionada.
+
+Em **Contas e modelos**, cada janela de cota mostra quando reinicia. Quando o Codex informar
+redefinições guardadas, a conta mostra quantidade e expiração. O botão só libera quando a janela
+semanal chegar a 100%; antes de gastar, a tela confirma que as janelas elegíveis serão restauradas
+e que a data do reset semanal mudará.
 
 No **Arquivo**, a retomada usa a conta registrada nos metadados da conversa e não troca de conta
 por cota ou por conveniência. Se a origem ficar ambígua, a retomada é recusada até haver uma única

@@ -88,6 +88,19 @@ class JanelaCota(BaseModel):
     por_modelo: bool = False
 
 
+class ResetCredit(BaseModel):
+    id: str
+    expires_at: int | None = None
+    title: str | None = None
+    description: str | None = None
+    status: Literal["available", "redeeming", "redeemed", "unknown"] = "unknown"
+
+
+class ResetCredits(BaseModel):
+    available_count: int
+    credits: list[ResetCredit] | None = None
+
+
 class CotaConta(BaseModel):
     """Cota de UMA credencial. `estado` distingue os quatro casos que a tela precisa separar:
     lida, conta sem credencial no disco, credencial expirada e falha de leitura."""
@@ -103,10 +116,12 @@ class CotaConta(BaseModel):
     ts: float | None = None
     idade_s: float | None = None
     motivo: str | None = None
+    reset_credits: ResetCredits | None = None
 
 
 # Resultado cru de um leitor: (estado, janelas, motivo).
 _Leitura = tuple[Estado, list[JanelaCota], str | None]
+_LeituraDetalhada = tuple[Estado, list[JanelaCota], str | None, ResetCredits | None]
 
 
 @dataclass(frozen=True)
@@ -114,7 +129,7 @@ class _Fonte:
     chave: str
     label: str
     provedor: Provedor
-    ler: Callable[[], _Leitura]
+    ler: Callable[[], _Leitura | _LeituraDetalhada]
     ativa: bool = False
 
 
@@ -490,7 +505,49 @@ def _janela_codex(o: object) -> JanelaCota | None:
                       pct=max(0.0, min(100.0, pct)), reset_ts=reset or None)
 
 
-def _ler_codex(home: Path | str | None = None) -> _Leitura:
+def codex_weekly_used(resposta: object) -> float | None:
+    if not isinstance(resposta, dict):
+        return None
+    limites = resposta.get("rateLimits")
+    if not isinstance(limites, dict):
+        return None
+    for janela in (limites.get("primary"), limites.get("secondary")):
+        if not isinstance(janela, dict) or _num(janela.get("windowDurationMins")) != 10080:
+            continue
+        pct = _num(janela.get("usedPercent"))
+        return max(0.0, min(100.0, pct)) if pct is not None else None
+    return None
+
+
+def codex_reset_credits(resposta: object) -> ResetCredits | None:
+    if not isinstance(resposta, dict):
+        return None
+    resumo = resposta.get("rateLimitResetCredits")
+    if not isinstance(resumo, dict):
+        return None
+    quantidade = resumo.get("availableCount")
+    if isinstance(quantidade, bool) or not isinstance(quantidade, int) or quantidade < 0:
+        return None
+    bruto = resumo.get("credits")
+    creditos = None
+    if isinstance(bruto, list):
+        creditos = []
+        for item in bruto:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            expira = item.get("expiresAt")
+            creditos.append(ResetCredit(
+                id=item["id"],
+                expires_at=expira if isinstance(expira, int) and not isinstance(expira, bool) else None,
+                title=item.get("title") if isinstance(item.get("title"), str) else None,
+                description=item.get("description") if isinstance(item.get("description"), str) else None,
+                status=item.get("status") if item.get("status") in
+                    ("available", "redeeming", "redeemed", "unknown") else "unknown",
+            ))
+    return ResetCredits(available_count=quantidade, credits=creditos)
+
+
+def _ler_codex_detalhada(home: Path | str | None = None) -> _LeituraDetalhada:
     """Cota da conta do Codex, pelo `account/rateLimits/read` de um app-server efêmero.
 
     Não é HTTP como as outras porque a credencial é um par OAuth do ChatGPT e o endpoint que a
@@ -506,7 +563,7 @@ def _ler_codex(home: Path | str | None = None) -> _Leitura:
     # "não há credencial".
     raiz = _codex_home(home)
     if not _tem_credencial_codex(raiz):
-        return "sem_credencial", [], None
+        return "sem_credencial", [], None, None
     try:
         # Mesmo teto das fontes HTTP: `_atualizar` espera TODAS as leituras juntas, então uma fonte
         # com teto maior que as outras vira o tempo de resposta do `/api/cotas` inteiro.
@@ -514,17 +571,22 @@ def _ler_codex(home: Path | str | None = None) -> _Leitura:
         r = codex_appserver.perguntar("account/rateLimits/read", timeout=_HTTP_TIMEOUT,
                                       **kwargs)
     except codex_appserver.CodexAusente:
-        return "indisponivel", [], "codex-ausente"
+        return "indisponivel", [], "codex-ausente", None
     except (RuntimeError, OSError) as e:
         _log.debug("cota: codex nao respondeu: %r", e)
-        return "indisponivel", [], "sem-resposta"
+        return "indisponivel", [], "sem-resposta", None
     limites = r.get("rateLimits")
     limites = limites if isinstance(limites, dict) else {}
     janelas = [j for j in (_janela_codex(limites.get("primary")),
                            _janela_codex(limites.get("secondary"))) if j is not None]
     if not janelas:
-        return "indisponivel", [], "formato-desconhecido"
-    return "lida", janelas, None
+        return "indisponivel", [], "formato-desconhecido", None
+    return "lida", janelas, None, codex_reset_credits(r)
+
+
+def _ler_codex(home: Path | str | None = None) -> _Leitura:
+    estado, janelas, motivo, _ = _ler_codex_detalhada(home)
+    return estado, janelas, motivo
 
 
 def _ler_opencode(cfg: dict[str, str]) -> _Leitura:
@@ -740,7 +802,7 @@ def _fontes() -> list[_Fonte]:
         raiz = account.home.expanduser().absolute().resolve(strict=False)
         out.append(_Fonte(
             f"codex:{raiz}", "Codex" if account.is_default else account.id, "codex",
-            lambda raiz=raiz: _ler_codex(raiz),
+            lambda raiz=raiz: _ler_codex_detalhada(raiz),
         ))
     for nome, key, base in _providers_kimi():
         # CommandCode plugado como provider do Kimi Code: o `<base>/usages` dele é 403 — a rota
@@ -780,7 +842,7 @@ def _fontes() -> list[_Fonte]:
     return out
 
 
-def _seguro(f: _Fonte) -> _Leitura:
+def _seguro(f: _Fonte) -> _Leitura | _LeituraDetalhada:
     try:
         return f.ler()
     except Exception:                                        # noqa: BLE001 - fail-soft por fonte
@@ -808,7 +870,9 @@ def _atualizar(fontes: list[_Fonte], forcar: bool = False) -> None:
     with ThreadPoolExecutor(max_workers=min(8, len(vencidas))) as ex:
         leituras = list(ex.map(_seguro, vencidas))
     with _lock:
-        for f, (estado, janelas, motivo) in zip(vencidas, leituras):
+        for f, leitura in zip(vencidas, leituras):
+            estado, janelas, motivo = leitura[:3]
+            reset_credits = leitura[3] if len(leitura) > 3 else None
             anterior = _cache.get(f.chave)
             # 429: o carimbo vai pro futuro, e a fonte só vence de novo depois da espera.
             carimbo = time.monotonic() + (_ESPERA_429_S - _TTL_S if motivo == "http-429" else 0.0)
@@ -820,6 +884,7 @@ def _atualizar(fontes: list[_Fonte], forcar: bool = False) -> None:
             _cache[f.chave] = (carimbo, CotaConta(
                 id=f.chave, label=f.label, provedor=f.provedor, ativa=f.ativa, estado=estado,
                 janelas=janelas, ts=time.time() if estado == "lida" else None, motivo=motivo,
+                reset_credits=reset_credits,
             ))
         _gravar_cache()
 

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { comTeto } from './credenciais';
+import { comTeto, novaChaveIdempotente } from './credenciais';
 import { listarCredenciais, credentialAuth } from './credenciais';
 import { listarCredenciais as coreListar, credentialAuth as coreAuth } from '@hangar/core';
 
@@ -38,5 +38,22 @@ describe('comTeto', () => {
 
   it('sem sinal do chamador devolve só o teto', () => {
     expect(comTeto(undefined, 8000)).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe('novaChaveIdempotente', () => {
+  it('continua gerando UUID v4 quando randomUUID não existe no HTTP da LAN', () => {
+    const original = globalThis.crypto;
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        return bytes;
+      },
+    });
+    try {
+      expect(novaChaveIdempotente()).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f');
+    } finally {
+      vi.stubGlobal('crypto', original);
+    }
   });
 });

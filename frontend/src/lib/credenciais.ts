@@ -8,7 +8,8 @@
 // O fetch segue o mesmo par do contaEstado.ts: `null` = servidor ATIVO (401 desloga), Server
 // explícito = máquina do ?srv= (401 de outra máquina não pode apagar a credencial ativa).
 import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { errorDetail, comTeto, type CodexAccount } from '@hangar/core';
+import { consumeCodexRateLimitReset, consumeCodexRateLimitResetForServer, errorDetail, comTeto,
+  type CodexAccount, type CodexResetOutcome } from '@hangar/core';
 import * as m from '../paraglide/messages';
 export { listarCredenciais, credentialAuth, credentialGroup, codexAccountMessage } from '@hangar/core';
 export type { Credencial, CotaResumo, TipoCredencial, AuthMethod, CodexAccount, CodexLoginAttempt } from '@hangar/core';
@@ -49,6 +50,23 @@ function em<T>(alvo: Server | null, path: string, init?: RequestInit): Promise<T
 }
 
 export { codexOpcoes, type CodexOpcoes } from '@hangar/core';
+
+export function novaChaveIdempotente(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function consumirRedefinicaoCodex(
+  alvo: Server | null, conta: string, credito: string | null, chaveIdempotente: string,
+): Promise<{ outcome: CodexResetOutcome }> {
+  return alvo
+    ? consumeCodexRateLimitResetForServer(alvo, conta, credito, chaveIdempotente)
+    : consumeCodexRateLimitReset(conta, credito, chaveIdempotente);
+}
 
 // `forcar` é o botão "atualizar" da aba: pede ao servidor a leitura de cota de AGORA,
 // pulando o cache de 5 min (ver backend/app/cotas.py — `?forcar=true`).

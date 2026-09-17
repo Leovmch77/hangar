@@ -325,6 +325,23 @@ depois de `_ESPERA_429_S` (10 min) — insistir no próximo poll só renova o 42
 fica fora, pelo mesmo motivo do `_avisar_sessoes`: a suíte gravaria fontes de mentira no arquivo
 real da máquina.
 
+## Redefinições guardadas do Codex respeitam a janela semanal
+
+(`app/cotas.py` + `codex_contas_api.py` + `ContasSettings.svelte`, 17/09/2026,
+codex-cli 0.154.0.) `account/rateLimits/read` devolve `rateLimitResetCredits` junto das janelas, e
+`account/rateLimitResetCredit/consume` gasta uma redefinição com chave idempotente. Na leitura real,
+a conta padrão tinha zero e uma conta adicional tinha duas; ambas ainda possuíam cota semanal.
+
+- A tela mostra quantidade, expiração e o reset de cada janela. Janela longa leva dia da semana,
+  data numérica e hora (`dom 04/10 2h`), porque só o nome do dia fica ambíguo. O consumo só é
+  habilitado quando a janela de 7 dias está em 100%.
+- O backend relê `account/rateLimits/read` imediatamente antes do consumo e recusa se a janela
+  semanal ainda tiver saldo. O botão não é barreira de segurança.
+- Uma tentativa usa UUID e conserva a mesma chave ao repetir depois de falha de transporte.
+  `alreadyRedeemed` é confirmação de uma tentativa anterior, não um segundo consumo.
+- `nothingToReset` e `noCredit` são resultados sem sucesso. Todo resultado definitivo força nova
+  leitura da credencial; falha nessa releitura preserva a informação de que o consumo já ocorreu.
+
 ## Servidor que não responde esfria; o interruptor manual não bastava
 
 (`packages/core/src/esfriamento.ts`, `api.ts`, `frontend/src/lib/sessionsStore.svelte.ts`,
