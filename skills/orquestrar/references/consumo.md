@@ -1,63 +1,62 @@
-# Consumo por papel na execução
+# Consumption per role
 
-Quem abre uma sessão mede seu intervalo; o revisor faz isso pelo verificador. O árbitro mede
-também seu próprio período. Leia na abertura/encerramento e na retrospectiva. Não há coleta
-periódica, consulta de preços ou varredura de conversas alheias.
+Whoever opens a session measures its interval (the reviewer does it for the verifier; the
+arbiter also measures his own period). Read at opening, closing and in the retrospective. No
+periodic collection, price lookup or sweep of other people's conversations.
 
-## Capturar início e fim
+## Capture start and end
 
-Use o coletor existente do Hangar (`stats.Accumulator`) pelo comando abaixo. O plano registra
-o caminho do checkout do Hangar. Crie `<duravel>/medicao/` e substitua todos os placeholders.
-O transcript deve ser o caminho absoluto confirmado da sessão, não um nome tmux ou um glob.
+Use Hangar's collector. The plan records the Hangar checkout path. Create `<durable>/medicao/`
+and fill every placeholder; the transcript is the session's confirmed absolute path, never a
+tmux name or a glob.
 
 ```bash
 uv run --directory <hangar>/backend --no-sync python -m app.orq_consumo snapshot \
-  --provider <claude|codex|pi|omp|kimi> --transcript <caminho-absoluto> \
-  --role <papel> --session <nome> --model <modelo-observado> --effort <esforco-observado> \
-  > <duravel>/medicao/<nome>-inicio.json
+  --provider <claude|codex|pi|omp|kimi> --transcript <absolute-path> \
+  --role <role> --session <name> --model <observed-model> --effort <observed-effort> \
+  > <durable>/medicao/<name>-inicio.json
 ```
 
-Capture antes do primeiro pedido e repita o comando ao encerrar, usando `<nome>-fim.json`.
-Confira o código de saída antes de registrar o artefato. Se a sessão já trabalhou, o início
-marca apenas o período observado: o consumo anterior fica fora. Não invente um início zerado.
-Na troca de sessão, papel ou modelo, feche o par atual e abra outro, com nomes de arquivo novos.
-O mesmo vale ao delimitar Tasks/rodadas: intervalos distintos, sem somar o total e suas partes.
+- Capture before the first request; repeat at closing into `<name>-fim.json`. Check the exit
+  code before recording the artifact.
+- A session that already worked: the start marks only the observed period. Never invent a
+  zeroed start.
+- Session, role or model changed: close the current pair and open another with new file names.
+  Same for delimiting Tasks or rounds: distinct intervals, never a total plus its parts.
+- File not yet created: wait for its confirmed creation before the request. Lost session or
+  unreachable source: record the gap; a missing end is never zero consumption.
+- Model and effort are observed from the session, never deduced from the contract nor
+  attributed per call.
+- Invalid JSON, a reset counter or a half-written line block exact measurement; wait for the
+  write to finish. A pair with no new usage is reported, not counted as proven consumption.
 
-Arquivo ainda inexistente: aguarde sua criação confirmada antes do pedido. Sessão perdida ou
-fonte inacessível: registre a lacuna; a falta do final não vira consumo zero. Modelo e esforço
-são observações da sessão, não valores deduzidos do contrato nem atribuição por chamada.
-JSON inválido, contador reiniciado e linha ainda pela metade impedem medição exata. Linha parcial
-exige esperar a escrita terminar; um par sem uso novo é informado, não vira consumo comprovado.
-
-## Relatório
+## Report
 
 ```bash
 uv run --directory <hangar>/backend --no-sync python -m app.orq_consumo report \
-  --pair <duravel>/medicao/<sessao1>-inicio.json <duravel>/medicao/<sessao1>-fim.json \
-  --pair <duravel>/medicao/<sessao2>-inicio.json <duravel>/medicao/<sessao2>-fim.json \
-  > <duravel>/medicao/relatorio.json
+  --pair <durable>/medicao/<session1>-inicio.json <durable>/medicao/<session1>-fim.json \
+  --pair <durable>/medicao/<session2>-inicio.json <durable>/medicao/<session2>-fim.json \
+  > <durable>/medicao/relatorio.json
 ```
 
-O relatório soma **final menos inicial**, por papel, separando entrada sem cache, cache lido,
-cache criado e saída. Fontes, identidade e intervalos acompanham os números. Repetição da mesma
-fonte em intervalos sobrepostos, arquivo trocado/truncado/reescrito e contadores incompatíveis
-falham explicitamente. Preserve os transcripts para a conferência dos prefixos registrados.
-Gere o relatório na mesma máquina e antes de mover/arquivar as fontes.
+- The report sums end minus start per role: uncached input, cache read, cache created, output,
+  with sources, identity and intervals. Overlapping intervals of the same source, a swapped,
+  truncated or rewritten file and incompatible counters fail explicitly.
+- Preserve the transcripts; generate the report on the same machine, before moving or archiving
+  the sources.
+- The total covers the registered sources only. Subagents with their own transcript need their
+  own pairs, linked to the role that opened them; without them, declare that coverage missing.
+  Never look for children by directory or name coincidence.
+- The events JSONL keeps its types; add only the report paths to the journal and to the
+  retrospective's request.
+- The observed window includes waiting and measures no productivity. Tokens are not price nor
+  subscription percentage. A quota variation belongs to the whole account; do not attribute it
+  to this work without separate measurement.
 
-O total cobre **as fontes registradas**. Subagentes com transcript próprio precisam de seus
-próprios pares, vinculados ao papel de quem os abriu; sem eles, declare essa cobertura ausente.
-Não procure filhos por coincidência de diretório ou nome. O JSONL de eventos continua com seus
-tipos atuais; acrescente só os caminhos dos relatórios ao registro e ao pedido da retrospectiva.
+## Comparing configurations
 
-Janela observada inclui espera e não mede produtividade. Tokens não equivalem a preço nem a
-porcentagem da assinatura. Uma variação de cota é da conta inteira; outras sessões e a renovação
-da janela impedem atribuí-la a este trabalho sem medição separada.
-
-## Comparar configurações
-
-A retrospectiva usa estes dados nas seções de desperdício e de modelos que já existem.
-Para testar uma troca de modelo, proponha tarefas representativas e repita o mesmo pedido,
-base de código e critérios nas configurações autorizadas, duas ou três vezes cada. Registre
-versões, tokens separados por cache e papel, reprovações e resultado da verificação.
-Execuções de comparação consomem cota e exigem autorização; não são disparadas pela retrospectiva.
-Uma execução isolada é observação, não prova de que uma configuração economiza ou entrega melhor.
+The retrospective uses this data in its waste and model-card sections. To test a model switch:
+representative tasks, the same request, codebase and criteria in each authorized
+configuration, two or three runs each; record versions, tokens split by cache and role,
+rejections and verification result. Comparison runs spend quota and require authorization; the
+retrospective never triggers them. One isolated run is an observation, not proof.

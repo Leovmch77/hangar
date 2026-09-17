@@ -128,8 +128,12 @@ fase 1 e só escala: `audit` (quem planejou escreve, uma revisão fresca do diff
 `full` (após o planejamento aprovado, executor e revisor independente trabalham com portão entre
 Tasks e revisão final da branch). A linha do executor na tabela do time pode ser escolhida pelo
 `Risk:` da Task (`vez` = `low`/`high`) em vez de rodízio. Push depende de autorização do usuário. Um escritor por árvore, execução serial por
-padrão; cada sessão lê só a referência do seu papel. Contrato visual, exceções de paralelismo e
-demais etapas ficam na skill.
+padrão. **Só planejador e árbitro invocam a skill**: executor, revisor, revisão final e
+retrospectiva recebem no kick-off o caminho da página do papel
+(`~/.claude/skills/orquestrar/references/<papel>.md`) e leem só ela. Cada página é escrita como
+regra imperativa, sem motivo nem caso, com teto de tamanho conferido por
+`scripts/checar-orquestrar.sh`. Contrato visual, exceções de paralelismo e demais etapas ficam
+na skill.
 
 **Instalar/atualizar numa máquina** (após `git pull`):
 

@@ -171,6 +171,36 @@ for f in references/revisao-final.md references/paralelo-worktree.md references/
   fi
 done
 
+# 7. Teto de tamanho por arquivo. A skill e relida em cada resposta de cada sessao; texto que
+#    entra empurra outro pra fora (a regra de escrita esta em references/retrospectiva.md, secao 5).
+teto_skill=8000
+teto_pagina=13000
+teto_planejamento=20000   # lida uma vez por trabalho, pelo planejador; carrega os moldes do contrato
+for f in "${arquivos[@]}"; do
+  tam=$(wc -c < "$f")
+  teto=$teto_pagina
+  [ "$f" = SKILL.md ] && teto=$teto_skill
+  [ "$f" = references/planejamento.md ] && teto=$teto_planejamento
+  if [ "$tam" -gt "$teto" ]; then
+    echo
+    echo "✗ $f tem $tam caracteres; teto e $teto. Enxugue ou funda outro trecho do mesmo arquivo."
+    falhou=1
+  fi
+done
+
+# 8. Pagina de papel que nao carrega a skill nao pode mandar ler o SKILL.md nem invoca-la.
+#    (a retrospectiva fica de fora: ela propoe patch pra skill inteira, SKILL.md incluso.)
+for f in references/executor.md references/executor-fluxo.md references/executor-visual.md \
+         references/revisor.md references/revisor-catalogo.md references/revisor-visual.md \
+         references/revisao-final.md; do
+  if grep -q 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f"; then
+    echo
+    echo "✗ $f aponta para o SKILL.md ou manda invocar a skill: executor, revisor, revisao final e retrospectiva leem SO a pagina do papel."
+    grep -n 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f" | sed 's/^/    /'
+    falhou=1
+  fi
+done
+
 echo
 if [ "$falhou" = 0 ]; then
   echo "orquestrar OK — ${#arquivos[@]} arquivos, nenhuma contradicao."
