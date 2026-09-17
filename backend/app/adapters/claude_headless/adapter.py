@@ -94,6 +94,20 @@ OPCOES_PLANO = ["Aprovar plano", "Continuar planejando"]
 _RECUSA_PLANO = "O usuário não aprovou o plano. Continue no modo plano e aguarde as instruções dele."
 
 
+def _mensagem_conversar(respostas: dict[str, str], conversar: list[str]) -> str:
+    """Tool_result do AskUserQuestion quando alguma pergunta ficou em "Conversar sobre isso"."""
+    linhas = [f"- {p} → {r}" for p, r in respostas.items()]
+    if linhas:
+        linhas.insert(0, "O usuário respondeu:")
+    if len(conversar) == 1:
+        linhas.append(f"Sobre «{conversar[0]}» ele prefere conversar antes de responder.")
+    else:
+        linhas.append("Sobre estas perguntas ele prefere conversar antes de responder:")
+        linhas.extend(f"- {p}" for p in conversar)
+    linhas.append("Não repita a pergunta: responda em texto e aguarde a mensagem dele.")
+    return "\n".join(linhas)
+
+
 class _CanoOcupado(RuntimeError):
     """Cano vivo que não respondeu: há outro cliente nele. Não se mata nem se substitui."""
 
@@ -461,10 +475,16 @@ class ClaudeHeadlessAdapter:
             raise ValueError("a pergunta mudou")
         perguntas = q["questions"]
         respostas: dict[str, str] = {}
+        conversar: list[str] = []
         for i, item in enumerate(perguntas):
             a = answers[i] if i < len(answers) else None
             if not a:
                 raise ValueError("responda a todas as perguntas")
+            if a.get("kind") == "chat":
+                # "Conversar sobre isso": sem picker pra fechar, o equivalente é recusar a tool com
+                # as respostas que já existem no texto — senão viravam 409 e a sessão ficava presa.
+                conversar.append(item["question"])
+                continue
             if a.get("kind") == "text":
                 texto = (a.get("value") or "").strip()
             else:
@@ -475,10 +495,12 @@ class ClaudeHeadlessAdapter:
             if not texto:
                 raise ValueError("responda a todas as perguntas")
             respostas[item["question"]] = texto
-        await self._responder(sess, q["request_id"], {
-            "behavior": "allow",
-            "updatedInput": {"questions": perguntas, "answers": respostas},
-        })
+        if conversar:
+            resposta = {"behavior": "deny", "message": _mensagem_conversar(respostas, conversar)}
+        else:
+            resposta = {"behavior": "allow",
+                        "updatedInput": {"questions": perguntas, "answers": respostas}}
+        await self._responder(sess, q["request_id"], resposta)
         sess.question = None
         self._recalcular_estado(sess)
         await self._notify(sess)

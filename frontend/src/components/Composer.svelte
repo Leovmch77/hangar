@@ -439,6 +439,9 @@
   const hasInput = $derived(inputText.trim().length > 0 || attachments.length > 0);
   const canSend = $derived(hasInput && !uploading && !sending && !recording && !transcribing);
   const isWorking = $derived(sessionState === 'working');
+  // Sem terminal, uma pergunta pendente (awaiting_input) só tem saída por aqui: não há pane
+  // pra mandar Esc, e mensagem digitada fica na fila até alguém responder.
+  const podeInterromper = $derived(isWorking || (headless && sessionState === 'awaiting_input'));
 
   // Com os atalhos de volta na fileira de baixo, a aba pode não ter nada: sessão fora de repo, sem
   // par, sem cache. Faixa vazia pendurada é pior que faixa ausente.
@@ -1119,7 +1122,7 @@
     }
     // Esc com a sessão trabalhando = o Esc do terminal: interrompe o turno. Parada, deixa
     // passar pro resto da tela (overlays, visor).
-    if (e.key === 'Escape' && isWorking) {
+    if (e.key === 'Escape' && podeInterromper) {
       e.preventDefault();
       onInterrupt();
       return;
@@ -2383,7 +2386,7 @@
           <button class="model-pill" onclick={() => submit(true)} disabled={!canSend}
             title={m.codex_orientar_ajuda()}>{m.codex_orientar()}</button>
         {/if}
-        {#if isWorking && !hasInput}
+        {#if podeInterromper && !hasInput}
           <!-- Pensando + input vazio -> o slot vira STOP. Ao digitar/colar algo, volta a ser SEND
                (enfileira a msg). Um slot so -> ganha espaco. -->
           <button class="stop-btn" onclick={() => (confirmStopOpen = true)} aria-label={m.composer_interromper_aria()}>
