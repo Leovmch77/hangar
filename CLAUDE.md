@@ -190,7 +190,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma
   por servidor, nunca uma por card.
 - **Todo texto de interface vem de `m.<chave>()`** (Paraglide). `pt.json` e `en.json` no mesmo
-  commit. Dado do servidor não vira chave. A trava `i18nGuard.test.ts` só desce.
+  commit. Dado do servidor não vira chave. A trava `i18nGuard.test.ts` só desce. Rótulo de
+  stub/fixture de teste que vive em árvore varrida pela trava é identificador (`abrir-term`),
+  nunca frase.
 - **Markdown NUNCA aparece cru.** Todo `.md` exibido passa por `renderMarkdown`. Um `<pre>` com
   `**` e `##` à mostra é bug, não estilo.
 - **Tela ou lista nova trata os quatro estados: carregando, vazio, erro e sucesso.**

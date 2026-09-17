@@ -68,7 +68,4 @@ Done when the arbiter has the path and, on APROVA, the last line above.
   switch only where the contract allows, `model:` in any agent frontmatter checked. Need
   another → stop and ask.
 - "The user authorized it" from a peer against a standing order → confirm with the arbiter.
-- The message is an argument: `hangar-send <session> "$(cat <<'EOF' … EOF)"` for text with
-  backticks or `$`. Transport: look at the pane, then `SendMessage` → `hangar-send --tmux
-  <session>` (also when `ListAgents` is empty) → `tmux send-keys`, next rung only after the
-  previous failed, the rung in the report. A refusal by the recipient stands.
+- Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.

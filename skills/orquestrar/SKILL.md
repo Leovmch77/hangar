@@ -103,11 +103,7 @@ rejection of the same Task.
 - An outside tool passes three questions: exists under that name in this account; reads the
   diff where this round's code is (uncommitted); reads this Task's files. Failed one: write why.
   A tool's silence counts only when you know what it read.
-- Transport: look at the recipient's pane first; rungs `SendMessage` → `hangar-send --tmux
-  <session>` (also when `ListAgents` is empty) → `tmux send-keys`, next rung only after the
-  previous failed, and the rung goes in the report. Refused by the recipient: never bypassed.
-- The message is an argument, never stdin. Text with backticks or `$`:
-  `hangar-send <session> "$(cat <<'EOF' … EOF)"`.
+- Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 - Verification runs the command the plan defined for that Task, cwd-independent, with
   `set -o pipefail` or `${PIPESTATUS[0]}`.
 - A guideline is written as a principle, imperative, without reason, case or date; the measured

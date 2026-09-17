@@ -6,9 +6,6 @@ Read at step 4 of `executor.md`.
 
 - The command the plan defined for this Task, cwd-independent (explicit prefix or directory).
 - `set -o pipefail` or `${PIPESTATUS[0]}`: `command | tail && echo OK` prints OK on failure.
-- UI against what is served: `dist` needs a build; a screen vanishing without console error is
-  HMR cache. Note it once in the report.
-- A temporary debug file is deleted in the same command that created it.
 - Before sending: `git diff <base>..HEAD -- <file>` shows only what the Task asked; check removed
   lines with `git diff <base>..HEAD | grep -E '^-.*(role=|aria-|try|catch|await)'`.
 
@@ -28,7 +25,6 @@ Before pasting a proof, say what would make it fail. Then:
   exists; undo the fix and watch it go red. Same for a finding an automatic reviewer raised.
 - Mutation runs in a detached worktree: `git worktree add --detach <tmp>/mut-<x> <object>` →
   apply → run → `git worktree remove --force`. The tree you commit stays intact.
-- A test-only file in a tree swept by a gate uses identifiers (`abrir-term`), never sentences.
 
 ## The proof stage
 

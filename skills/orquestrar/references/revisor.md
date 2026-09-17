@@ -28,8 +28,7 @@ Done when the protection proof is recorded and round, object and base are noted.
    uncommitted changes; reads this Task's files. Silence counts only when you know what it
    read. One you cannot find → tell the arbiter which and what exists instead, proceed.
    Correction round: judge the recipe's application and its proof yourself.
-3. Prioritize the dimension you would not look at yourself (accessibility, silent failure).
-   Contradictions between tools are yours to resolve. The visual gate is your own eyes.
+3. The visual gate is your own eyes.
 
 Done when the diff, the surrounding code and the tool outputs are read.
 
@@ -97,11 +96,7 @@ Done when the file is on disk with every field filled.
   `resultado` (lowercase), `sessao`, optional `motivo`; second rejection of the same cause →
   `"reincide": true`; the commit hash is a field, never a line. Run
   `~/.claude/skills/orquestrar/scripts/orq-valida-eventos.py <file>` right after.
-- The message is an argument: `hangar-send <session> "$(cat <<'EOF' … EOF)"` for text with
-  backticks or `$`. Transport: look at the recipient's pane, then `SendMessage` →
-  `hangar-send --tmux <session>` (also when `ListAgents` is empty) → `tmux send-keys`, next
-  rung only after the previous failed, the rung in the report. A refusal by the recipient
-  stands.
+- Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 
 Done when the message is delivered and the validator exits 0.
 
