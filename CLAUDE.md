@@ -95,6 +95,12 @@ npm --prefix frontend run check            # svelte-check + tsc — THIS is the 
 node scripts/test-pi-hangar-state.mjs          # hangar-state.ts: fork de subagente do Pi não rouba o pane
 ```
 
+**Verificação durante o trabalho é só a focada**: o teste do arquivo mexido
+(`cd backend && uv run pytest tests/test_x.py`, `cd frontend && npx vitest run src/x.test.ts`). `npm run check`, `vitest` e
+`pytest` completos só rodam quando o usuário pedir — typecheck do repo inteiro a cada entrega
+trava a máquina e a sessão, e o `ci.yml` julga depois do push. `npm run build` só para servir o
+`dist` local. Ao reportar, diga quais suítes completas não rodaram.
+
 Claude sessions with a terminal must run as `claude --session-id <uuid>` **inside tmux** —
 `scripts/install-claude-wrapper.sh` sets this up. Headless Claude/Codex sessions are created by the
 app or `hangar-send --new ... --headless` and are discovered from their durable sidecars.
@@ -187,7 +193,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 
 - **Duas interfaces, não uma: front web (`frontend/`, Svelte) e app nativo (`mobile/`, Expo).**
   Lógica (API, formatação, parser, tipos) entra em `packages/core` e serve as duas. Tela é por
-  interface, escrita duas vezes. Verificação é `npm run check` **na raiz**, que cobre as três.
+  interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
+  que cobre as três.
 - **Two views: mobile & desktop (820px).** `Sidebar` (desktop) e `SessionList` (mobile) são
   arquivos separados: template e CSS mudam nos DOIS e se verifica nos DOIS. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma

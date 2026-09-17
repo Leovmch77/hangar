@@ -105,7 +105,9 @@ rejection of the same Task.
   A tool's silence counts only when you know what it read.
 - Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 - Verification runs the command the plan defined for that Task, cwd-independent, with
-  `set -o pipefail` or `${PIPESTATUS[0]}`.
+  `set -o pipefail` or `${PIPESTATUS[0]}`. A Task's command is focused: the tests of the files
+  it touches. Full suites (whole-repo type check, full test run, build) run once, in phase 4,
+  before any push; never per Task, per round or per merge.
 - A guideline is written as a principle, imperative, without reason, case or date; the measured
   case goes to the journal, the commit message or the project's `CLAUDE.md`. The full writing
   rule and the size ceilings are in `references/retrospectiva.md`, section 5, and apply to any

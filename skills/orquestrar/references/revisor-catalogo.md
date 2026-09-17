@@ -6,7 +6,7 @@ recipe in `revisor-receita.md`; the screen Task in `revisor-visual.md`.
 
 ## What the report must cover
 
-Type gate, build and tests passing are the floor. Beyond it:
+The Task's focused tests passing are the floor; full suites wait for phase 4. Beyond it:
 
 - the full flow, in the UI or the real command, not only the touched unit;
 - sibling callers: does whoever else uses the changed symbol have the same cause?

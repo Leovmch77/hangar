@@ -35,9 +35,9 @@ Done when the diff, the surrounding code and the tool outputs are read.
 ### 3. Judge
 
 1. Go through `revisor-catalogo.md`; pixels touched → `revisor-visual.md` too.
-2. Run the verification independently: the plan's command, cwd-independent, `set -o pipefail`
-   or `${PIPESTATUS[0]}`; yourself, or through the verifier of `revisor-verificador.md`. Check
-   the output, the object tested and the gaps. Delegated proof is reported as delegated.
+2. Run the verification independently: the Task's focused command, never a full suite,
+   cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or through the verifier
+   of `revisor-verificador.md`. Check the output, the object tested and the gaps. Delegated proof is reported as delegated.
 3. A finding from a tool becomes a blocker only after you reproduce it.
 4. Judge every `Decided alone:` line of the executor's report: `ok`; `blocker N`; or `not
    theirs to decide` (an interface, a settled decision or the scope changed), which blocks.

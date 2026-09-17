@@ -71,7 +71,7 @@ One branch at a time, only after that Task's `APROVA`:
 
 ```bash
 git merge --no-ff <work>-t2
-# the plan's full verification, here, now
+# the merged Tasks' verifications, here, now
 ```
 
 - Merge conflict = the Tasks were not independent. Stop; don't resolve. The losing Task becomes a
@@ -79,9 +79,9 @@ git merge --no-ff <work>-t2
   file the plan declared additive — the arbiter resolves it at the merge by merge strategy and
   proves it by content (key counts on each side before and after, zero values changed); never
   returns it to the executor.
-- Full verification after each merge. Red → back to that Task's executor even with its isolated
-  `APROVA`: fix on the main line, reviewer judges before the commit — dirty tree, frozen round,
-  `APROVA`, then the commit.
+- The merged Tasks' verifications after each merge. Red → back to that Task's executor even
+  with its isolated `APROVA`: fix on the main line, reviewer judges before the commit — dirty
+  tree, frozen round, `APROVA`, then the commit.
 - While any round is open on the main line (a post-merge fix, or a serial Task beside the batch),
   stop merging. Git refusing the merge on a dirty tree is the rule. Only the reviewer's `APROVA`
   closes a gate.

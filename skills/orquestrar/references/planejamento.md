@@ -106,8 +106,9 @@ chosen model has a card or a `## What they say` section.
      touching a public contract, shared state, destination or credential. Proposed with the team,
      decided by the user; it only ever rises.
    - Untouchables: paths with parallel changes in the tree, one by one.
-   - Verification: exact command and what counts as passing. Orchestration Task (tmux, CLI,
-     process, account, network) → smoke step against the real source, literal command.
+   - Verification: focused command and its pass criterion; full suites → `Final verification:`
+     line. Orchestration Task (tmux, CLI, process, account, network) → literal smoke step
+     against the real source.
    - Bar, one line per pixel-touching Task (`planejamento-equipe.md`, "The bar"); what the review
      must cover; open decisions (goal: an empty list).
    - A step or recipe creating screen state fed by a request declares the three outcomes (success,

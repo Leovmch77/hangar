@@ -37,10 +37,12 @@ Done when every item above has an answer for this range.
 
 ### 3. Verify
 
-Run the plan's verifications on the branch tip, cwd-independent, `set -o pipefail` or
-`${PIPESTATUS[0]}`; yourself, or through the contract's optional `verificador` line
-(`revisor-verificador.md`). Every tool you dispatch passes the three questions of `revisor.md`
-(step 2). Say who ran each command.
+Run the plan's `Final verification:` (full suites: whole-repo type check, full test run, build)
+once on the branch tip, cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or
+through the contract's optional `verificador` line (`revisor-verificador.md`). No such line →
+the project's documented full checks. A red test → run it on `<base>` in a detached worktree;
+red there too → known failure, noted, not a blocker. Every tool you dispatch passes the three
+questions of `revisor.md` (step 2). Say who ran each command.
 
 Done when every command's result is pasted with its runner.
 
