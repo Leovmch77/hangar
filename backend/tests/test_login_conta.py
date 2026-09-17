@@ -281,9 +281,12 @@ def test_passo_detecta_autorizacao_pelo_navegador_sem_codigo(bateia, monkeypatch
     assert login_conta.passo("conta-a")["etapa"] == "aguardando"
     assert consultas == []
 
+    (tmp_path / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": False, "theme": "dark"}))
     credencial.write_text(json.dumps({"claudeAiOauth": {"accessToken": "novo"}}))
     passo = login_conta.passo("conta-a")
     assert passo == {"etapa": "concluido", "url": None, "email": "u@exemplo.com", "plano": "max"}
+    # `claude auth login` não conclui as boas-vindas: sem isto o terminal pediria login de novo.
+    assert json.loads((tmp_path / ".claude.json").read_text()) == {"hasCompletedOnboarding": True, "theme": "dark"}
     assert bateia.matadas == ["term-login-conta-a"]
     assert not login_conta._em_curso("conta-a")
     assert login_conta.passo("conta-a")["etapa"] == "idle"

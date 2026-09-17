@@ -12,7 +12,7 @@
   // que é o nome no disco. Trocar os dois faz o Entrar e o Apagar mirarem uma conta que não
   // existe assim que a pessoa renomear a primeira.
   import { onDestroy, tick, untrack } from 'svelte';
-import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, deleteCodexAccountForServer, isAbortError, isTimeoutError, type Motor, type EnginesResponse } from '@hangar/core';
+import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, deleteCodexAccountForServer, isAbortError, isTimeoutError, type Motor, type EnginesResponse } from '@hangar/core';
   import { formatarIntervalo } from '../../lib/contaEstado';
   import { listarCredenciais, definirApelido, definirCookie, consumirRedefinicaoCodex,
     novaChaveIdempotente, type Credencial } from '../../lib/credenciais';
@@ -134,6 +134,9 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   // Apagar: "Remover" nomeado no card abre a confirmação inline; confirmar apaga e recarrega.
   let confirmando = $state<string | null>(null);  // id da credencial com a confirmação aberta
   let apagando = $state(false);
+  let saindoDe = $state<string | null>(null);  // id da conta Claude com a confirmação de Sair aberta
+  let saindo = $state(false);
+  let sairErro = $state('');
   let aviso = $state('');
   let avisoErro = $state(false);
   let resetConfirmando = $state<string | null>(null);
@@ -245,6 +248,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     loginErro = ''; loginEnviando = false; loginIniciando = false; loginParado = false;
     aviso = ''; avisoErro = false;
     confirmando = null;
+    saindoDe = null; saindo = false; sairErro = '';
     resetConfirmando = null; resetTentativa = null; resetConsumindo = false;
     renomeando = null; apelidoTexto = ''; salvandoApelido = false;
     cookieDe = null; cookieWs = ''; cookieValor = ''; salvandoCookie = false;
@@ -423,6 +427,45 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
       avisoErro = true;
     } finally {
       apagando = false;
+    }
+  }
+
+  // Uma coluna por janela de cota na lista compacta, a mesma em todo card: 5h e 7d primeiro.
+  function rotulosDaLista(itens: Credencial[]): string[] {
+    const vistos = new Set<string>();
+    for (const c of itens) if (c.cota?.estado === 'lida') for (const j of c.cota.janelas) vistos.add(j.rotulo);
+    const ordem = (r: string) => (r === '5h' ? 0 : r === '7d' ? 1 : 2);
+    return [...vistos].sort((a, b) => ordem(a) - ordem(b));
+  }
+
+  async function sair() {
+    const conta = contas.find((x) => x.id === saindoDe);
+    if (!conta || saindo) return;
+    const g = geracao;
+    saindo = true;
+    sairErro = '';
+    aviso = '';
+    avisoErro = false;
+    try {
+      await sairConta(apiTarget, conta.nome_natural);
+      if (g !== geracao) return;
+      saindoDe = null;
+      aviso = m.contas_saiu({ nome: conta.nome });
+      // O backend já releu a conta deslogada; a lista comum viria do cache de 5 min.
+      clienteQuery.setQueryData<Credencial[]>(credenciais(apiTarget).queryKey, lista => lista?.map<Credencial>(c =>
+        c.id === conta.id ? { ...c, login: { estado: 'ok', loggedIn: false }, cota: null } : c));
+      const alvo = apiTarget;
+      void listarCredenciais(alvo, true).then(lista => {
+        if (g === geracao) clienteQuery.setQueryData(credenciais(alvo).queryKey, lista);
+      }).catch(() => {
+        if (g === geracao) { aviso = m.contas_saiu_atualizar_erro({ nome: conta.nome }); avisoErro = true; }
+      });
+    } catch (e) {
+      if (g !== geracao) return;
+      // Na linha da confirmação: o aviso geral fica no pé da lista, fora da vista.
+      sairErro = e instanceof Error && e.message ? e.message : m.contas_sair_erro();
+    } finally {
+      if (g === geracao) saindo = false;
     }
   }
 
@@ -819,8 +862,9 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
         <!-- Cards separados (não uma caixa com divisórias): cada credencial é uma unidade que se
              lê de uma vez — nome, e-mail, nome no disco e as barras de limite. `compacta` troca o
              card por uma linha de escaneamento (sem sublinhas nem barras, só o %). -->
-        <div class="ct-lista" class:compacta>
-          {#each itens as conta (conta.id)}{@render cartao(conta)}{/each}
+        {@const rotulos = rotulosDaLista(itens)}
+        <div class="ct-lista" class:compacta style:--slots={Math.max(1, rotulos.length)}>
+          {#each itens as conta (conta.id)}{@render cartao(conta, rotulos)}{/each}
         </div>
       {:else}
         <p class="ct-vazio">{vazio}</p>
@@ -828,7 +872,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     </section>
   {/snippet}
 
-  {#snippet cartao(conta: Credencial)}
+  {#snippet cartao(conta: Credencial, rotulos: string[])}
         <!-- Marcas de uso ("roda o Claude Code", "cota pelo painel") saem da linha do NOME e viram
              texto na linha do subtítulo. Pílula fica só para o TIPO da credencial e para "em uso":
              com quatro pílulas na mesma linha, o nome — que é o que distingue uma linha da outra —
@@ -979,7 +1023,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
           {#if compacta && conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length}
             <span class="ct-mini-cotas" class:velha={!leituraFresca(conta)}>
               {#each conta.cota.janelas as j (j.rotulo)}
-                <span class="ct-mini-jan">{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
+                <span class="ct-mini-jan" style:grid-column={rotulos.indexOf(j.rotulo) + 1}>{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
                   {#if resetDaJanela(j.reset_ts)}<small class="ct-mini-reset">{resetDaJanela(j.reset_ts)}</small>{/if}
                 </span>
               {/each}
@@ -1027,9 +1071,13 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
             <!-- O kebab saiu: eram no máximo três ações, e uma delas (apagar) é a mesma que o card
                  do modelo e a conta Codex adicional já mostram nomeada. A conta do Claude
                  gerenciada passa a usar ESSE botão, com a mesma confirmação inline. -->
+            {#if conta.tipo === 'claude' && conta.gerenciada !== false && conta.login?.estado === 'ok' && conta.login.loggedIn && conta.cota?.estado !== 'expirada'}
+              <button type="button" class="ct-acao" aria-label={m.contas_sair_aria({ nome: conta.nome })}
+                onclick={() => { saindoDe = conta.id; sairErro = ''; confirmando = null; }}>{m.contas_sair()}</button>
+            {/if}
             {#if conta.tipo !== 'codex' && !motor && conta.gerenciada !== false}
               <button type="button" class="ct-acao" aria-label={m.contas_remover_aria({ nome: conta.nome })}
-                onclick={() => (confirmando = conta.id)}>{m.lista_remover()}</button>
+                onclick={() => { confirmando = conta.id; saindoDe = null; }}>{m.lista_remover()}</button>
             {/if}
           </span>
           </div>
@@ -1177,6 +1225,17 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                 disabled={apagando}>{apagando ? '…' : m.comum_apagar()}</button>
               <button type="button" class="ct-confirma-btn"
                 onclick={() => (confirmando = null)} disabled={apagando}>{m.comum_cancelar()}</button>
+            </div>
+          {/if}
+
+          {#if saindoDe === conta.id}
+            <div class="ct-confirma">
+              <span class="ct-confirma-txt">{m.contas_sair_pergunta({ nome: conta.nome })}</span>
+              <button type="button" class="ct-confirma-btn perigo" onclick={sair}
+                disabled={saindo}>{saindo ? '…' : m.contas_sair()}</button>
+              <button type="button" class="ct-confirma-btn"
+                onclick={() => (saindoDe = null)} disabled={saindo}>{m.comum_cancelar()}</button>
+              {#if sairErro}<span class="ct-confirma-aviso erro" role="alert">{sairErro}</span>{/if}
             </div>
           {/if}
         </div>
@@ -1337,6 +1396,23 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
   .ct-mini-idade { font-size: var(--text-3xs); color: var(--text-muted); }
   .ct-mini-jan { display: inline-flex; align-items: baseline; gap: 4px; }
   .ct-mini-reset { font-size: var(--text-3xs); font-weight: 400; color: var(--text-muted); }
+  /* Compacta com largura: uma grade só pra lista inteira (subgrid), então nome, botões e cada
+     janela de cota ficam na mesma coluna em todo card, qualquer que seja o tamanho do texto. */
+  @container (min-width: 621px) {
+    .ct-lista.compacta { display: grid; row-gap: var(--space-1); column-gap: var(--space-3);
+      grid-template-columns: auto minmax(14ch, 1fr) auto auto repeat(var(--slots), auto); }
+    .ct-lista.compacta .ct-card { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+    .ct-lista.compacta .ct-card > * { grid-column: 1 / -1; }
+    .ct-lista.compacta .ct-top { display: grid; grid-template-columns: subgrid; align-items: center; }
+    .ct-lista.compacta .ct-ico { grid-column: 1; }
+    .ct-lista.compacta .ct-txt { grid-column: 2; }
+    .ct-lista.compacta .ct-tag { grid-column: 3; margin-top: 0; }
+    .ct-lista.compacta .ct-acoes { grid-column: 4; justify-content: flex-end; }
+    .ct-lista.compacta .ct-mini-cotas { grid-column: 5 / -1; display: grid; grid-template-columns: subgrid; }
+    .ct-lista.compacta .ct-mini-idade { grid-column: 1 / -1; grid-row: 2; }
+    /* Nome sempre sozinho na 1ª linha: Renomear, "em uso" e Conectada descem juntos em todo card. */
+    .ct-lista.compacta .ct-nome { flex-basis: 100%; }
+  }
   .ct-sub { flex-shrink: 0; color: var(--text-secondary); font-size: var(--text-xs); }
   .ct-sub.fraco { color: var(--text-muted); }
   /* O modelo é um id de máquina (`kimi-k3`), como o caminho no disco: monoespaçado. */
@@ -1399,6 +1475,7 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
                              border-color: var(--accent); }
   /* Linha inteira própria (o `.ct-confirma` embrulha): o aviso é ressalva, não parte da pergunta. */
   .ct-confirma-aviso { flex-basis: 100%; font-size: var(--text-2xs); color: var(--text-muted); }
+  .ct-confirma-aviso.erro { font-size: var(--text-xs); color: var(--error); }
 
   .ct-rodape { display: flex; gap: var(--space-2); margin-top: var(--space-3); flex-wrap: wrap;
                align-items: center; }

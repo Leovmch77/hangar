@@ -1778,6 +1778,44 @@ async def delete_claude_config(nome: str):
     return {"ok": True}
 
 
+@app.post("/api/claude-configs/{nome}/logout", dependencies=[Depends(require_auth)])
+async def logout_claude_config(nome: str):
+    """Sai da conta sem apagar a pasta. Sessão aberta na conta não impede: ela só perde o login
+    (se renovar o token em memória, pode regravar a credencial).
+
+    `nome` é o rótulo da lista (o apelido, quando a conta foi renomeada), igual ao login."""
+    conta = next((c for c in list_config_dirs() if c.label == nome), None)
+    if conta is None:
+        raise HTTPException(404, detail=erro("erro_conta_inexistente", f"conta {nome} não existe", nome=nome))
+    alvo = Path(conta.path)
+    pasta = alvo.name.removeprefix(".claude-")
+    if alvo.resolve() == _backend_config_base().resolve():
+        raise HTTPException(409, detail=erro("erro_conta_ativa_backend",
+                                 "esta conta é a configuração ativa do backend — não dá pra "
+                                 "mexer nela por aqui"))
+
+    def _checar_e_sair():
+        with contas.ciclo_conta(pasta):
+            if contas.caminho(pasta).resolve() != alvo.resolve():
+                raise contas.ContaError(404, f"{alvo} não é uma conta criada pelo hangar")
+            try:
+                conta_estado._auth_logout(alvo)
+            except RuntimeError as e:
+                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado", str(e))) from None
+            conta_estado.esquecer_conta(conta.path)
+            estado = conta_estado._estado_login(conta_estado._auth_status(alvo))
+            if estado.estado != "ok" or estado.loggedIn:
+                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado",
+                                         "a conta não apareceu deslogada depois do logout"))
+
+    try:
+        await asyncio.to_thread(_checar_e_sair)
+    except contas.ContaError as e:
+        raise HTTPException(e.status, detail=erro("erro_conta_inexistente", e.detail,
+                                                  nome=nome)) from None
+    return {"ok": True}
+
+
 @app.get("/api/desktop/palette", dependencies=[Depends(require_auth), Depends(require_loopback)])
 def desktop_palette_get():
     # 404 e resposta de negocio, nao erro: e como o front sabe que nao ha rice nesta maquina e
@@ -6883,6 +6921,14 @@ def _session_config_dir_strict(name: str) -> tuple[Path | None, bool]:
     não a que está sendo apagada.
     """
     from app import tmux
+    # Sem terminal não há pane: a conta vem do sidecar, mesmo com o processo estacionado (ele
+    # volta com --resume na mesma conta).
+    if headless_sessions.exists(name):
+        meta = headless_sessions.load(name)
+        if not isinstance(meta, dict):
+            return None, False
+        cfg = meta.get("config_dir")
+        return (Path(cfg) if cfg else None), True
     try:
         pid = tmux.pane_pid(name)
     except Exception:

@@ -122,6 +122,84 @@ def test_apagar_conta(casa):
     assert not (casa / ".claude-cotna2").exists()
 
 
+@pytest.fixture
+def cli_sair(casa, monkeypatch):
+    from app import conta_estado
+    contas.criar("conta2")
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [])
+    chamadas = []
+    monkeypatch.setattr(conta_estado, "_auth_logout", lambda d: chamadas.append(d))
+    monkeypatch.setattr(conta_estado, "_auth_status", lambda d: {"loggedIn": False})
+    return chamadas
+
+
+def test_sair_da_conta_desloga_e_mantem_a_pasta(casa, cli_sair):
+    r = TestClient(app).post("/api/claude-configs/conta2/logout", headers=AUTH)
+    assert r.status_code == 200
+    assert cli_sair == [casa / ".claude-conta2"]
+    assert (casa / ".claude-conta2").is_dir()
+
+
+def test_sair_de_conta_renomeada_usa_a_pasta_do_apelido(casa, cli_sair, monkeypatch):
+    from app import apelidos
+    contas.criar("conta3")
+    pasta = casa / ".claude-conta3"
+    monkeypatch.setattr(apelidos, "ler", lambda: {f"claude:{pasta}": "Mayron E Wanderson"})
+    r = TestClient(app).post("/api/claude-configs/Mayron%20E%20Wanderson/logout", headers=AUTH)
+    assert r.status_code == 200
+    assert cli_sair == [pasta]
+
+
+def test_sair_da_config_ativa_do_backend_devolve_409(casa, cli_sair, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(casa / ".claude-conta2"))
+    r = TestClient(app).post("/api/claude-configs/conta2/logout", headers=AUTH)
+    assert r.status_code == 409
+    assert cli_sair == []
+
+
+def test_sair_com_sessao_aberta_na_conta_desloga_mesmo_assim(casa, cli_sair, monkeypatch):
+    class S:
+        name = "sessao-x"
+
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [S()])
+    monkeypatch.setattr(api_mod, "_session_config_dir_strict",
+                        lambda name: (casa / ".claude-conta2", True))
+    r = TestClient(app).post("/api/claude-configs/conta2/logout", headers=AUTH)
+    assert r.status_code == 200
+    assert cli_sair == [casa / ".claude-conta2"]
+
+
+def test_apagar_com_sessao_sem_terminal_na_conta_diz_o_nome(casa, monkeypatch):
+    from app.adapters.claude_headless import sessions as headless_sessions
+    contas.criar("conta2")
+
+    class S:
+        name = "web-back"
+
+    headless_sessions.save("web-back", str(casa), "sid-1", config_dir=str(casa / ".claude-conta2"))
+    monkeypatch.setattr(api_mod.registry, "list", lambda: [S()])
+    r = TestClient(app).delete("/api/claude-configs/conta2", headers=AUTH)
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "erro_sessao_usa_conta"
+    assert "web-back" in r.json()["detail"]["msg"]
+    assert (casa / ".claude-conta2").is_dir()
+
+
+def test_sair_que_a_cli_nao_confirma_devolve_502(casa, cli_sair, monkeypatch):
+    from app import conta_estado
+    monkeypatch.setattr(conta_estado, "_auth_status", lambda d: {"loggedIn": True})
+    r = TestClient(app).post("/api/claude-configs/conta2/logout", headers=AUTH)
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == "erro_logout_nao_confirmado"
+
+
+def test_sair_de_pasta_nao_carimbada_devolve_404(casa, cli_sair):
+    (casa / ".claude-solta").mkdir()
+    r = TestClient(app).post("/api/claude-configs/solta/logout", headers=AUTH)
+    assert r.status_code == 404
+    assert cli_sair == []
+
+
 def test_apagar_pasta_nao_carimbada_devolve_404(casa):
     (casa / ".claude-backup").mkdir()
     r = TestClient(app).delete("/api/claude-configs/backup", headers=AUTH)

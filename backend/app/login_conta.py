@@ -250,6 +250,8 @@ def _logou_sozinho(conta: str, t: Tentativa) -> dict | None:
     if not estado.loggedIn:
         return None
     diag.registrar("conta.login.concluiu", etapa="confirmar_credencial", **campos)
+    conta_estado.concluir_onboarding(t.dir_conta)
+    conta_estado.esquecer_conta(t.dir_conta)
     _limpar(conta, t)
     return {"etapa": "concluido", "url": None, "email": estado.email, "plano": estado.plano}
 
@@ -296,6 +298,8 @@ def confirmar(conta: str, codigo: str, *, estado_fake=None, timeout_s: float = _
             if estado.estado == "ok" and estado.loggedIn and _token_novo(oauth, tentativa.token_anterior):
                 diag.registrar("conta.login.concluiu", etapa="confirmar_credencial",
                                ms=int((time.monotonic() - tentativa.inicio) * 1000), **campos)
+                conta_estado.concluir_onboarding(tentativa.dir_conta)
+                conta_estado.esquecer_conta(tentativa.dir_conta)
                 return {
                     "ok": True,
                     "email": estado.email,

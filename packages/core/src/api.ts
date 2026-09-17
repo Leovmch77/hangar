@@ -866,6 +866,14 @@ export async function apagarConta(alvo: Server | null, nome: string): Promise<vo
   await apiFetch(`/api/claude-configs/${encodeURIComponent(nome)}`, init);
 }
 
+// Sai da conta (claude auth logout) mantendo a pasta. Recusa 409 se houver sessão viva usando-a.
+export async function sairConta(alvo: Server | null, nome: string): Promise<void> {
+  const caminho = `/api/claude-configs/${encodeURIComponent(nome)}/logout`;
+  const init = { method: 'POST' };
+  if (alvo) await apiFetchForServer<void>(alvo, caminho, init);
+  else await apiFetch(caminho, init);
+}
+
 // Web Push: chave VAPID publica deste servidor (applicationServerKey). Vazia = push desligado la.
 export async function getVapidKey(s: Server): Promise<string> {
   const res = await fetch(`${s.baseUrl}/api/push/vapid`, {

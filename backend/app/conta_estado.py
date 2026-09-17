@@ -20,13 +20,14 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import contas, diag, login_conta, renova_token
+from app import atomico, contas, diag, login_conta, renova_token
 from app.auth import require_auth
 from app.config import list_config_dirs
 from app.mensagens import erro
@@ -135,6 +136,22 @@ def _auth_status(dir_conta: Path) -> dict | None:
     return bruto
 
 
+def _auth_logout(dir_conta: Path) -> None:
+    """I/O: `claude auth logout` no config dir da conta. Trocada nos testes; levanta se a CLI falhar."""
+    exe = renova_token._bin_claude()
+    if exe is None:
+        raise RuntimeError("claude não encontrado no PATH")
+    env = dict(os.environ)
+    env["CLAUDE_CONFIG_DIR"] = str(dir_conta)
+    try:
+        r = subprocess.run([exe, "auth", "logout"], env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=_CLI_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"claude auth logout falhou: {type(e).__name__}") from e
+    if r.returncode != 0:
+        raise RuntimeError(f"claude auth logout saiu com {r.returncode}")
+
+
 def _texto_legivel(valor, campo: str) -> str | None:
     """String da CLI, ou None se ela veio com U+FFFD — o carimbo do `errors="replace"`.
 
@@ -177,6 +194,45 @@ def _estado_login(bruto: dict | None) -> EstadoLogin:
 
 _login_cache: dict[str, tuple[float, EstadoLogin]] = {}
 _login_lock = threading.Lock()
+
+
+def esquecer_conta(dir_conta: str) -> None:
+    """Login ou logout acabou de mudar a conta: o login e a cota em cache descreveriam a anterior."""
+    from app import cotas
+    with _login_lock:
+        _login_cache.pop(dir_conta, None)
+    with cotas._lock:
+        cotas._cache.pop(f"claude:{dir_conta}", None)
+
+
+def concluir_onboarding(dir_conta: str) -> None:
+    """Marca as boas-vindas como feitas depois de um login pelo app.
+
+    O `claude auth login` grava a credencial e não toca em `hasCompletedOnboarding` (só a variante
+    por refresh token marca); sem a marca, a TUI abre tema + método de login com a conta já logada.
+    Mesma regra da CLI: só escreve quando ainda não está `true`. Falha vai pro diário, sem derrubar
+    o login, que já está válido.
+    """
+    destino = Path(dir_conta) / ".claude.json"
+    try:
+        try:
+            dados = json.loads(destino.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            dados = {}
+        if not isinstance(dados, dict):
+            raise ValueError("formato inválido do .claude.json")
+        if dados.get("hasCompletedOnboarding") is True:
+            return
+        dados["hasCompletedOnboarding"] = True
+        # tmp+rename: um CLI vivo lendo no meio da escrita receberia JSON truncado.
+        tmp = destino.with_name(f"{destino.name}.hangar-novo.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        tmp.write_text(json.dumps(dados, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        atomico.substituir(tmp, destino)
+    except (OSError, ValueError) as exc:
+        diag.registrar("conta.login.onboarding_falhou", "aviso", provider="claude",
+                       conta_id=diag.conta_id(dir_conta), etapa="concluir_onboarding",
+                       **diag.erro_campos(exc))
+        _log.warning("não consegui marcar o onboarding de %s: %s", dir_conta, exc)
 
 
 def _login_de(cfg) -> EstadoLogin:

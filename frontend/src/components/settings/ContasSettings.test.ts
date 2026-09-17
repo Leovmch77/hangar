@@ -38,6 +38,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   setPermissionMode: vi.fn().mockResolvedValue({ mode: 'plan', current: 'plan' }),
   criarConta: vi.fn(async () => ({ path: '/x', label: 'x', active: false })),
   apagarConta: vi.fn(async () => {}),
+  sairConta: vi.fn(async () => {}),
   putEngine: vi.fn(async () => ({ motores: {} })),
   putEngineForServer: vi.fn(async () => ({ motores: {} })),
   deleteEngine: vi.fn(async () => ({ ok: true })),
@@ -443,6 +444,46 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     await tick(); await tick();
     expect(apiMock.apagarConta).toHaveBeenCalledWith(ALVO, 'jefferson');
     expect(credMock.listarCredenciais).toHaveBeenCalledTimes(2);
+    unmount(t.comp);
+  });
+
+  it('Sair → confirmação → sairConta mantém a conta na lista, agora com Entrar', async () => {
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    expect(botaoNomeado(t.el, m.contas_entrar())).toBeUndefined();
+    botaoNomeado(t.el, m.contas_sair())!.click();
+    await tick();
+    expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.contas_sair_pergunta({ nome: 'jefferson' }));
+    credMock.listarCredenciais.mockResolvedValue([claude({ login: { estado: 'ok', loggedIn: false }, cota: null })]);
+    t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
+    await vi.waitFor(() => expect(apiMock.sairConta).toHaveBeenCalledWith(ALVO, 'jefferson'));
+    await vi.waitFor(() => expect(botaoNomeado(t.el, m.contas_entrar())).not.toBeUndefined());
+    expect(apiMock.apagarConta).not.toHaveBeenCalled();
+    expect(credMock.listarCredenciais).toHaveBeenCalledWith(ALVO, true);
+    expect(t.el.querySelector('.ct-aviso')!.textContent).toContain(m.contas_saiu({ nome: 'jefferson' }));
+    unmount(t.comp);
+  });
+
+  it('Sair recusado mostra o motivo do backend e mantém a conta conectada', async () => {
+    apiMock.sairConta.mockRejectedValueOnce(
+      Object.assign(new Error(mensagemDeErro('erro_sessao_usa_conta', { nome: 'sessao-x' })!), { status: 409 }));
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    expect(botaoNomeado(t.el, m.lista_remover())).not.toBeUndefined();
+    botaoNomeado(t.el, m.contas_sair())!.click();
+    await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
+    await tick(); await tick();
+    expect(t.el.querySelector('.ct-confirma [role="alert"]')!.textContent).toContain('sessao-x');
+    expect(botaoNomeado(t.el, m.contas_entrar())).toBeUndefined();
+    expect(t.el.querySelector('.ct-confirma')).not.toBeNull();
+    unmount(t.comp);
+  });
+
+  it('conta deslogada não mostra Sair', async () => {
+    const t = montar([DESLOGADA]);
+    await tick(); await tick();
+    expect(botaoNomeado(t.el, m.contas_sair())).toBeUndefined();
     unmount(t.comp);
   });
 
