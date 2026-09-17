@@ -665,6 +665,9 @@ export interface BastaoResult {
   dossie: string;    // caminho do .md gravado no disco DAQUELA máquina
   texto: string;     // o dossiê que foi realmente gravado (o da prévia era outro, mais velho)
   kickoff: string;   // as linhas que entraram na fila durável da sessão nova
+  // Só quando a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente): a sessão
+  // nasceu com o resumo montado por código, e quem pediu tem de saber que recebeu o outro.
+  aviso?: string | null;
 }
 
 // Cria a sessão sucessora COM o dossiê: o backend monta → grava → cria → enfileira o kick-off.
@@ -682,6 +685,11 @@ export function passarBastao(
     permission_mode?: string | null;
     omp_profile?: string | null;
     codex_account?: string | null;
+    // Modo de execução da sessão que recebe o trabalho: ela é nova e nasce onde a pessoa
+    // escolher, sem herdar o modo da origem.
+    headless?: boolean | null;
+    // Pedir ao modelo que reescreva o resumo antes de gravar. Gasta cota da origem.
+    resumo_por_modelo?: boolean;
   },
   server?: Server | null,
 ): Promise<BastaoResult> {

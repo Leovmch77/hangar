@@ -842,6 +842,77 @@ def caminho(destino: str) -> Path:
     return d / f"{_sanitize(destino)}.md"
 
 
+# ── Resumo reescrito pelo modelo (opcional) ─────────────────────────────────────────────────
+# O resumo montado por código é EXTRATIVO: cita literal, não interpreta. Isso é o que o torna
+# reprodutível e o que faz ele funcionar com a conta da origem esgotada. O que ele não faz é
+# dizer o que IMPORTA de tudo aquilo — e é isso que um modelo acrescenta.
+#
+# Por isso a reescrita é opcional e ADITIVA: o texto de código é sempre montado primeiro e é o que
+# vai pro disco se qualquer coisa falhar (sem cota, sem CLI, tempo estourado). Nunca o contrário.
+_REESCRITA_TIMEOUT = 180
+# Puro texto: o resumo entra como prompt, então nenhuma ferramenta de efeito colateral é liberada
+# (mesma lista e mesmo motivo do refine do loop). O prompt vai por STDIN, nunca no argv.
+_REESCRITA_NEGADAS = ("Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch")
+
+_REESCRITA_PEDIDO = """Você recebeu abaixo um resumo automático de uma sessão de trabalho, montado \
+por código a partir do histórico. Ele é fiel mas cru: lista o que aconteceu sem dizer o que importa.
+
+Reescreva esse resumo para quem vai CONTINUAR este trabalho agora, sem ter visto nada do que veio \
+antes. Regras:
+
+- Comece por onde o trabalho está e qual é o próximo passo concreto.
+- Preserve TODO caminho de arquivo, comando, hash e nome próprio exatamente como aparecem.
+- Não invente decisão, motivo ou estado que não esteja no texto. Se algo estiver ambíguo, diga que \
+está ambíguo em vez de escolher.
+- Mantenha as seções que já existem e o formato Markdown. Pode encurtar o que for repetição.
+- Responda SÓ com o resumo reescrito, sem comentário seu antes ou depois.
+
+--- resumo automático ---
+"""
+
+
+def reescrever_com_modelo(texto: str, config_dir: str | None = None,
+                          modelo: str = "sonnet") -> tuple[str, str | None]:
+    """Pede ao modelo que reescreva o resumo. Devolve `(texto, aviso)`.
+
+    NUNCA levanta: qualquer falha devolve o texto de entrada intacto mais um aviso dizendo o que
+    houve. Gastar cota é o ponto da opção, então a conta é a da ORIGEM (`config_dir`) — é o
+    trabalho dela que está sendo resumido.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    exe = shutil.which("claude")
+    if exe is None:
+        return texto, "o CLI do Claude não foi encontrado nesta máquina"
+    env = dict(os.environ)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    try:
+        p = subprocess.run(
+            [exe, "-p", "--model", modelo, "--disallowedTools", *_REESCRITA_NEGADAS],
+            input=_REESCRITA_PEDIDO + texto, cwd=tempfile.gettempdir(), env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_REESCRITA_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _log.warning("reescrita do resumo falhou ao rodar: %r", e)
+        return texto, "o modelo não respondeu a tempo"
+    if p.returncode != 0:
+        # Cota esgotada cai aqui. O texto de código já está pronto, então a continuação acontece
+        # do mesmo jeito — só sem a camada interpretada.
+        erro = (p.stderr or "").strip()[-300:]
+        _log.warning("reescrita do resumo: exit %s — %s", p.returncode, erro)
+        return texto, "o modelo não conseguiu responder (cota ou erro do CLI)"
+    saida = (p.stdout or "").strip()
+    if len(saida) < 200:
+        # Resposta curta demais pra ser um resumo: recusa, meta-resposta ou truncamento.
+        _log.warning("reescrita do resumo: saída curta demais (%d chars)", len(saida))
+        return texto, "o modelo devolveu uma resposta curta demais"
+    return saida, None
+
+
 def gravar(destino: str, texto: str) -> Path:
     """Grava o dossiê da sessão `destino` e devolve o caminho. Falha SOBE (não engole OSError).
 

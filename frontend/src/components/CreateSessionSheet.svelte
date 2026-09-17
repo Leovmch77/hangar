@@ -207,6 +207,9 @@
   // Claude/Codex sem terminal: processo gerenciado pelo backend, sem tmux. Fora do modo bastão e
   // sem retomar conversa (a retomada nasce por outro caminho).
   let semTerminal = $state(false);
+  // Quem escreve o resumo da continuação. Padrão: o Hangar monta por código — funciona com a cota
+  // da origem esgotada e cita literal. Ligado, o modelo reescreve por cima disso (gasta cota dela).
+  let resumoPorModelo = $state(false);
 
   // `targetServer` (acima) é o servidor de destino. Ele entra na chave porque MOTOR É POR SERVIDOR
   // (comentário do loadConfigs): sem isso o app lembraria um modelo de motor que o outro servidor
@@ -828,8 +831,14 @@
           effort: body.effort,
           permission_mode: body.provider === 'claude' ? (permissao || null) : null,
           omp_profile: body.provider === 'omp' ? (perfilOmp.trim() || null) : null,
+          // Só Claude e Codex têm modo sem terminal; nos outros o seletor nem aparece.
+          headless: (body.provider === 'claude' || body.provider === 'codex') ? semTerminal : false,
+          resumo_por_modelo: resumoPorModelo,
         }, ...(body.provider === 'codex' ? [server] : []));
         if (body.provider === 'codex' && (g !== codexGeneration || !open)) return;
+        // Pediu o resumo do modelo e ele não deu: a sessão nasceu com o do Hangar. Sem este aviso
+        // a escolha era ignorada em silêncio e o texto chegava diferente do que a pessoa esperava.
+        if (r.aviso) alert(m.bastao_resumo_falhou({ motivo: r.aviso }));
         onClose();
         if (body.provider === 'codex' && server) window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(r.name)}`;
         else onOpenSession(r.name);
@@ -1141,7 +1150,9 @@
         </div>
       {/if}
 
-      {#if !conversaAlvo && (provider === 'claude' || provider === 'codex') && !bastao}
+      <!-- Vale no bastão também: a sessão que recebe o trabalho é nova e nasce onde a pessoa
+           escolher — ficar presa ao modo da origem não era regra de nada. -->
+      {#if !conversaAlvo && (provider === 'claude' || provider === 'codex')}
         <!-- Onde a sessão roda, logo abaixo da conta: decide se vai existir painel de terminal, e
              "Sem terminal" é novo — num select no fim do formulário ninguém o encontrava. -->
         <div class="field">
@@ -1336,6 +1347,27 @@
               {/if}
             </div>
           {/if}
+        </div>
+      {/if}
+
+      {#if bastao}
+        <!-- Quem escreve o resumo. O padrão monta por código: cita literal e funciona mesmo com a
+             cota da origem no fim. Ligado, o modelo reescreve por cima — diz o que importa, e
+             gasta cota DELA. Falhando, o de código vai pro disco do mesmo jeito. -->
+        <div class="field">
+          <span class="field-label" id="resumo-autor-rotulo">{m.bastao_resumo_autor()}</span>
+          <div class="modos" role="group" aria-labelledby="resumo-autor-rotulo">
+            <button type="button" class="modo" class:on={!resumoPorModelo} aria-pressed={!resumoPorModelo}
+                    onclick={() => (resumoPorModelo = false)}>
+              <span class="modo-nome">{m.bastao_resumo_hangar()}</span>
+              <span class="modo-resumo">{m.bastao_resumo_hangar_desc()}</span>
+            </button>
+            <button type="button" class="modo" class:on={resumoPorModelo} aria-pressed={resumoPorModelo}
+                    onclick={() => (resumoPorModelo = true)}>
+              <span class="modo-nome">{m.bastao_resumo_modelo()}</span>
+              <span class="modo-resumo">{m.bastao_resumo_modelo_desc()}</span>
+            </button>
+          </div>
         </div>
       {/if}
 

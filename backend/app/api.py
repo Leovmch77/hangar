@@ -2699,6 +2699,12 @@ class BastaoBody(_StrictBody):
     permission_mode: str | None = None
     omp_profile: str | None = None
     codex_account: str | None = None
+    # Modo de execução da SUCESSORA (Claude/Codex sem terminal). A sessão que recebe o trabalho é
+    # nova e nasce onde a pessoa escolher — não herda o modo da origem.
+    headless: bool | None = None
+    # Pedir ao modelo que reescreva o resumo antes de gravar. Gasta cota DA ORIGEM e é por isso
+    # que é escolha, não padrão; falhando, o resumo montado por código vai pro disco do mesmo jeito.
+    resumo_por_modelo: bool = False
     # Endereçam a origem MORTA no archive (project + session_id); nunca a sucessora, e são
     # ignorados quando a origem está viva.
     project: str | None = None
@@ -2715,16 +2721,32 @@ def _nome_ocupado(nome: str) -> bool:
     return tmux.has_session(nome) or codex_sessions.exists(nome) or headless_sessions.exists(nome)
 
 
-def _bastao_preparar(info: SessionInfo, origem: str, destino: str) -> tuple[str, Path, str]:
-    """Monta o dossiê, GRAVA e devolve (texto, caminho, kick-off). Tudo sync, numa thread só.
+def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
+                     por_modelo: bool = False) -> tuple[str, Path, str, str | None]:
+    """Monta o resumo, GRAVA e devolve (texto, caminho, kick-off, aviso). Tudo sync, numa thread só.
 
     Gravar antes de criar a sessão é o que fecha o caso "sessão nova viva apontando pra um arquivo
     que não existe": se o disco recusar, a exceção sobe daqui e nada foi criado ainda.
+
+    Com `por_modelo`, o texto de código passa pelo modelo ANTES de gravar — e só ele vai pro disco
+    se der certo. A reescrita nunca levanta: falhando, grava o de código e devolve o aviso, porque
+    uma continuação sem a camada interpretada é muito melhor que continuação nenhuma.
     """
     texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem, info.codex_home)
+    aviso = None
+    if por_modelo:
+        # A conta é a da ORIGEM: é o trabalho dela que está sendo resumido, e é a cota dela que
+        # paga. O transcript do Claude mora em `<config_dir>/projects/<projeto>/<uuid>.jsonl`, daí
+        # os três níveis; sem transcript (ou noutro provider) vai sem env e o CLI usa o padrão.
+        cfg = None
+        if info.provider == "claude" and info.jsonl:
+            p = Path(info.jsonl).parents
+            if len(p) >= 3:
+                cfg = str(p[2])
+        texto, aviso = bastao_mod.reescrever_com_modelo(texto, cfg)
     alvo = bastao_mod.gravar(destino, texto)
     conta, modelo = bastao_mod.origem_resumida(info.jsonl, info.provider, info.codex_home)
-    return texto, alvo, bastao_mod.kickoff(origem, alvo, conta, modelo)
+    return texto, alvo, bastao_mod.kickoff(origem, alvo, conta, modelo), aviso
 
 
 @app.post("/api/sessions/{name}/bastao", dependencies=[Depends(require_auth)])
@@ -2801,7 +2823,8 @@ async def bastao_passar(name: str, body: BastaoBody):
                                              "a sessão de origem não tem diretório conhecido; "
                                              "escolha o cwd da sessão nova"))
     try:
-        texto, alvo, kick = await asyncio.to_thread(_bastao_preparar, info, name, destino)
+        texto, alvo, kick, aviso_resumo = await asyncio.to_thread(
+            _bastao_preparar, info, name, destino, body.resumo_por_modelo)
     except OSError as e:
         # Falha APARECE, e a sessão não nasce órfã: nada foi criado até aqui.
         _log.warning("bastao: não deu pra gravar o dossiê de %s -> %s: %s", name, destino, e)
@@ -2818,7 +2841,10 @@ async def bastao_passar(name: str, body: BastaoBody):
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
         engine=body.engine, model=body.model, effort=body.effort,
         permission_mode=body.permission_mode, omp_profile=body.omp_profile,
-        codex_account=sucessora_codex_account))
+        codex_account=sucessora_codex_account,
+        # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
+        # virar False, e não chegar como None num campo que só aceita bool.
+        headless=bool(body.headless)))
     try:
         await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
             kick, delivered=False, pre_transcript=True))
@@ -2836,7 +2862,10 @@ async def bastao_passar(name: str, body: BastaoBody):
     # Vale só pro Claude na prática (Pi/Kimi nascem com `jsonl=None` e a thread sai calada); não há
     # perda, a fila é durável e o drain do próximo idle/SSE entrega.
     threading.Thread(target=_drain_session, args=(novo.name,), daemon=True).start()
-    return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick}
+    # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
+    # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
+    return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,
+            "aviso": aviso_resumo}
 
 
 @app.get("/api/sessions/{name}/workflows", dependencies=[Depends(require_auth)])
