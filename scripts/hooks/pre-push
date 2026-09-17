@@ -67,7 +67,11 @@ while read -r _localref localsha _remoteref remotesha; do
         echo "pre-push: não consegui varrer $intervalo — trava incompleta, push recusado." >&2
         exit 1
     fi
-    mudados+="$(git log --name-only --format= $intervalo -- .)"$'\n'
+    nomes="$(git log --name-only --format= $intervalo -- .)" || {
+        echo "pre-push: não consegui listar os arquivos de $intervalo — testes do push não rodariam, push recusado." >&2
+        exit 1
+    }
+    mudados+="$nomes"$'\n'
     adicionado="$(printf '%s\n' "$log_saida" | grep '^+' | grep -v '^+++' || true)"
     [[ -z "$adicionado" ]] && continue
     for entrada in "${PADROES[@]}"; do
@@ -124,8 +128,12 @@ if (( ${#core[@]} )); then
 fi
 if (( ${#front[@]} )); then
     echo "pre-push: vitest dos arquivos do front que vão subir…" >&2
-    (cd frontend && npm run --silent i18n:compile >/dev/null && flock -w 900 /tmp/hangar-verificacao.lock \
-        npx --no-install vitest related --run --passWithNoTests "${front[@]}") || falhou+=("vitest frontend")
+    if (cd frontend && npm run --silent i18n:compile >/dev/null); then
+        (cd frontend && flock -w 900 /tmp/hangar-verificacao.lock \
+            npx --no-install vitest related --run --passWithNoTests "${front[@]}") || falhou+=("vitest frontend")
+    else
+        falhou+=("i18n:compile do frontend (vitest não rodou)")
+    fi
 fi
 if (( ${#back[@]} )); then
     mapfile -t back < <(printf '%s\n' "${back[@]}" | sort -u)

@@ -84,6 +84,9 @@ async def test_enviar_prefixa_de_e_recusa_caminho_nativo(identidade, monkeypatch
         assert not res.is_error and len(enviados) == 2
         res = await s.call_tool("enviar", {"alvo": "eu", "texto": "oi", "tmux": True})
         assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 2
+        monkeypatch.setattr(settings, "server_id", "srv1")
+        res = await s.call_tool("enviar", {"alvo": "srv1::eu", "texto": "oi"})
+        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 2
 
 
 async def test_sessoes_marca_a_propria(identidade, monkeypatch):
