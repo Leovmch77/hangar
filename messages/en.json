@@ -450,6 +450,7 @@
   "config_moeda_cotacao": "Applies to every cost in the app. Latest rate read: 1 US$ = R$ {taxa}.",
   "config_moeda_sem_cotacao": "Applies to every cost in the app. No rate right now — dollars only.",
   "ctx_abrir_arquivo": "Open {n} in the editor",
+  "composer_trocar_rascunho": "You have a message typed in the box. Replace it with {cmd}?",
   "ctx_cheio_aviso": "Context is filling up — answers start losing quality from here.",
   "ctx_cheio_compactar": "Compact",
   "ctx_cheio_compactar_detalhe": "Summarizes the conversation and carries on in this session. The command goes to the message box so you can check it before sending.",

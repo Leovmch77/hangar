@@ -738,7 +738,7 @@
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
   let composerRef = $state<{ focus: () => void; ditarArquivo: (f: File) => void;
-                            preencherComando: (n: string) => Promise<void> } | undefined>();
+                            preencherComando: (n: string) => Promise<boolean> } | undefined>();
 
   // Anexo de audio de volta pro ditado: busca o arquivo que ja esta no servidor e entrega ao
   // Composer, que transcreve de novo e abre a barra de versoes. O download acontece AQUI porque a
@@ -2770,7 +2770,8 @@
       onRecarregar={recarregar}
       recarregarBloqueado={currentState !== 'idle' || recarregando}
       onAbrirArquivo={nested ? undefined : (p) => void filesStore.abrir(p)}
-      onCompactar={sessionProvider === 'claude' ? () => void composerRef?.preencherComando('compact') : undefined}
+      onCompactar={sessionProvider === 'claude' && currentState !== 'dead'
+        ? () => void composerRef?.preencherComando('compact') : undefined}
       onPassarBastao={nested ? undefined : passarBastaoDaqui}
       session={planSession}
       {planDetail}

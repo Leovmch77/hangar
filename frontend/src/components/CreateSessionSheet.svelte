@@ -582,6 +582,9 @@
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
       modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
+      // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
+      // gastava cota da origem sem ninguém ter escolhido isso de novo.
+      resumoPorModelo = false;
       modelos = []; listaReduzida = false; erroModelos = '';
       // Mesmo motivo do bloco acima, pro atalho de retomar: um `retomando` que sobreviveu a um
       // fechamento durante a chamada deixa o seletor E o botao travados na reabertura, com o botao
@@ -835,10 +838,11 @@
           headless: (body.provider === 'claude' || body.provider === 'codex') ? semTerminal : false,
           resumo_por_modelo: resumoPorModelo,
         }, ...(body.provider === 'codex' ? [server] : []));
-        if (body.provider === 'codex' && (g !== codexGeneration || !open)) return;
-        // Pediu o resumo do modelo e ele não deu: a sessão nasceu com o do Hangar. Sem este aviso
-        // a escolha era ignorada em silêncio e o texto chegava diferente do que a pessoa esperava.
+        // O aviso vem ANTES da guarda de resposta obsoleta logo abaixo: a sessão foi criada de
+        // qualquer jeito, e quem fechou a folha durante a reescrita (que leva até 180s) é
+        // justamente quem não veria o recado. Ele não depende de a folha continuar aberta.
         if (r.aviso) alert(m.bastao_resumo_falhou({ motivo: r.aviso }));
+        if (body.provider === 'codex' && (g !== codexGeneration || !open)) return;
         onClose();
         if (body.provider === 'codex' && server) window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(r.name)}`;
         else onOpenSession(r.name);

@@ -1030,8 +1030,17 @@
   // Exportado porque o painel de contexto oferece "Compactar" quando o contexto enche: comando
   // destrutivo chega ao composer pra revisao, nunca disparado por um clique — mesma regra que o
   // strip de sugestoes ja segue.
-  export async function preencherComando(name: string) {
+  //
+  // Diferenca pro `fillCommand` de dentro: la o usuario JA esta digitando um `/comando` e
+  // sobrescrever e o esperado. Aqui o clique vem de fora, pode pegar uma mensagem inteira escrita
+  // no campo, e apagar sem perguntar seria perder texto dela. Devolve false quando nao preencheu.
+  export async function preencherComando(name: string): Promise<boolean> {
+    if (inputText.trim() && !confirm(m.composer_trocar_rascunho({ cmd: '/' + name }))) {
+      textareaEl?.focus();
+      return false;
+    }
     await fillCommand(name);
+    return true;
   }
   async function fillCommand(name: string) {
     inputText = '/' + name + ' ';

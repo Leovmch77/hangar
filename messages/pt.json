@@ -450,6 +450,7 @@
   "config_moeda_cotacao": "Vale em todo custo do app. Última cotação lida: 1 US$ = R$ {taxa}.",
   "config_moeda_sem_cotacao": "Vale em todo custo do app. Sem cotação agora — só dólar.",
   "ctx_abrir_arquivo": "Abrir {n} no editor",
+  "composer_trocar_rascunho": "Você tem uma mensagem escrita no campo. Trocar por {cmd}?",
   "ctx_cheio_aviso": "Contexto cheio — as respostas começam a perder qualidade daqui.",
   "ctx_cheio_compactar": "Compactar",
   "ctx_cheio_compactar_detalhe": "Resume a conversa e segue nesta sessão. O comando vai pro campo de mensagem pra você conferir antes de enviar.",

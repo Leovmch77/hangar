@@ -2735,15 +2735,23 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
     texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem, info.codex_home)
     aviso = None
     if por_modelo:
-        # A conta é a da ORIGEM: é o trabalho dela que está sendo resumido, e é a cota dela que
-        # paga. O transcript do Claude mora em `<config_dir>/projects/<projeto>/<uuid>.jsonl`, daí
-        # os três níveis; sem transcript (ou noutro provider) vai sem env e o CLI usa o padrão.
+        # A conta TEM de ser a da ORIGEM: é o trabalho dela que está sendo resumido e é a cota dela
+        # que a pessoa aceitou gastar. O transcript do Claude mora em
+        # `<config_dir>/projects/<projeto>/<uuid>.jsonl`, daí os três níveis.
+        #
+        # Não dando pra determinar a conta (origem Codex/Pi/Kimi, ou caminho fora do formato), a
+        # reescrita NÃO acontece. Rodar sem o env usaria a conta Claude padrão da máquina: daria
+        # certo, devolveria um resumo bonito e cobraria de quem não foi escolhido — pior que
+        # recusar, porque ninguém ficaria sabendo.
         cfg = None
         if info.provider == "claude" and info.jsonl:
             p = Path(info.jsonl).parents
             if len(p) >= 3:
                 cfg = str(p[2])
-        texto, aviso = bastao_mod.reescrever_com_modelo(texto, cfg)
+        if cfg is None:
+            aviso = "só dá pra usar o modelo quando a sessão de origem é Claude nesta máquina"
+        else:
+            texto, aviso = bastao_mod.reescrever_com_modelo(texto, cfg)
     alvo = bastao_mod.gravar(destino, texto)
     conta, modelo = bastao_mod.origem_resumida(info.jsonl, info.provider, info.codex_home)
     return texto, alvo, bastao_mod.kickoff(origem, alvo, conta, modelo), aviso
