@@ -10,8 +10,13 @@
     query: string;
     onPick: (cmd: CommandInfo) => void;
     onComplete: (cmd: CommandInfo) => void;
+    listboxId: string;
+    activeOptionId?: string;
   }
-  let { commands, query, onPick, onComplete }: Props = $props();
+  let {
+    commands, query, onPick, onComplete, listboxId,
+    activeOptionId = $bindable(),
+  }: Props = $props();
 
   const MAX = 8;
   let selectedName = $state('');
@@ -43,6 +48,11 @@
           .map((x) => x.c)
   );
   const selected = $derived(matches.find((c) => c.name === selectedName) ?? matches[0]);
+  const selectedIndex = $derived(selected ? matches.indexOf(selected) : -1);
+
+  $effect(() => {
+    activeOptionId = selectedIndex >= 0 ? `${listboxId}-${selectedIndex}` : undefined;
+  });
 
   export function handleKeydown(event: KeyboardEvent): boolean {
     if (!selected || event.ctrlKey || event.altKey || event.metaKey) return false;
@@ -67,10 +77,11 @@
 </script>
 
 {#if matches.length > 0}
-  <div class="suggest" role="listbox" aria-label={m.slash_sugestoes()}>
+  <div class="suggest" id={listboxId} role="listbox" aria-label={m.slash_sugestoes()}>
     {#each matches as c, index (c.name)}
       <button bind:this={rows[index]} class="row" class:selected={c === selected} role="option"
-        aria-selected={c === selected} onmouseenter={() => (selectedName = c.name)} onclick={() => onPick(c)}>
+        id="{listboxId}-{index}" tabindex="-1" aria-selected={c === selected}
+        onmouseenter={() => (selectedName = c.name)} onclick={() => onPick(c)}>
         <span class="name">{c.display}</span>
         {#if c.description}<span class="desc">{c.description}</span>{/if}
         <span class="badge badge--{c.source}">{badge(c.source)}</span>

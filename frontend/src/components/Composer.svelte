@@ -189,6 +189,9 @@
   // Comeca vazio; o $effect popula na hora a partir do cache (sincrono) ou da rede.
   let commands = $state<CommandInfo[]>([]);
   let slashSuggest = $state<{ handleKeydown: (event: KeyboardEvent) => boolean }>();
+  let slashActiveOptionId = $state<string>();
+  const uid = $props.id();
+  const slashListboxId = `slash-${uid}`;
   let commandSheetOpen = $state(false);
   let confirmStopOpen = $state(false);
 
@@ -2059,8 +2062,9 @@
       {#if attachError}<span class="attach-error">{attachError}</span>{/if}
     {/if}
 
-    <SlashSuggest bind:this={slashSuggest} {commands} query={inputText} onPick={handleSuggestPick}
-      onComplete={(cmd) => void fillCommand(cmd.name)} />
+    <SlashSuggest bind:this={slashSuggest} bind:activeOptionId={slashActiveOptionId}
+      {commands} query={inputText} onPick={handleSuggestPick}
+      onComplete={(cmd) => void fillCommand(cmd.name)} listboxId={slashListboxId} />
 
     <textarea
       bind:this={textareaEl}
@@ -2072,6 +2076,8 @@
       onkeydown={handleKeydown}
       onpaste={onPaste}
       aria-label={m.composer_aria_mensagem()}
+      aria-controls={slashActiveOptionId ? slashListboxId : undefined}
+      aria-activedescendant={slashActiveOptionId}
     ></textarea>
 
     {#if starting && !recording}

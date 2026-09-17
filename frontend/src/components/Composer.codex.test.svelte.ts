@@ -130,6 +130,23 @@ it('setas percorrem as sugestões de comando', async () => {
   expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain('/revisar');
 });
 
+it('expõe a sugestão ativa ao leitor de tela', async () => {
+  const props = await montar();
+  props.inputText = '/re'; await flush();
+  const textarea = document.querySelector('textarea')!;
+  const listbox = document.querySelector<HTMLElement>('[role="listbox"]')!;
+  let selected = document.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')!;
+
+  expect(listbox.id).not.toBe('');
+  expect(textarea.getAttribute('aria-controls')).toBe(listbox.id);
+  expect(textarea.getAttribute('aria-activedescendant')).toBe(selected.id);
+
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+  await flush();
+  selected = document.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')!;
+  expect(textarea.getAttribute('aria-activedescendant')).toBe(selected.id);
+});
+
 it('Tab completa a sugestão selecionada', async () => {
   const props = await montar();
   props.inputText = '/resu'; await flush();
