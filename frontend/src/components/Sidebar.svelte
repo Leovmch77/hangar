@@ -4,6 +4,7 @@ import * as m from '../paraglide/messages';
   import HangarMark from './icons/HangarMark.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import IconFolder from './icons/IconFolder.svelte';
+  import IconWorktree from './icons/IconWorktree.svelte';
   import { createSession, gitAction, checkoutBranch, getHistoryTailForServer } from '@hangar/core';
   import { getActiveId, serverColor, withServer } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
@@ -149,6 +150,24 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   // Agrupando por projeto, o cwd já está no header do grupo; mostrar o caminho em cada row é
   // redundância. Ele volta a aparecer quando o agrupamento é por servidor.
   const showCwd = $derived(model.groupMode === 'server');
+  // Worktree é a EXCEÇÃO: a pasta aparece mesmo com o cwd desligado, porque é o nome dela que
+  // distingue duas cópias do mesmo repositório na mesma branch — sem ele o ícone não diria qual.
+  function mostraPasta(s: AggSession): boolean {
+    return showCwd || s.worktree === true;
+  }
+  // O rótulo do grupo é o resumo do ticket inteiro ("ABC-1234 Assunto comprido do chamado…"). A
+  // chave sozinha identifica; o resto é assunto e vai em cinza, sem competir com a lista.
+  const PAIR_COD = /^([A-Za-z][\w.]*-\d+)\b\s*(.*)$/;
+  function pairCodigo(label: string): string {
+    return PAIR_COD.exec(label)?.[1] ?? label;
+  }
+  function pairResto(label: string): string {
+    return PAIR_COD.exec(label)?.[2] ?? '';
+  }
+  function worktreeTitle(s: AggSession): string {
+    const base = s.worktree ? `${m.sessao_worktree()}: ${s.cwd}` : (s.cwd ?? '');
+    return showBranch(s.branch) ? `${base} · branch ${s.branch}` : base;
+  }
   let activeId = $state(getActiveId());
   let showCreate = $state(false);
   // Passagem de bastão: mesma folha de criar, aberta pra CONTINUAR a sessão apontada. Fica ao lado
@@ -687,13 +706,23 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         {#if item.kind === 'header'}
           {#if expanded}
           <!-- Cluster de pareamento (Opção C): sub-header colapsável do grupo, dentro do servidor.
-               É a TAMPA da "pasta": ele e os membros formam uma pílula contínua (CSS .pair-head /
-               .pair-member / .pair-last), pra o grupo se ler como um bloco e não como recuo. -->
+               Cabeçalho leve + barra de accent nos membros: dentro de uma caixa tingida o realce
+               de quem espera resposta sumia. -->
+          {@const pairAwaiting = countAwaiting(g.sessions.filter((x) => x.pair_gid === item.gid))}
           <button class="pair-head" class:recolhido={model.collapsed.has(`pair:${item.gid}`)}
                   onclick={() => model.toggleGroup(`pair:${item.gid}`)}
                   aria-expanded={!model.collapsed.has(`pair:${item.gid}`)} title={m.sessao_grupo_pareado({ label: item.label })}>
             <span class="grp-chevron" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
-            <span class="pair-head-label"><GroupGlyph size={13} />&nbsp;{item.label}</span>
+            <span class="pair-head-glifo"><GroupGlyph size={13} /></span>
+            <!-- Código curto em destaque e o resto do assunto em cinza: o rótulo é o resumo do
+                 ticket inteiro e, todo em accent, virava a coisa mais berrante da lista. -->
+            <span class="pair-head-cod">{pairCodigo(item.label)}</span>
+            {#if pairResto(item.label)}<span class="pair-head-resto">{pairResto(item.label)}</span>{/if}
+            <!-- Quantas do grupo esperam você: o header de SERVIDOR já diz isso e o de pareamento
+                 não dizia — e é o que precisa sobreviver com o grupo recolhido. -->
+            {#if pairAwaiting > 0}
+              <span class="grp-await" title={`${pairAwaiting} ${m.estado_aguardando()}`}>{pairAwaiting}</span>
+            {/if}
             <span class="grp-count">{item.count}</span>
           </button>
           {:else}
@@ -785,12 +814,12 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                 {:else}
                   <span class="row-mark" style="color: {s.limited ? 'var(--pill-limite-fg)' : stateColors[s.state]};"><HangarMark size={18} /></span>
                 {/if}
-                {#if !expanded && !model.selectMode && model.showProviderTags}
-                  <!-- Mesma regra da lista aberta: quando a lista MISTURA agentes, todo mundo leva o
-                       glifo, Claude incluído — marcar só a exceção não diz nada num trilho onde os
-                       nomes já sumiram. Vai no canto de cima do avatar (o de baixo é da barra de
-                       plano, o outro de cima é do ponto de estado), absoluto pra não empurrar as
-                       iniciais nem mudar a altura da linha. -->
+                {#if !model.selectMode && model.showProviderTags}
+                  <!-- Quando a lista MISTURA agentes, todo mundo leva o glifo, Claude incluído —
+                       marcar só a exceção não diz de quem é o resto. Vai no canto de cima do avatar
+                       (o de baixo é da barra de plano), absoluto pra não empurrar nada nem mudar a
+                       altura da linha. O avatar em si continua sendo a marca tingida pelo ESTADO:
+                       trocá-lo pelo glifo do agente custaria a cor, que é o que muda sozinho. -->
                   <span class="prov-rail" title={provTag ?? 'Claude'}><ProviderGlyph provider={s.provider} size={10} /></span>
                 {/if}
               </span>
@@ -813,12 +842,24 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       <span class="sess-badge pending-questions" title={questionLabel} aria-label={questionLabel}>? {pendingQuestions}</span>
                     {/if}
                     {#if s.tracked === false}<span class="sess-badge" title={untrackedReason(s.provider)}>{m.sessao_sem_id()}</span>{/if}
+                    <!-- Conta e hora no FIM DA LINHA DO NOME: aqui sobra largura, e as duas juntas
+                         liberam a linha da resposta inteira — que é onde a largura faltava. A conta
+                         deixa de ocupar uma linha própria na fila de chips. -->
+                    {#if contaChip || (s.state === 'idle' && s.last_reply_at)}
+                      <span class="fim-nome">
+                        {#if contaChip}
+                          <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
+                        {/if}
+                        {#if s.state === 'idle' && s.last_reply_at}
+                          <span class="reply-time">{relativeTime(s.last_reply_at)}</span>
+                        {/if}
+                      </span>
+                    {/if}
                   </span>
                   {#if s.state === 'idle' && s.last_reply}
                     <span class="status-sub reply" title={s.last_reply}>
                       <span class="reply-mark" aria-hidden="true">◆</span>
                       <span class="reply-text">{s.last_reply}</span>
-                      {#if s.last_reply_at}<span class="reply-time">{relativeTime(s.last_reply_at)}</span>{/if}
                     </span>
                   {:else if sub}
                     <span
@@ -828,51 +869,52 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       title={s.state === 'awaiting_input' || pendingQuestions > 0 ? s.question : s.label}
                     >{sub}</span>
                   {/if}
-                  <!-- ⧉ = worktree ligada. Fora do bloco da branch de propósito: worktree com HEAD
-                       destacado (ou em main) não tem chip de branch e ainda assim precisa se
-                       distinguir do checkout principal. -->
-                  {#if s.worktree}
-                    <span class="wt" title={m.sessao_worktree()}>worktree</span>
-                  {/if}
                   <!-- Pasta, branch e "+128 −24" numa linha só: com o caminho reduzido à última
                        pasta sobra largura, e os três dizem a mesma coisa (onde e como está o repo).
                        Em coluna eram três linhas de meta por sessão. -->
-                  {#if (showCwd && s.cwd) || showBranch(s.branch) || s.git_added || s.git_removed}
+                  {#if (mostraPasta(s) && s.cwd) || showBranch(s.branch) || s.git_added || s.git_removed || s.git_ahead || s.git_behind}
                     <span class="cwd-line">
-                      {#if showCwd && s.cwd}
+                      {#if mostraPasta(s) && s.cwd}
                         {@const cp = cwdParts(s.cwd)}
                         <!-- Ícone no lugar do caminho ATÉ a última pasta: o prefixo comia a largura e
                              truncava justo o nome que identifica o projeto ("/home/jef…/Área de traba…/
                              Assinado…"). O caminho inteiro segue no title. Custo assumido: dois
                              checkouts do mesmo repo em pastas diferentes leem igual na lista. -->
-                        <span class="cwd" title={showBranch(s.branch) ? `${s.cwd} · branch ${s.branch}` : s.cwd}>
+                        <span class="cwd" class:cwd--worktree={s.worktree} title={worktreeTitle(s)}>
                           <!-- O caminho inteiro também no sr-only: o `title` de um span não é lido de
                                forma confiável, e sem isto quem usa leitor de tela ficaria só com a
                                última pasta — que é o que a TELA mostra, não o que identifica. -->
-                          <span class="sr-only">{s.cwd}</span>
-                          <span class="cwd-icone" aria-hidden="true"><IconFolder size={11} /></span><span class="cwd-base" aria-hidden="true">{cp.base}</span>
+                          <span class="sr-only">{s.worktree ? `${m.sessao_worktree()}: ${s.cwd}` : s.cwd}</span>
+                          <!-- Worktree troca o ÍCONE da pasta, em vez de uma pílula escrita
+                               "worktree" numa linha só dela: a worktree é a pasta, e é o nome dela
+                               que distingue duas cópias do mesmo repo na mesma branch. -->
+                          <span class="cwd-icone" aria-hidden="true">
+                            {#if s.worktree}<IconWorktree size={11} />{:else}<IconFolder size={11} />{/if}
+                          </span><span class="cwd-base" aria-hidden="true">{cp.base}</span>
                           {#if showBranch(s.branch)}<span class="branch-inline">⎇ {s.branch}</span>{/if}
                         </span>
                       {:else if showBranch(s.branch)}
                         <span class="branch" title={m.sessao_branch_git_atual()}>⎇ {s.branch}</span>
+                      {/if}
+                      <!-- ↑ falta enviar, ↓ falta trazer — mesmas setas e cores do painel Git
+                           (GitColuna). Zero não desenha: a ausência de seta É "está em dia", e um
+                           ✓ em toda linha sincronizada seria ruído na largura da sidebar. -->
+                      {#if s.git_ahead || s.git_behind}
+                        <span class="sync" title={m.git_sync_titulo({ ahead: s.git_ahead ?? 0, behind: s.git_behind ?? 0 })}>
+                          {#if s.git_ahead}<span class="sync-ah">↑{s.git_ahead}</span>{/if}{#if s.git_behind}<span class="sync-be">↓{s.git_behind}</span>{/if}
+                        </span>
                       {/if}
                       {#if s.git_added || s.git_removed}
                         <span class="diff-stats" aria-hidden="true">{#if s.git_added}<span class="diff-add">+{s.git_added}</span>{/if}{#if s.git_removed}<span class="diff-del">−{s.git_removed}</span>{/if}</span>
                       {/if}
                     </span>
                   {/if}
-                  {#if model.showProviderTags || provTag || s.then_target || s.pair_peers?.length || s.loop_status || s.engine || s.plan_name || contaChip}
+                  {#if s.then_target || s.pair_peers?.length || s.loop_status || s.engine || s.plan_name}
                     <!-- Chips informativos (⏳/🔗/🤝/↻/⚙) na COLUNA DE TEXTO, nao ao lado do state-chip:
-                         inline eles cobriam o cwd em sidebar estreita (mesmo fix do SessionCard mobile). -->
+                         inline eles cobriam o cwd em sidebar estreita (mesmo fix do SessionCard mobile).
+                         O glifo do agente saiu daqui pro canto do avatar (mesmo arranjo do trilho) e a
+                         conta subiu pra linha do nome — os dois eram o que enchia esta fila. -->
                     <span class="badges-line">
-                      {#if model.showProviderTags}
-                        <!-- Glifo pra TODOS quando a lista mistura providers (pedido do usuário), e
-                             SÓ o glifo: cada provider tem marca própria (o ⬡ da OpenAI, o Ω do omp),
-                             então o nome escrito ao lado repetia o desenho e roubava a largura do
-                             chip da conta. O nome continua no title e no leitor de tela.
-                             provider ausente = Claude (o campo só viaja quando não é Claude). -->
-                        <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={s.provider} size={12} /></span>
-                      {/if}
                       {#if s.then_target}
                         <span class="chain-chip" title={m.sessao_chain_envia({ n: s.then_target })}>🔗&nbsp;{s.then_target}</span>
                       {/if}
@@ -897,10 +939,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                              NÃO mostramos custo aqui: o preço que o Claude Code calcula é tabela Anthropic
                              e mentiria pra um motor de outro provedor. -->
                         <span class="engine-chip" title={m.sessao_motor({ n: s.engine })}>⚙&nbsp;{s.engine}</span>
-                      {/if}
-                      {#if contaChip}
-                        <!-- Conta Anthropic da sessão (paridade com o SessionCard do celular). -->
-                        <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
                       {/if}
                     </span>
                   {/if}
@@ -1546,44 +1584,30 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   @media (hover: hover) { .grp-head:hover { color: var(--text-secondary); } }
 
-  /* Sub-header do cluster de pareamento (Opção C): recuado sob o servidor, cor accent, colapsável.
-     padding-left: var(--space-4) → chevron na coluna x=16px, mesmo eixo da borda-accent dos
-     .pair-member logo abaixo (8px de margin + 3px de border + padding da .sess-main = label em
-     ~19px; o texto do pair-head cai na mesma coluna porque o gap+16px de padding fecham a conta). */
-  /* "Pasta" do grupo na lista aberta: o cabeçalho é a tampa e os membros o corpo de UMA pílula
-     (fundo um tom acima, borda sutil, raio no topo do cabeçalho e na base do último). O recuo +
-     borda fina de antes não se lia como grupo — o usuário pediu destaque maior. O gap da lista é
-     compensado com margin negativa pra não haver costura. */
+  /* O grupo é uma BARRA na esquerda ligando os membros, não uma caixa tingida. Dentro de um
+     retângulo de accent a 12% o realce âmbar de quem espera resposta sumia — o agrupamento passava
+     na frente da urgência, que é o oposto do que a lista precisa. */
   .pair-head {
-    display: flex; align-items: center; gap: var(--space-2);
+    display: flex; align-items: center; gap: 6px;
     width: 100%; text-align: left;
-    padding: 5px var(--space-2) 5px var(--space-3); margin-bottom: -2px;
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-subtle)); border-bottom: none;
+    padding: 6px var(--space-2) 4px var(--space-2);
     cursor: pointer;
     font-size: var(--text-xs); font-weight: 600; color: var(--accent);
-    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    border-radius: var(--radius-sm);
   }
-  .pair-head.recolhido { border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-subtle)); border-radius: var(--radius-md); margin-bottom: 0; }
-  .pair-head-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; }
+  .pair-head-glifo { display: inline-flex; align-items: center; flex-shrink: 0; }
+  .pair-head-cod { flex-shrink: 0; }
+  /* O rótulo é o resumo do ticket inteiro; só a chave fica em accent e o assunto vai em cinza,
+     senão a linha inteira do grupo compete com as sessões. */
+  .pair-head-resto {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 400; color: var(--text-muted);
+  }
+  .pair-head .grp-await, .pair-head .grp-count { margin-left: auto; }
+  .pair-head .grp-await + .grp-count { margin-left: 0; }
   @media (hover: hover) { .pair-head:hover { color: var(--text-primary); } }
   .sidebar:not(.collapsed) .sess-row.pair-member {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised));
-    border-right: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-subtle)); border-radius: 0;
-    margin-bottom: -2px; padding-bottom: 2px;
-  }
-  .sidebar:not(.collapsed) .sess-row.pair-member.pair-last {
-    border-bottom: 1px solid var(--border-subtle); border-radius: 0 0 var(--radius-md) var(--radius-md);
-    margin-bottom: 0;
-  }
-  /* Mesma especificidade que o fundo da pílula: sem isto a sessão aberta e o hover somem dentro
-     do grupo (o fundo plano do membro vencia `.sess-row.active` e `.sess-row:hover`). */
-  @media (hover: hover) { .sidebar:not(.collapsed) .sess-row.pair-member:hover { background: var(--bg-hover); } }
-  /* Dentro da pílula (já tingida a 12%) a aberta precisa de MAIS que o tint padrão: dobra a
-     tinta e ganha a barra de accent na borda, igual ao trilho. */
-  .sidebar:not(.collapsed) .sess-row.pair-member.active {
-    background: color-mix(in srgb, var(--accent) 26%, var(--surface-raised));
-    box-shadow: inset 3px 0 0 0 var(--accent);
+    margin-left: var(--space-2); border-radius: 0 var(--radius-md) var(--radius-md) 0;
   }
   .grp-chevron {
     flex-shrink: 0; font-size: 9px; color: var(--text-muted);
@@ -1654,7 +1678,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      e apagava a faixa do cluster justo na sidebar expandida — que é onde o cluster aparece. Reafirma a
      cor no mesmo escopo; awaiting vem DEPOIS e ganha no desempate por ordem: urgência > agrupamento
      (o membro ainda fica identificado pelo recuo e pelo 🤝 do sub-header). */
-  .sidebar:not(.collapsed) .sess-row.pair-member { border-left-color: var(--accent-dim); }
+  .sidebar:not(.collapsed) .sess-row.pair-member { border-left-color: var(--accent); }
   .sidebar:not(.collapsed) .sess-row.awaiting {
     border-left-color: var(--warning);
     background: color-mix(in srgb, var(--warning) 7%, transparent);
@@ -1691,7 +1715,14 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .status-sub.reply { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }
   .reply-mark { flex-shrink: 0; color: var(--text-muted); font-size: 8px; }
   .reply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .reply-time { flex-shrink: 0; margin-left: auto; color: var(--text-muted); font-size: 10px; }
+  .reply-time { flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
+  /* Conta + hora empurradas pro fim da linha do NOME. O nome encolhe antes delas (elas são curtas
+     e de largura fixa), e a linha da resposta abaixo fica com a largura inteira. */
+  .fim-nome {
+    flex-shrink: 0; margin-left: auto;
+    display: inline-flex; align-items: center; gap: var(--space-1);
+    max-width: 55%;
+  }
   /* Pasta + branch + diff numa linha. O `.cwd` cede a largura (shrink) e o diff nunca encolhe:
      o número é curto e é o que some primeiro se ele puder encolher. */
   .cwd-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
@@ -1713,18 +1744,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .branch-inline { flex-shrink: 0; margin-left: var(--space-1); }
-  /* Marcador de worktree: chip com a palavra inteira, nunca trunca (quem cede largura é o cwd).
-     Era um glifo ⧉ de 10px e não dava pra ver — dizer o nome custa 8 caracteres. */
-  .wt {
-    flex-shrink: 0;
-    padding: 0 5px;
-    border-radius: var(--radius-full);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-  }
+  /* Worktree: a pasta inteira muda de cor junto com o ícone. Tingir só o ícone de 11px não se
+     lia; é o NOME da pasta que diz qual das cópias é esta. */
+  .cwd--worktree,
+  .cwd--worktree .cwd-icone { color: var(--pill-working-fg); }
   /* "+128 −24" do working tree (paridade com o SessionCard): mono, cores semânticas de diff. */
   .diff-stats {
     flex-shrink: 0;
@@ -1735,6 +1758,18 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   .diff-add { color: var(--success); }
   .diff-del { color: var(--error); }
+  /* ↑/↓ do upstream: mesmas cores do painel Git, e negrito porque é o único item da linha que
+     pede ação — o resto dela (pasta, branch, diff) é descrição de onde a sessão está. */
+  .sync {
+    flex-shrink: 0;
+    display: inline-flex;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .sync-ah { color: var(--accent); }
+  .sync-be { color: var(--warning); }
   /* Envelope da pilula (o desenho dela vive no StateChip.svelte). */
   .state-chip { display: inline-flex; flex-shrink: 0; border-radius: var(--radius-full); }
   /* Travada (feature #7): anel âmbar sutil no chip — avisa sem gritar. Outline, e nao box-shadow
@@ -1815,7 +1850,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     color: var(--accent); background: var(--accent-dim);
     padding: 1px 6px; border-radius: var(--radius-full);
   }
-  .lead { width: 18px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+  /* position: relative ancora o glifo do agente (.prov-rail, absoluto) no AVATAR. Sem isto ele
+     subiria pro .sess-main e pousaria no canto da row inteira. */
+  .lead { width: 18px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; position: relative; }
   /* Rail recolhido: coluna estado-em-cima / nome-embaixo, altura FIXA pra toda sessão ocupar o
      mesmo bloco — é o que iguala `hangar` e `storefront-web` (a 2ª linha vazia mantém a altura). */
   .sidebar.collapsed .lead {

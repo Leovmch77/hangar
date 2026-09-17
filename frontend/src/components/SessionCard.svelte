@@ -9,6 +9,7 @@ import { textoProblema } from '../lib/problema';
   import { planBadge } from '@hangar/core';
   import PlanBar from './PlanBar.svelte';
   import IconFolder from './icons/IconFolder.svelte';
+  import IconWorktree from './icons/IconWorktree.svelte';
   import StateChip from './StateChip.svelte';
   import BottomSheet from './BottomSheet.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
@@ -32,10 +33,13 @@ import { textoProblema } from '../lib/problema';
     selectMode?: boolean;
     selected?: boolean;
     onToggleSelect?: () => void;
+    // Só quando a lista MISTURA agentes (mesma regra da Sidebar): com tudo em Claude a marca é a
+    // mesma em toda linha e não separa nada — vira textura ao lado do nome.
+    showProvider?: boolean;
   }
   let {
     session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onLoop,
-    selectMode = false, selected = false, onToggleSelect,
+    selectMode = false, selected = false, onToggleSelect, showProvider = false,
   }: Props = $props();
 
 
@@ -51,6 +55,9 @@ import { textoProblema } from '../lib/problema';
   // sessao ("hangar" + "/home/jeff…/hangar"), a linha inteira e redundante e so
   // roubava largura do nome/branch.
   const showCwd = $derived(!!session.cwd && cwdPartes.base.toLowerCase() !== session.name.toLowerCase());
+  // Worktree é a EXCEÇÃO: a pasta aparece mesmo repetindo o nome da sessão, porque é ela que
+  // carrega a marca de worktree — e é o nome dela que distingue duas cópias do mesmo repositório.
+  const mostraPasta = $derived(showCwd || session.worktree === true);
 
   // Chip de estado so quando o estado PEDE atencao. "pronto" repetido em toda linha e ruido: o
   // ponto colorido do lead ja diz que esta parada.
@@ -298,12 +305,22 @@ import { textoProblema } from '../lib/problema';
         {:else}
           <span class="session-name">{title}</span>
           <SessionSignals browser={browserOpen} headless={session.headless === true} />
+          <!-- Marca do agente junto dos outros sinais do nome, não numa fila de chips própria: cada
+               agente tem marca colorida, o nome ao lado repetia o desenho e segue no title. -->
+          {#if showProvider}
+            <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={session.provider} size={12} /></span>
+          {/if}
           {#if pendingQuestions > 0}
             <span class="untracked-badge pending-questions" title={`${m.ask_perguntas()}: ${pendingQuestions}`} aria-label={`${m.ask_perguntas()}: ${pendingQuestions}`}>? {pendingQuestions}</span>
           {/if}
         {/if}
         {#if untracked}
           <span class="untracked-badge" title={untrackedReason(session.provider)}>⚠ {m.sessao_sem_id()}</span>
+        {/if}
+        <!-- Conta no FIM DA LINHA DO NOME (paridade com a Sidebar): aqui sobra largura, e ela
+             deixa de ocupar um lugar na fila de chips, que é a linha que enche primeiro. -->
+        {#if contaChip}
+          <span class="conta-chip conta-no-nome" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
         {/if}
       </span>
       {#if (session.state === 'awaiting_input' || pendingQuestions > 0) && session.question}
@@ -321,48 +338,47 @@ import { textoProblema } from '../lib/problema';
            muda, entao vem primeiro e nunca some; o cwd fecha a linha e trunca primeiro. O tempo
            relativo ("51 min atrás") vem por último, colado à direita — informação de contexto, não
            de identidade. -->
-      {#if serverBadge || session.branch || session.worktree || showCwd || agoLabel}
+      {#if serverBadge || session.branch || mostraPasta || agoLabel}
         <span class="meta-line">
           {#if serverBadge}
             <span class="srv" style="color: {serverBadge.color};">{serverBadge.label}</span>
-            {#if session.branch || showCwd}<span class="meta-sep">·</span>{/if}
-          {/if}
-          <!-- ⧉ = worktree ligada. IRMÃO da branch, não filho: worktree com HEAD destacado não tem
-               branch nenhuma e ainda assim precisa se distinguir do checkout principal. -->
-          {#if session.worktree}
-            <span class="wt" title={m.sessao_worktree()}>worktree</span>
+            {#if session.branch || mostraPasta}<span class="meta-sep">·</span>{/if}
           {/if}
           {#if session.branch}
             <span class="branch" title={m.sessao_branch_git_atual()}>⎇ {session.branch}</span>
-            {#if showCwd}<span class="meta-sep">·</span>{/if}
+            {#if mostraPasta}<span class="meta-sep">·</span>{/if}
           {/if}
           <!-- Diff do working tree (referência: cards do super.engineering, "+128 −24" ao lado da
                branch). IRMÃO da branch, não filho: HEAD destacado (sem branch) ainda tem diff. -->
+          <!-- ↑ falta enviar, ↓ falta trazer — mesmas setas e cores do painel Git (GitColuna).
+               Zero não desenha: a ausência de seta É "está em dia". -->
+          {#if session.git_ahead || session.git_behind}
+            <span class="sync" title={m.git_sync_titulo({ ahead: session.git_ahead ?? 0, behind: session.git_behind ?? 0 })}>
+              {#if session.git_ahead}<span class="sync-ah">↑{session.git_ahead}</span>{/if}{#if session.git_behind}<span class="sync-be">↓{session.git_behind}</span>{/if}
+            </span>
+          {/if}
           {#if session.git_added || session.git_removed}
             <span class="diff-stats" aria-hidden="true">{#if session.git_added}<span class="diff-add">+{session.git_added}</span>{/if}{#if session.git_removed}<span class="diff-del">−{session.git_removed}</span>{/if}</span>
           {/if}
-          {#if showCwd}
+          {#if mostraPasta}
             <!-- Só a última pasta, com ícone no lugar do prefixo (mesma razão da Sidebar: o
                  prefixo truncava o nome que identifica). Caminho inteiro no title. -->
             <!-- sr-only com o caminho inteiro: mesma razão da Sidebar, onde está o comentário. -->
-            <span class="cwd" title={session.cwd}><span class="sr-only">{session.cwd}</span><span class="cwd-icone" aria-hidden="true"><IconFolder size={11} /></span><span class="cwd-base" aria-hidden="true">{cwdPartes.base}</span></span>
+            <!-- Worktree troca o ÍCONE da pasta em vez de uma pílula escrita "worktree": a worktree
+                 é a pasta, e é o nome dela que distingue duas cópias do mesmo repo na mesma branch. -->
+            <span class="cwd" class:cwd--worktree={session.worktree} title={session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}><span class="sr-only">{session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}</span><span class="cwd-icone" aria-hidden="true">{#if session.worktree}<IconWorktree size={11} />{:else}<IconFolder size={11} />{/if}</span><span class="cwd-base" aria-hidden="true">{cwdPartes.base}</span></span>
           {/if}
           {#if agoLabel}
-            {#if serverBadge || session.branch || showCwd}<span class="meta-sep" aria-hidden="true">·</span>{/if}
+            {#if serverBadge || session.branch || mostraPasta}<span class="meta-sep" aria-hidden="true">·</span>{/if}
             <span class="ago" title={fmtWhen(session.last_activity)}>{agoLabel}</span>
           {/if}
         </span>
       {/if}
-      <!-- A linha de chips agora SEMPRE existe: o primeiro chip é a marca do provider (glifo pra
-           todos, texto só nas não-Claude) — 🤝 grupo, ⏳ rate-limit, 🔁 loop e ⚙ motor seguem na
-           mesma linha, no fluxo da coluna de texto (na row-right esmagavam o nome — visto no iPhone). -->
+      <!-- 🤝 grupo, ⏳ rate-limit, 🔁 loop e ⚙ motor, no fluxo da coluna de texto (na row-right
+           esmagavam o nome — visto no iPhone). A linha só existe quando tem chip: a marca do agente
+           subiu pra linha do nome e a conta também, e sem elas sobrava uma linha inteira vazia. -->
+      {#if session.pair_peers?.length || loopChip || planChip || session.engine}
       <span class="badges-line">
-          <!-- Marca do provider pra TODOS (pedido do usuário): o glifo colorido sempre; o TEXTO
-               só nas não-Claude — a exceção se nomeia, o default se reconhece pelo ícone.
-               provider ausente = Claude (o campo só viaja quando não é Claude). -->
-          <!-- Só o glifo, como na Sidebar: cada provider tem marca própria e o nome ao lado repetia
-               o desenho. O nome segue no title e no leitor de tela. -->
-          <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={session.provider} size={12} /></span>
           {#if session.pair_peers?.length}
             <span class="paired-chip" title={m.sessao_grupo_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} />&nbsp;{session.pair_peers.length === 1 ? session.pair_peers[0] : session.pair_peers.length + 1}</span>
           {/if}
@@ -381,12 +397,8 @@ import { textoProblema } from '../lib/problema';
                  mostramos custo aqui: o preço que o Claude Code calcula é tabela Anthropic e mentiria. -->
             <span class="engine-chip" title={m.sessao_motor({ n: session.engine })}>⚙&nbsp;{session.engine}</span>
           {/if}
-          {#if contaChip}
-            <!-- Qual conta Anthropic paga esta sessão. No celular não havia isto em lugar nenhum,
-                 e três sessões paradas no limite da mesma conta pareciam três problemas. -->
-            <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
-          {/if}
         </span>
+      {/if}
       <PlanBar {session} />
       <!-- Retomar e Claude-only de ponta a ponta (candidatos de ~/.claude/projects + relance com
            `claude --resume`): numa sessao Pi/Kimi/OMP o botao so poderia errar, entao mostramos a
@@ -684,6 +696,8 @@ import { textoProblema } from '../lib/problema';
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Empurrada pro fim da linha do nome: o nome encolhe antes dela, que é curta e de largura fixa. */
+  .conta-no-nome { margin-left: auto; flex-shrink: 0; }
   /* Input do rename inline (toque longo). Mesmo visual do .server-edit da lista de servidores. */
   .name-edit {
     flex: 1;
@@ -706,6 +720,10 @@ import { textoProblema } from '../lib/problema';
     align-items: center;
     gap: 5px;
     min-width: 0;
+    /* Os itens curtos da linha (setas, diff, tempo) não encolhem; sem isto, quando a soma deles
+       passa da largura, eles vazam POR CIMA do vizinho em vez de serem cortados — o tempo
+       aparecia escrito sobre o nome da pasta. */
+    overflow: hidden;
     font-size: var(--text-xs);
   }
   /* Chips informativos no fluxo da coluna de texto (nao na row-right). */
@@ -760,7 +778,10 @@ import { textoProblema } from '../lib/problema';
     /* encolhe COM ellipsis: "flex: 0 0 auto" nunca encolhia e o basename vazava por baixo
        da row-right (overlap visto no iPhone). O prefixo continua encolhendo primeiro. */
     flex: 0 1 auto;
-    min-width: 3ch;
+    /* min-width ZERO, e não um piso: com piso a pasta ou vira "p.." (um caractere e reticências,
+       que não identificam nada) ou para de encolher e passa por baixo do tempo. Cedendo até o fim
+       sobra só o ícone — que é o marcador — e o caminho segue no title. */
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -776,18 +797,10 @@ import { textoProblema } from '../lib/problema';
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Marcador de worktree: chip com a palavra inteira, nunca trunca (quem cede a largura é o cwd).
-     Era um glifo ⧉ e não dava pra ver — dizer o nome custa 8 caracteres. */
-  .wt {
-    flex-shrink: 0;
-    padding: 0 5px;
-    border-radius: var(--radius-full);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent);
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-  }
+  /* Worktree: a pasta inteira muda de cor junto com o ícone. Tingir só o ícone de 11px não se
+     lia; é o NOME da pasta que diz qual das cópias é esta. */
+  .cwd--worktree,
+  .cwd--worktree .cwd-icone { color: var(--pill-working-fg); }
   /* "+128 −24" do working tree: mono como a branch ao lado, nas cores semânticas de sempre
      (verde/vermelho do diff, não accent — é dado de código, não identidade). Não trunca: são 2
      números curtos e é informação que muda; quem cede é o cwd, como sempre. */
@@ -800,6 +813,18 @@ import { textoProblema } from '../lib/problema';
   }
   .diff-add { color: var(--success); }
   .diff-del { color: var(--error); }
+  /* ↑/↓ do upstream: mesmas cores do painel Git, e negrito porque é o único item da meta-line que
+     pede ação — o resto dela descreve onde a sessão está. */
+  .sync {
+    flex-shrink: 0;
+    display: inline-flex;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+  .sync-ah { color: var(--accent); }
+  .sync-be { color: var(--warning); }
   /* Tempo relativo no fim da meta-line: mutado de propósito, não disputa com nome/branch. */
   .ago { flex-shrink: 0; color: var(--text-muted); white-space: nowrap; }
 

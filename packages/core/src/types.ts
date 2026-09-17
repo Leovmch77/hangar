@@ -56,6 +56,10 @@ export interface SessionInfo {
   git_added?: number | null;
   git_removed?: number | null;
   git_dirty?: number | null;
+  // Commits que faltam enviar (ahead) e trazer (behind) vs o upstream. null sem upstream real,
+  // então "0" e "não dá pra comparar" não se confundem -> sem seta nas duas listas.
+  git_ahead?: number | null;
+  git_behind?: number | null;
   // Estado vivo detalhado, pra a linha ser acionável sem abrir a sessão (feature #1):
   label?: string | null;       // working: texto do spinner
   startup_steps?: string[];    // saída do lançador, em ordem, antes de abrir a conversa

@@ -194,6 +194,20 @@ import * as m from '../paraglide/messages';
 
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê
   // o ativo a cada chamada (sem reload). Assim chat/SSE/delete vão pro backend certo.
+  // O rótulo do grupo é o resumo do ticket inteiro ("ABC-1234 Assunto comprido do chamado…"). A
+  // chave sozinha identifica; o resto é assunto e vai em cinza, sem competir com a lista.
+  const PAIR_COD = /^([A-Za-z][\w.]*-\d+)\b\s*(.*)$/;
+  function pairCodigo(label: string): string {
+    return PAIR_COD.exec(label)?.[1] ?? label;
+  }
+  function pairResto(label: string): string {
+    return PAIR_COD.exec(label)?.[2] ?? '';
+  }
+  // Quantas do grupo esperam resposta: é o que precisa sobreviver com o cluster recolhido.
+  function pairAwaiting(gid: string): number {
+    return countAwaiting(model.flatRows.filter((s) => s.pair_gid === gid));
+  }
+
   function openSession(s: AggSession) {
     // Sem id confiável não abre (exceções kimi e codex) — o modelo bloqueia igual; repetir aqui é
     // pra não salvar o scroll nem congelar o save de uma saída que não vai acontecer. A cópia da
@@ -431,7 +445,10 @@ import * as m from '../paraglide/messages';
                     <button class="pair-head" onclick={() => model.toggleGroup(`pair:${item.gid}`)}
                             aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}>
                       <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
-                      <span class="pair-label"><GroupGlyph size={13} />&nbsp;{item.label}</span>
+                      <span class="pair-label"><GroupGlyph size={13} />&nbsp;<b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto">{pairResto(item.label)}</span>{/if}</span>
+                {#if pairAwaiting(item.gid) > 0}
+                  <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
+                {/if}
                       <span class="pair-count">{item.count}</span>
                     </button>
                   {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
@@ -446,6 +463,7 @@ import * as m from '../paraglide/messages';
                         onRename={(nv) => handleRename(session, nv)}
                         onGit={() => handleGit(session)}
                         onLoop={() => handleLoop(session)}
+                        showProvider={model.showProviderTags}
                         selectMode={model.selectMode}
                         selected={model.selected.has(`${session.serverId}:${session.name}`)}
                         onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}
@@ -467,7 +485,10 @@ import * as m from '../paraglide/messages';
               <button class="pair-head" onclick={() => model.toggleGroup(`pair:${item.gid}`)}
                       aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}>
                 <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
-                <span class="pair-label"><GroupGlyph size={13} />&nbsp;{item.label}</span>
+                <span class="pair-label"><GroupGlyph size={13} />&nbsp;<b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto">{pairResto(item.label)}</span>{/if}</span>
+                {#if pairAwaiting(item.gid) > 0}
+                  <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
+                {/if}
                 <span class="pair-count">{item.count}</span>
               </button>
             {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
@@ -482,6 +503,7 @@ import * as m from '../paraglide/messages';
               onRename={(nv) => handleRename(session, nv)}
               onGit={() => handleGit(session)}
               onLoop={() => handleLoop(session)}
+              showProvider={model.showProviderTags}
               selectMode={model.selectMode}
               selected={model.selected.has(`${session.serverId}:${session.name}`)}
               onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}
@@ -717,7 +739,18 @@ import * as m from '../paraglide/messages';
   }
   .pair-chev { flex-shrink: 0; font-size: 10px; transition: transform 160ms var(--ease-out); }
   .pair-chev.collapsed { transform: rotate(-90deg); }
-  .pair-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; display: inline-flex; align-items: center; }
+  .pair-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+  .pair-cod { flex-shrink: 0; font-weight: 600; }
+  .pair-resto {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 400; color: var(--text-muted); font-size: var(--text-xs);
+  }
+  .pair-await {
+    flex-shrink: 0; font-size: var(--text-xs); font-weight: 700;
+    color: var(--warning); background: rgba(255, 159, 10, 0.14);
+    border-radius: var(--radius-full); padding: 1px 8px;
+    font-variant-numeric: tabular-nums;
+  }
   .pair-count {
     flex-shrink: 0; font-size: var(--text-xs); color: var(--accent);
     background: var(--accent-dim); border-radius: var(--radius-full); padding: 1px 8px;
@@ -725,7 +758,7 @@ import * as m from '../paraglide/messages';
   /* Faixa-accent alinhada à coluna do texto do pair-head (~26px: 16 padding + ~10 chevron + 8 gap
      - 2 da própria borda). margin-left (não padding) porque a borda precisa ficar FORA do card. */
   .pair-wrap.pair-member {
-    border-left: 2px solid var(--accent-dim);
+    border-left: 2px solid var(--accent);
     margin-left: calc(var(--space-4) + var(--space-2) - 2px);
   }
 
