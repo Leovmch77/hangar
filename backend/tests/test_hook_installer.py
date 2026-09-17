@@ -274,3 +274,19 @@ def test_nav_hook_avisa_como_abrir_e_a_url_quando_ja_aberto(tmp_path, monkeypatc
     assert mod._url_do_navegador(str(nav), "minha") == "http://localhost:3100/"
     assert mod._url_do_navegador(str(nav), "outra") is None
     assert "http://localhost:3100/" in mod.texto("http://localhost:3100/")
+
+
+def test_guard_de_conta_com_hooks_compartilhados_grava_o_caminho_do_principal(tmp_path):
+    # Conta cuja pasta hooks/ é link pra do principal: o comando tem de ser o mesmo do principal,
+    # senão o espelho de settings e o instalador trocam o caminho um do outro a cada subida.
+    principal = tmp_path / ".claude"
+    (principal / "hooks").mkdir(parents=True)
+    conta = tmp_path / ".claude-conta"
+    conta.mkdir()
+    (conta / "hooks").symlink_to(principal / "hooks")
+    assert hook_installer._guard_path(conta) == hook_installer._guard_path(principal)
+    assert hook_installer._guard_path(principal) == str((principal / "hooks").resolve() / "guard_tmux.py")
+    # Conta com hooks/ própria continua com o caminho dela.
+    solta = tmp_path / ".claude-solta"
+    solta.mkdir()
+    assert hook_installer._guard_path(solta) == str((solta / "hooks").resolve() / "guard_tmux.py")

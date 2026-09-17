@@ -301,12 +301,15 @@ def _guard_path(config_dir: Path) -> str:
         # devolve o alvo com o prefixo de caminho estendido (\\?\C:\...), entao a igualdade por
         # string nunca dava certo e o symlink era refeito a cada subida do backend. Mesmo motivo
         # (e mesma correcao) do contas._aponta_para, onde o estrago era maior.
-        if link.is_symlink() and os.path.realpath(link) == os.path.realpath(GUARD_HOOK):
-            return str(link)
-        if link.exists() or link.is_symlink():
-            link.unlink()
-        link.symlink_to(GUARD_HOOK)
-        return str(link)
+        if not (link.is_symlink() and os.path.realpath(link) == os.path.realpath(GUARD_HOOK)):
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(GUARD_HOOK)
+        # Pasta `hooks/` da conta é link pra do principal: grava o caminho do principal. Com o da
+        # conta, o espelho do settings (contas._espelhar_do_principal) e este instalador trocavam o
+        # comando um do outro a cada subida/abertura, e toda sessão sem terminal da conta acusava
+        # "config mudou".
+        return str(Path(os.path.realpath(link.parent)) / link.name)
     except OSError:
         return GUARD_HOOK
 
