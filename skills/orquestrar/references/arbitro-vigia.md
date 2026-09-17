@@ -70,7 +70,7 @@ Compare the watchdog's list with the last line of `eventos.jsonl`:
 | `task_inicio` | the Task's `executor` |
 | `entrega` | the round's `revisor` |
 | `veredito` `reprova` | the `executor` |
-| `veredito` `aprova` | the `executor`, until the `commit` field appears |
+| `veredito` `aprova` | the `executor`, until the commit hash reaches you (`arbitro.md`, step 5) |
 | `execucao_fim` | nobody — disarm |
 
 Mismatch → re-arm, don't nudge; a session waiting exactly as ordered is not stalled.

@@ -75,8 +75,9 @@
 # anterior falhou: (0) olhe o pane do destino — overlay/menu aberto recusa digitação e é o que o
 # backend reporta como "sessão indisponível"; (1) SendMessage, quando o alvo aparece em ListAgents;
 # (2) `hangar-send --tmux <sessao>` — também quando ListAgents vem VAZIO, que acontece; (3)
-# `tmux send-keys` no pane. Recusa da FERRAMENTA se contorna subindo o degrau; recusa do
-# DESTINATÁRIO, não. A mensagem é ARGUMENTO, nunca stdin: heredoc cru
+# `tmux send-keys` no pane. Destino SEM terminal (--headless): não há pane, os degraus 0 e 3 não
+# existem e o (2) é o último — ele entra pela fila da API. Recusa da FERRAMENTA se contorna
+# subindo o degrau; recusa do DESTINATÁRIO, não. A mensagem é ARGUMENTO, nunca stdin: heredoc cru
 # (`hangar-send <s> <<'EOF'`) dá erro de uso e nada sai. Texto com crase ou $ vai assim:
 #   hangar-send <sessao> "$(cat <<'EOF'
 #   ...texto livre...

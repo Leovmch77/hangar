@@ -33,7 +33,8 @@ Route: <audit | full>            # decided in phase 1, escalates only
    produce, you produce by hand. Executing half: what the executor invokes per Task; its command
    goes in `Executes with:` (`none` when there is none).
 3. Check both halves installed and tested in the account that executes, every time:
-   `checar-skills.sh <names from the contract>`.
+   `<hangar>/scripts/checar-skills.sh <names from the contract>` (the Hangar checkout path the
+   plan records, `consumo.md`).
 4. Ask which domain skill applies; `Domain skill:` is mandatory even as `none`. The plan
    instantiates the skill, never repeats it; fit plan and contract to the skill, never the skill to
    the work. Waiving a skill step is the user's decision.

@@ -130,7 +130,8 @@ Tasks e revisão final da branch). A linha do executor na tabela do time pode se
 `Risk:` da Task (`vez` = `low`/`high`) em vez de rodízio. Push depende de autorização do usuário. Um escritor por árvore, execução serial por
 padrão. **Só planejador e árbitro invocam a skill**: executor, revisor, revisão final e
 retrospectiva recebem no kick-off o caminho da página do papel
-(`~/.claude/skills/orquestrar/references/<papel>.md`) e leem só ela. Cada página é escrita como
+(`~/.claude/skills/orquestrar/references/<papel>.md`) e leem só ela e as irmãs que ela nomeia
+no passo. Cada página é escrita como
 regra imperativa, sem motivo nem caso, com teto de tamanho conferido por
 `scripts/checar-orquestrar.sh`. Contrato visual, exceções de paralelismo e demais etapas ficam
 na skill.

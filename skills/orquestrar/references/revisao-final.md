@@ -51,16 +51,20 @@ and who ran them; each blocker with cause reproduced, location, all callers, pro
 mechanism, steps, final behavior and verification. File first, in the durable directory; the
 message carries the path.
 
-- Findings go straight to the executor the kick-off names (`Executor for findings:`); none
-  named → ask the arbiter to open one. They return a frozen round (dirty tree,
-  `git stash store`, review before the commit); a fix made after your verdict on the `audit`
-  route discards it, and a NEW fresh session reviews.
-- One synthesis, one message, to the arbiter. Push and MR are the user's.
+- Route `full`: findings go straight to the executor the kick-off names
+  (`Executor for findings:`); none named → ask the arbiter to open one. They return YOU the
+  frozen round (dirty tree, `git stash store`, review before the commit) and you judge it; the
+  arbiter enters at the closing, never in the middle.
+- Route `audit` (no arbiter): findings go to the writer session; a fix made after your verdict
+  discards it, and a NEW fresh session reviews the result, never you.
+- One synthesis, one message, to the arbiter (on `audit`, to the writer). Push and MR are the
+  user's.
 - On APROVA, the message to the arbiter ends with:
 
 > **Phase 5 (retrospective) is still missing** — fresh session, `references/retrospectiva.md`.
 
-Done when the arbiter has the path and, on APROVA, the last line above.
+Done when the arbiter (on `audit`, the writer) has the path and, on APROVA, the last line
+above.
 
 ## Locks
 

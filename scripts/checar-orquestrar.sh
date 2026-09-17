@@ -176,7 +176,7 @@ done
 teto_skill=8000
 teto_pagina=13000
 for f in "${arquivos[@]}"; do
-  tam=$(wc -c < "$f")
+  tam=$(wc -m < "$f")   # caracteres, nao bytes: a regra e em caracteres e o texto tem acento
   teto=$teto_pagina
   [ "$f" = SKILL.md ] && teto=$teto_skill
   if [ "$tam" -gt "$teto" ]; then
@@ -188,11 +188,7 @@ done
 
 # 8. Pagina de papel que nao carrega a skill nao pode mandar ler o SKILL.md nem invoca-la.
 #    (a retrospectiva fica de fora: ela propoe patch pra skill inteira, SKILL.md incluso.)
-for f in references/executor.md references/executor-fluxo.md references/executor-visual.md \
-         references/executor-verificacao.md references/executor-receita.md references/executor-subagentes.md \
-         references/revisor.md references/revisor-catalogo.md references/revisor-visual.md \
-         references/revisor-receita.md references/revisor-verificador.md \
-         references/revisao-final.md; do
+for f in references/executor*.md references/revisor*.md references/revisao-final.md; do
   if grep -q 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f"; then
     echo
     echo "✗ $f aponta para o SKILL.md ou manda invocar a skill: executor, revisor, revisao final e retrospectiva leem SO a pagina do papel."

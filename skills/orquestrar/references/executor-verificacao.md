@@ -6,8 +6,9 @@ Read at step 4 of `executor.md`.
 
 - The command the plan defined for this Task, cwd-independent (explicit prefix or directory).
 - `set -o pipefail` or `${PIPESTATUS[0]}`: `command | tail && echo OK` prints OK on failure.
-- Before sending: `git diff <base>..HEAD -- <file>` shows only what the Task asked; check removed
-  lines with `git diff <base>..HEAD | grep -E '^-.*(role=|aria-|try|catch|await)'`.
+- Before sending (the round is uncommitted, so diff against HEAD, never `<base>..HEAD`):
+  `git diff HEAD -- <file>` shows only what the Task asked; check removed lines with
+  `git diff HEAD | grep -E '^-.*(role=|aria-|try|catch|await)'`.
 
 ## Proof
 

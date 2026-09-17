@@ -95,6 +95,11 @@ a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
   mensagens são funções compiladas, não valores reativos); o seletor guarda em `PARAGLIDE_LOCALE`.
   Texto que o **backend** manda pra tela (erros, descrições de built-ins) chega como chave/código e é
   traduzido no front — exceção: frontmatter de skills e conteúdo de chat são dados, não interface.
+  Rótulo de stub/fixture de teste que vive em árvore varrida pela trava é identificador
+  (`abrir-term`), nunca frase: numa orquestração de setembro/2026 um stub escrito como frase disparou
+  a trava e tentou uma exceção global no `i18n-allow.json`; renomeado pra identificador, o extrator
+  voltou vazio e o build real mostrou que ele não vaza pro produto. A regra saiu da skill
+  `orquestrar` (é deste repo, não do fluxo) e mora aqui.
 
 ## iOS black-rectangle repaint.
 
