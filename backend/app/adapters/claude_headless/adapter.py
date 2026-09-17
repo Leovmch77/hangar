@@ -434,7 +434,8 @@ class ClaudeHeadlessAdapter:
             # Aprovar sai do plano para o `prePlanMode` da CLI, que não existe em sessão que
             # nasceu no plano: ela cai em `default` e passa a pedir cada edição. A base é
             # reaplicada quando a CLI anunciar a saída (`_reaplicar_base_do_plano`).
-            aprovou = option == 1 and sess.modo_nao_plan not in (None, "manual")
+            aprovou = (option == 1 or (option == 3 and bool(sugestoes))) \
+                and sess.modo_nao_plan not in (None, "manual")
             sess.base_apos_plano = sess.modo_nao_plan if aprovou else None
         if option == 1:
             resposta = {"behavior": "allow", "updatedInput": req.get("input") or {}}
@@ -1528,8 +1529,11 @@ class ClaudeHeadlessAdapter:
         async def _reaplicar() -> None:
             try:
                 await self.set_permission_mode(sess.name, base)
-            except Exception:
+            except Exception as e:
                 _log.exception("claude headless: modo de base não reaplicado após o plano name=%s", sess.name)
+                self._registrar_problema(sess, "headless_turno_erro",
+                                         f"modo {base!r} não reaplicado após o plano: {str(e)[:200]}")
+                await self._notify(sess)
 
         t = asyncio.get_running_loop().create_task(_reaplicar())
         self._tarefas.add(t)

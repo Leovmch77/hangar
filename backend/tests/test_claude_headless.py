@@ -676,6 +676,29 @@ def test_aprovar_plano_volta_ao_modo_de_base(adapter):
     assert len(ctrl_calls) == 1
 
 
+def test_plano_aprovado_com_regra_tambem_volta_a_base_e_falha_aparece(adapter):
+    sess = adapter._sessions["s1"]
+
+    async def ctrl(s, subtype, **req):
+        raise RuntimeError("cli recusou")
+    adapter._ctrl = ctrl   # type: ignore[method-assign]
+
+    async def fluxo():
+        sess.in_progress = True
+        sess.permission_mode, sess.modo_nao_plan = "plan", "bypassPermissions"
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "r1",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "ExitPlanMode",
+                                                   "input": {"plan": "p"},
+                                                   "permission_suggestions": [{"type": "setMode"}]}})
+        assert await adapter.select("s1", 3) is True
+        assert sess.base_apos_plano == "bypassPermissions"
+        await adapter._on_event(sess, {"type": "system", "subtype": "status", "permissionMode": "default"})
+        await asyncio.gather(*adapter._tarefas)
+    _run(fluxo())
+    ev = adapter._evento(sess)
+    assert ev.problema == "headless_turno_erro" and "bypassPermissions" in (ev.problema_detalhe or "")
+
+
 def test_plano_com_base_bypass_nao_pergunta_por_ferramenta(adapter):
     """Quem abriu em bypass e entrou no plano não volta a ver cartão de ferramenta — só o do plano."""
     sess = adapter._sessions["s1"]
