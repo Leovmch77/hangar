@@ -1,7 +1,117 @@
 # Harnesses — Claude, Codex, Pi, omp, Kimi
 
-Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
-a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
+Decisões medidas, com data e número. As regras vigentes ficam na seção abaixo (o `CLAUDE.md`
+só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo assunto.
+
+## Regras vigentes
+
+- **`omp` é um FORK do Pi** — mesmo JSONL, mesmas extensões, e as diferenças pequenas já custaram
+  bugs calados (binário próprio, raiz `~/.omp/agent`, sem `--session-id`, outros nomes de evento,
+  subagente no mesmo processo). Raiz do agente omp tem UMA resposta: `app/omp_dirs.agent_dir()`.
+- **A lista de modelos NUNCA é constante.** Conta Anthropic lê o picker ao vivo (cache de 1h,
+  porque ler dirige o terminal); sessão de motor usa `/v1/models` do provedor. `/model <id>`
+  grava default global — reponha o valor anterior.
+- **Antes de digitar no composer do Claude, ESVAZIE ele** (`C-u` enquanto o conteúdo diminui):
+  digitar por cima gruda as mensagens num Enter só e o reconcile reentrega. No Claude a decisão é
+  apagar, não adiar como no Pi — rascunho sendo escrito no terminal some junto.
+- **Antes de digitar no composer do Pi, PERGUNTE a ele** (`getEditorText`): a tela não distingue
+  aviso de extensão de rascunho da pessoa, e comparar duas capturas não resolve.
+- **Statusline e prévia vêm de sidecar do agente, não do pane.** O pane corta na largura da
+  janela. `""` é resposta ("nada em voo"), `None` é ausência. Sessão Pi já aberta só publica
+  depois de `/reload`.
+- **Estado da sessão Claude vem do registro nativo (`<config>/sessions/<pid>.json`) quando ele
+  existe e o pid vive**; marcador de hook e pane são o fallback. `idle`/`busy`/`waiting` são o
+  estado da TUI escrito por ela mesma; `waiting` inclui diálogo aberto (`/model`), que o pane
+  rebaixa. Nunca escrever nesse arquivo.
+- **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
+  a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
+  mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.
+- **Integração nativa do Codex: o Codex converte, o backend decide quando, o lançador só avisa.**
+  Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. Nunca gravar confiança
+  para autoaprovar hooks. Fonte inválida nunca significa remoção.
+- **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
+  religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
+  initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
+  Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
+  de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
+  sucesso vazio. Um cliente por cano.
+- **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
+  `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
+- **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
+  `~/.hangar/claude-headless/`, Codex em `~/.hangar/codex-sessions/`; tmux só identifica sessões com
+  terminal. Rename e `/clear` preservam a chave; `HANGAR_CANO_KEY` cobre sessões Codex já abertas
+  antes dessa identidade comum.
+- **Contas Codex adicionais têm `CODEX_HOME` próprio**; a identidade é `credential_id=codex:<home>`,
+  nunca a chave. Sem migração, rotação ou troca automática por cota.
+- **Abrir Codex adicional não espera no modal**: o pane nasce primeiro, e o lançador espera o
+  preparo da conta e a confiança da pasta antes de subir a TUI. O backend não prepara por trás;
+  chamada que falha ou excede o prazo deixa o erro no terminal até Enter e não abre a TUI com
+  config antiga.
+- **A memória do Claude só é vista pelo Codex com uma CONVERSA ao lado dela** — e não basta o
+  `.jsonl` existir: sessão que abriu e nunca conversou é descartada igual. Copiar só a `memory/`
+  faz a reconciliação terminar `ok` sem trazer nada. Como o critério do detector não é documentado,
+  o que foi copiado é conferido contra o que ele reconheceu, e a diferença vira aviso.
+- **A consolidação da memória é o único item que gasta cota**: por isso é opt-in, não roda abaixo de
+  25% de cota (decide antes de gastar), só sobe com a TUI, e vale a partir da SEGUNDA sessão — o
+  índice entra na abertura, então quem manda consolidar não vê o próprio resultado.
+- **Instruções nativas do Codex entram por `AGENTS.override.md`** apontando para o `CLAUDE.md`.
+  Override pessoal nunca é sobrescrito; onde existe `AGENTS.md` de verdade, ele deixa de ser lido.
+- **A ponte de skills é a ÚNICA dona das pastas de ponte**, é stdlib-only, e só mexe em symlink
+  cujo alvo está numa fonte conhecida. Config alheia é conferida, nunca editada.
+- **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
+  o env entra por `execvpe` dentro do pane (nunca `tmux -e`, que expõe a chave no `cmdline`), e a
+  janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+- **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
+  trabalhando" existe para o `/model`, que é texto.
+- **"Padrão" na tela de criação vira o modo da conta AINDA na criação**, e `bypassPermissions`
+  quando a conta não define nenhum: campo nulo virava flag ausente, e a sessão nascia no que a
+  máquina tivesse. **Em plano, sessão cuja base é bypass não pergunta por ferramenta** — só o
+  `ExitPlanMode`, que é o cartão do plano. Quem nasce no plano grava a base.
+- **Codex sem terminal: `thread/start` leva o modelo, o esforço não** — não existe campo pra ele
+  ali. Sem um `thread/settings/update` depois, o nível escolhido some no `model_reasoning_effort`
+  do `config.toml`.
+- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** `cano.py` é stdlib, um
+  por sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
+  snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no
+  backend. Leitura do socket com `limit=16 MB` e embrulhada — leitor pendurado é sessão presa.
+  Órfão é cano sem sidecar, não cano de backend anterior.
+- **Claude sem terminal estaciona depois de `_OCIOSA_S` (65 min) parado** e sem nada em aberto: o
+  processo sai, o sidecar fica, o próximo prompt sobe com `--resume`. Quem encerra por dentro tira
+  a sessão da memória (`_encerrar`) — saída nossa não marca `returncode`.
+- **Claude sem terminal só relê MCP/hooks/settings quando o processo nasce**: não há `/mcp
+  reconnect` em `-p`. Recarregar = `_encerrar` + `acordar` (sobe com `--resume`), só ociosa. O
+  motivo vai no `state` (`recarregar_motivo`: a marca do `mcpServers` + `settings.json` gravada
+  na subida mudou — nunca mtime do `.claude.json`, que o Claude Code reescreve a toda hora) e a
+  tela só oferece o botão com motivo; no menu ele fica sempre.
+- **Claude sem terminal que não sobe para em `_TETO_SUBIDAS`**, com espera sob a trava de spawn
+  (todo gatilho de drain passa por ela). A mensagem fica `desistiu` e o problema na faixa; só ação
+  do usuário (`acordar`) abre outra rodada. Sessão com processo morto não é entregável.
+- **Pensamento no Claude sem terminal só com `--thinking-display summarized`**: com `-p` a CLI
+  ignora `showThinkingSummaries`. Pensamento e ferramenta em voo têm fonte e evento SSE próprios,
+  nunca a prévia da resposta.
+- **Runtime por conta não vira atalho** (`telemetry/`, `feedback/`, `image-cache/`, caches por
+  config dir) — senão cada reconciliação acha "deriva" e gaveta de novo.
+- **O diálogo de confiança do Claude Code derruba três coisas**: a chave do pre-trust usa barra
+  normal no Windows, `is_overlay` tem que ignorar as linhas em branco do fim do pane, e o Enter
+  às cegas cai em "No, exit".
+- **Loop runner**: `LOOP_DONE` só fecha com confirmação humana; guardrails são max_iters,
+  branch≠main e kill-switch. Loop ativo suprime o chain.
+- **Plugin e marketplace do Codex usam os comandos nativos do CLI.** Nome do plugin + origem
+  confirmada identificam um alias (o mesmo pacote tem nome diferente em cada manifesto);
+  associar só pelo nome deixa o plugin antigo executando. Hook de arquivo em subpasta preserva
+  o caminho relativo inteiro — homônimo na raiz não o substitui.
+- **Falha do CLI do Codex deixa diagnóstico privado**, nunca stdout/stderr cru no log do
+  serviço: a saída pode transcrever tokens.
+- **Quem segura a abertura de uma sessão Codex é a TUI parada num widget**, não a
+  sincronização. Sem thread não há sidecar, e o app fica esperando para sempre — o cartão de
+  seletor pré-thread existe para isso.
+- **Pergunta assíncrona do Codex chega como `agentMessage` com `delivery: "async"`**, não como
+  pedido JSON-RPC. Cada pergunta é independente; o eco da resposta local não responde outra de
+  título igual.
+- **O aviso de espera vem de `model/safetyBuffering/updated`**, não de temporizador local — o
+  turno continua trabalhando.
+- **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
+  o instalador preserva o que está lá.
 
 ## Troca de provider durante o SSE
 

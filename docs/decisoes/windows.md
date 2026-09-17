@@ -1,7 +1,46 @@
 # Windows — psmux, ConPTY, instalador, armadilhas de plataforma
 
-Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
-a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
+Decisões medidas, com data e número. As regras vigentes ficam na seção abaixo (o `CLAUDE.md`
+só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo assunto.
+
+## Regras vigentes
+
+- **Windows roda psmux, não tmux** — e ele aceita comando que não executa. O que a doc do tmux
+  diz que falha, aqui às vezes "funciona" errado: `%N` endereça a sessão errada, `kill-session`
+  com `=` não mata, `rename-session` sobrescreve em vez de recusar, `list-clients` inventa tty,
+  `set -g <qualquer coisa>` volta do `show -g`. Endereço é `=<sessão>:<janela>.<pane>`.
+- **Multi-linha vai pelo CLIPBOARD**, porque os buffers do psmux cortam no primeiro `\n`. O
+  fallback ramifica pelo **código de retorno**, nunca pelo nome do sistema.
+- **Buffer do psmux é da SESSÃO e ignora `-b`**: sem `-t` o comando fala com outra sessão,
+  `show-buffer -b` devolve vazio com rc 0 e o `-F '#{buffer_name}'` não dá o nome real. Leia o
+  mais recente com `-t`; no tmux, `-t` é recusado e o código de retorno decide.
+- **O ambiente do pane vem do SERVIDOR no tmux e de QUEM CHAMA no psmux** — por isso
+  `CLAUDE_CONFIG_DIR` não pode ser exportado incondicionalmente ali.
+- **`Path.replace` É `os.replace`** e carrega o mesmo WinError 5; toda troca atômica passa por
+  `atomico.substituir` (guarda de AST em `test_atomico_call_sites.py`).
+- **Falha de decode em `subprocess` morre numa thread**: `run()` não levanta e `stdout` volta
+  `None`. Use `errors="replace"` e não carimbe como bom o que tem U+FFFD.
+- **`monkeypatch.setattr(os, "name", …)` leva o `pathlib` junto** e estoura longe de onde você
+  aplicou. Em teste que faz isso, use `os.path`.
+- **Código de retorno no Windows não se lê como falha** (`taskkill` sem processo devolve 128).
+  Separe "comando não existe" de "comando falhou"; stderr vem na codepage do console.
+- **`shutil.rmtree` em pasta onde o git escreveu precisa de `onexc`** que tira o somente-leitura:
+  o git grava packs read-only e o Windows recusa o unlink (WinError 5); no POSIX passa.
+- **Encoding é por interpretador**: `.cmd` em OEM, `.vbs` em UTF-16LE com BOM, `.sh` em UTF-8 sem
+  BOM, `.env`/`settings.json` sem BOM, perfil do PowerShell com BOM.
+- **Instalação Windows mantém o nível de permissão**: iniciada como admin, registra tarefas
+  interativas elevadas e atalhos elevados do Electron; comum, usa UAC pontual. Atualização
+  manual sem elevação não pode rebaixar uma instalação elevada.
+- **A tarefa Windows acompanha o processo até ele terminar.** Reinício controlado não encerra
+  a árvore inteira: sessões e atualizador sobrevivem. A vigia confirma falha HTTP, respeita
+  instalação/atualização e só inicia outra instância após confirmar a parada da anterior.
+- **`ln -sf` do Git Bash COPIA e devolve 0**; confira com `test -L` depois. Script sem extensão é
+  invisível para o PowerShell, e a falha é muda.
+- **O navegador embutido precisa da sessão gráfica ATIVA**: com a janela ocluída o teclado entrega
+  e o mouse não. View escondido precisa de `setDeviceMetricsOverride` para ter viewport e print.
+- **Recado repetido no Windows não é o par insistindo** — é o oráculo de entrega: o argv entre
+  Python e psmux come uma contrabarra quando o argumento vai entre aspas, a comparação falha e o
+  reconcile redigita. Olhe `REQUEUE` no log antes de responder.
 
 ## Process info lives in `app/procinfo.py` — the only OS-bound layer.
 

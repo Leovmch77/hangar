@@ -1,7 +1,33 @@
 # Instalação, atualização e serviços
 
-Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
-a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
+Decisões medidas, com data e número. As regras vigentes ficam na seção abaixo (o `CLAUDE.md`
+só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo assunto.
+
+## Regras vigentes
+
+- **Quem serve a interface é o BACKEND; o `frontend/dist` chega pronto do CI.** Gate que pergunta
+  "o front mudou?" tem que conhecer TODAS as árvores de onde o front é compilado (`frontend` **e**
+  `packages`) — senão serve tela velha ou apaga edição local.
+- **Instalador com portão de prova por etapa**: essencial que falha para na hora; extra opcional
+  que falha entra na lista e o fim nunca diz "Pronto". Nada é dado como feito sem prova.
+- **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO. O log nunca
+  carrega o token.
+- **Atualizar pelo app faz tudo sozinho, mas nada é irreversível**: resgate antes de qualquer
+  passo destrutivo, com a ref conferida. Passo só entra no registro depois da prova passar, e o
+  registro é do que JÁ RODOU aqui — não do intervalo de commits.
+- **O botão Atualizar NÃO roda o instalador.** Sozinho ele faz dist do CI, `uv sync`, `npm ci` por
+  hash do lock, restart e prova de vida por **pid** (HTTP o processo velho também responde).
+  Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
+  recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
+  Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
+- **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
+  continua sendo o fallback comum; qualquer variante que executa algo exige `prova`.
+- **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no
+  arquivo da raiz, build calculado — nunca tag de release nem commit do CI.
+- **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é
+  `systemctl --user restart`.
+- **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
+  recusa escopo transiente derrubava toda criação de sessão.
 
 ## Restarting the backend.
 
