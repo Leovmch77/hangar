@@ -238,7 +238,9 @@ class StateEvent(BaseModel):
     codex_buffering: bool = False
     claude_permission_mode: Optional[str] = None
     claude_previous_non_plan: Optional[str] = None
-    label: Optional[str] = None         # working: live status text, e.g. "Elucidating…"
+    # Claude sem terminal com `ExitPlanMode` aguardando aprovação: {plan, path, tool_use_id}.
+    claude_plan_pending: dict | None = None
+    label: Optional[str] = None        # working: live status text, e.g. "Elucidating…"
     question: Optional[str] = None       # awaiting_input: the question line
     options: Optional[list[str]] = None  # awaiting_input: selectable option labels
     status_line: Optional[str] = None    # raw bottom chrome from the pane, shown as-is on the web

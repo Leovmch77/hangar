@@ -87,6 +87,11 @@ OPCOES_PERMISSAO = ["Permitir", "Negar"]
 # 3ª opção só quando a CLI mandou `permission_suggestions` (a regra que a TUI ofereceria como
 # "sempre permitir"); a resposta leva as regras em `updatedPermissions` e a CLI grava no settings.
 OPCAO_SEMPRE = "Sempre permitir"
+# `ExitPlanMode` pendente é a aprovação do plano, não uma permissão de ferramenta: o texto do plano
+# vai no estado, e negar mantém a sessão planejando.
+PERGUNTA_PLANO = "Aprovar o plano?"
+OPCOES_PLANO = ["Aprovar plano", "Continuar planejando"]
+_RECUSA_PLANO = "O usuário não aprovou o plano. Continue no modo plano e aguarde as instruções dele."
 
 
 class _CanoOcupado(RuntimeError):
@@ -132,6 +137,8 @@ class _Sessao:
         self.permission_mode: str | None = meta.get("permission_mode")
         # Último modo que não era `plan`: é pra onde "Implementar o plano" volta.
         self.modo_nao_plan: str | None = meta.get("previous_non_plan")
+        # Plano aprovado esperando a CLI sair do plano: o modo que deve ser reaplicado depois.
+        self.base_apos_plano: str | None = None
         self.context_window: int | None = meta.get("context_window")
         self.usage: dict | None = None
         self.cost: float | None = None
@@ -400,6 +407,7 @@ class ClaudeHeadlessAdapter:
         sess = self._sessions.get(name)
         if sess is None or not sess.vivo or not (sess.in_progress or sess.pending or sess.question):
             return False
+        sess.base_apos_plano = None
         # Pedido pendente some junto com o turno: negar antes evita a tool rodar depois do Esc.
         for rid in list(sess.pending):
             await self._responder(sess, rid, {"behavior": "deny", "message": "Interrompido pelo usuário."})
@@ -422,11 +430,19 @@ class ClaudeHeadlessAdapter:
             return False
         rid, req = next(iter(sess.pending.items()))
         sugestoes = _sugestoes_de(req)
+        if req.get("tool_name") == "ExitPlanMode":
+            # Aprovar sai do plano para o `prePlanMode` da CLI, que não existe em sessão que
+            # nasceu no plano: ela cai em `default` e passa a pedir cada edição. A base é
+            # reaplicada quando a CLI anunciar a saída (`_reaplicar_base_do_plano`).
+            aprovou = option == 1 and sess.modo_nao_plan not in (None, "manual")
+            sess.base_apos_plano = sess.modo_nao_plan if aprovou else None
         if option == 1:
             resposta = {"behavior": "allow", "updatedInput": req.get("input") or {}}
         elif option == 3 and sugestoes:
             resposta = {"behavior": "allow", "updatedInput": req.get("input") or {},
                         "updatedPermissions": sugestoes}
+        elif req.get("tool_name") == "ExitPlanMode":
+            resposta = {"behavior": "deny", "message": _RECUSA_PLANO}
         else:
             resposta = {"behavior": "deny", "message": "Usuário recusou."}
         await self._responder(sess, rid, resposta)
@@ -751,7 +767,8 @@ class ClaudeHeadlessAdapter:
         sess.encerrando = True
         _matar_grupo(int(pid), sess.name)
 
-    def _argv(self, sid: str, *, resume: bool, model=None, effort=None, permission_mode=None) -> list[str]:
+    def _argv(self, sid: str, *, resume: bool, model=None, effort=None, permission_mode=None,
+              permitir_bypass: bool = False) -> list[str]:
         base = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
                 "--setting-sources", "user,project,local"]
@@ -760,6 +777,10 @@ class ClaudeHeadlessAdapter:
             # Com `-p` a CLI ignora `showThinkingSummaries` e o bloco vem cifrado; só a flag
             # explícita traz o texto, no stream e no .jsonl.
             base += ["--thinking-display", "summarized"]
+        if permitir_bypass and permission_mode != "bypassPermissions":
+            # Base bypass rodando noutro modo (o plano): sem a flag a CLI recusa voltar ao bypass
+            # pelo resto do processo, e aprovar o plano ou "Implementar" caem em pedir cada edição.
+            base.append("--allow-dangerously-skip-permissions")
         # A CLI nasce no `permissions.defaultMode` do settings.json da conta, não num padrão dela;
         # passar o modo explícito é o que faz a sessão nascer no modo que o Hangar mostra.
         return base + model_args.args_de("claude", model, effort, permission_mode)
@@ -812,7 +833,8 @@ class ClaudeHeadlessAdapter:
         # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
         # (medido: sessão "manual" reaberta após restart rodou Bash sem perguntar).
         argv = self._argv(sess.sid, resume=resume, model=sess.model, effort=sess.effort,
-                          permission_mode=sess.permission_mode)
+                          permission_mode=sess.permission_mode,
+                          permitir_bypass=sess.modo_nao_plan == "bypassPermissions")
         if meta.get("engine"):
             pre = ["hangar-engine", "--exec", meta["engine"]]
             if sess.model:
@@ -1140,6 +1162,7 @@ class ClaudeHeadlessAdapter:
             return
         if t == "result":
             sess.in_progress = False
+            sess.base_apos_plano = None
             sess.turno_inicio = None
             sess.pending.clear()
             sess.question = None
@@ -1246,12 +1269,14 @@ class ClaudeHeadlessAdapter:
                 sess.model = ev["model"]
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
+                self._reaplicar_base_do_plano(sess)
             if isinstance(ev.get("terminal_slash_commands"), list):
                 sess.comandos_terminal = frozenset(str(c) for c in ev["terminal_slash_commands"])
             sess.initialized.set()
         elif sub == "status":
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
+                self._reaplicar_base_do_plano(sess)
             if ev.get("status") == "requesting" and sess.in_progress:
                 sess.label = "Pensando…"
         elif sub == "thinking_tokens":
@@ -1490,6 +1515,26 @@ class ClaudeHeadlessAdapter:
             # A fila segue pendente (nada foi marcado); o próximo fim de turno tenta de novo.
             _log.exception("claude headless: drain de fim de turno falhou name=%s", sess.name)
 
+    def _reaplicar_base_do_plano(self, sess: _Sessao) -> None:
+        """A CLI saiu do plano aprovado: volta ao modo de base. Em tarefa própria porque a
+        resposta do `set_permission_mode` chega por este mesmo leitor."""
+        base = sess.base_apos_plano
+        if not base or sess.permission_mode == "plan":
+            return
+        sess.base_apos_plano = None
+        if sess.permission_mode == base:
+            return
+
+        async def _reaplicar() -> None:
+            try:
+                await self.set_permission_mode(sess.name, base)
+            except Exception:
+                _log.exception("claude headless: modo de base não reaplicado após o plano name=%s", sess.name)
+
+        t = asyncio.get_running_loop().create_task(_reaplicar())
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
+
     def _agendar_cota(self, sess: _Sessao) -> None:
         # Referência guardada e falha logada: tarefa solta some com a exceção junto.
         t = asyncio.get_running_loop().create_task(self._atualizar_cota(sess))
@@ -1514,11 +1559,15 @@ class ClaudeHeadlessAdapter:
             _log.warning("claude headless: leitura de cota falhou name=%s", sess.name, exc_info=True)
 
     def _evento(self, sess: _Sessao) -> StateEvent:
-        question = options = None
+        question = options = plano = None
         if sess.pending and not sess.question:
             req = next(iter(sess.pending.values()))
-            question = self._permissao_texto(req)
-            options = list(OPCOES_PERMISSAO) + ([OPCAO_SEMPRE] if _sugestoes_de(req) else [])
+            plano = _plano_pendente(req)
+            if plano is not None:
+                question, options = PERGUNTA_PLANO, list(OPCOES_PLANO)
+            else:
+                question = self._permissao_texto(req)
+                options = list(OPCOES_PERMISSAO) + ([OPCAO_SEMPRE] if _sugestoes_de(req) else [])
         label, state = sess.label, sess.state
         if sess.iniciando and state == "idle":
             # Sem terminal, este é o único sinal de que o prompt foi aceito e a sessão está subindo.
@@ -1531,6 +1580,7 @@ class ClaudeHeadlessAdapter:
                           status_line=self.status_line(sess),
                           claude_permission_mode=sess.permission_mode,
                           claude_previous_non_plan=sess.modo_nao_plan,
+                          claude_plan_pending=plano,
                           limited=sess.limited, limit_reset=sess.limit_reset,
                           codex_question=sess.question,
                           problema=sess.problema, problema_detalhe=sess.problema_detalhe)
@@ -1731,6 +1781,21 @@ def _alvo_da_permissao(req: dict) -> tuple[str, str]:
     if len(detalhe) > 200:
         detalhe = detalhe[:200] + "…"
     return str(tool), detalhe
+
+
+def _plano_pendente(req: dict) -> dict | None:
+    """Plano de um `ExitPlanMode` aguardando aprovação; None para qualquer outra permissão."""
+    if req.get("tool_name") != "ExitPlanMode":
+        return None
+    inp = req.get("input") or {}
+    plano = inp.get("plan")
+    caminho = inp.get("planFilePath")
+    tool_use_id = req.get("tool_use_id")
+    return {
+        "plan": plano if isinstance(plano, str) else "",
+        "path": caminho if isinstance(caminho, str) else None,
+        "tool_use_id": tool_use_id if isinstance(tool_use_id, str) else None,
+    }
 
 
 def _tabela_limites(janelas: list) -> str:

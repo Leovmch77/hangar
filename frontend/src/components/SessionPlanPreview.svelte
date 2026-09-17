@@ -19,10 +19,15 @@
     discoveryLoading?: boolean;
     discoveryError?: string;
     onRetryDiscovery?: () => void;
+    /** Plano aguardando aprovação no seletor da sessão: o card só mostra, não implementa. */
+    aprovacaoPendente?: boolean;
+    /** Arquivo do plano quando ele não veio da descoberta. */
+    caminho?: string | null;
   }
   let {
     sessionName, serverId = '', provider, revision, desktop, codexPlan, disabled, onImplement,
     discovery = undefined, discoveryLoading = false, discoveryError = '', onRetryDiscovery,
+    aprovacaoPendente = false, caminho = null,
   }: Props = $props();
   let metadata = $state<ClaudePlanPreview | null>(null);
   let modalMetadata = $state<ClaudePlanPreview | null>(null);
@@ -144,7 +149,7 @@
       </button>
     {/if}
     {#if discoveryLoadingAtual}<p class="plan-status" role="status">{m.chat_plan_carregando()}</p>{/if}
-    {#if codexPlan && dismissed !== codexPlan}
+    {#if codexPlan && dismissed !== codexPlan && !aprovacaoPendente}
       <div class="plan-actions">
         <button class="primary-btn" onclick={implement} disabled={disabled || sending}>
           {sending ? m.chat_plan_iniciando() : m.chat_plan_implementar()}
@@ -168,7 +173,8 @@
     <h2>{title}</h2>
     <button class="ghost-btn" onclick={close}>{m.sessao_fechar()}</button>
   </header>
-  {#if metadataModal}<p class="plan-path">{metadataModal.path}</p>{/if}
+  {#if metadataModal}<p class="plan-path">{metadataModal.path}</p>
+  {:else if caminho}<p class="plan-path">{caminho}</p>{/if}
   {#if loading}<p role="status">{m.chat_plan_carregando()}</p>
   {:else if error}
     <p class="error-msg" role="alert">{error}</p>

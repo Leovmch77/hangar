@@ -171,7 +171,9 @@ export interface StateEvent {
   codex_mode?: 'default' | 'plan' | null;
   claude_permission_mode?: string | null;
   claude_previous_non_plan?: string | null;
-  headless?: boolean;          // Claude/Codex sem terminal (vem do stream da sessão, não da lista)
+  /** Claude sem terminal com `ExitPlanMode` aguardando aprovação: o plano que será aprovado. */
+  claude_plan_pending?: { plan: string; path: string | null; tool_use_id: string | null } | null;
+  headless?: boolean;         // Claude/Codex sem terminal (vem do stream da sessão, não da lista)
   /** Sem terminal: o processo está desatualizado ("config" = MCP/settings da conta mudaram
    *  depois de ele subir) e a tela oferece Recarregar. */
   recarregar_motivo?: string | null;

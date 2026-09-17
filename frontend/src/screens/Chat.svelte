@@ -1025,7 +1025,24 @@
   // plano em ~/.claude/plans (a descoberta acha o arquivo e ancora na última resposta), mas
   // ninguém pergunta "implementar?". O card ganha o botão: volta pro modo anterior (ou
   // acceptEdits) e manda o pedido. Sem arquivo descoberto, a última resposta do turno é o plano.
+  // Com `ExitPlanMode` pendente a CLI pergunta, sim: a aprovação é o seletor, e o plano vem no
+  // estado. O card ancora na chamada da ferramenta e só mostra o plano, sem botão de implementar.
+  const headlessPlanoPendente = $derived(sessionHeadless && currentState === 'awaiting_input'
+    ? stateEvent?.claude_plan_pending ?? null : null);
   const headlessPlanEvent = $derived.by(() => {
+    const pendente = headlessPlanoPendente;
+    if (pendente) {
+      for (let i = events.length - 1; i >= 0; i--) {
+        const event = events[i];
+        if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
+        if (event.kind === 'tool_use' && event.tool_name === 'ExitPlanMode'
+            && (!pendente.tool_use_id || event.tool_use_id === pendente.tool_use_id)) {
+          const doEvento = event.tool_input?.plan;
+          return { id: event.id, plan: pendente.plan || (typeof doEvento === 'string' ? doEvento : '') };
+        }
+      }
+      return null;
+    }
     if (!sessionHeadless || stateEvent?.claude_permission_mode !== 'plan' || currentState !== 'idle') return null;
     const anchor = claudePlanDiscovery?.anchor_id ?? null;
     for (let i = events.length - 1; i >= 0; i--) {
@@ -1073,7 +1090,9 @@
     codexPlan: sessionHeadless ? headlessPlan : codexPlan,
     disabled: currentState !== 'idle' || pending.length > 0,
     onImplement: sessionHeadless ? implementHeadlessPlan : implementCodexPlan,
-    discovery: sessionProvider === 'claude' ? (planAnchorId ? claudePlanDiscovery : null) : undefined,
+    discovery: sessionProvider === 'claude' ? (planAnchorId && !headlessPlanoPendente ? claudePlanDiscovery : null) : undefined,
+    aprovacaoPendente: headlessPlanoPendente !== null,
+    caminho: headlessPlanoPendente?.path ?? null,
     discoveryLoading: sessionProvider === 'claude' ? claudePlanDiscoveryLoading : false,
     discoveryError: sessionProvider === 'claude' ? claudePlanDiscoveryError : '',
     onRetryDiscovery: sessionProvider === 'claude' ? () => { claudePlanDiscoveryRetry++; } : undefined,
