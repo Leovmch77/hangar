@@ -59,7 +59,7 @@ TODAS = ["De onde veio", "O que falta", "Onde está o trabalho", "Arquivos e com
 def test_transcript_real_do_claude_monta_todas_as_secoes(tmp_path):
     md = bastao.montar(str(FIX / "jsonl_samples.jsonl"), str(tmp_path), "claude", "origem")
     assert _titulos(md) == TODAS
-    assert md.startswith("# Passagem de bastão — sessão `origem`")
+    assert md.startswith("# Continuação da sessão `origem` — resumo do trabalho")
     # A fixture tem UMA fala do assistente ("PONG") e nenhuma do usuário: a cauda cita ela e a
     # seção de decisões fica honestamente vazia, sem inventar par nenhum.
     assert "**agente:** PONG" in md
@@ -347,7 +347,7 @@ def test_kickoff_sem_conta_nem_modelo_nao_inventa_nem_mostra_vazio():
     txt = bastao.kickoff("origem", "/x.md")
     assert len(txt.splitlines()) == 6
     assert "``" not in txt and "None" not in txt
-    assert "primeira seção do dossiê" in txt
+    assert "primeira seção do resumo" in txt
 
 
 def test_kickoff_manual_continua_identico():
@@ -465,7 +465,7 @@ def test_rota_devolve_markdown(api_client_bastao):
                                   headers={"Authorization": "Bearer secret"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/markdown")
-    assert r.text.startswith("# Passagem de bastão — sessão `cc`")
+    assert r.text.startswith("# Continuação da sessão `cc` — resumo do trabalho")
 
 
 def test_rota_404_sem_transcript(api_client_bastao):
@@ -656,7 +656,7 @@ def test_get_bastao_de_sessao_morta_pelo_archive(api_client_bastao, tmp_path, mo
                                   params={"project": proj, "session_id": sid, "config_dir": cfg},
                                   headers={"Authorization": "Bearer secret"})
     assert r.status_code == 200, r.text
-    assert r.text.startswith("# Passagem de bastão — sessão `morta`")
+    assert r.text.startswith("# Continuação da sessão `morta` — resumo do trabalho")
 
 
 def test_get_bastao_recusa_config_dir_desconhecido(api_client_bastao, tmp_path):
