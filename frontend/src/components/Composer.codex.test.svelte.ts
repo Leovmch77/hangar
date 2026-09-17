@@ -8,7 +8,10 @@ import * as m from '../paraglide/messages';
 vi.mock('../lib/aquecimento', () => ({ aoAquecer: () => Promise.resolve() }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof api>(),
-  getCommands: vi.fn().mockResolvedValue([{ name: 'revisar', display: '/revisar', source: 'skill', description: 'Revisão' }]),
+  getCommands: vi.fn().mockResolvedValue([
+    { name: 'revisar', display: '/revisar', source: 'skill', description: 'Revisão' },
+    { name: 'resumir', display: '/resumir', source: 'skill', description: 'Resumo' },
+  ]),
   getCodexModels: vi.fn().mockResolvedValue({ models: [], current: { model: 'gpt-6-astra', effort: 'high', mode: 'default' } }),
   getCodexPermissions: vi.fn().mockResolvedValue({ modes: [], current: 'Full Access' }),
   setCodexPermission: vi.fn(),
@@ -110,6 +113,46 @@ it('lista skills com barra e preenche argumentos antes do envio', async () => {
   expect(skill).toBeTruthy(); skill.click(); await flush();
   expect(document.querySelector('textarea')!.value).toBe('/revisar ');
   expect(props.onSend).not.toHaveBeenCalled();
+});
+
+it('setas percorrem as sugestões de comando', async () => {
+  const props = await montar();
+  props.inputText = '/re'; await flush();
+  const textarea = document.querySelector('textarea')!;
+  expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain('/revisar');
+
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+  await flush();
+  expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain('/resumir');
+
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+  await flush();
+  expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain('/revisar');
+});
+
+it('Tab completa a sugestão selecionada', async () => {
+  const props = await montar();
+  props.inputText = '/resu'; await flush();
+  const textarea = document.querySelector('textarea')!;
+  const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  textarea.dispatchEvent(tab);
+  await flush();
+
+  expect(tab.defaultPrevented).toBe(true);
+  expect(textarea.value).toBe('/resumir ');
+  expect(document.activeElement).toBe(textarea);
+});
+
+it('Tab só completa a skill no Claude sem executá-la', async () => {
+  const props = await montar();
+  (props as unknown as { provider: 'claude' | 'codex' }).provider = 'claude';
+  props.inputText = '/resu'; await flush();
+  const textarea = document.querySelector('textarea')!;
+  textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  await flush();
+
+  expect(textarea.value).toBe('/resumir ');
+  expect(props.onCommand).not.toHaveBeenCalled();
 });
 
 it('permite orientar agora ou enviar à fila e conserva o texto em caso de falha', async () => {

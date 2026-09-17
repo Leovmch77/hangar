@@ -188,6 +188,7 @@
   // ── Slash commands: busca uma vez por sessao (com cache) ────────────────────
   // Comeca vazio; o $effect popula na hora a partir do cache (sincrono) ou da rede.
   let commands = $state<CommandInfo[]>([]);
+  let slashSuggest = $state<{ handleKeydown: (event: KeyboardEvent) => boolean }>();
   let commandSheetOpen = $state(false);
   let confirmStopOpen = $state(false);
 
@@ -1104,6 +1105,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    if (slashSuggest?.handleKeydown(e)) return;
     // Enter-envia SO no desktop (hover + pointer fine). No teclado do celular, Enter QUEBRA LINHA
     // (comportamento nativo do textarea): enviar era facil demais de disparar sem querer — no
     // mobile o envio e pelo botao. Shift+Enter segue quebrando linha no desktop. Checado na hora
@@ -2057,7 +2059,8 @@
       {#if attachError}<span class="attach-error">{attachError}</span>{/if}
     {/if}
 
-    <SlashSuggest {commands} query={inputText} onPick={handleSuggestPick} />
+    <SlashSuggest bind:this={slashSuggest} {commands} query={inputText} onPick={handleSuggestPick}
+      onComplete={(cmd) => void fillCommand(cmd.name)} />
 
     <textarea
       bind:this={textareaEl}

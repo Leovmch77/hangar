@@ -9,10 +9,13 @@
     commands: CommandInfo[];
     query: string;
     onPick: (cmd: CommandInfo) => void;
+    onComplete: (cmd: CommandInfo) => void;
   }
-  let { commands, query, onPick }: Props = $props();
+  let { commands, query, onPick, onComplete }: Props = $props();
 
   const MAX = 8;
+  let selectedName = $state('');
+  let rows: HTMLButtonElement[] = [];
 
   const trimmed = $derived(query.replace(/^\s+/, ''));
   const active = $derived(trimmed.startsWith('/'));
@@ -39,6 +42,24 @@
           .slice(0, MAX)
           .map((x) => x.c)
   );
+  const selected = $derived(matches.find((c) => c.name === selectedName) ?? matches[0]);
+
+  export function handleKeydown(event: KeyboardEvent): boolean {
+    if (!selected || event.ctrlKey || event.altKey || event.metaKey) return false;
+    if (event.key === 'Tab' && !event.shiftKey) {
+      event.preventDefault();
+      onComplete(selected);
+      return true;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return false;
+
+    event.preventDefault();
+    const current = Math.max(0, matches.indexOf(selected));
+    const next = (current + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+    selectedName = matches[next].name;
+    rows[next]?.scrollIntoView?.({ block: 'nearest' });
+    return true;
+  }
 
   function badge(source: CommandInfo['source']): string {
     return source === 'builtin' ? 'base' : source === 'plugin' ? 'plugin' : 'skill';
@@ -47,8 +68,9 @@
 
 {#if matches.length > 0}
   <div class="suggest" role="listbox" aria-label={m.slash_sugestoes()}>
-    {#each matches as c (c.name)}
-      <button class="row" role="option" aria-selected="false" onclick={() => onPick(c)}>
+    {#each matches as c, index (c.name)}
+      <button bind:this={rows[index]} class="row" class:selected={c === selected} role="option"
+        aria-selected={c === selected} onmouseenter={() => (selectedName = c.name)} onclick={() => onPick(c)}>
         <span class="name">{c.display}</span>
         {#if c.description}<span class="desc">{c.description}</span>{/if}
         <span class="badge badge--{c.source}">{badge(c.source)}</span>
@@ -85,6 +107,10 @@
   }
 
   .row:active {
+    background: var(--bg-hover);
+  }
+
+  .row.selected {
     background: var(--bg-hover);
   }
 
