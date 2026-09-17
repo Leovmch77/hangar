@@ -268,6 +268,8 @@ class PassoLogin(BaseModel):
     endereço de autorização (o link tocável da tela)."""
     etapa: str
     url: str | None = None
+    email: str | None = None
+    plano: str | None = None
 
 
 def _conta_por_label(label: str):
@@ -315,7 +317,8 @@ def confirmar_login(label: str, body: LoginBody) -> dict:
 def passo_login(label: str) -> PassoLogin:
     """A etapa atual do fluxo: o link de autorização quando já apareceu no pane."""
     p = login_conta.passo(label)
-    return PassoLogin(etapa=p.get("etapa", "idle"), url=p.get("url"))
+    return PassoLogin(etapa=p.get("etapa", "idle"), url=p.get("url"),
+                      email=p.get("email"), plano=p.get("plano"))
 
 
 @conta_estado_router.post("/{label}/login/cancelar", dependencies=[Depends(require_auth)])

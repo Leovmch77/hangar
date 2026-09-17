@@ -11,8 +11,10 @@ import * as m from '../paraglide/messages';
 // tratado abaixo) e o TETO de tempo (TimeoutError, que o usuario precisa entender).
 
 export interface PassoLogin {
-  etapa: 'idle' | 'aguardando';
+  etapa: 'idle' | 'aguardando' | 'concluido';
   url?: string | null;
+  email?: string | null;
+  plano?: string | null;
 }
 
 export interface ResultadoLogin {

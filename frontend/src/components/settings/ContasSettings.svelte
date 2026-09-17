@@ -409,7 +409,13 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
         lendo = true;
         try {
           const passo = await passoLogin(alvo, conta.nome_natural);
-          if (atual()) { loginPasso = passo; loginConsultaErro = false; }
+          if (!atual()) return;
+          loginConsultaErro = false;
+          if (passo.etapa === 'concluido') {
+            await concluirLogin(alvo, tentativa, g, { ok: true, email: passo.email, plano: passo.plano });
+          } else {
+            loginPasso = passo;
+          }
         } catch {
           if (atual()) loginConsultaErro = true;
         } finally { lendo = false; }
@@ -438,6 +444,27 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
     }
   }
 
+  // Ponto único de sucesso: código confirmado OU autorização que voltou sozinha pelo navegador.
+  async function concluirLogin(alvo: Server | null, tentativa: Credencial, g: number, r: ResultadoLogin) {
+    if (loginSucesso) return;
+    pararPoll();
+    await clienteQuery.cancelQueries({ queryKey: credenciais(alvo).queryKey });
+    if (destruido || g !== geracao || loginConta !== tentativa || loginSucesso) return;
+    loginDe = null;
+    loginCodigo = '';
+    loginPasso = { etapa: 'idle' };
+    loginSucesso = r;
+    ultimaContaConectada = tentativa.id;
+    // A confirmação já releu a credencial; a cota anterior não pode pedir outro login.
+    clienteQuery.setQueryData<Credencial[]>(credenciais(alvo).queryKey, lista => lista?.map<Credencial>(c =>
+      c.id === tentativa.id ? { ...c, login: { estado: 'ok', loggedIn: true, email: r.email, plano: r.plano }, cota: null } : c));
+    void listarCredenciais(alvo, true).then(lista => {
+      if (!destruido && g === geracao && ultimaContaConectada === tentativa.id) clienteQuery.setQueryData(credenciais(alvo).queryKey, lista);
+    }).catch(() => {
+      if (!destruido && g === geracao && ultimaContaConectada === tentativa.id) { aviso = m.contas_login_atualizar_erro(); avisoErro = true; }
+    });
+  }
+
   async function confirmarEntrar() {
     const conta = loginDe;
     const tentativa = loginConta;
@@ -454,24 +481,10 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
       const r = await confirmarLogin(alvo, conta, loginCodigo);
       if (destruido || g !== geracao || loginConta !== tentativa) return;
       if (!r.ok) throw new Error(m.contas_login_nao_confirmado());
-      pararPoll();
-      await clienteQuery.cancelQueries({ queryKey: credenciais(alvo).queryKey });
-      if (destruido || g !== geracao || loginConta !== tentativa) return;
-      loginDe = null;
-      loginCodigo = '';
-      loginPasso = { etapa: 'idle' };
-      loginSucesso = r;
-      ultimaContaConectada = tentativa.id;
-      // A confirmação já releu a credencial; a cota anterior não pode pedir outro login.
-      clienteQuery.setQueryData<Credencial[]>(credenciais(alvo).queryKey, lista => lista?.map<Credencial>(c =>
-        c.id === tentativa.id ? { ...c, login: { estado: 'ok', loggedIn: true, email: r.email, plano: r.plano }, cota: null } : c));
-      void listarCredenciais(alvo, true).then(lista => {
-        if (!destruido && g === geracao && ultimaContaConectada === tentativa.id) clienteQuery.setQueryData(credenciais(alvo).queryKey, lista);
-      }).catch(() => {
-        if (!destruido && g === geracao && ultimaContaConectada === tentativa.id) { aviso = m.contas_login_atualizar_erro(); avisoErro = true; }
-      });
+      await concluirLogin(alvo, tentativa, g, r);
     } catch (e) {
-      if (destruido || g !== geracao || loginConta !== tentativa) return;
+      // A autorização pode ter chegado pelo navegador enquanto o código era conferido.
+      if (destruido || g !== geracao || loginConta !== tentativa || loginSucesso) return;
       pararPoll();
       loginFalhou = true;
       loginPasso = { etapa: 'idle' };

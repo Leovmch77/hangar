@@ -411,6 +411,31 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     unmount(t.comp);
   });
 
+  it('detecta autorização que voltou pelo navegador sem código colado', async () => {
+    loginMock.passoLogin
+      .mockResolvedValueOnce({ etapa: 'aguardando', url: 'https://claude.com/cai/oauth/authorize' })
+      .mockResolvedValueOnce({ etapa: 'concluido', url: null, email: 'u@exemplo.com', plano: 'max' });
+    vi.useFakeTimers();
+    const t = montar([DESLOGADA]);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      t.el.querySelector<HTMLButtonElement>('.ct-acao.primaria')!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.el.querySelector('.ct-campo-cod')).not.toBeNull();
+      credMock.listarCredenciais.mockResolvedValue([claude({ ...DESLOGADA,
+        login: { estado: 'ok', loggedIn: true, email: 'u@exemplo.com', plano: 'max' }, cota: null })]);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(t.el.querySelector('.ct-login-sucesso')?.textContent).toContain('u@exemplo.com');
+      expect(loginMock.confirmarLogin).not.toHaveBeenCalled();
+      const chamadas = loginMock.passoLogin.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(loginMock.passoLogin.mock.calls.length).toBe(chamadas);
+    } finally {
+      unmount(t.comp);
+      vi.useRealTimers();
+    }
+  });
+
   it('mostra confirmação em andamento e oferece nova tentativa se falhar', async () => {
     let rejeitar!: (erro: Error) => void;
     loginMock.confirmarLogin.mockReturnValueOnce(new Promise((_resolve, reject) => { rejeitar = reject; }));

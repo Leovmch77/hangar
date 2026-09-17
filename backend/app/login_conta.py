@@ -203,6 +203,7 @@ def passo(conta: str) -> dict:
 
     - "idle": nenhuma tentativa em voo
     - "aguardando": janela aberta; `url` presente quando o CLI já imprimiu o endereço
+    - "concluido": a autorização voltou sozinha pelo navegador; traz `email` e `plano`
     """
     if not _em_curso(conta):
         return {"etapa": "idle", "url": None}
@@ -214,9 +215,35 @@ def passo(conta: str) -> dict:
         t.url_registrada = True
         diag.registrar("conta.login.autorizacao_disponivel", provider="claude",
                        operacao=t.operacao, etapa="aguardar_autorizacao")
-    if url and _PROMPT_RE.search(texto):
-        return {"etapa": "aguardando", "url": url}
+    concluido = _logou_sozinho(conta, t)
+    if concluido:
+        return concluido
     return {"etapa": "aguardando", "url": url}
+
+
+def _token_novo(oauth: dict | None, anterior: str | None) -> bool:
+    token = (oauth or {}).get("accessToken")
+    vencimento = renova_token._epoch(oauth, "expiresAt")
+    return (isinstance(token, str) and bool(token) and token != anterior
+            and (vencimento is None or vencimento > time.time()))
+
+
+def _logou_sozinho(conta: str, t: Tentativa) -> dict | None:
+    """Autorização que voltou pelo callback local da CLI, sem código colado.
+
+    O token do disco filtra antes do `auth status`, que abre um processo a cada consulta.
+    Leitura sem `estrito`: a CLI pode estar no meio da escrita, e aí a próxima consulta resolve.
+    """
+    if not _token_novo(renova_token._oauth(Path(t.dir_conta)), t.token_anterior):
+        return None
+    estado = conta_estado._estado_login(conta_estado._auth_status(Path(t.dir_conta)))
+    if estado.estado != "ok" or not estado.loggedIn or _tentativas.get(conta) is not t:
+        return None
+    diag.registrar("conta.login.concluiu", provider="claude", conta_id=diag.conta_id(t.dir_conta),
+                   operacao=t.operacao, etapa="confirmar_credencial",
+                   ms=int((time.monotonic() - t.inicio) * 1000))
+    _limpar(conta, t)
+    return {"etapa": "concluido", "url": None, "email": estado.email, "plano": estado.plano}
 
 
 def confirmar(conta: str, codigo: str, *, estado_fake=None, timeout_s: float = _TIMEOUT_S) -> dict:
@@ -258,11 +285,7 @@ def confirmar(conta: str, codigo: str, *, estado_fake=None, timeout_s: float = _
             # A CLI ainda diz loggedIn para token vencido ou revogado: espere a troca.
             etapa = "aguardar_token_novo"
             oauth = renova_token._oauth(Path(tentativa.dir_conta), estrito=True)
-            vencimento = renova_token._epoch(oauth, "expiresAt")
-            token = (oauth or {}).get("accessToken")
-            token_novo = isinstance(token, str) and bool(token) and token != tentativa.token_anterior
-            if (estado.estado == "ok" and estado.loggedIn and token_novo
-                    and (vencimento is None or vencimento > time.time())):
+            if estado.estado == "ok" and estado.loggedIn and _token_novo(oauth, tentativa.token_anterior):
                 diag.registrar("conta.login.concluiu", etapa="confirmar_credencial",
                                ms=int((time.monotonic() - tentativa.inicio) * 1000), **campos)
                 return {

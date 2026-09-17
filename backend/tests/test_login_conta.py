@@ -265,6 +265,38 @@ def test_sem_url_ainda_na_tela_passo_aguardando_sem_url(bateia):
     assert passo["url"] is None
 
 
+def test_passo_detecta_autorizacao_pelo_navegador_sem_codigo(bateia, monkeypatch, tmp_path):
+    credencial = tmp_path / ".credentials.json"
+    credencial.write_text(json.dumps({"claudeAiOauth": {"accessToken": "antigo"}}))
+    consultas = []
+
+    def auth_status(dir_conta):
+        consultas.append(dir_conta)
+        return {"loggedIn": True, "email": "u@exemplo.com", "subscriptionType": "max"}
+
+    monkeypatch.setattr(conta_estado, "_auth_status", auth_status)
+    bateia.ler_ = lambda: _pane_mentira()
+    login_conta.iniciar("conta-a", str(tmp_path))
+
+    assert login_conta.passo("conta-a")["etapa"] == "aguardando"
+    assert consultas == []
+
+    credencial.write_text(json.dumps({"claudeAiOauth": {"accessToken": "novo"}}))
+    passo = login_conta.passo("conta-a")
+    assert passo == {"etapa": "concluido", "url": None, "email": "u@exemplo.com", "plano": "max"}
+    assert bateia.matadas == ["term-login-conta-a"]
+    assert not login_conta._em_curso("conta-a")
+    assert login_conta.passo("conta-a")["etapa"] == "idle"
+
+
+def test_passo_espera_credencial_escrita_pela_metade(bateia, monkeypatch, tmp_path):
+    monkeypatch.setattr(conta_estado, "_auth_status", lambda _: {"loggedIn": True})
+    login_conta.iniciar("conta-a", str(tmp_path))
+    (tmp_path / ".credentials.json").write_text("{")
+    assert login_conta.passo("conta-a")["etapa"] == "aguardando"
+    assert login_conta._em_curso("conta-a")
+
+
 def test_sem_tentativa_passo_devolve_idle(bateia):
     passo = login_conta.passo("conta-a")
     assert passo["etapa"] == "idle"
