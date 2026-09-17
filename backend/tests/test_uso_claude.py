@@ -497,6 +497,15 @@ def test_skill_sem_prefixo_ganha_o_grupo_da_pasta_de_onde_veio(tmp_path, monkeyp
     r = uso_report.montar(uso, [], "all", plugin="superpowers", origens=origens)
     assert [b.key for b in r.by_skill] == ["brainstorming"]
 
+    # Pasta ilegível perde só as skills dela.
+    trancada = home / ".agents" / "skills"
+    trancada.chmod(0)
+    try:
+        origens = uso_report.origens_de_skill(home)
+    finally:
+        trancada.chmod(0o755)
+    assert (origens.get("orquestrar"), origens.get("brainstorming")) == ("@repo", "superpowers")
+
 
 def test_subagente_nao_e_sessao(tmp_path):
     def sessao(p, dia, i):

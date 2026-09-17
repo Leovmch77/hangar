@@ -268,7 +268,10 @@
     return gruposSkill
       .map((g) => ({ ...g, itens: g.itens.filter((i) => !termo || i.nome.toLowerCase().includes(termo) || nomeGrupo(g.plugin).toLowerCase().includes(termo)) }))
       .filter((g) => g.itens.length)
-      .map((g) => ({ ...g, itens: [...g.itens].sort(porChave(ordemGrupo)) }))
+      .map((g) => ({
+        ...g, itens: [...g.itens].sort(porChave(ordemGrupo)),
+        peso: g.itens.reduce((n, i) => n + i.peso, 0), vezes: g.itens.reduce((n, i) => n + i.vezes, 0),
+      }))
       .sort(porChave(ordemGrupo));
   });
   const maxGrupo = $derived({ peso: Math.max(...gruposVistos.map((g) => g.peso), 1), vezes: Math.max(...gruposVistos.map((g) => g.vezes), 1) });

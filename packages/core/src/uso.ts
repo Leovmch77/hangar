@@ -131,10 +131,10 @@ export interface UsoGrupo { plugin: string; peso: number; vezes: number; itens: 
 
 // Grupo = `plugin` do servidor, senão o prefixo da chave, senão `semPlugin`. O item perde o
 // prefixo e junta o mesmo nome vindo do Claude e do Codex (`superpowers:brainstorming` e
-// `brainstorming`); `keys` guarda as chaves originais pra abrir o detalhe.
+// `brainstorming`); `keys` guarda as chaves originais, a mais pesada primeiro (é a que o detalhe abre).
 export function agruparPorPlugin(lista: UsoBucket[], peso: (b: UsoBucket) => number, semPlugin = ''): UsoGrupo[] {
   const grupos = new Map<string, UsoGrupo>();
-  for (const b of lista) {
+  for (const b of [...lista].sort((x, y) => peso(y) - peso(x) || y.chamadas - x.chamadas)) {
     const i = b.key.indexOf(':');
     const plugin = b.plugin || (i > 0 ? b.key.slice(0, i) : semPlugin);
     const nome = i > 0 ? b.key.slice(i + 1) : b.key;

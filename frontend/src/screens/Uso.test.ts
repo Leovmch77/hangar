@@ -58,6 +58,14 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
     ([...target.querySelectorAll('.gcab .th')].find((b) => b.textContent?.includes(m.uso_col_vezes())) as HTMLButtonElement).click();
     await settle();
     expect(grupos()[0]).toBe(m.uso_grupo_sem());
+    // Busca recorta as skills e o total do grupo acompanha: s00…s09 = 10 × 5 cargas.
+    const busca = target.querySelector('input.busca') as HTMLInputElement;
+    busca.value = 's0'; busca.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(grupos()).toEqual([m.uso_grupo_sem()]);
+    expect([...target.querySelectorAll('.grupos > li > button .gcel b')].map((b) => b.textContent)[1]).toBe('50');
+    busca.value = ''; busca.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
     // Ferramentas sem Skill/Agent, com os comandos do Bash; subagentes agrupados pelo plugin.
     const [ferramentas, agentes] = [...target.querySelectorAll('ol.rk')];
     expect([...ferramentas.querySelectorAll('li strong')].map((s) => s.textContent)).toEqual(['Bash']);

@@ -49,12 +49,18 @@ describe('agruparPorPlugin', () => {
     const g = agruparPorPlugin([
       b('superpowers:brainstorming', { plugin: 'superpowers', chamadas: 3, ocupados_tokens_est: 30 }),
       b('brainstorming', { plugin: 'superpowers', chamadas: 1, ocupados_tokens_est: 10 }),
+      b('superpowers:tdd', { plugin: 'superpowers', chamadas: 1, ocupados_tokens_est: 5 }),
+      b('tdd', { plugin: 'superpowers', chamadas: 1, ocupados_tokens_est: 20 }),
       b('orquestrar', { plugin: '@repo', chamadas: 2, ocupados_tokens_est: 100 }),
       b('ecc:typescript-reviewer', { chamadas: 5, ocupados_tokens_est: 0 }),
       b('Explore', { chamadas: 4, ocupados_tokens_est: 0 }),
     ], peso, '@nativo');
-    expect(g.map((x) => [x.plugin, x.peso, x.vezes])).toEqual([['@repo', 100, 2], ['superpowers', 40, 4], ['ecc', 0, 5], ['@nativo', 0, 4]]);
-    expect(g[1].itens).toEqual([{ nome: 'brainstorming', keys: ['superpowers:brainstorming', 'brainstorming'], peso: 40, vezes: 4 }]);
+    expect(g.map((x) => [x.plugin, x.peso, x.vezes])).toEqual([['@repo', 100, 2], ['superpowers', 65, 6], ['ecc', 0, 5], ['@nativo', 0, 4]]);
+    // O detalhe abre keys[0]: a chave que mais pesa, venha do Claude ou do Codex.
+    expect(g[1].itens).toEqual([
+      { nome: 'brainstorming', keys: ['superpowers:brainstorming', 'brainstorming'], peso: 40, vezes: 4 },
+      { nome: 'tdd', keys: ['tdd', 'superpowers:tdd'], peso: 25, vezes: 2 },
+    ]);
     expect(g[2].itens[0].nome).toBe('typescript-reviewer');
   });
 });

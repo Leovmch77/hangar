@@ -5,6 +5,7 @@ o `pricing` via `costs._custo_da_linha`. Aqui só se soma e se corta por períod
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import defaultdict
@@ -19,6 +20,7 @@ from app.models import Applied, UsoBucket, UsoReport
 from app.uso_claude import UsoLinha, plugin_de, skill_do_caminho
 
 _REPO = Path(__file__).resolve().parents[2]
+_log = logging.getLogger("hangar.uso")
 
 # Grupo de skill sem prefixo de plugin. `@` não existe em nome de plugin: a tela traduz.
 ORIGEM_REPO = "@repo"
@@ -48,14 +50,17 @@ def origens_de_skill(home: Path | None = None) -> dict[str, str]:
     fundas = [home / ".claude" / "plugins" / "cache", home / ".codex" / "plugins" / "cache",
               home / ".claude" / "plugins" / "marketplaces"]
     achadas: dict[str, str] = {}
-    for raiz in rasas:
-        for skill in sorted(raiz.iterdir()) if raiz.is_dir() else []:
-            if (skill / "SKILL.md").is_file():
-                achadas.setdefault(skill.name, _origem_da_pasta(skill, home))
-    for raiz in fundas:
-        for md in sorted(raiz.rglob("SKILL.md")) if raiz.is_dir() else []:
-            if "skills" in md.parts:
-                achadas.setdefault(md.parent.name, _origem_da_pasta(md.parent, home))
+    for raiz in rasas + fundas:
+        # Pasta ilegível perde só as skills dela; o relatório inteiro não cai por isso.
+        try:
+            if raiz in rasas:
+                pastas = [s for s in sorted(raiz.iterdir()) if (s / "SKILL.md").is_file()] if raiz.is_dir() else []
+            else:
+                pastas = [md.parent for md in sorted(raiz.rglob("SKILL.md")) if "skills" in md.parts] if raiz.is_dir() else []
+            for pasta in pastas:
+                achadas.setdefault(pasta.name, _origem_da_pasta(pasta, home))
+        except OSError as e:
+            _log.warning("uso: origem das skills em %s não lida: %s", raiz, e)
     return achadas
 
 # chars/4 é a régua de "tokens estimados": a tela SEMPRE rotula como estimativa.
