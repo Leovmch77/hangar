@@ -3,7 +3,7 @@
 - The default is serial: one writer per tree, the gate closing each Task before the next opens.
 - Parallelize only when the Tasks are truly independent and the work is big enough to pay the setup.
 - Prefer arms inside one tree first: the executor runs one subagent per disjoint file set,
-  verification once after the join (`executor.md`, "Subagents inside your session"). A worktree only for a Task that
+  verification once after the join (`executor-subagentes.md`). A worktree only for a Task that
   justifies a whole session of its own.
 
 ## The trigger — four conditions, all together

@@ -44,7 +44,7 @@ allow=(
   'the word `Step` by regex'                   # a mesma excecao, dita no roteador
   'There is no "correction commit"'            # a frase que ANUNCIA que nao existe
   'there is no "correction commit"'
-  'Steps:'                                     # rotulo de campo do template da receita (revisor.md)
+  'Steps:'                                     # rotulo de campo do template da receita (revisor-receita.md)
 )
 
 permitido() {  # $1 = linha inteira do grep
@@ -189,7 +189,9 @@ done
 # 8. Pagina de papel que nao carrega a skill nao pode mandar ler o SKILL.md nem invoca-la.
 #    (a retrospectiva fica de fora: ela propoe patch pra skill inteira, SKILL.md incluso.)
 for f in references/executor.md references/executor-fluxo.md references/executor-visual.md \
+         references/executor-verificacao.md references/executor-receita.md references/executor-subagentes.md \
          references/revisor.md references/revisor-catalogo.md references/revisor-visual.md \
+         references/revisor-receita.md references/revisor-verificador.md \
          references/revisao-final.md; do
   if grep -q 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f"; then
     echo

@@ -1,8 +1,8 @@
 # Reviewer — the report's catalog
 
 Read with the diff already in hand. The review is adversarial: try to break the final state,
-not to confirm the plan was followed. The procedure, the format and the recipe are in
-`revisor.md`; the screen Task in `revisor-visual.md`.
+not to confirm the plan was followed. The procedure and the format are in `revisor.md`, the
+recipe in `revisor-receita.md`; the screen Task in `revisor-visual.md`.
 
 ## What the report must cover
 
