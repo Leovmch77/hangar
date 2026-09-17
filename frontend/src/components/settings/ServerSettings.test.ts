@@ -40,7 +40,7 @@ function criarStore(inicial: string) {
     get salvo() { return false; },
     get temMudanca() { return false; },
     valorAtual: (k: string) => (k === 'scan_roots' ? estado.valor : ''),
-    rascunhoDe: () => '',
+    rascunhoDe: () => '', remocaoPendente: () => false,
     setRascunho: (k: string, v: unknown) => { if (k === 'scan_roots') estado.valor = String(v); },
     carregar: vi.fn(),
     salvar: vi.fn(),
@@ -193,7 +193,7 @@ describe('ServerSettings — somente leitura', () => {
       get variaveisEnv() { return []; },
       get carregando() { return false; }, get salvando() { return false; },
       get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
-      valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+      valorAtual: () => '', rascunhoDe: () => '', remocaoPendente: () => false, setRascunho: vi.fn(),
       carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
     } as unknown as ConfigServidorStore;
     const alvo = document.createElement('div');
@@ -228,7 +228,7 @@ describe('ServerSettings — somente leitura', () => {
       get variaveisEnv() { return []; },
       get carregando() { return false; }, get salvando() { return false; },
       get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
-      valorAtual: () => '/a', rascunhoDe: () => '', setRascunho: vi.fn(),
+      valorAtual: () => '/a', rascunhoDe: () => '', remocaoPendente: () => false, setRascunho: vi.fn(),
       carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
     } as unknown as ConfigServidorStore;
     const alvo = document.createElement('div');
@@ -252,7 +252,7 @@ describe('ServerSettings — somente leitura', () => {
       get variaveisEnv() { return []; },
       get carregando() { return false; }, get salvando() { return false; },
       get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
-      valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+      valorAtual: () => '', rascunhoDe: () => '', remocaoPendente: () => false, setRascunho: vi.fn(),
       carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
     } as unknown as ConfigServidorStore;
     const alvo = document.createElement('div');
@@ -273,7 +273,7 @@ describe('ServerSettings — respiro do rodapé', () => {
       get variaveisEnv() { return []; },
       get carregando() { return false; }, get salvando() { return false; },
       get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return true; },
-      valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+      valorAtual: () => '', rascunhoDe: () => '', remocaoPendente: () => false, setRascunho: vi.fn(),
       carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
     } as unknown as ConfigServidorStore;
   }
@@ -350,7 +350,7 @@ function montarEnv(vars: VariavelEnv[], leitura: Record<string, string | number 
     get salvo() { return false; },
     get temMudanca() { return false; },
     valorAtual: () => '',
-    rascunhoDe: () => '',
+    rascunhoDe: () => '', remocaoPendente: () => false,
     setRascunho: vi.fn(),
     carregar: vi.fn(),
     salvar: vi.fn(),
