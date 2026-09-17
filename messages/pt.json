@@ -447,7 +447,7 @@
   "config_moeda_dolar": "Dólar americano",
   "config_moeda_real": "Real brasileiro",
   "config_moeda_busca_desc": "Dólar ou real em todo custo do app.",
-  "config_moeda_cotacao": "Vale em todo custo do app. Cotação de hoje: 1 US$ = R$ {taxa}.",
+  "config_moeda_cotacao": "Vale em todo custo do app. Última cotação lida: 1 US$ = R$ {taxa}.",
   "config_moeda_sem_cotacao": "Vale em todo custo do app. Sem cotação agora — só dólar.",
   "ctx_abrir_arquivo": "Abrir {n} no editor",
   "ctx_mais_alterados": "Mais alterados",

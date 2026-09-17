@@ -397,7 +397,11 @@ export async function fetchCotacao(): Promise<number | null> {
   try {
     const r = await apiFetch<{ usd_brl: number | null }>('/api/cotacao');
     return typeof r.usd_brl === 'number' ? r.usd_brl : null;
-  } catch {
+  } catch (e) {
+    // Cair pro dólar é o comportamento certo, mas sem rastro nenhum não dá pra responder
+    // "por que o real nunca fica disponível aqui". O backend loga a falha dele; este é o lado
+    // do cliente.
+    registrarDiag({ evento: 'cotacao.falhou', nivel: 'erro', detalhe: String(e) });
     return null;
   }
 }

@@ -447,7 +447,7 @@
   "config_moeda_dolar": "US dollar",
   "config_moeda_real": "Brazilian real",
   "config_moeda_busca_desc": "Dollars or reais for every cost in the app.",
-  "config_moeda_cotacao": "Applies to every cost in the app. Today's rate: 1 US$ = R$ {taxa}.",
+  "config_moeda_cotacao": "Applies to every cost in the app. Latest rate read: 1 US$ = R$ {taxa}.",
   "config_moeda_sem_cotacao": "Applies to every cost in the app. No rate right now — dollars only.",
   "ctx_abrir_arquivo": "Open {n} in the editor",
   "ctx_mais_alterados": "Most changed",

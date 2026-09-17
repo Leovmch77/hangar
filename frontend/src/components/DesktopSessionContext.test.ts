@@ -376,6 +376,34 @@ describe('DesktopSessionContext — topo vivo e rodapé', () => {
     unmount(c);
   });
 
+  it('repositório limpo esconde a lista em vez de deixar os arquivos de antes do commit', async () => {
+    const props = {
+      status: { raw: '', repo: 'hangar', branch: 'main', dirty: true },
+      session: { name: 's', state: 'idle', git_added: 115, git_removed: 5, git_dirty: 4 },
+      onOpenGit: () => {},
+    };
+    const c = montarCom(props);
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(document.querySelectorAll('.arq-linha').length).toBe(3);
+
+    // Commitou: o backend passa a mandar 0 — que é número, não ausente, então `diffRepo` continua
+    // existindo e o gate precisa olhar o conteúdo dele.
+    unmount(c);
+    document.body.innerHTML = '';
+    const limpo = montarCom({
+      ...props,
+      status: { raw: '', repo: 'hangar', branch: 'main', dirty: false },
+      session: { name: 's', state: 'idle', git_added: 0, git_removed: 0, git_dirty: 0 },
+    });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(document.querySelectorAll('.arq-linha').length).toBe(0);
+    unmount(limpo);
+  });
+
   it('execução fica no rodapé, fora do scroller', async () => {
     const c = montarCom({ provider: 'claude', serverLabel: 'Notebook' });
     await tick();

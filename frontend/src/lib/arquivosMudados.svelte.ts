@@ -14,6 +14,7 @@ export interface ArquivoMudado {
 export function criarArquivosMudados(quantos = 3) {
   let itens = $state<ArquivoMudado[]>([]);
   let ultima = '';
+  let ultimaSessao = '';
   let geracao = 0;
 
   return {
@@ -27,6 +28,15 @@ export function criarArquivosMudados(quantos = 3) {
     // ainda não trouxe os contadores, por exemplo). Limpar aqui matava a carga em voo e o bloco
     // nunca aparecia. Quem decide não mostrar é o componente, pelo estado do repositório.
     async carregar(sessionName: string, chave: string): Promise<void> {
+      // Troca de sessão limpa na hora: segurar o valor só faz sentido entre duas leituras do
+      // MESMO repositório. O painel não remonta ao trocar de sessão, então sem isto a sessão nova
+      // abria mostrando os arquivos da anterior até a resposta dela chegar.
+      if (sessionName !== ultimaSessao) {
+        ultimaSessao = sessionName;
+        ultima = '';
+        itens = [];
+        geracao++;   // descarta resposta da sessão antiga que ainda esteja em voo
+      }
       if (!sessionName) {
         itens = [];
         ultima = '';

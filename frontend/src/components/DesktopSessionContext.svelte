@@ -618,7 +618,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
     <!-- QUAIS arquivos mudaram. Fica dentro de Repositório (é sobre ele) e não vira seção nova:
          a lista inteira é o painel de git, aqui são só as três maiores. -->
-    {#if diffRepo && arqMudados.itens.length}
+    <!-- Mesmo critério do repoEstado: com o repositório limpo `git_added`/`git_removed` chegam
+         como 0 (número, não ausente), então `diffRepo` continua existindo — sem checar o conteúdo,
+         a lista seguia na tela com os arquivos de antes do commit. -->
+    {#if diffRepo && (diffRepo.added || diffRepo.removed) && arqMudados.itens.length}
       <div class="arq-topo">
         <span class="arq-titulo">{m.ctx_mais_alterados()}</span>
         {#if onOpenGit}
