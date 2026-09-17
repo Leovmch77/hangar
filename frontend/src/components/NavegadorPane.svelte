@@ -56,7 +56,10 @@
       podeVoltar = p.voltar;
       podeAvancar = p.avancar;
       if (typeof p.layoutWidth === 'number') ajustarNavAoViewport(p.layoutWidth);
-      if (p.layoutError) avisar(p.layoutError);
+      if (p.layoutError) {
+        console.warn('navegador: layout', p.layoutError);
+        avisar(m.nav_layout_falhou());
+      }
       if (p.abas) {
         abas = p.abas;
         // Trocou de aba ativa: um "nova aba" que ficou pendente no campo perde a vez.

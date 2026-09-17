@@ -152,6 +152,8 @@
   let selecionado = $state<{ aba: Aba; key: string } | null>(null);
   let serie = $state<UsoBucket[]>([]);
   let serieCarregando = $state(false);
+  let serieFalhas = $state<{ failed: string[]; mismatched: string[] }>({ failed: [], mismatched: [] });
+  let serieTentativa = $state(0);
   const itemSelecionado = $derived.by(() => {
     if (!report || !selecionado) return null;
     return listaDa(selecionado.aba).find((b) => b.key === selecionado!.key) ?? null;
@@ -164,13 +166,16 @@
     const p = period;
     const f = filtros;
     const alvo = servidoresAtivos;
-    if (!sel) { serie = []; return; }
+    serieTentativa;
+    if (!sel) { serie = []; serieFalhas = { failed: [], mismatched: [] }; return; }
     let vivo = true;
     serieCarregando = true;
     Promise.all(alvo.map((s) => clienteQuery.fetchQuery(uso(s, p, { ...f, foco: sel.key })).catch(() => null)))
       .then((rs) => {
         if (!vivo) return;
-        serie = mergeUso(rs.map((r, i) => ({ report: r, id: alvo[i].id, label: alvo[i].label })), p).report.by_day;
+        const juntos = mergeUso(rs.map((r, i) => ({ report: r, id: alvo[i].id, label: alvo[i].label })), p);
+        serie = juntos.report.by_day;
+        serieFalhas = { failed: juntos.failed, mismatched: juntos.mismatched };
         serieCarregando = false;
       });
     return () => { vivo = false; };
@@ -757,6 +762,20 @@
       <div><dt>{m.uso_detalhe_media_sessao()}</dt><dd>≈ {tok(porSessao(b))}</dd></div>
     </dl>
     <h4>{m.uso_detalhe_por_dia()} <span class="dim">({rotuloMedida(abaAtual.medida)})</span></h4>
+    {#if !serieCarregando && (serieFalhas.failed.length || serieFalhas.mismatched.length)}
+      <p class="warn">
+        ⚠ {m.custos_total_parcial()}
+        {#if serieFalhas.failed.length}
+          {serieFalhas.failed.length === 1 ? m.custos_servidor_nao_respondeu_1() : m.custos_servidor_nao_respondeu({ n: serieFalhas.failed.length })}
+          ({serieFalhas.failed.join(', ')}).
+        {/if}
+        {#if serieFalhas.mismatched.length}
+          {serieFalhas.mismatched.length === 1 ? m.custos_fora_periodo_1() : m.custos_fora_periodo({ n: serieFalhas.mismatched.length })}
+          ({serieFalhas.mismatched.join(', ')}).
+        {/if}
+        <button class="retry" onclick={() => serieTentativa++}>{m.config_server_tentar_de_novo()}</button>
+      </p>
+    {/if}
     {#if serieCarregando}
       <div class="bloco medio sk-serie"></div>
     {:else if !serie.length}

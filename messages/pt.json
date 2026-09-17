@@ -905,6 +905,7 @@
   "nav_aba_vazia": "Nova aba",
   "nav_aba_teto": "O navegador desta sessão já tem 8 abas",
   "nav_aba_sumiu": "Essa aba já foi fechada",
+  "nav_layout_falhou": "Não deu pra aplicar o tamanho da tela nesta aba",
   "nav_cookies_trazer": "Trazer login do Chrome",
   "nav_cookies_buscando": "Buscando o login no Chrome…",
   "nav_cookies_ok": "{n} cookies trazidos do Chrome",

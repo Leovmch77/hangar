@@ -133,6 +133,34 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 
+it('série do detalhe que falha avisa qual servidor não respondeu e tenta de novo', async () => {
+  localStorage.clear(); servidor();
+  let focoFalha = true;
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    const q = query as unknown as Record<string, string>;
+    if (q.foco && focoFalha) return Promise.reject(new Error('rede')) as ReturnType<typeof clienteQuery.fetchQuery>;
+    return Promise.resolve(q.foco
+      ? { by_day: [{ ...zeroUso('2026-09-10'), chamadas: 3, input: 45 }], applied: { period: q.period } }
+      : report(q.period)) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Uso, { target, props: { onBack: vi.fn() } });
+  try {
+    await settle();
+    ([...target.querySelectorAll('tr.click')].find((tr) => tr.textContent?.includes('pesada')) as HTMLElement).click();
+    await settle();
+    const det = () => target.querySelector('.detalhe')!;
+    expect(det().querySelector('.warn')?.textContent).toContain(m.custos_servidor_nao_respondeu_1());
+    expect(det().querySelector('.warn')?.textContent).toContain('(A)');
+    expect(det().querySelector('svg.serie')).toBeNull();
+    focoFalha = false;
+    ([...det().querySelectorAll('button.retry')].find((b) => b.textContent === m.config_server_tentar_de_novo()) as HTMLButtonElement).click();
+    await settle();
+    expect(det().querySelector('.warn')).toBeNull();
+    expect(det().querySelector('svg.serie')).not.toBeNull();
+  } finally { await unmount(component); target.remove(); localStorage.clear(); }
+});
+
 it('trocar filtro de conta refaz a busca com a conta e mantém o painel montado enquanto atualiza', async () => {
   localStorage.clear(); servidor();
   const pedidos: string[][] = [];

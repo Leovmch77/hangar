@@ -905,6 +905,7 @@
   "nav_aba_vazia": "New tab",
   "nav_aba_teto": "This session's browser already has 8 tabs",
   "nav_aba_sumiu": "That tab was already closed",
+  "nav_layout_falhou": "Couldn't apply the screen size to this tab",
   "nav_cookies_trazer": "Bring login from Chrome",
   "nav_cookies_buscando": "Fetching the login from Chrome…",
   "nav_cookies_ok": "{n} cookies imported from Chrome",
