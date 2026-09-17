@@ -466,7 +466,7 @@ def test_arquivo_de_outro_repositorio_usa_a_raiz_dele(tmp_path):
     assert uso_areas.area_do_caminho(str(tmp_path / "solto" / "a.md"), cwd, uso_areas.regras_de(cwd)) == "outros"
 
 
-def test_subagente_nao_e_sessao_e_periodo_anterior_compara_tokens(tmp_path):
+def test_subagente_nao_e_sessao(tmp_path):
     def sessao(p, dia, i):
         _escrever(p, [
             {**_user("x", "p1", ts=f"{dia}T12:00:00Z")},
@@ -474,16 +474,9 @@ def test_subagente_nao_e_sessao_e_periodo_anterior_compara_tokens(tmp_path):
         ])
     sessao(tmp_path / "p" / "s1.jsonl", "2026-09-10", 100)
     sessao(tmp_path / "p" / "s1" / "subagents" / "agent-a1.jsonl", "2026-09-10", 40)
-    sessao(tmp_path / "p" / "s0.jsonl", "2026-09-02", 70)               # semana anterior
-    agora = datetime(2026, 9, 10, 20, 0, tzinfo=uso_report.LOCAL)
-    # O histórico começa no meio da janela anterior: comparar mediria o que falta, não o uso.
-    assert uso_report.montar(ct.varrer_uso(tmp_path), [], "7d", now=agora).anterior is None
-    sessao(tmp_path / "p" / "s-velha.jsonl", "2026-08-20", 5)           # histórico cobre a janela
-    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "7d", now=agora)
+    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all")
     assert (r.totals.sessions, r.totals.subagentes) == (1, 1)
     assert r.totals.input == 100 + 40
-    assert r.anterior is not None and r.anterior.input == 70 and r.anterior.sessions == 1
-    assert uso_report.montar(ct.varrer_uso(tmp_path), [], "all", now=agora).anterior is None
 
 
 @pytest.mark.parametrize("caminho,esperado", [

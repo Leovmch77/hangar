@@ -47,8 +47,6 @@ export interface UsoFiltros {
 
 export interface UsoReport {
   totals: UsoBucket;
-  // Mesmos filtros, janela do mesmo tamanho logo antes; null em "tudo" ou servidor antigo.
-  anterior?: UsoBucket | null;
   by_skill: UsoBucket[];
   by_tool: UsoBucket[];
   by_bash: UsoBucket[];
@@ -130,7 +128,6 @@ const ordenar = (m: Map<string, UsoBucket>) =>
 
 export function mergeUso(results: UsoServerResult[], period: string): MergedUso {
   const totals = zeroUso('totals');
-  let anterior: UsoBucket | null = null;
   const dims = Object.fromEntries(USO_DIMS.map((d) => [d, new Map<string, UsoBucket>()])) as Record<UsoDim, Map<string, UsoBucket>>;
   const dias = new Map<string, UsoBucket>();
   const servidores: UsoBucket[] = [];
@@ -149,7 +146,6 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
       return;
     }
     somar(totals, r.totals ?? {});
-    if (r.anterior) somar((anterior ??= zeroUso('anterior')), r.anterior);
     const bs = zeroUso(res.id ?? res.label ?? `#${i + 1}`);
     bs.label = res.label ?? null;
     somar(bs, r.totals ?? {});
@@ -164,7 +160,6 @@ export function mergeUso(results: UsoServerResult[], period: string): MergedUso 
   return {
     report: {
       totals,
-      anterior,
       by_skill: ordenar(dims.by_skill),
       by_tool: ordenar(dims.by_tool),
       by_bash: ordenar(dims.by_bash),

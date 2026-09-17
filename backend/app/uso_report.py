@@ -200,20 +200,9 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
 
     now = now or datetime.now(LOCAL)
     dias = costs.PERIODOS.get(period)
-    anterior = None
     if dias:
         corte = (now - timedelta(days=dias - 1)).date()
-        inicio_anterior = corte - timedelta(days=dias)
-        # Mesma janela, logo antes: é a comparação do número do topo ("↑ 12% vs antes"). Sem dado
-        # desde o começo dessa janela, a comparação mediria o histórico faltando, não o uso.
-        mais_antigo = min((l.dia for l in uso if l.dia), default="")
-        if mais_antigo and datetime.fromisoformat(mais_antigo).date() <= inicio_anterior:
-            antes = _zero()
-            for l in filtrar([l for l in uso if l.dia
-                              and inicio_anterior <= datetime.fromisoformat(l.dia).date() < corte]):
-                _somar_em(antes, l, {})
-            anterior = _bucket("anterior", antes)
-        uso = [l for l in uso if l.dia and datetime.fromisoformat(l.dia).date() >= corte]
+        uso =[l for l in uso if l.dia and datetime.fromisoformat(l.dia).date() >= corte]
         tokens = [r for r in tokens if r.ts.date() >= corte]
     agentes = _custo_dos_agentes(tokens)
     por_conta = _por_dimensao(uso, agentes, lambda l: l.conta, rotulo_de_provedor)
@@ -285,7 +274,6 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
 
     return UsoReport(
         totals=_bucket("totals", total),
-        anterior=anterior,
         by_skill=_ordenar(por_tipo["skill"]),
         by_tool=_ordenar(por_tipo["tool"]),
         by_bash=_ordenar(por_tipo["bash"]),

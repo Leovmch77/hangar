@@ -148,7 +148,7 @@
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
 
   // ── Seleção + detalhe (consulta própria com `foco`) ──────────────────────────
-  type Aba = 'skill' | 'agente' | 'area' | 'plugin' | 'tool' | 'bash' | 'mcp' | 'imagem' | 'contexto';
+  type Aba = 'skill' | 'agente' | 'plugin' | 'tool' | 'bash' | 'mcp' | 'imagem' | 'contexto';
   let aba = $state<Aba>('skill');
   let selecionado = $state<{ aba: Aba; key: string } | null>(null);
   let serie = $state<UsoBucket[]>([]);
@@ -180,13 +180,12 @@
   // ── Tabela com abas ──────────────────────────────────────────────────────────
   // Uma medida por aba, sempre em tokens (a conta é por assinatura, não por dólar):
   // `ocupados` — skill/plugin: tamanho do texto × respostas em que ele ficou no contexto;
-  // `tokens` — agente/área: tokens reais das respostas (transcript filho / turno dividido);
+  // `tokens` — agente: tokens reais do transcript filho;
   // `ctx` — o resto: o que o resultado ou a injeção colocou no contexto.
   type Medida = 'ocupados' | 'tokens' | 'ctx';
   const ABAS: { id: Aba; label: string; medida: Medida }[] = [
     { id: 'skill', label: m.uso_aba_skills(), medida: 'ocupados' },
     { id: 'agente', label: m.uso_aba_agentes(), medida: 'tokens' },
-    { id: 'area', label: m.uso_aba_areas(), medida: 'tokens' },
     { id: 'plugin', label: m.uso_aba_plugins(), medida: 'ocupados' },
     { id: 'tool', label: m.uso_aba_tools(), medida: 'ctx' },
     { id: 'bash', label: m.uso_aba_bash(), medida: 'ctx' },
@@ -202,72 +201,11 @@
   const rotuloMedida = (md: Medida) => (md === 'ocupados' ? m.uso_col_ocupados() : md === 'tokens' ? m.uso_col_tokens() : m.uso_col_ctx());
   function listaDa(a: Aba): UsoBucket[] {
     if (!report) return [];
-    return ({ skill: report.by_skill, agente: report.by_agente, area: report.by_area, plugin: report.by_plugin, tool: report.by_tool,
+    return ({ skill: report.by_skill, agente: report.by_agente, plugin: report.by_plugin, tool: report.by_tool,
       bash: report.by_bash, mcp: report.by_mcp, contexto: report.by_contexto, imagem: report.by_imagem })[a];
   }
   const rotulo = (a: Aba, b: UsoBucket) =>
-    a === 'imagem' ? (b.key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: b.key.replace(/^lida:/, '') }))
-      : a === 'area' ? nomeArea(b.key) : (b.label ?? b.key);
-
-  // ── Onde vão os tokens: tokens reais por área ────────────────────────────────
-  // A cor segue a área, nunca a posição. Só há 4 cores de gráfico: vão pras áreas de código; a
-  // conversa é cinza e o resto (docs, outros, áreas do mapa pessoal) um cinza claro — quem separa
-  // esses é a legenda, que nomeia cada área com o valor.
-  const ORDEM_AREA = ['front', 'back', 'banco', 'infra', 'docs', 'outros', 'conversa'];
-  const COR_AREA: Record<string, string> = {
-    front: 'var(--chart-1)', back: 'var(--chart-2)', banco: 'var(--chart-3)', infra: 'var(--chart-4)', conversa: 'var(--text-muted)',
-  };
-  const NOME_AREA: Record<string, () => string> = {
-    front: m.uso_area_front, back: m.uso_area_back, banco: m.uso_area_banco, infra: m.uso_area_infra,
-    docs: m.uso_area_docs, outros: m.uso_area_outros, conversa: m.uso_area_conversa,
-  };
-  function nomeArea(a: string) { return NOME_AREA[a]?.() ?? a; }
-  const corArea = (a: string) => COR_AREA[a] ?? 'var(--border-strong)';
-  const posArea = (a: string) => { const i = ORDEM_AREA.indexOf(a); return i < 0 ? ORDEM_AREA.length : i; };
-  let hoverArea = $state<string | null>(null);
-  const areas = $derived.by(() => {
-    const itens = [...(report?.by_area ?? [])].filter((b) => tokensReais(b) > 0)
-      .sort((a, b) => posArea(a.key) - posArea(b.key) || tokensReais(b) - tokensReais(a));
-    const total = itens.reduce((n, b) => n + tokensReais(b), 0);
-    return { total, itens: itens.map((b) => ({ b, frac: total ? tokensReais(b) / total : 0, cor: corArea(b.key) })) };
-  });
-  let larguraAreaDia = $state(0);
-  let hoverAreaDia = $state<number | null>(null);
-  const areaDias = $derived.by(() => {
-    const porDia = new Map<string, Map<string, number>>();
-    for (const b of report?.by_area_dia ?? []) {
-      const dia = b.key.slice(0, 10), area = b.label ?? b.key.slice(11);
-      const d = porDia.get(dia) ?? new Map<string, number>();
-      d.set(area, (d.get(area) ?? 0) + tokensReais(b));
-      porDia.set(dia, d);
-    }
-    const ordem = areas.itens.map((i) => i.b.key);
-    const lista = [...porDia.keys()].sort().map((dia) => {
-      const d = porDia.get(dia)!;
-      return { dia, total: [...d.values()].reduce((n, v) => n + v, 0), partes: ordem.filter((a) => (d.get(a) ?? 0) > 0).map((a) => ({ area: a, v: d.get(a)! })) };
-    });
-    const padL = 6, padR = 6, padT = 8, padB = 20;
-    const W = Math.max(larguraAreaDia, 160), H = ALT_TENDENCIA;
-    const plotW = W - padL - padR, plotH = H - padT - padB;
-    const teto = Math.max(...lista.map((d) => d.total), 0) || 1;
-    const passo = lista.length ? plotW / lista.length : plotW;
-    const bw = Math.min(22, Math.max(2, passo - 2));
-    return {
-      W, H, padT, plotH, base: padT + plotH,
-      colunas: lista.map((d, i) => {
-        let topo = padT + plotH;
-        // 2px de superfície entre os segmentos: a pilha se lê sem borda desenhada.
-        const segs = d.partes.map((p) => {
-          const h = Math.max(1, (p.v / teto) * plotH);
-          const s = { area: p.area, x: padL + i * passo + (passo - bw) / 2, w: bw, y: topo - h, h: Math.max(1, h - 2) };
-          topo -= h;
-          return s;
-        });
-        return { ...d, segs, cx: padL + i * passo + passo / 2 };
-      }),
-      rotulos: lista.length ? [0, Math.floor((lista.length - 1) / 2), lista.length - 1].filter((v, i, a) => a.indexOf(v) === i).map((i) => ({ i, x: padL + i * passo + passo / 2 })) : [],
-    };
-  });
+    a === 'imagem' ? (b.key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: b.key.replace(/^lida:/, '') })) : (b.label ?? b.key);
   type Col = 'nome' | 'chamadas' | 'principal' | 'porChamada' | 'respostas' | 'sessions';
   const valorDe = (b: UsoBucket, c: Col): number | string => ({
     nome: b.label ?? b.key, chamadas: b.chamadas, principal: principal(b, abaAtual.medida),
@@ -313,29 +251,36 @@
   let expandida = $state(false);
   $effect(() => { aba; expandida = false; });
 
-  // ── Topo: 4 números ──────────────────────────────────────────────────────────
+  // ── Topo: 4 números de skills e tools ────────────────────────────────────────
   const totalTokens = $derived(report ? tokensReais(report.totals) : 0);
-  // Variação contra a janela do mesmo tamanho logo antes; sem base (tudo, ou nada antes) não mostra.
-  const variacao = $derived.by(() => {
-    const antes = report?.anterior ? tokensReais(report.anterior) : 0;
-    return antes > 0 ? ((totalTokens - antes) / antes) * 100 : null;
-  });
-  const tokensPorSessao = $derived(report && report.totals.sessions > 0 ? totalTokens / report.totals.sessions : 0);
+  const soma = (lista: UsoBucket[] | undefined, v: (b: UsoBucket) => number) => (lista ?? []).reduce((n, b) => n + v(b), 0);
+  const cargasSkills = $derived(soma(report?.by_skill, (b) => b.chamadas));
   const pctSkills = $derived(totalTokens > 0 ? (ocupadosSkills / totalTokens) * 100 : 0);
+  // `tool:Skill` e `tool:Agent` repetem as abas de skill e agente: aqui só ferramenta.
+  const ferramentas = $derived((report?.by_tool ?? []).filter((b) => b.key !== 'Skill' && b.key !== 'Agent'));
+  const chamadasFerramenta = $derived(soma(ferramentas, (b) => b.chamadas));
+  const topFerramenta = $derived([...ferramentas].sort((a, b) => b.chamadas - a.chamadas)[0] ?? null);
+  const disparosAgente = $derived(soma(report?.by_agente, (b) => b.chamadas));
+  const tokensAgentes = $derived(soma(report?.by_agente, tokensReais));
 
-  // ── Rankings: barras horizontais, 8 itens + "outros" ─────────────────────────
+  // ── Rankings: barras horizontais, 8 itens + "outros"; clicar abre o detalhe ──
   const TOP_RANK = 8;
-  function ranking(lista: UsoBucket[], nome: (k: string) => string) {
-    const ord = [...lista].filter((b) => tokensReais(b) > 0).sort((a, b) => tokensReais(b) - tokensReais(a));
-    const total = ord.reduce((n, b) => n + tokensReais(b), 0) || 1;
-    const linhas = ord.slice(0, TOP_RANK).map((b) => ({ key: b.key, nome: nome(b.key), v: tokensReais(b) }));
-    const resto = ord.slice(TOP_RANK).reduce((n, b) => n + tokensReais(b), 0);
+  function ranking(a: Aba, valor: (b: UsoBucket) => number) {
+    const ord = listaDa(a).filter((b) => valor(b) > 0).sort((x, y) => valor(y) - valor(x));
+    const total = ord.reduce((n, b) => n + valor(b), 0) || 1;
+    const linhas = ord.slice(0, TOP_RANK).map((b) => ({ key: b.key, nome: rotulo(a, b), v: valor(b) }));
+    const resto = ord.slice(TOP_RANK).reduce((n, b) => n + valor(b), 0);
     if (resto > 0) linhas.push({ key: '', nome: m.uso_outros_itens({ n: ord.length - TOP_RANK }), v: resto });
     const max = Math.max(...linhas.map((l) => l.v), 1);
     return linhas.map((l) => ({ ...l, frac: l.v / total, largura: l.v / max }));
   }
-  const rankProjetos = $derived(ranking(report?.by_projeto ?? [], projectLabel));
-  const rankModelos = $derived(ranking(report?.by_modelo ?? [], (k) => k));
+  const rankings = $derived<{ aba: Aba; titulo: string; aprox: boolean; linhas: ReturnType<typeof ranking> }[]>([
+    { aba: 'skill', titulo: m.uso_rank_skills(), aprox: true, linhas: ranking('skill', (b) => b.ocupados_tokens_est ?? 0) },
+    { aba: 'tool', titulo: m.uso_rank_ferramentas(), aprox: false, linhas: ranking('tool', (b) => (b.key === 'Skill' || b.key === 'Agent' ? 0 : b.chamadas)) },
+    { aba: 'agente', titulo: m.uso_rank_agentes(), aprox: false, linhas: ranking('agente', tokensReais) },
+    { aba: 'mcp', titulo: m.uso_rank_mcp(), aprox: false, linhas: ranking('mcp', (b) => b.chamadas) },
+  ]);
+  function abrirItem(a: Aba, key: string) { aba = a; selecionar(a, key); }
   let avancadoAberto = $state(localStorage.getItem('cp_uso_avancado') === '1');
   $effect(() => { localStorage.setItem('cp_uso_avancado', avancadoAberto ? '1' : '0'); });
 
@@ -364,7 +309,7 @@
       rotulos: n ? [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i).map((i) => ({ i, x: padL + i * passo + passo / 2 })) : [],
     };
   }
-  const grafChamadas = $derived(colunas(dias, (b) => b.chamadas, larguraDia));
+  const grafChamadas = $derived(colunas(dias, (b) => b.chamadas, larguraDia, ALT_TENDENCIA));
   const grafSerie = $derived(colunas(serie, (b) => principal(b, abaAtual.medida), 300, 90));
   const diaCurto = (k: string) => k.slice(5).replace('-', '/');
 
@@ -492,17 +437,20 @@
   {:else}
     <dl class="numeros">
       <div>
-        <dt>{m.uso_kpi_tokens()}</dt><dd>{tok(totalTokens)}</dd>
-        {#if variacao !== null}<p class="sub">{variacao >= 0 ? '↑' : '↓'} {dec(Math.abs(variacao), 0)}% {m.uso_vs_anterior()}</p>{/if}
+        <dt>{m.uso_kpi_cargas_skills()}</dt><dd>{dec(cargasSkills, 0)}</dd>
+        <p class="sub">{m.uso_kpi_skills_distintas({ n: dec(report.by_skill.length, 0) })}</p>
+      </div>
+      <div title={m.uso_ocupados_nota()}>
+        <dt>{m.uso_kpi_ocupados_skills()}</dt><dd>≈ {tok(ocupadosSkills)}</dd>
+        <p class="sub">{m.uso_kpi_do_total({ pct: dec(pctSkills, 1) })}</p>
       </div>
       <div>
-        <dt>{m.uso_kpi_sessoes()}</dt><dd>{dec(report.totals.sessions, 0)}</dd>
-        {#if report.totals.subagentes}<p class="sub">{m.uso_mais_subagentes({ n: dec(report.totals.subagentes, 0) })}</p>{/if}
+        <dt>{m.uso_kpi_chamadas_ferramenta()}</dt><dd>{dec(chamadasFerramenta, 0)}</dd>
+        {#if topFerramenta}<p class="sub">{m.uso_kpi_mais_usada({ nome: topFerramenta.key, pct: dec((topFerramenta.chamadas / (chamadasFerramenta || 1)) * 100, 0) })}</p>{/if}
       </div>
-      <div><dt>{m.uso_kpi_por_sessao()}</dt><dd>{tok(tokensPorSessao)}</dd></div>
-      <div title={m.uso_ocupados_nota()}>
-        <dt>{m.uso_kpi_skills_parte()}</dt><dd>{dec(pctSkills, 1)}%</dd>
-        <p class="sub">≈ {tok(ocupadosSkills)}</p>
+      <div>
+        <dt>{m.uso_kpi_subagentes()}</dt><dd>{dec(disparosAgente, 0)}</dd>
+        <p class="sub">{m.uso_kpi_tokens_subagentes({ n: tok(tokensAgentes) })}</p>
       </div>
     </dl>
 
@@ -511,55 +459,37 @@
         <section class="bloco-graf tendencia">
           <div class="cab">
             <div>
-              <h2>{m.uso_graf_tendencia()}</h2>
-              <p class="hint">{m.uso_graf_tendencia_nota()}</p>
+              <h2>{m.uso_graf_chamadas_dia()}</h2>
+              <p class="hint">{m.uso_graf_chamadas_dia_nota()}</p>
             </div>
-            <span class="total">{tok(areas.total)}</span>
           </div>
-          {#if !areas.itens.length}
-            <p class="muted">{m.uso_vazio_secao()}</p>
+          {#if !dias.length}
+            <p class="muted">{m.uso_sem_dias()}</p>
           {:else}
-            <ul class="legenda inline" aria-label={m.uso_graf_areas()}>
-              {#each areas.itens as s (s.b.key)}
-                <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
-                  <span class="swatch" style="background: {s.cor}"></span>{nomeArea(s.b.key)} <span class="dim">{dec(s.frac * 100, 0)}%</span>
-                </li>
-              {/each}
-            </ul>
-            <div>
-              <div>
-                <div class="svgbox" bind:clientWidth={larguraAreaDia}>
-                  <svg viewBox="0 0 {areaDias.W} {areaDias.H}" width={areaDias.W} height={areaDias.H} role="img" aria-label={m.uso_graf_areas_dia()}
-                       onmouseleave={() => (hoverAreaDia = null)}>
-                    <line x1="0" x2={areaDias.W} y1={areaDias.base} y2={areaDias.base} class="eixo" />
-                    {#each areaDias.colunas as c, i (c.dia)}
-                      {#each c.segs as s (s.area)}
-                        <rect x={s.x} y={s.y} width={s.w} height={s.h} rx="2" fill={corArea(s.area)}
-                              opacity={(hoverAreaDia === null || hoverAreaDia === i) && (hoverArea === null || hoverArea === s.area) ? 1 : 0.4} />
-                      {/each}
-                      <rect x={c.cx - Math.max(c.segs[0]?.w ?? 12, 12) / 2} y={areaDias.padT} width={Math.max(c.segs[0]?.w ?? 12, 12)} height={areaDias.plotH}
-                            fill="transparent" role="presentation" onmouseenter={() => (hoverAreaDia = i)} />
-                    {/each}
-                    {#each areaDias.rotulos as r (r.i)}
-                      <text x={r.x} y={areaDias.H - 6} text-anchor="middle" class="tick">{diaCurto(areaDias.colunas[r.i].dia)}</text>
-                    {/each}
-                  </svg>
-                  {#if hoverAreaDia !== null && areaDias.colunas[hoverAreaDia]}
-                    {@const c = areaDias.colunas[hoverAreaDia]}
-                    <div class="tip" style="left: {Math.min(Math.max(c.cx, 80), areaDias.W - 80)}px; top: 0">
-                      <b>{c.dia} · {tok(c.total)}</b>
-                      {#each [...c.partes].reverse() as p (p.area)}<span>{nomeArea(p.area)}: {tok(p.v)}</span>{/each}
-                    </div>
-                  {/if}
+            <div class="svgbox" bind:clientWidth={larguraDia}>
+              <svg viewBox="0 0 {grafChamadas.W} {grafChamadas.H}" width={grafChamadas.W} height={grafChamadas.H} role="img"
+                   aria-label={m.uso_graf_chamadas_dia()} onmouseleave={() => (hoverDia = null)}>
+                <line x1="0" x2={grafChamadas.W} y1={grafChamadas.base} y2={grafChamadas.base} class="eixo" />
+                {#each grafChamadas.barras as c, i (c.b.key)}
+                  <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="3" fill="var(--chart-1)" opacity={hoverDia === null || hoverDia === i ? 1 : 0.45} />
+                  <rect x={c.cx - Math.max(c.w, 12) / 2} y={grafChamadas.padT} width={Math.max(c.w, 12)} height={grafChamadas.plotH}
+                        fill="transparent" role="presentation" onmouseenter={() => (hoverDia = i)} />
+                {/each}
+                {#each grafChamadas.rotulos as r (r.i)}
+                  <text x={r.x} y={grafChamadas.H - 6} text-anchor="middle" class="tick">{diaCurto(dias[r.i].key)}</text>
+                {/each}
+              </svg>
+              {#if hoverDia !== null && grafChamadas.barras[hoverDia]}
+                <div class="tip" style="left: {Math.min(Math.max(grafChamadas.barras[hoverDia].cx, 60), grafChamadas.W - 60)}px; top: 0">
+                  <b>{dec(grafChamadas.barras[hoverDia].v, 0)} {m.uso_graf_chamadas()}</b><span>{dias[hoverDia].key}</span>
                 </div>
-              </div>
+              {/if}
             </div>
           {/if}
         </section>
 
         <div class="linha-graf dois">
-          {#each [{ titulo: m.uso_top_projetos(), linhas: rankProjetos, filtro: 'projeto' as DimF },
-                  { titulo: m.uso_top_modelos(), linhas: rankModelos, filtro: 'modelo' as DimF }] as r (r.titulo)}
+          {#each rankings as r (r.aba)}
             <section class="bloco-graf">
               <div class="cab"><h2>{r.titulo}</h2></div>
               {#if !r.linhas.length}
@@ -569,12 +499,12 @@
                   {#each r.linhas as l (l.key || l.nome)}
                     <li>
                       {#if l.key}
-                        <button class="rank-nome" title={m.uso_filtrar_por({ nome: l.nome })} onclick={() => setFiltro(r.filtro, [l.key])}>{l.nome}</button>
+                        <button class="rank-nome" title={l.key} onclick={() => abrirItem(r.aba, l.key)}>{l.nome}</button>
                       {:else}
                         <span class="rank-nome dim">{l.nome}</span>
                       {/if}
                       <span class="rank-barra"><i style="width: {l.largura * 100}%" class:resto={!l.key}></i></span>
-                      <b>{tok(l.v)}</b><span class="dim">{dec(l.frac * 100, 0)}%</span>
+                      <b>{r.aprox ? '≈ ' : ''}{r.aba === 'tool' || r.aba === 'mcp' ? dec(l.v, 0) : tok(l.v)}</b><span class="dim">{dec(l.frac * 100, 0)}%</span>
                     </li>
                   {/each}
                 </ol>
@@ -585,67 +515,7 @@
 
         <details class="avancado" bind:open={avancadoAberto}>
         <summary>{m.uso_avancado()}</summary>
-        <div class="linha-graf tres">
-          <section class="bloco-graf">
-            <div class="cab">
-              <h2>{m.uso_graf_areas()}</h2>
-              <span class="total">{tok(areas.total)}</span>
-            </div>
-            {#if !areas.itens.length}
-              <p class="muted">{m.uso_vazio_secao()}</p>
-            {:else}
-              <div class="pilha" role="img" aria-label={m.uso_graf_areas()} onmouseleave={() => (hoverArea = null)}>
-                {#each areas.itens as s (s.b.key)}
-                  <span class="seg-pilha" style="width: {s.frac * 100}%; background: {s.cor}" class:apagada={hoverArea !== null && hoverArea !== s.b.key}
-                        title="{nomeArea(s.b.key)}: {tok(tokensReais(s.b))}" onmouseenter={() => (hoverArea = s.b.key)} role="presentation"></span>
-                {/each}
-              </div>
-              <ul class="legenda">
-                {#each areas.itens as s (s.b.key)}
-                  <li class:apagada={hoverArea !== null && hoverArea !== s.b.key} onmouseenter={() => (hoverArea = s.b.key)} onmouseleave={() => (hoverArea = null)}>
-                    <span class="swatch" style="background: {s.cor}"></span>
-                    <span class="lab">{nomeArea(s.b.key)}</span>
-                    <b>{tok(tokensReais(s.b))}</b><span class="dim">{dec(s.frac * 100, 0)}%</span>
-                  </li>
-                {/each}
-              </ul>
-              <p class="hint">{m.uso_graf_areas_nota()}</p>
-            {/if}
-          </section>
-
-          <section class="bloco-graf">
-            <div class="cab"><h2>{m.uso_graf_chamadas_dia()}</h2></div>
-            {#if !dias.length}
-              <p class="muted">{m.uso_sem_dias()}</p>
-            {:else}
-              <div bind:clientWidth={larguraDia}>
-                {#each [{ g: grafChamadas, titulo: m.uso_graf_chamadas(), fmt: (v: number) => dec(v, 0), cor: 'var(--chart-1)' }] as p (p.titulo)}
-                  <div class="mini">
-                    <h3>{p.titulo}</h3>
-                    <div class="svgbox">
-                      <svg viewBox="0 0 {p.g.W} {p.g.H}" width={p.g.W} height={p.g.H} role="img" aria-label={p.titulo} onmouseleave={() => (hoverDia = null)}>
-                        <line x1="0" x2={p.g.W} y1={p.g.base} y2={p.g.base} class="eixo" />
-                        {#each p.g.barras as c, i (c.b.key)}
-                          <rect x={c.x} y={c.y} width={c.w} height={c.h} rx="3" fill={p.cor} opacity={hoverDia === null || hoverDia === i ? 1 : 0.45} />
-                          <rect x={c.cx - Math.max(c.w, 12) / 2} y={p.g.padT} width={Math.max(c.w, 12)} height={p.g.plotH}
-                                fill="transparent" role="presentation" onmouseenter={() => (hoverDia = i)} />
-                        {/each}
-                        {#each p.g.rotulos as r (r.i)}
-                          <text x={r.x} y={p.g.H - 6} text-anchor="middle" class="tick">{diaCurto(dias[r.i].key)}</text>
-                        {/each}
-                      </svg>
-                      {#if hoverDia !== null && p.g.barras[hoverDia]}
-                        <div class="tip" style="left: {Math.min(Math.max(p.g.barras[hoverDia].cx, 60), p.g.W - 60)}px; top: 0">
-                          <b>{p.fmt(p.g.barras[hoverDia].v)}</b><span>{dias[hoverDia].key}</span>
-                        </div>
-                      {/if}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </section>
-
+        <div>
           <section class="bloco-graf">
             <div class="cab">
               <h2>{m.uso_graf_ctx()}</h2>
@@ -850,9 +720,7 @@
   .cab .hint { font-size: var(--text-xs); color: var(--text-secondary); max-width: 80ch; margin-top: 2px; }
   .cab .total { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
   .linha-graf { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
-  .linha-graf.tres { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .numeros .sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 2px; }
-  .tendencia .legenda.inline { flex-wrap: wrap; margin-bottom: var(--space-2); }
   .rank { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   .rank li { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) auto 3.5ch; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
   .rank-nome { justify-self: stretch; min-width: 0; background: transparent; border: 0; padding: 0; font: inherit; color: var(--text-primary); text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -872,7 +740,6 @@
   .tip { position: absolute; transform: translateX(-50%); pointer-events: none; background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 4px 8px; font-size: var(--text-xs); display: flex; flex-direction: column; gap: 2px; white-space: nowrap; z-index: 2; }
   .tip b { font-variant-numeric: tabular-nums; }
   .tip span { color: var(--text-secondary); }
-  .mini h3 { font-size: var(--text-xs); color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: var(--space-1); }
   .pilha { display: flex; height: 20px; gap: 2px; border-radius: 4px; overflow: hidden; margin-bottom: var(--space-3); }
   .seg-pilha { display: block; height: 100%; min-width: 2px; transition: opacity 120ms; }
   .seg-pilha.apagada { opacity: 0.35; }
@@ -923,7 +790,7 @@
     .uso { padding-inline: var(--space-3); }
     .numeros { gap: var(--space-4); }
     .numeros dd { font-size: var(--text-base); }
-    .linha-graf, .linha-graf.tres { grid-template-columns: 1fr; }
+    .linha-graf { grid-template-columns: 1fr; }
     .busca { min-width: 0; flex: 1 1 140px; }
     .ibar { width: 36px; }
     table.data td.nome { max-width: 24ch; }

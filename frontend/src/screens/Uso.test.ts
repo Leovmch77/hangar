@@ -13,10 +13,8 @@ vi.mock('../lib/queries', () => ({
 }));
 
 const report = (period: string): Partial<UsoReport> => ({
-  totals: { ...zeroUso('totals'), sessions: 3, subagentes: 2, chamadas: 120, ctx_chars: 4000, ctx_tokens_est: 1000, input: 130 },
-  anterior: { ...zeroUso('anterior'), input: 100 },
-  by_projeto: Array.from({ length: 10 }, (_, i) => ({ ...zeroUso(`/p/proj${i}`), input: 100 - i })),
-  by_modelo: [{ ...zeroUso('claude-opus-5'), input: 90 }, { ...zeroUso('gpt-5.6-sol'), input: 40 }],
+  totals: { ...zeroUso('totals'), sessions: 3, subagentes: 2, chamadas: 120, ctx_chars: 4000, ctx_tokens_est: 1000, input: 1_000_000 },
+  by_mcp: [{ ...zeroUso('hangar'), sessions: 1, chamadas: 4 }],
   // Skills pesam pelos tokens que OCUPARAM: "muitas" ocupa mais no total; "pesada" é maior por
   // carga (15 × a mediana).
   by_skill: [
@@ -25,7 +23,8 @@ const report = (period: string): Partial<UsoReport> => ({
     ...Array.from({ length: 20 }, (_, i) => ({ ...zeroUso(`s${String(i).padStart(2, '0')}`), sessions: 1, chamadas: 5, ctx_tokens_est: 500, ocupados_tokens_est: 500, respostas: 1 })),
   ],
   by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000 }],
-  by_tool: [{ ...zeroUso('Bash'), sessions: 3, chamadas: 100, ctx_chars: 4000, ctx_tokens_est: 1000 }],
+  by_tool: [{ ...zeroUso('Bash'), sessions: 3, chamadas: 100, ctx_chars: 4000, ctx_tokens_est: 1000 },
+            { ...zeroUso('Skill'), sessions: 1, chamadas: 50 }],
   by_contexto: [{ ...zeroUso('instructions'), sessions: 2, chamadas: 2, ctx_chars: 8000, ctx_tokens_est: 2000 }],
   by_day: [{ ...zeroUso('2026-09-10'), chamadas: 120, input:130 }],
   by_conta: [{ ...zeroUso('anthropic:1'), label: 'um@x', sessions: 2, chamadas: 50 }, { ...zeroUso('anthropic:2'), label: 'dois@x', sessions: 1, chamadas: 10 }],
@@ -45,19 +44,24 @@ it('monta o painel: números, bolhas, por dia, contexto e a tabela com abas orde
   const nomes = () => [...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim());
   try {
     await settle();
-    // Topo: 4 números; variação contra o período anterior (130 vs 100) e subagentes fora das sessões.
+    // Topo: só skills e tools — 88 cargas de 22 skills, ferramentas sem contar Skill/Agent (100 do Bash).
     const numeros = target.querySelector('.numeros')!;
     expect(numeros.querySelectorAll(':scope > div')).toHaveLength(4);
-    expect(numeros.textContent).toContain(`↑ 30% ${m.uso_vs_anterior()}`);
-    expect(numeros.textContent).toContain(m.uso_mais_subagentes({ n: '2' }));
-    expect(numeros.textContent).not.toContain(m.uso_graf_chamadas());
-    // Rankings: 8 projetos + "outros (2)"; clicar num projeto vira filtro.
-    const [projetos, modelos] = [...target.querySelectorAll('ol.rank')];
-    expect(projetos.querySelectorAll('li')).toHaveLength(9);
-    expect(projetos.textContent).toContain(m.uso_outros_itens({ n: 2 }));
-    expect(modelos.querySelectorAll('li')).toHaveLength(2);
-    expect(target.querySelector('circle.bolha')).toBeNull();
-    expect(target.querySelector('details.avancado .pilha')).not.toBeNull();   // o que já existia fica em Avançado
+    expect(numeros.textContent).toContain(m.uso_kpi_skills_distintas({ n: '22' }));
+    expect(numeros.textContent).toContain(m.uso_kpi_mais_usada({ nome: 'Bash', pct: '100' }));
+    // Rankings: skills (8 + "outros (14)"), ferramentas, agentes, MCP; área e projeto não moram aqui.
+    const [skills, ferramentas, agentes, mcp] = [...target.querySelectorAll('ol.rank')];    expect(skills.querySelectorAll('li')).toHaveLength(9);
+    expect(skills.textContent).toContain(m.uso_outros_itens({ n: 14 }));
+    expect([...ferramentas.querySelectorAll('li')].map((li) => li.querySelector('.rank-nome')?.textContent)).toEqual(['Bash']);
+    expect(agentes.textContent).toContain('Explore');
+    expect(mcp.textContent).toContain('hangar');
+    expect(target.textContent).not.toContain(m.uso_graf_areas());
+    // Clicar numa skill do ranking abre o detalhe dela.
+    (skills.querySelector('button.rank-nome') as HTMLButtonElement).click();
+    await settle();
+    expect(target.querySelector('.detalhe')?.textContent).toContain('muitas');
+    (target.querySelector('.detalhe button') as HTMLButtonElement).click();
+    await settle();
     expect(nomes().slice(0, 2)).toEqual(['muitas', 'pesada']);                // tokens ocupados, decrescente
     // "pesada" está fora da curva por carga: leva a marca. Skill mostra cargas e respostas, não custo.
     const linhaPesada = [...target.querySelectorAll('tr.click')].find((tr) => tr.textContent?.includes('pesada'))!;
@@ -74,7 +78,7 @@ it('monta o painel: números, bolhas, por dia, contexto e a tabela com abas orde
     // Aba de tools: coluna de contexto no lugar de custo.
     ([...target.querySelectorAll('[role="tab"]')].find((b) => b.textContent?.includes(m.uso_aba_tools())) as HTMLButtonElement).click();
     await settle();
-    expect(nomes()).toEqual(['Bash']);
+    expect(nomes()).toEqual(['Bash', 'Skill']);                               // a aba mostra a tool crua
     expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_ctx());
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
@@ -103,7 +107,7 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
     expect(det.textContent).toContain(m.uso_col_ocupados());                  // skill pesa pelo que ocupou
     expect(det.querySelector('svg.serie')).not.toBeNull();
     // Números da tela continuam lá (nada foi apagado durante o detalhe).
-    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_mais_subagentes({ n: '2' }));
+    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_kpi_cargas_skills());
     (det.querySelector('button') as HTMLButtonElement).click();
     await settle();
     expect(target.querySelector('.detalhe')).toBeNull();
@@ -166,48 +170,8 @@ it('202 "aquecendo" mostra o progresso e repergunta até o dado chegar', async (
     await vi.advanceTimersByTimeAsync(3000);
     await settle();
     expect(target.querySelector('.aquecendo')).toBeNull();
-    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_mais_subagentes({ n: '2' }));
+    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_kpi_cargas_skills());
   } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
-});
-
-it('onde vai o dinheiro: pilha por área em ordem fixa, série por dia e aba de áreas por custo', async () => {
-  localStorage.clear(); servidor();
-  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
-    const { period } = query as unknown as { period: string };
-    return Promise.resolve({
-      ...report(period),
-      by_area: [
-        { ...zeroUso('back'), chamadas: 20, input:60 },
-        { ...zeroUso('conversa'), input:10 },
-        { ...zeroUso('front'), chamadas: 9, input:30 },
-      ],
-      by_area_dia: [
-        { ...zeroUso('2026-09-09|back'), label: 'back', input:40 },
-        { ...zeroUso('2026-09-10|back'), label: 'back', input:20 },
-        { ...zeroUso('2026-09-10|front'), label: 'front', input:30 },
-        { ...zeroUso('2026-09-10|conversa'), label: 'conversa', input:10 },
-      ],
-    }) as ReturnType<typeof clienteQuery.fetchQuery>;
-  });
-  const target = document.body.appendChild(document.createElement('div'));
-  const component = mount(Uso, { target, props: { onBack: vi.fn() } });
-  try {
-    await settle();
-    const avancado = target.querySelector('details.avancado section')!;       // 1º bloco: áreas
-    // Ordem fixa por área (front, back, …, conversa), não por valor: a cor segue a área.
-    expect([...avancado.querySelectorAll('.legenda .lab')].map((e) => e.textContent)).toEqual(
-      [m.uso_area_front(), m.uso_area_back(), m.uso_area_conversa()]);
-    expect(avancado.querySelectorAll('.pilha .seg-pilha')).toHaveLength(3);
-    const tendencia = target.querySelector('.tendencia')!;
-    expect(tendencia.textContent).toContain('60%');
-    // Dia 09: um segmento; dia 10: três.
-    expect(tendencia.querySelectorAll('svg rect[rx="2"]')).toHaveLength(4);
-    ([...target.querySelectorAll('[role="tab"]')].find((b) => b.textContent?.includes(m.uso_aba_areas())) as HTMLButtonElement).click();
-    await settle();
-    expect([...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim()))
-      .toEqual([m.uso_area_back(), m.uso_area_front(), m.uso_area_conversa()]);
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_tokens());
-  } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 
 it('sem uso no período mostra o vazio, não o painel', async () => {

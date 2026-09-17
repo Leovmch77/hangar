@@ -459,8 +459,6 @@ class UsoBucket(BaseModel):
 
 class UsoReport(BaseModel):
     totals: UsoBucket = UsoBucket(key="totals")
-    # Mesmos filtros, janela do mesmo tamanho logo antes do período; None em "tudo".
-    anterior: Optional[UsoBucket] = None
     by_skill: list[UsoBucket] = []
     by_tool: list[UsoBucket] = []
     by_bash: list[UsoBucket] = []

@@ -4,11 +4,11 @@
   import NavBar from '../components/NavBar.svelte';
   import Select from '../components/Select.svelte';
   import { listServers, onServersChanged, type Server } from '../lib/auth';
-  import { clienteQuery, custos } from '../lib/queries';
+  import { clienteQuery, custos, uso } from '../lib/queries';
   import {
     mergeReports, fillDayGaps, tarifasPorModelo, custoDesconhecido, precoParcial, partirOcultos,
-    custoSemCacheDe, equivalenteDe, isFree, Aquecendo,
-    type ServerResult, type MergedReport, type CostReport,
+    custoSemCacheDe, equivalenteDe, isFree, Aquecendo, mergeUso,
+    type ServerResult, type MergedReport, type CostReport, type UsoBucket, type UsoReport,
   } from '@hangar/core';
   import { agruparPor, aplicar, filtrar, somar, valores, type Filtro } from '../lib/cubo';
   import {
@@ -270,6 +270,59 @@
     subagente: temCombos ? filtro.subagente : undefined,
   }));
   const temFiltro = $derived(Object.values(filtroAtivo).some((v) => v !== undefined));
+
+  // ── Por área do código ──────────────────────────────────────────────────────
+  // Vem do relatório de uso: tokens de cada turno divididos pelas áreas dos arquivos tocados.
+  // Lá só existem projeto e modelo; provedor, fonte e máquina não recortam as áreas.
+  const comoLista = (v: string | string[] | undefined) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+  let areasUso = $state<UsoBucket[] | null>(null);
+  let areasErro = $state(false);
+  const chaveAreas = $derived(JSON.stringify([comoLista(filtroAtivo.project), comoLista(filtroAtivo.model)]));
+  async function usoEsperandoAquecer(s: Server, p: Periodo, f: { projeto: string[]; modelo: string[] }, vivo: () => boolean) {
+    for (let tentativa = 0; ; tentativa++) {
+      try { return await clienteQuery.fetchQuery(uso(s, p, f)); }
+      catch (e) {
+        if (!(e instanceof Aquecendo) || tentativa >= AQUECENDO_TENTATIVAS || !vivo()) return null;
+        await esperar(AQUECENDO_INTERVALO_MS);
+      }
+    }
+  }
+  $effect(() => {
+    const p = period;
+    chaveAtivos; chaveAreas;
+    const alvo = untrack(() => servidoresAtivos);
+    const f = untrack(() => ({ projeto: comoLista(filtroAtivo.project), modelo: comoLista(filtroAtivo.model) }));
+    let vivo = true;
+    areasUso = null;
+    areasErro = false;
+    Promise.all(alvo.map((s) => usoEsperandoAquecer(s, p, f, () => vivo))).then((rs) => {
+      if (!vivo) return;
+      areasErro = rs.every((r) => r === null);
+      areasUso = mergeUso(rs.map((r, i) => ({ report: r as Partial<UsoReport> | null, id: alvo[i].id, label: alvo[i].label })), p).report.by_area;
+    });
+    return () => { vivo = false; };
+  });
+  const areasForaDoRecorte = $derived(filtroAtivo.provider !== undefined || filtroAtivo.source !== undefined || filtroAtivo.servidor !== undefined);
+  // A cor segue a área, nunca a posição: 4 cores pras áreas de código, cinza pra conversa e cinza
+  // claro pro resto (docs, outros, áreas do mapa pessoal) — a tabela nomeia cada uma.
+  const ORDEM_AREA = ['front', 'back', 'banco', 'infra', 'docs', 'outros', 'conversa'];
+  const COR_AREA: Record<string, string> = {
+    front: 'var(--chart-1)', back: 'var(--chart-2)', banco: 'var(--chart-3)', infra: 'var(--chart-4)', conversa: 'var(--text-muted)',
+  };
+  const NOME_AREA: Record<string, () => string> = {
+    front: m.uso_area_front, back: m.uso_area_back, banco: m.uso_area_banco, infra: m.uso_area_infra,
+    docs: m.uso_area_docs, outros: m.uso_area_outros, conversa: m.uso_area_conversa,
+  };
+  const posArea = (a: string) => { const i = ORDEM_AREA.indexOf(a); return i < 0 ? ORDEM_AREA.length : i; };
+  const tokensDaArea = (b: UsoBucket) => b.input + b.output + b.cache_write + b.cache_read;
+  const areas = $derived.by(() => {
+    const itens = [...(areasUso ?? [])].filter((b) => tokensDaArea(b) > 0)
+      .sort((a, b) => posArea(a.key) - posArea(b.key) || tokensDaArea(b) - tokensDaArea(a));
+    return {
+      total: itens.reduce((n, b) => n + tokensDaArea(b), 0),
+      itens: itens.map((b) => ({ key: b.key, nome: NOME_AREA[b.key]?.() ?? b.key, cor: COR_AREA[b.key] ?? 'var(--border-strong)', toks: tokensDaArea(b), cost: b.cost })),
+    };
+  });
   const recorte = $derived(filtrar(base, filtroAtivo));
 
   // O que se LÊ de um corte. A chave da conta Anthropic é 'anthropic:<uuid>' — identidade que não
@@ -1152,6 +1205,37 @@
         </div>
       </div>
     {/if}
+
+    <div class="card">
+      <h2>{m.uso_graf_areas()}</h2>
+      <p class="hint">{m.uso_graf_areas_nota()}{#if areasForaDoRecorte} {m.custos_areas_sem_recorte()}{/if}</p>
+      {#if areasUso === null}
+        <p class="empty">{m.custos_areas_carregando()}</p>
+      {:else if areasErro}
+        <p class="empty">{m.custos_areas_erro()}</p>
+      {:else if !areas.itens.length}
+        <p class="empty">{m.custos_sem_dados_no_periodo()}</p>
+      {:else}
+        <div class="stack100">
+          {#each areas.itens as a (a.key)}<i style="background: {a.cor}; flex: {a.toks}" title="{a.nome}: {tok(a.toks)}"></i>{/each}
+        </div>
+        <div class="twrap"><table class="breakdown">
+          <thead>
+            <tr><th></th><th class="n">{m.ctx_tokens()}</th><th class="n">{m.custos_custo()}</th><th class="n">{m.custos_areas_pct()}</th></tr>
+          </thead>
+          <tbody>
+            {#each areas.itens as a (a.key)}
+              <tr>
+                <td class="name"><span class="swatch" style="background: {a.cor}"></span>{a.nome}</td>
+                <td class="n">{tok(a.toks)}</td>
+                <td class="n">{m2(a.cost)}</td>
+                <td class="n dim">{pct(a.toks, areas.total)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table></div>
+      {/if}
+    </div>
 
     <div class="card">
       <h2>{m.custos_por_projeto()}</h2>

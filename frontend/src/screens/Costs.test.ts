@@ -9,6 +9,7 @@ import Costs from './Costs.svelte';
 vi.mock('../components/NavBar.svelte', () => ({ default: createRawSnippet(() => ({ render: () => '<nav></nav>' })) }));
 vi.mock('../lib/queries', () => ({
   custos: (server: { id: string }, period: string) => ({ id: server.id, period }),
+  uso: (server: { id: string }, period: string, filtros: Record<string, string[]>) => ({ tipo: 'uso', id: server.id, period, ...filtros }),
   clienteQuery: { fetchQuery: vi.fn(), invalidateQueries: vi.fn(async () => {}) },
 }));
 
@@ -89,6 +90,38 @@ it('distingue contas de mesmo nome no Claude e Codex ao comparar', async () => {
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 
+it('por área do código: tokens e custo por área em ordem fixa, com o filtro de projeto indo junto', async () => {
+  localStorage.clear();
+  localStorage.setItem('cp_servers', JSON.stringify([{ id: 'local', label: 'Local', baseUrl: 'https://local.test', token: 'test' }]));
+  const bucket = { key: 'totals', sessions: 1, input: 100, output: 20, cache_read: 80, cache_write: 0,
+    cost: 2, cost_input: 1, cost_output: 0.8, cost_cache_read: 0.2, cost_cache_write: 0 };
+  const area = (key: string, input: number, cost: number) => ({ key, label: null, plugin: '', sessions: 1, chamadas: 1, pedidas: 0,
+    ctx_chars: 0, ctx_tokens_est: 0, input, output: 0, cache_write: 0, cache_read: 0, cost });
+  const pedidosUso: Record<string, unknown>[] = [];
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    const q = query as unknown as Record<string, unknown>;
+    if (q.tipo === 'uso') {
+      pedidosUso.push(q);
+      return Promise.resolve({ applied: { period: q.period }, by_area: [area('back', 60, 3), area('conversa', 10, 1), area('front', 30, 2)] }) as ReturnType<typeof clienteQuery.fetchQuery>;
+    }
+    return Promise.resolve({ totals: bucket, applied: { period: q.period }, by_day: [{ ...bucket, key: '2026-09-10' }],
+      by_project: [{ ...bucket, key: '/p/hangar' }] }) as ReturnType<typeof clienteQuery.fetchQuery>;
+  });
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(Costs, { target, props: { onBack: vi.fn() } });
+  const settle = async () => { for (let i = 0; i < 12; i++) await tick(); };
+  try {
+    await settle();
+    const card = [...target.querySelectorAll('.card')].find((c) => c.querySelector('h2')?.textContent === m.uso_graf_areas())!;
+    // Ordem fixa por área (a cor segue a área), não por valor.
+    expect([...card.querySelectorAll('tbody td.name')].map((td) => td.textContent?.trim()))
+      .toEqual([m.uso_area_front(), m.uso_area_back(), m.uso_area_conversa()]);
+    expect(card.querySelectorAll('.stack100 i')).toHaveLength(3);
+    expect(card.textContent).toContain('60');
+    expect(pedidosUso.at(-1)).toMatchObject({ period: '30d', projeto: [], modelo: [] });
+  } finally { await unmount(component); target.remove(); localStorage.clear(); }
+});
+
 it('202 "aquecendo" mostra o progresso da primeira leitura e pergunta de novo até o dado chegar', async () => {
   vi.useFakeTimers();
   localStorage.clear();
@@ -96,7 +129,8 @@ it('202 "aquecendo" mostra o progresso da primeira leitura e pergunta de novo at
   const bucket = { key: 'totals', sessions: 1, input: 100, output: 20, cache_read: 80, cache_write: 0,
     cost: 2, cost_input: 1, cost_output: 0.8, cost_cache_read: 0.2, cost_cache_write: 0 };
   let chamadas = 0;
-  vi.mocked(clienteQuery.fetchQuery).mockImplementation(() => {
+  vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
+    if ((query as unknown as { tipo?: string }).tipo === 'uso') return Promise.resolve({ applied: { period: '30d' } }) as ReturnType<typeof clienteQuery.fetchQuery>;
     chamadas += 1;
     if (chamadas < 3) return Promise.reject(new Aquecendo(chamadas * 100, 690));
     return Promise.resolve({ totals: bucket, applied: { period: '30d' }, by_day: [{ ...bucket, key: '2026-09-10' }] }) as ReturnType<typeof clienteQuery.fetchQuery>;
