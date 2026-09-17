@@ -1233,10 +1233,6 @@
         </div>
       {/if}
 
-      {#if !conversaAlvo && provider === 'codex'}
-        <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
-      {/if}
-
       {#if !conversaAlvo && (provider === 'claude' || (provider === 'codex' && semTerminal))}
         <div class="field">
           <label class="field-label" for="perm-pick">{m.criar_permissao()}</label>
@@ -1250,6 +1246,10 @@
       {/if}
 
       </div>
+
+      {#if !conversaAlvo && provider === 'codex'}
+        <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
+      {/if}
 
       {#if temMotor || temSubagente || retomaveis.length}
         <!-- O que quase ninguém muda fica recolhido, mas o resumo mostra o valor de cada um: a

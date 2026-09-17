@@ -1015,7 +1015,9 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
     await tick();
-    expect(document.querySelector('#perm-pick')).not.toBeNull();
+    const trio = document.querySelector('.trio')!;
+    expect(trio.querySelector('#perm-pick')).not.toBeNull();
+    expect(trio.querySelector('.context-control')).toBeNull();
     await escolherNoCombo('#perm-pick', 'Full Access');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
