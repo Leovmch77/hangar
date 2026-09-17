@@ -218,16 +218,12 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 ### Enviar
 - **Texto:** digite e envie. **Multi-linha** funciona (Shift+Enter / colar — vai por bracketed paste).
 - **Imagem / arquivo:** 📎 no composer (upload) — ou cole no terminal do Claude que o app mostra o thumbnail.
-- **Áudio (ditado):** 🎤 no composer grava pelo microfone (toque grava, toque ⏹ para); ou anexe um
-  arquivo de áudio pelo 📎. Nos dois casos o áudio é sempre **gravado e transcrito** (Groq /
-  whisper-large-v3-turbo) — o app não usa mais o reconhecimento de fala do navegador (o do Safari,
-  no iPhone), então o texto some do campo enquanto você fala e reaparece de uma vez só ao final, não
-  palavra por palavra. O resultado cai como texto no campo pra você revisar e enviar; o áudio em si
-  não vira anexo. **Requer a chave da Groq** — sem ela não há ditado nenhum (antes o navegador
-  cobria quando faltava): `CP_GROQ_API_KEY=<sua-chave>` no `backend/.env` (ou `GROQ_API_KEY` no
-  ambiente do backend, reiniciando-o), ou a **chave da Groq** em Configurações → Anexos e
-  transcrição. Sem chave, a gravação funciona mas a transcrição responde 503. Pegue a chave grátis
-  em <https://console.groq.com>.
+- **Áudio (transcrição):** 🎤 no composer grava pelo microfone (toque grava, toque ⏹ para); ou anexe
+  um arquivo de áudio pelo 📎. Nos dois casos o áudio é gravado e enviado a uma API compatível com
+  a OpenAI; o texto reaparece de uma vez ao final e o áudio não vira anexo. Configure chave,
+  endpoint e modelo em **Configurações → Voz → Transcrição**. Endpoint e modelo vazios usam Groq e
+  `whisper-large-v3-turbo`; a chave padrão também pode vir de `CP_GROQ_API_KEY`/`GROQ_API_KEY` no
+  ambiente do backend. Sem chave, a gravação funciona, mas a transcrição responde 503.
 - **Conversa por voz com Codex (Beta):** nasce desligada. Ative em **Configurações → Harnesses →
   Codex → Opções → Conversa por voz**. O botão **Voz · Beta** aparece nas sessões Codex daquele
   servidor. A escolha vale só para esse servidor; desligar durante uma chamada encerra o microfone

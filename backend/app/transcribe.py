@@ -10,10 +10,11 @@ from app.uploads import _safe_ext
 
 logger = logging.getLogger(__name__)
 
-# Transcricao de audio via Groq (whisper-large-v3-turbo). Groq aceita webm/mp4/m4a/mp3/wav/ogg
-# direto -> sem pre-conversao com ffmpeg. HTTP feito com urllib (stdlib): multipart montado a mao,
-# zero dep nova. A chave vem de settings.groq_api_key (CP_GROQ_API_KEY no .env ou GROQ_API_KEY no env).
-GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+# Transcricao de audio por uma API compativel com a OpenAI. O servico padrao aceita
+# webm/mp4/m4a/mp3/wav/ogg direto -> sem pre-conversao com ffmpeg. HTTP feito com urllib (stdlib):
+# multipart montado a mao, zero dependencia nova. O nome interno da chave segue legado para nao
+# invalidar CP_GROQ_API_KEY nem o runtime-config existente; a interface nao amarra o recurso a ele.
+PADRAO_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_MODEL = "whisper-large-v3-turbo"
 
 # O que se dita neste app e prompt pra agente: nome de ferramenta, comando, caminho e sigla. Sao
@@ -72,13 +73,14 @@ def vocabulario() -> str:
     return juntos[:_VOCAB_MAX]
 
 
-def build_multipart(filename: str, content: bytes, vocab: str = "") -> tuple[bytes, str]:
+def build_multipart(filename: str, content: bytes, vocab: str = "",
+                    model: str = GROQ_MODEL) -> tuple[bytes, str]:
     """Monta um corpo multipart/form-data (model + response_format + language + prompt + file) e
     devolve (body, boundary). Separado da chamada de rede pra ser testavel sem tocar na Groq."""
     boundary = "----hangar" + secrets.token_hex(16)
     b = boundary.encode()
     parts: list[bytes] = []
-    campos = [("model", GROQ_MODEL), ("response_format", "text"), ("language", IDIOMA)]
+    campos = [("model", model), ("response_format", "text"), ("language", IDIOMA)]
     if vocab:
         campos.append(("prompt", vocab))
     for name, value in campos:
@@ -93,20 +95,22 @@ def build_multipart(filename: str, content: bytes, vocab: str = "") -> tuple[byt
 
 
 def transcribe(content: bytes, filename: str | None) -> str:
-    """Transcreve os bytes de audio via Groq e devolve o texto em UMA linha (send-keys rejeita '\\n').
-    Levanta TranscribeError(status, detail): 503 sem chave, 502 falha/erro da Groq."""
+    """Transcreve áudio via API OpenAI-compatible e devolve UMA linha."""
     api_key = (runtime_config.get("groq_api_key") or "").strip()
     if not api_key:
-        raise TranscribeError(503, "GROQ_API_KEY (ou CP_GROQ_API_KEY) nao configurada no backend")
+        raise TranscribeError(503, "chave de transcricao nao configurada no backend")
+    base_url = (runtime_config.get("transcription_base_url") or "").strip().rstrip("/")
+    url = f"{base_url or PADRAO_BASE_URL}/audio/transcriptions"
+    model = (runtime_config.get("transcription_model") or "").strip() or GROQ_MODEL
     # Nome enviado a Groq: FIXO no servidor, so a extensao sanitizada (_safe_ext) — nunca o nome cru do
     # cliente, que interpolado no header Content-Disposition permitiria injecao de aspas/CRLF (partes/campos
     # extras no multipart). A Groq so usa a extensao pra detectar o formato. 'bin' (sem ext) -> webm.
     ext = _safe_ext(filename)
     if ext == "bin":
         ext = "webm"
-    body, boundary = build_multipart(f"audio.{ext}", content, vocabulario())
+    body, boundary = build_multipart(f"audio.{ext}", content, vocabulario(), model)
     req = urllib.request.Request(
-        GROQ_URL, data=body, method="POST",
+        url, data=body, method="POST",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
@@ -125,10 +129,10 @@ def transcribe(content: bytes, filename: str | None) -> str:
             # ler o corpo de erro tambem e um read() de socket -> pode cair/timeout. Nao deixa
             # vazar cru (viraria 500); mantem o 502 com o codigo, sem o corpo.
             detail = "(sem corpo)"
-        raise TranscribeError(502, f"Groq {e.code}: {detail}")
+        raise TranscribeError(502, f"servico de transcricao {e.code}: {detail}")
     except (OSError, http.client.HTTPException) as e:
         # OSError cobre URLError (conexao) e TimeoutError/socket.timeout no read(); http.client cobre
         # IncompleteRead (conexao cai no meio da resposta). Sem isto, timeout no read vazaria como 500.
-        raise TranscribeError(502, f"falha ao contatar a Groq: {e}")
+        raise TranscribeError(502, f"falha ao contatar o servico de transcricao: {e}")
     # response_format=text -> corpo e o texto puro. Achata espacos/quebras numa linha so.
     return " ".join(text.split())

@@ -79,6 +79,36 @@ def test_transcribe_manda_idioma_e_vocabulario_no_corpo_real(monkeypatch):
     assert "Acme, projeto-x".encode() in body   # e o vocabulario do usuario tambem
 
 
+def test_transcribe_usa_endpoint_e_modelo_configurados(monkeypatch):
+    """Trocar o provedor na tela precisa mudar a requisicao real, nao so o rotulo exibido."""
+    config = {
+        "groq_api_key": "chave-outro-servico",
+        "transcription_base_url": "https://fala.exemplo/v1/",
+        "transcription_model": "whisper-personalizado",
+        "ditado_vocabulario": "",
+    }
+    monkeypatch.setattr(mod_transcribe.runtime_config, "get", config.get)
+    captured = {}
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"texto transcrito"
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["authorization"] = req.headers["Authorization"]
+        captured["body"] = req.data
+        return FakeResp()
+
+    monkeypatch.setattr("app.transcribe.urllib.request.urlopen", fake_urlopen)
+    assert transcribe(b"audio", "a.webm") == "texto transcrito"
+    assert captured["url"] == "https://fala.exemplo/v1/audio/transcriptions"
+    assert captured["authorization"] == "Bearer chave-outro-servico"
+    assert b"whisper-personalizado" in captured["body"]
+    assert b"whisper-large-v3-turbo" not in captured["body"]
+
+
 def test_vocabulario_trunca_e_GRITA(monkeypatch, caplog):
     # Lista gigante nao pode passar em silencio: a API corta em ~224 tokens e perderia o fim sem
     # avisar. O corte aqui e explicito, testado — e RUIDOSO. Cortar calado seria reimplementar

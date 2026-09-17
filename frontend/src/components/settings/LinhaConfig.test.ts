@@ -11,6 +11,9 @@ function store(campos: Record<string, unknown>, valor: unknown = '') {
     valorAtual: () => valor,
     rascunhoDe: () => '',
     setRascunho: vi.fn(),
+    removerRascunho: vi.fn(),
+    remocaoPendente: () => false,
+    desfazerRascunho: vi.fn(),
   } as unknown as ConfigServidorStore;
 }
 
@@ -30,6 +33,26 @@ describe('LinhaConfig', () => {
     expect(alvo.textContent).toContain('sk-•••1234');
     expect(alvo.querySelector<HTMLInputElement>('input[type="text"]')!.value).toBe('');
     unmount(app);
+  });
+
+  it('configuração salva pelo app pode ser removida sem apagar valor vindo do env', () => {
+    const salvoNoApp = store({ k: { definido: true, valor: 'sk-•••1234', origem: 'app' } });
+    const app = montar({
+      campo: { chave: 'k', rotulo: 'Chave', ajuda: 'ajuda', tipo: 'segredo' },
+      store: salvoNoApp,
+      removivel: true,
+    });
+    [...app.alvo.querySelectorAll('button')].find((b) => b.textContent?.includes(m.lista_remover()))!.click();
+    expect(salvoNoApp.removerRascunho).toHaveBeenCalledWith('k');
+    unmount(app.app);
+
+    const vindoDoEnv = montar({
+      campo: { chave: 'k', rotulo: 'Chave', ajuda: 'ajuda', tipo: 'segredo' },
+      store: store({ k: { definido: true, valor: 'sk-•••1234', origem: 'env' } }),
+      removivel: true,
+    });
+    expect([...vindoDoEnv.alvo.querySelectorAll('button')].some((b) => b.textContent?.includes(m.lista_remover()))).toBe(false);
+    unmount(vindoDoEnv.app);
   });
 
   it('interruptor reflete o valor atual', () => {

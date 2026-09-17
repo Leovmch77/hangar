@@ -23,6 +23,8 @@ from app.config import _backend_config_base, settings
 EDITAVEIS: dict[str, type] = {
     "sync": bool,                 # ativa esta máquina como principal sem reiniciar
     "groq_api_key": str,          # transcrição de áudio e de vídeo
+    "transcription_base_url": str,  # base OpenAI-compatible; vazio = serviço padrão
+    "transcription_model": str,     # modelo de áudio; vazio = whisper-large-v3-turbo
     "upload_retention_days": int,  # dias que um anexo sobrevive
     "notify_finished": bool,
     "notify_dead": bool,
@@ -218,7 +220,7 @@ def _coagir(campo: str, valor: Any) -> Any:
                 raise ValueError(f"term_origins: '{entrada}' precisa comecar com http:// ou https://")
             if not urlparse(entrada).netloc:
                 raise ValueError(f"term_origins: '{entrada}' nao tem endereco (ex: https://app.exemplo.com)")
-    if campo in ("llm_base_url", "llm_briefing_base_url") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
+    if campo in ("transcription_base_url", "llm_base_url", "llm_briefing_base_url") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
         # Mesmo argumento do editor: antes so o dono da maquina escolhia o endpoint (env), agora o
         # celular escreve. Aceita vazio (volta ao padrao) ou uma URL http(s) de verdade.
         raise ValueError(f"{campo}: use vazio ou uma URL http(s)://")

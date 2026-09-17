@@ -41,6 +41,26 @@ beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe('criarConfigServidor — ownership do salvar (round 2)', () => {
+  it('remoção pendente envia null e mostra o valor vazio até salvar', async () => {
+    let alvo: Server | null = A;
+    const config = criarConfigServidor(() => alvo);
+    apiMock.getConfigForServer.mockResolvedValueOnce(payload({
+      groq_api_key: { valor: 'gsk_••••final', definido: true, origem: 'app' },
+    }) as never);
+    await config.carregar();
+
+    config.removerRascunho('groq_api_key');
+    expect(config.remocaoPendente('groq_api_key')).toBe(true);
+    expect(config.valorAtual('groq_api_key')).toBe('');
+
+    apiMock.patchConfigForServer.mockResolvedValueOnce(payload({
+      groq_api_key: { valor: '', definido: false, origem: 'env' },
+    }) as never);
+    await config.salvar();
+    expect(apiMock.patchConfigForServer).toHaveBeenLastCalledWith(A, { groq_api_key: null });
+    expect(config.remocaoPendente('groq_api_key')).toBe(false);
+  });
+
   it('save A tardio não pinta sobre o save B: campos, rascunho, salvo, erro, salvando e timer', async () => {
     let alvo: Server | null = A;
     const store = criarConfigServidor(() => alvo);

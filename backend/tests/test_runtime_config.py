@@ -174,6 +174,14 @@ def test_llm_base_url_aceita_http_e_vazio():
     assert rc.get("llm_base_url") == ""
 
 
+def test_endpoint_de_transcricao_aceita_http_e_recusa_outro_esquema():
+    rc.aplicar({"transcription_base_url": "https://fala.exemplo/v1"})
+    assert rc.get("transcription_base_url") == "https://fala.exemplo/v1"
+    with pytest.raises(ValueError):
+        rc.aplicar({"transcription_base_url": "ftp://fala.exemplo"})
+    assert rc.get("transcription_base_url") == "https://fala.exemplo/v1"
+
+
 def test_vocabulario_grande_demais_e_RECUSADO_na_gravacao():
     """O teto tem que doer na hora de salvar, nao na hora de transcrever. Sem isto a tela diz
     "salvo", o corte acontece calado depois, e os nomes que a pessoa cadastrou pra parar de sair

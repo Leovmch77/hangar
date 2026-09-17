@@ -78,10 +78,9 @@ def _provedor(perfil: str = "padrao") -> tuple[str, str, str]:
     tempo. Endpoint de briefing VAZIO = cai no provedor de sempre, entao quem nao configurar nada
     segue com o comportamento antigo.
 
-    `llm_api_key` so vale com endpoint proprio (base != PADRAO_BASE_URL) — endpoint padrao usa
-    SEMPRE `groq_api_key`, sem fallback pra `llm_api_key`. Sem essa amarra, uma `llm_api_key` de
-    outro provedor sobrando de config anterior mandaria um segredo valido pro host errado (Groq) —
-    e o usuario so veria "provedor 401".
+    `llm_api_key` so vale com endpoint proprio (base != PADRAO_BASE_URL). O endpoint padrao reutiliza
+    a chave da transcricao apenas quando ela tambem usa o servico padrao; chave de audio propria
+    nunca viaja para outro host.
 
     Isso tambem resolve um beco: `llm_api_key` esta em SEGREDOS, e o runtime_config ignora string
     vazia quando ja ha valor (:137-140), entao ela nao pode ser esvaziada pela tela. Presa ao
@@ -96,7 +95,10 @@ def _provedor(perfil: str = "padrao") -> tuple[str, str, str]:
                     (runtime_config.get("llm_briefing_model") or "").strip() or PADRAO_MODELO)
     base = (runtime_config.get("llm_base_url") or "").strip().rstrip("/") or PADRAO_BASE_URL
     if base == PADRAO_BASE_URL:
-        chave = (runtime_config.get("groq_api_key") or "").strip()
+        # A chave legada é compartilhada só quando a TRANSCRIÇÃO também usa o serviço padrão.
+        # Com endpoint de áudio próprio ela pertence a outro host e nunca pode viajar para cá.
+        transcricao_propria = (runtime_config.get("transcription_base_url") or "").strip()
+        chave = "" if transcricao_propria else (runtime_config.get("groq_api_key") or "").strip()
     else:
         chave = (runtime_config.get("llm_api_key") or "").strip()
     modelo = (runtime_config.get("llm_model") or "").strip() or PADRAO_MODELO
@@ -171,8 +173,8 @@ def chamar_chat(system: str, prompt: str, *, temperature: float, timeout: int,
         # usuario segue a instrucao e continua com 503 (achado da re-review de 2026-08-01).
         if base_url == PADRAO_BASE_URL:
             msg = (
-                "chave do provedor nao configurada: preencha a chave da Groq em "
-                "Configuracoes -> Anexos e transcricao (ou GROQ_API_KEY/CP_GROQ_API_KEY)"
+                "chave do provedor nao configurada: configure a organizacao do texto em "
+                "Configuracoes -> Voz"
             )
         elif perfil == "briefing":
             msg = (

@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 from app.config import _default_projects_dir, detect_lan_ip, pairing_url_api, resolve_bind_ip, pairing_url, Settings
 from app.config import SEGREDOS_DO_ENV, VARIAVEIS_DO_AMBIENTE, variaveis_env
 from app.config import (
@@ -300,6 +303,31 @@ def test_rota_de_config_entrega_as_variaveis_do_env_sem_vazar_segredo(monkeypatc
 
     # o aviso do kill-switch também atravessa a rota, não só a função.
     assert por_nome["CP_CODEX_SYNC_ENABLED"]["alerta"] == "codex_sync_desligado"
+
+
+@pytest.mark.asyncio
+async def test_post_config_com_null_remove_override_e_volta_ao_env(monkeypatch, tmp_path):
+    """A tela precisa apagar uma chave salva sem mandar string vazia, que segredos ignoram."""
+    from app import api as api_mod
+    from app import runtime_config
+    from app.config import settings as singleton
+
+    monkeypatch.setattr(runtime_config, "_caminho", lambda: tmp_path / "runtime-config.json")
+    monkeypatch.setattr(singleton, "groq_api_key", "")
+    monkeypatch.setattr(api_mod, "_somente_leitura", lambda request: {})
+    async def direto(funcao, *args, **kwargs):
+        return funcao(*args, **kwargs)
+    monkeypatch.setattr(api_mod.asyncio, "to_thread", direto)
+    runtime_config.aplicar({"groq_api_key": "chave-salva-pelo-app"})
+
+    class Request:
+        async def json(self):
+            return {"groq_api_key": None}
+
+    resposta = await api_mod.patch_config(Request())
+    campo = resposta["campos"]["groq_api_key"]
+    assert campo == {"valor": "", "definido": False, "origem": "env"}
+    assert "groq_api_key" not in json.loads(runtime_config._caminho().read_text())
 
 
 def test_nome_da_variavel_respeita_o_alias_declarado_no_campo():

@@ -48,11 +48,26 @@
   };
 
   // --- Transcrever -----------------------------------------------------------------------------
-  const transcreverOk = $derived(store.campos['groq_api_key']?.definido === true);
-  const CAMPO_GROQ = {
+  const transcreverOk = $derived(
+    store.campos['groq_api_key']?.definido === true && !store.remocaoPendente('groq_api_key'),
+  );
+  const transcricaoPersonalizada = $derived(
+    String(store.valorAtual('transcription_base_url') ?? '').trim().length > 0,
+  );
+  const CAMPO_TRANSCRICAO_CHAVE = {
     chave: 'groq_api_key', tipo: 'segredo' as const,
-    rotulo: m.config_server_groq(), ajuda: m.voz_transcrever_ajuda(),
+    rotulo: m.config_server_groq(), ajuda: m.config_server_groq_ajuda(),
   };
+  const CAMPO_TRANSCRICAO_ENDPOINT = {
+    chave: 'transcription_base_url', tipo: 'texto' as const,
+    rotulo: m.config_server_transcription_endpoint(), ajuda: m.config_server_transcription_endpoint_ajuda(),
+  };
+  const CAMPO_TRANSCRICAO_MODELO = {
+    chave: 'transcription_model', tipo: 'texto' as const,
+    rotulo: m.config_server_transcription_model(), ajuda: m.config_server_transcription_model_ajuda(),
+  };
+  let transcricaoAvancadaAberta = $state(false);
+  let transcricaoAvancadaDecidida = $state(false);
 
   // --- Limpar o texto ----------------------------------------------------------------------------
   // Sozinho, sem chave nenhuma: usa Groq com o padrão do app. O acordeão só existe pra quem quer
@@ -61,6 +76,7 @@
   // colapsado, e isso deixaria a tela "dizendo" o endpoint do LLM mesmo com o acordeão fechado.
   let avancadoAberto = $state(false);
   let avancadoDecidido = $state(false);
+  let briefingAberto = $state(false);
   // Tipado à mão porque só uma das linhas tem veredito: sem a anotação, o TypeScript infere a
   // união dos objetos e ler `c.veredito` nas outras vira erro.
   const CAMPOS_LLM: {
@@ -75,10 +91,20 @@
       opcoes: [{ value: '', label: m.config_server_raciocinio_padrao() },
                { value: 'none', label: 'none' }, { value: 'low', label: 'low' },
                { value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
+  ];
+  const CAMPOS_BRIEFING = [
     { chave: 'llm_briefing_base_url', tipo: 'texto' as const, rotulo: m.config_server_endpoint_llm_briefing(), ajuda: m.config_server_endpoint_llm_briefing_ajuda() },
     { chave: 'llm_briefing_api_key', tipo: 'segredo' as const, rotulo: m.config_server_chave_llm_briefing(), ajuda: m.config_server_chave_llm_briefing_ajuda() },
     { chave: 'llm_briefing_model', tipo: 'texto' as const, rotulo: m.config_server_modelo_llm_briefing(), ajuda: m.config_server_modelo_llm_briefing_ajuda() },
   ];
+  const organizacaoPersonalizada = $derived(
+    String(store.valorAtual('llm_base_url') ?? '').trim().length > 0,
+  );
+  const organizacaoOk = $derived(
+    organizacaoPersonalizada
+      ? store.campos['llm_api_key']?.definido === true && !store.remocaoPendente('llm_api_key')
+      : transcreverOk && !transcricaoPersonalizada,
+  );
 
   // Nasce ABERTO quando quem já configurou um provedor próprio chega na tela — fechado por padrão
   // parecia configuração perdida. Decide UMA vez, quando os campos terminam de carregar: sem o
@@ -87,15 +113,36 @@
   $effect(() => {
     if (avancadoDecidido || store.carregando || !Object.keys(store.campos).length) return;
     avancadoDecidido = true;
-    if (CAMPOS_LLM.some((c) => String(store.valorAtual(c.chave) ?? '').trim())) avancadoAberto = true;
+    if ([...CAMPOS_LLM, ...CAMPOS_BRIEFING].some((c) => String(store.valorAtual(c.chave) ?? '').trim())) {
+      avancadoAberto = true;
+    }
+    if (CAMPOS_BRIEFING.some((c) => String(store.valorAtual(c.chave) ?? '').trim())) briefingAberto = true;
+  });
+
+  $effect(() => {
+    if (transcricaoAvancadaDecidida || store.carregando || !Object.keys(store.campos).length) return;
+    transcricaoAvancadaDecidida = true;
+    if (String(store.valorAtual('transcription_base_url') ?? '').trim()
+      || String(store.valorAtual('transcription_model') ?? '').trim()) {
+      transcricaoAvancadaAberta = true;
+    }
   });
 
   // --- Ler em voz alta -----------------------------------------------------------------------
-  const lerOk = $derived(store.campos['elevenlabs_api_key']?.definido === true);
+  const lerOk = $derived(
+    store.campos['elevenlabs_api_key']?.definido === true
+      && !store.remocaoPendente('elevenlabs_api_key'),
+  );
   // `lerOk` só decide a UI extra da ElevenLabs (voz/naturalidade/amostra — não existe pro comando
   // local). `podeLerAgora` é a pergunta de verdade "já dá pra ouvir alguma coisa" — mesmo critério
   // de segredos.podeLer(), aqui contra o valor AO VIVO do rascunho, sem esperar o Salvar.
   const podeLerAgora = $derived(podeLerCriterio(lerOk, store.valorAtual('tts_local_cmd')));
+  const vozLocalOk = $derived(String(store.valorAtual('tts_local_cmd') ?? '').trim().length > 0);
+  let elevenAberto = $state(false);
+  let localAberto = $state(false);
+  let ajustesAbertos = $state(false);
+  $effect(() => { if (lerOk) elevenAberto = true; });
+  $effect(() => { if (vozLocalOk) localAberto = true; });
   const CAMPO_ELEVEN = {
     chave: 'elevenlabs_api_key', tipo: 'segredo' as const,
     rotulo: m.config_server_elevenlabs(), ajuda: m.config_server_elevenlabs_ajuda(),
@@ -116,6 +163,10 @@
   let carregandoVozes = $state(false);
   let saldo = $state<{ usados: number | null; limite: number | null } | null>(null);
   let saldoErro = $state('');
+  const vozSelecionadaId = $derived(String(store.valorAtual('elevenlabs_voice_id') ?? '').trim());
+  const vozSelecionada = $derived(
+    vozes.find((v) => v.id === vozSelecionadaId)?.nome || vozSelecionadaId || m.config_server_padrao_servidor(),
+  );
 
   function carregarVozes() {
     vozErro = '';
@@ -169,7 +220,7 @@
     store.setRascunho(a.chave, n);
   }
   function ajusteResetar(a: AjusteSlider) {
-    store.setRascunho(a.chave, a.padrao);
+    store.removerRascunho(a.chave);
   }
 
   // O rodapé só existe quando há o que salvar — e, quando existe, a tela reserva a altura dele:
@@ -181,66 +232,97 @@
 </script>
 
 <div class="voz" class:com-rodape={rodapeVisivel}>
-  <header class="cfg-head">
-    <h2>{m.voz_titulo()}</h2>
-  </header>
-
   {#if store.carregando}
     <p class="aviso">{m.comum_carregando()}</p>
   {:else if store.erro && !Object.keys(store.campos).length}
     <p class="aviso erro">{store.erro}</p>
     <button class="btn" onclick={() => void store.carregar()}>{m.config_server_tentar_de_novo()}</button>
   {:else}
-    <!-- Ditar -->
+    <!-- Transcrição -->
     <section class="secao">
-      <h3>{m.voz_ditar()}</h3>
-
-      <div class="linha-maos-livres">
-        <div class="txt">
-          <label class="rot" for="voz-maos-livres">{m.config_ditado_titulo()}</label>
-          <span class="ajuda">{m.config_ditado_desc()}</span>
+      <div class="secao-cabeca">
+        <div>
+          <h3>{m.voz_transcrever()}</h3>
+          <p class="secao-ajuda">{m.voz_transcrever_ajuda()}</p>
         </div>
-        <input id="voz-maos-livres" class="switch" type="checkbox" bind:checked={maosLivres}
-          onchange={() => setMaosLivres(maosLivres)} />
+        <span class="estado" class:ativo={transcreverOk}>
+          {transcreverOk
+            ? transcricaoPersonalizada ? m.voz_status_personalizado() : m.voz_status_ativo()
+            : m.voz_status_desativado()}
+        </span>
       </div>
-      <p class="nota">{m.voz_so_neste_aparelho()}</p>
 
-      <div class="estilo">
-        <div class="txt">
-          <span class="rot">{m.voz_estilo()} <EscopoChip escopo="servidor" /></span>
-          <span class="ajuda">{m.voz_estilo_ajuda()}</span>
-        </div>
-        <SegmentedPicker value={ditadoEstilo.valor} options={OPCOES_ESTILO}
-          ariaLabel={m.voz_estilo()} onPick={(v) => void escolherEstilo(v)} />
-      </div>
-      {#if estiloErro}<p class="aviso erro">{estiloErro}</p>{/if}
-
-      <LinhaConfig campo={CAMPO_VOCABULARIO} {store} />
-    </section>
-
-    <!-- Transcrever -->
-    <section class="secao">
-      <h3>{m.voz_transcrever()}</h3>
-      {#if !transcreverOk}
-        <p class="aviso">{m.voz_transcrever_sem_chave()}</p>
-      {/if}
-      <LinhaConfig campo={CAMPO_GROQ} {store} />
+      {#if !transcreverOk}<p class="aviso">{m.voz_transcrever_sem_chave()}</p>{/if}
+      <LinhaConfig campo={CAMPO_TRANSCRICAO_CHAVE} {store} removivel />
       <a class="link" href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">
         {m.voz_criar_chave()}
       </a>
+
+      <details class="detalhes transcription-provider" bind:open={transcricaoAvancadaAberta}>
+        <summary>{m.voz_transcricao_outro_servico()}</summary>
+        {#if transcricaoAvancadaAberta}
+          <div class="detalhes-corpo">
+            <LinhaConfig campo={CAMPO_TRANSCRICAO_ENDPOINT} {store} removivel />
+            <LinhaConfig campo={CAMPO_TRANSCRICAO_MODELO} {store} removivel />
+          </div>
+        {/if}
+      </details>
+
+      <div class="preferencias">
+        <p class="grupo-rotulo">{m.voz_preferencias_transcricao()}</p>
+
+        <div class="linha-maos-livres">
+          <div class="txt">
+            <label class="rot" for="voz-maos-livres">{m.config_ditado_titulo()}</label>
+            <span class="ajuda">{m.config_ditado_desc()}</span>
+            <span class="nota">{m.voz_so_neste_aparelho()}</span>
+          </div>
+          <input id="voz-maos-livres" class="switch" type="checkbox" bind:checked={maosLivres}
+            onchange={() => setMaosLivres(maosLivres)} />
+        </div>
+
+        <div class="estilo">
+          <div class="txt">
+            <span class="rot">{m.voz_estilo()} <EscopoChip escopo="servidor" /></span>
+            <span class="ajuda">{m.voz_estilo_ajuda()}</span>
+          </div>
+          <SegmentedPicker value={ditadoEstilo.valor} options={OPCOES_ESTILO}
+            ariaLabel={m.voz_estilo()} onPick={(v) => void escolherEstilo(v)} />
+        </div>
+        {#if estiloErro}<p class="aviso erro">{estiloErro}</p>{/if}
+
+        <LinhaConfig campo={CAMPO_VOCABULARIO} {store} removivel />
+      </div>
     </section>
 
-    <!-- Limpar o texto -->
+    <!-- Organização do texto -->
     <section class="secao">
-      <h3>{m.voz_limpar()}</h3>
-      <p class="ajuda">{m.voz_limpar_ajuda()}</p>
+      <div class="secao-cabeca">
+        <div>
+          <h3>{m.voz_limpar()}</h3>
+          <p class="secao-ajuda">{m.voz_limpar_ajuda()}</p>
+        </div>
+        <span class="estado" class:ativo={organizacaoOk}>
+          {organizacaoOk
+            ? organizacaoPersonalizada ? m.voz_status_personalizado() : m.voz_status_padrao()
+            : m.voz_status_desativado()}
+        </span>
+      </div>
       <details class="detalhes" bind:open={avancadoAberto}>
         <summary>{m.voz_usar_outro_servico()}</summary>
         {#if avancadoAberto}
           <div class="detalhes-corpo">
             {#each CAMPOS_LLM as c (c.chave)}
-              <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} />
+              <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} removivel />
             {/each}
+            <details class="subdetalhes" bind:open={briefingAberto}>
+              <summary>{m.voz_briefing_proprio()}</summary>
+              {#if briefingAberto}
+                {#each CAMPOS_BRIEFING as c (c.chave)}
+                  <LinhaConfig campo={c} {store} removivel />
+                {/each}
+              {/if}
+            </details>
           </div>
         {/if}
       </details>
@@ -248,12 +330,25 @@
 
     <!-- Ler em voz alta -->
     <section class="secao">
-      <h3>{m.voz_ler()}</h3>
-      <LinhaConfig campo={CAMPO_ELEVEN} {store} />
-      {#if !lerOk}
-        <p class="aviso">{podeLerAgora ? m.voz_ler_via_comando_local() : m.voz_ler_sem_chave()}</p>
-      {:else}
-        <div class="tts-extra">
+      <div class="secao-cabeca">
+        <div>
+          <h3>{m.voz_ler()}</h3>
+          <p class="secao-ajuda">{m.voz_ler_ajuda()}</p>
+        </div>
+        <span class="estado" class:ativo={podeLerAgora}>
+          {lerOk ? m.voz_status_elevenlabs() : vozLocalOk ? m.voz_status_local() : m.voz_status_desativado()}
+        </span>
+      </div>
+      {#if !podeLerAgora}<p class="aviso">{m.voz_ler_sem_chave()}</p>{/if}
+
+      <details class="provedor" bind:open={elevenAberto}>
+        <summary>{m.voz_provedor_elevenlabs()}</summary>
+        {#if elevenAberto}
+          <div class="provedor-corpo">
+            <LinhaConfig campo={CAMPO_ELEVEN} {store} removivel />
+          {#if lerOk}
+            <div class="tts-extra">
+          <p class="config-atual">{m.voz_configuracao_atual({ valor: vozSelecionada })}</p>
           {#if vozErro}
             <p class="aviso erro">{vozErro}</p>
             <button class="btn" onclick={carregarVozes} disabled={carregandoVozes}>{m.config_server_tentar_de_novo()}</button>
@@ -272,36 +367,44 @@
               onchange={(v) => store.setRascunho('elevenlabs_voice_id', v)}
             />
             <span class="ajuda">{m.config_server_voz_ajuda()}</span>
+            {#if store.campos['elevenlabs_voice_id']?.origem === 'app'}
+              <button class="ajuste-reset" onclick={() => store.removerRascunho('elevenlabs_voice_id')}>
+                {m.config_server_voltar_padrao()}
+              </button>
+            {/if}
           {:else}
             <button class="btn" onclick={carregarVozes} disabled={carregandoVozes}>
               {carregandoVozes ? m.comum_carregando() : m.config_server_carregar_vozes()}
             </button>
           {/if}
 
-          <div class="naturalidade">
-            {#each AJUSTES_VOZ as a (a.chave)}
-              {@const valor = ajusteValor(a)}
-              <div class="ajuste">
-                <div class="ajuste-cabeca">
-                  <span class="ajuste-rot">{a.rotulo} <em>{valor}</em> <EscopoChip escopo="servidor" /></span>
-                  {#if valor !== a.padrao}
-                    <!-- São quatro botões iguais na tela, um por ajuste: sem o rótulo do ajuste no
-                         nome acessível, o leitor de tela lê "voltar ao padrão" quatro vezes. -->
-                    <button class="ajuste-reset" onclick={() => ajusteResetar(a)}
-                            aria-label={`${a.rotulo} — ${m.config_server_voltar_padrao()}`}
-                      >{m.config_server_voltar_padrao()}</button>
-                  {/if}
-                </div>
-                <span class="ajuda">{a.ajuda}</span>
-                <div class="ajuste-slider">
-                  <span class="ponta">{a.esquerda}</span>
-                  <input type="range" aria-label={a.rotulo} min={a.min} max={a.max} step="1" value={valor}
-                    oninput={(e) => ajusteDefinir(a, +e.currentTarget.value)} />
-                  <span class="ponta">{a.direita}</span>
-                </div>
+          <details class="ajustes" bind:open={ajustesAbertos}>
+            <summary>{m.voz_ajustar()}</summary>
+            {#if ajustesAbertos}
+              <div class="naturalidade">
+                {#each AJUSTES_VOZ as a (a.chave)}
+                  {@const valor = ajusteValor(a)}
+                  <div class="ajuste">
+                    <div class="ajuste-cabeca">
+                      <span class="ajuste-rot">{a.rotulo} <em>{valor}</em> <EscopoChip escopo="servidor" /></span>
+                      {#if store.campos[a.chave]?.origem === 'app' && !store.remocaoPendente(a.chave)}
+                        <button class="ajuste-reset" onclick={() => ajusteResetar(a)}
+                                aria-label={`${a.rotulo}, ${m.config_server_voltar_padrao()}`}
+                          >{m.config_server_voltar_padrao()}</button>
+                      {/if}
+                    </div>
+                    <span class="ajuda">{a.ajuda}</span>
+                    <div class="ajuste-slider">
+                      <span class="ponta">{a.esquerda}</span>
+                      <input type="range" aria-label={a.rotulo} min={a.min} max={a.max} step="1" value={valor}
+                        oninput={(e) => ajusteDefinir(a, +e.currentTarget.value)} />
+                      <span class="ponta">{a.direita}</span>
+                    </div>
+                  </div>
+                {/each}
               </div>
-            {/each}
-          </div>
+            {/if}
+          </details>
 
           <div class="amostra">
             <!-- O motivo de estar apagado viaja com o botão: solto numa linha ao lado, ele lia como
@@ -320,11 +423,23 @@
             <p class="sub">{m.config_server_consumo({ usados: saldo.usados ?? '?', limite: saldo.limite ?? '?' })}</p>
           {/if}
           {#if saldoErro}<p class="aviso erro">{saldoErro}</p>{/if}
-        </div>
-      {/if}
-      <LinhaConfig campo={CAMPO_MAX_CHARS} {store} />
-      <LinhaConfig campo={CAMPO_CMD_LOCAL} {store}
-        veredito={m.config_server_comando_voz_vered()} motivo={m.config_server_comando_voz_porque()} />
+            </div>
+          {/if}
+          </div>
+        {/if}
+      </details>
+
+      <details class="provedor" bind:open={localAberto}>
+        <summary>{m.voz_provedor_local()}</summary>
+        {#if localAberto}
+          <div class="provedor-corpo">
+            <LinhaConfig campo={CAMPO_CMD_LOCAL} {store} removivel
+              veredito={m.config_server_comando_voz_vered()} motivo={m.config_server_comando_voz_porque()} />
+          </div>
+        {/if}
+      </details>
+
+      {#if podeLerAgora}<LinhaConfig campo={CAMPO_MAX_CHARS} {store} removivel />{/if}
     </section>
   {/if}
 
@@ -349,25 +464,41 @@
   .voz { container-type: inline-size; padding: var(--space-2) var(--space-4) var(--space-4); display: flex; flex-direction: column; gap: var(--space-5); }
   .voz.com-rodape { padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
 
-  /* Mesmo par h2+sub das telas irmãs (ServerSettings.svelte) — a Voz também é config de servidor. */
-  .cfg-head h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
-
-  /* O título da etapa tem que pesar MAIS que o rótulo do campo — com os dois em `sm`/600 a
-     hierarquia se invertia e a tela virava uma lista sem começo. */
-  .secao h3 {
-    margin: 0 0 var(--space-3);
-    padding-bottom: var(--space-2);
+  .secao { min-width: 0; }
+  .secao-cabeca {
+    display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap;
+    gap: var(--space-3); padding-bottom: var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
-    font-size: var(--text-base); font-weight: 600; letter-spacing: -0.01em;
+  }
+  .secao-cabeca > div { flex: 1 1 260px; min-width: 0; }
+  @container (min-width: 600px) { .secao-cabeca { padding-right: 52px; } }
+  .secao h3 {
+    margin: 0; font-size: var(--text-base); font-weight: 650; letter-spacing: -0.01em;
     color: var(--text-primary);
   }
+  .secao-ajuda {
+    max-width: 64ch; margin: 4px 0 0; color: var(--text-muted);
+    font-size: var(--text-xs); line-height: 1.45;
+  }
+  .estado {
+    flex: 0 0 auto; margin-top: 1px; padding: 3px 8px;
+    border-radius: var(--radius-full); background: var(--surface-inset);
+    color: var(--text-muted); font-size: 11px; font-weight: 650;
+  }
+  .estado.ativo { background: var(--pill-idle-bg); color: var(--pill-idle-fg); }
 
   .txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .rot { font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
   .ajuda { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; min-width: 0; }
   .nota { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--text-muted); }
 
-  .linha-maos-livres { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-2) 0; }
+  .preferencias { margin-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
+  .grupo-rotulo {
+    margin: var(--space-3) 0 var(--space-1); color: var(--text-muted);
+    font-size: var(--label-size); font-weight: var(--label-weight);
+    text-transform: uppercase; letter-spacing: var(--label-tracking);
+  }
+  .linha-maos-livres { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-3) 0; }
   .estilo { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) 0; border-top: 1px solid var(--border-subtle); }
 
   .link { display: inline-block; margin-top: var(--space-2); font-size: var(--text-xs); color: var(--accent); }
@@ -376,8 +507,20 @@
   .detalhes { margin-top: var(--space-2); }
   .detalhes summary { cursor: pointer; font-size: var(--text-sm); font-weight: 600; color: var(--accent); }
   .detalhes-corpo { margin-top: var(--space-2); }
+  .subdetalhes { margin-top: var(--space-3); }
+  .subdetalhes > summary { color: var(--text-secondary); }
+
+  .provedor {
+    padding: var(--space-3) 0; border-bottom: 1px solid var(--border-subtle);
+  }
+  .provedor > summary, .ajustes > summary {
+    cursor: pointer; color: var(--text-primary); font-size: var(--text-sm); font-weight: 600;
+  }
+  .provedor-corpo { margin-top: var(--space-2); }
+  .ajustes { margin-top: var(--space-3); }
 
   .tts-extra { container-type: inline-size; margin-top: var(--space-2); }
+  .config-atual { margin: 0 0 var(--space-2); color: var(--text-secondary); font-size: var(--text-xs); }
   /* O rótulo do seletor de voz é a única coisa acima do select: vira bloco pra o select não subir
      pra linha dele. */
   .rot-voz { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: 4px; }

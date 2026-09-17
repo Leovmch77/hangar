@@ -414,6 +414,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   (consertar depois é impossível por construção); regra de prompt só funciona com exemplo de
   entrada e saída; raciocínio no modelo de limpeza piora e não é calibragem. Quem manda no estilo
   é a pill que a pessoa leu antes de falar, não a config.
+- **Transcrição, organização do texto e leitura são capacidades separadas.** A tela não leva nome
+  de provedor no rótulo da transcrição; endpoint próprio de áudio nunca compartilha sua chave com
+  o LLM padrão, e controles de voz só aparecem dentro do provedor que os oferece.
 - **Cota tem cache em disco e respeita 429**: restart do backend não relê todas as contas, e
   fonte que levou 429 espera 10 min antes de insistir.
 - **Servidor que não responde é marcado como DESLIGADO na primeira falha de rede, e só volta a ser

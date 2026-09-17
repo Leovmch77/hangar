@@ -64,10 +64,8 @@ def test_sem_chave_levanta_503(monkeypatch):
     with pytest.raises(NarrarError) as ei:
         narrar.narrar("texto", [], "explique o código")
     assert ei.value.status == 503
-    # Endpoint padrao (sem base_url): a mensagem tem que mandar pro campo que _provedor() realmente
-    # le nesse ramo (chave da Groq), nunca pra Chave do LLM — esse campo nao e lido aqui.
-    assert "chave da Groq" in ei.value.detail
-    assert "Chave do LLM" not in ei.value.detail
+    assert "Configuracoes -> Voz" in ei.value.detail
+    assert "Groq" not in ei.value.detail
 
 
 def test_sem_chave_endpoint_custom_levanta_503(monkeypatch):
@@ -219,6 +217,15 @@ def test_endpoint_padrao_ignora_llm_api_key_de_outro_provedor(monkeypatch):
     monkeypatch.setattr("app.narrar.urllib.request.urlopen", fake_urlopen)
     narrar.narrar("texto", [], "explica isso")
     assert captured["req"].headers["Authorization"] == "Bearer chave-groq"
+
+
+def test_transcricao_custom_nao_envia_sua_chave_ao_llm_padrao(monkeypatch):
+    """Serviços independentes: a chave do áudio nunca pode vazar para o host do LLM padrão."""
+    _config(monkeypatch, {
+        "transcription_base_url": "https://fala.exemplo/v1",
+        "groq_api_key": "chave-da-transcricao-custom",
+    })
+    assert narrar._provedor() == (narrar.PADRAO_BASE_URL, "", narrar.PADRAO_MODELO)
 
 
 def test_base_url_e_modelo_custom_chegam_na_request(monkeypatch):

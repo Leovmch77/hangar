@@ -4865,8 +4865,10 @@ async def patch_config(request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, detail=erro("erro_corpo_deve_ser_objeto", "corpo deve ser um objeto"))
+    remover = {campo for campo, valor in body.items() if valor is None}
+    mudancas = {campo: valor for campo, valor in body.items() if valor is not None}
     try:
-        await asyncio.to_thread(runtime_config.aplicar, body)
+        await asyncio.to_thread(runtime_config.aplicar, mudancas, remover=remover)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"campos": runtime_config.estado(), "somente_leitura": _somente_leitura(request)}

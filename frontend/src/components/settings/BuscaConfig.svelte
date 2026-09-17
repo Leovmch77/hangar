@@ -91,6 +91,9 @@
     { tela: 'sincronizacao', rotulo: m.sync_config_abrir, descricao: m.sync_config_como_entrar },
 
     { tela: 'voz', rotulo: m.voz_transcrever, descricao: m.voz_transcrever_ajuda },
+    { tela: 'voz', rotulo: m.config_server_groq, descricao: m.config_server_groq_ajuda },
+    { tela: 'voz', rotulo: m.config_server_transcription_endpoint, descricao: m.config_server_transcription_endpoint_ajuda },
+    { tela: 'voz', rotulo: m.config_server_transcription_model, descricao: m.config_server_transcription_model_ajuda },
     { tela: 'voz', rotulo: m.voz_limpar, descricao: m.voz_limpar_ajuda },
     { tela: 'voz', rotulo: m.voz_estilo, descricao: m.voz_estilo_ajuda },
     { tela: 'voz', rotulo: m.config_ditado_titulo, descricao: m.config_ditado_desc },

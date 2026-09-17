@@ -11,6 +11,7 @@ import { getActiveId, serverIdentidade, type Server } from './auth';
 import { segredos } from './segredos.svelte';
 
 export type ValorCampo = string | number | boolean;
+type RascunhoCampo = ValorCampo | null;
 
 // `identidade` (opcional) é a string que identifica o alvo sendo editado. O default deriva do `alvo`,
 // mas quem precisa de precisão (SettingsModal, via App) passa a identidade EXPLÍCITA: no modo global
@@ -26,7 +27,7 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
   let campos = $state<Record<string, CampoConfig>>({});
   let leitura = $state<Record<string, string | number | boolean>>({});
   let variaveisEnv = $state<VariavelEnv[]>([]);
-  let rascunho = $state<Record<string, ValorCampo>>({});
+  let rascunho = $state<Record<string, RascunhoCampo>>({});
   let carregando = $state(false);
   let salvando = $state(false);
   let erro = $state('');
@@ -141,13 +142,16 @@ export function criarConfigServidor(alvo: () => Server | null, identidade?: () =
     get salvo() { return salvo; },
     get temMudanca() { return Object.keys(rascunho).length > 0; },
     valorAtual(chave: string): ValorCampo {
-      if (chave in rascunho) return rascunho[chave];
+      if (chave in rascunho) return rascunho[chave] ?? '';
       return campos[chave]?.valor ?? '';
     },
     // Segredo NUNCA mostra o valor vindo do servidor (e a mascara, gsk_XXXX...): so o que foi
     // digitado nesta sessao. Editar em cima da mascara manda a mascara de volta como override real.
     rascunhoDe(chave: string): string { return (rascunho[chave] as string) ?? ''; },
     setRascunho(chave: string, valor: ValorCampo) { rascunho[chave] = valor; },
+    removerRascunho(chave: string) { rascunho[chave] = null; },
+    remocaoPendente(chave: string): boolean { return chave in rascunho && rascunho[chave] === null; },
+    desfazerRascunho(chave: string) { delete rascunho[chave]; },
     carregar,
     salvar,
     invalidar,

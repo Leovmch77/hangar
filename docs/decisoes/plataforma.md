@@ -209,7 +209,8 @@ Este
   - **O provedor da limpeza é trocável pela tela, e não só a Groq** (Configurações → Servidor →
     Avançado: Endpoint / Chave / Modelo / Raciocínio do LLM → `llm_*` em
     `~/.claude/runtime-config.json`). `_provedor()` só lê `llm_api_key` quando há `llm_base_url`
-    próprio; endpoint vazio = Groq com a `groq_api_key`. E o **briefing tem provedor próprio**
+    próprio; endpoint vazio reutiliza a `groq_api_key` somente quando a transcrição também usa o
+    serviço padrão. E o **briefing tem provedor próprio**
     (`llm_briefing_*`, `_provedor("briefing")`), porque os dois usos não pedem o mesmo modelo:
     limpar e prosa querem rapidez — a pessoa está olhando o campo esperando o texto —, o briefing
     quer quem estrutura melhor e pode demorar. Medido aqui: Groq/`gpt-oss-120b` 2,1s no limpar,
@@ -237,6 +238,25 @@ Este
     Duas coisas que o fallback NÃO muda, medidas: o texto dele passa pelas mesmas travas (um resumo
     volta como cru, igual ao do provedor), e a `_cobertura` continua rejeitando o ditado curto cheio
     de `barra`/`traço traço` — 0,727 contra o piso 0,80 de `limpar`, idêntico pela Groq.
+
+## Transcrição, organização do texto e leitura são capacidades separadas
+
+(`VozSettings.svelte` + `transcribe.py` + `narrar._provedor`, 17/09/2026.) A tela móvel mostrava
+`Voz` duas vezes, depois `Ditar`, `Transcrever`, duas chaves de LLM sem relação explícita e ajustes
+de voz que só funcionam com ElevenLabs. A captura real também mostrou o efeito mais perigoso do
+vocabulário: uma chave de outro serviço de transcrição parecia poder alimentar a organização do
+texto, mas o backend a enviaria para o endpoint padrão do LLM.
+
+- A transcrição tem endpoint e modelo próprios, compatíveis com a API da OpenAI; vazios preservam
+  o serviço e o modelo anteriores. O nome do provedor padrão aparece só no guia de criação de chave,
+  não no rótulo da capacidade.
+- Endpoint próprio de transcrição torna a chave exclusiva do áudio. Sem `llm_base_url` e
+  `llm_api_key` próprios, a organização fica indisponível; a chave nunca viaja para o host padrão.
+- ElevenLabs e comando local são alternativas de leitura. Voz, amostra e naturalidade só montam
+  dentro da opção ElevenLabs; comando local não finge oferecer controles que não entende.
+- `null` no `POST /api/config` remove o override e volta ao valor do ambiente. A tela oferece essa
+  ação apenas quando `origem == app`; valor vindo do `.env` continua visível, mas não apagável pelo
+  navegador.
 
 ## Grupo: o protocolo é do HOOK, a saída é de UMA esteira, e o anti-loop é do backend
 

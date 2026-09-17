@@ -24,9 +24,12 @@
      *  juntos, ou nenhum: veredito sem motivo é o mesmo texto vago que isto veio resolver. */
     veredito?: string;
     motivo?: string;
+    /** Permite remover o override salvo pelo app e voltar ao valor do ambiente. */
+    removivel?: boolean;
   }
-  let { campo: c, store, escopo = 'servidor', veredito, motivo }: Props = $props();
+  let { campo: c, store, escopo = 'servidor', veredito, motivo, removivel = false }: Props = $props();
   const estado = $derived(store.campos[c.chave]);
+  const removendo = $derived(store.remocaoPendente(c.chave));
 </script>
 
 <div class="linha" class:liga={c.tipo === 'liga'}>
@@ -34,7 +37,7 @@
     <label class="rot" for={`cfg-${c.chave}`}>
       {c.rotulo}
       {#if escopo}<EscopoChip {escopo} />{/if}
-      {#if estado?.origem === 'app'}<span class="tag">{m.config_server_editado()}</span>{/if}
+      {#if estado?.origem === 'app' && !removendo}<span class="tag">{m.config_server_editado()}</span>{/if}
     </label>
     <span class="ajuda">{c.ajuda}</span>
     {#if veredito && motivo}
@@ -46,6 +49,13 @@
       </details>
     {/if}
   </div>
+
+  {#if removendo}
+    <div class="remocao" role="status">
+      <span>{m.config_server_remocao_ao_salvar()}</span>
+      <button type="button" onclick={() => store.desfazerRascunho(c.chave)}>{m.comum_desfazer()}</button>
+    </div>
+  {/if}
 
   {#if c.tipo === 'liga'}
     <input
@@ -76,7 +86,7 @@
     <!-- O segredo ENTRA mas não sai. O campo fica VAZIO: pré-preencher com a máscara faz
          qualquer toque no input mandar o texto mascarado de volta e sobrescrever a chave
          real. A máscara aparece ao lado, como informação, não como valor editável. -->
-    {#if estado?.definido}
+    {#if estado?.definido && !removendo}
       <span class="mascara" title={m.config_server_chave_nao_volta()}>
         {estado.valor} <span class="mascara-nota">{m.config_server_configurada()}</span>
       </span>
@@ -103,6 +113,11 @@
       value={store.valorAtual(c.chave)}
       oninput={(e) => store.setRascunho(c.chave, e.currentTarget.value)}
     />
+  {/if}
+  {#if removivel && estado?.origem === 'app' && !removendo}
+    <button class="remover" type="button" onclick={() => store.removerRascunho(c.chave)}>
+      {m.lista_remover()}
+    </button>
   {/if}
 </div>
 
@@ -166,6 +181,15 @@
     font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-secondary);
   }
   .mascara-nota { font-family: var(--font-ui); color: var(--success); font-size: 11px; }
+
+  .remover {
+    align-self: flex-start; padding: 0; color: var(--error); font-size: var(--text-xs);
+  }
+  .remocao {
+    display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2);
+    color: var(--warning); font-size: var(--text-xs);
+  }
+  .remocao button { padding: 0; color: var(--accent); font-size: inherit; }
 
   /* `.switch` é global (app.css) — vocabulário único de liga/desliga do app. */
 </style>

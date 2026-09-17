@@ -18,7 +18,9 @@ function montar(campos: Record<string, unknown>) {
     get campos() { return campos; }, get leitura() { return {}; },
     get carregando() { return false; }, get salvando() { return false; },
     get erro() { return ''; }, get salvo() { return false; }, get temMudanca() { return false; },
-    valorAtual: () => '', rascunhoDe: () => '', setRascunho: vi.fn(),
+    valorAtual: (chave: string) => (campos[chave] as { valor?: string } | undefined)?.valor ?? '',
+    rascunhoDe: () => '', setRascunho: vi.fn(),
+    removerRascunho: vi.fn(), remocaoPendente: () => false, desfazerRascunho: vi.fn(),
     carregar: vi.fn(), salvar: vi.fn(), invalidar: vi.fn(),
   } as unknown as ConfigServidorStore;
   const app = mount(VozSettings, { target: alvo, props: { store } });
@@ -26,6 +28,23 @@ function montar(campos: Record<string, unknown>) {
 }
 
 describe('VozSettings', () => {
+  it('não repete o título da tela e não expõe Groq na superfície principal', () => {
+    const { alvo, app } = montar({ groq_api_key: { definido: false, origem: 'env' } });
+    expect(alvo.querySelector('h2')).toBeNull();
+    expect(alvo.textContent).not.toContain('Groq');
+    unmount(app);
+  });
+
+  it('oferece endpoint e modelo próprios para outro serviço de transcrição', async () => {
+    const { alvo, app } = montar({ groq_api_key: { definido: true, origem: 'app' } });
+    alvo.querySelector<HTMLDetailsElement>('.transcription-provider')!.open = true;
+    alvo.querySelector<HTMLDetailsElement>('.transcription-provider')!.dispatchEvent(new Event('toggle'));
+    await tick();
+    expect(alvo.querySelector('#cfg-transcription_base_url')).not.toBeNull();
+    expect(alvo.querySelector('#cfg-transcription_model')).not.toBeNull();
+    unmount(app);
+  });
+
   it('sem chave de transcrição, avisa que ditar está desligado', () => {
     const { alvo, app } = montar({ groq_api_key: { definido: false } });
     expect(alvo.textContent).toContain(m.voz_transcrever_sem_chave());
@@ -57,12 +76,25 @@ describe('VozSettings', () => {
     vi.mocked(listarVozesTts).mockResolvedValue([{ id: 'v1', nome: 'Dora' }] as never);
     const { alvo, app } = montar({ elevenlabs_api_key: { definido: true } });
     // A lista de vozes só é buscada a pedido (abrir a tela não pode sair pra rede).
+    await tick();
     [...alvo.querySelectorAll('button')].find((b) => b.textContent?.includes(m.config_server_carregar_vozes()))!.click();
     await tick(); await Promise.resolve(); await Promise.resolve(); await tick();
     const bloco = alvo.querySelector('.rot-voz')!;
     expect(bloco.textContent).toContain(m.config_server_voz());
     expect(bloco.textContent).toContain(m.config_escopo_servidor());
     expect(alvo.querySelector('.campo-select')).not.toBeNull();   // o rótulo é DO seletor, que está montado
+    unmount(app);
+  });
+
+  it('mostra qual voz está salva antes de buscar a lista externa', async () => {
+    vi.mocked(listarVozesTts).mockClear();
+    const { alvo, app } = montar({
+      elevenlabs_api_key: { definido: true, origem: 'app' },
+      elevenlabs_voice_id: { valor: 'voz-abc123', origem: 'app' },
+    });
+    await tick();
+    expect(alvo.textContent).toContain('voz-abc123');
+    expect(listarVozesTts).not.toHaveBeenCalled();
     unmount(app);
   });
 
