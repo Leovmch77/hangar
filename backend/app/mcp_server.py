@@ -28,6 +28,36 @@ from app.config import settings
 
 mcp = MCPServer("hangar")
 
+# Nomes antigos das tools (português) → nome de hoje. Uma sessão já aberta carregou o catálogo na
+# abertura e vai chamar pelo nome que conhece até ser reiniciada — e sessão de trabalho não fecha
+# porque o servidor renomeou uma tool. Aqui o nome velho continua CHAMÁVEL sem aparecer no
+# catálogo: quem abre agora vê só os dez nomes novos, e quem está no meio de uma tarefa não quebra.
+#
+# Some quando não houver mais sessão viva de antes do rename — é ponte, não API.
+_NOMES_ANTIGOS = {
+    "quem_sou": "who_am_i",
+    "sessoes": "sessions",
+    "enviar": "send",
+    "grupo": "group",
+    "parear": "pair",
+    "desparear": "unpair",
+    "nova_sessao": "new_session",
+    "nav_abrir": "browser_open",
+    "nav": "browser",
+    "nav_lote": "browser_batch",
+}
+
+_chamar_tool = mcp.call_tool
+
+
+async def _call_tool_com_nome_antigo(name, arguments, context=None, **kw):
+    # Tradução ANTES do despacho: o handler do protocolo chama `self.call_tool(params.name, ...)`,
+    # então é aqui que o nome velho vira o novo sem duplicar nada no catálogo.
+    return await _chamar_tool(_NOMES_ANTIGOS.get(name, name), arguments, context, **kw)
+
+
+mcp.call_tool = _call_tool_com_nome_antigo
+
 
 def _cabecalhos(ctx: Context) -> dict[str, str]:
     req = getattr(ctx.request_context, "request", None)
@@ -49,7 +79,7 @@ def _detalhe(e: HTTPException) -> str:
 
 @mcp.tool(description="Quem é esta sessão no Hangar (nome e por qual cabeçalho foi resolvida). "
                       "Diagnóstico; equivale a `hangar-send` descobrindo a própria sessão.")
-async def quem_sou(ctx: Context) -> dict[str, str]:
+async def who_am_i(ctx: Context) -> dict[str, str]:
     try:
         nome, origem = await asyncio.to_thread(quem_chama.resolver, _cabecalhos(ctx))
     except quem_chama.SessaoDesconhecida as e:
@@ -60,7 +90,7 @@ async def quem_sou(ctx: Context) -> dict[str, str]:
 @mcp.tool(description="Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). "
                       "`voce: true` marca esta sessão. "
                       "Equivale a `hangar-send --list` sem os servidores remotos.")
-async def sessoes(ctx: Context) -> list[dict[str, Any]]:
+async def sessions(ctx: Context) -> list[dict[str, Any]]:
     from app import api
     try:
         eu = await _eu(ctx)
@@ -75,7 +105,7 @@ async def sessoes(ctx: Context) -> list[dict[str, Any]]:
                       "chega lá como `[de: <você>] texto`. `alvo` aceita `servidor::sessao` "
                       "pra outro servidor. Recusa alvo Claude local com caminho nativo "
                       "(use SendMessage) a menos que `tmux=true`.")
-async def enviar(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
+async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     if alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}"):
@@ -107,7 +137,7 @@ async def enviar(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dic
 @mcp.tool(description="Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: "
                       "chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um "
                       "`[grupo: …]` com isto. `pulados` lista quem não recebeu (mande por SendMessage).")
-async def grupo(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
+async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     try:
@@ -119,7 +149,7 @@ async def grupo(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
 @mcp.tool(description="Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> "
                       "<tarefa>`: registra no app e injeta o protocolo nos dois lados. `alvo` aceita "
                       "`servidor::sessao`. Só quando o usuário pedir pareamento.")
-async def parear(ctx: Context, alvo: str, tarefa: str = "", substituir_tarefa: bool = False) -> dict[str, Any]:
+async def pair(ctx: Context, alvo: str, tarefa: str = "", substituir_tarefa: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     try:
@@ -129,7 +159,7 @@ async def parear(ctx: Context, alvo: str, tarefa: str = "", substituir_tarefa: b
 
 
 @mcp.tool(description="Desfaz o pareamento desta sessão (`hangar-send --unpair`).")
-async def desparear(ctx: Context) -> dict[str, Any]:
+async def unpair(ctx: Context) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     try:
@@ -140,22 +170,41 @@ async def desparear(ctx: Context) -> dict[str, Any]:
 
 @mcp.tool(description="Cria outra sessão nesta máquina, como `hangar-send --new <nome> <cwd>`. Nunca "
                       "`tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi; `headless` só "
-                      "claude/codex. Conta é a mesma desta sessão; pra outra conta use o CLI "
-                      "(`--conta`), que prepara a conta antes.")
-async def nova_sessao(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
+                      "claude/codex. A sessão nasce na MESMA conta de quem chama, e a resposta "
+                      "devolve o `config_dir` usado — confira. `conta` (caminho do config dir) "
+                      "força outra; pra conta que ainda precisa ser preparada, use o CLI "
+                      "(`hangar-send --new --conta <nome>`).")
+async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
                       model: str | None = None, effort: str | None = None, permissao: str | None = None,
-                      headless: bool = False, read_only: bool = False) -> dict[str, Any]:
+                      headless: bool = False, read_only: bool = False,
+                      conta: str | None = None) -> dict[str, Any]:
     from app import api
-    await _eu(ctx)
+    eu = await _eu(ctx)
     if headless and provider not in ("claude", "codex"):
         raise ToolError(f"headless só vale com provider claude ou codex (veio: {provider})")
+    # A conta da sessão nova é a de QUEM CHAMA. Antes o nome resolvido era descartado e o
+    # `config_dir` ia vazio: o backend caía na conta padrão (~/.claude), e uma sessão que vive
+    # noutra conta criava a irmã na conta errada — dizendo, pela descrição desta tool, que tinha
+    # herdado. Gasta a cota de quem ninguém escolheu e só aparece quando alguém confere.
+    config_dir = conta
+    if config_dir is None:
+        cfg, confiavel = await asyncio.to_thread(api._session_config_dir_strict, eu)
+        if not confiavel:
+            # Não deu pra ler a conta de quem chama. Criar assim mesmo repetiria o bug de cima,
+            # só que calado; quem quiser seguir escolhe a conta no parâmetro.
+            raise ToolError(f"não consegui confirmar a conta da sessão '{eu}' — passe `conta` "
+                            f"com o caminho do config dir, ou use `hangar-send --new --conta`")
+        config_dir = str(cfg) if cfg else None
     try:
         info = await api.create_session(api.CreateBody(
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
-            permission_mode=permissao, headless=headless, read_only=read_only))
+            permission_mode=permissao, headless=headless, read_only=read_only,
+            config_dir=config_dir))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
-    return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless}
+    return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,
+            # Volta na resposta pra que herdar errado nunca mais passe despercebido.
+            "config_dir": config_dir}
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "layout", "console",
@@ -190,7 +239,7 @@ async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) 
 
 @mcp.tool(description="Abre o navegador embutido desta sessão no app desktop do Hangar, como "
                       "`hangar-preview open <url>`. O painel monta na tela do usuário: avise-o.")
-async def nav_abrir(ctx: Context, url: str) -> dict[str, Any]:
+async def browser_open(ctx: Context, url: str) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     try:
@@ -207,7 +256,7 @@ async def nav_abrir(ctx: Context, url: str) -> dict[str, Any]:
                       "do PNG), layout [mobile|desktop|<largura> <altura>], close, tab-list, "
                       "tab-new <url>, tab-switch <id>, tab-close [id]. "
                       "`aba` age numa aba sem trocar a que o usuário vê.")
-async def nav(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None) -> str:
+async def browser(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None) -> str:
     eu = await _eu(ctx)
     async with _travas_nav.setdefault(eu, asyncio.Lock()):
         return await _verbo_nav(eu, verbo, [str(a) for a in args or []], aba)
@@ -215,7 +264,7 @@ async def nav(ctx: Context, verbo: str, args: list[str | int] | None = None, aba
 
 @mcp.tool(description="Vários verbos do navegador em sequência, como `hangar-preview batch`: para no "
                       "primeiro que falhar e diz em qual. Cada passo é {verbo, args?, aba?}.")
-async def nav_lote(ctx: Context, passos: list[dict[str, Any]]) -> dict[str, Any]:
+async def browser_batch(ctx: Context, passos: list[dict[str, Any]]) -> dict[str, Any]:
     eu = await _eu(ctx)
     feitos: list[str] = []
     async with _travas_nav.setdefault(eu, asyncio.Lock()):

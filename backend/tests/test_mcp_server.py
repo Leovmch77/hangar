@@ -1,4 +1,5 @@
 import contextlib
+from pathlib import Path
 
 import httpx2
 import pytest
@@ -50,8 +51,22 @@ async def test_sem_token_401_e_fora_da_maquina_403():
 async def test_lista_tools_e_quem_sou(identidade):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         nomes = {t.name for t in (await s.list_tools()).tools}
-        assert nomes == {"quem_sou", "sessoes", "enviar", "grupo", "parear", "desparear", "nova_sessao",
-                         "nav_abrir", "nav", "nav_lote"}
+        assert nomes == {"who_am_i", "sessions", "send", "group", "pair", "unpair", "new_session",
+                         "browser_open", "browser", "browser_batch"}
+        res = await s.call_tool("who_am_i", {})
+        assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
+
+
+async def test_nome_antigo_ainda_chama_mas_some_do_catalogo(identidade):
+    """Sessão aberta ANTES do rename segue chamando pelo nome que carregou no catálogo dela.
+
+    Ela não vai fechar só porque o servidor renomeou uma tool, e o catálogo dela é do momento da
+    abertura. O nome velho continua chamável; o catálogo de quem abre agora não o mostra, senão
+    toda sessão nova carregaria vinte tools pra sustentar dez.
+    """
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        nomes = {t.name for t in (await s.list_tools()).tools}
+        assert "quem_sou" not in nomes and "nav_abrir" not in nomes
         res = await s.call_tool("quem_sou", {})
         assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
 
@@ -178,7 +193,9 @@ async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monk
         chamadas["desparear"] = name; return {"ok": True}
 
     async def create_session(body):
-        chamadas["nova"] = (body.name, body.cwd, body.provider, body.headless)
+        # `config_dir` entra na tupla porque a conta da sessão nova é o contrato da tool: sem ele
+        # aqui, criar na conta padrão em vez da de quem chama voltaria a passar no teste.
+        chamadas["nova"] = (body.name, body.cwd, body.provider, body.headless, body.config_dir)
         return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider, headless=body.headless)
 
     for n, f in (("group_message", group_message), ("pair_session", pair_session),
@@ -188,12 +205,60 @@ async def test_grupo_parear_nova_sessao_chamam_as_rotas_como_eu(identidade, monk
         assert not (await s.call_tool("grupo", {"texto": "marco"})).is_error
         assert not (await s.call_tool("parear", {"alvo": "outra", "tarefa": "t"})).is_error
         assert not (await s.call_tool("desparear", {})).is_error
-        res = await s.call_tool("nova_sessao", {"nome": "nova", "cwd": "/tmp", "provider": "codex", "headless": True})
+        res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp", "provider": "codex",
+                                                "headless": True, "conta": "/home/x/.claude-outra"})
         assert res.structured_content["name"] == "nova"
-        res = await s.call_tool("nova_sessao", {"nome": "n2", "cwd": "/tmp", "provider": "pi", "headless": True})
+        # A conta usada volta na resposta: herdar errado calado foi o bug que isto fecha.
+        assert res.structured_content["config_dir"] == "/home/x/.claude-outra"
+        res = await s.call_tool("new_session", {"nome": "n2", "cwd": "/tmp", "provider": "pi", "headless": True})
         assert res.is_error and "headless só vale" in res.content[0].text
     assert chamadas == {"grupo": ("eu", "marco", False), "parear": ("eu", "outra", "t"), "desparear": "eu",
-                        "nova": ("nova", "/tmp", "codex", True)}
+                        "nova": ("nova", "/tmp", "codex", True, "/home/x/.claude-outra")}
+
+
+async def test_new_session_sem_conta_herda_a_de_quem_chama(identidade, monkeypatch):
+    """Sem `conta`, a sessão nasce na conta de QUEM CHAMOU — não na padrão.
+
+    O bug real: o nome resolvido era descartado, `config_dir` ia vazio e o backend caía no
+    ~/.claude. Uma sessão que vive noutra conta criava a irmã na errada, gastando cota de quem
+    ninguém escolheu, e a descrição da tool dizia que tinha herdado.
+    """
+    from app import api
+    from app.models import SessionInfo
+    visto = {}
+
+    async def create_session(body):
+        visto["config_dir"] = body.config_dir
+        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
+
+    monkeypatch.setattr(api, "create_session", create_session)
+    monkeypatch.setattr(api, "_session_config_dir_strict",
+                        lambda nome: (Path("/home/x/.claude-jefferson"), True))
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
+    assert visto["config_dir"] == "/home/x/.claude-jefferson"
+    assert res.structured_content["config_dir"] == "/home/x/.claude-jefferson"
+
+
+async def test_new_session_recusa_quando_nao_da_pra_ler_a_conta(identidade, monkeypatch):
+    """Conta de quem chama ilegível: RECUSA em vez de cair na padrão.
+
+    Criar assim mesmo repetiria o bug, só que sem ninguém saber — e cota gasta não volta."""
+    from app import api
+    from app.models import SessionInfo
+    criou = False
+
+    async def create_session(body):
+        nonlocal criou
+        criou = True
+        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
+
+    monkeypatch.setattr(api, "create_session", create_session)
+    monkeypatch.setattr(api, "_session_config_dir_strict", lambda nome: (None, False))
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("new_session", {"nome": "nova", "cwd": "/tmp"})
+    assert res.is_error and "não consegui confirmar a conta" in res.content[0].text
+    assert not criou
 
 
 async def _coro(v):

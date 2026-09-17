@@ -267,6 +267,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Comentário explica o PORQUÊ, e é curto.** Medição, versão de CLI e data envelhecem: num
   comentário viram afirmação falsa que ninguém revisa. Elas moram em `docs/decisoes/` e na
   mensagem de commit, datadas por construção.
+- **Identificador NOVO é em inglês; comentário e texto de tela continuam em português.** Vale
+  para função, variável, classe, campo, nome de tool MCP, chave de evento e arquivo novo. O que
+  já existe em português FICA: este repositório nasceu assim, e renomear em massa não é tarefa —
+  só entra no rename o que você já ia mexer por outro motivo. Nome público que muda (tool, rota,
+  evento) leva ponte para o nome antigo enquanto houver sessão viva que o carregou no catálogo,
+  e a ponte sai do catálogo para não cobrar contexto de quem abre depois.
 - **Grupo: protocolo reinjetado no `SessionStart`, saída por UMA esteira, anti-loop no backend.**
   Varredura de sessão morta confirma ausência por TEMPO, nunca por número de polls.
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
