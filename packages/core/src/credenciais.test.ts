@@ -111,6 +111,7 @@ describe('contas e servidor explícito', () => {
   it('consome uma redefinição Codex com id e chave idempotente', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       Response.json({ outcome: 'reset' }));
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
     const key = '123e4567-e89b-12d3-a456-426614174000';
 
     await consumeCodexRateLimitResetForServer(server, 'work /', 'credit /', key);
@@ -121,6 +122,8 @@ describe('contas e servidor explícito', () => {
       method: 'POST',
       body: JSON.stringify({ credit_id: 'credit /', idempotency_key: key }),
     });
+    expect(timeout).toHaveBeenCalledWith(90_000);
+    expect(timeout).not.toHaveBeenCalledWith(8000);
   });
 
   it('prazo estourado cita o prazo que valeu, não 8s fixo', async () => {

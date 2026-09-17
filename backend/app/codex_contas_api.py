@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import threading
 import time
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import codex_appserver, cotas
+from app import atomico, codex_appserver, cotas, log_paths
 from app import codex_contas as accounts
 from app.auth import require_auth
 from app.mensagens import erro
 
 
 codex_contas_router = APIRouter(prefix="/api/codex-contas")
+_log = logging.getLogger("hangar.codex.contas")
 
 _RESET_ATTEMPT_TTL_S = 86400
-_reset_attempts: dict[tuple[str, str], float] = {}
+_reset_attempts: dict[tuple[str, str | None, str], float] = {}
 _reset_attempts_lock = threading.Lock()
 
 
@@ -40,25 +45,97 @@ class _ResetError(RuntimeError):
         self.status, self.code, self.message, self.params = status, code, message, params
 
 
-def _tentativa_anterior(account_id: str, key: str) -> bool:
-    agora = time.monotonic()
-    with _reset_attempts_lock:
-        for tentativa, ts in list(_reset_attempts.items()):
-            if agora - ts > _RESET_ATTEMPT_TTL_S:
-                _reset_attempts.pop(tentativa, None)
-        return (account_id, key) in _reset_attempts
+def _arquivo_tentativas() -> Path:
+    return log_paths.base().parent / "codex-reset-attempts.json"
 
 
-def _guardar_tentativa(account_id: str, key: str) -> None:
+def _ler_tentativas() -> dict[tuple[str, str | None, str], float]:
+    alvo = _arquivo_tentativas()
+    try:
+        linhas = alvo.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return dict(_reset_attempts)
+    except OSError as exc:
+        raise _ResetError(503, "codex_reset_failed",
+                          "não foi possível conferir a tentativa anterior") from exc
+    tentativas = dict(_reset_attempts)
+    ilegiveis = 0
+    for linha in linhas:
+        try:
+            item = json.loads(linha)
+            account_id = item["account_id"]
+            credit_id = item.get("credit_id")
+            key = item["idempotency_key"]
+            accepted_at = float(item["accepted_at"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            ilegiveis += 1
+            continue
+        if isinstance(account_id, str) and isinstance(key, str):
+            tentativas[(account_id, credit_id if isinstance(credit_id, str) else None, key)] = accepted_at
+        else:
+            ilegiveis += 1
+    if ilegiveis:
+        _log.warning("tentativas de redefinicao Codex: %d linha(s) ilegivel(is) em %s", ilegiveis, alvo)
+    return tentativas
+
+
+def _gravar_tentativas(tentativas: dict[tuple[str, str | None, str], float]) -> None:
+    # Reescreve só as vigentes: o arquivo não cresce e linha ilegível sai na próxima gravação.
+    alvo = _arquivo_tentativas()
+    alvo.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = alvo.with_name(alvo.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as arquivo:
+        for (account_id, credit_id, key), accepted_at in tentativas.items():
+            arquivo.write(json.dumps({"account_id": account_id, "credit_id": credit_id,
+                                      "idempotency_key": key, "accepted_at": accepted_at}) + "\n")
+        arquivo.flush()
+        os.fsync(arquivo.fileno())
+    atomico.substituir(tmp, alvo)
+
+
+def _tentativas_atuais() -> dict[tuple[str, str | None, str], float]:
+    agora = time.time()
+    return {tentativa: ts for tentativa, ts in _ler_tentativas().items()
+            if agora - _RESET_ATTEMPT_TTL_S <= ts <= agora + 300}
+
+
+def _tentativa_anterior(account_id: str, credit_id: str | None, key: str) -> bool:
+    global _reset_attempts
     with _reset_attempts_lock:
-        _reset_attempts[(account_id, key)] = time.monotonic()
+        _reset_attempts = _tentativas_atuais()
+        return (account_id, credit_id, key) in _reset_attempts
+
+
+def _guardar_tentativa(account_id: str, credit_id: str | None, key: str) -> None:
+    global _reset_attempts
+    with _reset_attempts_lock:
+        tentativas = _tentativas_atuais()
+        tentativas[(account_id, credit_id, key)] = time.time()
+        try:
+            _gravar_tentativas(tentativas)
+        except OSError as exc:
+            raise _ResetError(503, "codex_reset_failed",
+                              "não foi possível guardar a tentativa de redefinição") from exc
+        _reset_attempts = tentativas
+
+
+def _perguntar_reset(account: accounts.Account, etapa: str, metodo: str,
+                     params: dict | None = None) -> dict:
+    try:
+        return codex_appserver.perguntar(
+            metodo, codex_home=account.home, params=params)
+    except (codex_appserver.CodexIndisponivel, codex_appserver.CodexRecusado,
+            codex_appserver.CodexRespostaInvalida) as exc:
+        _log.error("redefinicao Codex falhou conta=%s etapa=%s causa=%s",
+                   account.id, etapa, type(exc).__name__)
+        raise
 
 
 def _consume_reset(account: accounts.Account, body: ConsumeResetBody) -> dict:
-    atual = codex_appserver.perguntar("account/rateLimits/read", codex_home=account.home)
+    atual = _perguntar_reset(account, "leitura", "account/rateLimits/read")
     semanal = cotas.codex_weekly_used(atual)
     chave = str(body.idempotency_key)
-    repeticao = _tentativa_anterior(account.id, chave)
+    repeticao = _tentativa_anterior(account.id, body.credit_id, chave)
     if semanal is None:
         raise _ResetError(409, "codex_reset_weekly_unavailable",
                           "não foi possível confirmar a cota semanal")
@@ -69,12 +146,12 @@ def _consume_reset(account: accounts.Account, body: ConsumeResetBody) -> dict:
     if not repeticao and (redefinicoes is None or redefinicoes.available_count < 1):
         return {"outcome": "noCredit"}
     if not repeticao:
-        _guardar_tentativa(account.id, chave)
+        _guardar_tentativa(account.id, body.credit_id, chave)
     params = {"idempotencyKey": chave}
     if body.credit_id:
         params["creditId"] = body.credit_id
-    resposta = codex_appserver.perguntar(
-        "account/rateLimitResetCredit/consume", codex_home=account.home, params=params)
+    resposta = _perguntar_reset(
+        account, "consumo", "account/rateLimitResetCredit/consume", params)
     outcome = resposta.get("outcome")
     if outcome not in ("reset", "nothingToReset", "noCredit", "alreadyRedeemed"):
         raise _ResetError(502, "codex_reset_invalid_response",

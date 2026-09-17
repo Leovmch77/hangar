@@ -2618,6 +2618,7 @@
   "codex_reset_invalid_response": "O Codex devolveu uma resposta inválida ao redefinir a cota.",
   "codex_reset_failed": "Não foi possível redefinir a cota do Codex.",
   "codex_reset_refresh_failed": "A redefinição foi aplicada, mas não foi possível atualizar os dados agora.",
+  "codex_reset_refresh_failed_neutral": "Não foi possível atualizar os dados agora.",
   "cota_mostrar_barra": "Mostrar na barra",
   "cota_esconder_barra": "Esconder da barra",
   "cota_pill_aria": "Uso das contas: pior leitura {p}% em {j} ({c})",

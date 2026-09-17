@@ -2618,6 +2618,7 @@
   "codex_reset_invalid_response": "Codex returned an invalid response while resetting usage.",
   "codex_reset_failed": "Could not reset Codex usage.",
   "codex_reset_refresh_failed": "The reset was applied, but usage data could not be refreshed right now.",
+  "codex_reset_refresh_failed_neutral": "Usage data could not be refreshed right now.",
   "cota_mostrar_barra": "Pin to the bar",
   "cota_esconder_barra": "Hide from the bar",
   "cota_pill_aria": "Account usage: worst reading {p}% on {j} ({c})",

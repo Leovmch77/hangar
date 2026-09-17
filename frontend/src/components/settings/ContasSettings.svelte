@@ -314,6 +314,7 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
       const resultado = await consumirRedefinicaoCodex(
         alvo, resetTentativa.conta, resetTentativa.credito, resetTentativa.chave);
       if (g !== geracao) return;
+      const aplicada = resultado.outcome === 'reset' || resultado.outcome === 'alreadyRedeemed';
       if (resultado.outcome === 'reset') {
         aviso = m.codex_reset_success();
       } else if (resultado.outcome === 'alreadyRedeemed') {
@@ -333,7 +334,9 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
         }
       } catch {
         if (g === geracao) {
-          aviso = `${aviso} ${m.codex_reset_refresh_failed()}`;
+          aviso = `${aviso} ${aplicada
+            ? m.codex_reset_refresh_failed()
+            : m.codex_reset_refresh_failed_neutral()}`;
           avisoErro = true;
         }
       }

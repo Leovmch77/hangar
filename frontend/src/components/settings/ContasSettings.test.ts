@@ -258,6 +258,30 @@ describe('ContasSettings — a lista', () => {
     unmount(t.comp);
   });
 
+  it('não diz que a redefinição foi aplicada quando noCredit e a releitura falha', async () => {
+    const conta = codex({ cota: {
+      estado: 'lida', idade_s: 5,
+      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 100 }],
+      reset_credits: { available_count: 1, credits: null },
+    } } as Credencial);
+    credMock.listarCredenciais
+      .mockResolvedValueOnce([conta])
+      .mockRejectedValueOnce(new Error('offline'));
+    credMock.consumirRedefinicaoCodex.mockResolvedValueOnce({ outcome: 'noCredit' });
+    const t = montar([conta]);
+    await tick(); await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!.click();
+    await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-reset-confirm .primario')!.click();
+    await vi.waitFor(() => expect(t.el.querySelector('.ct-aviso')?.textContent)
+      .toContain(m.codex_reset_no_credit()));
+    expect(t.el.querySelector('.ct-aviso')?.textContent)
+      .toContain(m.codex_reset_refresh_failed_neutral());
+    expect(t.el.querySelector('.ct-aviso')?.textContent)
+      .not.toContain(m.codex_reset_refresh_failed());
+    unmount(t.comp);
+  });
+
   it('conta deslogada CONTINUA na lista, com Entrar (inerte) e estado de leitura explícito', async () => {
     const t = montar([LOGADA, DESLOGADA]);
     await tick(); await tick();

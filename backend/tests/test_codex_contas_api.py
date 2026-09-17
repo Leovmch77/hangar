@@ -21,6 +21,14 @@ TOKEN = "token-codex-contas"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+@pytest.fixture(autouse=True)
+def tentativas_isoladas(monkeypatch, tmp_path):
+    arquivo = tmp_path / "codex-reset-attempts.json"
+    monkeypatch.setattr(codex_contas_api, "_arquivo_tentativas", lambda: arquivo)
+    monkeypatch.setattr(codex_contas_api, "_reset_attempts", {})
+    return arquivo
+
+
 @pytest.fixture
 def painel(monkeypatch):
     service = SimpleNamespace(
@@ -189,9 +197,15 @@ def test_redefinicao_sem_credito_na_revalidacao_nao_chama_consume(painel, monkey
     assert chamadas == ["account/rateLimits/read"]
 
 
-def test_retry_da_mesma_tentativa_chega_em_already_redeemed_apos_o_reset(painel, monkeypatch):
+def test_retry_da_mesma_tentativa_sobrevive_reinicio_e_chega_em_already_redeemed(
+        painel, monkeypatch, tentativas_isoladas, caplog):
     client, _ = painel
     chave = str(uuid.uuid4())
+    tentativas = tentativas_isoladas
+    vencida = str(uuid.uuid4())
+    tentativas.write_text(
+        '{"account_id": "work", "credit_id": null, "idempotency_key": "%s", "accepted_at": 1}\n'
+        "linha cortada {\n" % vencida, encoding="utf-8")
     semana = iter((100, 12))
     outcomes = iter(("reset", "alreadyRedeemed"))
 
@@ -207,11 +221,44 @@ def test_retry_da_mesma_tentativa_chega_em_already_redeemed_apos_o_reset(painel,
     monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
     corpo = {"credit_id": "reset-1", "idempotency_key": chave}
 
-    primeira = client.post("/api/codex-contas/work/rate-limit-reset", headers=AUTH, json=corpo)
+    with caplog.at_level("WARNING", logger="hangar.codex.contas"):
+        primeira = client.post("/api/codex-contas/work/rate-limit-reset", headers=AUTH, json=corpo)
+    codex_contas_api._reset_attempts.clear()
     segunda = client.post("/api/codex-contas/work/rate-limit-reset", headers=AUTH, json=corpo)
 
     assert primeira.json() == {"outcome": "reset"}
     assert segunda.json() == {"outcome": "alreadyRedeemed"}
+    gravado = tentativas.read_text(encoding="utf-8")
+    assert chave in gravado
+    assert vencida not in gravado and "linha cortada" not in gravado
+    assert "1 linha(s) ilegivel(is)" in caplog.text
+
+
+def test_falha_do_appserver_registra_conta_e_etapa_sem_expor_saida(
+        painel, monkeypatch, caplog):
+    client, _ = painel
+
+    def perguntar(metodo, **kwargs):
+        if metodo == "account/rateLimits/read":
+            return {
+                "rateLimits": {"secondary": {
+                    "usedPercent": 100, "windowDurationMins": 10080}},
+                "rateLimitResetCredits": {"availableCount": 1, "credits": []},
+            }
+        raise codex_contas_api.codex_appserver.CodexIndisponivel("SAIDA-PRIVADA")
+
+    monkeypatch.setattr(codex_contas_api.codex_appserver, "perguntar", perguntar)
+    with caplog.at_level("ERROR", logger="hangar.codex.contas"):
+        response = client.post(
+            "/api/codex-contas/work/rate-limit-reset", headers=AUTH,
+            json={"credit_id": "reset-1", "idempotency_key": str(uuid.uuid4())},
+        )
+
+    assert response.status_code == 502
+    assert "conta=work" in caplog.text
+    assert "etapa=consumo" in caplog.text
+    assert "CodexIndisponivel" in caplog.text
+    assert "SAIDA-PRIVADA" not in caplog.text
 
 
 def test_get_prepare_concluido_confia_cwd_antes_de_liberar_lancador(painel, monkeypatch):

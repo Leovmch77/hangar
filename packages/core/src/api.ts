@@ -813,7 +813,7 @@ export function consumeCodexRateLimitResetForServer(
   return apiFetchForServer(server, codexAccountPath(id, 'rate-limit-reset'), {
     method: 'POST',
     body: JSON.stringify({ credit_id: creditId, idempotency_key: idempotencyKey }),
-  });
+  }, 90_000);
 }
 export function consumeCodexRateLimitReset(
   id: string, creditId: string | null, idempotencyKey: string,
