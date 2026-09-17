@@ -5,6 +5,7 @@ Read at step 4 of `executor.md`.
 ## Run
 
 - The command the plan defined for this Task, cwd-independent (explicit prefix or directory).
+- Once per round, after the last edit; never between edits. Red → rerun only what failed.
 - `set -o pipefail` or `${PIPESTATUS[0]}`: `command | tail && echo OK` prints OK on failure.
 - Before sending (the round is uncommitted, so diff against HEAD, never `<base>..HEAD`):
   `git diff HEAD -- <file>` shows only what the Task asked; check removed lines with

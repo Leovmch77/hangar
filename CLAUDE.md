@@ -95,11 +95,13 @@ npm --prefix frontend run check            # svelte-check + tsc — THIS is the 
 node scripts/test-pi-hangar-state.mjs          # hangar-state.ts: fork de subagente do Pi não rouba o pane
 ```
 
-**Verificação durante o trabalho é só a focada**: o teste do arquivo mexido
-(`cd backend && uv run pytest tests/test_x.py`, `cd frontend && npx vitest run src/x.test.ts`). `npm run check`, `vitest` e
-`pytest` completos só rodam quando o usuário pedir — typecheck do repo inteiro a cada entrega
-trava a máquina e a sessão, e o `ci.yml` julga depois do push. `npm run build` só para servir o
-`dist` local. Ao reportar, diga quais suítes completas não rodaram.
+**A verificação da tarefa é o uso real**: abrir a tela, clicar, rodar o fluxo. **Teste
+automatizado (vitest, pytest, check) só roda quando o usuário pedir** — ele pede no fim, antes do
+push; nem entre edições, nem ao terminar a tarefa. Pedido o focado: num comando só, os testes dos
+arquivos tocados (`cd backend && uv run pytest tests/test_x.py tests/test_y.py`,
+`cd frontend && npx vitest run src/x.test.ts src/y.test.ts`); falhou → repita só o que falhou.
+Pedido o completo: `npm run check` na raiz, `vitest` e `pytest` inteiros. O `pre-push` roda sozinho os testes
+ligados aos arquivos que vão subir e recusa o push se falharem; a suíte inteira é do `ci.yml`. `npm run build` só para servir o `dist` local. Ao reportar, diga o que foi conferido no uso real e que os testes automatizados não rodaram.
 
 Claude sessions with a terminal must run as `claude --session-id <uuid>` **inside tmux** —
 `scripts/install-claude-wrapper.sh` sets this up. Headless Claude/Codex sessions are created by the

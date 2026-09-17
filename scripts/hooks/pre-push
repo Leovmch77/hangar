@@ -46,6 +46,7 @@ PADROES+=('IP da tailnet (endereço real de máquina)::100\.(6[5-9]|[7-9][0-9]|1
 
 ZERO=0000000000000000000000000000000000000000
 achou=0
+mudados=""
 while read -r _localref localsha _remoteref remotesha; do
     [[ "$localsha" == "$ZERO" ]] && continue          # delete de branch: nada sai
     if [[ "$remotesha" == "$ZERO" ]]; then
@@ -66,6 +67,7 @@ while read -r _localref localsha _remoteref remotesha; do
         echo "pre-push: não consegui varrer $intervalo — trava incompleta, push recusado." >&2
         exit 1
     fi
+    mudados+="$(git log --name-only --format= $intervalo -- .)"$'\n'
     adicionado="$(printf '%s\n' "$log_saida" | grep '^+' | grep -v '^+++' || true)"
     [[ -z "$adicionado" ]] && continue
     for entrada in "${PADROES[@]}"; do
@@ -91,8 +93,55 @@ FIM
     exit 1
 fi
 
-# O portão do CI NÃO roda aqui: a suíte inteira (svelte-check + vitest + build) numa máquina que já
-# está com várias sessões trabalhando derruba o resto e ainda falha por estouro de tempo, em teste
-# que passa sozinho. Quem julga isso é o ci.yml, no runner do GitHub. `scripts/ci-gates.sh` continua
-# existindo pra rodar à mão quando a máquina estiver livre.
+# Só os testes ligados ao que o push leva. A suíte inteira NÃO roda aqui: com várias sessões
+# trabalhando ela derruba a máquina e estoura tempo, e o pytest completo fecha as sessões sem
+# terminal. Quem julga a suíte inteira é o ci.yml; `scripts/ci-gates.sh` roda à mão.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+raiz="$(git rev-parse --show-toplevel)" || exit 1
+cd "$raiz" || exit 1
+
+front=(); core=(); back=()
+while IFS= read -r f; do
+    [[ -n "$f" && -e "$f" ]] || continue
+    case "$f" in
+        packages/core/src/*.ts) core+=("$raiz/$f"); front+=("$raiz/$f") ;;
+        frontend/src/paraglide/*) ;;
+        frontend/src/*.ts|frontend/src/*.js|frontend/src/*.svelte) front+=("$raiz/$f") ;;
+        backend/tests/test_*.py) back+=("${f#backend/}") ;;
+        backend/app/*.py)
+            nome="$(basename "$f" .py)"
+            for t in backend/tests/test_"$nome".py backend/tests/test_"$nome"_*.py; do
+                [[ -e "$t" ]] && back+=("${t#backend/}")
+            done ;;
+    esac
+done < <(printf '%s' "$mudados" | sort -u)
+
+falhou=()
+if (( ${#core[@]} )); then
+    echo "pre-push: vitest dos arquivos de @hangar/core que vão subir…" >&2
+    (cd packages/core && flock -w 900 /tmp/hangar-verificacao.lock \
+        npx --no-install vitest related --run --passWithNoTests "${core[@]}") || falhou+=("vitest @hangar/core")
+fi
+if (( ${#front[@]} )); then
+    echo "pre-push: vitest dos arquivos do front que vão subir…" >&2
+    (cd frontend && npm run --silent i18n:compile >/dev/null && flock -w 900 /tmp/hangar-verificacao.lock \
+        npx --no-install vitest related --run --passWithNoTests "${front[@]}") || falhou+=("vitest frontend")
+fi
+if (( ${#back[@]} )); then
+    mapfile -t back < <(printf '%s\n' "${back[@]}" | sort -u)
+    echo "pre-push: pytest de ${#back[@]} arquivo(s) de teste ligados ao que vai subir…" >&2
+    (cd backend && uv run pytest -q "${back[@]}") || falhou+=("pytest backend")
+fi
+
+if (( ${#falhou[@]} )); then
+    cat >&2 <<FIM
+
+  ── push recusado: testes ligados ao que vai subir falharam ────────────────
+  Falhou: ${falhou[*]}
+  Corrija e tente de novo. Emergência, sabendo o que está fazendo:
+  git push --no-verify
+
+FIM
+    exit 1
+fi
 exit 0
