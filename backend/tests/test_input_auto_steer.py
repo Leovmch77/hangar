@@ -289,6 +289,7 @@ def test_cli_claude_nativo_continua_recusando_envio_por_input():
     program = '''set -e
 set -- destino recado
 api() { printf '%s' '{"uds":"/tmp/inbox"}'; }
+me() { echo origem; }
 ''' + tail
     result = subprocess.run(["bash", "-c", program], env={**os.environ,
         "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/origem"}, capture_output=True, text=True)
