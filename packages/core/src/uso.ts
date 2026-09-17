@@ -126,6 +126,33 @@ const ordenar = (m: Map<string, UsoBucket>) =>
   [...m.values()].sort((a, b) =>
     b.cost - a.cost || b.ctx_chars - a.ctx_chars || b.chamadas - a.chamadas || a.key.localeCompare(b.key));
 
+export interface UsoItemGrupo { nome: string; keys: string[]; peso: number; vezes: number }
+export interface UsoGrupo { plugin: string; peso: number; vezes: number; itens: UsoItemGrupo[] }
+
+// Grupo = `plugin` do servidor, senão o prefixo da chave, senão `semPlugin`. O item perde o
+// prefixo e junta o mesmo nome vindo do Claude e do Codex (`superpowers:brainstorming` e
+// `brainstorming`); `keys` guarda as chaves originais pra abrir o detalhe.
+export function agruparPorPlugin(lista: UsoBucket[], peso: (b: UsoBucket) => number, semPlugin = ''): UsoGrupo[] {
+  const grupos = new Map<string, UsoGrupo>();
+  for (const b of lista) {
+    const i = b.key.indexOf(':');
+    const plugin = b.plugin || (i > 0 ? b.key.slice(0, i) : semPlugin);
+    const nome = i > 0 ? b.key.slice(i + 1) : b.key;
+    let g = grupos.get(plugin);
+    if (!g) { g = { plugin, peso: 0, vezes: 0, itens: [] }; grupos.set(plugin, g); }
+    let item = g.itens.find((x) => x.nome === nome);
+    if (!item) { item = { nome, keys: [], peso: 0, vezes: 0 }; g.itens.push(item); }
+    item.keys.push(b.key);
+    item.peso += peso(b);
+    item.vezes += b.chamadas;
+    g.peso += peso(b);
+    g.vezes += b.chamadas;
+  }
+  const lista2 = [...grupos.values()].filter((g) => g.peso > 0 || g.vezes > 0);
+  for (const g of lista2) g.itens.sort((a, b) => b.peso - a.peso || b.vezes - a.vezes || a.nome.localeCompare(b.nome));
+  return lista2.sort((a, b) => b.peso - a.peso || b.vezes - a.vezes || a.plugin.localeCompare(b.plugin));
+}
+
 export function mergeUso(results: UsoServerResult[], period: string): MergedUso {
   const totals = zeroUso('totals');
   const dims = Object.fromEntries(USO_DIMS.map((d) => [d, new Map<string, UsoBucket>()])) as Record<UsoDim, Map<string, UsoBucket>>;

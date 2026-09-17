@@ -5,14 +5,58 @@ o `pricing` via `costs._custo_da_linha`. Aqui só se soma e se corta por períod
 """
 from __future__ import annotations
 
+import os
+import time
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from app import costs, pricing
 from app.costs_sources import (LOCAL, PROJETO_DESCONHECIDO, UsageRow, coletar_uso,
                                rotulo_de_provedor)
 from app.models import Applied, UsoBucket, UsoReport
-from app.uso_claude import UsoLinha
+from app.uso_claude import UsoLinha, plugin_de, skill_do_caminho
+
+_REPO = Path(__file__).resolve().parents[2]
+
+# Grupo de skill sem prefixo de plugin. `@` não existe em nome de plugin: a tela traduz.
+ORIGEM_REPO = "@repo"
+ORIGEM_PESSOAL = "@pessoal"
+ORIGEM_AVULSA = "@avulsa"
+ORIGEM_EMBUTIDA = "@embutida"
+
+
+def _origem_da_pasta(pasta: Path, home: Path) -> str:
+    real = Path(os.path.realpath(pasta))
+    if real.is_relative_to(_REPO / "skills"):
+        return ORIGEM_REPO
+    plugin = plugin_de((skill_do_caminho(str(real / "SKILL.md")) or ("", True))[0])
+    if plugin:
+        return plugin
+    if real.is_relative_to(Path(os.path.realpath(home / ".agents" / "skills"))):
+        return ORIGEM_AVULSA
+    return ORIGEM_PESSOAL
+
+
+def origens_de_skill(home: Path | None = None) -> dict[str, str]:
+    """nome da skill -> grupo. Mesma precedência de descoberta do Claude: pasta do usuário, repo,
+    avulsas, depois o cache de plugins (onde o Codex acha `brainstorming` sem prefixo).
+    Nome que não está em pasta nenhuma é embutido no CLI ou já foi removido."""
+    home = home or Path.home()
+    rasas = [home / ".claude" / "skills", _REPO / "skills", home / ".agents" / "skills"]
+    fundas = [home / ".claude" / "plugins" / "cache", home / ".codex" / "plugins" / "cache",
+              home / ".claude" / "plugins" / "marketplaces"]
+    achadas: dict[str, str] = {}
+    for raiz in rasas:
+        for skill in sorted(raiz.iterdir()) if raiz.is_dir() else []:
+            if (skill / "SKILL.md").is_file():
+                achadas.setdefault(skill.name, _origem_da_pasta(skill, home))
+    for raiz in fundas:
+        for md in sorted(raiz.rglob("SKILL.md")) if raiz.is_dir() else []:
+            if "skills" in md.parts:
+                achadas.setdefault(md.parent.name, _origem_da_pasta(md.parent, home))
+    return achadas
 
 # chars/4 é a régua de "tokens estimados": a tela SEMPRE rotula como estimativa.
 _CHARS_POR_TOKEN = 4
@@ -188,8 +232,12 @@ def _lista(v: Filtro) -> list[str]:
 def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
            now: datetime | None = None, conta: Filtro = None,
            projeto: Filtro = None, modelo: Filtro = None,
-           plugin: Filtro = None, foco: str | None = None) -> UsoReport:
+           plugin: Filtro = None, foco: str | None = None,
+           origens: dict[str, str] | None = None) -> UsoReport:
     contas, projetos, modelos, plugins_f = _lista(conta), _lista(projeto), _lista(modelo), _lista(plugin)
+    if origens is not None:
+        uso = [replace(l, plugin=origens.get(l.nome, ORIGEM_EMBUTIDA)) if l.tipo == "skill" and not l.plugin else l
+               for l in uso]
 
     def filtrar(linhas: list[UsoLinha]) -> list[UsoLinha]:
         return [l for l in linhas
@@ -299,4 +347,16 @@ def report(period: str = "all", now: datetime | None = None, fresco: bool = Fals
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou.
     `filtros`: conta, projeto, modelo, plugin, foco (ver `montar`)."""
     uso, tokens = coletar_uso(fresco=fresco)
-    return montar(uso, tokens, period=period, now=now, **filtros)
+    return montar(uso, tokens, period=period, now=now, origens=_origens_recentes(), **filtros)
+
+
+_ORIGENS_TTL_S = 300
+_origens_cache: tuple[float, dict[str, str]] = (float("-inf"), {})
+
+
+def _origens_recentes() -> dict[str, str]:
+    # A varredura desce no cache de plugins inteiro; filtro e detalhe pedem o relatório de novo.
+    global _origens_cache
+    if time.monotonic() - _origens_cache[0] > _ORIGENS_TTL_S:
+        _origens_cache = (time.monotonic(), origens_de_skill())
+    return _origens_cache[1]

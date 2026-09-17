@@ -6,7 +6,7 @@
   import { listServers, onServersChanged, type Server } from '../lib/auth';
   import { clienteQuery, uso } from '../lib/queries';
   import {
-    mergeUso, Aquecendo, projectLabel,
+    mergeUso, agruparPorPlugin, Aquecendo, projectLabel,
     type UsoServerResult, type MergedUso, type UsoBucket, type UsoReport, type UsoFiltros,
   } from '@hangar/core';
   import { dec, tok } from '../lib/fmt';
@@ -143,7 +143,6 @@
   const tokensReais = (b: UsoBucket) => b.input + b.output + b.cache_write + b.cache_read;
   const ctxPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.ctx_tokens_est / b.chamadas : 0);
   const porSessao = (b: UsoBucket) => (b.sessions > 0 ? b.ctx_tokens_est / b.sessions : 0);
-  const ocupadosSkills = $derived((report?.by_skill ?? []).reduce((n, b) => n + (b.ocupados_tokens_est ?? 0), 0));
   const ctxPorSessaoTotal = $derived(report && report.totals.sessions > 0
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
 
@@ -205,7 +204,7 @@
       bash: report.by_bash, mcp: report.by_mcp, contexto: report.by_contexto, imagem: report.by_imagem })[a];
   }
   const rotulo = (a: Aba, b: UsoBucket) =>
-    a === 'imagem' ? (b.key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: b.key.replace(/^lida:/, '') })) : (b.label ?? b.key);
+    a === 'imagem' ? (b.key === 'enviada' ? m.uso_img_enviada() : m.uso_img_lida({ tool: b.key.replace(/^lida:/, '') })) : a === 'plugin' ? nomeGrupo(b.key) : (b.label ?? b.key);
   type Col = 'nome' | 'chamadas' | 'principal' | 'porChamada' | 'respostas' | 'sessions';
   const valorDe = (b: UsoBucket, c: Col): number | string => ({
     nome: b.label ?? b.key, chamadas: b.chamadas, principal: principal(b, abaAtual.medida),
@@ -251,35 +250,62 @@
   let expandida = $state(false);
   $effect(() => { aba; expandida = false; });
 
-  // ── Topo: 4 números de skills e tools ────────────────────────────────────────
-  const totalTokens = $derived(report ? tokensReais(report.totals) : 0);
-  const soma = (lista: UsoBucket[] | undefined, v: (b: UsoBucket) => number) => (lista ?? []).reduce((n, b) => n + v(b), 0);
-  const cargasSkills = $derived(soma(report?.by_skill, (b) => b.chamadas));
-  const pctSkills = $derived(totalTokens > 0 ? (ocupadosSkills / totalTokens) * 100 : 0);
-  // `tool:Skill` e `tool:Agent` repetem as abas de skill e agente: aqui só ferramenta.
-  const ferramentas = $derived((report?.by_tool ?? []).filter((b) => b.key !== 'Skill' && b.key !== 'Agent'));
-  const chamadasFerramenta = $derived(soma(ferramentas, (b) => b.chamadas));
-  const topFerramenta = $derived([...ferramentas].sort((a, b) => b.chamadas - a.chamadas)[0] ?? null);
-  const disparosAgente = $derived(soma(report?.by_agente, (b) => b.chamadas));
-  const tokensAgentes = $derived(soma(report?.by_agente, tokensReais));
-
-  // ── Rankings: barras horizontais, 8 itens + "outros"; clicar abre o detalhe ──
-  const TOP_RANK = 8;
-  function ranking(a: Aba, valor: (b: UsoBucket) => number) {
-    const ord = listaDa(a).filter((b) => valor(b) > 0).sort((x, y) => valor(y) - valor(x));
-    const total = ord.reduce((n, b) => n + valor(b), 0) || 1;
-    const linhas = ord.slice(0, TOP_RANK).map((b) => ({ key: b.key, nome: rotulo(a, b), v: valor(b) }));
-    const resto = ord.slice(TOP_RANK).reduce((n, b) => n + valor(b), 0);
-    if (resto > 0) linhas.push({ key: '', nome: m.uso_outros_itens({ n: ord.length - TOP_RANK }), v: resto });
-    const max = Math.max(...linhas.map((l) => l.v), 1);
-    return linhas.map((l) => ({ ...l, frac: l.v / total, largura: l.v / max }));
+  // ── Skills agrupadas por plugin ──────────────────────────────────────────────
+  // Grupo que começa com `@` não é plugin: o servidor achou a skill numa pasta (repo, suas…).
+  const GRUPOS: Record<string, () => string> = {
+    '@repo': m.uso_grupo_repo, '@pessoal': m.uso_grupo_pessoal, '@avulsa': m.uso_grupo_avulsa,
+    '@embutida': m.uso_grupo_embutida, '@nativo': m.uso_grupo_nativo, '': m.uso_grupo_sem,
+  };
+  const nomeGrupo = (p: string) => GRUPOS[p]?.() ?? p;
+  const pesoSkill = (b: UsoBucket) => b.ocupados_tokens_est ?? 0;
+  const gruposSkill = $derived(agruparPorPlugin(report?.by_skill ?? [], pesoSkill));
+  type Chave = 'peso' | 'vezes';
+  let ordemGrupo = $state<Chave>('peso');
+  const porChave = <T extends { peso: number; vezes: number }>(k: Chave) => (a: T, b: T) =>
+    b[k] - a[k] || b[k === 'peso' ? 'vezes' : 'peso'] - a[k === 'peso' ? 'vezes' : 'peso'];
+  const gruposVistos = $derived.by(() => {
+    const termo = busca.trim().toLowerCase();
+    return gruposSkill
+      .map((g) => ({ ...g, itens: g.itens.filter((i) => !termo || i.nome.toLowerCase().includes(termo) || nomeGrupo(g.plugin).toLowerCase().includes(termo)) }))
+      .filter((g) => g.itens.length)
+      .map((g) => ({ ...g, itens: [...g.itens].sort(porChave(ordemGrupo)) }))
+      .sort(porChave(ordemGrupo));
+  });
+  const maxGrupo = $derived({ peso: Math.max(...gruposVistos.map((g) => g.peso), 1), vezes: Math.max(...gruposVistos.map((g) => g.vezes), 1) });
+  const maxItem = $derived({
+    peso: Math.max(...gruposVistos.flatMap((g) => g.itens.map((i) => i.peso)), 1),
+    vezes: Math.max(...gruposVistos.flatMap((g) => g.itens.map((i) => i.vezes)), 1),
+  });
+  const pesoTotalSkills = $derived(gruposSkill.reduce((n, g) => n + g.peso, 0) || 1);
+  // null = só o primeiro grupo aberto; o primeiro clique vira a escolha da pessoa.
+  let abertos = $state<Set<string> | null>(null);
+  const aberto = (p: string) => (abertos ? abertos.has(p) : p === gruposVistos[0]?.plugin);
+  function alternarGrupo(p: string) {
+    const s = new Set(abertos ?? (gruposVistos[0] ? [gruposVistos[0].plugin] : []));
+    if (s.has(p)) s.delete(p); else s.add(p);
+    abertos = s;
   }
-  const rankings = $derived<{ aba: Aba; titulo: string; aprox: boolean; linhas: ReturnType<typeof ranking> }[]>([
-    { aba: 'skill', titulo: m.uso_rank_skills(), aprox: true, linhas: ranking('skill', (b) => b.ocupados_tokens_est ?? 0) },
-    { aba: 'tool', titulo: m.uso_rank_ferramentas(), aprox: false, linhas: ranking('tool', (b) => (b.key === 'Skill' || b.key === 'Agent' ? 0 : b.chamadas)) },
-    { aba: 'agente', titulo: m.uso_rank_agentes(), aprox: false, linhas: ranking('agente', tokensReais) },
-    { aba: 'mcp', titulo: m.uso_rank_mcp(), aprox: false, linhas: ranking('mcp', (b) => b.chamadas) },
-  ]);
+
+  // ── Topo: a resposta com nome ────────────────────────────────────────────────
+  const soma = (lista: UsoBucket[] | undefined, v: (b: UsoBucket) => number) => (lista ?? []).reduce((n, b) => n + v(b), 0);
+  const itensSkill = $derived(gruposSkill.flatMap((g) => g.itens.map((i) => ({ ...i, grupo: g.plugin }))));
+  const maiorPor = <T,>(lista: T[], v: (x: T) => number): T | null =>
+    lista.reduce<T | null>((a, x) => (v(x) > 0 && (!a || v(x) > v(a)) ? x : a), null);
+  const pluginTop = $derived(maiorPor(gruposSkill.filter((g) => g.plugin && !g.plugin.startsWith('@')), (g) => g.peso));
+  const skillPesada = $derived(maiorPor(itensSkill, (i) => i.peso));
+  const skillUsada = $derived(maiorPor(itensSkill, (i) => i.vezes));
+  // `tool:Skill` e `tool:Agent` repetem skills e subagentes: aqui só ferramenta.
+  const ferramentas = $derived((report?.by_tool ?? []).filter((b) => b.key !== 'Skill' && b.key !== 'Agent')
+    .filter((b) => b.chamadas > 0).sort((a, b) => b.chamadas - a.chamadas));
+  const chamadasFerramenta = $derived(soma(ferramentas, (b) => b.chamadas));
+  const topFerramenta = $derived(ferramentas[0] ?? null);
+  const TOP_FERRAMENTAS = 12;
+  const maxFerramenta = $derived(topFerramenta?.chamadas || 1);
+  const comandosBash = $derived([...(report?.by_bash ?? [])].sort((a, b) => b.chamadas - a.chamadas).slice(0, 5)
+    .map((b) => `${b.key} ${dec(b.chamadas, 0)}`).join(', '));
+  const gruposAgente = $derived([...agruparPorPlugin(report?.by_agente ?? [], tokensReais, '@nativo')].sort(porChave('vezes')));
+  const maxAgente = $derived(gruposAgente[0]?.vezes || 1);
+  const TOP_NOMES = 4;
   function abrirItem(a: Aba, key: string) { aba = a; selecionar(a, key); }
   let avancadoAberto = $state(localStorage.getItem('cp_uso_avancado') === '1');
   $effect(() => { localStorage.setItem('cp_uso_avancado', avancadoAberto ? '1' : '0'); });
@@ -378,9 +404,9 @@
                ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: tok(tokensReais(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.plugin?.length}><Select ariaLabel={m.uso_plugin()} value="" onchange={() => {}} class="chipsel"
       values={filtros.plugin ?? []} onchangeMulti={(v) => setFiltro('plugin', v)}
-      rotuloMulti={rotuloFiltro('plugin', m.uso_todos(), (k) => k)}
+      rotuloMulti={rotuloFiltro('plugin', m.uso_todos(), nomeGrupo)}
       opcoes={[{ value: '', label: m.uso_todos() },
-               ...listas.plugin.map((b) => ({ value: b.key, label: b.key, hint: dec(b.chamadas, 0) }))]} /></span>
+               ...listas.plugin.map((b) => ({ value: b.key, label: nomeGrupo(b.key), hint: dec(b.chamadas, 0) }))]} /></span>
     <input class="busca" type="search" placeholder={m.uso_busca()} bind:value={busca} aria-label={m.uso_busca()} />
     {#if servidores.length > 1}
       <button class="chip" aria-expanded={mostrarServidores} onclick={() => (mostrarServidores = !mostrarServidores)}>
@@ -435,27 +461,142 @@
   {:else if vazioNoPeriodo}
     <p class="muted vazio">{m.uso_vazio()}</p>
   {:else}
-    <dl class="numeros">
-      <div>
-        <dt>{m.uso_kpi_cargas_skills()}</dt><dd>{dec(cargasSkills, 0)}</dd>
-        <p class="sub">{m.uso_kpi_skills_distintas({ n: dec(report.by_skill.length, 0) })}</p>
+    <div class="respostas">
+      <div class="resp">
+        <span class="q">{m.uso_resp_plugin_pesa()}</span>
+        {#if pluginTop}
+          <strong>{nomeGrupo(pluginTop.plugin)}</strong>
+          <span class="a">{m.uso_resp_plugin_sub({ n: tok(pluginTop.peso), pct: dec((pluginTop.peso / pesoTotalSkills) * 100, 0) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
       </div>
-      <div title={m.uso_ocupados_nota()}>
-        <dt>{m.uso_kpi_ocupados_skills()}</dt><dd>≈ {tok(ocupadosSkills)}</dd>
-        <p class="sub">{m.uso_kpi_do_total({ pct: dec(pctSkills, 1) })}</p>
+      <div class="resp">
+        <span class="q">{m.uso_resp_skill_pesa()}</span>
+        {#if skillPesada}
+          <strong>{skillPesada.nome}</strong>
+          <span class="a">{m.uso_resp_grupo_tokens({ grupo: nomeGrupo(skillPesada.grupo), n: tok(skillPesada.peso) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
       </div>
-      <div>
-        <dt>{m.uso_kpi_chamadas_ferramenta()}</dt><dd>{dec(chamadasFerramenta, 0)}</dd>
-        {#if topFerramenta}<p class="sub">{m.uso_kpi_mais_usada({ nome: topFerramenta.key, pct: dec((topFerramenta.chamadas / (chamadasFerramenta || 1)) * 100, 0) })}</p>{/if}
+      <div class="resp">
+        <span class="q">{m.uso_resp_skill_usada()}</span>
+        {#if skillUsada}
+          <strong>{skillUsada.nome}</strong>
+          <span class="a">{m.uso_resp_grupo_vezes({ grupo: nomeGrupo(skillUsada.grupo), n: dec(skillUsada.vezes, 0) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
       </div>
-      <div>
-        <dt>{m.uso_kpi_subagentes()}</dt><dd>{dec(disparosAgente, 0)}</dd>
-        <p class="sub">{m.uso_kpi_tokens_subagentes({ n: tok(tokensAgentes) })}</p>
+      <div class="resp">
+        <span class="q">{m.uso_resp_ferramenta()}</span>
+        {#if topFerramenta}
+          <strong>{topFerramenta.key}</strong>
+          <span class="a">{m.uso_resp_ferramenta_sub({ pct: dec((topFerramenta.chamadas / (chamadasFerramenta || 1)) * 100, 0), n: dec(topFerramenta.chamadas, 0) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
       </div>
-    </dl>
+    </div>
 
     <div class="painel" class:com-detalhe={desktop && itemSelecionado}>
       <div class="principal">
+        <section class="bloco-graf">
+          <div class="cab">
+            <div>
+              <h2>{m.uso_sec_por_plugin()}</h2>
+              <p class="hint" title={m.uso_ocupados_nota()}>
+                <span class="swatch peso"></span> {m.uso_legenda_peso()}
+                <span class="swatch vezes"></span> {m.uso_legenda_vezes()}
+              </p>
+            </div>
+          </div>
+          {#if !gruposVistos.length}
+            <p class="muted">{m.uso_vazio_secao()}</p>
+          {:else}
+            <div class="glinha gcab">
+              <span>{m.uso_col_grupo()}</span>
+              {#each [['peso', m.uso_col_peso()], ['vezes', m.uso_col_vezes()]] as [k, rot] (k)}
+                <button class="th" aria-pressed={ordemGrupo === k} onclick={() => (ordemGrupo = k as Chave)}>
+                  {rot}{#if ordemGrupo === k}<span class="seta">▾</span>{/if}
+                </button>
+              {/each}
+            </div>
+            <ul class="grupos">
+              {#each gruposVistos as g (g.plugin)}
+                {@const ab = aberto(g.plugin)}
+                <li>
+                  <button class="glinha grupo" aria-expanded={ab} onclick={() => alternarGrupo(g.plugin)}>
+                    <span class="gnome">
+                      <span class="chev" class:ab>▸</span><strong>{nomeGrupo(g.plugin)}</strong>
+                      <small>{g.itens.length === 1 ? m.uso_grupo_1_skill({ pct: dec((g.peso / pesoTotalSkills) * 100, 0) })
+                        : m.uso_grupo_n_skills({ n: g.itens.length, pct: dec((g.peso / pesoTotalSkills) * 100, 0) })}</small>
+                    </span>
+                    {@render celula(g.peso, maxGrupo.peso, 'peso')}
+                    {@render celula(g.vezes, maxGrupo.vezes, 'vezes')}
+                  </button>
+                  {#if ab}
+                    <ul>
+                      {#each g.itens as i (i.nome)}
+                        <li>
+                          <button class="glinha item" aria-pressed={selecionado?.aba === 'skill' && i.keys.includes(selecionado.key)}
+                            title={i.keys.join(', ')} onclick={() => abrirItem('skill', i.keys[0])}>
+                            <span class="gnome">{i.nome}</span>
+                            {@render celula(i.peso, maxItem.peso, 'peso')}
+                            {@render celula(i.vezes, maxItem.vezes, 'vezes')}
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            <p class="nota">{m.uso_grupo_nota()}</p>
+          {/if}
+          {#if !desktop && itemSelecionado}
+            <div class="detalhe-movel">{@render detalhe(itemSelecionado)}</div>
+          {/if}
+        </section>
+
+        <div class="linha-graf dois">
+          <section class="bloco-graf">
+            <div class="cab"><div><h2>{m.uso_rank_ferramentas()}</h2><p class="hint">{m.uso_ferr_nota()}</p></div></div>
+            {#if !ferramentas.length}
+              <p class="muted">{m.uso_vazio_secao()}</p>
+            {:else}
+              <ol class="rk">
+                {#each ferramentas.slice(0, TOP_FERRAMENTAS) as f (f.key)}
+                  <li>
+                    <button class="rk-topo" onclick={() => abrirItem('tool', f.key)}>
+                      <strong>{f.key}</strong>
+                      <b>{dec(f.chamadas, 0)} <span class="dim">· {dec((f.chamadas / (chamadasFerramenta || 1)) * 100, 0)}%</span></b>
+                    </button>
+                    <span class="gbar"><i class="vezes" style="width: {(f.chamadas / maxFerramenta) * 100}%"></i></span>
+                    {#if f.key === 'Bash' && comandosBash}<p class="rk-sub">{m.uso_ferr_bash({ lista: comandosBash })}</p>{/if}
+                  </li>
+                {/each}
+              </ol>
+              {#if ferramentas.length > TOP_FERRAMENTAS}<p class="nota">{m.uso_mais_na_tabela({ n: ferramentas.length - TOP_FERRAMENTAS })}</p>{/if}
+            {/if}
+          </section>
+          <section class="bloco-graf">
+            <div class="cab"><div><h2>{m.uso_sub_titulo()}</h2><p class="hint">{m.uso_sub_nota()}</p></div></div>
+            {#if !gruposAgente.length}
+              <p class="muted">{m.uso_vazio_secao()}</p>
+            {:else}
+              <ol class="rk">
+                {#each gruposAgente as g (g.plugin)}
+                  {@const nomes = [...g.itens].sort(porChave('vezes'))}
+                  <li>
+                    <div class="rk-topo"><strong>{nomeGrupo(g.plugin)}</strong><b>{dec(g.vezes, 0)}</b></div>
+                    <span class="gbar"><i class="vezes" style="width: {(g.vezes / maxAgente) * 100}%"></i></span>
+                    <p class="rk-sub">
+                      {#each nomes.slice(0, TOP_NOMES) as i, n (i.nome)}{n ? ' · ' : ''}<button class="rk-nome" onclick={() => abrirItem('agente', i.keys[0])}>{i.nome}</button> <span class="dim">{dec(i.vezes, 0)}</span>{/each}{#if nomes.length > TOP_NOMES} · <span class="dim">{m.uso_mais_n({ n: nomes.length - TOP_NOMES })}</span>{/if}
+                    </p>
+                  </li>
+                {/each}
+              </ol>
+            {/if}
+          </section>
+        </div>
+
+        <details class="avancado" bind:open={avancadoAberto}>
+        <summary>{m.uso_avancado()}</summary>
+        <div>
         <section class="bloco-graf tendencia">
           <div class="cab">
             <div>
@@ -488,34 +629,6 @@
           {/if}
         </section>
 
-        <div class="linha-graf dois">
-          {#each rankings as r (r.aba)}
-            <section class="bloco-graf">
-              <div class="cab"><h2>{r.titulo}</h2></div>
-              {#if !r.linhas.length}
-                <p class="muted">{m.uso_vazio_secao()}</p>
-              {:else}
-                <ol class="rank">
-                  {#each r.linhas as l (l.key || l.nome)}
-                    <li>
-                      {#if l.key}
-                        <button class="rank-nome" title={l.key} onclick={() => abrirItem(r.aba, l.key)}>{l.nome}</button>
-                      {:else}
-                        <span class="rank-nome dim">{l.nome}</span>
-                      {/if}
-                      <span class="rank-barra"><i style="width: {l.largura * 100}%" class:resto={!l.key}></i></span>
-                      <b>{r.aprox ? '≈ ' : ''}{r.aba === 'tool' || r.aba === 'mcp' ? dec(l.v, 0) : tok(l.v)}</b><span class="dim">{dec(l.frac * 100, 0)}%</span>
-                    </li>
-                  {/each}
-                </ol>
-              {/if}
-            </section>
-          {/each}
-        </div>
-
-        <details class="avancado" bind:open={avancadoAberto}>
-        <summary>{m.uso_avancado()}</summary>
-        <div>
           <section class="bloco-graf">
             <div class="cab">
               <h2>{m.uso_graf_ctx()}</h2>
@@ -539,8 +652,6 @@
               {/each}
             </ul>
           </section>
-        </div>
-        </details>
 
         <section class="ranking">
           <div class="abas" role="tablist">
@@ -574,7 +685,7 @@
                     <tr class="click" aria-selected={selecionado?.key === b.key && selecionado.aba === aba} onclick={() => selecionar(aba, b.key)}>
                       <td class="nome" title={b.key}>
                         {rotulo(aba, b)}
-                        {#if b.plugin && aba !== 'plugin'}<span class="tag">{b.plugin}</span>{/if}
+                        {#if b.plugin && aba !== 'plugin'}<span class="tag">{nomeGrupo(b.plugin)}</span>{/if}
                       </td>
                       <td class="n"><span class="ibar"><i style="width: {(b.chamadas / maxChamadas) * 100}%"></i></span>{dec(b.chamadas, 0)}</td>
                       <td class="n"><span class="ibar custo"><i style="width: {(v / maxPrincipal) * 100}%"></i></span>{v > 0 ? est + tok(v) : '—'}</td>
@@ -589,9 +700,6 @@
                 </tbody>
               </table>
             </div>
-            {#if !desktop && itemSelecionado}
-              <div class="detalhe-movel">{@render detalhe(itemSelecionado)}</div>
-            {/if}
             {#if linhas.length > TOPO}
               <button class="retry" onclick={() => (expandida = !expandida)}>
                 {expandida ? m.uso_mostrar_menos() : m.uso_mostrar_mais({ n: linhas.length - TOPO })}
@@ -599,6 +707,8 @@
             {/if}
           {/if}
         </section>
+        </div>
+        </details>
       </div>
 
       {#if desktop && itemSelecionado}
@@ -609,12 +719,19 @@
  </div>
 </div>
 
+{#snippet celula(v: number, max: number, medida: 'peso' | 'vezes')}
+  <span class="gcel">
+    <span class="gbar"><i class={medida} style="width: {v > 0 ? Math.max((v / max) * 100, 0.8) : 0}%"></i></span>
+    <b>{medida === 'peso' ? (v > 0 ? `≈ ${tok(v)}` : '—') : dec(v, 0)}</b>
+  </span>
+{/snippet}
+
 {#snippet detalhe(b: UsoBucket)}
   <div class="detalhe">
     <div class="det-cab">
       <div>
         <h3 title={b.key}>{rotulo(selecionado!.aba, b)}</h3>
-        <p class="dim">{abaAtual.label}{#if b.plugin} · {b.plugin}{/if}</p>
+        <p class="dim">{abaAtual.label}{#if b.plugin} · {nomeGrupo(b.plugin)}{/if}</p>
       </div>
       <button class="retry" onclick={() => (selecionado = null)}>{m.uso_detalhe_fechar()}</button>
     </div>
@@ -700,12 +817,51 @@
   .kpi-sk { height: 56px; } .grande { height: 380px; } .medio { height: 160px; }
   .sk-serie { height: 90px; }
 
-  /* números discretos: uma linha, sem cartão */
-  .numeros { display: flex; flex-wrap: wrap; gap: var(--space-6); margin: var(--space-2) 0 var(--space-5); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
-  .numeros div { min-width: 0; }
-  .numeros dt { font-size: var(--text-xs); color: var(--text-muted); margin-bottom: 2px; }
-  .numeros dd { font-size: var(--text-lg); font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-  .numeros div:first-child dd { color: var(--accent); }
+  /* topo: cada cartão é uma pergunta respondida com um nome */
+  .respostas { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin: var(--space-2) 0 var(--space-5); }
+  .resp { display: flex; flex-direction: column; gap: 2px; min-width: 0; background: var(--surface-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
+  .resp .q { font-size: var(--text-xs); color: var(--text-muted); }
+  .resp strong { font-size: var(--text-lg); font-weight: 650; overflow-wrap: anywhere; }
+  .resp .a { font-size: var(--text-xs); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+  /* skills por plugin: grupo clicável, skills dentro */
+  .hint .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-left: var(--space-2); }
+  .hint .swatch:first-child { margin-left: 0; }
+  .swatch.peso, .gbar > i.peso { background: var(--chart-1); }
+  .swatch.vezes, .gbar > i.vezes { background: var(--chart-2); }
+  .glinha { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); align-items: center; width: 100%; }
+  .gcab { font-size: var(--text-xs); color: var(--text-muted); padding: 0 var(--space-2) 6px; border-bottom: 1px solid var(--border-subtle); }
+  .gcab .th { background: transparent; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+  .gcab .th[aria-pressed='true'], .gcab .th:hover { color: var(--text-primary); font-weight: 600; }
+  .grupos, .grupos ul { list-style: none; margin: 0; padding: 0; }
+  .grupos > li { border-bottom: 1px solid var(--border-subtle); }
+  .grupos > li > ul { padding-bottom: var(--space-1); }
+  button.glinha { background: transparent; border: 0; font: inherit; color: var(--text-primary); text-align: left; padding: 7px var(--space-2); border-radius: var(--radius-sm); cursor: pointer; }
+  button.glinha:hover { background: var(--bg-hover); }
+  button.glinha.item[aria-pressed='true'] { background: var(--accent-dim); }
+  .gnome { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .gnome small { font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap; }
+  .item .gnome { display: block; padding-left: 26px; color: var(--text-secondary); }
+  .chev { display: inline-block; width: 12px; color: var(--text-muted); transition: transform 120ms; }
+  .chev.ab { transform: rotate(90deg); }
+  .gcel { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+  .gcel b { min-width: 7ch; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .item .gcel b { color: var(--text-secondary); }
+  .gbar { display: block; flex: 1; height: 6px; border-radius: 3px; background: var(--surface-inset); overflow: hidden; }
+  .gbar > i { display: block; height: 100%; border-radius: 0 3px 3px 0; }
+  .nota { font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2); }
+
+  /* ferramentas e subagentes: nome e número em cima, barra embaixo */
+  .rk { list-style: none; margin: 0; padding: 0; }
+  .rk li { padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
+  .rk li:last-child { border-bottom: 0; }
+  .rk-topo { display: flex; justify-content: space-between; gap: var(--space-2); width: 100%; margin-bottom: 5px; background: transparent; border: 0; padding: 0; font: inherit; color: var(--text-primary); text-align: left; }
+  button.rk-topo { cursor: pointer; }
+  button.rk-topo:hover strong { color: var(--accent); }
+  .rk-topo b { font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rk-sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 5px; }
+  .rk-nome { background: transparent; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+  .rk-nome:hover { color: var(--accent); }
 
   .painel { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-items: start; }
   .painel.com-detalhe { grid-template-columns: minmax(0, 1fr) 340px; }
@@ -720,16 +876,6 @@
   .cab .hint { font-size: var(--text-xs); color: var(--text-secondary); max-width: 80ch; margin-top: 2px; }
   .cab .total { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
   .linha-graf { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
-  .numeros .sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 2px; }
-  .rank { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-  .rank li { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 2fr) auto 3.5ch; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
-  .rank-nome { justify-self: stretch; min-width: 0; background: transparent; border: 0; padding: 0; font: inherit; color: var(--text-primary); text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  button.rank-nome:hover { color: var(--accent); }
-  .rank-barra { height: 10px; border-radius: 4px; background: var(--surface-inset); overflow: hidden; }
-  .rank-barra > i { display: block; height: 100%; background: var(--chart-1); border-radius: 4px; }
-  .rank-barra > i.resto { background: var(--text-muted); }
-  .rank b { font-variant-numeric: tabular-nums; text-align: right; }
-  .rank .dim { text-align: right; font-variant-numeric: tabular-nums; }
   .avancado { margin-bottom: var(--space-5); }
   .avancado > summary { cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary); padding: var(--space-2) 0; margin-bottom: var(--space-2); }
   .avancado > summary:hover { color: var(--text-primary); }
@@ -788,8 +934,10 @@
 
   @media (max-width: 819px) {
     .uso { padding-inline: var(--space-3); }
-    .numeros { gap: var(--space-4); }
-    .numeros dd { font-size: var(--text-base); }
+    .respostas { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .resp strong { font-size: var(--text-base); }
+    .glinha { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px var(--space-3); }
+    .glinha > .gnome, .gcab > span { grid-column: 1 / -1; }
     .linha-graf { grid-template-columns: 1fr; }
     .busca { min-width: 0; flex: 1 1 140px; }
     .ibar { width: 36px; }

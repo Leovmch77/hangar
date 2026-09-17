@@ -466,6 +466,38 @@ def test_arquivo_de_outro_repositorio_usa_a_raiz_dele(tmp_path):
     assert uso_areas.area_do_caminho(str(tmp_path / "solto" / "a.md"), cwd, uso_areas.regras_de(cwd)) == "outros"
 
 
+def test_skill_sem_prefixo_ganha_o_grupo_da_pasta_de_onde_veio(tmp_path, monkeypatch):
+    home, repo = tmp_path / "home", tmp_path / "repo"
+    monkeypatch.setattr(uso_report, "_REPO", repo)
+
+    def skill(pasta: Path) -> Path:
+        pasta.mkdir(parents=True)
+        (pasta / "SKILL.md").write_text("x", encoding="utf-8")
+        return pasta
+    skill(repo / "skills" / "orquestrar")
+    (home / ".claude" / "skills").mkdir(parents=True)
+    (home / ".claude" / "skills" / "orquestrar").symlink_to(repo / "skills" / "orquestrar")
+    skill(home / ".claude" / "skills" / "minha")
+    (home / ".claude" / "skills" / "avulsa").symlink_to(skill(home / ".agents" / "skills" / "avulsa"))
+    skill(home / ".codex" / "plugins" / "cache" / "mkt" / "superpowers" / "6.3.0" / "skills" / "brainstorming")
+    origens = uso_report.origens_de_skill(home)
+    assert {k: origens.get(k) for k in ("orquestrar", "minha", "avulsa", "brainstorming")} == {
+        "orquestrar": "@repo", "minha": "@pessoal", "avulsa": "@avulsa", "brainstorming": "superpowers"}
+
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("x", "p1"),
+        _assistant([_tool_use("Skill", {"skill": n}, f"t{i}") for i, n in
+                    enumerate(["orquestrar", "brainstorming", "sumida", "acme:k"])], "m1"),
+    ])
+    uso = ct.varrer_uso(tmp_path / "p")
+    r = uso_report.montar(uso, [], "all", origens=origens)
+    assert {b.key: b.plugin for b in r.by_skill} == {
+        "orquestrar": "@repo", "brainstorming": "superpowers", "sumida": "@embutida", "acme:k": "acme"}
+    # O filtro de plugin enxerga o grupo resolvido.
+    r = uso_report.montar(uso, [], "all", plugin="superpowers", origens=origens)
+    assert [b.key for b in r.by_skill] == ["brainstorming"]
+
+
 def test_subagente_nao_e_sessao(tmp_path):
     def sessao(p, dia, i):
         _escrever(p, [

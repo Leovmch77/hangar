@@ -18,11 +18,13 @@ const report = (period: string): Partial<UsoReport> => ({
   // Skills pesam pelos tokens que OCUPARAM: "muitas" ocupa mais no total; "pesada" é maior por
   // carga (15 × a mediana).
   by_skill: [
-    { ...zeroUso('muitas'), sessions: 2, chamadas: 10, pedidas: 2, ctx_tokens_est: 10000, ocupados_tokens_est: 100000, respostas: 40 },
-    { ...zeroUso('pesada'), sessions: 1, chamadas: 3, ctx_tokens_est: 4500, ocupados_tokens_est: 45000, respostas: 10 },
+    { ...zeroUso('muitas'), plugin: 'superpowers', sessions: 2, chamadas: 10, pedidas: 2, ctx_tokens_est: 10000, ocupados_tokens_est: 100000, respostas: 40 },
+    { ...zeroUso('pesada'), plugin: '@repo', sessions: 1, chamadas: 3, ctx_tokens_est: 4500, ocupados_tokens_est: 45000, respostas: 10 },
     ...Array.from({ length: 20 }, (_, i) => ({ ...zeroUso(`s${String(i).padStart(2, '0')}`), sessions: 1, chamadas: 5, ctx_tokens_est: 500, ocupados_tokens_est: 500, respostas: 1 })),
   ],
-  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000 }],
+  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000 },
+              { ...zeroUso('ecc:python-reviewer'), sessions: 1, chamadas: 2, input: 900 }],
+  by_bash: [{ ...zeroUso('git'), chamadas: 60 }, { ...zeroUso('grep'), chamadas: 40 }],
   by_tool: [{ ...zeroUso('Bash'), sessions: 3, chamadas: 100, ctx_chars: 4000, ctx_tokens_est: 1000 },
             { ...zeroUso('Skill'), sessions: 1, chamadas: 50 }],
   by_contexto: [{ ...zeroUso('instructions'), sessions: 2, chamadas: 2, ctx_chars: 8000, ctx_tokens_est: 2000 }],
@@ -33,7 +35,7 @@ const report = (period: string): Partial<UsoReport> => ({
 const settle = async () => { for (let i = 0; i < 12; i++) await tick(); };
 const servidor = () => localStorage.setItem('cp_servers', JSON.stringify([{ id: 'a', label: 'A', baseUrl: 'https://a.test', token: 't' }]));
 
-it('monta o painel: números, bolhas, por dia, contexto e a tabela com abas ordenada por custo', async () => {
+it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagentes e a tabela com abas', async () => {
   localStorage.clear(); servidor();
   vi.mocked(clienteQuery.fetchQuery).mockImplementation((query) => {
     const { period } = query as unknown as { period: string };
@@ -41,25 +43,34 @@ it('monta o painel: números, bolhas, por dia, contexto e a tabela com abas orde
   });
   const target = document.body.appendChild(document.createElement('div'));
   const component = mount(Uso, { target, props: { onBack: vi.fn() } });
-  const nomes = () => [...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.textContent?.trim());
+  const nomes = () => [...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.firstChild?.textContent?.trim());
+  const grupos = () => [...target.querySelectorAll('.grupos > li > button strong')].map((s) => s.textContent);
   try {
     await settle();
-    // Topo: só skills e tools — 88 cargas de 22 skills, ferramentas sem contar Skill/Agent (100 do Bash).
-    const numeros = target.querySelector('.numeros')!;
-    expect(numeros.querySelectorAll(':scope > div')).toHaveLength(4);
-    expect(numeros.textContent).toContain(m.uso_kpi_skills_distintas({ n: '22' }));
-    expect(numeros.textContent).toContain(m.uso_kpi_mais_usada({ nome: 'Bash', pct: '100' }));
-    // Rankings: skills (8 + "outros (14)"), ferramentas, agentes, MCP; área e projeto não moram aqui.
-    const [skills, ferramentas, agentes, mcp] = [...target.querySelectorAll('ol.rank')];    expect(skills.querySelectorAll('li')).toHaveLength(9);
-    expect(skills.textContent).toContain(m.uso_outros_itens({ n: 14 }));
-    expect([...ferramentas.querySelectorAll('li')].map((li) => li.querySelector('.rank-nome')?.textContent)).toEqual(['Bash']);
-    expect(agentes.textContent).toContain('Explore');
-    expect(mcp.textContent).toContain('hangar');
-    expect(target.textContent).not.toContain(m.uso_graf_areas());
-    // Clicar numa skill do ranking abre o detalhe dela.
-    (skills.querySelector('button.rank-nome') as HTMLButtonElement).click();
+    // Topo: cada cartão responde com um nome. "@repo" pesa menos que superpowers e não é plugin.
+    const respostas = [...target.querySelectorAll('.respostas .resp')].map((r) => r.querySelector('strong')?.textContent);
+    expect(respostas).toEqual(['superpowers', 'muitas', 'muitas', 'Bash']);
+    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_ferramenta_sub({ pct: '100', n: '100' }));
+    // Grupos por peso; só o primeiro abre sozinho; skill sem plugin cai em "sem plugin".
+    expect(grupos()).toEqual(['superpowers', m.uso_grupo_repo(), m.uso_grupo_sem()]);
+    expect([...target.querySelectorAll('.grupos button.item')].map((b) => b.querySelector('.gnome')?.textContent)).toEqual(['muitas']);
+    // Ordenar por vezes: as 20 skills sem plugin (100 cargas) passam na frente.
+    ([...target.querySelectorAll('.gcab .th')].find((b) => b.textContent?.includes(m.uso_col_vezes())) as HTMLButtonElement).click();
     await settle();
-    expect(target.querySelector('.detalhe')?.textContent).toContain('muitas');
+    expect(grupos()[0]).toBe(m.uso_grupo_sem());
+    // Ferramentas sem Skill/Agent, com os comandos do Bash; subagentes agrupados pelo plugin.
+    const [ferramentas, agentes] = [...target.querySelectorAll('ol.rk')];
+    expect([...ferramentas.querySelectorAll('li strong')].map((s) => s.textContent)).toEqual(['Bash']);
+    expect(ferramentas.textContent).toContain(m.uso_ferr_bash({ lista: 'git 60, grep 40' }));
+    expect([...agentes.querySelectorAll('.rk-topo strong')].map((s) => s.textContent)).toEqual([m.uso_grupo_nativo(), 'ecc']);
+    expect(agentes.textContent).toContain('python-reviewer');
+    expect(target.textContent).not.toContain(m.uso_graf_areas());
+    // Abrir outro grupo e clicar na skill abre o detalhe dela.
+    ([...target.querySelectorAll('.grupos > li > button')].find((b) => b.textContent?.includes(m.uso_grupo_repo())) as HTMLButtonElement).click();
+    await settle();
+    ([...target.querySelectorAll('.grupos button.item')].find((b) => b.textContent?.includes('pesada')) as HTMLButtonElement).click();
+    await settle();
+    expect(target.querySelector('.detalhe')?.textContent).toContain('pesada');
     (target.querySelector('.detalhe button') as HTMLButtonElement).click();
     await settle();
     expect(nomes().slice(0, 2)).toEqual(['muitas', 'pesada']);                // tokens ocupados, decrescente
@@ -107,7 +118,7 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
     expect(det.textContent).toContain(m.uso_col_ocupados());                  // skill pesa pelo que ocupou
     expect(det.querySelector('svg.serie')).not.toBeNull();
     // Números da tela continuam lá (nada foi apagado durante o detalhe).
-    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_kpi_cargas_skills());
+    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_pesa());
     (det.querySelector('button') as HTMLButtonElement).click();
     await settle();
     expect(target.querySelector('.detalhe')).toBeNull();
@@ -143,7 +154,7 @@ it('trocar filtro de conta refaz a busca com a conta e mantém o painel montado 
     expect(pedidos.at(-1)).toEqual(['anthropic:2', 'anthropic:1']);
     expect(select.textContent).toContain(m.uso_filtro_conta({ v: m.uso_n_de_m({ n: 2, m: 2 }) }));
     expect(target.textContent).toContain(m.uso_atualizando());
-    expect(target.querySelector('.numeros')).not.toBeNull();                  // painel continua montado
+    expect(target.querySelector('.respostas')).not.toBeNull();                  // painel continua montado
     expect(target.querySelector('.esqueleto')).toBeNull();
     soltar();
     await settle();
@@ -170,7 +181,7 @@ it('202 "aquecendo" mostra o progresso e repergunta até o dado chegar', async (
     await vi.advanceTimersByTimeAsync(3000);
     await settle();
     expect(target.querySelector('.aquecendo')).toBeNull();
-    expect(target.querySelector('.numeros')?.textContent).toContain(m.uso_kpi_cargas_skills());
+    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_pesa());
   } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
 });
 
