@@ -120,6 +120,27 @@ while IFS= read -r f; do
     esac
 done < <(printf '%s' "$mudados" | sort -u)
 
+total=$(( ${#core[@]} + ${#front[@]} + ${#back[@]} ))
+if (( total == 0 )); then
+    exit 0
+fi
+# PERGUNTA, não roda sozinho: rodar em todo push cobrava minutos de quem só queria enviar. Sem
+# terminal pra perguntar (sessão de agente, script), a resposta é NÃO e o push segue — quem julga
+# tudo é o ci.yml.
+resposta=""
+if { exec 3</dev/tty; } 2>/dev/null; then
+    read -r -t 60 -u 3 -p \
+        "pre-push: rodar os testes ligados aos ${total} arquivo(s) que vão subir? [s/N] " resposta
+    exec 3<&-
+    echo >&2
+else
+    echo "pre-push: sem terminal pra perguntar — testes pulados, o ci.yml julga" >&2
+fi
+case "${resposta:-n}" in
+    s|S|y|Y) ;;
+    *) exit 0 ;;
+esac
+
 falhou=()
 if (( ${#core[@]} )); then
     echo "pre-push: vitest dos arquivos de @hangar/core que vão subir…" >&2
