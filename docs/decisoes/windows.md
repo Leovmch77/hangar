@@ -351,3 +351,17 @@ This is how `test_script_ao_lado_do_projeto_nao_e_acusado_de_inexistente`
   before PATH) and cmd builtins skipped. Not-found → a `ProjectError` naming the command and warning
   about the orphan; found and failed → silence, with rc and the stderr tail in the log. The stderr
   never reaches the screen: it comes in the console's OEM codepage, not the locale's.
+
+## Deleting a folder that git has written into: `shutil.rmtree` stops at the first read-only file
+
+(`codex_contas.delete_account`, measured 2026-09-16 with Python 3.14.7 on Windows 11.)
+  Deleting an additional Codex account failed every time with `PermissionError` errno 13 /
+  **WinError 5**, logged as `conta.apagar.fim` → `codex_account_delete_failed`. The Codex CLI clones
+  marketplaces into `<CODEX_HOME>/.tmp/marketplaces/.staging/marketplace-upgrade-*/` and never cleans
+  them; git writes `.git/objects/pack/*.idx|.pack|.rev` **read-only** (48 such files in the real
+  account). On Windows `os.unlink` refuses a read-only file; on POSIX only the directory's permission
+  matters, so the same code passes there and the test suite never saw it. A copy of the account
+  folder reproduced the exact error on the first `.idx`; no process was holding any file (the SQLite
+  files opened with share mode `None`). The fix is `rmtree(..., onexc=...)` that clears the attribute
+  and retries only on `PermissionError`; anything else still surfaces. Claude accounts are not
+  affected: their `plugins/` is a symlink to the shared folder, so no git clone lives inside them.

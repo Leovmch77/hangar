@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 
 
 _NOME = r"[a-z0-9][a-z0-9_-]{0,31}"
@@ -202,6 +203,17 @@ def create_account(name: str) -> Account:
     return _account(name, target)
 
 
+def _retirar_somente_leitura(func, path, exc: BaseException) -> None:
+    # No Windows, arquivo somente-leitura (pack do git em .tmp/marketplaces) recusa unlink.
+    if not isinstance(exc, PermissionError):
+        raise exc
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        raise exc from None
+    func(path)
+
+
 def delete_account(account: Account) -> None:
     """Apaga a pasta de uma conta ADICIONAL gerenciada. A padrao (~/.codex) nunca e apagada."""
     if account.is_default or _canonical(account.home) == _canonical(default_home()):
@@ -209,7 +221,7 @@ def delete_account(account: Account) -> None:
     if not _managed(account.home, account.id):
         raise AccountError(409, "codex_account_invalid_marker", {"account_id": account.id})
     try:
-        shutil.rmtree(account.home)
+        shutil.rmtree(account.home, onexc=_retirar_somente_leitura)
     except OSError as error:
         raise AccountError(500, "codex_account_delete_failed", {"account_id": account.id}) from error
 
