@@ -1073,7 +1073,7 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
                  gerenciada passa a usar ESSE botão, com a mesma confirmação inline. -->
             {#if conta.tipo === 'claude' && conta.gerenciada !== false && conta.login?.estado === 'ok' && conta.login.loggedIn && conta.cota?.estado !== 'expirada'}
               <button type="button" class="ct-acao" aria-label={m.contas_sair_aria({ nome: conta.nome })}
-                onclick={() => { saindoDe = conta.id; sairErro = ''; confirmando = null; }}>{m.contas_sair()}</button>
+                disabled={saindo} onclick={() => { saindoDe = conta.id; sairErro = ''; confirmando = null; }}>{m.contas_sair()}</button>
             {/if}
             {#if conta.tipo !== 'codex' && !motor && conta.gerenciada !== false}
               <button type="button" class="ct-acao" aria-label={m.contas_remover_aria({ nome: conta.nome })}
