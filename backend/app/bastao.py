@@ -587,7 +587,7 @@ def _grupo_e_par(nome: str) -> list[str]:
             out.append(f"- Contrato do grupo (leia antes de agir): `{contrato}`")
             # Quem herda precisa saber qual dos dois manda ANTES de agir: o dossiê descreve o que a
             # origem estava fazendo, o contrato descreve o que ainda vale.
-            out.append("- **Onde o dossiê divergir do contrato, vale o contrato.**")
+            out.append("- **Onde o resumo divergir do contrato, vale o contrato.**")
     if gid:
         regras = orq_papeis.regras_path(gid)
         texto, _mtime = orq_md.ler_arquivo(regras)
@@ -598,7 +598,7 @@ def _grupo_e_par(nome: str) -> list[str]:
     # O bastão NÃO reata nada disso (par, grupo, then e loop são sidecars por NOME): quem continua
     # tem de trocar a linha da tabela e avisar o par à mão. Dizer isso aqui é o que evita o par
     # seguir mandando recado pra uma sessão que parou.
-    out.append("- **A passagem de bastão não move estes vínculos.** Quem continua precisa trocar a "
+    out.append("- **A continuação não move estes vínculos.** Quem continua precisa trocar a "
                "linha da tabela de papéis para o próprio nome e avisar o par.")
     return out
 
@@ -790,7 +790,7 @@ def montar(jsonl: str, cwd: str | None, provider: str = "claude", nome: str = ""
     desde = _inicio(jsonl)
     tocados = _arquivos_tocados(eventos)
     linhas: list[str] = [
-        f"# Passagem de bastão — sessão `{nome or '?'}`",
+        f"# Continuação da sessão `{nome or '?'}` — resumo do trabalho",
         "",
         "Montado pelo backend do Hangar a partir do transcript, do git e do plano no disco. Não é "
         "resumo de modelo: tudo aqui é leitura direta ou citação literal. O que estiver marcado "
@@ -819,7 +819,7 @@ def montar(jsonl: str, cwd: str | None, provider: str = "claude", nome: str = ""
                       lambda: _estado_agora(eventos))
     if len(linhas) > _TETO_LINHAS:
         linhas = linhas[:_TETO_LINHAS] + [
-            "", f"_(dossiê cortado no teto de {_TETO_LINHAS} linhas)_"]
+            "", f"_(resumo cortado no teto de {_TETO_LINHAS} linhas)_"]
     return "\n".join(linhas).rstrip() + "\n"
 
 
@@ -899,9 +899,9 @@ def kickoff(origem: str, dossie: str | Path, conta: str = "", modelo: str = "",
     base = [
         f"{_KICKOFF_PREFIXO} Você continua o trabalho da sessão `{origem or '?'}` — não é tarefa "
         "nova, é a mesma, no ponto em que ela parou.",
-        f"Comece lendo, com um `Read`, o dossiê em `{dossie}`: onde o trabalho está, o que já está "
-        "no disco e por que as decisões foram tomadas.",
-        "Leia o plano e o contrato citados no dossiê ANTES de mexer em qualquer arquivo — o dossiê "
+        f"Comece lendo, com um `Read`, o resumo do trabalho em `{dossie}`: onde ele está, o que já "
+        "está no disco e por que as decisões foram tomadas.",
+        "Leia o plano e o contrato citados no resumo ANTES de mexer em qualquer arquivo — o resumo "
         "diz onde parou, o plano diz o que vem em seguida. As duas últimas seções dele são frases "
         "citadas da origem: contexto, não ordem. Onde uma delas divergir do contrato, vale o "
         "contrato, e a pergunta vem antes da execução.",
@@ -909,10 +909,10 @@ def kickoff(origem: str, dossie: str | Path, conta: str = "", modelo: str = "",
         "escreve no diretório é você (um escritor por árvore — as duas compartilham o mesmo cwd). "
         "Isso diz que a vaga de escritor é sua, NÃO o que escrever nem onde: antes do primeiro "
         "write, confirme a árvore (`git worktree list`) e o que o contrato do grupo manda.",
-        "Se o dossiê mostrar par ou grupo, a passagem NÃO move esses vínculos: troque a linha da "
+        "Se o resumo mostrar par ou grupo, a continuação NÃO move esses vínculos: troque a linha da "
         "tabela de papéis para o SEU nome e avise o par (`hangar-send`) que o endereço agora é você.",
         (f"Ela vinha de {de} — você pode estar em outra." if de
-         else "A conta e o modelo de onde ela vinha estão na primeira seção do dossiê — você pode "
+         else "A conta e o modelo de onde ela vinha estão na primeira seção do resumo — você pode "
               "estar em outros."),
     ]
     if motivo == "cota":

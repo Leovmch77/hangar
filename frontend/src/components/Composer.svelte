@@ -1027,6 +1027,12 @@
 
   // ── Slash commands: preencher x enviar ──────────────────────────────────────
   // Preenche "/nome " no textarea e devolve o foco (pro usuario digitar o argumento).
+  // Exportado porque o painel de contexto oferece "Compactar" quando o contexto enche: comando
+  // destrutivo chega ao composer pra revisao, nunca disparado por um clique — mesma regra que o
+  // strip de sugestoes ja segue.
+  export async function preencherComando(name: string) {
+    await fillCommand(name);
+  }
   async function fillCommand(name: string) {
     inputText = '/' + name + ' ';
     await tick();

@@ -22,8 +22,6 @@ import * as m from '../paraglide/messages';
 import GroupGlyph from './icons/GroupGlyph.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import RateChips from './RateChips.svelte';
-  import PlanPanel from './PlanPanel.svelte';
-  import PlanRing from './PlanRing.svelte';
   import FilesPanel from './files/FilesPanel.svelte';
   import StateChip from './StateChip.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
@@ -33,7 +31,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import { moeda } from '../lib/moeda.svelte';
   import { criarArquivosMudados } from '../lib/arquivosMudados.svelte';
   import FileIcon from './files/FileIcon.svelte';
-  import { planBadge } from '@hangar/core';
 
   interface Props {
     state: State;
@@ -108,6 +105,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     // Clique num arquivo de "Mais alterados" -> abre no editor do app. Sem handler a linha fica
     // só informativa (o modal do Chat não empilha editor dentro de modal).
     onAbrirArquivo?: (path: string) => void;
+    // Saídas do contexto cheio. Compactar preenche `/compact` no composer (destrutivo passa pela
+    // revisão de quem clicou); passar o bastão abre a folha de criar sessão em modo continuação.
+    onCompactar?: () => void;
+    onPassarBastao?: () => void;
     // Abre a sessao do MEMBRO num modal (PairChatModal). So com UM par: com 2+ nao da pra escolher
     // por quem clicou, entao a secao segue abrindo a PairSheet, que tem o botao por membro.
     // `undefined` quando o Chat esta `nested` (dentro de um modal) — a guarda que evita modal
@@ -135,7 +136,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     loopLabel = null, loopColor = undefined, onLoopTap = undefined,
     onProviderTap = undefined, onOpenPair = undefined, onOpenOrq = undefined, onOpenGit = undefined,
     recarregarMotivo = null, onRecarregar = undefined, recarregarBloqueado = false,
-    onAbrirArquivo = undefined,
+    onAbrirArquivo = undefined, onCompactar = undefined, onPassarBastao = undefined,
     onOpenPeerChat = undefined,
     session = null, planDetail = null, planLoading = false, planError = false,
     toggleExterno = false,
@@ -193,7 +194,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // secao continua abrindo a PairSheet — la existe o botao por membro, e escolher por quem clicou
   // seria adivinhacao.
   const soloPeer = $derived(pairPeers?.length === 1 ? pairPeers[0] : null);
-  const planRing = $derived(session ? planBadge(session) : null);
   // Atalho direto pro modal SO quando ha um par; a PairSheet (contrato, conversa do grupo, lado a
   // lado, sair) nunca perde a porta — vira um segundo botao "grupo" na mesma secao.
   const openPeer = $derived(soloPeer && onOpenPeerChat ? () => onOpenPeerChat(soloPeer) : null);
@@ -203,6 +203,16 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // custom que escreva NaN/Infinity nao abre a secao pra um corpo vazio.
   const _known = (pct: number | undefined) => typeof pct === 'number' && isFinite(pct);
   const hasRate = $derived(limited || _known(status?.fiveHourPct) || _known(status?.weeklyPct) || _known(status?.monthlyPct));
+
+  // Contexto perto do teto. O corte é PORCENTAGEM da janela, não um número de tokens: 60% é o
+  // "600k de 1M" onde a conversa começa a se arrastar, e vale igual numa sessão de 200k, onde
+  // 600k nunca chegaria. Acima de 85% o aviso fica vermelho — ali a compactação automática do
+  // próprio agente está a poucos turnos.
+  const contextoCheio = $derived.by(() => {
+    const p = status?.ctxPct;
+    if (typeof p !== 'number' || !isFinite(p)) return null;
+    return p >= 85 ? 'grave' : p >= 60 ? 'atencao' : null;
+  });
 
   // Mesmos limiares do resto do app (RateChips, ContextRing): 70 ambar, 90 vermelho. Um vocabulario
   // so de medidor — a barra de contexto era a unica que ficava accent ate os 100%.
@@ -570,20 +580,32 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     </div>
   {/if}
 
-  {#if session?.plan_name || session?.plan_hidden}
-    <!-- Só quando ha plano ativo nesta sessao (Task 5b) — sem gate a secao apareceria vazia pra
-         toda sessao sem superpowers rodando. plan_hidden entra junto: com "nenhum plano" escolhido
-         o plan_name some, e o painel — que e onde fica o seletor pra voltar — sumiria com ele. -->
-    <section class="sec-metric">
-      <div class="section-head">
-        <span class="section-label">{m.ctx_plano()}</span>
-        {#if planRing}
-          <span title={planRing.title}><PlanRing pct={planRing.pct} complete={planRing.complete} /></span>
+  {#if contextoCheio}
+    <!-- Contexto perto do teto: a partir daqui a conversa começa a perder qualidade, porque cada
+         turno reescreve mais coisa do que o modelo consegue manter em foco. As duas saídas ficam
+         aqui do lado do número que disparou o aviso. -->
+    <div class="ctx-aviso" class:grave={contextoCheio === 'grave'} role="status">
+      <span class="ctx-aviso-texto">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" /><path d="M12 8v4.5" /><path d="M12 16h.01" />
+        </svg>
+        {m.ctx_cheio_aviso()}
+      </span>
+      <span class="ctx-aviso-acoes">
+        {#if onCompactar}
+          <!-- Preenche `/compact` no composer em vez de enviar: é comando destrutivo, e a regra do
+               app é que destrutivo passa pela revisão de quem clicou. -->
+          <button type="button" class="ctx-aviso-btn" onclick={onCompactar} title={m.ctx_cheio_compactar_detalhe()}>
+            {m.ctx_cheio_compactar()}
+          </button>
         {/if}
-      </div>
-      <PlanPanel {session} detail={planDetail ?? null} loading={planLoading ?? false}
-                 error={planError ?? false} />
-    </section>
+        {#if onPassarBastao}
+          <button type="button" class="ctx-aviso-btn" onclick={onPassarBastao} title={m.ctx_cheio_bastao_detalhe()}>
+            {m.ctx_cheio_bastao()}
+          </button>
+        {/if}
+      </span>
+    </div>
   {/if}
 
   <!-- "alteracoes locais" dizia que HAVIA algo e parava ali; o tamanho da mudanca so aparecia
@@ -1122,16 +1144,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     text-transform: uppercase;
   }
 
-  /* Cabecalho de secao com anel na ponta (Plano): o rotulo nao pode herdar o margin-bottom do
-     .section-label global — ele e o flex item da esquerda, quem respira e o .section-head. */
-  .section-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    margin-bottom: var(--space-2);
-  }
-  .section-head .section-label { margin-bottom: 0; }
 
   /* Chip do loop (🔁 N/M): mono como os badges numericos; cor vem do tone via style inline. */
   .loop-chip {
@@ -1209,6 +1221,18 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     font-weight: var(--fw-semibold);
   }
   .ctx-aviso-btn:disabled { opacity: 0.5; cursor: default; }
+  .ctx-aviso-acoes { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+  /* Passou de 85%: a compactação automática do agente está perto, e o aviso deixa de ser
+     "quando puder" pra ser "agora". */
+  .ctx-aviso.grave {
+    border-color: color-mix(in srgb, var(--error) 34%, transparent);
+    background: color-mix(in srgb, var(--error) 10%, transparent);
+  }
+  .ctx-aviso.grave .ctx-aviso-texto svg { color: var(--error); }
+  .ctx-aviso.grave .ctx-aviso-btn {
+    color: var(--error);
+    border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  }
 
   /* Diff do working tree: verde/vermelho são os mesmos do resto do app (tokens de estado), e o
      contador de arquivos fica muted — ele é o contexto dos dois números, não um terceiro. */
