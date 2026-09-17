@@ -58,12 +58,17 @@ async def quem_sou(ctx: Context) -> dict[str, str]:
 
 
 @mcp.tool(description="Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). "
+                      "`voce: true` marca esta sessão. "
                       "Equivale a `hangar-send --list` sem os servidores remotos.")
-async def sessoes() -> list[dict[str, Any]]:
+async def sessoes(ctx: Context) -> list[dict[str, Any]]:
     from app import api
+    try:
+        eu = await _eu(ctx)
+    except ToolError:
+        eu = None
     infos = await api.list_sessions()
     return [{"name": s.name, "state": s.state, "cwd": s.cwd,
-             "provider": s.provider, "headless": s.headless} for s in infos]
+             "provider": s.provider, "headless": s.headless, "voce": s.name == eu} for s in infos]
 
 
 @mcp.tool(description="Manda um recado 1:1 pra outra sessão, como `hangar-send <sessao> <msg>`: "
@@ -73,6 +78,9 @@ async def sessoes() -> list[dict[str, Any]]:
 async def enviar(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
+    if alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}"):
+        raise ToolError(f"recusado: '{alvo}' é esta sessão — o recado voltaria pra você. "
+                        "Quem é quem: tool `sessoes` (campo `voce`).")
     if peers.is_remote(alvo):
         srv, sess = peers.split_addr(alvo)
         if not settings.server_id:

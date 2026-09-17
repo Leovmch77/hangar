@@ -146,11 +146,11 @@ api() {
     return 1
 }
 
-if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
+listar() {
     api GET /api/sessions | python3 -c '
 import json, sys
 for s in json.load(sys.stdin):
-    print("%-24s %-15s %s" % (s["name"], s["state"], s["cwd"]))'
+    print("%-24s %-15s %s%s" % (s["name"], s["state"], s["cwd"], "  (você)" if s["name"] == sys.argv[1] else ""))' "$(me 2>/dev/null)"
     # Servidores do peers.json: mesmas colunas, nome prefixado servidor::sessao (é o endereço
     # que o hangar-send de envio aceita). Peer fora do ar não derruba a lista local — vira aviso.
     if [[ -f "$PEERS_FILE" ]]; then
@@ -192,7 +192,7 @@ for s in sessions:
         done
     fi
     exit 0
-fi
+}
 
 # Quem sou eu. Ordem: carimbo do nascimento (CP_SESSION_NAME, posto pelo new_session no tmux.py) ->
 # só então a "sessão corrente" do tmux.
@@ -264,6 +264,10 @@ me() {
     fi
     echo "${atual:-cli}"
 }
+
+if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
+    listar
+fi
 
 if [[ "$1" == "--pair" ]]; then
     peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa]}"; shift 2
@@ -453,6 +457,12 @@ if [[ "${1:-}" == "--tmux" ]]; then forcar_tmux=1; shift; fi
 
 target="$1"; shift
 [[ $# -ge 1 ]] || { echo "uso: hangar-send [--tmux] <sessao|servidor::sessao> <mensagem...>" >&2; exit 2; }
+
+eu=$(me 2>/dev/null)
+if [[ "$target" == "$eu" || ( -n "$SERVER_ID" && "$target" == "$SERVER_ID::$eu" ) ]]; then
+    echo "recusado: '$target' é esta sessão — o recado voltaria pra você. Quem é quem: hangar-send --list" >&2
+    exit 1
+fi
 
 # Caminho nativo alcança os DOIS lados? Então este envio é o pior dos dois — recusa e diz o certo.
 # Só pro 1:1 LOCAL: cross-server (`::`) cai fora pelo teste do alvo, e --group/--pair/--new nem

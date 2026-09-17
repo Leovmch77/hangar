@@ -82,6 +82,23 @@ async def test_enviar_prefixa_de_e_recusa_caminho_nativo(identidade, monkeypatch
         assert res.is_error and "SendMessage" in res.content[0].text
         res = await s.call_tool("enviar", {"alvo": "outra", "texto": "oi", "tmux": True})
         assert not res.is_error and len(enviados) == 2
+        res = await s.call_tool("enviar", {"alvo": "eu", "texto": "oi", "tmux": True})
+        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 2
+
+
+async def test_sessoes_marca_a_propria(identidade, monkeypatch):
+    from types import SimpleNamespace
+    from app import api
+    infos = [SimpleNamespace(name=n, state="idle", cwd="/x", provider="claude", headless=False)
+             for n in ("eu", "outra")]
+    monkeypatch.setattr(api, "list_sessions", lambda: _coro(infos))
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("sessoes", {})
+        assert {d["name"]: d["voce"] for d in res.structured_content["result"]} == {"eu": True, "outra": False}
+    async with sessao_mcp({}) as s:
+        res = await s.call_tool("sessoes", {})
+        assert not res.is_error
+        assert not any(d["voce"] for d in res.structured_content["result"])
 
 
 async def test_nav_sem_app_desktop_da_o_erro_do_cli(identidade, monkeypatch):
