@@ -34,7 +34,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { navegadorPanel } from '../lib/navegadorPanel.svelte';
-  import { createSessionListModel } from '../lib/sessionListModel.svelte';
+  import { createSessionListModel, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
 
   const DEFAULT_BRANCHES = new Set(['main', 'master']);
 
@@ -154,15 +154,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   // distingue duas cópias do mesmo repositório na mesma branch — sem ele o ícone não diria qual.
   function mostraPasta(s: AggSession): boolean {
     return showCwd || s.worktree === true;
-  }
-  // O rótulo do grupo é o resumo do ticket inteiro ("ABC-1234 Assunto comprido do chamado…"). A
-  // chave sozinha identifica; o resto é assunto e vai em cinza, sem competir com a lista.
-  const PAIR_COD = /^([A-Za-z][\w.]*-\d+)\b\s*(.*)$/;
-  function pairCodigo(label: string): string {
-    return PAIR_COD.exec(label)?.[1] ?? label;
-  }
-  function pairResto(label: string): string {
-    return PAIR_COD.exec(label)?.[2] ?? '';
   }
   function worktreeTitle(s: AggSession): string {
     const base = s.worktree ? `${m.sessao_worktree()}: ${s.cwd}` : (s.cwd ?? '');
@@ -901,7 +892,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                            ✓ em toda linha sincronizada seria ruído na largura da sidebar. -->
                       {#if s.git_ahead || s.git_behind}
                         <span class="sync" title={m.git_sync_titulo({ ahead: s.git_ahead ?? 0, behind: s.git_behind ?? 0 })}>
-                          {#if s.git_ahead}<span class="sync-ah">↑{s.git_ahead}</span>{/if}{#if s.git_behind}<span class="sync-be">↓{s.git_behind}</span>{/if}
+                          <!-- sr-only pela mesma razão da pasta: o `title` de um span não é lido
+                               de forma confiável, e a seta sozinha não diz o que significa. -->
+                          <span class="sr-only">{m.git_sync_titulo({ ahead: s.git_ahead ?? 0, behind: s.git_behind ?? 0 })}</span>
+                          {#if s.git_ahead}<span class="sync-ah" aria-hidden="true">↑{s.git_ahead}</span>{/if}{#if s.git_behind}<span class="sync-be" aria-hidden="true">↓{s.git_behind}</span>{/if}
                         </span>
                       {/if}
                       {#if s.git_added || s.git_removed}

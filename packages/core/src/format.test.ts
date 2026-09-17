@@ -111,6 +111,14 @@ describe('countAwaiting', () => {
   it('returns 0 when none are awaiting', () => {
     expect(countAwaiting([{ state: 'working' as const }, { state: 'idle' as const }])).toBe(0);
   });
+
+  it('counts a session with a pending question even while it still reads as working', () => {
+    expect(countAwaiting([
+      { state: 'working' as const, pending_questions: 1 },
+      { state: 'working' as const, pending_questions: 0 },
+      { state: 'idle' as const, pending_questions: null },
+    ])).toBe(1);
+  });
 });
 
 describe('nextAwaiting', () => {

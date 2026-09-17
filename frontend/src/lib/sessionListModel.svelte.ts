@@ -17,6 +17,19 @@ const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export type ListVariant = 'desktop' | 'mobile';
 
+// O rótulo do grupo pareado é o resumo do ticket inteiro ("ABC-1234 Assunto comprido do
+// chamado…"). A chave sozinha identifica; o resto é assunto e vai em cinza, sem competir com a
+// lista. Mora aqui porque as duas views desenham o mesmo cabeçalho.
+const PAIR_COD = /^([A-Za-z][\w.]*-\d+)\b\s*(.*)$/;
+
+export function pairCodigo(label: string): string {
+  return PAIR_COD.exec(label)?.[1] ?? label;
+}
+
+export function pairResto(label: string): string {
+  return PAIR_COD.exec(label)?.[2] ?? '';
+}
+
 export interface Group {
   id: string;
   label: string;

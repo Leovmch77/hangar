@@ -80,8 +80,13 @@ export const stateColors: Record<State, string> = {
 
 // Conta sessões aguardando resposta numa lista agregada — usado pro contador do header (mobile/
 // desktop) E pro badge do ícone do app (feature #13: navigator.setAppBadge). Pure, sem side-effect.
-export function countAwaiting(sessions: { state: State }[]): number {
-  return sessions.filter((s) => s.state === 'awaiting_input').length;
+// `pending_questions` entra junto: o backend só promove o estado pra `awaiting_input` quando o
+// anterior era `idle`, então uma sessão Codex perguntando enquanto trabalhava fica `working` com a
+// pergunta em aberto — contar só o estado esconde justamente quem espera resposta.
+export function countAwaiting(
+  sessions: { state: State; pending_questions?: number | null }[],
+): number {
+  return sessions.filter((s) => s.state === 'awaiting_input' || (s.pending_questions ?? 0) > 0).length;
 }
 
 // Proxima sessao "aguardando resposta" a partir da atual, com wrap-around — usado pela pilula de

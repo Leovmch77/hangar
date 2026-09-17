@@ -338,7 +338,8 @@ import { textoProblema } from '../lib/problema';
            muda, entao vem primeiro e nunca some; o cwd fecha a linha e trunca primeiro. O tempo
            relativo ("51 min atrás") vem por último, colado à direita — informação de contexto, não
            de identidade. -->
-      {#if serverBadge || session.branch || mostraPasta || agoLabel}
+      {#if serverBadge || session.branch || mostraPasta || agoLabel
+           || session.git_ahead || session.git_behind || session.git_added || session.git_removed}
         <span class="meta-line">
           {#if serverBadge}
             <span class="srv" style="color: {serverBadge.color};">{serverBadge.label}</span>
@@ -354,7 +355,10 @@ import { textoProblema } from '../lib/problema';
                Zero não desenha: a ausência de seta É "está em dia". -->
           {#if session.git_ahead || session.git_behind}
             <span class="sync" title={m.git_sync_titulo({ ahead: session.git_ahead ?? 0, behind: session.git_behind ?? 0 })}>
-              {#if session.git_ahead}<span class="sync-ah">↑{session.git_ahead}</span>{/if}{#if session.git_behind}<span class="sync-be">↓{session.git_behind}</span>{/if}
+              <!-- sr-only pela mesma razão da pasta: o `title` de um span não é lido de forma
+                   confiável, e a seta sozinha não diz o que significa. -->
+              <span class="sr-only">{m.git_sync_titulo({ ahead: session.git_ahead ?? 0, behind: session.git_behind ?? 0 })}</span>
+              {#if session.git_ahead}<span class="sync-ah" aria-hidden="true">↑{session.git_ahead}</span>{/if}{#if session.git_behind}<span class="sync-be" aria-hidden="true">↓{session.git_behind}</span>{/if}
             </span>
           {/if}
           {#if session.git_added || session.git_removed}

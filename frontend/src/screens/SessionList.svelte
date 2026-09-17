@@ -23,7 +23,7 @@ import * as m from '../paraglide/messages';
   import type { AggSession, Provider } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { createSessionListModel } from '../lib/sessionListModel.svelte';
+  import { createSessionListModel, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
   import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
   import { updateBadge } from '../lib/badge';
 
@@ -194,15 +194,6 @@ import * as m from '../paraglide/messages';
 
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê
   // o ativo a cada chamada (sem reload). Assim chat/SSE/delete vão pro backend certo.
-  // O rótulo do grupo é o resumo do ticket inteiro ("ABC-1234 Assunto comprido do chamado…"). A
-  // chave sozinha identifica; o resto é assunto e vai em cinza, sem competir com a lista.
-  const PAIR_COD = /^([A-Za-z][\w.]*-\d+)\b\s*(.*)$/;
-  function pairCodigo(label: string): string {
-    return PAIR_COD.exec(label)?.[1] ?? label;
-  }
-  function pairResto(label: string): string {
-    return PAIR_COD.exec(label)?.[2] ?? '';
-  }
   // Quantas do grupo esperam resposta: é o que precisa sobreviver com o cluster recolhido.
   function pairAwaiting(gid: string): number {
     return countAwaiting(model.flatRows.filter((s) => s.pair_gid === gid));
