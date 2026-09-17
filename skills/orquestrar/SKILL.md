@@ -45,7 +45,7 @@ its page and reads that page plus the sibling pages it names; nothing else of th
 
 | Role | Page | You are this when |
 |---|---|---|
-| planner | `references/planejamento.md` | the user asked you for the work; no kick-off exists |
+| planner | `references/planejamento.md` (+ `references/planejamento-equipe.md` for team, bars, contract and launch) | the user asked you for the work; no kick-off exists |
 | arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | you wrote the plan and the user approved it |
 | executor | `~/.claude/skills/orquestrar/references/executor.md` | kick-off says `Role: executor` |
 | reviewer | `~/.claude/skills/orquestrar/references/revisor.md` | kick-off says `Role: reviewer` |

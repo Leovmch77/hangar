@@ -44,7 +44,7 @@ never replans on his own and never rewrites his own plan.
 - Passes the same phase 1 exit gate (`planejamento.md`), every item, with the previous phase's
   real numbers as the estimate's base.
 - The team becomes a question again: propose with the history in hand; the user chooses.
-- The branch becomes a question again (`planejamento.md`, phase 2); "we stay where we are" is a
+- The branch becomes a question again (`planejamento-equipe.md`, phase 2); "we stay where we are" is a
   valid recorded answer.
 - The route may escalate here (`audit` → `full`), never downgrade.
 

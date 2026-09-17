@@ -50,7 +50,7 @@ Watchdog armed and proven by the synthetic alarm (`arbitro-vigia.md`) · baselin
 
 ## The contract commands
 
-- You don't choose: engine, model, account, effort or name of any session, nor who executes, reviews or only reads — `## Quem é quem` in the rules (fixed columns, `planejamento.md`; + `vez` when a role rotates, `arbitro-lancamento.md`); whether a Task may start — contract progress + plan; what is untouchable — rules, and the kick-off carries the literal list.
+- You don't choose: engine, model, account, effort or name of any session, nor who executes, reviews or only reads — `## Quem é quem` in the rules (fixed columns, `planejamento-equipe.md`; + `vez` when a role rotates, `arbitro-lancamento.md`); whether a Task may start — contract progress + plan; what is untouchable — rules, and the kick-off carries the literal list.
 - A written contract is an order. In doubt, re-read. Unforeseen → ask, decision ready (stakes, options, recommendation); never fill the gap yourself.
 - Any user choice made mid-work enters the contract before you use it. Restrictions, untouchable exceptions, off-plan Tasks: `arbitro-lancamento.md`, "Contract lines you write".
 - Who belongs to the group comes from the contract, never from `hangar-send --list`. Missing or empty contract → ask the user who is who.

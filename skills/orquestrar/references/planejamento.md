@@ -2,7 +2,7 @@
 
 Drive the research, write the spec and the plan **with the user**, launch the team. Plan approved →
 you become the arbiter: read `arbitro.md` and write no more code. Route `audit` → you are also the
-writer (below).
+writer (below). Team, contract and launch: `planejamento-equipe.md`.
 
 ## Method, domain skill and route come from the contract
 
@@ -92,7 +92,7 @@ User's plan: <absolute path>   (it is in charge; this file only orchestrates)
 
 ### Team first, then the plan
 
-- Ask about the team right after the spec closes, before Task 1.
+- Ask about the team right after the spec closes, before Task 1 (`planejamento-equipe.md`).
 - Read each chosen model's card in `~/.hangar/orq/modelos/`. No card → write the plan
   conservatively, do one sweep (vendor guide + community) into a `## What they say` section marked
   hypothesis, and create the card in the retrospective.
@@ -153,95 +153,7 @@ User's plan: <absolute path>   (it is in charge; this file only orchestrates)
 
 ### The bar
 
-- One line per pixel-touching Task. Three tests, all mandatory: named (a specific screen), findable
-  (absolute screenshot path, or an app screen that can be opened), comparable (same state, same
-  width). A Task that draws nothing needs no bar.
-- Propose; don't ask "what's the bar?". Two or three candidates already passed through the three
-  tests, one sentence each on why it is hard, plus "no bar":
-
-```
-Task 3 touches the Settings sheet. Bar — pick one:
-a) `EnginesSheet.svelte`, desktop, centered modal, 1440px — same `wide`/`centered` pair.
-b) `Git.svelte`, same width — same glass material, with tabs.
-c) A screenshot from another product — send me the path.
-d) No bar for this Task.
-```
-
-- "No bar" chosen → `Bar: none — user's decision, <date>`; that Task's visual gate is the
-  `executor-visual.md` protocol without the blind comparison.
-- Weak candidates → say so and propose others.
-
-### The team: you propose, the user chooses
-
-- Model, engine, harness and account are the user's. `~/.hangar/orquestracao-contas.md` says what
-  MAY be used, never what WILL; read it before assembling a team and copy into the contract only
-  what this work uses. Missing or stale → take the inventory, ask, write the answer there with the
-  date.
-- Ask once, proceed on any answer:
-
-> "Route `<audit | full>` (because <reason>). Do you want to pick the team (account and model per
-> role), or do we go with the default?"
-
-- Wants to pick → inventory, two or three combinations, they decide. No, or no answer → the
-  default on the account in use: executor Opus effort `medium`; reviewer, arbiter, final review and
-  retrospective Opus effort `high`; rows marked `default` with the date.
-- Leaving the account in use, or entering a per-token account, requires the user's word.
-- Inventory before proposing:
-
-```bash
-claude-engine                                        # engines
-pi --list-models | awk 'NR>1{print $1}' | sort -u    # Pi providers — from the USER's shell (`fish -l -c`)
-ls -d ~/.claude ~/.claude-*                          # Claude accounts
-```
-
-- Harness ≠ engine: list `--provider pi` and own CLIs too. Same-named models → full `provider/id`.
-- No default cast; a model in an example is an example. Per Task: mechanical volume, subtle
-  reasoning or visual judgment → who writes (possibly one writer per Task); where its error shows →
-  what the reviewer must be able to do; visual Task with an executor that cannot see images →
-  `executor-visual.md` vision protocol in the contract; account and quota → engines and fallback.
-- One role, one session; no session holds two roles. Phase switch (planner → arbiter) and
-  succession are not stacking. Final review in a fresh session. One writer per tree.
-- Team table in `regras-<gid>.md`, `## Quem é quem`, raw values only (`-` = empty). Start from
-  `<pair_dir>/regras-padrao.md` when it exists, adjusting only session names:
-
-```markdown
-## Quem é quem
-
-| papel | sessão | provider | conta | modelo | esforço |
-|---|---|---|---|---|---|
-| árbitro | <work>-arbitro | claude | padrao | opus[1m] | high |
-| executor | <work>-t* | claude | 200-01 | opus[1m] | medium |
-| revisor | <work>-review | pi | clinepass | cline-pass/glm-5.2 | high |
-| revisão final | <work>-final | claude | claude-200-3 | opus[1m] | high |
-| retrospectiva | <work>-retro | claude | claude-200-3 | opus[1m] | high |
-```
-
-- `provider`: `claude` | `codex` | `pi` | `kimi`. `conta`: config-dir name on Claude (`padrao`,
-  `200-01`); provider in `~/.kimi-code/config.toml` on Kimi; catalog provider on Pi;
-  `openai-codex` on Codex. `sessão` ending in `*` = one session per Task.
-- Optional `verificador` row (`<work>-verif-*`, own account/model/effort): delivers proofs; the
-  reviewer still decides. Without it the reviewer runs the tests. Never add it to a running
-  contract without authorization.
-- Optional `vez` column (`| papel | vez | sessão | …`), one row per value; a role uses one
-  selector: rotation (`vez` = 1, 2, 3; Task N → row `(N-1) % total`) or risk (`vez` = `low`/`high`;
-  Task N → the row its `Risk:` line names). Rule in `arbitro-lancamento.md`.
-- All pipeline roles in the table, phases 4 and 5 included. Final review with its trigger: "fires
-  when every code Task is approved", never "after Task N".
-- The table is machine-read: prose in a cell hides the role. Explanations go outside the table.
-- Below the table, one literal open command per role. Research, review, final review and
-  verification commands carry `--read-only` (`protecao.md`); declare where writing tests run and
-  where reports go; record the measurement command and its owner (`consumo.md`).
-- More than one repository: header `Repo: <one> (+ <other> from T13 on)`; each row is born in its
-  Task's repo; one writer per tree. Interfaces agreed before the sessions open:
-
-```markdown
-## Interfaces combinadas
-- <route, payload, event or type agreed between the repos>
-```
-
-- Subagents read, sessions write: editing outside the cwd requires a real session in that repo. A
-  session on another server (`servidor::sessao`) joins no group: 1:1 messages, and the agreement
-  written into the local contract by hand.
+- One line per pixel-touching Task: `planejamento-equipe.md`, "The bar".
 
 ### Before approving
 
@@ -294,54 +206,7 @@ PRODUCE = write it in the orchestration plan.
 14. PRODUCE — `Route:` declared with its reason; `Risk:` on every Task when the executor row is
     selected by risk.
 
-## Phase 2 — Launch (the user's single "go ahead")
+## Phase 2 — Launch
 
-- On `full`: you are now the arbiter. Read `arbitro.md` and run the launch of
-  `arbitro-lancamento.md` ("Launch"): pre-flight, branch question, baseline, sessions, contract,
-  kick-offs.
-- On `audit`: open no session. Run the pre-flight, the branch question and the baseline of
-  `arbitro-lancamento.md`; write the contract (skeleton below; three-row table, `Route: audit`)
-  and the journal; write Task 1 yourself. Open phase 4's session when the last Task is
-  committed, phase 5's after the branch is in the user's hands.
-
-### The contract skeleton
-
-Copy and fill; a field that doesn't apply gets `n/a`, never disappears. The rules file carries the
-same minus the history (first lines: `arbitro.md`, "The four files").
-
-````markdown
-> Arbiter's journal. Group rules: <path to regras-<gid>.md>.
-> Lessons: <path to licoes.md>. User's plan: <path>.
-> Orchestration plan: <path | this very file>.
-> Method: <name | none>. Executes with: <command | none>. Domain skill: <name | none>. Route: <audit | full>.
-> Branch: <branch>. Starting HEAD: <hash>.
-
-## Quem é quem
-In the rules (`regras-<gid>.md`, fixed table `| papel | sessão | provider | conta | modelo | esforço |`).
-Here only history: who took over from whom, when, why.
-A group notice contradicting that table: the table wins.
-
-## What the plan owns (point, don't copy)
-Task order, steps, verification per Task, untouchables, phase-1 bars: <plan, section>.
-Baseline: <command> → <result>, <date>.
-
-## Review tooling (per Task type)
-| Task type | Subagents/skills to dispatch | Don't use (reason in one line) |
-|---|---|---|
-
-## What the review must cover
-<full flow, sibling callers, concurrency, final state, visual>
-
-## Quota and fallback
-<remaining quota per account, with reading time; where to migrate when it runs out>
-
-## Bars decided AFTER plan approval
-Task N — Bar: <screen, state, width> | none — user's decision, <date>
-
-## Progress
-| Task | Hash | Verdict | Who fixed |
-|---|---|---|---|
-
-## Supervening decisions
-<date> — <decision, whose, reason in one line>
-````
+The user's single "go ahead": `planejamento-equipe.md`, "Phase 2" (procedure, contract
+skeleton, `audit` variant).

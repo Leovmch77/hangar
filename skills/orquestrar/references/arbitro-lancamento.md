@@ -70,7 +70,7 @@ tmux display -p '#{session_name}'   # which of those is you
   record a known failure the review ignores.
 
 Create, in order: `--new` (five steps below) → `--pair` → read the `gid` in your own sidecar →
-write the contract (skeleton in `planejamento.md`) → kick-offs.
+write the contract (skeleton in `planejamento-equipe.md`) → kick-offs.
 
 ```bash
 hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract"   # one call per session
@@ -154,7 +154,7 @@ Write it in the kick-off; it loosens nothing:
 
 ## Visual Task without a bar
 
-- Ask before releasing, with 2–3 verified candidates plus `no bar` (`planejamento.md`, "The bar"). No conservative default here.
+- Ask before releasing, with 2–3 verified candidates plus `no bar` (`planejamento-equipe.md`, "The bar"). No conservative default here.
 - Record on the Task's line either way. A recorded `none` counts as a bar for a NEW surface.
 
 ```markdown

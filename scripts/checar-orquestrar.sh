@@ -175,12 +175,10 @@ done
 #    entra empurra outro pra fora (a regra de escrita esta em references/retrospectiva.md, secao 5).
 teto_skill=8000
 teto_pagina=13000
-teto_planejamento=20000   # lida uma vez por trabalho, pelo planejador; carrega os moldes do contrato
 for f in "${arquivos[@]}"; do
   tam=$(wc -c < "$f")
   teto=$teto_pagina
   [ "$f" = SKILL.md ] && teto=$teto_skill
-  [ "$f" = references/planejamento.md ] && teto=$teto_planejamento
   if [ "$tam" -gt "$teto" ]; then
     echo
     echo "✗ $f tem $tam caracteres; teto e $teto. Enxugue ou funda outro trecho do mesmo arquivo."
