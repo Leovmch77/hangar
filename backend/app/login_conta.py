@@ -237,11 +237,19 @@ def _logou_sozinho(conta: str, t: Tentativa) -> dict | None:
     if not _token_novo(renova_token._oauth(Path(t.dir_conta)), t.token_anterior):
         return None
     estado = conta_estado._estado_login(conta_estado._auth_status(Path(t.dir_conta)))
-    if estado.estado != "ok" or not estado.loggedIn or _tentativas.get(conta) is not t:
+    if _tentativas.get(conta) is not t:
         return None
-    diag.registrar("conta.login.concluiu", provider="claude", conta_id=diag.conta_id(t.dir_conta),
-                   operacao=t.operacao, etapa="confirmar_credencial",
-                   ms=int((time.monotonic() - t.inicio) * 1000))
+    campos = {"provider": "claude", "conta_id": diag.conta_id(t.dir_conta), "operacao": t.operacao,
+              "ms": int((time.monotonic() - t.inicio) * 1000)}
+    if estado.estado != "ok":
+        # Token novo sem estado legível esperaria para sempre: o caminho do código também desiste aqui.
+        diag.registrar("conta.login.falhou", "erro", etapa="reler_auth", codigo="confirmacao_falhou", **campos)
+        _limpar(conta, t)
+        raise RuntimeError(f"não consegui reler o estado da conta {conta}: "
+                           f"{estado.motivo or 'indisponivel'}")
+    if not estado.loggedIn:
+        return None
+    diag.registrar("conta.login.concluiu", etapa="confirmar_credencial", **campos)
     _limpar(conta, t)
     return {"etapa": "concluido", "url": None, "email": estado.email, "plano": estado.plano}
 

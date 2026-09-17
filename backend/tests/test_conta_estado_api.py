@@ -278,6 +278,16 @@ def test_consultar_passo_do_login(cli, login_fake):
     assert login_fake["passo"] == ["testes"]
 
 
+def test_passo_que_desistiu_devolve_409(cli, monkeypatch):
+    def _passo(conta):
+        raise RuntimeError("não consegui reler o estado da conta")
+
+    monkeypatch.setattr(login_conta, "passo", _passo)
+    r = cli.get("/api/conta-estado/testes/login/passo", headers=AUTH)
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "erro_login_nao_confirmado"
+
+
 def test_passo_401_sem_credencial(cli):
     r = cli.get("/api/conta-estado/testes/login/passo")
     assert r.status_code == 401

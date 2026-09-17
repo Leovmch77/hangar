@@ -498,8 +498,17 @@ import { apagarConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, d
           } else {
             loginPasso = passo;
           }
-        } catch {
-          if (atual()) loginConsultaErro = true;
+        } catch (e) {
+          if (!atual()) return;
+          // 409 = o servidor desistiu da tentativa; repetir a consulta só mostraria "aguardando".
+          if ((e as { status?: unknown }).status === 409 && !loginSucesso) {
+            pararPoll();
+            loginFalhou = true;
+            loginPasso = { etapa: 'idle' };
+            loginErro = e instanceof Error && e.message ? e.message : m.contas_login_nao_confirmado();
+          } else {
+            loginConsultaErro = true;
+          }
         } finally { lendo = false; }
       };
       await consultar();

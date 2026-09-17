@@ -316,7 +316,10 @@ def confirmar_login(label: str, body: LoginBody) -> dict:
                          response_model=PassoLogin)
 def passo_login(label: str) -> PassoLogin:
     """A etapa atual do fluxo: o link de autorização quando já apareceu no pane."""
-    p = login_conta.passo(label)
+    try:
+        p = login_conta.passo(label)
+    except RuntimeError as e:
+        raise HTTPException(409, detail=erro("erro_login_nao_confirmado", str(e))) from None
     return PassoLogin(etapa=p.get("etapa", "idle"), url=p.get("url"),
                       email=p.get("email"), plano=p.get("plano"))
 

@@ -564,6 +564,64 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     }
   });
 
+  it('código e navegador concluindo juntos mostram o sucesso uma vez só', async () => {
+    let resolver!: (r: { ok: boolean; email: string; plano: string }) => void;
+    loginMock.confirmarLogin.mockReturnValueOnce(new Promise((resolve) => { resolver = resolve; }));
+    loginMock.passoLogin
+      .mockResolvedValueOnce({ etapa: 'aguardando', url: 'https://claude.com/cai/oauth/authorize' })
+      .mockImplementationOnce(async () => {
+        resolver({ ok: true, email: 'u@exemplo.com', plano: 'max' });
+        return { etapa: 'concluido', url: null, email: 'u@exemplo.com', plano: 'max' };
+      });
+    vi.useFakeTimers();
+    const t = montar([DESLOGADA]);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      t.el.querySelector<HTMLButtonElement>('.ct-acao.primaria')!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      const input = t.el.querySelector<HTMLInputElement>('.ct-campo-cod')!;
+      input.value = 'CODE-123'; input.dispatchEvent(new Event('input'));
+      await vi.advanceTimersByTimeAsync(0);
+      t.el.querySelector<HTMLButtonElement>('.ct-rodape.login .primario')!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      const listagensAntes = credMock.listarCredenciais.mock.calls.length;
+      // Segura o await do sucesso: as duas chegadas ficam suspensas ao mesmo tempo.
+      vi.spyOn(clienteQuery, 'cancelQueries').mockImplementation(() => new Promise((r) => setTimeout(r, 50)));
+      await vi.advanceTimersByTimeAsync(2100);
+      expect(loginMock.passoLogin).toHaveBeenCalledTimes(2);
+      expect(t.el.querySelector('.ct-login-sucesso')?.textContent).toContain('u@exemplo.com');
+      expect(t.el.querySelector('.ct-login [role="alert"]')).toBeNull();
+      expect(credMock.listarCredenciais.mock.calls.length).toBe(listagensAntes + 1);
+    } finally {
+      unmount(t.comp);
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
+  it('servidor que desiste da tentativa encerra a espera com erro', async () => {
+    loginMock.passoLogin
+      .mockResolvedValueOnce({ etapa: 'aguardando', url: 'https://claude.com/cai/oauth/authorize' })
+      .mockRejectedValueOnce(Object.assign(new Error('Não foi possível confirmar o acesso.'), { status: 409 }));
+    vi.useFakeTimers();
+    const t = montar([DESLOGADA]);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      t.el.querySelector<HTMLButtonElement>('.ct-acao.primaria')!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(t.el.querySelector('.ct-campo-cod')).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(t.el.querySelector('.ct-login [role="alert"]')?.textContent).toContain('Não foi possível confirmar o acesso.');
+      expect(t.el.querySelector('.ct-campo-cod')).toBeNull();
+      const chamadas = loginMock.passoLogin.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(loginMock.passoLogin.mock.calls.length).toBe(chamadas);
+    } finally {
+      unmount(t.comp);
+      vi.useRealTimers();
+    }
+  });
+
   it('mostra confirmação em andamento e oferece nova tentativa se falhar', async () => {
     let rejeitar!: (erro: Error) => void;
     loginMock.confirmarLogin.mockReturnValueOnce(new Promise((_resolve, reject) => { rejeitar = reject; }));

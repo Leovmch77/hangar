@@ -132,6 +132,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_login_sem_tentativa: () => m.erro_login_sem_tentativa(),
   erro_login_credencial_ilegivel: () => m.erro_login_credencial_ilegivel(),
   erro_login_timeout: () => m.erro_login_timeout(),
+  erro_login_nao_confirmado: () => m.contas_login_nao_confirmado(),
   erro_config_dir_sessao: (p) => m.erro_config_dir_sessao({ nome: String(p.nome) }),
   erro_sessao_usa_conta: (p) => m.erro_sessao_usa_conta({ nome: String(p.nome) }),
   erro_varredura_processos: () => m.erro_varredura_processos(),

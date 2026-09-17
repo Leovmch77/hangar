@@ -289,6 +289,24 @@ def test_passo_detecta_autorizacao_pelo_navegador_sem_codigo(bateia, monkeypatch
     assert login_conta.passo("conta-a")["etapa"] == "idle"
 
 
+def test_passo_com_token_novo_e_estado_ilegivel_desiste(bateia, monkeypatch, tmp_path):
+    monkeypatch.setattr(conta_estado, "_auth_status", lambda _: None)
+    login_conta.iniciar("conta-a", str(tmp_path))
+    (tmp_path / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "novo"}}))
+    with pytest.raises(RuntimeError):
+        login_conta.passo("conta-a")
+    assert bateia.matadas == ["term-login-conta-a"]
+    assert not login_conta._em_curso("conta-a")
+
+
+def test_passo_com_token_novo_ainda_deslogada_continua_esperando(bateia, monkeypatch, tmp_path):
+    monkeypatch.setattr(conta_estado, "_auth_status", lambda _: {"loggedIn": False})
+    login_conta.iniciar("conta-a", str(tmp_path))
+    (tmp_path / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": "novo"}}))
+    assert login_conta.passo("conta-a")["etapa"] == "aguardando"
+    assert bateia.matadas == []
+
+
 def test_passo_espera_credencial_escrita_pela_metade(bateia, monkeypatch, tmp_path):
     monkeypatch.setattr(conta_estado, "_auth_status", lambda _: {"loggedIn": True})
     login_conta.iniciar("conta-a", str(tmp_path))
