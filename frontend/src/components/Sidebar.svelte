@@ -1920,20 +1920,21 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .rename-dialog-input[aria-invalid='true'] { border-color: var(--error); }
   .rename-dialog-err { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--error); }
   @media (hover: hover) {
-    .sess-kebab { display: none; }
-    .sess-row:hover .sess-kebab, .sess-row:focus-within .sess-kebab { display: inline-flex; }
+    .sess-row:hover .sess-kebab,
+    .sess-row:focus-within .sess-kebab { visibility: visible; opacity: 1; pointer-events: auto; }
   }
   /* TOUCH (tablet/celular na sidebar): 3 botoes inline esmagavam o nome -> some git/loop/x,
      fica SO o kebab (abre o menu de contexto completo). Desktop com mouse: kebab nao existe,
      hover revela os botoes como antes. */
   .sess-kebab {
-    display: none; width: 22px; height: 22px; min-height: 0; flex-shrink: 0;
+    display: inline-flex; width: 22px; height: 22px; min-height: 0; flex-shrink: 0;
+    visibility: hidden; opacity: 0; pointer-events: none;
     border-radius: var(--radius-sm); color: var(--text-muted);
     font-size: var(--text-base); line-height: 1;
     align-items: center; justify-content: center;
   }
   @media (hover: none) {
-    .sess-kebab { display: inline-flex; opacity: 0.7; }
+    .sess-kebab { visibility: visible; opacity: 0.7; pointer-events: auto; }
   }
   /* Retomar da linha "sem id": unica acao possivel -> SEMPRE visivel (nao hover-revealed), tingida de
      accent pra puxar o olho (a row inteira fica apagada com opacity 0.45). */
