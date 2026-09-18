@@ -82,6 +82,11 @@ EDITAVEIS: dict[str, type] = {
     # nao no ambiente de quem sobe o servidor: a sessao so a recebe se tiver sido aberta com o
     # recurso ligado, e trocar de chave nao pede reinicio.
     "jev_api_key": str,
+    # Como a sessao NOVA nasce quando ninguem disse nada. Mora no servidor, e nao no localStorage
+    # da folha, porque os outros dois caminhos de criacao (hangar-send, MCP new_session) nao leem
+    # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
+    # continua vencendo naquela sessao, sem mexer neste padrao.
+    "jev_padrao": bool,
     # LLM pequeno que escreve o valor de um campo que o chamador nao cobriu — OPCIONAL, e a mesma
     # ordem de precedencia que o CLI ja usa: base_url + api_key + modelo (endpoint compativel com
     # a OpenAI), senao cmd, senao o padrao do proprio CLI.

@@ -268,6 +268,10 @@ class Settings(BaseSettings):
     # lê plugin de function hook. Nasce desligado, e vale para sessão NOVA — a variável entra no
     # ambiente do processo quando ele sobe.
     claude_function_hooks: bool = False
+    # Como a sessão nova nasce quando ninguém escolhe o Jev. Default aqui, e não só em
+    # `runtime_config.EDITAVEIS`, porque sem ele o campo responde `None` — e um interruptor que
+    # nasce sem valor nenhum na tela não sabe dizer se está ligado ou desligado.
+    jev_padrao: bool = False
     # Chave da Groq pra transcricao de audio (whisper-large-v3-turbo). Aceita CP_GROQ_API_KEY (padrao
     # do .env, com prefixo) OU GROQ_API_KEY (convencao do Groq/OpenAI SDK, ex: no Environment do systemd).
     # Vazio = transcricao desligada (o endpoint /transcribe responde 503). Ver docs/USAGE.md.

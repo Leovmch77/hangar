@@ -40,6 +40,9 @@
 #                                  tem esforço por flag). SEMPRE prefira nascer no
 #                                  modelo/esforço certo a mandar /model no primeiro recado — a
 #                                  sessão trabalha ANTES de ler o recado.
+#                                  --jev / --sem-jev liga ou desliga o Jev naquela sessão: com ele,
+#                                  `hangar-preview objetivo` navega e preenche tela sozinho. Sem
+#                                  nenhum dos dois vale o padrão do servidor (tela de Configurações).
 #   hangar-send --help                 esta ajuda (o cabeçalho deste arquivo).
 #
 # OUTRA CONTA: cada conta é um config dir próprio (~/.claude-<nome>), com skills/hooks symlinkados
@@ -288,7 +291,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev|--sem-jev]}"
     shift
     if [[ "$name" == *::* ]]; then
         echo "erro: '::' é reservado pro endereço servidor::sessao — escolha outro nome" >&2
@@ -299,7 +302,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev|--sem-jev]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -322,12 +325,13 @@ if [[ "$1" == "--new" ]]; then
     cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            # --jev: a sessão nasce com a chave do Jev no ambiente, e aí o `hangar-preview objetivo`
-            # funciona nela. Sem a flag a chave não entra — é assim que se roda a mesma tarefa com
-            # e sem o Jev sem apagar a configuração.
-            --jev)
-                [[ -n "$jev" ]] && { echo "erro: --jev informado duas vezes" >&2; exit 2; }
-                jev="true"; shift ;;
+            # --jev / --sem-jev: a sessão nasce (ou não) com a chave do Jev no ambiente, e é ela que
+            # faz o `hangar-preview objetivo` funcionar. SEM nenhum dos dois vale o padrão do
+            # servidor — por isso existe o `--sem-jev`: com o padrão ligado, não haveria outro jeito
+            # de rodar a mesma tarefa sem o Jev.
+            --jev|--sem-jev)
+                [[ -n "$jev" ]] && { echo "erro: --jev/--sem-jev informado duas vezes" >&2; exit 2; }
+                [[ "$1" == "--jev" ]] && jev="true" || jev="false"; shift ;;
             # --headless: sessão Claude ou Codex sem terminal (o mesmo campo da tela de criação).
             --headless)
                 [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
@@ -415,7 +419,9 @@ if sys.argv[10]:
 if sys.argv[11]:
     d["headless"] = True
 if sys.argv[12]:
-    d["jev"] = True
+    # "true"/"false", nunca ausente-por-omissao: o campo AUSENTE no corpo e o que faz o backend
+    # aplicar o padrao do servidor, e mandar `false` cru apagaria esse padrao em todo uso do CLI.
+    d["jev"] = sys.argv[12] == "true"
 print(json.dumps(d))' \
            "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev")
     api POST /api/sessions "$body" >/dev/null

@@ -363,3 +363,25 @@ async def test_cancelamento_espera_worker_de_criacao_antes_de_liberar_lease(monk
     with pytest.raises(asyncio.CancelledError):
         await task
     assert lease.marked == "cx-cancel"
+
+
+def test_jev_ausente_herda_o_padrao_do_servidor(monkeypatch):
+    """O ponto do campo ser `bool | None`: a folha, o `hangar-send` e o MCP mandam o campo só
+    quando alguém escolheu — ausente tem que virar o padrão, senão marcar o interruptor uma vez
+    não valeria pros outros dois caminhos."""
+    monkeypatch.setattr(api.runtime_config, "get", lambda campo: campo == "jev_padrao")
+    assert api._jev_efetivo(None) is True
+
+
+def test_escolha_explicita_vence_o_padrao_nos_dois_sentidos(monkeypatch):
+    """`false` explícito NÃO é o mesmo que ausente: é o `--sem-jev` do CLI, e ele precisa desligar
+    o Jev daquela sessão mesmo com o padrão do servidor ligado."""
+    monkeypatch.setattr(api.runtime_config, "get", lambda campo: campo == "jev_padrao")
+    assert api._jev_efetivo(False) is False
+    monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
+    assert api._jev_efetivo(True) is True
+
+
+def test_sem_padrao_e_sem_escolha_o_jev_fica_desligado(monkeypatch):
+    monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
+    assert api._jev_efetivo(None) is False

@@ -5,7 +5,7 @@
   import FolderScanner from './FolderScanner.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
-  import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage,
+  import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, patchConfig,
     type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
@@ -176,8 +176,9 @@
   // GET /api/model-options (Task 4), que já traz contexto/👁 pros provedores que informam.
   let modelo = $state('');
   let subagente = $state('');
-  // Escolha da ABERTURA, e por isso nasce desligada a cada folha: o ponto é rodar a mesma tarefa
-  // com e sem, não deixar o recurso ligado sem ninguém lembrar.
+  // Nasce no PADRÃO DO SERVIDOR (`jev_padrao`), não desligada: marcar uma vez tem que valer pras
+  // próximas, inclusive nas sessões que o CLI e o MCP abrem — e o localStorage não alcança
+  // nenhum dos dois. Mexer aqui grava o padrão novo no create (ver `salvarPadraoJev`).
   let jev = $state(false);
   let esforco = $state('');
   let modelos = $state<ModelOption[]>([]);
@@ -585,7 +586,8 @@
       // anterior sobrevive à reabertura quando o fetch de contas falha — o reset de carregarModelos
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
-      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false; jev = false;
+      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
+      jev = segredos.ligado('jev_padrao');
       // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
       // gastava cota da origem sem ninguém ter escolhido isso de novo.
       resumoPorModelo = false;
@@ -684,6 +686,22 @@
   // Sem chave cadastrada o interruptor não é um botão que falha, é um botão que não devia estar
   // ali — mesmo critério do chip "Ouvir" (lib/segredos).
   const temJev = $derived(!bastao && segredos.temChave('jev_api_key'));
+
+  /** Guarda a escolha do interruptor como padrão das próximas sessões, quando ela mudou.
+   *
+   * No CREATE, e não no `onchange` do checkbox: abrir a folha, mexer e desistir não é uma escolha.
+   * Vai pro servidor ATIVO — o mesmo de onde `segredos` leu o valor atual. Mandar pro servidor
+   * alvo faria a folha comparar com um número e gravar noutro, e o padrão passaria a oscilar
+   * sozinho pra quem usa dois servidores. */
+  async function salvarPadraoJev() {
+    if (!temJev || jev === segredos.ligado('jev_padrao')) return;
+    try {
+      await patchConfig({ jev_padrao: jev });
+      await segredos.carregar();
+    } catch {
+      // O padrão é conforto: falhar aqui não pode impedir a sessão de nascer com a escolha feita.
+    }
+  }
   const rotuloMotor = $derived(engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta());
   const rotuloSubagente = $derived(subagente
     ? (modelos.find((mod) => valorModelo(mod) === subagente)?.name ?? subagente)
@@ -855,6 +873,7 @@
         else onOpenSession(r.name);
         return;
       }
+      await salvarPadraoJev();
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,

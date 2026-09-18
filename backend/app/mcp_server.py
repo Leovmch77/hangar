@@ -174,11 +174,12 @@ async def unpair(ctx: Context) -> dict[str, Any]:
                       "devolve o `config_dir` usado — confira. `conta` (caminho do config dir) "
                       "força outra; pra conta que ainda precisa ser preparada, use o CLI "
                       "(`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do "
-                      "Jev no ambiente, e só aí o `hangar-preview objetivo` funciona nela.")
+                      "Jev no ambiente, e só aí o `hangar-preview objetivo` (o laço que navega e "
+                      "preenche tela sozinho) funciona nela. Omitido, vale o padrão do servidor.")
 async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
                       model: str | None = None, effort: str | None = None, permissao: str | None = None,
                       headless: bool = False, read_only: bool = False,
-                      conta: str | None = None, jev: bool = False) -> dict[str, Any]:
+                      conta: str | None = None, jev: bool | None = None) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     if headless and provider not in ("claude", "codex"):

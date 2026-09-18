@@ -6,9 +6,10 @@ description: |
   página web — mexeu numa tela e quer conferir, "testa o login", "vê como ficou", "clica no botão
   lá", "lê o console da página" —, mesmo que o usuário não fale em preview ou navegador. A skill
   ABRE o navegador embutido desta sessão (`hangar-preview open URL`, o painel monta na tela do
-  usuário) e o dirige por refs de acessibilidade. Cobre também preencher um formulário inteiro
-  numa chamada só (verbo `objetivo`, um laço em que o modelo Jev decide cada passo, sem ida ao
-  modelo grande entre eles) — use-o em vez de clicar campo por campo. Com o app desktop aberto
+  usuário) e o dirige por refs de acessibilidade. Qualquer sequência de mais de uma ação — navegar
+  até uma tela, escolher item de lista, trocar combobox, preencher um cadastro inteiro — vai numa
+  chamada só (verbo `objetivo`, um laço em que o modelo Jev decide cada passo, sem ida ao
+  modelo grande entre eles), nunca clique por clique. Com o app desktop aberto
   ela vence agent-browser e ver-front pra página local. Cada sessão tem o SEU navegador; --sessao opera o de outra só
   quando o usuário pedir. NÃO use para: máquina sem o app desktop (sem o aviso do hook, é
   agent-browser), site externo que precisa do login do usuário (browser-harness), ou o túnel de
@@ -47,20 +48,27 @@ hangar-preview eval 'location.href="/conversa"'
 hangar-preview wait --idle
 ```
 
-## Vai PREENCHER um formulário? Então NÃO use o ciclo abaixo
+## Mais de UMA ação na página? Então NÃO use o ciclo abaixo
 
-Formulário com mais de um campo — cadastro, login, filtro, tela com combobox — é **uma chamada só**:
+Qualquer sequência — preencher um cadastro, mas também abrir uma folha, escolher um item da lista,
+trocar um combobox, chegar até a tela que você quer conferir — é **uma chamada só**:
 
 ```
 hangar-preview objetivo "cadastrar um novo serviço e salvar" \
   --dados '{"nome":"Exames laboratoriais","cnae":"8640201","aliquota":"3"}'
+
+hangar-preview objetivo "escolher a pasta hangar na lista, trocar a conta para claude-200-5 e abrir o dropdown Modelo"
 ```
 
-O Jev decide cada passo e vai até o fim sozinho, combobox e autocomplete incluídos. Uma chamada,
-não uma por campo — e o custo não cresce com o número de campos. Detalhes, flags e o que fazer
-quando ele para: **Preencher um formulário inteiro**, mais abaixo.
+O Jev decide cada passo e vai até o fim sozinho, combobox e autocomplete incluídos. Ele acha o
+elemento pelo RÓTULO — você não precisa de `snapshot` pra descobrir a ref. Encadear
+`snapshot` → grep da ref → `click` → `snapshot` de novo põe a árvore inteira no seu contexto a
+cada volta; medido na mesma verificação de tela, ~20 comandos e 4 prints contra 2 comandos e 1.
 
-O ciclo a seguir é pro resto: conferir uma tela, clicar um botão solto, ler console, tirar print.
+Depois do `objetivo`, o `shot` é seu: ele responde "objetivo atingido", não devolve o conteúdo da
+tela. Detalhes, flags e o que fazer quando ele para: **Preencher um formulário inteiro**, abaixo.
+
+O ciclo a seguir é pro resto: UM clique solto, ler console, tirar print.
 
 ## O ciclo: snapshot → @ref → ação
 

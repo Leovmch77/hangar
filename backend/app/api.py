@@ -1483,9 +1483,12 @@ class CreateBody(_StrictBody):
     # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
     subagent_model: str | None = None
     # Jev (typesafe.ai) no `hangar-preview objetivo`. Escolha da ABERTURA: ligado, a sessão nasce
-    # com a chave no ambiente; desligado (padrão), só com o marcador, e o verbo recusa. É o que
+    # com a chave no ambiente; desligado, só com o marcador, e o verbo recusa. É o que
     # permite rodar a mesma tarefa com e sem, sem apagar a configuração.
-    jev: bool = Field(default=False, strict=True)
+    # AUSENTE (None) ≠ `false`: quem não disse nada herda o `jev_padrao` do servidor, e é assim que
+    # a escolha feita uma vez vale pros três caminhos de criação. `false` explícito continua
+    # desligando aquela sessão mesmo com o padrão ligado.
+    jev: bool | None = Field(default=None, strict=True)
     # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
     # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
     omp_profile: str | None = None
@@ -1494,6 +1497,15 @@ class CreateBody(_StrictBody):
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
     headless: bool = Field(default=False, strict=True)
+
+
+def _jev_efetivo(pedido: bool | None) -> bool:
+    """Jev desta sessão: o que o chamador pediu, ou o padrão do servidor quando ele não disse nada.
+
+    Um lugar só porque os três caminhos de criação (folha, `hangar-send --new`, MCP `new_session`)
+    desembocam todos no `create_session` — resolver em cada um faria o padrão valer em dois e
+    faltar no terceiro sem ninguém perceber."""
+    return bool(runtime_config.get("jev_padrao")) if pedido is None else pedido
 
 
 class TtsBody(_StrictBody):
@@ -2084,7 +2096,7 @@ async def create_session(body: CreateBody):
                             _kw["permission_mode"] = body.permission_mode
                         if body.subagent_model is not None:
                             _kw["subagent_model"] = body.subagent_model
-                        if body.jev:
+                        if _jev_efetivo(body.jev):
                             _kw["jev"] = True
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
@@ -2113,7 +2125,7 @@ async def create_session(body: CreateBody):
             _kw2["permission_mode"] = body.permission_mode
         if body.subagent_model is not None:
             _kw2["subagent_model"] = body.subagent_model
-        if body.jev:
+        if _jev_efetivo(body.jev):
             _kw2["jev"] = True
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt

@@ -127,6 +127,33 @@ test('para quando a decisao nao esta confiante', () => {
   assert.match(decidir({}, CANDIDATOS).parar, /sem operacao/);
 });
 
+test('dois botoes de rotulo IDENTICO somam a massa e o primeiro vale', () => {
+  const gemeos = parsarSnapshot(`- RootWebArea "Hangar"
+  - button "Nova sessão" [ref=@e2]
+  - button "Nova sessão" [ref=@e21]
+  - button "Configurações" [ref=@e6]`);
+  const r = {
+    operacao: { choice: 'CLICK', confidence: 0.9 },
+    concluido: { noul: 0.1 },
+    arriscado: { noul: 0.02 },
+    click_target: { choice: 'e21', probabilities: { e21: 0.44, e2: 0.32, e6: 0.13 } },
+  };
+  const passo = decidir(r, gemeos);
+  // Nenhum dos dois chega ao piso de 0.6 sozinho, e os dois abrem a mesma folha.
+  assert.equal(passo.alvo, 'e2');
+  assert.ok(passo.confianca >= 0.6);
+});
+
+test('rotulos DIFERENTES que dividem a massa continuam parando', () => {
+  const r = {
+    operacao: { choice: 'CLICK', confidence: 0.9 },
+    concluido: { noul: 0.1 },
+    arriscado: { noul: 0.02 },
+    click_target: { choice: 'e1', probabilities: { e1: 0.44, e2: 0.32 } },
+  };
+  assert.match(decide(r).parar, /sem alvo confiavel/);
+});
+
 test('o pedido ao LLM de texto leva campo, objetivo e historico', () => {
   const pedido = pedidoDeTexto('cadastrar o Jefferson', 'Nome do paciente', ['CLICK Iniciar']);
   assert.match(pedido, /Nome do paciente/);

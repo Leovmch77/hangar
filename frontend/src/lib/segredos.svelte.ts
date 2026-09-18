@@ -34,6 +34,11 @@ export const segredos = {
   podeLer(): boolean {
     return podeLerCriterio(this.temChave('elevenlabs_api_key'), estado.valores['tts_local_cmd']);
   },
+  // Valor de um campo booleano da config do servidor. `temChave` não serve para ele: um booleano
+  // DESLIGADO está definido, e responderia `true`.
+  ligado(campo: string): boolean {
+    return estado.valores[campo] === true;
+  },
   // Trocar de servidor ativo troca o dono das chaves: o que era verdade no servidor de casa não
   // vale no do trabalho. Sem isto o chip do chat responderia pela máquina errada. Bumping da
   // geração aqui também descarta qualquer `carregar()` ainda em voo (ex: id virou null, sem

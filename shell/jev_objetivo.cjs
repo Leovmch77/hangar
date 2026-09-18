@@ -62,6 +62,25 @@ function forca(resposta) {
   return typeof resposta?.confidence === 'number' ? resposta.confidence : 0;
 }
 
+/**
+ * Quando o vencedor tem GÊMEOS na página — mesmo papel e mesmo nome acessível —, devolve o
+ * primeiro deles e a massa somada de todos. Fora disso, null.
+ *
+ * O limiar do alvo existe porque clicar no elemento errado não se corrige no ciclo seguinte. Mas
+ * dois botões "Nova sessão" (o `+` do topo e o da barra lateral) abrem a MESMA folha: ali não há
+ * elemento errado, e mesmo assim a probabilidade se dividia (0.48 contra 0.31) e o laço desistia
+ * no primeiro passo. Só o rótulo IDÊNTICO entra: dois rótulos diferentes que o Jev não soube
+ * separar continuam sendo ambiguidade de verdade, e continuam parando.
+ */
+function sinonimos(head, candidatos) {
+  const vencedor = candidatos.find((c) => c.ref === head?.choice);
+  if (!vencedor) return null;
+  const iguais = candidatos.filter((c) => c.papel === vencedor.papel && c.nome === vencedor.nome);
+  if (iguais.length < 2) return null;
+  const p = head.probabilities ?? {};
+  return { ref: iguais[0].ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
+}
+
 const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cartao|cvv/i;
 
 /** Extrai os elementos acionáveis da árvore de acessibilidade do `snapshot`. */
@@ -429,13 +448,15 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
   if (escolha === 'SCROLL_DOWN') return { operacao: 'SCROLL_DOWN' };
 
   const head = respostas[HEAD_DA_OPERACAO[escolha]];
-  const forcaAlvo = forca(head);
+  const gemeos = sinonimos(head, candidatos);
+  const forcaAlvo = gemeos ? gemeos.massa : forca(head);
   if (!head || head.choice === NENHUM || forcaAlvo < limiares.alvo) {
     return { parar: `${escolha} sem alvo confiavel (${distribuicao(head) || forcaAlvo.toFixed(2)})` };
   }
-  const escolhido = candidatos.find((c) => c.ref === head.choice);
+  const alvo = gemeos ? gemeos.ref : head.choice;
+  const escolhido = candidatos.find((c) => c.ref === alvo);
   if (!escolhido) return { parar: `o Jev escolheu ${head.choice}, que nao esta na pagina` };
-  return { operacao: escolha, alvo: head.choice, escolhido, confianca: forcaAlvo };
+  return { operacao: escolha, alvo, escolhido, confianca: forcaAlvo };
 }
 
 /** O que o LLM de texto recebe: só o necessário para escrever um valor de campo. */
