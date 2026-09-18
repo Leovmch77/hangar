@@ -18,11 +18,15 @@ process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'hangar-main-test-'));
 test.after(() => { process.env.HOME = homeOriginal; });
 
 const criadas = [];
+// Trilha compartilhada com o webContents falso: navegar uma aba CONGELADA derruba a sessão do
+// depurador, então a ORDEM entre acordar e o `loadURL` é o contrato, não só o fato de acordar.
+const trilha = [];
 function criarControladorFalso(opcoes) {
   const c = { enfileirar: (fn) => fn(), fechado: false, opcoes, ocultos: [] };
   c.fechar = () => { c.fechado = true; };
   c.definirOculto = async (v) => { c.ocultos.push(v); };
   c.recongelar = async () => {};
+  c.navegando = async (v) => { trilha.push(`navegando:${v}`); };
   criadas.push(c);
   return c;
 }
@@ -32,9 +36,11 @@ require.cache[previewCtlPath] = {
   exports: { criarControlador: criarControladorFalso },
 };
 
+const EVENTOS_CARGA = new Set(['did-finish-load', 'did-stop-loading']);
+
 function criarWebContentsFalso() {
-  // `url` começa vazia como no view recém-criado; dispararLoad() simula o did-finish-load.
-  const estado = { url: '', titulo: '', morto: false, focos: 0, ouvintes: {}, ouvintesLoad: [] };
+  // `url` começa vazia como no view recém-criado; dispararLoad() simula o fim da carga.
+  const estado = { url: '', titulo: '', morto: false, focos: 0, navegando: false, ouvintes: {}, ouvintesLoad: [] };
   const dbg = {
     attached: false,
     isAttached: () => dbg.attached,
@@ -45,7 +51,11 @@ function criarWebContentsFalso() {
   };
   return {
     setUserAgent: () => {}, getUserAgent: () => 'UA',
-    setWindowOpenHandler: () => {}, loadURL: async () => {}, getURL: () => estado.url,
+    setWindowOpenHandler: () => {}, getURL: () => estado.url,
+    // Como no Electron: a navegação já está em voo quando o loadURL volta, e o getURL ainda
+    // devolve a URL ANTIGA até a página nova comprometer.
+    loadURL: async () => { trilha.push('loadURL'); estado.navegando = true; },
+    isLoadingMainFrame: () => estado.navegando,
     capturePage: async () => ({ isEmpty: () => false, toPNG: () => Buffer.alloc(0) }),
     close: () => {}, isDestroyed: () => estado.morto === true,
     getTitle: () => estado.titulo,
@@ -53,11 +63,15 @@ function criarWebContentsFalso() {
     focus: () => { estado.focos++; },
     navigationHistory: { canGoBack: () => false, canGoForward: () => false },
     setTitulo: (t) => { estado.titulo = t; },
-    on: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
-    once: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
+    on: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (EVENTOS_CARGA.has(ev)) estado.ouvintesLoad.push(cb); },
+    once: (ev, cb) => { (estado.ouvintes[ev] ||= []).push(cb); if (EVENTOS_CARGA.has(ev)) estado.ouvintesLoad.push(cb); },
     removeListener: () => {},
     emitir: (ev, ...a) => (estado.ouvintes[ev] || []).forEach((cb) => cb(...a)),
-    dispararLoad: () => { estado.url = 'https://z.test/'; estado.ouvintesLoad.splice(0).forEach((cb) => cb()); },
+    dispararLoad: () => {
+      estado.url = 'https://z.test/';
+      estado.navegando = false;
+      estado.ouvintesLoad.splice(0).forEach((cb) => cb());
+    },
     // Alvo derrubado por fora (Target.closeTarget via CDP, crash do renderer): ninguém chamou
     // fechar aba nenhuma, mas o `destroyed` dispara igual.
     matar: () => { estado.morto = true; (estado.ouvintes.destroyed || []).forEach((cb) => cb()); },
@@ -252,6 +266,40 @@ test('o controlador so e avisado do view escondido DEPOIS de a pagina carregar (
   // Trocar de sessão esconde o painel: o agente que continuar dirigindo precisa da emulação de volta.
   handlers.get('hangar:nav-hide')(a.ev, { chave: 'srv::viewport' });
   assert.deepEqual(ctl.ocultos, [true, false, true]);
+});
+
+// `open` numa aba que já existe é NAVEGAÇÃO: emular tamanho por cima da troca de página derrubava
+// a sessão do depurador, e daí em diante todo verbo respondia "Not attached to an active page".
+test('open que navega a aba escondida so mede quando a carga para', async () => {
+  const a = novaJanela();
+  const abrir = handlers.get('hangar:nav-open');
+  const chave = 'srv::navegando';
+  await abrir(a.ev, { chave, url: 'https://a.test/', bounds: {}, oculto: true });
+  const view = viewsFalsos.at(-1);
+  const ctl = criadas.at(-1);
+  view.webContents.dispararLoad();
+  assert.deepEqual(ctl.ocultos, [true]);
+
+  await abrir(a.ev, { chave, url: 'https://b.test/', bounds: {}, oculto: true });
+  assert.equal(view.webContents.isLoadingMainFrame(), true, 'o loadURL da navegacao esta em voo');
+  assert.deepEqual(ctl.ocultos, [true], 'nada de emular no meio da troca de pagina');
+
+  view.webContents.dispararLoad();
+  assert.deepEqual(ctl.ocultos, [true, true], 'a carga parou: agora a medida volta');
+});
+
+test('open que navega a aba escondida a acorda ANTES do loadURL', async () => {
+  const a = novaJanela();
+  const abrir = handlers.get('hangar:nav-open');
+  const chave = 'srv::acordar';
+  await abrir(a.ev, { chave, url: 'https://a.test/', bounds: {}, oculto: true });
+  const view = viewsFalsos.at(-1);
+  view.webContents.dispararLoad();
+
+  trilha.length = 0;
+  await abrir(a.ev, { chave, url: 'https://b.test/', bounds: {}, oculto: true });
+  assert.deepEqual(trilha, ['navegando:true', 'loadURL'],
+    'congelada, a troca de pagina derruba a sessao do depurador — acordar depois seria tarde');
 });
 
 test('criar, trocar e fechar aba: ids nao renumeram e a ultima fecha o navegador', async () => {

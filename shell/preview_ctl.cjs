@@ -133,13 +133,25 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     aoLayout();
   };
 
-  async function aplicarViewport(pedido) {
+  // Aba escondida não compõe quadro, e depois de navegar o Chromium passa a ENGOLIR mousedown e
+  // keydown: responde ok e nada chega ao JS (mousemove ainda passa). Reemitir a MESMA medida não
+  // ressuscita nada — o que ressuscita é uma medida DIFERENTE, que força surface nova. Daí a
+  // altura vizinha antes do valor real.
+  async function medir(viewport, reancorar) {
+    if (reancorar && oculto) {
+      const vizinha = viewport.height > 1 ? viewport.height - 1 : viewport.height + 1;
+      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { ...viewport, height: vizinha });
+    }
+    await dbg.sendCommand('Emulation.setDeviceMetricsOverride', viewport);
+  }
+
+  async function aplicarViewport(pedido, reancorar = false) {
     if (pedido.modo === 'mobile') {
       // Layout de celular pedido por quem está olhando de fora (acesso remoto). Vale MAIS que o
       // `oculto`: quem escolheu ver em celular quer o site servindo mobile, com ou sem painel.
       // Sem a emulação de toque a página não recebe touchstart e um carrossel que só escuta toque
       // fica morto — que é justamente o que se quer testar num layout de celular.
-      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_MOVEL);
+      await medir(VIEWPORT_MOVEL, reancorar);
       await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
       await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: UA_MOVEL });
       layoutVersaoAplicada = pedido.versao;
@@ -148,20 +160,24 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: false });
     await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: '' });
     if (pedido.modo === 'custom') {
-      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
-        width: pedido.width, height: pedido.height, deviceScaleFactor: 1, mobile: false,
-      });
-    } else if (oculto) await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_OCULTO);
+      await medir({ width: pedido.width, height: pedido.height, deviceScaleFactor: 1, mobile: false }, reancorar);
+    } else if (oculto) await medir(VIEWPORT_OCULTO, reancorar);
     else await dbg.sendCommand('Emulation.clearDeviceMetricsOverride');
     layoutVersaoAplicada = pedido.versao;
   }
 
-  function sincronizarLayout(forcar = false) {
+  // Reancorar é para quem NÃO está mudando de tamanho: `definirOculto` e `layout` já trocam a
+  // medida, e a troca por si só força a surface nova.
+  const reancorarQuadro = () => (oculto
+    ? serializarLayout(layoutEstado, () => aplicarViewport(copiarLayout(), true)).then(() => true, () => false)
+    : Promise.resolve(false));
+
+  function sincronizarLayout(forcar = false, reancorar = false) {
     return serializarLayout(layoutEstado, async () => {
       if (!forcar && layoutVersaoAplicada === layoutEstado.versao) return;
       layoutVersaoAplicada = -1;
       try {
-        await aplicarViewport(copiarLayout());
+        await aplicarViewport(copiarLayout(), reancorar);
         if (layoutEstado.erro) { layoutEstado.erro = null; aoLayout(); }
       } catch (err) {
         publicarErroLayout(err);
@@ -186,12 +202,14 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     requisicoesEmVoo = 0;
     if (temaAtual !== 'sistema') await aplicarTema();
     // A emulação de tamanho sobrevive à navegação, mas a do tema também deveria e não sobrevive;
-    // reaplicar custa um comando e o preço de errar é a página inteira em 0x0, calada.
+    // reaplicar custa um comando e o preço de errar é a página inteira em 0x0, calada. Aqui a
+    // medida repetida seria a MESMA de antes, que é justamente a que não reancora o quadro — por
+    // isso este é o único ponto que pede reancoragem.
     // O `oculto` aceita falhar calado (o comentário acima diz por quê). O layout de celular, não:
     // ele foi PEDIDO por alguém que está olhando, e se a emulação não voltar depois de navegar a
     // página vira desktop com a pill ainda marcando celular.
     if (oculto || layoutEstado.modo !== 'desktop') {
-      await sincronizarLayout(true).catch((err) => {
+      await sincronizarLayout(true, true).catch((err) => {
         if (layoutEstado.modo !== 'desktop') console.error(`[nav] layout pedido nao voltou apos navegar: ${err && err.message ? err.message : err}`);
       });
     }
@@ -208,6 +226,37 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     new Promise((r) => setTimeout(r, 500)),
   ]);
 
+  // O `ok:` de click e press era dado sem conferir nada, e na aba escondida que acabou de navegar
+  // o evento some no caminho: resposta de sucesso com a página intacta. A sonda é um ouvinte em
+  // captura, o mesmo jeito de medir que descobriu o defeito — ela prova que o EVENTO chegou ao
+  // documento, não que a página reagiu (isso é do handler dela).
+  const armarSonda = (tipo) => dbg.sendCommand('Runtime.evaluate', {
+    expression: `(()=>{window.__hangarSonda=0;addEventListener(${JSON.stringify(tipo)},`
+      + '()=>{window.__hangarSonda=1},{capture:true,once:true});return 1})()',
+  }).catch(() => {});
+  // Marcador sumido = documento novo: o evento navegou a página, logo chegou. Sonda que não pôde
+  // ser lida também conta como chegou — falha não se inventa.
+  async function sondaChegou() {
+    try {
+      const r = await dbg.sendCommand('Runtime.evaluate',
+        { expression: '(typeof window.__hangarSonda==="undefined"?2:window.__hangarSonda)', returnByValue: true });
+      return (r.result && r.result.value) !== 0;
+    } catch { return true; }
+  }
+  // Uma retentativa, e só depois de reancorar: dois disparos seguidos num alvo que já recebeu o
+  // primeiro seria clique duplo inventado.
+  async function comSonda(tipo, disparar) {
+    await armarSonda(tipo);
+    await disparar();
+    await quadro();
+    if (await sondaChegou()) return true;
+    if (!(await reancorarQuadro())) return false;
+    await armarSonda(tipo);
+    await disparar();
+    await quadro();
+    return sondaChegou();
+  }
+
   async function focoNaoEditavel() {
     const r = await dbg.sendCommand('Runtime.evaluate', { expression: FOCO, returnByValue: true });
     const v = r.result && r.result.value;
@@ -221,12 +270,18 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   // para. `aoDirigir` avisa o main, que tira/põe o modo economia no mesmo compasso.
   let congelada = false;
   let fechado = false;
+  // Navegar um documento CONGELADO mata a sessão do depurador: ele é descartado na troca de
+  // página e daí em diante todo comando responde "Not attached to an active page", até fechar e
+  // abrir o navegador. Medido: 0 falhas em 16 navegações emendadas (a aba nem chegava a congelar)
+  // contra 6 em 16 com 6s de ociosidade antes de cada uma. Enquanto há carga em voo a aba fica
+  // acordada, custe o que custar em GPU — é segundo, não minuto.
+  let emNavegacao = false;
   // Devolve se a página ficou no estado pedido. Nunca rejeita: falha vai pro log e `congelada`
   // fica como estava, pra próxima chamada tentar de novo — congelar que falhou calado é aba
   // gastando GPU escondida sem ninguém saber.
   async function economia() {
     if (fechado) return true;
-    const alvo = oculto && emVoo === 0;
+    const alvo = oculto && emVoo === 0 && !emNavegacao;
     if (alvo === congelada) return true;
     const estado = alvo ? 'frozen' : 'active';
     try {
@@ -337,6 +392,13 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       congelada = false;
       await economia();
     },
+    // O main abre e fecha esta janela em volta de toda carga (e ANTES do `loadURL` que ele mesmo
+    // dispara, que é o caso em que a aba já está congelada quando a navegação começa).
+    async navegando(valor) {
+      emNavegacao = !!valor;
+      if (!emNavegacao) congelada = false;   // o documento que chegou nasce ativo
+      await economia();
+    },
     // Dois caminhos, e qual serve depende de o view estar na tela. Visível: `capturePage` do
     // Electron. Escondido: ele REJEITA com UnknownVizError (não devolve imagem vazia), e quem
     // responde é o `Page.captureScreenshot` do CDP — mas só com a emulação de tamanho ligada,
@@ -400,15 +462,18 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       if (!p) return `erro: ref ${ref} nao existe (rode snapshot de novo)`;
       // Evento REAL, não `.click()` em JS: lista que só ouve mousedown ignora o click sintético.
       const base = { x: p.x, y: p.y, button: 'left', clickCount: 1 };
-      await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
-      await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
-      await quadro();
+      const chegou = await comSonda('mousedown', async () => {
+        await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+        await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
+      });
+      if (!chegou) return `erro: click ${ref}: o evento nao chegou na pagina (aba escondida sem quadro) — tire um shot e repita`;
       return `ok: click ${ref}`;
     },
     async preencher(ref, texto) {
       const p = await this.centroDe(ref);
       if (!p) return `erro: ref ${ref} nao existe (rode snapshot de novo)`;
-      await this.clicar(ref);
+      const clique = await this.clicar(ref);
+      if (clique.startsWith('erro:')) return clique;
       const foco = await focoNaoEditavel();
       if (foco) return `erro: fill ${ref}: o clique nao deixou um campo de texto com foco (foco em ${foco}) — a ref e mesmo um campo? rode snapshot`;
       // SUBSTITUI: sem seleção o insertText gruda no que já estava. Quem seleciona é o campo
@@ -431,9 +496,11 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     },
     async teclar(tecla) {
       const { text, unmodifiedText, ...soltar } = eventoTecla(String(tecla));
-      await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...soltar, ...(text ? { text, unmodifiedText } : {}) });
-      await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...soltar });
-      await quadro();
+      const chegou = await comSonda('keydown', async () => {
+        await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...soltar, ...(text ? { text, unmodifiedText } : {}) });
+        await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...soltar });
+      });
+      if (!chegou) return `erro: press ${tecla}: o evento nao chegou na pagina (aba escondida sem quadro) — tire um shot e repita`;
       return `ok: press ${tecla}`;
     },
     async pairar(ref) {

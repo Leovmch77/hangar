@@ -100,13 +100,11 @@ tire `snapshot` de novo antes de agir.
   o tamanho real, que é zero. Confira com `eval 'innerWidth'` antes de concluir que a página
   está vazia.
 - `hangar-preview snapshot` — árvore de acessibilidade compacta, com as refs atuais.
-- `hangar-preview click @eN` — clica (evento de mouse real, não `.click()` em JS). **Bug aberto:
-  às vezes ele responde `ok` sem o evento chegar na página.** Se a tela não reagiu a um clique
-  que disse `ok`, não conclua que a página é que não responde — confirme com um listener em
-  captura antes de mudar de rumo:
-  `eval '(() => { window.__c=0; document.addEventListener("click",()=>window.__c++,true); return "ok" })()'`,
-  clique, e leia `eval 'window.__c'`. Zero = o clique não chegou. Medição e hipóteses descartadas
-  em `docs/decisoes/frontend.md`.
+- `hangar-preview click @eN` — clica (evento de mouse real, não `.click()` em JS). O `ok:` agora
+  só sai com o evento comprovadamente entregue: a aba escondida que acabou de navegar para de
+  compor quadro e o Chromium engole o clique, e nesse caso o verbo reancora o quadro, tenta uma
+  vez e responde `erro: ... o evento nao chegou na pagina`. Vendo esse erro, um `shot` também
+  ressuscita. Medição em `docs/decisoes/frontend.md`.
 - `hangar-preview fill @eN <texto>` — foca o campo e substitui o conteúdo pelo texto.
 - `hangar-preview type <texto>` — digita no elemento que já está com foco (sem focar nada antes).
 - `hangar-preview press <tecla>` — uma tecla: `Enter`, `Tab`, `Escape`, `ArrowDown`...

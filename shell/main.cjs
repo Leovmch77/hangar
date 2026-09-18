@@ -455,18 +455,28 @@ function soltarControlador(chave, view) {
 // Conta ao controlador que o view saiu da tela (ou voltou pra ela): é ele quem liga a emulação
 // de tamanho que dá viewport e print a um view escondido. Espera a página carregar, porque
 // emular tamanho no `about:blank` de um view recém-criado derruba o processo com SIGSEGV.
-function avisarOculto(chave, view, oculto) {
+const ctlDoView = (chave, view) => {
   const r = registros.get(chave);
   const entrada = r && [...r.abas.values()].find((e) => e.view === view);
-  if (!entrada || !entrada.ctl?.definirOculto) return;
-  const aplicar = () => entrada.ctl.definirOculto(oculto).catch((err) => {
+  return entrada ? entrada.ctl : null;
+};
+
+function avisarOculto(chave, view, oculto) {
+  const ctl = ctlDoView(chave, view);
+  if (!ctl?.definirOculto) return;
+  const aplicar = () => ctl.definirOculto(oculto).catch((err) => {
     console.error('[nav] viewport do view escondido:', err && err.message);
   });
-  // O critério é a página, não o estado de carregamento: `about:blank` (ou URL vazia) é
-  // exatamente o documento em que a emulação mata o processo.
+  // `about:blank` (ou URL vazia) é o documento em que a emulação mata o processo. Navegação EM
+  // VOO conta igual, e o `getURL()` não denuncia: logo depois de um `loadURL` ele ainda devolve a
+  // URL antiga, e emular em cima da troca de página derrubava a sessão do depurador — daí em
+  // diante todo verbo respondia "Not attached to an active page" até fechar e abrir de novo.
+  // `did-stop-loading` e não `did-finish-load` porque carga que FALHA também precisa devolver a
+  // medida: sem isso a aba escondida ficaria sem viewport nenhuma até alguém navegar de novo.
   const url = view.webContents.getURL();
-  if (!url || url === 'about:blank') view.webContents.once('did-finish-load', aplicar);
-  else aplicar();
+  const navegando = view.webContents.isLoadingMainFrame?.() ?? view.webContents.isLoading?.() ?? false;
+  if (url && url !== 'about:blank' && !navegando) aplicar();
+  else view.webContents.once('did-stop-loading', aplicar);
 }
 
 // View escondido não pode ficar com o teclado: o Chromium foca o WebContents que acabou de nascer
@@ -721,6 +731,8 @@ function criarAba(win, chave, { url, oculto, bounds = null } = {}) {
     if (entrada) entrada.urlPedida = u;
     gravarSidecarNav(chave);
   });
+  wc.on('did-start-loading', () => ctl?.navegando?.(true));
+  wc.on('did-stop-loading', () => ctl?.navegando?.(false));
   wc.on('did-finish-load', () => { devolverFoco(win, view); ctl?.recongelar(); });
   // Preenchimento de login com as senhas salvas do Chrome do usuário, ao terminar de carregar
   // uma página cujo domínio tem senha salva. Uma vez por URL (o `dom-ready` repete em SPA).
@@ -918,7 +930,13 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
     // Reexibir NUNCA recarrega: a URL atual do view pode ter mudado por navegação interna (o
     // agente clicou em links) e o front só manda `url` quando o usuário digita uma nova.
     const destino = url ? urlNavegavel(url) : null;
-    if (destino && view.webContents.getURL() !== destino) view.webContents.loadURL(destino);
+    if (destino && view.webContents.getURL() !== destino) {
+      // Acordar ANTES do loadURL, e esperar: aqui a aba escondida está congelada desde o último
+      // verbo, e navegar documento congelado é o que derruba a sessão do depurador. O
+      // `did-start-loading` chegaria tarde demais — a troca de página já teria começado.
+      await ctlDoView(chave, view)?.navegando?.(true);
+      view.webContents.loadURL(destino);
+    }
     // Exibir, esconder, emular tamanho e posicionar é tudo do `trocarAba`: um dono só pro estado
     // de tela. Escondido, a página fica em 0x0 e sem quadro — quem devolve viewport de desktop e
     // print é a emulação de tamanho, e ela SÓ entra com a página carregada (antes disso, SIGSEGV).

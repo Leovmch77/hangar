@@ -101,6 +101,26 @@ test('escondida e ociosa a aba congela; verbo descongela antes de rodar e a fila
   assert.deepEqual(estados().at(-1), 'active', 'mostrar descongela');
 });
 
+// Navegar documento congelado mata a sessão do depurador ("Not attached to an active page"), e
+// depois disso todo verbo é recusado até fechar e abrir o navegador.
+test('a aba escondida fica acordada enquanto a navegacao esta em voo', async () => {
+  const dbg = dubleDbg();
+  const estados = () => dbg.chamadas.filter(([m]) => m === 'Page.setWebLifecycleState').map(([, p]) => p.state);
+  const ctl = criarControlador({ dbg, capturarPagina: async () => Buffer.alloc(0), aoNavegar: () => {} });
+  await ctl.definirOculto(true);
+  assert.deepEqual(estados(), ['frozen'], 'escondida e ociosa, congela');
+
+  await ctl.navegando(true);
+  assert.deepEqual(estados(), ['frozen', 'active'], 'quem vai navegar acorda a aba primeiro');
+
+  await ctl.enfileirar(async () => {});
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(estados(), ['frozen', 'active'], 'fila esvaziou, mas a carga segue: NAO recongela');
+
+  await ctl.navegando(false);
+  assert.deepEqual(estados().at(-1), 'frozen', 'carga terminou: volta a congelar');
+});
+
 test('lifecycle que falha nao muda o estado lembrado, loga, e verbo em aba congelada e recusado', async () => {
   let falhar = false;
   const dbg = dubleDbg({ 'Page.setWebLifecycleState': () => { if (falhar) throw new Error('cdp caiu'); return {}; } });
@@ -154,6 +174,50 @@ test('clicar usa evento de mouse REAL no centro da caixa, nao .click() em JS', a
   assert.equal(mouse[0][1].x, 20);
   assert.equal(mouse[0][1].y, 30);
   assert.match(saida, /^ok: click @e1/);
+});
+
+// O `ok:` era dado sem conferir nada: na aba escondida que acabou de navegar o evento some no
+// caminho e a resposta continuava de sucesso. A sonda é um ouvinte em captura, como no diagnóstico.
+test('clicar devolve erro quando o evento nao chega na pagina, e so tenta de novo apos reancorar', async () => {
+  const dbg = dubleDbg({
+    'Accessibility.getFullAXTree': { nodes: [
+      { nodeId: '1', role: { value: 'button' }, name: { value: 'Ok' }, childIds: [], backendDOMNodeId: 5 },
+    ] },
+    'DOM.getBoxModel': { model: { content: [10, 20, 30, 20, 30, 40, 10, 40] } },
+    'Runtime.evaluate': (p) => (/typeof window.__hangarSonda/.test(p.expression) ? { result: { value: 0 } } : {}),
+  });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => ({ isEmpty: () => false }), aoNavegar: () => {} });
+  await ctl.definirOculto(true);
+  await ctl.snapshot();
+  assert.match(await ctl.clicar('@e1'), /^erro: click @e1: o evento nao chegou na pagina/);
+  assert.equal(dbg.chamadas.filter(([m]) => m === 'Input.dispatchMouseEvent').length, 4,
+    'UMA retentativa: disparar de novo sem motivo seria clique duplo inventado');
+  const alturas = dbg.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride').map(([, p]) => p.height);
+  assert.deepEqual(alturas, [800, 799, 800], 'a retentativa veio depois de reancorar o quadro');
+});
+
+test('clicar que navegou a pagina conta como entregue: o marcador da sonda some com o documento', async () => {
+  const dbg = dubleDbg({
+    'Accessibility.getFullAXTree': { nodes: [
+      { nodeId: '1', role: { value: 'link' }, name: { value: 'Ir' }, childIds: [], backendDOMNodeId: 5 },
+    ] },
+    'DOM.getBoxModel': { model: { content: [10, 20, 30, 20, 30, 40, 10, 40] } },
+    'Runtime.evaluate': (p) => (/typeof window.__hangarSonda/.test(p.expression) ? { result: { value: 2 } } : {}),
+  });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => ({ isEmpty: () => false }), aoNavegar: () => {} });
+  await ctl.definirOculto(true);
+  await ctl.snapshot();
+  assert.match(await ctl.clicar('@e1'), /^ok: click @e1/);
+  assert.equal(dbg.chamadas.filter(([m]) => m === 'Input.dispatchMouseEvent').length, 2, 'sem retentativa');
+});
+
+test('teclar devolve erro quando o keydown nao chega na pagina', async () => {
+  const dbg = dubleDbg({
+    'Runtime.evaluate': (p) => (/typeof window.__hangarSonda/.test(p.expression) ? { result: { value: 0 } } : {}),
+  });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => ({ isEmpty: () => false }), aoNavegar: () => {} });
+  await ctl.definirOculto(true);
+  assert.match(await ctl.teclar('Enter'), /^erro: press Enter: o evento nao chegou na pagina/);
 });
 
 test('clicar em ref desconhecida nao dispara evento nenhum', async () => {
@@ -311,13 +375,16 @@ test('definirOculto liga e desliga a emulacao de tamanho', async () => {
   assert.equal(emulacao[1][0], 'Emulation.clearDeviceMetricsOverride');
 });
 
-test('escondido: a emulacao de tamanho e reaplicada depois de navegar', async () => {
+// Reemitir a MESMA medida depois de navegar não ressuscita o input da aba escondida — medido:
+// mousedown e keydown continuavam sendo engolidos. Quem reancora o quadro é uma medida DIFERENTE.
+test('escondido: navegar reaplica a emulacao e reancora com uma medida vizinha antes da real', async () => {
   const dbg = dubleDbg();
   let renavegar = null;
   const ctl = criarControlador({ dbg, aoNavegar: (cb) => (renavegar = cb), capturarPagina: async () => ({ isEmpty: () => false }) });
   await ctl.definirOculto(true);
   await renavegar();
-  assert.equal(dbg.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride').length, 2);
+  const alturas = dbg.chamadas.filter(([m]) => m === 'Emulation.setDeviceMetricsOverride').map(([, p]) => p.height);
+  assert.deepEqual(alturas, [800, 799, 800]);
 });
 
 test('visivel: navegar NAO manda emulacao de tamanho nenhuma', async () => {
@@ -694,7 +761,8 @@ test('click e shot esperam um quadro pintado antes de responder', async () => {
   await ctl.snapshot();
   await ctl.clicar('@e1');
   const ordem = dbg.chamadas.map(([m, p]) => (m === 'Runtime.evaluate' ? `frame:${/requestAnimationFrame/.test(p.expression)}` : m));
-  assert.deepEqual(ordem.slice(-3), ['Input.dispatchMouseEvent', 'Input.dispatchMouseEvent', 'frame:true']);
+  // A última avaliação é a leitura da sonda de entrega, que vem DEPOIS do quadro.
+  assert.deepEqual(ordem.slice(-4), ['Input.dispatchMouseEvent', 'Input.dispatchMouseEvent', 'frame:true', 'frame:false']);
   const antes = dbg.chamadas.length;
   await ctl.capturarPagina();
   assert.equal(capturas, 1);
