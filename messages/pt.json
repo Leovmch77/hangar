@@ -2885,6 +2885,7 @@
   "arq_descartar": "Descartar",
   "arq_editar": "Editar",
   "arq_nao_salvo": "alterações não salvas",
+  "arq_falhou_salvar": "a última gravação falhou",
   "arq_abas": "Arquivos abertos",
   "arq_fechar_aba": "Fechar {nome}",
   "arq_atalho_salvar": "Salvar (Ctrl+S)",

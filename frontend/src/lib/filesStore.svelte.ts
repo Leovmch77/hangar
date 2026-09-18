@@ -34,6 +34,11 @@ export class FilesStore {
   // Texto digitado e ainda nao gravado, por caminho. Trocar de aba nao pode perder digitacao —
   // e o rascunho e o que acende o ponto de "nao salvo" na aba mesmo quando ela nao esta ativa.
   rascunhos = new SvelteMap<string, string>();
+  // Erro da ultima gravacao de cada aba. Mora AQUI, e nao no visor, porque ha um FileViewer so
+  // para todas as abas: como estado do componente, o erro era apagado ao trocar de `path` e a
+  // resposta que chegasse depois da troca nao tinha onde aterrissar — a tentativa que falhou
+  // sumia, e a aba ficava com o mesmo ponto de "nao salvo" de quem ainda nem tentou.
+  errosSalvar = new SvelteMap<string, string>();
   // Ultima resposta boa de cada aba. Trocar de aba pinta DAQUI na hora e revalida por tras: sem
   // o cache, voltar pra uma aba mostrava o esqueleto de novo a cada ida e volta.
   private cache = new SvelteMap<string, { conteudo: FileContent; diff: PathDiff | null }>();
@@ -177,14 +182,21 @@ export class FilesStore {
       // de aba no meio), e voltar pra ela mostrando o texto de antes de gravar seria mentira.
       const emCache = this.cache.get(path);
       if (emCache) this.cache.set(path, { ...emCache, conteudo: { ...emCache.conteudo, text: texto, size: r.size, digest: r.digest } });
-      // Gravou: o que estava digitado virou o arquivo, entao a aba para de acender o ponto.
+      // Gravou: o que estava digitado virou o arquivo, entao a aba para de acender o ponto — e
+      // a falha da tentativa anterior deixa de valer.
       this.rascunhos.delete(path);
+      this.errosSalvar.delete(path);
       // O diff da tela envelheceu no instante da gravacao: reler e o que impede o visor de
       // afirmar um diff que nao existe mais. Externo nao tem diff (nem esta no repo da sessao).
       if (!eraExterno) void this.recarregarDiff(path);
       return null;
     } catch (e) {
-      return (e as Error)?.message || 'erro_arq_salvar_falhou';
+      const falha = (e as Error)?.message || 'erro_arq_salvar_falhou';
+      // Registrado POR CAMINHO antes de devolver: quem pediu a gravacao pode nao estar mais na
+      // tela, e devolver a mensagem para um visor que ja trocou de arquivo era o mesmo que
+      // jogar fora. Assim voltar para a aba mostra por que ela nao gravou.
+      this.errosSalvar.set(path, falha);
+      return falha;
     }
   }
 
@@ -225,7 +237,7 @@ export class FilesStore {
       this.cache.set(cru, { conteudo: c, diff: null });
       return true;
     } catch (e) {
-      if (g !== this.gArquivo) return true;
+      if (g !== this.gArquivo) { this._podarAbaMorta(cru); return true; }
       this.conteudo = null;
       this.diff = null;
       this.selecionado = null;
@@ -264,7 +276,13 @@ export class FilesStore {
       readFile(this.sessao, path),
       pathDiff(this.sessao, path, this.escopo),
     ]);
-    if (g !== this.gArquivo) return true; // uma abertura mais nova ja tomou o lugar — nao e falha DESTA
+    // Uma abertura mais nova ja tomou o lugar: esta nao pinta nada — nao e falha DESTA. Mas se
+    // ELA falhou, a aba que o clique registrou nunca carregou, e sem a poda abaixo ficaria na
+    // faixa como um nome clicavel que nao abre nada.
+    if (g !== this.gArquivo) {
+      if (c.status === 'rejected') this._podarAbaMorta(path);
+      return true;
+    }
     this.loading = false;
     if (c.status === 'rejected') {
       // Falha ao abrir nao pode deixar o conteudo do arquivo anterior na tela sob o nome novo.
@@ -356,8 +374,14 @@ export class FilesStore {
 
   // Texto digitado numa aba. `null` apaga o rascunho (descartar, ou voltar ao texto do disco).
   anotarRascunho(path: string, texto: string | null): void {
-    if (texto === null) this.rascunhos.delete(path);
-    else this.rascunhos.set(path, texto);
+    if (texto === null) {
+      this.rascunhos.delete(path);
+      // Descartar o que estava escrito encerra a tentativa: manter o aviso de gravacao falhada
+      // sobre o texto do disco acusaria um erro que ja nao tem dono.
+      this.errosSalvar.delete(path);
+    } else {
+      this.rascunhos.set(path, texto);
+    }
   }
 
   // Aba vizinha na faixa, em passos de +1/-1, dando a volta. Devolve null com menos de duas abas.
@@ -373,12 +397,22 @@ export class FilesStore {
     if (!this.abas.some((a) => a.path === path)) this.abas.push({ path, externo });
   }
 
+  // Poda a aba de uma abertura VELHA que falhou. Só tira o que nunca chegou a carregar: com o
+  // arquivo na tela, ou com resposta boa em cache, a aba é de uma abertura mais nova que deu
+  // certo — e derrubá-la por causa do 404 de uma tentativa abandonada tiraria da faixa um
+  // arquivo que o usuário está lendo.
+  private _podarAbaMorta(path: string): void {
+    if (this.selecionado === path || this.cache.has(path)) return;
+    this._descartarAba(path);
+  }
+
   // Tira a aba da faixa e joga fora tudo que era dela. NAO mexe em selecionado/conteudo: quem
   // chama decide o que fica na tela (o 404 limpa, o fechar passa pra vizinha).
   private _descartarAba(path: string): void {
     const i = this.abas.findIndex((a) => a.path === path);
     if (i !== -1) this.abas.splice(i, 1);
     this.rascunhos.delete(path);
+    this.errosSalvar.delete(path);
     this.cache.delete(path);
   }
 

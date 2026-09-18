@@ -2885,6 +2885,7 @@
   "arq_descartar": "Discard",
   "arq_editar": "Edit",
   "arq_nao_salvo": "unsaved changes",
+  "arq_falhou_salvar": "the last save failed",
   "arq_abas": "Open files",
   "arq_fechar_aba": "Close {nome}",
   "arq_atalho_salvar": "Save (Ctrl+S)",

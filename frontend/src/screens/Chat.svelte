@@ -2798,18 +2798,25 @@
         onEscopo={(e) => filesStore.trocarEscopo(e)}
         onFechar={fecharVisor}
         onSalvar={(t) => filesStore.salvar(arquivoAberto, t)}
-        abas={filesStore.abas.map((a) => ({ path: a.path, sujo: filesStore.rascunhos.has(a.path) }))}
+        abas={filesStore.abas.map((a) => ({
+          path: a.path,
+          sujo: filesStore.rascunhos.has(a.path),
+          falhou: filesStore.errosSalvar.has(a.path),
+        }))}
         onAtivarAba={(p) => void filesStore.ativar(p)}
         onFecharAba={(p) => {
-          // A parte que tira a aba e escolhe a vizinha roda antes de qualquer await, então dá
-          // pra ler o resultado aqui: sem vizinha, o visor fecha pelo caminho normal (é ele que
-          // devolve o foco pra quem abriu o arquivo).
+          // Lido ANTES de fechar, de propósito: ler o estado depois da chamada só funcionaria
+          // enquanto `fecharAba` escrevesse a seleção antes do primeiro await, e um await novo
+          // ali quebraria isto sem erro de compilação. Sem vizinha, o visor fecha pelo caminho
+          // normal, que é quem devolve o foco pra quem abriu o arquivo.
+          const eraUltima = filesStore.abas.length === 1 && filesStore.abas[0].path === p;
           void filesStore.fecharAba(p);
-          if (filesStore.selecionado === null) fecharVisor();
+          if (eraUltima) fecharVisor();
         }}
         onTrocarAba={(passo) => { const p = filesStore.abaVizinha(passo); if (p) void filesStore.ativar(p); }}
         rascunho={filesStore.rascunhos.get(arquivoAberto) ?? null}
         onRascunho={(t) => filesStore.anotarRascunho(arquivoAberto, t)}
+        erroSalvar={filesStore.errosSalvar.get(arquivoAberto) ?? null}
       />
     </div>
   {/if}

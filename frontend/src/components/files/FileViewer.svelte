@@ -28,7 +28,7 @@
     onSalvar?: ((texto: string) => Promise<string | null>) | null;
     // Faixa de abas. Vazia (default) = o visor desenha uma aba só, com o arquivo atual — é o que
     // o modal Git e o celular usam, e o que mantém este componente utilizável sem o store.
-    abas?: { path: string; sujo: boolean }[];
+    abas?: { path: string; sujo: boolean; falhou?: boolean }[];
     onAtivarAba?: ((p: string) => void) | null;
     onFecharAba?: ((p: string) => void) | null;
     onTrocarAba?: ((passo: number) => void) | null;
@@ -36,12 +36,16 @@
     // que devolver o que estava escrito. `null` = nada digitado desde a última leitura.
     rascunho?: string | null;
     onRascunho?: ((t: string | null) => void) | null;
+    // Erro da última gravação DESTA aba, guardado pelo hospedeiro por caminho. Não pode ser
+    // estado deste componente: existe um só para todas as abas, e trocar de `path` apagava o
+    // aviso de uma gravação que falhou de verdade.
+    erroSalvar?: string | null;
   }
   let {
     path, linha = null, diff, conteudo, loading, onEscopo, onFechar,
     rotuloVoltar = m.arq_voltar_conversa(), erro = null, onSalvar = null,
     abas = [], onAtivarAba = null, onFecharAba = null, onTrocarAba = null,
-    rascunho = null, onRascunho = null,
+    rascunho = null, onRascunho = null, erroSalvar = null,
   }: Props = $props();
 
   // Linhas do diff já destacadas. highlightDiff é assíncrona (import dinâmico do Shiki).
@@ -196,8 +200,9 @@
   // Não há modo de edição: quem pode gravar já digita. O botão de lápis existia só pra ligar um
   // estado que não precisava existir, e cobrava um clique antes de cada correção de uma linha.
   let salvando = $state(false);
-  let erroSalvar = $state<string | null>(null);
   let salvoAgora = $state(false);
+  // Já vem traduzida do api.ts; `mensagemDeErro` cobre o caso de o store ter guardado um código.
+  const erroSalvarVisivel = $derived(erroSalvar ? (mensagemDeErro(erroSalvar) ?? erroSalvar) : null);
   // Sem digest não há gravação (leitura truncada): deixar digitar seria oferecer algo que o
   // backend recusa de propósito.
   const podeEditar = $derived(onSalvar !== null && doArquivo !== null && doArquivo.digest !== null);
@@ -217,12 +222,11 @@
   // aparecendo (sem diff embutido): cortar a tela seria pior que mostrar o começo.
   const podeUsarEditor = $derived(doArquivo !== null);
 
-  // Trocar de arquivo zera o que é do SALVAMENTO (erro, "✓ Salvo", botão preso em "Salvando…").
-  // O rascunho não: ele é do hospedeiro, por aba, e voltar pra uma aba tem que devolver o que
-  // estava escrito nela.
+  // Trocar de arquivo zera só o que é EFÊMERO da tela: o "✓ Salvo" e o botão preso em
+  // "Salvando…". Rascunho e erro de gravação são do hospedeiro, por aba — voltar a uma aba tem
+  // que devolver o que estava escrito nela E por que ela não gravou.
   $effect(() => {
     void path;
-    erroSalvar = null;
     salvoAgora = false;
     salvando = false;
   });
@@ -231,31 +235,26 @@
     if (!onSalvar || !sujo || salvando) return;
     // O arquivo em que este salvamento começou. Trocar de arquivo com a gravação em voo é
     // possível (nada na árvore impede), e sem esta guarda a resposta antiga aterrissava na tela
-    // do arquivo novo: o erro de A aparecia sobre B, ou o "✓ Salvo" de A fechava a edição de B
-    // e sumia com o rastro do que estava sendo digitado.
+    // do arquivo novo: o "✓ Salvo" de A fechava a edição de B e sumia com o rastro do que estava
+    // sendo digitado. A FALHA não depende desta guarda: quem a registra é o store, por caminho.
     const meu = path;
     salvando = true;
-    erroSalvar = null;
     let falha: string | null = null;
     try {
       falha = await onSalvar(textoNoEditor);
     } finally {
       if (meu === path) salvando = false;
     }
-    if (meu !== path) return;
-    if (falha) {
-      // Ja vem traduzida do api.ts; o mensagemDeErro cobre o caso de vir um codigo cru.
-      erroSalvar = mensagemDeErro(falha) ?? falha;
-      return;
-    }
+    if (meu !== path || falha) return;
     salvoAgora = true;
     onRascunho?.(null);
     setTimeout(() => { if (meu === path) salvoAgora = false; }, 2000);
   }
 
+  // Descartar apaga o rascunho; o hospedeiro solta o erro de gravação junto, porque a tentativa
+  // que falhou era daquele texto.
   function descartar() {
     onRascunho?.(null);
-    erroSalvar = null;
   }
 
   // Atalhos do visor inteiro, ligados em CAPTURA no elemento raiz. Captura e não `onkeydown`
@@ -291,7 +290,7 @@
 
   // Ordem de aba pro Alt+1..9 e pro title: o hospedeiro manda a lista, mas sem ela o visor ainda
   // desenha a aba do arquivo atual — é como o modal do Git e o celular montam este componente.
-  const faixa = $derived(abas.length > 0 ? abas : [{ path, sujo }]);
+  const faixa = $derived(abas.length > 0 ? abas : [{ path, sujo, falhou: erroSalvar !== null }]);
   function nomeDe(p: string): string {
     const i = p.lastIndexOf('/');
     return i === -1 ? p : p.slice(i + 1);
@@ -315,7 +314,14 @@
             title={aba.path === path && metaArquivo ? `${aba.path} · ${metaArquivo}` : aba.path}
             onclick={() => aba.path !== path && onAtivarAba?.(aba.path)}
           >{nomeDe(aba.path)}</button>
-          {#if aba.sujo}<span class="ponto" title={m.arq_nao_salvo()}></span>{/if}
+          <!-- Ponto vermelho quando a gravação falhou: com a mesma cor dos dois, uma aba que
+               recusou gravar era indistinguível de uma que ainda não tentou, e o usuário podia
+               fechá-la achando que só faltava salvar. -->
+          {#if aba.falhou}
+            <span class="ponto falhou" title={m.arq_falhou_salvar()}></span>
+          {:else if aba.sujo}
+            <span class="ponto" title={m.arq_nao_salvo()}></span>
+          {/if}
           <button
             class="fechar-aba"
             aria-label={m.arq_fechar_aba({ nome: nomeDe(aba.path) })}
@@ -381,8 +387,8 @@
       {#if doArquivo.truncated}
         <p class="aviso">{m.arq_arquivo_cortado()}</p>
       {/if}
-      {#if erroSalvar}
-        <p class="aviso erro" role="alert">{erroSalvar}</p>
+      {#if erroSalvarVisivel}
+        <p class="aviso erro" role="alert">{erroSalvarVisivel}</p>
       {/if}
       <!-- Um editor só, sempre. Com o diff por dentro (unifiedMergeView) ele troca o `diff --git`
            /`@@` cru por arquivo inteiro, numeração real e trechos iguais dobrados; digitável
@@ -405,8 +411,8 @@
       {#if doArquivo.truncated}
         <p class="aviso">{m.arq_arquivo_cortado()}</p>
       {/if}
-      {#if erroSalvar}
-        <p class="aviso erro" role="alert">{erroSalvar}</p>
+      {#if erroSalvarVisivel}
+        <p class="aviso erro" role="alert">{erroSalvarVisivel}</p>
       {/if}
       <!-- Calha + linhas destacadas (mesmo desenho do DiffView: cor do token INLINE, vinda do
            tema do Shiki). Sem tokens ainda (destaque em voo) ou sem tokens possíveis (null do
@@ -486,6 +492,7 @@
   }
   .aba.ativa .aba-nome { cursor: default; }
   .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+  .ponto.falhou { background: var(--error); }
   .fechar-aba {
     width: 22px; height: 22px; flex: none;
     display: grid; place-items: center;
