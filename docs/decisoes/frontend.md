@@ -402,3 +402,55 @@ topo — `backend/app/navsock.py` (espelho do celular e teclado remoto, que reso
 front usa pra saber se a sessão tem navegador. Mover qualquer um desses campos para dentro de
 `abas` quebraria os três de uma vez, e a suíte do backend passando **sem mudança** é a prova de que
 não quebrou.
+
+## O clique do preview some, e o CDP cru no mesmo alvo entrega — ABERTO
+
+17/09/2026, Linux/Hyprland, com o painel do navegador fora da tela. Medido no mesmo instante e na
+mesma página (uma tela de aplicação em `localhost:3000`), com um listener de clique em fase de
+captura no `document`:
+
+- `hangar-preview click @e7` → responde `ok: click @e7`, e `window.__c` fica `[]`. **Zero eventos.**
+- Um `Input.dispatchMouseEvent` por CDP cru em `ws://127.0.0.1:9223/devtools/page/<id>`, nas mesmas
+  coordenadas → `["Todos"]`. **Chegou.**
+
+Descartados por medição, nesta ordem: **coordenada** (o `elementFromPoint` no centro calculado
+devolvia o elemento certo); **falta de `mouseMoved` antes do `mousePressed`** (as duas sequências
+entregaram pelo CDP cru, com e sem ele); **página congelada** (o `enfileirar` do `preview_ctl`
+descongela antes de cada verbo, e o `eval` responde normalmente no mesmo momento); **viewport 0×0**
+(o clique também falha com `layout 1280 800` aplicado e `innerWidth` em 1280). O que sobra de
+diferença é o **canal**: o `preview_ctl` usa `webContents.debugger` do Electron, o teste usa uma
+conexão CDP externa. Causa não determinada.
+
+O comportamento é INTERMITENTE, e o gatilho observado para parar de entregar foi um
+`location.reload()` na página — antes dele o mesmo `click` funcionava (o filtro da lista mudou de
+25 para 9 linhas, o painel de Arquivos do Hangar abriu). Por isso não bate com
+[a entrada do Windows](windows.md#o-navegador-embutido-funciona-no-windows--com-a-sessão-gráfica-ativa),
+que mediu a janela **ocluída** e concluiu que o CDP cru também não entregava; aqui, na mesma
+máquina e no mesmo minuto, um entrega e o outro não.
+
+**O que isso custa:** o `click` responde `ok` sem ter clicado, então quem dirige o navegador não
+tem como perceber — e um agente que alimente o próprio estado com esse `ok` passa a raciocinar em
+cima de uma ação que não aconteceu. Foi o que aconteceu aqui: um teste inteiro foi conduzido sobre
+cliques que nunca chegaram. **Antes de concluir que uma página não reage, confirme com um listener
+em captura** (`document.addEventListener('click', …, true)`) que o evento chega.
+
+## A aba que NASCE com a sessão fora da tela vem 0×0
+
+17/09/2026. A skill promete que a página escondida é medida em 1280×800, e o desenho entrega isso:
+`definirOculto(true)` liga `VIEWPORT_OCULTO` em `shell/preview_ctl.cjs`, e o `nav-hide` do
+`main.cjs` chama isso quando o view sai da tela. O que falha é o estado INICIAL. Em
+`shell/main.cjs:688` (e `:813`):
+
+```js
+const escondida = oculto ?? (anterior ? !anterior.view.getVisible() : false);
+```
+
+Sem `oculto` explícito e **sem aba anterior** — o caso de um navegador nascendo do zero para uma
+sessão que não está na tela — o padrão é `false`. O controlador nunca recebe `definirOculto(true)`,
+não liga a emulação, cai no `clearDeviceMetricsOverride` e o agente lê uma página de 0×0: sem
+layout, `snapshot` e `shot` de uma tela sem dimensão.
+
+**Saída enquanto não for consertado:** `hangar-preview layout 1280 800` (modo custom, que aplica
+`setDeviceMetricsOverride` direto). `layout desktop` NÃO serve — ele cai no ramo que limpa a
+emulação e devolve o tamanho real, que é zero. Confira com `eval 'innerWidth'` antes de concluir
+que a página está vazia.

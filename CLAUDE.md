@@ -236,6 +236,14 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
+- **`hangar-preview click` pode responder `ok` sem ter clicado — ABERTO.** Intermitente, medido
+  no Linux: no mesmo instante e alvo, o CDP cru na 9223 entrega o evento e o `preview_ctl` não.
+  Antes de concluir que a página não reage, prove com listener em captura
+  (`document.addEventListener('click', …, true)`) que o evento chegou. Não repita o diagnóstico
+  de "janela ocluída" sem medir: ele já foi descartado aqui.
+- **Aba que NASCE com a sessão fora da tela vem 0×0**, apesar da skill prometer 1280×800
+  (`main.cjs:688` assume visível quando não há aba anterior). Saída: `layout 1280 800`;
+  `layout desktop` não serve, porque limpa a emulação. Confira com `eval 'innerWidth'`.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

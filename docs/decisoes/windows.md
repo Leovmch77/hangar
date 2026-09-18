@@ -245,6 +245,14 @@ Nine functions
   500ms, não bloqueia) e o flag `oculto` (a sessão fora do painel tem `oculto=true`, e é
   justamente esse ramo que só tem o `captureScreenshot`). Teto agora 15000ms.
 
+  **Ressalva de 17/09/2026:** a conclusão "não é do `hangar-preview`" vale para o que foi medido
+  aqui — janela **ocluída**, sessão gráfica desconectada. NÃO generalize para o mouse que não
+  entrega em outras situações: no Linux, com a sessão gráfica ativa e o painel apenas fora da
+  tela, o CDP cru no mesmo alvo e no mesmo instante ENTREGA enquanto o `preview_ctl` não. São
+  sintomas iguais com causas diferentes, e usar esta entrada para descartar a hipótese do
+  `preview_ctl` custou uma sessão inteira de investigação no fantasma errado. Ver
+  [a entrada em frontend.md](frontend.md#o-clique-do-preview-some-e-o-cdp-cru-no-mesmo-alvo-entrega--aberto).
+
 ## No Windows, um recado do `hangar-send` pode chegar TRÊS vezes de UM envio só — e a culpa é do oráculo de entrega, não de quem mandou
 
 (06/09/2026). A prova de que o texto chegou é
