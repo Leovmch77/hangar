@@ -435,6 +435,15 @@ antes da real, e só ali (`definirOculto` e `layout` já trocam a medida por con
 disparar, lê o marcador depois, reancora e tenta **uma** vez, e só então responde `erro:`. Marcador
 sumido conta como entregue — é documento novo, ou seja o evento navegou a página.
 
+**A sonda do clique escuta `pointerdown` E `mousedown`, nessa ordem, e não só o segundo.** Um
+`preventDefault()` no `pointerdown` SUPRIME o `mousedown` de compatibilidade, e é exatamente o que
+todo combobox do Radix faz. Com a sonda só em `mousedown`, um clique que CHEGOU era lido como não
+entregue, e a retentativa disparava um segundo `pointerdown` que alternava o componente de volta ao
+estado inicial — resposta `erro:` numa tela que não mudou, a mesma classe de falha que a sonda veio
+eliminar. Medido numa página feita para o caso, com contador por tipo em captura: um `click` dava
+`pointerdown: 2`, `pointerup: 2`, `click: 2`, **`mousedown` ausente**, `aria-expanded` de volta em
+`false`. O `pointerdown` a página não consegue suprimir; por isso ele é o primeiro da lista.
+
 **Por que parecia depender da página:** não dependia. `open` numa aba que já existe é `loadURL`, ou
 seja navegação. Abrindo `fluxo.html` e depois `clinica.html` na mesma aba, quem falha é a segunda;
 invertendo a ordem, falha a outra. O mesmo no site real: o primeiro clique num link da barra

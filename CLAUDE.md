@@ -240,8 +240,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Reemitir a mesma medida não ressuscita; quem reancora é uma medida DIFERENTE (ou um `shot`). Por
   isso `click`/`press` conferem a entrega com ouvinte em captura, reancoram, tentam UMA vez e só
   então respondem `erro:` — resposta de sucesso sem o evento ter chegado é o que custou uma
-  sessão inteira de investigação. Antes de concluir que a página não reage, prove com
-  `document.addEventListener('click', …, true)` que o evento chegou.
+  sessão inteira de investigação. A sonda do clique escuta `pointerdown` antes de `mousedown`:
+  `preventDefault` no primeiro suprime o segundo (todo combobox do Radix), e sonda só de
+  `mousedown` fazia a retentativa alternar o componente de volta. Antes de concluir que a página
+  não reage, prove com `document.addEventListener('click', …, true)` que o evento chegou.
 - **Aba escondida NÃO pode navegar congelada**: o documento `frozen` é descartado na troca e leva
   junto a sessão do `webContents.debugger` (`Not attached to an active page`, e o navegador só
   volta com `close` + `open`). Quem for navegar abre a janela `navegando(true)` ANTES do

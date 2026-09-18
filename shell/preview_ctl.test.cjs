@@ -196,6 +196,29 @@ test('clicar devolve erro quando o evento nao chega na pagina, e so tenta de nov
   assert.deepEqual(alturas, [800, 799, 800], 'a retentativa veio depois de reancorar o quadro');
 });
 
+// `preventDefault` no pointerdown SUPRIME o mousedown (todo combobox do Radix faz isso). Sonda só
+// de mousedown lia "não chegou" num clique que chegou, e a retentativa alternava o componente de
+// volta ao estado inicial — medido: pointerdown 2, mousedown 0, dropdown fechado, resposta `erro:`.
+test('a sonda do clique escuta pointerdown, que a pagina nao consegue suprimir', async () => {
+  const dbg = dubleDbg({
+    'Accessibility.getFullAXTree': { nodes: [
+      { nodeId: '1', role: { value: 'combobox' }, name: { value: 'ISS' }, childIds: [], backendDOMNodeId: 5 },
+    ] },
+    'DOM.getBoxModel': { model: { content: [10, 20, 30, 20, 30, 40, 10, 40] } },
+  });
+  const ctl = criarControlador({ dbg, capturarPagina: async () => ({ isEmpty: () => false }), aoNavegar: () => {} });
+  await ctl.snapshot();
+  assert.match(await ctl.clicar('@e1'), /^ok: click @e1/);
+  const armada = dbg.chamadas.find(([m, p]) => m === 'Runtime.evaluate' && /__hangarSonda=0/.test(p.expression));
+  assert.match(armada[1].expression, /"pointerdown","mousedown"/,
+    'pointerdown PRIMEIRO: e o unico que a pagina nao consegue suprimir');
+  // A asserção que faltava e deixou o bug passar: UM clique = UM pointerdown, ou seja um par
+  // mousePressed/mouseReleased e nada mais. Contar só "clicou" não distingue um clique de dois.
+  const mouse = dbg.chamadas.filter(([m]) => m === 'Input.dispatchMouseEvent');
+  assert.equal(mouse.length, 2, 'um clique entregue nao pode disparar uma segunda rodada');
+  assert.deepEqual(mouse.map(([, p]) => p.type), ['mousePressed', 'mouseReleased']);
+});
+
 test('clicar que navegou a pagina conta como entregue: o marcador da sonda some com o documento', async () => {
   const dbg = dubleDbg({
     'Accessibility.getFullAXTree': { nodes: [

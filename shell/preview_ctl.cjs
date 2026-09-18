@@ -230,9 +230,14 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   // o evento some no caminho: resposta de sucesso com a página intacta. A sonda é um ouvinte em
   // captura, o mesmo jeito de medir que descobriu o defeito — ela prova que o EVENTO chegou ao
   // documento, não que a página reagiu (isso é do handler dela).
-  const armarSonda = (tipo) => dbg.sendCommand('Runtime.evaluate', {
-    expression: `(()=>{window.__hangarSonda=0;addEventListener(${JSON.stringify(tipo)},`
-      + '()=>{window.__hangarSonda=1},{capture:true,once:true});return 1})()',
+  // Vários tipos porque UM não basta: `preventDefault` no `pointerdown` SUPRIME o `mousedown` de
+  // compatibilidade (é o que todo combobox do Radix faz), e uma sonda só de `mousedown` lia
+  // "não chegou" num clique que chegou — a retentativa então alternava o componente de volta ao
+  // estado inicial, calada. O `pointerdown` a página não consegue suprimir.
+  const armarSonda = (tipos) => dbg.sendCommand('Runtime.evaluate', {
+    expression: `(()=>{window.__hangarSonda=0;const ts=${JSON.stringify(tipos)};`
+      + 'const f=()=>{window.__hangarSonda=1;ts.forEach(t=>removeEventListener(t,f,true))};'
+      + 'ts.forEach(t=>addEventListener(t,f,true));return 1})()',
   }).catch(() => {});
   // Marcador sumido = documento novo: o evento navegou a página, logo chegou. Sonda que não pôde
   // ser lida também conta como chegou — falha não se inventa.
@@ -245,13 +250,13 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
   }
   // Uma retentativa, e só depois de reancorar: dois disparos seguidos num alvo que já recebeu o
   // primeiro seria clique duplo inventado.
-  async function comSonda(tipo, disparar) {
-    await armarSonda(tipo);
+  async function comSonda(tipos, disparar) {
+    await armarSonda(tipos);
     await disparar();
     await quadro();
     if (await sondaChegou()) return true;
     if (!(await reancorarQuadro())) return false;
-    await armarSonda(tipo);
+    await armarSonda(tipos);
     await disparar();
     await quadro();
     return sondaChegou();
@@ -462,7 +467,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
       if (!p) return `erro: ref ${ref} nao existe (rode snapshot de novo)`;
       // Evento REAL, não `.click()` em JS: lista que só ouve mousedown ignora o click sintético.
       const base = { x: p.x, y: p.y, button: 'left', clickCount: 1 };
-      const chegou = await comSonda('mousedown', async () => {
+      const chegou = await comSonda(['pointerdown', 'mousedown'], async () => {
         await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
         await dbg.sendCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base });
       });
@@ -496,7 +501,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, aoDirigir = () => {}
     },
     async teclar(tecla) {
       const { text, unmodifiedText, ...soltar } = eventoTecla(String(tecla));
-      const chegou = await comSonda('keydown', async () => {
+      const chegou = await comSonda(['keydown'], async () => {
         await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', ...soltar, ...(text ? { text, unmodifiedText } : {}) });
         await dbg.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...soltar });
       });
