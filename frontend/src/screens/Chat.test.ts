@@ -367,7 +367,7 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
       texto.innerHTML = renderMarkdown(`Veja \`${nome}:12\`.`, { fileLinks: true });
       t.el.querySelector('.chat-underlay')!.append(texto);
       texto.querySelector('button')!.click();
-      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith(path, expect.any(String), 12));
+      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith(path, 12));
       expect(api.resolverCitados).toHaveBeenLastCalledWith('sess', [path]);
     } finally {
       abrir.mockRestore();
@@ -398,7 +398,7 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
       texto.innerHTML = renderMarkdown(`Veja \`${nome}\`.`, { fileLinks: true });
       t.el.querySelector('.chat-underlay')!.append(texto);
       texto.querySelector('button')!.click();
-      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith('/home/a/guard.sh', expect.any(String), null));
+      await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith('/home/a/guard.sh', null));
       expect(t.el.querySelector('.chat-error')).toBeNull();
     } finally {
       abrir.mockRestore();
