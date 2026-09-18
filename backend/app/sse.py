@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from app import atomico, diag
+from app import atomico, diag, plugin_bridge
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -504,6 +504,7 @@ async def list_events(ping_secs: float = 8.0):
     cond = _list_refresher.acquire()
     started = time.monotonic()
     diag.registrar("sse.lista_abriu")
+    plugin_bridge.app_entrou()
 
     async def reader():
         last_version = -1
@@ -546,6 +547,7 @@ async def list_events(ping_secs: float = 8.0):
         for t in tasks:
             t.cancel()
         _list_refresher.release()
+        plugin_bridge.app_saiu()
         diag.registrar("sse.lista_fechou", ms=int((time.monotonic() - started) * 1000))
 
 
@@ -821,6 +823,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa=evento, erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    sugestao_emitida = ""          # ultima sugestao que saiu; so a mudanca vira evento
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
     ultimo_estado = None           # ultimo `state` emitido; None ate o primeiro tick
@@ -874,6 +877,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     _log.info("sse: abriu name=%s provider=%s jsonl=%s", name, provider, Path(jsonl).name if jsonl else None)
     diag.registrar("sse.abriu", sessao=name, provider=provider,
                    etapa="retomada" if start_offset is not None else "inicio")
+    plugin_bridge.app_entrou()
     try:
         while True:
             # Só o tail_pump enfileira o 3o item (o offset -> `id:` do SSE); os demais produtores
@@ -974,6 +978,13 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 yield {"event": event, "data": json.dumps({"text": slot["text"]})}
                 continue
             if event == "state":
+                # Sugestão do terminal (a frase cinza que o Tab aceita lá): sem fonte própria, ela
+                # pega carona no tique do estado — 0,75s é de sobra pra uma frase que só aparece no
+                # fim do turno, e isso evita mais um pump por sessão. Só quando MUDA.
+                sug = plugin_bridge.sugestao(name)
+                if sug != sugestao_emitida:
+                    sugestao_emitida = sug
+                    yield {"event": "suggest", "data": json.dumps({"text": sug}, ensure_ascii=False)}
                 # Rastreia transicoes do awaiting_input pra resetar o guard de emissao unica.
                 # Quando awaiting_input + overlay (rodape de abas = AskUserQuestion estruturado),
                 # emite ask_question UMA VEZ por prompt; reseta ao sair do estado.
@@ -1034,6 +1045,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            erro_tipo=type(exc).__name__)
         raise
     finally:
+        plugin_bridge.app_saiu()
         diag.registrar("sse.fechou", "erro" if motivo_diag.startswith("falha_") else "ok",
                        sessao=name, provider=current_provider, detalhe=motivo_diag,
                        ms=int((time.monotonic() - _t0) * 1000), quantidade=sum(_sent.values()))

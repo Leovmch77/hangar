@@ -43,3 +43,12 @@ A vigia consultava porta TCP e idade dos processos; após dez minutos sem porta,
 outra instância sem encerrar a anterior. Em 12/09/2026, esse fluxo foi substituído por tarefa
 que aguarda o filho, recuperação nativa e vigia HTTP com parada seletiva. Evidência e limites
 da validação em [instalacao.md](instalacao.md#a-tarefa-windows-acompanha-o-processo-até-ele-terminar).
+
+## Function hooks fora do Hangar
+
+Em 14/09/2026 os function hooks do Claude Code foram medidos e deixados de fora: a API é de
+acesso antecipado e muda sem aviso, e o interruptor `claude_function_hooks` só punha a variável
+no ambiente para o plugin de quem usa o Hangar. Em 18/09/2026 o Hangar passou a carregar um
+plugin próprio (`plugins/hangar`) atrás do mesmo interruptor, como caminho opcional por cima do
+tmux: o risco da API virou fallback por ausência, não motivo para não usar. Regra atual e
+medições em [harnesses.md](harnesses.md#function-hooks-o-plugin-pluginshangar-é-um-plus-por-cima-do-tmux-18092026).

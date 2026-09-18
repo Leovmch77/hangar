@@ -13,6 +13,7 @@ from app import atomico, diag, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
+from app import plugin_bridge
 from app import runtime_config
 from app.names import sanitize_session_name
 from app.git_ops import git_summary, git_diffstat, head_info
@@ -132,12 +133,17 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
     return cwd.replace("\\", "/") if windows else cwd
 
 
-def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude") -> dict:
+def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
+                nome: str | None = None) -> dict:
     env = runtime_config.env_jev(jev)
     # Quem lê a variável é o binário `claude` — com ou sem motor, que só troca o provedor do modelo.
     # Nos outros providers ela não seria lida por ninguém.
     if provider == "claude":
         env.update(runtime_config.env_function_hooks())
+        # Endereço e token do caminho nativo de entrada. Só com nome: o pane precisa
+        # saber por qual sessão ele responde, e é o nome que a fila usa.
+        if nome:
+            env.update(plugin_bridge.env_da_sessao(nome))
     if modelo:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = modelo
     return {"env": env}
@@ -1929,7 +1935,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
-        env_pane = _env_sessao(subagent_model, jev, provider)
+        env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")

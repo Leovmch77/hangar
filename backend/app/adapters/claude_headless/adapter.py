@@ -94,6 +94,34 @@ OPCOES_PLANO = ["Aprovar plano", "Continuar planejando"]
 _RECUSA_PLANO = "O usuário não aprovou o plano. Continue no modo plano e aguarde as instruções dele."
 
 
+def respostas_do_app(perguntas: list[dict], answers: list[dict]) -> tuple[dict[str, str], list[str]]:
+    """Respostas do stepper do app viradas no mapa pergunta→texto que o AskUserQuestion espera.
+
+    O segundo valor são as perguntas deixadas em "Conversar sobre isso". ValueError = faltou resposta."""
+    respostas: dict[str, str] = {}
+    conversar: list[str] = []
+    for i, item in enumerate(perguntas):
+        a = answers[i] if i < len(answers) else None
+        if not a:
+            raise ValueError("responda a todas as perguntas")
+        if a.get("kind") == "chat":
+            # "Conversar sobre isso": sem picker pra fechar, o equivalente é recusar a tool com
+            # as respostas que já existem no texto — senão viravam 409 e a sessão ficava presa.
+            conversar.append(item["question"])
+            continue
+        if a.get("kind") == "text":
+            texto = (a.get("value") or "").strip()
+        else:
+            opcoes = item.get("options") or []
+            idx = a.get("indices") or []
+            rotulos = a.get("labels") or [opcoes[j]["label"] for j in idx if 0 <= j < len(opcoes)]
+            texto = ", ".join(rotulos)
+        if not texto:
+            raise ValueError("responda a todas as perguntas")
+        respostas[item["question"]] = texto
+    return respostas, conversar
+
+
 def _mensagem_conversar(respostas: dict[str, str], conversar: list[str]) -> str:
     """Tool_result do AskUserQuestion quando alguma pergunta ficou em "Conversar sobre isso".
 
@@ -477,27 +505,7 @@ class ClaudeHeadlessAdapter:
         if request_id is not None and str(request_id) != str(q["request_id"]):
             raise ValueError("a pergunta mudou")
         perguntas = q["questions"]
-        respostas: dict[str, str] = {}
-        conversar: list[str] = []
-        for i, item in enumerate(perguntas):
-            a = answers[i] if i < len(answers) else None
-            if not a:
-                raise ValueError("responda a todas as perguntas")
-            if a.get("kind") == "chat":
-                # "Conversar sobre isso": sem picker pra fechar, o equivalente é recusar a tool com
-                # as respostas que já existem no texto — senão viravam 409 e a sessão ficava presa.
-                conversar.append(item["question"])
-                continue
-            if a.get("kind") == "text":
-                texto = (a.get("value") or "").strip()
-            else:
-                opcoes = item.get("options") or []
-                idx = a.get("indices") or []
-                rotulos = a.get("labels") or [opcoes[j]["label"] for j in idx if 0 <= j < len(opcoes)]
-                texto = ", ".join(rotulos)
-            if not texto:
-                raise ValueError("responda a todas as perguntas")
-            respostas[item["question"]] = texto
+        respostas, conversar = respostas_do_app(perguntas, answers)
         if conversar:
             resposta = {"behavior": "deny", "message": _mensagem_conversar(respostas, conversar)}
         else:

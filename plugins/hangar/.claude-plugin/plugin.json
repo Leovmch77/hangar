@@ -1,0 +1,5 @@
+{
+  "name": "hangar",
+  "version": "0.1.0",
+  "description": "Caminho nativo do Hangar: entrada, estado e escolha de opcao por function hooks, sem ler o pane."
+}

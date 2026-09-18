@@ -756,6 +756,7 @@
   "composer_enviando": "uploading…",
   "composer_mensagem_para": "Message for {nome}…",
   "composer_aria_mensagem": "Message",
+  "composer_sugestao_placeholder": "{texto}  ·  Tab to use",
   "composer_preparando_mic": "Preparing microphone",
   "composer_preparando_mic_curto": "preparing microphone…",
   "composer_gravando_audio": "Recording audio",

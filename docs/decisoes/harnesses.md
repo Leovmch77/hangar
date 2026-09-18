@@ -61,6 +61,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
   o env entra por `execvpe` dentro do pane (nunca `tmux -e`, que expõe a chave no `cmdline`), e a
   janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+- **Function hooks (`plugins/hangar`) são um plus por cima do tmux, nunca no lugar dele.** Fallback
+  é por AUSÊNCIA de long-poll vivo; entrega só vale com prova (rascunho confirmado, Enter aceito,
+  composer vazio). `classic.*` não chega a plugin de `--plugin-dir`, `$` não atravessa `import`, e
+  é um módulo por plugin. Meça no SSE, não em linha de log.
+- **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
+  roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
+  Windows), não segura.
+- **Steer no Claude é só pelo botão**: `ctrl+x ctrl+s` INTERROMPE o turno em curso. Colado num
+  recado (`steer:true`), abortaria o trabalho da sessão que recebe — o automático é só do Kimi.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
   trabalhando" existe para o `/model`, que é texto.
 - **"Padrão" na tela de criação vira o modo da conta AINDA na criação**, e `bypassPermissions`
@@ -927,17 +936,46 @@ pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `
 do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
 manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
 
-Os mods (function hooks, `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) e o socket de mensagens
-(`/run/user/<uid>/cc-socks/<pid>.sock`, JSON por linha, `auth` com o `peerToken` de
-`sessions/<pid>.<sha>.key`) foram medidos no mesmo dia e ficaram de fora: o mod é early access e a
-API muda sem aviso; o socket embrulha tudo como "mensagem de outra sessão" (`isMeta`, origem
-`peer`), não roda comando de barra e é o mesmo canal que o `SendMessage` nativo já usa.
+O socket de mensagens (`/run/user/<uid>/cc-socks/<pid>.sock`, JSON por linha, `auth` com o
+`peerToken` de `sessions/<pid>.<sha>.key`) foi medido no mesmo dia e ficou de fora: embrulha tudo
+como "mensagem de outra sessão" (`isMeta`, origem `peer`), não roda comando de barra e é o mesmo
+canal que o `SendMessage` nativo já usa.
 
-Isto vale para o HANGAR usar function hooks e continua valendo. Não confundir com o interruptor
-`claude_function_hooks` da tela de Harnesses (18/09/2026), que é outra coisa: ele só põe a variável
-no ambiente das sessões novas para que o plugin de quem USA o Hangar carregue. Quem assume o risco
-do acesso antecipado ali é o dono do plugin, e o texto da opção diz isso. Ver
-[plataforma.md](plataforma.md#function-hooks-configuração-do-servidor-e-por-isso-o-relançamento-relê).
+Os function hooks também tinham ficado de fora nesse dia (API em acesso antecipado). Em 18/09/2026
+entraram como caminho OPCIONAL por cima do tmux — ver a entrada seguinte; a decisão antiga está em
+[superado.md](superado.md#function-hooks-fora-do-hangar). O interruptor é o mesmo
+`claude_function_hooks` da tela de Harnesses
+([plataforma.md](plataforma.md#function-hooks-configuração-do-servidor-e-por-isso-o-relançamento-relê)):
+ligado, a sessão nova recebe a variável E o plugin `plugins/hangar`.
+
+## Function hooks: o plugin `plugins/hangar` é um plus por cima do tmux (18/09/2026)
+
+Claude Code 2.1.277, `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, plugin carregado por `--plugin-dir`.
+O contrato vem de `/plugin-types` (gerado por versão); o que está aqui é só o que foi MEDIDO e o
+contrato não diz. Ponte: `app/plugin_bridge.py`, rotas `/api/plugin/*`, credencial = HMAC por
+sessão (o bearer do app nunca entra no pane). Fallback é por AUSÊNCIA: sem long-poll vivo da
+sessão, tudo segue pela tecla; interruptor desligado ou CLI sem `--plugin-dir` (sonda `claude
+--help`, cache de 10 min) não põe env nem flag, e o comportamento é byte a byte o de antes.
+
+**Regras do engine que o validador impõe** (`claude plugin validate`): um módulo por plugin
+(`hooks.json` recusa o segundo), dois arquivos não hookam o mesmo evento sem matcher, e `$` não
+atravessa `import` — cada arquivo lê o ambiente e chama `$.http.fetch` sozinho.
+
+| peça | o que foi medido |
+|---|---|
+| envio (`input.ts`) | `$.prompt.submit` embrulha a mensagem numa moldura em inglês que nenhum hook tira (`next() passed an argument with an origin other than the engine set`). `$.prompt.fill` + UM Enter por tmux não tem moldura: 0,058 s numa linha e 0,120 s em 2 KB, contra 0,401 s e 0,680 s do `send-keys`. O Enter só sai com o rascunho confirmado, e a entrega só vale com o composer vazio depois (`_submeteu`); qualquer falha limpa o composer e devolve para a tecla |
+| long-poll | 25 s segurados não gastam o orçamento de 10 s do hook: o relógio para enquanto um `$` ou o `next(e)` está em voo. `$.clock.sleep` é o único que gasta |
+| token | sorteado em memória, todo restart do backend deixava a sessão viva em 403 para sempre. É HMAC do segredo do servidor + nome: refaz igual |
+| `AskUserQuestion` (`ask.ts`) | hook de `tool.call`; os argumentos vêm direto em `e` (`e.questions`), não em `e.input`. `next(e)` abre o diálogo do terminal e corre contra o app: devolver `{ result: { questions, answers } }` antes fecha o diálogo. Resposta pelo app em 16 ms, inclusive com o painel de terminal aberto (onde a tecla responde 409). O resultado gravado tem a mesma forma do respondido no terminal. Backend reiniciado no meio: o hook volta a bater e a pergunta segue respondível |
+| hook que lança | o engine pula o hook, escreve uma linha (`hangar: tool.call hook skipped: threw …`) e o diálogo abre normal |
+| `classic.*` | Stop, Notification e PermissionRequest NÃO são entregues a plugin de `--plugin-dir`. Registrar não dá erro; o hook só nunca roda. Fim de turno é `turn.complete` (traz `reason`: answer/aborted/refusal/error) |
+| permissão (`perm.ts`) | só `tool.check` alcança o pedido, e ele roda ANTES do diálogo: enquanto o hook segura o `ask`, o terminal não mostra nada (12 s segurados = 12 s sem diálogo). Aprovar pelo app: 8–11 ms, sem tecla. Por isso o backend só manda segurar com SSE do app aberto E nenhum cliente tmux preso, reperguntado a cada 5 s: prender um terminal no meio devolveu o diálogo a ele em 4 s, e o card do app trocou sozinho para o menu real. `AskUserQuestion`, `ExitPlanMode` e `EnterPlanMode` ficam FORA: o `ask` deles é o próprio diálogo, e segurá-lo escondeu a pergunta do terminal e do `ask.ts` (a resposta do app esperou 5 s por um aviso que não vinha) |
+| estado (`state.ts`) | aviso do plugin ACORDA o `StateMonitor`: `awaiting_input` em 90 ms (o pane viu o menu 0,9 s depois), `dead` 41 ms depois do `kill-session`. `session.end` não dispara em `kill -9` e dispara em `/clear`, então quem declara a morte continua sendo o tmux. A âncora `working`/`idle` do plugin NÃO chega à tela: o marcador de hook logo abaixo dela vence — e o registro nativo (entrada anterior) já cobre esse estado |
+| sugestão (`suggest.ts`) | `prompt.suggest` com `origin.kind = suggestion` traz a frase cinza do composer. Não vem todo turno (só quando o modelo consegue inferir o próximo pedido) e não há evento de descarte: quem apaga é o começo do turno seguinte |
+| steer | o marcador real é `ctrl+x ctrl+s to send now`. No Claude o acorde INTERROMPE o turno em curso (`Interrupted · What should Claude do instead?`, o comando rodando morre); no Kimi o `ctrl-s` injeta sem parar nada |
+
+O `capture-pane` a 0,75 s não foi reduzido: menu de permissão fora da regra acima, `/model`,
+diálogo de confiança e morte continuam sendo do pane.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 

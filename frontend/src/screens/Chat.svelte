@@ -428,6 +428,7 @@
   // bloco pelo tail do .jsonl: apagar na hora abriria um buraco. Quem apaga é o `thinking` real;
   // o timer só vence se ele nunca vier (interrupção).
   let pensamentoVivo = $state('');
+  let sugestao = $state('');
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
     clearTimeout(pensamentoTimer);
@@ -2090,6 +2091,17 @@
       }
     });
 
+    // Sugestão do terminal: a frase cinza que o Tab aceita lá. Vazia = não há (ela nasce no fim do
+    // turno e nem todo turno produz uma), e o backend a aposenta quando o turno seguinte começa.
+    es.addEventListener('suggest', (e) => {
+      noteAlive();
+      try {
+        sugestao = (JSON.parse(e.data) as { text?: string }).text ?? '';
+      } catch {
+        sugestao = '';
+      }
+    });
+
     es.addEventListener('pensamento', (e) => {
       noteAlive();
       try {
@@ -3068,6 +3080,7 @@
         estreito={colunaEstreita}
         voiceBeta={codexVoiceBeta}
         sessionState={currentState}
+        sugestao={composerText ? '' : sugestao}
         status={status}
         {lastCache}
         stats={statsEvent}

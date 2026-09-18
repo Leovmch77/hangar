@@ -10,6 +10,7 @@ from app.config import settings
 from app.state import StateEvent, StateMonitor
 from app.transcript import ChatEvent, TranscriptTailer
 from app import model_args
+from app import plugin_bridge
 from app import terminal_input as ti
 
 # Mesma regex de app.registry.sanitize_cwd. Duplicada (nao importada) pra nao criar ciclo
@@ -40,7 +41,12 @@ class ClaudeAdapter:
     def spawn_command(self, cwd: str, session_id: str,
                       model: str | None = None, effort: str | None = None,
                       permission_mode: str | None = None) -> list[str]:
-        return ["claude", "--session-id", session_id] + model_args.args_de("claude", model, effort, permission_mode)
+        argv = ["claude", "--session-id", session_id]
+        # O plugin do caminho nativo entra por `--plugin-dir`: nada instalado no
+        # config dir do usuário, e a sessão que nasce fora do Hangar não o carrega.
+        for raiz in plugin_bridge.raizes_dos_plugins():
+            argv += ["--plugin-dir", raiz]
+        return argv + model_args.args_de("claude", model, effort, permission_mode)
 
     def transcript_path(self, cwd: str, session_id: str) -> str:
         return str(Path(settings.projects_dir) / _SANITIZE_RE.sub("-", cwd) / f"{session_id}.jsonl")

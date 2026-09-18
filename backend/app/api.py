@@ -25,7 +25,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
-                 migracao_sidecars, pensamento_pt, procinfo, quem_chama, tmux)
+                 pensamento_pt, plugin_bridge, procinfo, quem_chama, tmux)
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -578,6 +578,7 @@ app.include_router(credenciais.credenciais_router)
 app.include_router(codex_contas_api.codex_contas_router)
 app.include_router(harness_api.harness_router)
 app.include_router(peers_api.peers_router)
+app.include_router(plugin_bridge.plugin_router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -2161,6 +2162,7 @@ async def kill_session(name: str):
         await asyncio.to_thread(registry.kill, name)
     except KillFailed as e:
         raise HTTPException(500, str(e))
+    plugin_bridge.esquecer(name)
     warn = None
     if link:
         errs = await _avisar_saida(name, link["peers"], "encerrou a sessão e saiu do grupo de trabalho")
@@ -3092,8 +3094,19 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     # um "partial" que um dia devolvesse sem passar por `_partial()` leria a sobra de outro envio.
     if hasattr(terminal_input._ULTIMA_LIMPEZA, "limpou"):
         del terminal_input._ULTIMA_LIMPEZA.limpou
+    # Caminho NATIVO: sessão Claude com o function-hook ouvindo recebe por
+    # `$.prompt.submit` e nenhuma tecla é emitida. Slash-command fica de fora — é
+    # meta, e depende do menu que só existe na TUI. Ninguém ouvindo = pane, como sempre.
+    # `deliverable` antes de tudo: o rascunho entra pela API do engine, mas o Enter é tecla, e
+    # tecla em overlay navega o menu em vez de submeter. Mesmo gate do caminho de sempre.
+    pelo_plugin = (provider == "claude" and not stripped.startswith("/")
+                   and plugin_bridge.aguardando(name)
+                   and terminal_input.deliverable(name)
+                   and plugin_bridge.entregar(name, text))
+    if pelo_plugin:
+        _log.info("SEND name=%s pelo plugin (sem tecla) text=%r", name, text[:80])
     try:
-        result = terminal.send_prompt(
+        result = "sent" if pelo_plugin else terminal.send_prompt(
             name, text, provider, pane_id=pane_id,
             **({"msg_id": entry["id"]} if entry is not None else {}))
         # DIAG: correlaciona o send com o jsonl pra onde ESTE nome resolve AGORA -> pega o cross-wire
@@ -3384,8 +3397,11 @@ async def input_prompt(name: str, body: InputBody):
             elif provider != "codex" and not _headless(name):
                 provider, _ = await _send_thread(_pane_info, name)
                 q = PromptQueue(name)
+                # Só Kimi: o steer dele injeta no turno em curso. O "send now" do Claude INTERROMPE o
+                # turno (mata o comando rodando), então lá a promoção é só pelo botão, nunca colada
+                # num recado.
                 if provider == "kimi" and await _send_thread(q.entry_delivered, entry_id):
-                    if await _send_thread(terminal_input.steer_now, name) is True:
+                    if await _send_thread(terminal_input.steer_now, name, provider) is True:
                         steered = True
                         await _send_thread(q.confirm_delivered)
         except Exception:
@@ -3407,7 +3423,7 @@ async def input_prompt(name: str, body: InputBody):
 
 @app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth)])
 async def steer_session(name: str, body: InputBody | None = None):
-    """Orienta o turno do Codex por RPC ou promove a fila da TUI do Kimi por ctrl-s."""
+    """Orienta o turno do Codex por RPC ou promove a fila da TUI (Kimi: ctrl-s; Claude: ctrl+x ctrl+s)."""
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, "sessão não encontrada")
     if _provider_of(name) == "codex":
@@ -3438,12 +3454,12 @@ async def steer_session(name: str, body: InputBody | None = None):
             # Processo morreu entre a checagem e a escrita: a mensagem continua na fila.
             raise HTTPException(502, detail=erro("erro_envio_falhou", f"o processo não recebeu: {e}")) from None
     provider, _ = await _send_thread(_pane_info, name)
-    if provider != "kimi":
-        raise HTTPException(409, "só sessão Kimi tem steer (ctrl-s)")
+    if provider not in ("kimi", "claude"):
+        raise HTTPException(409, "só sessão Kimi ou Claude tem steer pela fila do terminal")
     # `is False` e nao `not ...`: o unico produtor de False e o tmux recusando a tecla; um dublê de
     # teste que devolve None nao pode virar erro. Sem esta checagem a rota afirmava entrega de um
     # ctrl-s que nunca saiu (pane morto) — o chip sumia da tela e a msg ficava parada na fila.
-    r = await _send_thread(terminal_input.steer_now, name)
+    r = await _send_thread(terminal_input.steer_now, name, provider)
     if r is False:
         raise HTTPException(502, "o terminal recusou a tecla — a mensagem continua na fila")
     if r == "sem-fila":
@@ -4310,6 +4326,18 @@ def select(name: str, body: SelectBody):
     # uma opção de sessão morta digitava no vazio e a resposta era {"ok": true} — o catch do card
     # nunca disparava. (O fix de raiz em send_keys/_run é outro diff: interrupt/model_picker/
     # TerminalMirror também passam por lá.)
+    # Pedido de permissão que o plugin segura: o card do app é o de DUAS opções montado em
+    # state.py (1 = Yes, 2 = No), e a resposta entra sem tecla. Não cai na tecla se o plugin não
+    # pegar: segurado, o terminal não tem menu nenhum para dirigir.
+    pend = plugin_bridge.pergunta_pendente(name)
+    if pend is not None and str(pend["id"]).startswith("perm:"):
+        if body.option not in (1, 2):
+            raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+        if plugin_bridge.responder_pergunta(name, {"permitir": body.option == 1}, pend["id"]):
+            _log.info("SELECT name=%s permissão pelo plugin (sem tecla) opcao=%d", name, body.option)
+            return {"ok": True}
+        raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu",
+                                             "o pedido de permissão não está mais aberto — confira a sessão"))
     _recusa_se_painel_aberto(name)
     if not _session_exists(name):
         raise HTTPException(404, detail=erro("erro_sessao_opcao_nao_enviada", "sessão não encontrada — opção NÃO enviada"))
@@ -6398,6 +6426,25 @@ def answer(name: str, body: AnswerBody):
             _log.warning("resposta ao Claude sem terminal falhou: %s", type(exc).__name__)
             raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível enviar a resposta.")) from exc
         return {"ok": True, "fallback": False}
+    # Function hook do plugin segurando a pergunta: a resposta entra sem tecla. Se ele não pegar
+    # (hook morto, pergunta já fechada no terminal), o caminho de tecla abaixo assume.
+    if getattr(info, "provider", "claude") == "claude":
+        pend = plugin_bridge.pergunta_pendente(name)
+        # Só PERGUNTA: o mesmo canal segura pedido de permissão (`perm:`), que é do /select.
+        if pend is not None and pend["questions"] and not str(pend["id"]).startswith("perm:"):
+            from app.adapters.claude_headless.adapter import _mensagem_conversar, respostas_do_app
+            try:
+                respostas, conversar = respostas_do_app(pend["questions"], answers)
+            except ValueError as exc:
+                raise HTTPException(409, detail=erro("erro_sem_resposta", str(exc))) from exc
+            corpo = ({"deny": _mensagem_conversar(respostas, conversar)} if conversar
+                     else {"answers": respostas})
+            if plugin_bridge.responder_pergunta(name, corpo, pend["id"]):
+                _log.info("ANSWER name=%s pelo plugin (sem tecla)", name)
+                if info and info.jsonl:
+                    clear_pending_askq(info.jsonl)
+                return {"ok": True, "fallback": False}
+            _log.warning("ANSWER name=%s: plugin não pegou a resposta — indo pela tecla", name)
     _recusa_se_painel_aberto(name)
     jsonl = info.jsonl if info else None
     fallback = False

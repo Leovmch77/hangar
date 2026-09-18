@@ -1,0 +1,67 @@
+import type { EngineInterface, On } from "claude-code";
+
+// O scanner do engine não segue `$` através de um import: cada arquivo fala com
+// a ponte sozinho. Por isso o endereço é lido e enviado aqui, sem helper comum.
+let url: string | null = null;
+let token: string | null = null;
+let sessao: string | null = null;
+let lido = false;
+
+async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}) {
+  if (!lido) {
+    url = (await $.env.get("HANGAR_PLUGIN_URL")) ?? null;
+    token = (await $.env.get("HANGAR_PLUGIN_TOKEN")) ?? null;
+    sessao = (await $.env.get("CP_SESSION_NAME")) ?? null;
+    lido = true;
+  }
+  if (!url || !token || !sessao) return;
+  await $.http.fetch(`${url}/state`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessao, token, estado, ...extra }),
+  });
+}
+
+/** Estado por EVENTO, no lugar da leitura do pane.
+ *
+ * O par é `turn.start`/`turn.complete`, não `prompt.submit`/`classic.Stop`: o
+ * turno é o que o rótulo descreve, e a submissão do próprio plugin não passa
+ * pelos hooks dele (medido — o `working` sumia justo na mensagem vinda do app).
+ *
+ * Só avisa a transição; quem decide o rótulo continua sendo o backend, que já
+ * tem a máquina de estados e as outras fontes (Codex, Pi, Kimi). */
+export function registerState(on: On) {
+  on("session.start", async ($, e, next) => {
+    await send($, "idle", { cwd: await $.session.cwd(), model: await $.session.model() });
+    return next(e);
+  });
+
+  on("turn.start", async ($, e, next) => {
+    await send($, "working");
+    return next(e);
+  });
+
+  on("turn.complete", async ($, e, next) => {
+    await send($, "idle", { motivo: e.reason });
+    return next(e);
+  });
+
+  // A pergunta de múltipla escolha é DESENHADA: é o instante exato em que a
+  // sessão passa a esperar o usuário, sem depender de achar o menu no pane.
+  on("ui.render", { component: "AskUserQuestion" }, async ($, e, next) => {
+    await send($, "awaiting_input", { motivo: "pergunta" });
+    return next(e);
+  });
+
+  on("classic.Notification", async ($, e, next) => {
+    await send($, "awaiting_input", { motivo: e.message });
+    return next(e);
+  });
+
+  // Só ACORDA o backend: quem declara a sessão morta continua sendo o tmux, porque
+  // `kill -9` não dispara este evento e `/clear` dispara sem ninguém ter morrido.
+  on("session.end", async ($, e, next) => {
+    await send($, "fim", { motivo: e.reason });
+    return next(e);
+  });
+}

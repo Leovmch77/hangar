@@ -13,6 +13,7 @@ from app import kimi_models
 from app.askquestion import pergunta_aberta
 from app import model_picker as mp
 from app import pi_inbox
+from app import plugin_bridge
 from app import tmux
 from app.models import scrub_surrogates
 from app.pqueue import PromptQueue, _transcript_start_ts
@@ -672,6 +673,35 @@ def _send_lock(name: str) -> threading.Lock:
     return _send_locks.setdefault(name, threading.Lock())
 
 
+def _drain_pelo_plugin(name: str, q: PromptQueue, start_ts: float) -> int:
+    """Entrega a fila pelo function-hook, enquanto houver long-poll ouvindo.
+
+    Uma entrada por volta: o plugin some da escuta ao processar, e insistir com
+    a segunda faria a entrega falhar no meio do lote. A próxima sai no drain
+    seguinte, quando o poll voltar.
+    """
+    # `deliverable` pelo mesmo motivo do `/input`: o rascunho entra pela API do engine, mas o Enter
+    # é tecla, e tecla em overlay navega o menu em vez de submeter.
+    if not plugin_bridge.aguardando(name) or not deliverable(name):
+        return 0
+    entregues = 0
+    while plugin_bridge.aguardando(name):
+        claimed = q.claim_undelivered(min_ts=start_ts, limit=1)
+        if not claimed:
+            break
+        entry = claimed[0]
+        if plugin_bridge.entregar(name, entry["text"]):
+            entregues += 1
+            _log.info("drain name=%s: entrada %s entregue pelo plugin (sem tecla)",
+                      name, entry.get("id"))
+            continue
+        # Ninguém ouvindo entre o gate e a entrega: NADA foi digitado, então a
+        # entrada volta pra fila inteira e o caminho de tecla assume.
+        q.set_delivered(entry["id"], False)
+        break
+    return entregues
+
+
 def drain(name: str, jsonl: str, provider: str = "claude") -> int:
     """Entrega ao tty as entradas pendentes (delivered=False) quando o pane volta a aceitar texto.
     Retorna quantas entregou. claim-1-envia-1: um crash entre o claim e o envio deixa NO MAXIMO 1
@@ -710,8 +740,13 @@ def drain(name: str, jsonl: str, provider: str = "claude") -> int:
     if podadas:
         _log.info("poda name=%s: %d entrada(s) de vida anterior descartada(s) (corte=%.0f)",
                   name, podadas, start_ts)
+    # Caminho NATIVO: com o function-hook da sessão ouvindo, a entrega é por
+    # `$.prompt.submit` e nenhuma tecla é emitida. Sem long-poll aberto, cai no
+    # de sempre logo abaixo — o fallback é ausência, não erro.
+    sent = _drain_pelo_plugin(name, q, start_ts)
+    if sent:
+        return sent
     ti = TerminalInput()
-    sent = 0
     while True:
         claimed = q.claim_undelivered(min_ts=start_ts, limit=1)
         if not claimed:
@@ -1541,10 +1576,17 @@ def _partial(name: str, motivo: str, texto: str, pastes_antes: set[str] | None =
 # Marcador da fila INTERNA da TUI do Kimi ("↑ to edit · ctrl-s to steer immediately", medido em
 # 19/08/2026 no 0.37.2, some no instante em que a fila é promovida): presente = há o que steerar;
 # ausente = o ctrl-s seria no-op e o caller precisa saber disso (chip da UI fica ou sai).
-_STEER_MARKER = "ctrl-s to steer"
+# Marcador e tecla do "promove agora", por provider: a TUI só aceita a tecla quando ELA mostra a
+# linha, e cada uma escreve a sua. Claude: medido no print do dono (18/09/2026, v2.1.277) — a
+# sessão com fila mostra "ctrl+x ctrl+s to send now" e "Press up to edit queued messages".
+_STEER_POR_PROVIDER = {
+    "kimi": ("ctrl-s to steer", ("C-s",)),
+    "claude": ("ctrl+x ctrl+s to send now", ("C-x", "C-s")),
+}
+_STEER_MARKER = _STEER_POR_PROVIDER["kimi"][0]
 
 
-def steer_now(name: str) -> bool | str:
+def steer_now(name: str, provider: str = "kimi") -> bool | str:
     """`ctrl-s` AVULSO: promove o que JA esta na fila da TUI do Kimi pro turno em curso.
 
     Medido em 14/08/2026 numa sessao Kimi real: texto+Enter com ele trabalhando deixa a msg na fila
@@ -1567,13 +1609,19 @@ def steer_now(name: str) -> bool | str:
     isso, a rota respondia 200 pra uma tecla que nunca saiu, o chip sumia da tela e a msg ficava
     parada na fila sem ninguem saber. "sem-fila" = a TUI nao tinha o que promover. True = promovido
     (o caller baixa a fila duravel)."""
+    marcador, teclas = _STEER_POR_PROVIDER.get(provider, _STEER_POR_PROVIDER["kimi"])
     with _send_lock(name):
         try:
-            if _STEER_MARKER not in (_capture(name) or ""):
+            if marcador not in (_capture(name) or ""):
                 return "sem-fila"
         except Exception:
             pass  # pane ilegivel: degrada pro comportamento de sempre (tecla e no-op se vazio)
-        return send_keys(name, "C-s") is not False
+        # Acorde de duas teclas (Claude): a segunda só vale depois da primeira, e uma recusa no
+        # meio deixaria o prefixo pendurado no terminal — para na primeira que o tmux recusar.
+        for tecla in teclas:
+            if send_keys(name, tecla) is False:
+                return False
+        return True
 
 
 class TerminalInput:

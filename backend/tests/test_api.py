@@ -118,21 +118,22 @@ def test_input_eager_send_marks_delivered(api_client):
     ap.assert_called_once_with("oi", delivered=True, ts=ANY)
 
 
-def test_steer_manda_ctrl_s_so_no_kimi(api_client):
-    """A rota do ctrl-s avulso (msg JA na fila da TUI entra no turno em curso). Fora do Kimi recusa
-    com 409 e NAO toca no terminal — a tecla nao significa isso em outra TUI."""
-    with patch("app.api._pane_info", return_value=("kimi", "%1")), \
-         patch("app.api.terminal_input.steer_now") as st, \
-         patch("app.api.PromptQueue") as pq:
-        r = api_client.post("/api/sessions/cc/steer", headers=_h())
-    assert r.status_code == 200
-    st.assert_called_once_with("cc")
-    # Promoveu (retorno truthy genérico): a fila durável é baixada na hora — o wire do Kimi só
-    # grava a msg steerada no FIM do turno, e o chip não pode ficar aceso até lá.
-    pq.return_value.confirm_delivered.assert_called_once_with()
-    assert r.json()["promoted"] is True
+def test_steer_promove_a_fila_da_tui_no_kimi_e_no_claude(api_client):
+    """A rota do steer avulso (msg JA na fila da TUI). Kimi e Claude têm a tecla, cada um a sua —
+    por isso o provider segue junto. Fora deles recusa com 409 e NAO toca no terminal."""
+    for provider in ("kimi", "claude"):
+        with patch("app.api._pane_info", return_value=(provider, "%1")), \
+             patch("app.api.terminal_input.steer_now") as st, \
+             patch("app.api.PromptQueue") as pq:
+            r = api_client.post("/api/sessions/cc/steer", headers=_h())
+        assert r.status_code == 200
+        st.assert_called_once_with("cc", provider)
+        # Promoveu (retorno truthy genérico): a fila durável é baixada na hora — o wire do Kimi só
+        # grava a msg steerada no FIM do turno, e o chip não pode ficar aceso até lá.
+        pq.return_value.confirm_delivered.assert_called_once_with()
+        assert r.json()["promoted"] is True
 
-    with patch("app.api._pane_info", return_value=("claude", "%1")), \
+    with patch("app.api._pane_info", return_value=("pi", "%1")), \
          patch("app.api.terminal_input.steer_now") as st:
         r = api_client.post("/api/sessions/cc/steer", headers=_h())
     assert r.status_code == 409
@@ -1841,6 +1842,76 @@ def test_answer_conversar_fecha_o_picker_e_manda_as_respostas_por_texto(api_clie
     intr.assert_called_once_with("s1")
     assert "Azul" in send.call_args[0][1]
     clear.assert_called_once()
+
+
+def test_answer_com_o_plugin_segurando_a_pergunta_entra_sem_tecla(api_client):
+    info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
+    pend = {"id": "toolu_1", "tool": None, "resumo": None, "questions": [
+        {"question": "Cor?", "options": [{"label": "Azul"}, {"label": "Verde"}]}]}
+    with patch.object(ti_mod, "answer_questions") as drive, \
+         patch("app.api.registry.list", return_value=[info]), \
+         patch.object(api_mod.plugin_bridge, "pergunta_pendente", return_value=pend), \
+         patch.object(api_mod.plugin_bridge, "responder_pergunta", return_value=True) as resp, \
+         patch.object(api_mod, "clear_pending_askq") as clear:
+        r = api_client.post("/api/sessions/s1/answer", headers=_h(),
+                            json={"answers": [{"kind": "option", "indices": [1]}]})
+    assert r.status_code == 200 and r.json()["fallback"] is False
+    resp.assert_called_once_with("s1", {"answers": {"Cor?": "Verde"}}, "toolu_1")
+    drive.assert_not_called()
+    clear.assert_called_once()
+
+
+def test_answer_cai_na_tecla_quando_o_plugin_nao_pega(api_client):
+    # Hook morto ou pergunta já fechada no terminal: a resposta da pessoa não pode parar ali.
+    info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
+    pend = {"id": "toolu_1", "tool": None, "resumo": None, "questions": [
+        {"question": "Cor?", "options": [{"label": "Azul"}, {"label": "Verde"}]}]}
+    with patch.object(ti_mod, "answer_questions") as drive, \
+         patch("app.api.registry.list", return_value=[info]), \
+         patch.object(api_mod.plugin_bridge, "pergunta_pendente", return_value=pend), \
+         patch.object(api_mod.plugin_bridge, "responder_pergunta", return_value=False), \
+         patch.object(api_mod, "clear_pending_askq"):
+        r = api_client.post("/api/sessions/s1/answer", headers=_h(),
+                            json={"answers": [{"kind": "option", "indices": [1]}]})
+    assert r.status_code == 200
+    drive.assert_called_once()
+
+
+def test_answer_nao_manda_resposta_de_pergunta_pra_pedido_de_permissao(api_client):
+    # O mesmo canal segura pedido de permissão; ele é do /select. Mandar as respostas pra lá
+    # esperava 5 s por um aviso que não vem.
+    info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
+    pend = {"id": "perm:toolu_1", "tool": "Bash", "resumo": "echo ok", "questions": []}
+    with patch.object(ti_mod, "answer_questions") as drive, \
+         patch("app.api.registry.list", return_value=[info]), \
+         patch.object(api_mod.plugin_bridge, "pergunta_pendente", return_value=pend), \
+         patch.object(api_mod.plugin_bridge, "responder_pergunta") as resp, \
+         patch.object(api_mod, "clear_pending_askq"):
+        r = api_client.post("/api/sessions/s1/answer", headers=_h(),
+                            json={"answers": [{"kind": "option", "indices": [1]}]})
+    assert r.status_code == 200
+    resp.assert_not_called()
+    drive.assert_called_once()
+
+
+def test_select_com_permissao_segurada_pelo_plugin_nao_tecla(api_client):
+    # Segurado, o terminal não tem menu: a opção vai pro plugin e, se ele não pegar, é erro visível
+    # — teclar ali cairia no composer vazio e responderia ok.
+    pend = {"id": "perm:toolu_1", "tool": "Bash", "resumo": "echo ok", "questions": []}
+    with patch("app.api.terminal.select") as sel, \
+         patch.object(api_mod.plugin_bridge, "pergunta_pendente", return_value=pend), \
+         patch.object(api_mod.plugin_bridge, "responder_pergunta", return_value=True) as resp:
+        r = api_client.post("/api/sessions/cc/select", json={"option": 2}, headers=_h())
+    assert r.status_code == 200
+    resp.assert_called_once_with("cc", {"permitir": False}, "perm:toolu_1")
+    sel.assert_not_called()
+
+    with patch("app.api.terminal.select") as sel, \
+         patch.object(api_mod.plugin_bridge, "pergunta_pendente", return_value=pend), \
+         patch.object(api_mod.plugin_bridge, "responder_pergunta", return_value=False):
+        r = api_client.post("/api/sessions/cc/select", json={"option": 1}, headers=_h())
+    assert r.status_code == 409
+    sel.assert_not_called()
 
 
 def test_answer_so_conversar_continua_dirigindo_o_picker(api_client):

@@ -6,6 +6,7 @@ import re
 import time
 from typing import AsyncIterator, Callable, Optional
 
+from app import plugin_bridge
 from app import tmux
 from app.askquestion import pergunta_aberta
 from app.hook_state import hook_state
@@ -703,6 +704,7 @@ class StateMonitor:
         no_spinner = 0      # polls consecutivos sem spinner (filtra redraw transiente)
         held_state = "idle"
         held_label = None
+        ultima_divergencia: tuple[str, str] | None = None
         permission_mode = None
         previous_non_plan = None
         while True:
@@ -719,6 +721,7 @@ class StateMonitor:
                     await asyncio.sleep(self.poll)
                     continue
                 if existe is False:
+                    plugin_bridge.esquecer(self.name)
                     yield StateEvent(session=self.name, state="dead")
                     return
             if self.observe_permission:
@@ -753,6 +756,22 @@ class StateMonitor:
                     state, label = "awaiting_input", None
                     question, options = q.question, [o.label for o in q.options]
 
+            # Pergunta que o PLUGIN segura: é a própria chamada do AskUserQuestion em aberto, com as
+            # perguntas como a ferramenta as recebeu — não depende do menu caber ou ser lido no pane.
+            if state != "awaiting_input":
+                do_plugin_q = plugin_bridge.pergunta_pendente(self.name)
+                if do_plugin_q is not None and str(do_plugin_q["id"]).startswith("perm:"):
+                    # Pedido de permissão segurado pelo plugin: não há menu no pane para raspar,
+                    # então o card sai do próprio pedido. Duas opções, na ordem que o /select lê.
+                    state, label = "awaiting_input", None
+                    question = f"{do_plugin_q.get('tool') or '?'}: {do_plugin_q.get('resumo') or ''}"
+                    options = ["Yes", "No"]
+                elif do_plugin_q is not None and do_plugin_q["questions"]:
+                    q0 = do_plugin_q["questions"][0]
+                    state, label = "awaiting_input", None
+                    question = q0.get("question")
+                    options = [o.get("label") for o in q0.get("options") or []]
+
             if state == "awaiting_input":
                 # Menu real (AskUserQuestion/permissão) -> estado autoritativo, sem debounce.
                 prev_spinner = None
@@ -777,6 +796,26 @@ class StateMonitor:
             # deterministico — corrige o pane mal-lido (spinner congelado, redraw). O pane segue
             # dono de awaiting_input/overlay (menus NAO disparam hook) e de dead. Marcador
             # "working" preso (claude morto mid-turn) expira via HOOK_WORKING_GRACE.
+            # Âncora do PLUGIN, acima da de hook: `turn.start`/`turn.complete` são o próprio começo
+            # e fim do turno, enquanto o pane infere isso de spinner congelado (STALE_LIMIT polls de
+            # atraso, por construção) e o marcador de hook chega por arquivo. Só corrige
+            # working/idle: menu e morte continuam do pane, que é quem os enxerga.
+            if state in ("working", "idle"):
+                do_plugin = plugin_bridge.estado_recente(self.name)
+                if do_plugin is not None and do_plugin[0] in ("working", "idle"):
+                    if do_plugin[0] != state and (do_plugin[0], state) != ultima_divergencia:
+                        # Discordância é o valor desta âncora: aqui se vê o pane errando, e é o
+                        # único lugar onde dá pra notar que o caminho novo parou de corrigir. Uma
+                        # linha por DIVERGÊNCIA, não por poll: a mesma correção se repete a 0,75s
+                        # enquanto o pane não alcança, e isso encheria o log de cópias.
+                        _log.info("estado %s: plugin diz %s, pane dizia %s",
+                                  self.name, do_plugin[0], state)
+                    ultima_divergencia = (do_plugin[0], state) if do_plugin[0] != state else None
+                    state = do_plugin[0]
+                    if state == "idle":
+                        label = None
+                    prev_spinner, frozen, no_spinner = None, 0, 0
+
             if self.sid_get is not None and state in ("working", "idle"):
                 # `_marcador` LE disco quando ha transcript (corrige_ocioso_kimi -> rabo do wire +
                 # scandir da pasta de agentes) e este laco e uma corrotina que roda a cada 0.75s por
@@ -831,4 +870,9 @@ class StateMonitor:
                                  claude_permission_mode=permission_mode,
                                  claude_previous_non_plan=previous_non_plan,
                                  shells=shells)
-            await asyncio.sleep(self.poll)
+            # Com o plugin vivo, aviso dele (turno, pergunta, fim) acorda o laço na hora; o tique
+            # do pane segue igual por baixo. Sem plugin é o sleep de sempre.
+            if plugin_bridge.vivo(self.name):
+                await plugin_bridge.esperar_evento(self.name, self.poll)
+            else:
+                await asyncio.sleep(self.poll)

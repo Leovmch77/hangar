@@ -95,6 +95,9 @@
     sendToPair?: boolean;
     onToggleSendToPair?: () => void;
     inputText?: string;  // bindable: o pai injeta um draft (ex: interrupt devolve a msg pendente)
+    // A frase que o terminal propõe no fim do turno (Tab aceita lá). Vazia = não há. Ela NÃO é
+    // digitada aqui: Tab copia pro campo e a pessoa decide — o terminal não recebe tecla nenhuma.
+    sugestao?: string;
     // Faixa de estatísticas da sessão (evento SSE `stats`). null = sem faixa.
     stats?: StatsEvent | null;
     // Cada provider consulta o catálogo e os controles da sua própria sessão.
@@ -121,6 +124,7 @@
     sendToPair = false, onToggleSendToPair,
     shellsRodando = 0, onOpenActivity,
     inputText = $bindable(''),
+    sugestao = '',
     provider = 'claude',
     headless = false,
     engine = null,
@@ -1127,6 +1131,14 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (slashSuggest?.handleKeydown(e)) return;
+    // Tab aceita a sugestão do terminal, como lá. Só com o campo vazio: com texto digitado o Tab
+    // é navegação, e roubá-lo prenderia quem usa teclado dentro do composer.
+    if (e.key === 'Tab' && !e.shiftKey && sugestao && !inputText) {
+      e.preventDefault();
+      inputText = sugestao;
+      textareaEl?.focus();
+      return;
+    }
     // Enter-envia SO no desktop (hover + pointer fine). No teclado do celular, Enter QUEBRA LINHA
     // (comportamento nativo do textarea): enviar era facil demais de disparar sem querer — no
     // mobile o envio e pelo botao. Shift+Enter segue quebrando linha no desktop. Checado na hora
@@ -2088,7 +2100,9 @@
       bind:this={textareaEl}
       bind:value={inputText}
       class="composer-textarea"
-      placeholder={m.composer_mensagem_para({ nome: nomePlaceholder })}
+      placeholder={sugestao && !inputText
+        ? m.composer_sugestao_placeholder({ texto: sugestao })
+        : m.composer_mensagem_para({ nome: nomePlaceholder })}
       rows={1}
       oninput={handleInput}
       onkeydown={handleKeydown}
@@ -2097,6 +2111,7 @@
       aria-controls={slashActiveOptionId ? slashListboxId : undefined}
       aria-activedescendant={slashActiveOptionId}
     ></textarea>
+
 
     {#if starting && !recording}
       <!-- O getUserMedia leva 300-800ms pra acordar o mic — sem este aviso, quem aperta Ctrl+Espaco
