@@ -32,7 +32,8 @@
     const [{ EditorView: EV, keymap, lineNumbers, highlightActiveLine, drawSelection, rectangularSelection, crosshairCursor },
            { EditorState },
            { defaultKeymap, history, historyKeymap, indentWithTab },
-           { searchKeymap, highlightSelectionMatches, search },
+           { searchKeymap, highlightSelectionMatches, search, SearchQuery, setSearchQuery, getSearchQuery,
+             findNext, findPrevious, closeSearchPanel, replaceNext, replaceAll },
            { syntaxHighlighting, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, bracketMatching },
            { oneDarkHighlightStyle },
            { unifiedMergeView }] = await Promise.all([
@@ -99,6 +100,217 @@
       '.cm-collapsedLines::before, .cm-collapsedLines::after': { content: "'⋯'", opacity: '0.6' },
     }, { dark: true });
 
+    // Painel de busca próprio, no lugar do que o @codemirror/search desenha. O de fábrica gasta
+    // dois andares (~200px) com cinco botões de texto do mesmo peso, dá 140px ao campo — que é a
+    // única coisa que a pessoa usa — e não diz quantas ocorrências achou, então `próxima` é
+    // apertado no escuro. Este cabe numa linha, põe a contagem dentro do campo e reduz as opções
+    // às convenções que o VS Code e o próprio Chrome já usam (Aa, .*, |ab|).
+    // TETO da contagem: arquivo grande com termo de uma letra tem dezenas de milhares de
+    // ocorrências, e varrer todas a cada tecla trava a digitação.
+    const MAX_CONTAGEM = 5000;
+
+    function painelDeBusca(view: import('@codemirror/view').EditorView) {
+      const inicial = getSearchQuery(view.state);
+      const opcoes = {
+        caseSensitive: inicial.caseSensitive,
+        regexp: inicial.regexp,
+        wholeWord: inicial.wholeWord,
+      };
+
+      const cria = (tag: string, cls: string) => {
+        const e = document.createElement(tag);
+        e.className = cls;
+        return e;
+      };
+
+      const dom = cria('div', 'cp-busca');
+      const linha = cria('div', 'cp-busca-linha');
+      const campoBox = cria('label', 'cp-busca-campo');
+
+      const lupa = cria('span', 'cp-busca-lupa');
+      lupa.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>';
+
+      const campo = document.createElement('input');
+      campo.type = 'text';
+      campo.className = 'cp-busca-input';
+      campo.placeholder = m.arq_busca_find();
+      campo.setAttribute('aria-label', m.arq_busca_find());
+      campo.setAttribute('autocomplete', 'off');
+      campo.setAttribute('spellcheck', 'false');
+      campo.value = inicial.search;
+
+      const contador = cria('span', 'cp-busca-contador');
+      contador.setAttribute('aria-live', 'polite');
+
+      campoBox.append(lupa, campo, contador);
+
+      const botao = (cls: string, titulo: string, conteudo: string, aoClicar: () => void) => {
+        const b = document.createElement('button');
+        b.className = cls;
+        b.type = 'button';
+        b.title = titulo;
+        b.setAttribute('aria-label', titulo);
+        b.innerHTML = conteudo;
+        b.onclick = (e) => { e.preventDefault(); aoClicar(); view.focus(); };
+        return b;
+      };
+
+      const nav = cria('span', 'cp-busca-nav');
+      nav.append(
+        botao('cp-busca-icone', m.arq_busca_previous(),
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>',
+          () => findPrevious(view)),
+        botao('cp-busca-icone', m.arq_busca_next(),
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+          () => findNext(view)),
+      );
+
+      const opc = cria('span', 'cp-busca-opc');
+      const chip = (rotulo: string, titulo: string, chave: 'caseSensitive' | 'regexp' | 'wholeWord') => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'cp-busca-chip';
+        b.textContent = rotulo;
+        b.title = titulo;
+        b.setAttribute('aria-label', titulo);
+        const pinta = () => {
+          b.classList.toggle('on', opcoes[chave]);
+          b.setAttribute('aria-pressed', opcoes[chave] ? 'true' : 'false');
+        };
+        pinta();
+        b.onclick = (e) => { e.preventDefault(); opcoes[chave] = !opcoes[chave]; pinta(); buscar(); campo.focus(); };
+        return b;
+      };
+      opc.append(
+        chip('Aa', m.arq_busca_match_case(), 'caseSensitive'),
+        chip('.*', m.arq_busca_regexp(), 'regexp'),
+        chip('|ab|', m.arq_busca_by_word(), 'wholeWord'),
+      );
+
+      // Substituir sai da barra fixa: ele só existe em arquivo que dá pra gravar, e era o que
+      // ocupava o segundo andar em TODO arquivo, inclusive os de leitura.
+      const sub = cria('div', 'cp-busca-sub');
+      sub.hidden = true;
+      const campoSub = document.createElement('input');
+      campoSub.type = 'text';
+      campoSub.className = 'cp-busca-input';
+      campoSub.placeholder = m.arq_busca_replace();
+      campoSub.setAttribute('aria-label', m.arq_busca_replace());
+      campoSub.setAttribute('autocomplete', 'off');
+      const bSub = document.createElement('button');
+      bSub.type = 'button';
+      bSub.className = 'cp-busca-txt';
+      bSub.textContent = m.arq_busca_replace_btn();
+      bSub.onclick = (e) => { e.preventDefault(); buscar(); replaceNext(view); };
+      const bSubTodas = document.createElement('button');
+      bSubTodas.type = 'button';
+      bSubTodas.className = 'cp-busca-txt';
+      bSubTodas.textContent = m.arq_busca_replace_all();
+      bSubTodas.onclick = (e) => { e.preventDefault(); buscar(); replaceAll(view); };
+      sub.append(campoSub, bSub, bSubTodas);
+
+      let abrirSub: HTMLButtonElement | null = null;
+      if (editavel) {
+        abrirSub = botao('cp-busca-icone cp-busca-girar', m.arq_busca_replace(),
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+          () => {});
+        abrirSub.onclick = (e) => {
+          e.preventDefault();
+          sub.hidden = !sub.hidden;
+          abrirSub!.classList.toggle('aberto', !sub.hidden);
+          if (!sub.hidden) campoSub.focus();
+        };
+      }
+
+      const fechar = botao('cp-busca-icone', m.arq_busca_close(),
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+        () => closeSearchPanel(view));
+
+      if (abrirSub) linha.append(abrirSub);
+      linha.append(campoBox, nav, opc, fechar);
+      dom.append(linha, sub);
+
+      function buscar() {
+        view.dispatch({
+          effects: setSearchQuery.of(new SearchQuery({
+            search: campo.value,
+            replace: campoSub.value,
+            caseSensitive: opcoes.caseSensitive,
+            regexp: opcoes.regexp,
+            wholeWord: opcoes.wholeWord,
+          })),
+        });
+        posicionar();
+      }
+
+      // Busca incremental: a cada tecla o editor pula pra primeira ocorrência A PARTIR de onde o
+      // cursor já está, dando a volta no fim. Sem isto o contador nasce em "0 de 11" — há onze
+      // ocorrências e você não está em nenhuma — e só sai de zero depois de apertar `próxima`.
+      // A partir do `from` da seleção, não do fim: senão cada letra digitada saltaria adiante.
+      function posicionar() {
+        const q = getSearchQuery(view.state);
+        if (!q.search || !q.valid) return;
+        const cursor = q.getCursor(view.state, view.state.selection.main.from);
+        let achado = cursor.next();
+        if (achado.done) achado = q.getCursor(view.state, 0).next();
+        if (achado.done) return;
+        view.dispatch({
+          selection: { anchor: achado.value.from, head: achado.value.to },
+          scrollIntoView: true,
+        });
+      }
+
+      // "3 de 17" dentro do campo. O índice sai da comparação com a seleção atual, que é o que o
+      // findNext move — sem ela o número diria só quantas existem, não onde você está.
+      function atualizarContador() {
+        const q = getSearchQuery(view.state);
+        if (!q.search) { contador.textContent = ''; contador.classList.remove('vazio'); return; }
+        if (!q.valid) { contador.textContent = m.arq_busca_regex_invalida(); contador.classList.add('vazio'); return; }
+        const sel = view.state.selection.main;
+        let total = 0;
+        let atual = 0;
+        const cursor = q.getCursor(view.state);
+        for (let v = cursor.next(); !v.done; v = cursor.next()) {
+          total++;
+          if (v.value.from === sel.from && v.value.to === sel.to) atual = total;
+          if (total >= MAX_CONTAGEM) { total = -1; break; }
+        }
+        if (total === -1) {
+          contador.textContent = m.arq_busca_muitos({ n: MAX_CONTAGEM });
+          contador.classList.remove('vazio');
+          return;
+        }
+        contador.textContent = m.arq_busca_contador({ atual, total });
+        contador.classList.toggle('vazio', total === 0);
+      }
+
+      campo.oninput = buscar;
+      campoSub.oninput = buscar;
+      dom.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (e.target === campoSub) { replaceNext(view); return; }
+          if (e.shiftKey) findPrevious(view); else findNext(view);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          closeSearchPanel(view);
+          view.focus();
+        }
+      };
+
+      return {
+        dom,
+        top: true,
+        mount() { campo.focus(); campo.select(); atualizarContador(); },
+        update(u: import('@codemirror/view').ViewUpdate) {
+          if (u.docChanged || u.selectionSet
+              || u.transactions.some((t) => t.effects.some((ef) => ef.is(setSearchQuery)))) {
+            atualizarContador();
+          }
+        },
+      };
+    }
+
     const teclas = [...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab, ...foldKeymap];
     if (onSalvar) {
       teclas.unshift({
@@ -120,7 +332,7 @@
           crosshairCursor(),
           highlightActiveLine(),
           highlightSelectionMatches(),
-          search({ top: true }),
+          search({ top: true, createPanel: painelDeBusca }),
           indentOnInput(),
           bracketMatching(),
           // SÓ as cores de sintaxe do one-dark, nunca o tema inteiro: o `oneDark` pinta o fundo
@@ -145,21 +357,10 @@
           // Os rótulos do painel de busca vêm do pacote em inglês e passam por `phrase`, que é o
           // gancho de i18n dele. As chaves são o texto original do CodeMirror, e é assim que a
           // regra do projeto (texto de interface sai de `m.*`) alcança o painel.
-          EditorState.phrases.of({
-            '$ unchanged lines': m.arq_linhas_sem_mudanca(),
-            'Find': m.arq_busca_find(),
-            'Replace': m.arq_busca_replace(),
-            'next': m.arq_busca_next(),
-            'previous': m.arq_busca_previous(),
-            'all': m.arq_busca_all(),
-            'match case': m.arq_busca_match_case(),
-            'regexp': m.arq_busca_regexp(),
-            'by word': m.arq_busca_by_word(),
-            'replace': m.arq_busca_replace_btn(),
-            'replace all': m.arq_busca_replace_all(),
-            'close': m.arq_busca_close(),
-            'current match': m.arq_busca_current_match(),
-          }),
+          // `phrase` é o gancho de i18n do CodeMirror, e sobrou só a dobra do merge view: os
+          // rótulos da busca passavam por aqui quando o painel era o de fábrica, e o `createPanel`
+          // acima monta o nosso, que lê de `m.*` direto.
+          EditorState.phrases.of({ '$ unchanged lines': m.arq_linhas_sem_mudanca() }),
           keymap.of(teclas),
           tema,
           EV.lineWrapping,
@@ -310,4 +511,138 @@
        uma peça só. Sem o hospedeiro, cai no fundo opaco do app. */
     background: var(--cp-editor-surface, var(--bg-base));
   }
+
+  /* O painel de busca (Ctrl+F) é DOM do CodeMirror, criado por JS: fica fora do escopo do
+     Svelte e só alcança por `:global`. Sem isto ele sai com o visual cru do navegador —
+     campo branco e botões cinza de sistema — porque o projeto importa só as cores de sintaxe
+     do one-dark, nunca o tema inteiro. */
+  .editor :global(.cm-panels) {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border-default);
+  }
+  /* Fluxo em linha, com os `<br>` do próprio CodeMirror separando busca, opções e substituição:
+     virar flex-wrap quebrava a barra em quatro alturas na largura do visor. */
+  /* ── painel de busca próprio (createPanel) ─────────────────────────────────────────────────
+     Uma linha: campo largo com a contagem dentro, ‹ › compactos, as três opções como chips de
+     uma letra. A linha de substituir fica atrás do chevron e só existe em arquivo editável. */
+  .editor :global(.cp-busca) {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 0.82rem;
+  }
+  .editor :global(.cp-busca-linha),
+  .editor :global(.cp-busca-sub) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  /* O `display: flex` acima ganha do `[hidden]` do navegador, e a linha de substituir ficava
+     visível com o atributo posto — dois andares de novo, que é o que este painel existe pra
+     acabar. */
+  .editor :global(.cp-busca-sub[hidden]) { display: none; }
+  .editor :global(.cp-busca-campo) {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 200px;
+    min-width: 0;
+  }
+  .editor :global(.cp-busca-lupa) {
+    position: absolute;
+    left: 9px;
+    display: grid;
+    place-items: center;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+  .editor :global(.cp-busca-lupa svg) { width: 13px; height: 13px; }
+  .editor :global(.cp-busca-input) {
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border-default);
+    background: var(--surface-inset);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  /* Só o campo da BUSCA abre espaço pra lupa e pro contador; o de substituir não tem nenhum dos
+     dois, e herdar o recuo deixaria o texto flutuando no meio da caixa. */
+  .editor :global(.cp-busca-campo .cp-busca-input) { padding-left: 29px; padding-right: 78px; }
+  .editor :global(.cp-busca-input:focus-visible) {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+  }
+  .editor :global(.cp-busca-contador) {
+    position: absolute;
+    right: 9px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    max-width: 68px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .editor :global(.cp-busca-contador.vazio) { color: var(--error); }
+  .editor :global(.cp-busca-nav),
+  .editor :global(.cp-busca-opc) { display: flex; gap: 2px; flex: none; }
+  .editor :global(.cp-busca-icone) {
+    width: 26px;
+    height: 26px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .editor :global(.cp-busca-icone svg) { width: 13px; height: 13px; }
+  .editor :global(.cp-busca-icone:hover) { background: var(--bg-hover); color: var(--text-primary); }
+  .editor :global(.cp-busca-girar svg) { transition: transform 160ms var(--ease-out); }
+  .editor :global(.cp-busca-girar.aberto svg) { transform: rotate(90deg); }
+  .editor :global(.cp-busca-chip) {
+    height: 24px;
+    padding: 0 8px;
+    flex: none;
+    border: 1px solid transparent;
+    background: none;
+    color: var(--text-muted);
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+  }
+  .editor :global(.cp-busca-chip:hover) { background: var(--bg-hover); color: var(--text-primary); }
+  .editor :global(.cp-busca-chip.on) {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .editor :global(.cp-busca-txt) {
+    flex: none;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-default);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .editor :global(.cp-busca-txt:hover) { background: var(--bg-hover); color: var(--text-primary); }
 </style>

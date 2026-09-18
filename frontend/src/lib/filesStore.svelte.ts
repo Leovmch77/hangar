@@ -12,14 +12,31 @@ import { cleanErr } from './gitStore.svelte';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { FileContent, PathDiff, FileSearchHit, TreeEntry } from '@hangar/core';
 
+// Uma aba da faixa. `externo` decide o endpoint de leitura e de gravacao (arquivo citado fora da
+// raiz nao passa pelo /files/read), entao ele viaja com a aba — reabrir pelo caminho errado da
+// 404 num arquivo que esta na tela.
+export interface Aba {
+  path: string;
+  externo: boolean;
+}
+
 export class FilesStore {
   // Pastas expandidas na arvore (caminho absoluto dentro do repo). SvelteSet, nao Set: `$state`
   // so faz proxy de objeto simples e array (svelte/internal/client/proxy.js), entao `.add`/
   // `.delete` num Set cru nao repintariam a arvore.
   abertos = new SvelteSet<string>();
-  // Arquivo selecionado na arvore (caminho absoluto).
+  // Arquivo selecionado na arvore (caminho absoluto). E sempre a aba ATIVA.
   selecionado = $state<string | null>(null);
   linha = $state<number | null>(null);
+  // Abas abertas, na ordem de abertura. Array simples (nao SvelteSet): a ORDEM e o que a faixa
+  // desenha, e `$state` faz proxy de array.
+  abas = $state<Aba[]>([]);
+  // Texto digitado e ainda nao gravado, por caminho. Trocar de aba nao pode perder digitacao —
+  // e o rascunho e o que acende o ponto de "nao salvo" na aba mesmo quando ela nao esta ativa.
+  rascunhos = new SvelteMap<string, string>();
+  // Ultima resposta boa de cada aba. Trocar de aba pinta DAQUI na hora e revalida por tras: sem
+  // o cache, voltar pra uma aba mostrava o esqueleto de novo a cada ida e volta.
+  private cache = new SvelteMap<string, { conteudo: FileContent; diff: PathDiff | null }>();
   // Aberto de FORA do cwd (citado na conversa, servido pelo /file): so leitura, e nao vai pro
   // localStorage — no reload o readFile do cwd daria 404 num caminho que nunca foi da arvore.
   externo = $state(false);
@@ -153,6 +170,12 @@ export class FilesStore {
       if (this.conteudo?.path === path) {
         this.conteudo = { ...this.conteudo, text: texto, size: r.size, digest: r.digest };
       }
+      // O cache da aba tambem: ela pode nem estar ativa (Ctrl+S com a gravacao em voo e troca
+      // de aba no meio), e voltar pra ela mostrando o texto de antes de gravar seria mentira.
+      const emCache = this.cache.get(path);
+      if (emCache) this.cache.set(path, { ...emCache, conteudo: { ...emCache.conteudo, text: texto, size: r.size, digest: r.digest } });
+      // Gravou: o que estava digitado virou o arquivo, entao a aba para de acender o ponto.
+      this.rascunhos.delete(path);
       // O diff da tela envelheceu no instante da gravacao: reler e o que impede o visor de
       // afirmar um diff que nao existe mais. Externo nao tem diff (nem esta no repo da sessao).
       if (!this.externo) void this.recarregarDiff(path);
@@ -166,6 +189,8 @@ export class FilesStore {
     try {
       const d = await pathDiff(this.sessao, path, this.escopo);
       if (this.selecionado === path) this.diff = d;
+      const emCache = this.cache.get(path);
+      if (emCache) this.cache.set(path, { ...emCache, diff: d });
     } catch {
       // Diff e enfeite aqui: a gravacao ja aconteceu, e falhar em reler nao pode virar erro na
       // cara de quem acabou de salvar com sucesso.
@@ -182,7 +207,11 @@ export class FilesStore {
     this.linha = linha;
     this.externo = true;
     this.erro = null;
-    this.loading = true;
+    this._registrarAba(cru, true);
+    // Com cache, a aba ja aparece preenchida e a releitura corre por tras: `loading` ligado
+    // poria o esqueleto por cima de um conteudo que ja esta certo na tela.
+    const tinhaCache = this._pintarDoCache(cru);
+    this.loading = !tinhaCache;
     const g = ++this.gArquivo;
     const ge = ++this.gErro;
     try {
@@ -190,6 +219,7 @@ export class FilesStore {
       if (g !== this.gArquivo) return true;
       this.conteudo = c;
       this.diff = null;
+      this.cache.set(cru, { conteudo: c, diff: null });
       return true;
     } catch (e) {
       if (g !== this.gArquivo) return true;
@@ -197,6 +227,7 @@ export class FilesStore {
       this.diff = null;
       this.selecionado = null;
       this.externo = false;
+      this._descartarAba(cru);
       if (ge === this.gErro) {
         this.erro = (e as { status?: number }).status === 404 ? m.erro_arq_inexistente() : cleanErr(e);
       }
@@ -212,7 +243,9 @@ export class FilesStore {
     this.externo = false;
     this._persistir();
     this.erro = null;
-    this.loading = true;
+    this._registrarAba(path, false);
+    const tinhaCache = this._pintarDoCache(path);
+    this.loading = !tinhaCache;
     const g = ++this.gArquivo;
     const ge = ++this.gErro;   // esta abertura e a dona do erro a partir de agora
     const gr = this.gResultados;   // geracao dos resultados que ESTA abertura pode podar (B4)
@@ -239,6 +272,7 @@ export class FilesStore {
       // ao vivo com um binario: o erro sumia no recarregar e a tela afirmava que o png nao tem
       // diff). Sem selecao, o painel mostra o aviso de erro e a arvore continua navegavel.
       this.selecionado = null;
+      this._descartarAba(path);
       this._persistir();
       // Linha fantasma (Task 11): arquivo apagado entre listar e abrir. Alem do erro certo,
       // RE-LISTA — sem a recarga, a linha continua clicavel para sempre apontando pra nada
@@ -279,6 +313,79 @@ export class FilesStore {
     // Diff que falha NAO derruba a leitura: fora de repositorio git o path_diff responde 409 e
     // a arvore tem que continuar lendo arquivo. `diff = null` e o estado de "sem alteracao".
     this.diff = d.status === 'fulfilled' ? d.value : null;
+    this.cache.set(path, { conteudo: this.conteudo, diff: this.diff });
+    return true;
+  }
+
+  // Troca a aba ativa. Passa pelo mesmo `abrir`/`abrirExterno` de sempre — o cache pinta na hora
+  // e a releitura corre por tras — pra nao existirem dois caminhos de abertura com guardas
+  // diferentes (e diff de aba parada, que envelhece calado, volta fresco na troca).
+  async ativar(path: string): Promise<void> {
+    if (this.selecionado === path) return;
+    const aba = this.abas.find((a) => a.path === path);
+    if (!aba) return;
+    await (aba.externo ? this.abrirExterno(path) : this.abrir(path));
+  }
+
+  // Fecha uma aba. Fechando a ATIVA, a vizinha da direita assume (a da esquerda quando era a
+  // ultima) — o mesmo comportamento de todo editor, e evita cair na tela vazia com abas abertas.
+  async fecharAba(path: string): Promise<void> {
+    const i = this.abas.findIndex((a) => a.path === path);
+    if (i === -1) return;
+    const eraAtiva = this.selecionado === path;
+    this._descartarAba(path);
+    if (!eraAtiva) return;
+    const proxima = this.abas[i] ?? this.abas[i - 1];
+    if (!proxima) {
+      this.selecionado = null;
+      this.conteudo = null;
+      this.diff = null;
+      this.externo = false;
+      this.erro = null;
+      // Invalida a leitura em voo: sem isto a resposta da aba fechada aterrissa e repinta o
+      // visor que o usuario acabou de fechar.
+      this.gArquivo++;
+      this._persistir();
+      return;
+    }
+    await (proxima.externo ? this.abrirExterno(proxima.path) : this.abrir(proxima.path));
+  }
+
+  // Texto digitado numa aba. `null` apaga o rascunho (descartar, ou voltar ao texto do disco).
+  anotarRascunho(path: string, texto: string | null): void {
+    if (texto === null) this.rascunhos.delete(path);
+    else this.rascunhos.set(path, texto);
+  }
+
+  // Aba vizinha na faixa, em passos de +1/-1, dando a volta. Devolve null com menos de duas abas.
+  abaVizinha(passo: number): string | null {
+    if (this.abas.length < 2 || this.selecionado === null) return null;
+    const i = this.abas.findIndex((a) => a.path === this.selecionado);
+    if (i === -1) return null;
+    const n = this.abas.length;
+    return this.abas[(i + passo + n) % n].path;
+  }
+
+  private _registrarAba(path: string, externo: boolean): void {
+    if (!this.abas.some((a) => a.path === path)) this.abas.push({ path, externo });
+  }
+
+  // Tira a aba da faixa e joga fora tudo que era dela. NAO mexe em selecionado/conteudo: quem
+  // chama decide o que fica na tela (o 404 limpa, o fechar passa pra vizinha).
+  private _descartarAba(path: string): void {
+    const i = this.abas.findIndex((a) => a.path === path);
+    if (i !== -1) this.abas.splice(i, 1);
+    this.rascunhos.delete(path);
+    this.cache.delete(path);
+  }
+
+  // Pinta o visor com a ultima resposta boa desta aba. Devolve se havia cache — e o que decide
+  // entre mostrar o esqueleto e revalidar em silencio.
+  private _pintarDoCache(path: string): boolean {
+    const c = this.cache.get(path);
+    if (!c) return false;
+    this.conteudo = c.conteudo;
+    this.diff = c.diff;
     return true;
   }
 
@@ -323,6 +430,10 @@ export class FilesStore {
   async trocarEscopo(escopo: 'branch' | 'nao_commitado') {
     if (escopo === this.escopo) return;
     this.escopo = escopo;
+    // Todo diff em cache e do escopo ANTERIOR: mantido, a proxima troca de aba pintaria a
+    // comparacao errada sob o rotulo do escopo novo. O texto do arquivo fica (nao depende do
+    // escopo), e cada aba relê o diff dela quando for ativada.
+    for (const [p, c] of this.cache) this.cache.set(p, { ...c, diff: null });
     // Externo nao tem diff (nem esta no cwd): reabrir pelo readFile daria 404 num arquivo que
     // acabou de ser mostrado.
     if (this.selecionado && !this.externo) await this.abrir(this.selecionado);

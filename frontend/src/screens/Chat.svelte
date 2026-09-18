@@ -2798,6 +2798,18 @@
         onEscopo={(e) => filesStore.trocarEscopo(e)}
         onFechar={fecharVisor}
         onSalvar={(t) => filesStore.salvar(arquivoAberto, t)}
+        abas={filesStore.abas.map((a) => ({ path: a.path, sujo: filesStore.rascunhos.has(a.path) }))}
+        onAtivarAba={(p) => void filesStore.ativar(p)}
+        onFecharAba={(p) => {
+          // A parte que tira a aba e escolhe a vizinha roda antes de qualquer await, então dá
+          // pra ler o resultado aqui: sem vizinha, o visor fecha pelo caminho normal (é ele que
+          // devolve o foco pra quem abriu o arquivo).
+          void filesStore.fecharAba(p);
+          if (filesStore.selecionado === null) fecharVisor();
+        }}
+        onTrocarAba={(passo) => { const p = filesStore.abaVizinha(passo); if (p) void filesStore.ativar(p); }}
+        rascunho={filesStore.rascunhos.get(arquivoAberto) ?? null}
+        onRascunho={(t) => filesStore.anotarRascunho(arquivoAberto, t)}
       />
     </div>
   {/if}

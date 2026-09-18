@@ -26,8 +26,23 @@
     // Gravar é do hospedeiro (quem tem o store). Sem esta prop o visor é só leitura — é o que
     // acontece na aba de commit, onde o arquivo mostrado é o de um commit passado, não o do disco.
     onSalvar?: ((texto: string) => Promise<string | null>) | null;
+    // Faixa de abas. Vazia (default) = o visor desenha uma aba só, com o arquivo atual — é o que
+    // o modal Git e o celular usam, e o que mantém este componente utilizável sem o store.
+    abas?: { path: string; sujo: boolean }[];
+    onAtivarAba?: ((p: string) => void) | null;
+    onFecharAba?: ((p: string) => void) | null;
+    onTrocarAba?: ((passo: number) => void) | null;
+    // Texto digitado e não gravado, guardado pelo hospedeiro por aba: trocar de aba e voltar tem
+    // que devolver o que estava escrito. `null` = nada digitado desde a última leitura.
+    rascunho?: string | null;
+    onRascunho?: ((t: string | null) => void) | null;
   }
-  let { path, linha = null, diff, conteudo, loading, onEscopo, onFechar, rotuloVoltar = m.arq_voltar_conversa(), erro = null, onSalvar = null }: Props = $props();
+  let {
+    path, linha = null, diff, conteudo, loading, onEscopo, onFechar,
+    rotuloVoltar = m.arq_voltar_conversa(), erro = null, onSalvar = null,
+    abas = [], onAtivarAba = null, onFecharAba = null, onTrocarAba = null,
+    rascunho = null, onRascunho = null,
+  }: Props = $props();
 
   // Linhas do diff já destacadas. highlightDiff é assíncrona (import dinâmico do Shiki).
   // A flag `valida` do $effect descarta resposta velha — escopo trocado, diff novo ou o
@@ -178,33 +193,38 @@
   $effect(() => { void path; verArquivo = linha !== null; });
 
   // ── edição ────────────────────────────────────────────────────────────────────────────────
-  let editando = $state(false);
-  let rascunho = $state('');
+  // Não há modo de edição: quem pode gravar já digita. O botão de lápis existia só pra ligar um
+  // estado que não precisava existir, e cobrava um clique antes de cada correção de uma linha.
   let salvando = $state(false);
   let erroSalvar = $state<string | null>(null);
   let salvoAgora = $state(false);
-  const sujo = $derived(editando && doArquivo !== null && rascunho !== doArquivo.text);
-  // Sem digest não há gravação (leitura truncada): mostrar o botão seria oferecer algo que o
+  // Sem digest não há gravação (leitura truncada): deixar digitar seria oferecer algo que o
   // backend recusa de propósito.
-  // Não depende de estar mostrando o diff: o arquivo que a pessoa quer editar é justamente o que
-  // ela acabou de ver mudar. Entrando em edição, o editor toma o lugar do diff.
   const podeEditar = $derived(onSalvar !== null && doArquivo !== null && doArquivo.digest !== null);
+  const sujo = $derived(rascunho !== null && doArquivo !== null && rascunho !== doArquivo.text);
+  // O que vai no editor: o rascunho quando existe, o disco quando não.
+  const textoNoEditor = $derived(rascunho ?? doArquivo?.text ?? '');
 
   // A base do diff embutido. `undefined` (campo ausente, backend antigo) vira null: sem base o
   // editor mostra só o arquivo, que é o certo — nunca um diff inventado.
-  const baseDoDiff = $derived(diffDoArquivo?.original ?? null);
+  // Base VAZIA (arquivo novo) também vira null: comparar com "" pinta o arquivo inteiro de verde,
+  // o que a barra já diz em `+N −0`, e ainda desenha um trecho removido fantasma — a linha vazia
+  // da string vazia, uma tira vermelha de 22px no topo (visto ao vivo no tsconfig.json novo).
+  const baseDoDiff = $derived(
+    diffDoArquivo?.original && diffDoArquivo.original !== '' ? diffDoArquivo.original : null,
+  );
   // O editor só assume a leitura quando temos o conteúdo do disco. Arquivo truncado continua
   // aparecendo (sem diff embutido): cortar a tela seria pior que mostrar o começo.
   const podeUsarEditor = $derived(doArquivo !== null);
 
-  // Trocar de arquivo com edição aberta larga o rascunho: manter o texto de `a` sobre o nome de
-  // `b` seria o mesmo defeito que o `doArquivo` existe pra impedir, agora com risco de gravar.
+  // Trocar de arquivo zera o que é do SALVAMENTO (erro, "✓ Salvo", botão preso em "Salvando…").
+  // O rascunho não: ele é do hospedeiro, por aba, e voltar pra uma aba tem que devolver o que
+  // estava escrito nela.
   $effect(() => {
     void path;
-    editando = false;
     erroSalvar = null;
     salvoAgora = false;
-    salvando = false;   // senão o botão do arquivo novo nasce preso em "Salvando…"
+    salvando = false;
   });
 
   async function salvar() {
@@ -218,7 +238,7 @@
     erroSalvar = null;
     let falha: string | null = null;
     try {
-      falha = await onSalvar(rascunho);
+      falha = await onSalvar(textoNoEditor);
     } finally {
       if (meu === path) salvando = false;
     }
@@ -229,56 +249,103 @@
       return;
     }
     salvoAgora = true;
-    editando = false;
+    onRascunho?.(null);
     setTimeout(() => { if (meu === path) salvoAgora = false; }, 2000);
   }
 
-  function abrirEdicao() {
-    if (!doArquivo) return;
-    rascunho = doArquivo.text;
+  function descartar() {
+    onRascunho?.(null);
     erroSalvar = null;
-    editando = true;
   }
 
-  function descartar() {
-    editando = false;
-    erroSalvar = null;
+  // Atalhos do visor inteiro, ligados em CAPTURA no elemento raiz. Captura e não `onkeydown`
+  // porque o CodeMirror trata o keydown no próprio conteúdo: com o cursor no código, o atalho
+  // declarado no template nunca chegava (medido ao vivo — Ctrl+PageDown trocava de aba com o
+  // foco na faixa e não fazia nada com o foco no editor). Daqui vale para os dois, num lugar só,
+  // e sem duplicar binding dentro do CodeMirror.
+  let visorEl = $state<HTMLDivElement | null>(null);
+  $effect(() => {
+    const el = visorEl;
+    if (!el) return;
+    el.addEventListener('keydown', atalhosDoVisor, true);
+    return () => el.removeEventListener('keydown', atalhosDoVisor, true);
+  });
+
+  function atalhosDoVisor(e: KeyboardEvent) {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.altKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      void salvar();
+      return;
+    }
+    if (e.altKey && !mod && e.key.toLowerCase() === 'w') {
+      e.preventDefault();
+      if (onFecharAba) onFecharAba(path); else onFechar();
+      return;
+    }
+    if (mod && (e.key === 'PageDown' || e.key === 'PageUp')) {
+      e.preventDefault();
+      onTrocarAba?.(e.key === 'PageDown' ? 1 : -1);
+    }
+  }
+
+  // Ordem de aba pro Alt+1..9 e pro title: o hospedeiro manda a lista, mas sem ela o visor ainda
+  // desenha a aba do arquivo atual — é como o modal do Git e o celular montam este componente.
+  const faixa = $derived(abas.length > 0 ? abas : [{ path, sujo }]);
+  function nomeDe(p: string): string {
+    const i = p.lastIndexOf('/');
+    return i === -1 ? p : p.slice(i + 1);
   }
 
 </script>
 
-<div class="visor" role="region" tabindex="-1" aria-label={path} aria-busy={loading || destacando || destacandoArquivo}>
-  <!-- Faixa de abas — desenho C, transportado do mock aprovado em 20/08/2026
-       (docs: mock-refino-C.png). Ordem, tamanhos e cores vêm de lá; o que mudar aqui deixa de
-       casar com o que foi aprovado. -->
+<div class="visor" role="region" tabindex="-1" aria-label={path} bind:this={visorEl}
+     aria-busy={loading || destacando || destacandoArquivo}>
+  <!-- Faixa de abas — desenho C (mock aprovado em 20/08/2026, docs: mock-refino-C.png), agora
+       com a lista inteira em vez de um rótulo só. Rola na horizontal: seis arquivos abertos não
+       podem espremer o nome de nenhum nem empurrar as ações pra fora da tela. -->
   <div class="abas">
-    <span class="aba">
-      <span class="aba-nome" title={metaArquivo ? `${path} · ${metaArquivo}` : path}>{nomeArquivo}</span>
-      {#if sujo}<span class="ponto" title={m.arq_nao_salvo()}></span>{/if}
-      <button class="fechar-aba" aria-label={m.arq_fechar()} onclick={onFechar}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-      </button>
-    </span>
+    <div class="faixa" role="tablist" aria-label={m.arq_abas()}>
+      {#each faixa as aba (aba.path)}
+        <span class="aba" class:ativa={aba.path === path}>
+          <button
+            class="aba-nome"
+            role="tab"
+            aria-selected={aba.path === path}
+            title={aba.path === path && metaArquivo ? `${aba.path} · ${metaArquivo}` : aba.path}
+            onclick={() => aba.path !== path && onAtivarAba?.(aba.path)}
+          >{nomeDe(aba.path)}</button>
+          {#if aba.sujo}<span class="ponto" title={m.arq_nao_salvo()}></span>{/if}
+          <button
+            class="fechar-aba"
+            aria-label={m.arq_fechar_aba({ nome: nomeDe(aba.path) })}
+            title={m.arq_atalho_fechar()}
+            onclick={() => (onFecharAba ? onFecharAba(aba.path) : onFechar())}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </span>
+      {/each}
+    </div>
     <span class="empurra"></span>
-    {#if temDiff && diffDoArquivo && !editando}
+    <!-- O segmento só existe quando HÁ o que comparar. Preso em `temDiff`, ele aparecia em
+         arquivo novo (que tem diff textual mas base vazia) oferecendo duas vistas idênticas. -->
+    {#if baseDoDiff !== null && doArquivo && baseDoDiff !== doArquivo.text}
       <span class="seg" role="group" aria-label={m.arq_ver_como()}>
         <button class:on={!verArquivo} onclick={() => (verArquivo = false)}>{m.arq_ver_alteracoes()}</button>
         <button class:on={verArquivo} onclick={() => (verArquivo = true)}>{m.arq_ver_arquivo()}</button>
       </span>
     {/if}
-    {#if podeEditar}
-      {#if editando}
-        <button class="acao" onclick={descartar}>{m.arq_descartar()}</button>
-        <button class="acao primaria" disabled={!sujo || salvando} onclick={salvar}>
-          {salvando ? m.arq_salvando() : m.arq_salvar()}
-        </button>
-      {:else}
-        <button class="icone-acao" aria-label={m.arq_editar()} title={m.arq_editar()} onclick={abrirEdicao}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        </button>
-      {/if}
+    {#if salvoAgora}
+      <span class="salvo">✓ {m.arq_salvo()}</span>
+    {:else if podeEditar && sujo}
+      <!-- Só aparece com texto não gravado: sem nada digitado, um "Salvar" apagado ali só
+           ocuparia a faixa e sugeriria que a edição precisa ser ligada. -->
+      <button class="acao" onclick={descartar}>{m.arq_descartar()}</button>
+      <button class="acao primaria" disabled={salvando} onclick={salvar} title={m.arq_atalho_salvar()}>
+        {salvando ? m.arq_salvando() : m.arq_salvar()}
+      </button>
     {/if}
-    {#if salvoAgora}<span class="salvo">✓ {m.arq_salvo()}</span>{/if}
   </div>
 
   <div class="subbarra">
@@ -310,24 +377,24 @@
            roda — senao o usuario veria "sem diferenças" junto de "arquivo binario", duas
            afirmacoes que se contradizem. -->
       <p class="aviso erro" role="alert">{erro}</p>
-    {:else if editando && doArquivo}
-      {#if erroSalvar}
-        <p class="aviso erro" role="alert">{erroSalvar}</p>
-      {/if}
-      <!-- Editando: o arquivo puro. Ver o diff e digitar ao mesmo tempo brigaria — as faixas de
-           texto removido são widgets, e o cursor andaria por cima delas. -->
-      <CodeEditor texto={rascunho} path={path} editavel={true} original={null}
-                  onChange={(t) => (rascunho = t)} onSalvar={salvar} />
     {:else if podeUsarEditor && doArquivo}
       {#if doArquivo.truncated}
         <p class="aviso">{m.arq_arquivo_cortado()}</p>
       {/if}
-      <!-- Leitura: o MESMO editor, com o diff por dentro (unifiedMergeView). É o que troca o
-           `diff --git`/`@@` cru por arquivo inteiro, numeração real e trechos iguais dobrados. -->
+      {#if erroSalvar}
+        <p class="aviso erro" role="alert">{erroSalvar}</p>
+      {/if}
+      <!-- Um editor só, sempre. Com o diff por dentro (unifiedMergeView) ele troca o `diff --git`
+           /`@@` cru por arquivo inteiro, numeração real e trechos iguais dobrados; digitável
+           quando dá pra gravar. O rascunho NÃO troca a vista: `original` entra na criação do
+           estado do CodeMirror, então mudá-lo ao digitar remontaria o editor e jogaria o cursor
+           pro começo do arquivo a cada primeira tecla. -->
       <!-- Base IGUAL ao texto (arquivo sem mudança no escopo) não vira diff: o merge view dobrava
            o arquivo inteiro em "327 linhas sem mudança" e a tela ficava vazia (medido 26/08). -->
-      <CodeEditor texto={doArquivo.text} path={path} editavel={false} {linha}
-                  original={verArquivo || baseDoDiff === doArquivo.text ? null : baseDoDiff} />
+      <CodeEditor texto={textoNoEditor} path={path} editavel={podeEditar} {linha}
+                  original={verArquivo || baseDoDiff === doArquivo.text ? null : baseDoDiff}
+                  onChange={(t) => onRascunho?.(t === doArquivo.text ? null : t)}
+                  onSalvar={salvar} />
     {:else if temDiff && diffDoArquivo}
       {@const d = diffDoArquivo}
       {#if d.truncated}
@@ -384,23 +451,43 @@
 
   /* ── faixa de abas (valores do mock C) ────────────────────────────────────────────────── */
   .abas {
-    display: flex; align-items: center; gap: 4px;
+    display: flex; align-items: center; gap: 4px; min-width: 0;
     padding: 6px 8px 0;
     background: var(--bg-base);          /* a faixa é o fundo mais escuro */
     flex: none;
   }
-  .aba {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 8px 14px;
-    border-radius: 10px 10px 0 0;
-    background: var(--cp-editor-surface);  /* a aba ATIVA tem a cor do editor */
-    font-size: 12.5px; font-weight: 500; color: var(--text-primary);
-    min-width: 0; max-width: 55%;
+  /* A faixa rola em X e as ações ficam paradas à direita: com muitos arquivos abertos, o que
+     some de vista é uma aba distante, nunca o Salvar. A barra de rolagem some (ela ficaria
+     encostada na aba ativa, cortando o degrau de cor); a rolagem por gesto e por teclado fica. */
+  .faixa {
+    display: flex; align-items: flex-end; gap: 4px;
+    min-width: 0; overflow-x: auto; overflow-y: hidden;
+    scrollbar-width: none;
   }
-  .aba-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .faixa::-webkit-scrollbar { display: none; }
+  .aba {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 6px 0 14px;
+    border-radius: 10px 10px 0 0;
+    background: transparent;
+    font-size: 12.5px; font-weight: 500; color: var(--text-muted);
+    min-width: 0; max-width: 200px; flex: none;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  /* A aba ATIVA tem a cor do editor — é o degrau que liga a aba ao código embaixo dela. */
+  .aba.ativa { background: var(--cp-editor-surface); color: var(--text-primary); }
+  @media (hover: hover) and (pointer: fine) {
+    .aba:not(.ativa):hover { background: var(--bg-hover); color: var(--text-secondary); }
+  }
+  .aba-nome {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding: 8px 0; border: 0; background: none; color: inherit;
+    font: inherit; cursor: pointer; min-width: 0;
+  }
+  .aba.ativa .aba-nome { cursor: default; }
   .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
   .fechar-aba {
-    width: 20px; height: 20px; flex: none;
+    width: 22px; height: 22px; flex: none;
     display: grid; place-items: center;
     border: 0; background: none; color: var(--text-muted);
     border-radius: 6px; cursor: pointer;
@@ -426,19 +513,6 @@
   /* Tinta sobre o vidro, não uma superfície opaca: `--surface-raised` deixava o botão ativo com
      mais peso do que o mock e engordava a faixa inteira. */
   .seg button.on { background: rgba(255, 248, 244, 0.09); color: var(--text-primary); font-weight: 500; }
-
-  .icone-acao {
-    width: 28px; height: 28px; flex: none; margin-bottom: 6px;
-    display: grid; place-items: center;
-    border: 0; background: none; color: var(--text-muted);
-    border-radius: 8px; cursor: pointer;
-    transition: transform 160ms var(--ease-out), background 120ms ease, color 120ms ease;
-  }
-  .icone-acao svg { width: 14px; height: 14px; }
-  .icone-acao:active { transform: scale(0.94); }
-  @media (hover: hover) and (pointer: fine) {
-    .icone-acao:hover { background: var(--bg-hover); color: var(--text-primary); }
-  }
 
   .acao {
     padding: 5px 12px; border-radius: 8px; flex: none; margin-bottom: 6px;
