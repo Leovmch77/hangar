@@ -22,13 +22,13 @@ def _reg(tmp_path, monkeypatch, visto):
 def test_create_no_terminal_exporta_a_variavel_no_pane(tmp_path, monkeypatch):
     visto = {}
     _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path), subagent_model="claude-opus-5")
-    assert visto["env"] == {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5"}
+    assert visto["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
 
 
 def test_create_sem_escolha_nao_exporta_nada(tmp_path, monkeypatch):
     visto = {}
     _reg(tmp_path, monkeypatch, visto).create("s", str(tmp_path))
-    assert visto["env"] is None
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in visto["env"]
 
 
 @pytest.mark.parametrize("kw", [{"provider": "pi"}, {"engine": "kimi"}])
@@ -50,7 +50,14 @@ def test_sem_terminal_grava_no_sidecar(tmp_path, monkeypatch):
 
 def test_new_session_passa_o_env_como_e(monkeypatch):
     rodou = {}
-    monkeypatch.setattr(tmux, "_run", lambda args: rodou.setdefault("args", args) and MagicMock(returncode=1))
+    # A sonda de `systemd-run` também passa pelo `_run`: guardar a PRIMEIRA chamada pegaria ela
+    # numa máquina sem systemd e o teste falharia só ali.
+    def _fake_run(args):
+        if "new-session" in args:
+            rodou["args"] = args
+        return MagicMock(returncode=1)
+
+    monkeypatch.setattr(tmux, "_run", _fake_run)
     tmux.new_session("s", "/tmp", "claude", env={"CLAUDE_CODE_SUBAGENT_MODEL": "opus"})
     args = rodou["args"]
     assert args[args.index("CLAUDE_CODE_SUBAGENT_MODEL=opus") - 1] == "-e"

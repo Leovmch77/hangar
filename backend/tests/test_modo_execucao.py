@@ -52,7 +52,7 @@ def test_sem_terminal_vira_pane_com_resume_e_as_escolhas(reg, tmp_path, monkeypa
     cmd = ordem[1][1]
     assert f"--resume {SID}" in cmd and "--model haiku" in cmd and "--effort low" in cmd
     assert "--permission-mode acceptEdits" in cmd
-    assert ordem[2] == ("env", {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
+    assert ordem[2][0] == "env" and ordem[2][1]["CLAUDE_CODE_SUBAGENT_MODEL"] == "sonnet"
     assert not S.exists("hl") and not info.headless and info.jsonl == jsonl
     assert S.em_troca("hl")
     assert any(e.get("text") == "nota que fica" for e in PromptQueue("hl").load())

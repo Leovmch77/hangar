@@ -123,7 +123,7 @@ def test_criacao_registra_etapas_sem_caminho_ou_comando(diario, tmp_path, monkey
     reg = registry.SessionRegistry(projects_dir=tmp_path / "projects")
     monkeypatch.setattr(registry.tmux, "has_session", lambda _: False)
     monkeypatch.setattr(registry.codex_sessions, "exists", lambda _: False)
-    monkeypatch.setattr(registry.tmux, "new_session", lambda *args, provider="claude": criou)
+    monkeypatch.setattr(registry.tmux, "new_session", lambda *args, provider="claude", env=None: criou)
     monkeypatch.setattr(registry, "_pretrust_cwd", lambda *args: None)
     monkeypatch.setattr(registry.PromptQueue, "clear", lambda _: None)
     monkeypatch.setattr(registry.ThenLink, "clear", lambda _: None)
