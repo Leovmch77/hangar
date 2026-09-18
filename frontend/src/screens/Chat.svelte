@@ -941,10 +941,15 @@
   );
   function esquecerDispensaRecarga() {
     recargaDispensada = false;
+    // Armazém que recusa o remove deixa a marca presa e um aviso futuro nasceria dispensado. É
+    // o mesmo armazém que recusaria o set, então não há dispensa gravada a limpar na prática.
     try { localStorage.removeItem(recargaKey); } catch { /* sem storage */ }
   }
   $effect(() => {
-    if (!recarregarMotivo && recargaDispensada) esquecerDispensaRecarga();
+    // `stateEvent` só chega com o primeiro evento do SSE: até lá o motivo é null por falta de
+    // notícia, não por ter sumido. Apagar aí desfaria a dispensa em TODO mount — inclusive o
+    // recarregamento que o iOS faz sozinho, que é justamente por quem a marca é gravada.
+    if (stateEvent && !recarregarMotivo && recargaDispensada) esquecerDispensaRecarga();
   });
   function dispensarRecarga() {
     recargaDispensada = true;
