@@ -925,11 +925,31 @@
   const recarregavel = $derived(sessionProvider === 'claude' && sessionHeadless);
   const recarregarMotivo = $derived(recarregavel ? (stateEvent?.recarregar_motivo ?? null) : null);
   let recarregando = $state(false);
+  // Dispensar a pill: reciclar o processo é escolha da pessoa (pode não querer agora, não precisar
+  // do que mudou, ou ser falso alarme), e até dispensar o aviso ficava em cima do composer o tempo
+  // todo. Dispensa é da TELA, não do aviso: no desktop ele continua no painel de contexto, e no
+  // celular a ação segue no menu. Guarda o MOTIVO, pra mudança nova voltar a avisar; gravado
+  // porque o iOS recarrega o PWA sozinho e uma marca em memória sumiria sem a pessoa fazer nada.
+  // svelte-ignore state_referenced_locally
+  const recargaKey = `cp-recarga-dispensada:${sessionName}`;
+  let recargaDispensada = $state<string | null>(
+    (() => { try { return localStorage.getItem(recargaKey); } catch { return null; } })(),
+  );
+  function dispensarRecarga() {
+    recargaDispensada = recarregarMotivo;
+    try {
+      if (recarregarMotivo) localStorage.setItem(recargaKey, recarregarMotivo);
+    } catch { /* sem storage: vale só nesta sessão da aba */ }
+  }
   async function recarregar() {
     if (recarregando || currentState !== 'idle') return;
     recarregando = true;
     try {
       await recarregarSessao(sessionName);
+      // Recarregou: a dispensa cumpriu o papel e some. Sem isto, um motivo IGUAL mais adiante
+      // (outra mudança do mesmo tipo) nasceria dispensado e ninguém seria avisado.
+      recargaDispensada = null;
+      try { localStorage.removeItem(recargaKey); } catch { /* sem storage */ }
     } catch (err) {
       mostrarAviso(err);
     } finally {
@@ -2970,7 +2990,7 @@
 
   <!-- Com o painel de contexto aberto o aviso vive LÁ (faixa acionável junto do resto do estado da
        sessão), e a pill flutuante daqui seria o mesmo recado duas vezes na mesma tela. -->
-  {#if recarregarMotivo && !avisoErr && !painelCtxAberto}
+  {#if recarregarMotivo && recarregarMotivo !== recargaDispensada && !avisoErr && !painelCtxAberto}
     <!-- O processo desta sessão está desatualizado (config da conta mudou depois de ele subir).
          Discreto e só enquanto há motivo: some sozinho depois do recarregar. -->
     <div class="recarga-pill" style:bottom={`calc(${dockH}px + 10px + var(--cp-tts-h, 0px))`} role="status">
@@ -2979,6 +2999,8 @@
               title={currentState !== 'idle' ? m.modo_so_ociosa() : m.recarregar_sessao_detalhe()}>
         {m.recarregar_agora()}
       </button>
+      <button class="recarga-pill-x" onclick={dispensarRecarga}
+              aria-label={m.recarregar_dispensar()} title={m.recarregar_dispensar_detalhe()}>×</button>
     </div>
   {/if}
 
@@ -3663,6 +3685,19 @@
     cursor: pointer;
   }
   .recarga-pill-btn:disabled { opacity: 0.5; cursor: default; }
+  .recarga-pill-x {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: var(--radius-full, 999px);
+    background: transparent;
+    color: var(--text-tertiary, var(--text-secondary));
+    font-size: var(--text-lg);
+    line-height: 1;
+    cursor: pointer;
+  }
+  .recarga-pill-x:hover { color: var(--text-primary); }
 
   .aviso-err {
     position: absolute;

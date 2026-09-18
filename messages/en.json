@@ -2352,6 +2352,8 @@
   "recarregar_sessao_detalhe": "Restarts this session's process keeping the conversation; use when MCP, hooks or account config change",
   "recarregar_aviso_config": "This account's config changed after the process started (MCP, hooks or settings)",
   "recarregar_agora": "Reload now",
+  "recarregar_dispensar": "Dismiss this notice",
+  "recarregar_dispensar_detalhe": "Hides the notice; the action stays in the context panel and in the session menu",
   "erro_recarregar_so_sem_terminal": "reload only applies to a Claude session without a terminal",
   "chat_problema_dispensar": "Dismiss notice",
   "composer_permissao": "Permission",

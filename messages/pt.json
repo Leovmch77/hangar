@@ -2352,6 +2352,8 @@
   "recarregar_sessao_detalhe": "Reinicia o processo desta sessão mantendo a conversa; use quando MCP, hooks ou config da conta mudarem",
   "recarregar_aviso_config": "A config desta conta mudou depois que o processo subiu (MCP, hooks ou settings)",
   "recarregar_agora": "Recarregar agora",
+  "recarregar_dispensar": "Dispensar este aviso",
+  "recarregar_dispensar_detalhe": "Tira o aviso da tela; a ação continua no painel de contexto e no menu da sessão",
   "erro_recarregar_so_sem_terminal": "recarregar só vale para sessão Claude sem terminal",
   "chat_problema_dispensar": "Dispensar aviso",
   "composer_permissao": "Permissão",
