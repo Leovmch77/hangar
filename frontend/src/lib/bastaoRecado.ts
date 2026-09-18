@@ -25,7 +25,9 @@ export type RecadoBastao = {
 };
 
 const ORIGEM = /Você continua o trabalho da sessão\s*`([^`]+)`/;
-const DOSSIE = /o dossiê em\s*`([^`]+)`/;
+// Duas redações porque o kick-off já chamou o arquivo de "dossiê" e hoje o chama de "resumo do
+// trabalho" — transcript antigo continua no disco e ainda é desenhado ao reabrir o chat.
+const DOSSIE = /o (?:dossiê|resumo do trabalho) em\s*`([^`]+)`/;
 const DE = /Ela vinha de\s*(.+?)\s*—/;
 const CONTA = /conta\s*`([^`]+)`/;
 const MODELO = /modelo\s*`([^`]+)`/;

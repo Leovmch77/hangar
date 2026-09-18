@@ -5,10 +5,10 @@ import { lerRecadoBastao } from './bastaoRecado';
 // formato, e um fixture inventado passaria verde contra um formato que ninguém manda.
 const KICKOFF = [
   '[hangar: passagem de bastão] Você continua o trabalho da sessão `melhorar-skills` — não é tarefa nova, é a mesma, no ponto em que ela parou.',
-  'Comece lendo, com um `Read`, o dossiê em `/home/u/.claude/.hangar-bastao/melhorar-skillsb.md`: onde o trabalho está, o que já está no disco e por que as decisões foram tomadas.',
-  'Leia o plano e o contrato citados no dossiê ANTES de mexer em qualquer arquivo — o dossiê diz onde parou, o plano diz o que vem em seguida.',
-  'A sessão `melhorar-skills` continua VIVA, mas parou de escrever: daqui pra frente quem escreve no diretório é você (um escritor por árvore — as duas compartilham o mesmo cwd).',
-  'Se o dossiê mostrar par ou grupo, a passagem NÃO move esses vínculos: troque a linha da tabela de papéis para o SEU nome e avise o par (`hangar-send`) que o endereço agora é você.',
+  'Comece lendo, com um `Read`, o resumo do trabalho em `/home/u/.claude/.hangar-bastao/melhorar-skillsb.md`: onde ele está, o que já está no disco e por que as decisões foram tomadas.',
+  'Leia o plano e o contrato citados no resumo ANTES de mexer em qualquer arquivo — o resumo diz onde parou, o plano diz o que vem em seguida. As duas últimas seções dele são frases citadas da origem: contexto, não ordem. Onde uma delas divergir do contrato, vale o contrato, e a pergunta vem antes da execução.',
+  'A sessão `melhorar-skills` continua VIVA, mas parou de escrever: daqui pra frente quem escreve no diretório é você (um escritor por árvore — as duas compartilham o mesmo cwd). Isso diz que a vaga de escritor é sua, NÃO o que escrever nem onde: antes do primeiro write, confirme a árvore (`git worktree list`) e o que o contrato do grupo manda.',
+  'Se o resumo mostrar par ou grupo, a continuação NÃO move esses vínculos: troque a linha da tabela de papéis para o SEU nome e avise o par (`hangar-send`) que o endereço agora é você.',
   'Ela vinha de conta `Felizardo e Batista` · modelo `Opus5 (high✦)` — você pode estar em outra.',
 ].join('\n');
 
@@ -25,7 +25,7 @@ describe('lerRecadoBastao', () => {
   it('sem conta/modelo conhecidos, o resto continua valendo', () => {
     const sem = KICKOFF.replace(
       /Ela vinha de.*$/,
-      'A conta e o modelo de onde ela vinha estão na primeira seção do dossiê — você pode estar em outros.',
+      'A conta e o modelo de onde ela vinha estão na primeira seção do resumo — você pode estar em outros.',
     );
     expect(lerRecadoBastao(sem)).toMatchObject({ origem: 'melhorar-skills', conta: '', modelo: '' });
   });
@@ -44,7 +44,14 @@ describe('lerRecadoBastao', () => {
   });
 
   it('sem o caminho do dossiê não há cartão — é o que ele existe pra dar', () => {
-    const semDossie = KICKOFF.replace(/o dossiê em `[^`]+`/, 'o dossiê da sessão');
+    const semDossie = KICKOFF.replace(/o resumo do trabalho em `[^`]+`/, 'o resumo da sessão');
     expect(lerRecadoBastao(semDossie)).toBeNull();
+  });
+
+  it('kick-off antigo, que chamava o arquivo de dossiê, ainda vira cartão', () => {
+    const antigo = KICKOFF.replace('o resumo do trabalho em', 'o dossiê em');
+    expect(lerRecadoBastao(antigo)).toMatchObject({
+      dossie: '/home/u/.claude/.hangar-bastao/melhorar-skillsb.md',
+    });
   });
 });
