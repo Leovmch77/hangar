@@ -946,10 +946,13 @@
     try { localStorage.removeItem(recargaKey); } catch { /* sem storage */ }
   }
   $effect(() => {
-    // `stateEvent` só chega com o primeiro evento do SSE: até lá o motivo é null por falta de
-    // notícia, não por ter sumido. Apagar aí desfaria a dispensa em TODO mount — inclusive o
-    // recarregamento que o iOS faz sozinho, que é justamente por quem a marca é gravada.
-    if (stateEvent && !recarregarMotivo && recargaDispensada) esquecerDispensaRecarga();
+    // Motivo null vale como "resolvido" só depois que as DUAS fontes chegaram: o primeiro evento
+    // do SSE (`stateEvent`) e a lista de sessões, de onde sai o provider que decide se esta sessão
+    // é recarregável. Qualquer uma faltando, null é falta de notícia — e apagar aí desfaria a
+    // dispensa a cada mount, inclusive no recarregamento que o iOS faz sozinho, que é justamente
+    // por quem a marca é gravada. São conexões independentes: nenhuma garante chegar primeiro.
+    if (!stateEvent || !allSessions.some((s) => s.name === sessionName)) return;
+    if (!recarregarMotivo && recargaDispensada) esquecerDispensaRecarga();
   });
   function dispensarRecarga() {
     recargaDispensada = true;
