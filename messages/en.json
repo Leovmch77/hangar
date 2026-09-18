@@ -734,6 +734,7 @@
   "composer_interromper": "Interrupt",
   "composer_interromper_aria": "Interrupt Claude",
   "notice_interrupted": "You interrupted this turn",
+  "notice_compacted": "Context compacted",
   "composer_preview_rodando": "Project preview running",
   "composer_pareamento_sessoes": "Session pairing",
   "composer_parear_outra": "Pair with another session",

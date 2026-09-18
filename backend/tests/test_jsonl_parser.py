@@ -29,6 +29,16 @@ def test_interrupcao_vira_aviso_e_nao_bolha_do_usuario():
     assert evs == [ChatEvent(kind="notice", id="u9", text="interrupted")]
 
 
+def test_resumo_do_compact_vira_aviso_e_nao_bolha_do_usuario():
+    # O /compact grava o resumo inteiro como entrada "user". O terminal mostra só a marca; aqui ele
+    # virava uma bolha de 20 KB em inglês, como se a pessoa tivesse escrito.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u12", "parentUuid": None, "isCompactSummary": True,
+        "message": {"role": "user", "content": "This session is being continued from a previous…"},
+    }))
+    assert evs == [ChatEvent(kind="notice", id="u12", text="compacted")]
+
+
 def test_interrupcao_em_blocos_tambem_vira_aviso():
     # Sem terminal o CLI grava o mesmo texto como LISTA de blocos (medido na 2.1.276) — só o ramo
     # da string não bastava, e o aviso voltava a aparecer como bolha.

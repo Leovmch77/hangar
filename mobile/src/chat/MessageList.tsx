@@ -105,7 +105,9 @@ export function MessageList({
           // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
           // aviso novo do harness não sumir calado.
           const conhecido = ev.text === 'interrupted' || ev.text === 'turn_aborted';
-          return <Text style={styles.notice}>{conhecido ? m.notice_interrupted() : ev.text}</Text>;
+          const frase = conhecido ? m.notice_interrupted()
+            : ev.text === 'compacted' ? m.notice_compacted() : ev.text;
+          return <Text style={styles.notice}>{frase}</Text>;
         }
         return null;
       }

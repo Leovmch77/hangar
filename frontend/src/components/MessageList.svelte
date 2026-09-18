@@ -588,7 +588,8 @@
           <!-- Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
                aviso novo do harness não sumir calado. -->
           <p class="notice">{ev.text === 'interrupted' || ev.text === 'turn_aborted'
-            ? m.notice_interrupted() : ev.text}</p>
+            ? m.notice_interrupted()
+            : ev.text === 'compacted' ? m.notice_compacted() : ev.text}</p>
         {:else if ev.kind === 'tool_use' && agentesRodandoIds.has(ev.tool_use_id ?? '')}
           <!-- Agent rodando: o cartão dele está grudado no fim; aqui ficaria em dobro. -->
         {:else if ev.kind === 'tool_use'}

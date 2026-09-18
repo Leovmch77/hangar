@@ -354,6 +354,9 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         # inteiro (ver _peer_msg). E conversa de verdade, nao ruido do harness.
         if (peer := _peer_msg(obj)) is not None:
             return [ChatEvent(kind="user_msg", id=uid, text=peer)]
+        # O resumo do /compact e gravado como msg de usuario; o terminal mostra so a marca.
+        if obj.get("isCompactSummary") is True:
+            return [ChatEvent(kind="notice", id=uid, text="compacted")]
         if obj.get("isMeta") is True:
             return []
         if isinstance(content, str):

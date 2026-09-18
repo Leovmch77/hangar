@@ -734,6 +734,7 @@
   "composer_interromper": "Interromper",
   "composer_interromper_aria": "Interromper Claude",
   "notice_interrupted": "Turno interrompido por você",
+  "notice_compacted": "Contexto compactado",
   "composer_preview_rodando": "Preview de projeto rodando",
   "composer_pareamento_sessoes": "Pareamento de sessões",
   "composer_parear_outra": "Parear com outra sessão",
