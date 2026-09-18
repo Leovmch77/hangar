@@ -1924,8 +1924,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     .sess-row:focus-within .sess-kebab { visibility: visible; opacity: 1; pointer-events: auto; }
   }
   /* TOUCH (tablet/celular na sidebar): 3 botoes inline esmagavam o nome -> some git/loop/x,
-     fica SO o kebab (abre o menu de contexto completo). Desktop com mouse: kebab nao existe,
-     hover revela os botoes como antes. */
+     fica SO o kebab (abre o menu de contexto completo). Desktop com mouse reserva os 22px,
+     mas o kebab fica invisivel ate hover/foco. */
   .sess-kebab {
     display: inline-flex; width: 22px; height: 22px; min-height: 0; flex-shrink: 0;
     visibility: hidden; opacity: 0; pointer-events: none;
