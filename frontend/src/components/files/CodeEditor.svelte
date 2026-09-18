@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import * as m from '../../paraglide/messages';
   import type { EditorView } from '@codemirror/view';
 
@@ -142,7 +142,24 @@
           })] : []),
           // O rótulo da dobra vem do pacote em inglês e passa por `phrase` — é o gancho de i18n
           // dele, e é o que mantém a regra do projeto (texto de interface sai de `m.*`).
-          EditorState.phrases.of({ '$ unchanged lines': m.arq_linhas_sem_mudanca() }),
+          // Os rótulos do painel de busca vêm do pacote em inglês e passam por `phrase`, que é o
+          // gancho de i18n dele. As chaves são o texto original do CodeMirror, e é assim que a
+          // regra do projeto (texto de interface sai de `m.*`) alcança o painel.
+          EditorState.phrases.of({
+            '$ unchanged lines': m.arq_linhas_sem_mudanca(),
+            'Find': m.arq_busca_find(),
+            'Replace': m.arq_busca_replace(),
+            'next': m.arq_busca_next(),
+            'previous': m.arq_busca_previous(),
+            'all': m.arq_busca_all(),
+            'match case': m.arq_busca_match_case(),
+            'regexp': m.arq_busca_regexp(),
+            'by word': m.arq_busca_by_word(),
+            'replace': m.arq_busca_replace_btn(),
+            'replace all': m.arq_busca_replace_all(),
+            'close': m.arq_busca_close(),
+            'current match': m.arq_busca_current_match(),
+          }),
           keymap.of(teclas),
           tema,
           EV.lineWrapping,
@@ -239,7 +256,11 @@
     void original;
     if (!el) return;
     let vivo = true;
-    const doc = texto;
+    // `untrack`: o texto é só o conteúdo INICIAL do editor. Lido de forma rastreada, cada tecla
+    // digitada (que sobe pelo onChange e volta como `texto`) remontava o editor inteiro e
+    // devolvia o cursor pro começo do arquivo — digitar era impossível. Texto novo vindo de fora
+    // entra pelo efeito de sincronia abaixo, que altera o documento sem recriar o editor.
+    const doc = untrack(() => texto);
     const base = original;
     montar(el, doc, base).then((v) => {
       if (!vivo) { v.destroy(); return; }

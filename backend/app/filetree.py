@@ -210,7 +210,12 @@ def list_dir(cwd: str, path: str | None = None, so_modificados: bool = True) -> 
 
 
 def read_file(cwd: str, path: str) -> dict:
-    _raiz, alvo = _resolver(cwd, path)
+    return read_at(_resolver(cwd, path)[1], path)
+
+
+def read_at(alvo: Path, path: str) -> dict:
+    """Le um alvo JA resolvido. A politica de caminho e de quem chama: a raiz da sessao no
+    `read_file`, a citacao no transcript no endpoint de arquivo externo."""
     if alvo.is_dir():
         raise FileError(400, "erro_arq_e_pasta", "isso e uma pasta")
     if not alvo.is_file():
@@ -249,7 +254,11 @@ def write_file(cwd: str, path: str, texto: str, digest_lido: str | None) -> dict
     Mesmas travas de caminho da leitura (`_resolver` + `_protege_git`): sem isso a escrita seria
     um caminho novo pra sair da raiz da sessão ou tocar no `.git`.
     """
-    _raiz, alvo = _resolver(cwd, path)
+    return write_at(_resolver(cwd, path)[1], path, texto, digest_lido)
+
+
+def write_at(alvo: Path, path: str, texto: str, digest_lido: str | None) -> dict:
+    """Grava num alvo JA resolvido. A politica de caminho e de quem chama (ver `read_at`)."""
     if alvo.is_dir():
         raise FileError(400, "erro_arq_e_pasta", "isso e uma pasta")
     if not alvo.is_file():

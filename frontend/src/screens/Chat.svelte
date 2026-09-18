@@ -38,7 +38,7 @@
   import DesktopSessionContext from '../components/DesktopSessionContext.svelte';
   import FileViewer from '../components/files/FileViewer.svelte';
   import { filesStores } from '../lib/filesStore.svelte';
-  import { caminhosCitadosPorNome, fileUrl, resolverCitados } from '@hangar/core';
+  import { caminhosCitadosPorNome, resolverCitados } from '@hangar/core';
   import type { GitTabId } from '../lib/gitTabs';
   import { navegadorPanel, marcarNavAberto, atualizarNavUrl } from '../lib/navegadorPanel.svelte';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
@@ -520,7 +520,7 @@
         return;
       }
       const abertura = resolvido.relativo === null
-        ? filesStore.abrirExterno(path, fileUrl(sessionName, path), linha)
+        ? filesStore.abrirExterno(path, linha)
         : filesStore.abrir(resolvido.relativo, linha);
       if (!filesInContext) { gitInitialTab = 'files'; gitOpen = true; }
       await abertura;

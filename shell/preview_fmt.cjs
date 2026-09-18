@@ -7,6 +7,9 @@ const MUDOS = new Set(['none', 'generic', 'presentation', 'InlineTextBox', 'Line
 const ACIONAVEIS = new Set([
   'button', 'link', 'textbox', 'searchbox', 'checkbox', 'radio', 'combobox', 'listbox',
   'option', 'menuitem', 'tab', 'switch', 'slider', 'spinbutton',
+  // Sem `treeitem` a árvore de arquivos do próprio Hangar não ganhava ref: quem dirige via
+  // snapshot enxergava a pasta e não tinha como clicar nela.
+  'treeitem',
 ]);
 
 function compactarAX(nos) {

@@ -428,3 +428,34 @@ resolvendo localmente porque funciona com o backend caído. **Token**: Claude Co
 `config.toml` (0600). Nunca exportado no pane: `printenv` num turno mandaria o token pro
 transcript. Prova ponta a ponta: `enviar` de `hangar-2` pra `cx-pergunta` entregou
 `[de: hangar-2] …` e a resposta `ok` voltou pelo caminho de sempre.
+
+## Arquivo citado na conversa é editável, com a citação como consentimento
+
+17/09/2026. Um arquivo fora da raiz da sessão abria no visor em modo leitura: `abrirExterno`
+gravava `digest: null` e o `FileViewer` só liga o botão de salvar quando há digest. Quem
+tropeçou nisso foi o caminho mais comum — o agente cita `~/.claude/settings.json` numa resposta,
+a pessoa clica, a tela abre, e não dá pra mudar nada ali.
+
+A trava que faltava para a escrita já existia para a leitura: `serve_file` só serve um caminho
+que **aparece no transcript desta sessão**. Citado por quem usa ou pelo agente = consentido.
+Ela virou `_resolver_citado()` e passou a valer para os dois lados, com `GET`/`POST
+/api/sessions/{name}/file/text` ao lado do `/files/read` e `/files/write` da árvore: mesma
+mecânica do `filetree` (teto de 512 KB, recusa de binário, digest da leitura, tmp+rename
+preservando o modo), outra política de caminho — a raiz da sessão lá, a citação aqui. O
+`filetree` ganhou `read_at`/`write_at`, que é a mecânica sem `_resolver`; `read_file` e
+`write_file` continuam sendo `_resolver` + a mesma chamada.
+
+**Por que a citação basta como autorização.** Quem tem o bearer do Hangar já pode mandar um
+prompt e fazer o agente editar qualquer arquivo do disco. A escrita direta não amplia o alcance
+de um invasor, só encurta o caminho. O risco que sobra é engano de quem usa, e contra ele valem
+o digest (recusa se o arquivo mudou no disco desde a leitura) e o fato de o arquivo já estar
+aberto na tela. A pasta `.git` fica de fora aqui também, pela mesma regra do `_protege_git`:
+componente `.git` sobre o **realpath**, então `atalho -> .git` não escapa.
+
+Medido ao vivo, backend reiniciado e front rebuildado: `GET /file/text` devolveu o digest de um
+`/tmp` citado; `POST` com o digest certo gravou; com o digest velho voltou 409
+`erro_arq_mudou_no_disco`; caminho nunca citado voltou 403 `erro_arquivo_nao_citado` nos dois
+verbos; `.git/config` citado voltou 403 `erro_arq_area_do_git`. Na tela, pelo navegador
+embutido: o arquivo de fora da raiz abriu com o botão **Editar**, e o Salvar mudou o conteúdo no
+disco. Um primeiro teste com `/etc/hosts` deu 200 e parecia furo — era o transcript, que já o
+citava 5 vezes; a trava estava certa e o teste, errado.

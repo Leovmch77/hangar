@@ -125,7 +125,7 @@
     if (c.relativo === null) {
       // Fora do cwd: texto abre no visor do app; mídia/pdf/html vão pro navegador.
       if (MIDIA.test(c.cru)) { window.open(fileUrl(sessionName, c.cru), '_blank', 'noopener'); return; }
-      if (!(await store.abrirExterno(c.cru, fileUrl(sessionName, c.cru)))) ocultos.add(c.cru);
+      if (!(await store.abrirExterno(c.cru))) ocultos.add(c.cru);
       return;
     }
     if (await store.abrir(c.relativo)) return;

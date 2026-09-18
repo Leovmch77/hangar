@@ -7,7 +7,7 @@
 // $effect o RECRIA quando a sessao muda — o padrao contrario, que faz a regua "pasta aberta
 // continua aberta ao voltar" falhar sem erro nenhum.
 import * as m from '../paraglide/messages';
-import { listFiles, readFile, searchFiles, pathDiff, writeFile } from '@hangar/core';
+import { listFiles, readFile, readCitedFile, searchFiles, pathDiff, writeFile, writeCitedFile } from '@hangar/core';
 import { cleanErr } from './gitStore.svelte';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { FileContent, PathDiff, FileSearchHit, TreeEntry } from '@hangar/core';
@@ -145,14 +145,17 @@ export class FilesStore {
     const atual = this.conteudo;
     if (!atual || atual.path !== path) return 'erro_arq_inexistente';
     try {
-      const r = await writeFile(this.sessao, path, texto, atual.digest);
+      // Arquivo de fora da raiz grava pelo endpoint da citacao: o `files/write` recusaria o
+      // caminho absoluto antes de olhar o conteudo.
+      const gravar = this.externo ? writeCitedFile : writeFile;
+      const r = await gravar(this.sessao, path, texto, atual.digest);
       // So atualiza se ainda for o mesmo arquivo na tela (o usuario pode ter trocado no meio).
       if (this.conteudo?.path === path) {
         this.conteudo = { ...this.conteudo, text: texto, size: r.size, digest: r.digest };
       }
       // O diff da tela envelheceu no instante da gravacao: reler e o que impede o visor de
-      // afirmar um diff que nao existe mais.
-      void this.recarregarDiff(path);
+      // afirmar um diff que nao existe mais. Externo nao tem diff (nem esta no repo da sessao).
+      if (!this.externo) void this.recarregarDiff(path);
       return null;
     } catch (e) {
       return (e as Error)?.message || 'erro_arq_salvar_falhou';
@@ -170,10 +173,11 @@ export class FilesStore {
   }
 
   // Abre um arquivo: pinta conteudo + diff (no escopo atual) quando a resposta voltar.
-  // Arquivo de fora do cwd, pelo endpoint /file (so serve o que esta no transcript): texto no
-  // MESMO visor da arvore, sem diff e sem editar (digest nulo). Midia continua no navegador.
+  // Arquivo de fora do cwd, pelo endpoint /file/text (so serve o que esta no transcript): texto
+  // no MESMO visor da arvore, sem diff mas EDITAVEL — vem com digest, e o `salvar` roteia pro
+  // endpoint citado. Midia continua no navegador.
   // Devolve se ESTA abertura deu certo (abertura mais nova por cima conta como "nao falhou").
-  async abrirExterno(cru: string, url: string, linha: number | null = null): Promise<boolean> {
+  async abrirExterno(cru: string, linha: number | null = null): Promise<boolean> {
     this.selecionado = cru;
     this.linha = linha;
     this.externo = true;
@@ -181,15 +185,10 @@ export class FilesStore {
     this.loading = true;
     const g = ++this.gArquivo;
     const ge = ++this.gErro;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 30_000);
     try {
-      const r = await fetch(url, { signal: ctl.signal });
+      const c = await readCitedFile(this.sessao, cru);
       if (g !== this.gArquivo) return true;
-      if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
-      const text = await r.text();
-      if (g !== this.gArquivo) return true;
-      this.conteudo = { path: cru, text, size: text.length, truncated: false, digest: null };
+      this.conteudo = c;
       this.diff = null;
       return true;
     } catch (e) {
@@ -203,7 +202,6 @@ export class FilesStore {
       }
       return false;
     } finally {
-      clearTimeout(timer);
       if (g === this.gArquivo) this.loading = false;
     }
   }

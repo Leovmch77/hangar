@@ -297,6 +297,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
   ambiente do pane: Claude via `headersHelper`, Codex via `http_headers`. Tool mapeia 1:1 num
   endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
+- **Arquivo citado na conversa é LEGÍVEL e EDITÁVEL; a citação é o consentimento.** Fora da raiz
+  da sessão a política de caminho é `_resolver_citado()` (aparece no transcript), não a raiz — e
+  é a mesma para o `GET` e para o `POST` de `/file/text`. A mecânica de ler e gravar é a do
+  `filetree` (`read_at`/`write_at`): digest da leitura, tmp+rename, `.git` fora por componente
+  do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o

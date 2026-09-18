@@ -1766,6 +1766,20 @@ export function readFile(name: string, path: string): Promise<FileContent> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/read?${q}`);
 }
 
+// Arquivo CITADO na conversa (fora da raiz da sessao), como texto editavel: mesma resposta do
+// readFile — inclusive o digest, que e o que liga o botao de salvar no visor.
+export function readCitedFile(name: string, path: string): Promise<FileContent> {
+  const q = new URLSearchParams({ path });
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/file/text?${q}`);
+}
+
+export function writeCitedFile(name: string, path: string, text: string, digest: string | null): Promise<{ path: string; size: number; digest: string }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/file/text`, {
+    method: 'POST',
+    body: JSON.stringify({ path, text, digest }),
+  });
+}
+
 // Visão "citados": quais caminhos citados existem (relativo resolvido) e quais não.
 export function resolverCitados(name: string, caminhos: string[]): Promise<{ ok: Record<string, { relativo: string | null; real: string }>; faltam: string[] }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/resolver`, { method: 'POST', body: JSON.stringify({ caminhos }) });
