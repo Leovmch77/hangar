@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 # multipart montado a mao, zero dependencia nova. O nome interno da chave segue legado para nao
 # invalidar CP_GROQ_API_KEY nem o runtime-config existente; a interface nao amarra o recurso a ele.
 PADRAO_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_MODEL = "whisper-large-v3-turbo"
+# O `turbo` nao e mais rapido neste uso: medido no mesmo audio, 1,07s contra 1,03s do grande num
+# ditado de 42s. O que ele perde e sentido — chegou a inserir um "nao" que inverteu a frase — e
+# pontuacao, que e justamente o trabalho que a limpeza depois tem que refazer.
+GROQ_MODEL = "whisper-large-v3"
 
 # O que se dita neste app e prompt pra agente: nome de ferramenta, comando, caminho e sigla. Sao
 # exatamente as palavras que a Whisper mais erra, porque nenhuma delas e portugues ("hangar-send" sai

@@ -19,7 +19,9 @@ def test_build_multipart_has_model_format_and_file():
     # boundary aparece no corpo e todos os campos estao presentes e bem formados
     assert boundary.encode() in body
     assert b'name="model"' in body
-    assert b"whisper-large-v3-turbo" in body
+    # Contra a CONSTANTE, nao contra o nome literal: o que este teste guarda e que o campo `model`
+    # carrega o modelo configurado, nao qual modelo esta escolhido hoje.
+    assert mod_transcribe.GROQ_MODEL.encode() in body
     assert b'name="response_format"' in body
     assert b'name="language"' in body
     assert b'name="file"; filename="nota.webm"' in body
