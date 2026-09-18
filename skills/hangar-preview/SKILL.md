@@ -6,8 +6,10 @@ description: |
   página web — mexeu numa tela e quer conferir, "testa o login", "vê como ficou", "clica no botão
   lá", "lê o console da página" —, mesmo que o usuário não fale em preview ou navegador. A skill
   ABRE o navegador embutido desta sessão (`hangar-preview open URL`, o painel monta na tela do
-  usuário) e o dirige por refs de acessibilidade. Com o app desktop aberto ela vence agent-browser
-  e ver-front pra página local. Cada sessão tem o SEU navegador; --sessao opera o de outra só
+  usuário) e o dirige por refs de acessibilidade. Cobre também preencher um formulário inteiro
+  numa chamada só (verbo `objetivo`, um laço em que o modelo Jev decide cada passo, sem ida ao
+  modelo grande entre eles) — use-o em vez de clicar campo por campo. Com o app desktop aberto
+  ela vence agent-browser e ver-front pra página local. Cada sessão tem o SEU navegador; --sessao opera o de outra só
   quando o usuário pedir. NÃO use para: máquina sem o app desktop (sem o aviso do hook, é
   agent-browser), site externo que precisa do login do usuário (browser-harness), ou o túnel de
   porta do celular (PreviewSheet).
@@ -44,6 +46,21 @@ tela do usuário. Troque de rota por dentro e espere:
 hangar-preview eval 'location.href="/conversa"'
 hangar-preview wait --idle
 ```
+
+## Vai PREENCHER um formulário? Então NÃO use o ciclo abaixo
+
+Formulário com mais de um campo — cadastro, login, filtro, tela com combobox — é **uma chamada só**:
+
+```
+hangar-preview objetivo "cadastrar um novo serviço e salvar" \
+  --dados '{"nome":"Exames laboratoriais","cnae":"8640201","aliquota":"3"}'
+```
+
+O Jev decide cada passo e vai até o fim sozinho, combobox e autocomplete incluídos. Uma chamada,
+não uma por campo — e o custo não cresce com o número de campos. Detalhes, flags e o que fazer
+quando ele para: **Preencher um formulário inteiro**, mais abaixo.
+
+O ciclo a seguir é pro resto: conferir uma tela, clicar um botão solto, ler console, tirar print.
 
 ## O ciclo: snapshot → @ref → ação
 
@@ -146,6 +163,8 @@ tire `snapshot` de novo antes de agir.
   usuário, o view morre). **Terminou de usar, feche.** Deixe aberto só se você ainda vai dirigir
   ele ou se o usuário vai testar a página — e nesse caso diga isso na resposta. Navegador aberto
   numa página cujo servidor você já derrubou é lixo órfão na tela dele.
+- `hangar-preview objetivo <texto> [--dados <json>] [--passos N]` — preenche um formulário inteiro
+  numa chamada só, com o Jev decidindo cada passo; ver **Preencher um formulário inteiro** abaixo.
 - `hangar-preview list` — quais sessões têm navegador vivo agora.
 - `--sessao <nome>` opera o navegador de OUTRA sessão — só quando o usuário pedir, e avise-o.
 
@@ -229,6 +248,33 @@ printf 'click @e2\nwait --idle\nfill @e5 usuario@example.com\nclick @e7\nwait --
 Linha em branco e linha começando com `#` são ignoradas. Texto com espaço não precisa de aspas
 (`fill @e5 nome completo aqui` funciona) — só `fill`, `type`, `eval` e `wait` levam o resto da linha
 como um único argumento de texto.
+
+## Preencher um formulário inteiro: `objetivo`
+
+```
+hangar-preview objetivo "cadastrar um novo serviço e salvar" \
+  --dados '{"nome":"Exames laboratoriais","cnae":"8640201","aliquota":"3"}' --passos 22
+```
+
+Um laço em que o modelo Jev decide a operação e o alvo a cada ciclo. **Você chama uma vez e ele
+vai até o fim** — não há ida ao modelo grande entre os passos, então o custo não cresce com o
+número de campos. Prefira-o a conduzir na mão sempre que forem vários campos, ou um formulário
+que você não conhece.
+
+Ele resolve sozinho: campo de texto, `<select>` nativo, dropdown do Radix, switch, e **combobox
+editável** (autocomplete — abre, digita, espera a lista aparecer e escolhe a opção).
+
+- `--dados` leva os valores que VOCÊ já sabe, em JSON. As chaves são livres: o Jev casa a chave
+  com o rótulo da tela, então mande o valor real (`"plano":"Unimed"`), não só o nome do campo.
+- Campo sem valor em `--dados` vai a um modelo de texto pequeno. Não sabendo o dado, o laço para
+  e imprime `falta-dado: <campo>` — chame de novo com esse dado em `--dados`, que a página fica
+  onde parou e ele continua dali.
+- Ele para sozinho quando a página confirma que acabou. Qualquer outra parada vem com o motivo na
+  linha `parou:` (alvo sem confiança, alvo repetido, operação arriscada, erro do navegador).
+- **Confira o resultado lendo a tela** (`text` ou `snapshot`), nunca pelo log do laço.
+
+Exige a chave do Jev na sessão: nasça com `hangar-send --new <nome> <cwd> --jev`, ou marque o Jev
+em "Mais opções" ao criar. Sem ela o verbo diz onde cadastrar.
 
 ## Regras
 

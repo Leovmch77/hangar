@@ -44,6 +44,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
+import jev from '../shell/jev_objetivo.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
@@ -64,6 +65,8 @@ const pos = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--sessao') flags.sessao = args[++i];
   else if (args[i] === '--aba') flags.aba = Number(args[++i]);
+  else if (args[i] === '--dados') flags.dados = args[++i];
+  else if (args[i] === '--passos') flags.passos = args[++i];
   else pos.push(args[i]);
 }
 if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
@@ -99,6 +102,11 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   --aba <id>              age nessa aba SEM trocar a ativa (vale pros verbos de página)
   close                   fecha o navegador desta sessão (o painel some; terminou de usar, feche)
   batch                   lê várias linhas do stdin, uma por comando
+  objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
+    --passos <n>          teto de passos (default 15)
+    --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
+                          um com o rótulo da página. Campo não coberto cai no LLM pequeno
+                          (JEV_TEXTO_BASE_URL/_API_KEY/_MODELO, ou JEV_TEXTO_CMD)
 
 Referência completa: skill hangar-preview.`);
   process.exit(0);
@@ -209,7 +217,7 @@ function srv() {
 }
 
 // `aba` explícito (o batch manda por linha) vence o flag global.
-async function comando(chave, verbo, cmdArgs, aba = flags.aba) {
+async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
   const { porta, token } = srv();
   const r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
     method: 'POST',
@@ -217,9 +225,14 @@ async function comando(chave, verbo, cmdArgs, aba = flags.aba) {
     body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
   });
   const texto = await r.text();
-  console.log(texto);
   // O servidor local responde SEMPRE 200 (é o texto que carrega erro: ...) — r.ok não basta.
-  return r.ok && !texto.startsWith('erro:') ? 0 : 1;
+  return { texto, codigo: r.ok && !texto.startsWith('erro:') ? 0 : 1 };
+}
+
+async function comando(chave, verbo, cmdArgs, aba = flags.aba) {
+  const { texto, codigo } = await chamar(chave, verbo, cmdArgs, aba);
+  console.log(texto);
+  return codigo;
 }
 
 // --- comandos ---
@@ -322,4 +335,87 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|close|batch)`);
+/**
+ * Por que o `objetivo` não tem chave. O backend injeta `HANGAR_JEV=on|off` no nascimento da sessão;
+ * com `off` a chave nem entra no processo, então daqui não dá para saber se ela existe cadastrada —
+ * por isso a frase do `off` cobre os dois caminhos em vez de afirmar o que não se mediu.
+ */
+function semJev() {
+  if (process.env.HANGAR_JEV === 'off') {
+    return 'o Jev esta desligado nesta sessao. Abra uma com `hangar-send --new <nome> <cwd> --jev`'
+      + ' (ou marque o Jev em "Mais opcoes" ao criar). Se a chave ainda nao foi cadastrada, ela fica'
+      + ' em Configuracoes do servidor > Avancado.';
+  }
+  return 'o Jev nao esta configurado nesta sessao. Cadastre a chave em Configuracoes do servidor >'
+    + ' Avancado e abra a sessao com --jev; em sessao aberta antes disso, TYPESAFE_API_KEY no ambiente'
+    + ' tambem serve.';
+}
+
+// O LLM pequeno que escreve o valor de um campo no `objetivo` — o único ponto do laço em que um
+// modelo de linguagem entra. Endpoint compatível com a OpenAI se JEV_TEXTO_BASE_URL estiver posta;
+// senão, um comando local que lê o pedido como argumento e imprime só o valor.
+const TEXTO_CMD_PADRAO = 'claude -p --model claude-haiku-4-5-20251001';
+
+function escritorDeTexto() {
+  if (process.env.JEV_TEXTO_BASE_URL && process.env.JEV_TEXTO_API_KEY) {
+    const base = process.env.JEV_TEXTO_BASE_URL.replace(/\/$/, '');
+    const modelo = process.env.JEV_TEXTO_MODELO || 'gpt-4o-mini';
+    return async (pedido) => {
+      const r = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${process.env.JEV_TEXTO_API_KEY}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120, temperature: 0 }),
+      });
+      if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      return (await r.json()).choices?.[0]?.message?.content ?? '';
+    };
+  }
+  const cmd = (process.env.JEV_TEXTO_CMD || TEXTO_CMD_PADRAO).split(' ');
+  return async (pedido) => {
+    try {
+      return execFileSync(cmd[0], [...cmd.slice(1), pedido], { encoding: 'utf8', timeout: 60_000 });
+    } catch (err) {
+      erro(`o modelo de texto falhou (${cmd[0]}): ${String(err.message).slice(0, 200)}`);
+    }
+  };
+}
+
+if (cmd === 'objetivo') {
+  const objetivo = pos.slice(1).join(' ').trim();
+  if (!objetivo) erro('objetivo precisa do texto: hangar-preview objetivo "faz login e abre a agenda"');
+  const chaveJev = process.env.TYPESAFE_API_KEY;
+  if (!chaveJev) erro(semJev());
+  const chave = sidecarDa(nomeSessao()).chave;
+  let dados;
+  try {
+    dados = flags.dados ? JSON.parse(flags.dados) : undefined;
+  } catch {
+    erro('--dados precisa ser um JSON de objeto: --dados \'{"nome":"Jefferson","plano":"Unimed"}\'');
+  }
+
+  const resultado = await jev.rodar({
+    objetivo,
+    dados,
+    maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
+    escreverTexto: escritorDeTexto(),
+    log: (linha) => console.log(linha),
+    executar: async (verbo, args) => (await chamar(chave, verbo, args)).texto,
+    perguntar: async (estado, perguntas) => {
+      const r = await fetch('https://api.typesafe.ai/v1/systemone', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${chaveJev}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'jev-latest', state: estado, questions: perguntas }),
+      });
+      if (!r.ok) erro(`o Jev recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      return (await r.json()).answers;
+    },
+  });
+  console.log(`\nparou: ${resultado.parou}`);
+  // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
+  // frase acima. A página fica onde parou, então a segunda chamada continua dali.
+  if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
+  console.log(resultado.feito.length ? `acoes: ${resultado.feito.length}` : 'nenhuma acao executada');
+  process.exit(0);
+}
+
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|objetivo|close|batch)`);
