@@ -839,7 +839,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                     {#if contaChip || (s.state === 'idle' && s.last_reply_at)}
                       <span class="fim-nome">
                         {#if contaChip}
-                          <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
+                          <span class="conta-chip" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}><span class="conta-label">{contaChip.label}</span></span>
                         {/if}
                         {#if s.state === 'idle' && s.last_reply_at}
                           <span class="reply-time">{relativeTime(s.last_reply_at)}</span>
@@ -1695,8 +1695,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .sess-list.compact .cwd,
   .sess-list.compact .branch { display: none; }
   .row-info { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
-  .name-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-  .name-and-signals { display: flex; align-items: center; gap: 3px; min-width: 0; }
+  .name-row { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+  .name-and-signals { display: flex; align-items: flex-start; gap: 3px; flex: 0 1 auto; min-width: min-content; max-width: 100%; }
   /* Subtítulo de estado vivo: a pergunta (awaiting) ou o texto do spinner (working), truncado —
      linha acionável sem abrir a sessão (feature #1). */
   .status-sub {
@@ -1712,10 +1712,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .reply-mark { flex-shrink: 0; color: var(--text-muted); font-size: 8px; }
   .reply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .reply-time { flex-shrink: 0; color: var(--text-muted); font-size: 10px; }
-  /* Conta + hora empurradas pro fim da linha do NOME. O nome encolhe antes delas (elas são curtas
-     e de largura fixa), e a linha da resposta abaixo fica com a largura inteira. */
+  /* Conta + hora cedem antes do nome, que é a identidade da sessão. */
   .fim-nome {
-    flex-shrink: 0; margin-left: auto;
+    flex: 1 100 auto; min-width: 0; margin-left: auto;
     display: inline-flex; align-items: center; gap: var(--space-1);
     max-width: 55%;
   }
@@ -1785,6 +1784,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     padding: 1px 6px; border-radius: var(--radius-full); white-space: nowrap;
     background: var(--fill-subtle); color: var(--text-secondary);
   }
+  .conta-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .conta-chip::before {
     content: ''; flex: 0 0 auto;
     width: 5px; height: 5px; border-radius: 50%;
@@ -1892,7 +1892,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      relação ao body inteiro em vez de ficar na base desta linha. */
   .sidebar.collapsed .sess-main { justify-content: center; padding: 0; position: relative; }
   .sess-row.active .sess-main { color: var(--text-primary); }
-  .sess-name { min-width: 0; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-name {
+    flex: 0 1 auto; min-width: min-content; max-width: 100%;
+    font-size: var(--text-sm); line-height: 1.25; overflow-wrap: anywhere;
+  }
   .sess-main.untracked { opacity: 0.45; cursor: default; }
   /* Kimi "sem id" (pré-1º-prompt) ABRE o chat: cursor normal pra não mentir que a linha é inerte. */
   .sess-main.untracked.untracked-open { cursor: pointer; }

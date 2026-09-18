@@ -320,7 +320,7 @@ import { textoProblema } from '../lib/problema';
         <!-- Conta no FIM DA LINHA DO NOME (paridade com a Sidebar): aqui sobra largura, e ela
              deixa de ocupar um lugar na fila de chips, que é a linha que enche primeiro. -->
         {#if contaChip}
-          <span class="conta-chip conta-no-nome" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
+          <span class="conta-chip conta-no-nome" style="--conta-cor: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}><span class="conta-label">{contaChip.label}</span></span>
         {/if}
       </span>
       {#if (session.state === 'awaiting_input' || pendingQuestions > 0) && session.question}
@@ -688,20 +688,22 @@ import { textoProblema } from '../lib/problema';
 
   .name-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--space-2);
     min-width: 0;
   }
   .session-name {
+    flex: 0 1 auto;
+    min-width: min-content;
+    max-width: 100%;
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
   }
-  /* Empurrada pro fim da linha do nome: o nome encolhe antes dela, que é curta e de largura fixa. */
-  .conta-no-nome { margin-left: auto; flex-shrink: 0; }
+  /* O nome é a identidade da sessão: a conta cede quase toda a largura antes de ele quebrar. */
+  .conta-no-nome { margin-left: auto; flex: 1 100 auto; min-width: 0; max-width: min(32%, 92px); }
   /* Input do rename inline (toque longo). Mesmo visual do .server-edit da lista de servidores. */
   .name-edit {
     flex: 1;
@@ -919,8 +921,9 @@ import { textoProblema } from '../lib/problema';
     display: inline-flex; align-items: center; gap: 4px;
     font-size: 10px; font-weight: var(--fw-medium); letter-spacing: 0.02em;
     padding: 1px 6px; border-radius: var(--radius-full);
-    background: var(--fill-subtle); color: var(--text-secondary); flex-shrink: 0;
+    background: var(--fill-subtle); color: var(--text-secondary); min-width: 0;
   }
+  .conta-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .conta-chip::before {
     content: ''; flex: 0 0 auto;
     width: 5px; height: 5px; border-radius: 50%;
