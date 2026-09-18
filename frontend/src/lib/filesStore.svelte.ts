@@ -39,6 +39,11 @@ export class FilesStore {
   // resposta que chegasse depois da troca nao tinha onde aterrissar — a tentativa que falhou
   // sumia, e a aba ficava com o mesmo ponto de "nao salvo" de quem ainda nem tentou.
   errosSalvar = new SvelteMap<string, string>();
+  // Caminhos com gravacao em voo. Aqui e nao no visor pelo mesmo motivo do erro: o `salvando`
+  // do componente era zerado a cada troca de `path`, entao VOLTAR para uma aba que ainda estava
+  // gravando destravava o botao e deixava disparar uma segunda gravacao do mesmo arquivo, as
+  // duas com o mesmo digest.
+  salvandoEm = new SvelteSet<string>();
   // Ultima resposta boa de cada aba. Trocar de aba pinta DAQUI na hora e revalida por tras: sem
   // o cache, voltar pra uma aba mostrava o esqueleto de novo a cada ida e volta.
   private cache = new SvelteMap<string, { conteudo: FileContent; diff: PathDiff | null }>();
@@ -70,6 +75,11 @@ export class FilesStore {
   // qualquer outra operacao comecasse. O de lista e POR PASTA: `recarregar()` re-lista varias
   // pastas em paralelo e uma nao pode cancelar a outra.
   private gArquivo = 0;
+  // Geracao da abertura mais recente DE CADA CAMINHO. A poda da aba morta precisa disto: com
+  // duas tentativas do mesmo arquivo em voo (abrir A, sair, voltar em A, sair de novo), a mais
+  // VELHA podia chegar rejeitada e derrubar a aba enquanto a mais nova, que ia dar certo,
+  // ainda estava vindo — a aba de um arquivo que carregou sumia da faixa.
+  private ultimaAberturaDe = new Map<string, number>();
   private gBusca = 0;
   private gLista = new Map<string, number>();
 
@@ -166,6 +176,10 @@ export class FilesStore {
   async salvar(path: string, texto: string): Promise<string | null> {
     const atual = this.conteudo;
     if (!atual || atual.path !== path) return 'erro_arq_inexistente';
+    // Uma gravacao por caminho. A trava fica no store, nao no botao: o botao vive num visor so,
+    // compartilhado por todas as abas, e por isso nao sabe o que as outras estao fazendo.
+    if (this.salvandoEm.has(path)) return null;
+    this.salvandoEm.add(path);
     try {
       // Arquivo de fora da raiz grava pelo endpoint da citacao: o `files/write` recusaria o
       // caminho absoluto antes de olhar o conteudo. `eraExterno` e capturado ANTES do await:
@@ -195,8 +209,14 @@ export class FilesStore {
       // Registrado POR CAMINHO antes de devolver: quem pediu a gravacao pode nao estar mais na
       // tela, e devolver a mensagem para um visor que ja trocou de arquivo era o mesmo que
       // jogar fora. Assim voltar para a aba mostra por que ela nao gravou.
-      this.errosSalvar.set(path, falha);
+      // So enquanto a aba EXISTE: fechada no meio da gravacao, ela ja descartou o rascunho de
+      // proposito, e reinserir o erro aqui o deixaria preso no mapa para sempre — e aceso no
+      // ponto vermelho se o mesmo caminho fosse reaberto depois, acusando uma tentativa que a
+      // aba nova nunca fez.
+      if (this.abas.some((a) => a.path === path)) this.errosSalvar.set(path, falha);
       return falha;
+    } finally {
+      this.salvandoEm.delete(path);
     }
   }
 
@@ -228,6 +248,7 @@ export class FilesStore {
     const tinhaCache = this._pintarDoCache(cru);
     this.loading = !tinhaCache;
     const g = ++this.gArquivo;
+    this.ultimaAberturaDe.set(cru, g);
     const ge = ++this.gErro;
     try {
       const c = await readCitedFile(this.sessao, cru);
@@ -237,7 +258,7 @@ export class FilesStore {
       this.cache.set(cru, { conteudo: c, diff: null });
       return true;
     } catch (e) {
-      if (g !== this.gArquivo) { this._podarAbaMorta(cru); return true; }
+      if (g !== this.gArquivo) { this._podarAbaMorta(cru, e, ge, g); return true; }
       this.conteudo = null;
       this.diff = null;
       this.selecionado = null;
@@ -262,6 +283,7 @@ export class FilesStore {
     const tinhaCache = this._pintarDoCache(path);
     this.loading = !tinhaCache;
     const g = ++this.gArquivo;
+    this.ultimaAberturaDe.set(path, g);
     const ge = ++this.gErro;   // esta abertura e a dona do erro a partir de agora
     const gr = this.gResultados;   // geracao dos resultados que ESTA abertura pode podar (B4)
     const gb = this.gBusca;        // ... e a geracao da busca vigente no momento do clique
@@ -280,7 +302,7 @@ export class FilesStore {
     // ELA falhou, a aba que o clique registrou nunca carregou, e sem a poda abaixo ficaria na
     // faixa como um nome clicavel que nao abre nada.
     if (g !== this.gArquivo) {
-      if (c.status === 'rejected') this._podarAbaMorta(path);
+      if (c.status === 'rejected') this._podarAbaMorta(path, c.reason, ge, g);
       return true;
     }
     this.loading = false;
@@ -401,9 +423,19 @@ export class FilesStore {
   // arquivo na tela, ou com resposta boa em cache, a aba é de uma abertura mais nova que deu
   // certo — e derrubá-la por causa do 404 de uma tentativa abandonada tiraria da faixa um
   // arquivo que o usuário está lendo.
-  private _podarAbaMorta(path: string): void {
+  // A aba não some calada: o motivo vai para `erro` pela MESMA regra de dono do resto do
+  // arquivo. Com uma abertura mais nova em andamento ela é a dona, e o aviso dela é que vale —
+  // quem está esperando o arquivo que pediu por último não quer notícia do que abandonou.
+  private _podarAbaMorta(path: string, motivo: unknown, ge: number, g: number): void {
     if (this.selecionado === path || this.cache.has(path)) return;
+    // Outra tentativa MAIS NOVA deste mesmo caminho esta em voo (ou ja respondeu): a aba e dela,
+    // e esta rejeicao velha nao manda nela.
+    if (this.ultimaAberturaDe.get(path) !== g) return;
+    this.ultimaAberturaDe.delete(path);
     this._descartarAba(path);
+    if (ge !== this.gErro) return;
+    const status = (motivo as { status?: number })?.status;
+    this.erro = status === 404 ? m.erro_arq_inexistente() : cleanErr(motivo);
   }
 
   // Tira a aba da faixa e joga fora tudo que era dela. NAO mexe em selecionado/conteudo: quem

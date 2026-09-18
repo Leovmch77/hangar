@@ -2817,6 +2817,7 @@
         rascunho={filesStore.rascunhos.get(arquivoAberto) ?? null}
         onRascunho={(t) => filesStore.anotarRascunho(arquivoAberto, t)}
         erroSalvar={filesStore.errosSalvar.get(arquivoAberto) ?? null}
+        salvando={filesStore.salvandoEm.has(arquivoAberto)}
       />
     </div>
   {/if}

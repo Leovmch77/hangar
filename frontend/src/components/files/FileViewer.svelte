@@ -40,12 +40,15 @@
     // estado deste componente: existe um só para todas as abas, e trocar de `path` apagava o
     // aviso de uma gravação que falhou de verdade.
     erroSalvar?: string | null;
+    // Gravação em voo DESTA aba, também do hospedeiro: como estado deste componente, ela era
+    // zerada ao trocar de `path`, e voltar para a aba destravava o botão no meio da gravação.
+    salvando?: boolean;
   }
   let {
     path, linha = null, diff, conteudo, loading, onEscopo, onFechar,
     rotuloVoltar = m.arq_voltar_conversa(), erro = null, onSalvar = null,
     abas = [], onAtivarAba = null, onFecharAba = null, onTrocarAba = null,
-    rascunho = null, onRascunho = null, erroSalvar = null,
+    rascunho = null, onRascunho = null, erroSalvar = null, salvando = false,
   }: Props = $props();
 
   // Linhas do diff já destacadas. highlightDiff é assíncrona (import dinâmico do Shiki).
@@ -199,7 +202,6 @@
   // ── edição ────────────────────────────────────────────────────────────────────────────────
   // Não há modo de edição: quem pode gravar já digita. O botão de lápis existia só pra ligar um
   // estado que não precisava existir, e cobrava um clique antes de cada correção de uma linha.
-  let salvando = $state(false);
   let salvoAgora = $state(false);
   // Já vem traduzida do api.ts; `mensagemDeErro` cobre o caso de o store ter guardado um código.
   const erroSalvarVisivel = $derived(erroSalvar ? (mensagemDeErro(erroSalvar) ?? erroSalvar) : null);
@@ -222,13 +224,12 @@
   // aparecendo (sem diff embutido): cortar a tela seria pior que mostrar o começo.
   const podeUsarEditor = $derived(doArquivo !== null);
 
-  // Trocar de arquivo zera só o que é EFÊMERO da tela: o "✓ Salvo" e o botão preso em
-  // "Salvando…". Rascunho e erro de gravação são do hospedeiro, por aba — voltar a uma aba tem
-  // que devolver o que estava escrito nela E por que ela não gravou.
+  // Trocar de arquivo zera só o "✓ Salvo", que é um pisca da tela. Rascunho, erro de gravação e
+  // "gravando agora" são do hospedeiro, por aba — voltar a uma aba tem que devolver o que estava
+  // escrito nela, por que ela não gravou, e se ela ainda está gravando.
   $effect(() => {
     void path;
     salvoAgora = false;
-    salvando = false;
   });
 
   async function salvar() {
@@ -236,15 +237,10 @@
     // O arquivo em que este salvamento começou. Trocar de arquivo com a gravação em voo é
     // possível (nada na árvore impede), e sem esta guarda a resposta antiga aterrissava na tela
     // do arquivo novo: o "✓ Salvo" de A fechava a edição de B e sumia com o rastro do que estava
-    // sendo digitado. A FALHA não depende desta guarda: quem a registra é o store, por caminho.
+    // sendo digitado. Falha e "gravando" não dependem desta guarda: quem os registra é o store,
+    // por caminho.
     const meu = path;
-    salvando = true;
-    let falha: string | null = null;
-    try {
-      falha = await onSalvar(textoNoEditor);
-    } finally {
-      if (meu === path) salvando = false;
-    }
+    const falha = await onSalvar(textoNoEditor);
     if (meu !== path || falha) return;
     salvoAgora = true;
     onRascunho?.(null);
