@@ -133,13 +133,18 @@ describe('SessionCard: diff stats e tempo (referência super.engineering)', () =
       c?.querySelector('.sr-only')?.remove();
       return (c?.textContent ?? '').trim();
     };
-    const { el, comp } = montar(sessao({ provider: 'kimi' }));
+    // `showProvider` nasce false: o chip só entra onde a lista pede. Sem passar aqui, o que se
+    // testava era uma marca que nem renderiza — e o `?.` das asserções escondia isso, porque
+    // `undefined` passa no `not.toBeNull()`.
+    const { el, comp } = montar(sessao({ provider: 'kimi' }), { showProvider: true });
     const chipKimi = el.querySelector('.prov-chip');
+    expect(chipKimi, 'o chip do provider tem que existir para o resto do teste valer').not.toBeNull();
     expect(chipKimi?.querySelector('.pg svg')).not.toBeNull();
     expect(visivel(chipKimi), 'o nome não vai pra tela — cada provider tem marca própria').toBe('');
     expect(chipKimi?.querySelector('.sr-only')?.textContent).toContain('Kimi');
-    const { el: el2, comp: comp2 } = montar(sessao({ provider: 'claude' }));
+    const { el: el2, comp: comp2 } = montar(sessao({ provider: 'claude' }), { showProvider: true });
     const chipClaude = el2.querySelector('.prov-chip--so-icone');
+    expect(chipClaude).not.toBeNull();
     expect(chipClaude?.querySelector('.pg svg')).not.toBeNull();
     expect(visivel(chipClaude)).toBe('');
     expect(chipClaude?.querySelector('.sr-only')?.textContent).toContain('Claude');
