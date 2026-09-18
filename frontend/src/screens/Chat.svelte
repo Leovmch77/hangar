@@ -928,28 +928,34 @@
   // Dispensar a pill: reciclar o processo é escolha da pessoa (pode não querer agora, não precisar
   // do que mudou, ou ser falso alarme), e até dispensar o aviso ficava em cima do composer o tempo
   // todo. Dispensa é da TELA, não do aviso: no desktop ele continua no painel de contexto, e no
-  // celular a ação segue no menu. Guarda o MOTIVO, pra mudança nova voltar a avisar; gravado
-  // porque o iOS recarrega o PWA sozinho e uma marca em memória sumiria sem a pessoa fazer nada.
+  // celular a ação segue no menu. Gravada porque o iOS recarrega o PWA sozinho e uma marca em
+  // memória sumiria sem a pessoa fazer nada.
+  // Vale enquanto ESTE aviso durar: some junto com o motivo, e um aviso novo depois disso volta a
+  // aparecer. Guardar o motivo pra comparar não serviria — o backend só tem um ("config"), então
+  // toda mudança seguinte seria igual à dispensada e a pill ficaria muda pra sempre. É também o
+  // que impede a dispensa de vazar pra uma sessão futura de mesmo nome: sem motivo, ela se apaga.
   // svelte-ignore state_referenced_locally
   const recargaKey = `cp-recarga-dispensada:${sessionName}`;
-  let recargaDispensada = $state<string | null>(
-    (() => { try { return localStorage.getItem(recargaKey); } catch { return null; } })(),
+  let recargaDispensada = $state(
+    (() => { try { return localStorage.getItem(recargaKey) === '1'; } catch { return false; } })(),
   );
+  function esquecerDispensaRecarga() {
+    recargaDispensada = false;
+    try { localStorage.removeItem(recargaKey); } catch { /* sem storage */ }
+  }
+  $effect(() => {
+    if (!recarregarMotivo && recargaDispensada) esquecerDispensaRecarga();
+  });
   function dispensarRecarga() {
-    recargaDispensada = recarregarMotivo;
-    try {
-      if (recarregarMotivo) localStorage.setItem(recargaKey, recarregarMotivo);
-    } catch { /* sem storage: vale só nesta sessão da aba */ }
+    recargaDispensada = true;
+    try { localStorage.setItem(recargaKey, '1'); } catch { /* sem storage: vale só nesta aba */ }
   }
   async function recarregar() {
     if (recarregando || currentState !== 'idle') return;
     recarregando = true;
     try {
       await recarregarSessao(sessionName);
-      // Recarregou: a dispensa cumpriu o papel e some. Sem isto, um motivo IGUAL mais adiante
-      // (outra mudança do mesmo tipo) nasceria dispensado e ninguém seria avisado.
-      recargaDispensada = null;
-      try { localStorage.removeItem(recargaKey); } catch { /* sem storage */ }
+      esquecerDispensaRecarga();   // recarregou: não há mais o que dispensar
     } catch (err) {
       mostrarAviso(err);
     } finally {
@@ -2990,7 +2996,7 @@
 
   <!-- Com o painel de contexto aberto o aviso vive LÁ (faixa acionável junto do resto do estado da
        sessão), e a pill flutuante daqui seria o mesmo recado duas vezes na mesma tela. -->
-  {#if recarregarMotivo && recarregarMotivo !== recargaDispensada && !avisoErr && !painelCtxAberto}
+  {#if recarregarMotivo && !recargaDispensada && !avisoErr && !painelCtxAberto}
     <!-- O processo desta sessão está desatualizado (config da conta mudou depois de ele subir).
          Discreto e só enquanto há motivo: some sozinho depois do recarregar. -->
     <div class="recarga-pill" style:bottom={`calc(${dockH}px + 10px + var(--cp-tts-h, 0px))`} role="status">
