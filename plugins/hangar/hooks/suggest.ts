@@ -14,11 +14,15 @@ async function avisar($: EngineInterface, texto: string, mostrada: boolean) {
     lido = true;
   }
   if (!url || !token || !sessao) return;
-  await $.http.fetch(`${url}/suggest`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessao, token, texto, mostrada }),
-  });
+  try {
+    await $.http.fetch(`${url}/suggest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessao, token, texto, mostrada }),
+    });
+  } catch {
+    // Backend fora do ar: perde-se a sugestão, não o resultado do hook.
+  }
 }
 
 /** A frase cinza que a TUI propõe depois do turno (Tab aceita, no terminal).

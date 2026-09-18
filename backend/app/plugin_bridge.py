@@ -347,7 +347,7 @@ class StateBody(BaseModel):
 
 @plugin_router.post("/pull")
 async def pull(body: PullBody):
-    """Long-poll do plugin. 200 com texto, 204 quando a janela fecha vazia.
+    """Long-poll do plugin. Sempre 200: com o texto, ou `{"text": null}` quando a janela fecha vazia.
 
     Sem `Depends(require_auth)`: quem chama é o pane, que não tem o bearer do
     app. O token por sessão é a credencial daqui.

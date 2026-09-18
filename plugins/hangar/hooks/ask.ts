@@ -21,6 +21,9 @@ export function registerAsk(on: On) {
 
     let acabou = false;
     const terminal = next(e).then((r) => ({ de: "terminal" as const, r }));
+    // Quando o app vence, o diálogo abortado embaixo pode REJEITAR depois do retorno: sem isto
+    // sobraria uma rejeição sem dono no worker. A corrida continua vendo a rejeição normalmente.
+    terminal.catch(() => {});
     const app = doApp($, ponte, id, questions, () => acabou).then((r) => ({ de: "app" as const, r }));
     let vencedor: "terminal" | "app" | "erro" = "erro";
     try {
@@ -68,7 +71,14 @@ async function doApp(
       await $.clock.sleep(RETRY_MS);
       continue;
     }
-    const corpo = JSON.parse(texto) as DoApp;
+    let corpo: DoApp;
+    try {
+      corpo = JSON.parse(texto) as DoApp;
+    } catch {
+      // Corpo ilegível não pode derrubar a corrida: o diálogo do terminal já está aberto.
+      await $.clock.sleep(RETRY_MS);
+      continue;
+    }
     if (corpo.answers || corpo.deny) return corpo;
   }
   return new Promise<DoApp>(() => {});

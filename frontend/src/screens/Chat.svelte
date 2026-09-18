@@ -2148,6 +2148,7 @@
       // `jsonl`, e o /clear abre outro. Não há o que apagar aqui.
       etagCauda = null;
       events = [];
+      sugestao = '';        // era do contexto que o /clear acabou de apagar
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)

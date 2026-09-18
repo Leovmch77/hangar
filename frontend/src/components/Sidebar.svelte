@@ -1695,7 +1695,13 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .sess-list.compact .cwd,
   .sess-list.compact .branch { display: none; }
   .row-info { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
-  .name-row { display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+  /* overflow: nome de um token só (sem hífen nem espaço) tem min-content do tamanho inteiro e
+     vazaria pra fora da barra; corta na borda da linha. relative: regra do repo pra bloco com
+     overflow próprio. */
+  .name-row {
+    display: flex; align-items: flex-start; gap: var(--space-2); min-width: 0;
+    overflow: hidden; position: relative;
+  }
   .name-and-signals { display: flex; align-items: flex-start; gap: 3px; flex: 0 1 auto; min-width: min-content; max-width: 100%; }
   /* Subtítulo de estado vivo: a pergunta (awaiting) ou o texto do spinner (working), truncado —
      linha acionável sem abrir a sessão (feature #1). */

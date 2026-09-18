@@ -15,11 +15,16 @@ async function send($: EngineInterface, estado: string, extra: Record<string, un
     lido = true;
   }
   if (!url || !token || !sessao) return;
-  await $.http.fetch(`${url}/state`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessao, token, estado, ...extra }),
-  });
+  try {
+    await $.http.fetch(`${url}/state`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessao, token, estado, ...extra }),
+    });
+  } catch {
+    // Backend fora do ar: o aviso se perde e o pane segue decidindo. Lançar aqui impediria o
+    // `next(e)` de quem chamou.
+  }
 }
 
 /** Estado por EVENTO, no lugar da leitura do pane.

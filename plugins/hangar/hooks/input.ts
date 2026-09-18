@@ -41,7 +41,14 @@ async function pull($: EngineInterface, ponte: Ponte) {
     if (r.status === 200) {
       const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
       if (text && modo === "fill") {
-        const { isFilled } = await $.prompt.fill({ text, mode: "replace" });
+        let isFilled = false;
+        try {
+          ({ isFilled } = await $.prompt.fill({ text, mode: "replace" }));
+        } catch (err) {
+          // Engine recusou o rascunho: avisa `ok: false` na hora, em vez de deixar o backend
+          // esperar o prazo inteiro sem saber se foi a rede ou o composer.
+          $.ui.log(`hangar: prompt.fill falhou: ${String(err)}`, { to: "debug" });
+        }
         await $.http.fetch(`${ponte.url}/filled`, {
           method: "POST",
           headers: { "content-type": "application/json" },
