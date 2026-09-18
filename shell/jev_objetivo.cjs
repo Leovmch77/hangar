@@ -202,6 +202,22 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
   };
 }
 
+/**
+ * A prova de que a ação deu certo pode estar no COMEÇO da página (um aviso no topo) ou no FIM
+ * (um toast, a linha nova no fim de uma grade). Cortar só o começo escondia o registro recém-criado
+ * — medido nesta tela: o texto tem 2654 caracteres e o registro salvo cai no 1624, fora de um corte
+ * de 1500, e o Jev julgava "concluiu?" sem nunca ver o que acabara de criar. Então guarda as duas
+ * pontas e joga fora o miolo, que numa grade longa é repetição de linha.
+ */
+const TETO_DO_TEXTO = 4000;
+const CABECA = 2500;
+
+function recortarTexto(texto) {
+  const t = String(texto).trim();
+  if (t.length <= TETO_DO_TEXTO) return t;
+  return `${t.slice(0, CABECA)}\n[...]\n${t.slice(-(TETO_DO_TEXTO - CABECA))}`;
+}
+
 /** O estado que acompanha as perguntas. */
 function montarEstado(objetivo, url, feito, textoDaPagina = '', anotacao = {}) {
   return {
@@ -214,7 +230,7 @@ function montarEstado(objetivo, url, feito, textoDaPagina = '', anotacao = {}) {
     obrigatorios_ainda_vazios: anotacao.obrigatorios_vazios ?? [],
     // Sem o texto, DONE fica sem evidência: a tela de sucesso costuma ser só uma frase, sem nenhum
     // elemento acionável para aparecer em `elementos`.
-    texto_da_pagina: String(textoDaPagina).trim().slice(0, 1500),
+    texto_da_pagina: recortarTexto(textoDaPagina),
     // Os rotulos dos elementos NAO entram aqui: cada um ja e criterio do head que o mira, e estado
     // repetido e o "context rot" que a doc do Jev aponta como causa de queda de acerto.
   };
@@ -402,7 +418,7 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
         };
       }
       [escolha, forcaOp] = alternativa;
-    } else if (escolha === 'DONE') return { parar: `objetivo atingido, pagina confirma (${prova.toFixed(2)})` };
+    } else if (escolha === 'DONE') return { sucesso: true, parar: `objetivo atingido, pagina confirma (${prova.toFixed(2)})` };
     else return { parar: `o Jev diz que daqui nao da (${forcaOp.toFixed(2)})` };
   }
 
@@ -489,7 +505,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // O navegador responde erro como TEXTO. Sem esta checagem, um `erro: a aba nao descongelou`
     // seria lido como uma página sem elementos e o laço reportaria a página errada em vez da falha.
     for (const [verbo, saida] of [['snapshot', snapshot], ['url', url], ['text', texto]]) {
-      if (String(saida).startsWith('erro:')) return { feito, parou: `o navegador falhou no ${verbo}: ${saida}` };
+      if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
     const candidatos = parsarSnapshot(snapshot);
     const anotacao = await valoresAtuais(executar);
@@ -501,6 +517,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       const prova = typeof concluido?.noul === 'number' ? concluido.noul : 0;
       return {
         feito,
+        sucesso: prova >= LIMIARES.conclusao,
         parou: prova >= LIMIARES.conclusao
           ? `objetivo atingido, pagina confirma (${prova.toFixed(2)})`
           : `a pagina nao tem elemento acionavel e nao confirma conclusao (${prova.toFixed(2)})`,
@@ -510,7 +527,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     const cofre = dados && typeof dados === 'object' ? dados : {};
     const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta));
     const decisao = decidir(respostas, candidatos);
-    if (decisao.parar) return { feito, parou: decisao.parar };
+    if (decisao.parar) return { feito, sucesso: decisao.sucesso === true, parou: decisao.parar };
 
     // As refs sao indice de arvore, nao identidade de no: renumeram a cada re-render (nesta mesma
     // tela, 40 refs com o formulario aberto e 10 com o popover aberto). Entre o snapshot e a
@@ -532,14 +549,14 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     repetidas = assinatura === anterior ? repetidas + 1 : 0;
     anterior = assinatura;
     if (repetidas >= 2) {
-      return { feito, parou: `${decisao.operacao} em @${decisao.alvo} repetiu 3x sem avancar; parei` };
+      return { feito, sucesso: false, parou: `${decisao.operacao} em @${decisao.alvo} repetiu 3x sem avancar; parei` };
     }
 
     if (decisao.operacao === 'SELECT') {
       log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") conf=${decisao.confianca.toFixed(2)}`);
       const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
       if (String(saida).includes(SEM_SELECT)) await executar('click', [`@${decisao.alvo}`]);
-      else if (String(saida).includes('erro:')) return { feito, parou: `SELECT falhou: ${saida}` };
+      else if (String(saida).includes('erro:')) return { feito, sucesso: false, parou: `SELECT falhou: ${saida}` };
       feito.push(`SELECT "${decisao.escolhido.nome}"`);
     } else if (decisao.operacao === 'SCROLL_DOWN') {
       log(`jev-objetivo passo ${passo}: SCROLL_DOWN`);
@@ -554,7 +571,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         feito,
         escreverTexto,
       });
-      if (parou) return { feito, parou, falta };
+      if (parou) return { feito, sucesso: false, parou, falta };
       const mostrado = ehSegredo(decisao.escolhido.nome) ? '(oculto)' : valor.slice(0, 40);
       log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) conf=${decisao.confianca.toFixed(2)}`);
       if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
@@ -580,7 +597,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
     await executar('wait', ['--idle']);
   }
-  return { feito, parou: `estourou ${maxPassos} passos` };
+  return { feito, sucesso: false, parou: `estourou ${maxPassos} passos` };
 }
 
 module.exports = {

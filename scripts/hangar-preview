@@ -415,7 +415,11 @@ if (cmd === 'objetivo') {
   // frase acima. A página fica onde parou, então a segunda chamada continua dali.
   if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
   console.log(resultado.feito.length ? `acoes: ${resultado.feito.length}` : 'nenhuma acao executada');
-  process.exit(0);
+  // Código de saída é o que um script encadeando este comando lê. Sair 0 numa parada por teto de
+  // passos ou por alvo sem confiança faria a automação seguir como se tivesse dado certo. O campo
+  // `sucesso` vem do laço de propósito: amarrar isto ao texto de `parou` quebraria calado na
+  // primeira vez que alguém mexesse na redação da frase.
+  process.exit(resultado.sucesso ? 0 : 1);
 }
 
 erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|objetivo|close|batch)`);

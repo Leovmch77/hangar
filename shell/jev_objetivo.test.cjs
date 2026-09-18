@@ -508,6 +508,59 @@ test('DONE com a pagina confirmando encerra', () => {
   assert.match(d.parar, /objetivo atingido, pagina confirma/);
 });
 
+// O CLI sai com `process.exit(resultado.sucesso ? 0 : 1)`. Sem este campo, um script encadeando
+// `hangar-preview objetivo` seguia em frente achando que tinha dado certo.
+test('so a conclusao confirmada devolve sucesso; toda parada devolve falha', async () => {
+  const pronto = await rodar({
+    objetivo: 'salvar',
+    executar: navegador([], SO_TEXTO),
+    perguntar: async () => ({ concluido: { noul: 0.96 } }),
+  });
+  assert.equal(pronto.sucesso, true);
+
+  const semConfirmar = await rodar({
+    objetivo: 'salvar',
+    executar: navegador([], SO_TEXTO),
+    perguntar: async () => ({ concluido: { noul: 0.1 } }),
+  });
+  assert.equal(semConfirmar.sucesso, false);
+
+  const alvos = ['e1', 'e2', 'e1', 'e2'];
+  let i = 0;
+  const estourou = await rodar({
+    objetivo: 'alterna alvo',
+    maxPassos: 2,
+    executar: navegador([]),
+    perguntar: async () => resposta({ click: alvos[i++ % alvos.length] }),
+  });
+  assert.equal(estourou.sucesso, false, 'teto de passos e falha, nao sucesso');
+
+  const navegadorQuebrado = await rodar({
+    objetivo: 'salvar',
+    executar: async (verbo) => (verbo === 'snapshot' ? 'erro: a aba nao descongelou' : 'ok'),
+    perguntar: async () => resposta(),
+  });
+  assert.equal(navegadorQuebrado.sucesso, false);
+});
+
+test('o sucesso nasce no decidir, nao da frase em portugues', () => {
+  assert.equal(decide(resposta({ op: 'DONE' })).sucesso, true);
+  assert.notEqual(decide(resposta({ op: 'BLOCKED' })).sucesso, true);
+});
+
+test('o texto da pagina guarda as DUAS pontas — a prova pode estar no fim', () => {
+  const longo = `${'a'.repeat(5000)}FOI CRIADO`;
+  const e = montarEstado('salvar', 'http://local', [], longo);
+  assert.ok(e.texto_da_pagina.includes('FOI CRIADO'), 'o fim da pagina e onde vive o toast de sucesso');
+  assert.ok(e.texto_da_pagina.startsWith('aaa'), 'e o comeco tambem entra');
+  assert.ok(e.texto_da_pagina.length < 4200, 'mas com teto: pagina inteira no estado e context rot');
+});
+
+test('texto curto entra inteiro, sem marca de corte', () => {
+  const e = montarEstado('salvar', 'http://local', [], 'Servico criado com sucesso.');
+  assert.equal(e.texto_da_pagina, 'Servico criado com sucesso.');
+});
+
 test('o estado nao repete os rotulos que ja estao nos criterios dos heads', () => {
   const e = montarEstado('objetivo', 'http://local', [], 'texto');
   assert.ok(!('elementos' in e));
