@@ -95,15 +95,18 @@ _RECUSA_PLANO = "O usuário não aprovou o plano. Continue no modo plano e aguar
 
 
 def _mensagem_conversar(respostas: dict[str, str], conversar: list[str]) -> str:
-    """Tool_result do AskUserQuestion quando alguma pergunta ficou em "Conversar sobre isso"."""
-    linhas = [f"- {p} → {r}" for p, r in respostas.items()]
-    if linhas:
-        linhas.insert(0, "O usuário respondeu:")
+    """Tool_result do AskUserQuestion quando alguma pergunta ficou em "Conversar sobre isso".
+
+    A recusa vem na PRIMEIRA linha: é ela que a tela mostra resumida, em vermelho de tool recusada.
+    """
     if len(conversar) == 1:
-        linhas.append(f"Sobre «{conversar[0]}» ele prefere conversar antes de responder.")
+        linhas = [f"Sobre «{conversar[0]}» ele prefere conversar antes de responder."]
     else:
-        linhas.append("Sobre estas perguntas ele prefere conversar antes de responder:")
+        linhas = ["Sobre estas perguntas ele prefere conversar antes de responder:"]
         linhas.extend(f"- {p}" for p in conversar)
+    if respostas:
+        linhas.append("Ele já respondeu:")
+        linhas.extend(f"- {p} → {r}" for p, r in respostas.items())
     linhas.append("Não repita a pergunta: responda em texto e aguarde a mensagem dele.")
     return "\n".join(linhas)
 
