@@ -66,6 +66,22 @@ def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
     assert pb.pergunta_pendente("s1") is None
 
 
+def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypatch):
+    # Desligado, a sessão nasce byte a byte como antes: sem flag, sem env. É a promessa do fallback.
+    from app.adapters import get_adapter
+    monkeypatch.setattr(pb, "ligado", lambda: False)
+    assert pb.raizes_dos_plugins() == [] and pb.env_da_sessao("s1") == {}
+    assert get_adapter("claude").spawn_command("/tmp/p", "sid") == ["claude", "--session-id", "sid"]
+
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    (raiz,) = pb.raizes_dos_plugins()
+    assert raiz.endswith("plugins/hangar")
+    assert get_adapter("claude").spawn_command("/tmp/p", "sid")[:5] == [
+        "claude", "--session-id", "sid", "--plugin-dir", raiz]
+    env = pb.env_da_sessao("s1")
+    assert env["HANGAR_PLUGIN_TOKEN"] == pb.mint("s1") and env["HANGAR_PLUGIN_URL"].endswith("/api/plugin")
+
+
 def test_resposta_sem_ninguem_segurando_nao_e_entrega():
     assert pb.responder_pergunta("s1", {"permitir": True}) is False
 

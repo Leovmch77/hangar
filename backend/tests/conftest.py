@@ -103,6 +103,22 @@ def _sem_git_dir_no_ambiente_de_teste():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _sem_plugin_de_function_hooks_da_maquina():
+    # O interruptor `claude_function_hooks` é config da MÁQUINA (~/.claude/runtime-config.json) e a
+    # capacidade vem de `claude --help`: ligado aqui, todo teste que confere o comando ou o env de
+    # uma sessão Claude ganhava `--plugin-dir` e `HANGAR_PLUGIN_*`, e a suíte passava no CI e
+    # falhava na máquina de quem usa o recurso. Session-scoped e sem monkeypatch pelo motivo do
+    # topo do arquivo. Quem testa o portão ligado troca `plugin_bridge.ligado` no próprio teste.
+    from app import plugin_bridge
+    original = plugin_bridge.ligado
+    plugin_bridge.ligado = lambda: False
+    try:
+        yield
+    finally:
+        plugin_bridge.ligado = original
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sem_servidor_de_teste_vazado():
     """No fim da suite, nenhum socket de teste pode ter processo vivo.
 
