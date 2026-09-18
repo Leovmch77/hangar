@@ -1423,3 +1423,36 @@ def test_evento_desconhecido_tem_teto_por_tipo(adapter, tmp_path, monkeypatch):
     _run(adapter._on_event(_Sessao("s2", sess.meta), {"type": "outro"}))
     assert len(arq.read_text(encoding="utf-8").splitlines()) == 3
     pqueue.PromptQueue("s1").clear()
+
+
+def test_ask_user_question_conversar_nao_e_409_e_leva_as_outras_respostas(adapter):
+    # 17/09/2026: 3 perguntas, duas respondidas e a terceira em "Conversar sobre isso" -> o envio
+    # voltava 409 ("responda a todas as perguntas") e a sessão ficava presa em awaiting_input, sem
+    # botão de interromper nem terminal pra sair.
+    sess = adapter._sessions["s1"]
+    perguntas = [
+        {"question": "Branch base?", "header": "Branch", "multiSelect": False,
+         "options": [{"label": "develop", "description": ""}, {"label": "v4021", "description": ""}]},
+        {"question": "Story points?", "header": "SP", "multiSelect": False,
+         "options": [{"label": "5", "description": ""}, {"label": "3", "description": ""}]},
+        {"question": "Trabalhar onde?", "header": "Workspace", "multiSelect": False,
+         "options": [{"label": "Branch no próprio repo", "description": ""}, {"label": "Worktree", "description": ""}]},
+    ]
+
+    async def fluxo():
+        sess.in_progress = True
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "q1",
+                                       "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+                                                   "input": {"questions": perguntas}}})
+        await adapter.answer_questions("s1", "q1", [
+            {"kind": "option", "indices": [0], "multi": False, "labels": ["develop"]},
+            {"kind": "option", "indices": [0], "multi": False, "labels": ["5"]},
+            {"kind": "chat", "chat_index": 3},
+        ])
+        assert sess.question is None and sess.state == "working"
+    _run(fluxo())
+    resp = adapter.escritos[-1]["response"]["response"]
+    assert resp["behavior"] == "deny"
+    assert "Branch base? → develop" in resp["message"]
+    assert "Story points? → 5" in resp["message"]
+    assert "Trabalhar onde?" in resp["message"]

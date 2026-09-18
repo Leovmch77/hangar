@@ -6275,6 +6275,47 @@ def _askq_fallback_text(answers: list[dict], jsonl: str | None) -> str:
     return "Respondendo as perguntas (o seletor de opções falhou, vai por texto):\n" + "\n".join(lines)
 
 
+def _askq_conversar_text(answers: list[dict], jsonl: str | None) -> str:
+    """Texto do "Conversar sobre isso" com terminal: a TUI cancela o picker INTEIRO ao escolher
+    "Chat about this" e descarta o que já foi respondido, então as respostas dadas viram mensagem em
+    vez de sumir. Sem nada a preservar, devolve "" — aí o drive normal faz o certo pela opção nativa.
+    """
+    questions = []
+    if jsonl:
+        askq = read_pending_askq(jsonl)
+        if askq:
+            questions = askq.questions
+
+    def pergunta(i: int) -> str | None:
+        return questions[i].question if i < len(questions) else None
+
+    respondidas: list[str] = []
+    conversar: list[str] = []
+    for i, a in enumerate(answers):
+        if a["kind"] == "chat":
+            q = pergunta(i)
+            if q:
+                conversar.append(q)
+            continue
+        resp = (a.get("value") or "") if a["kind"] == "text" else ", ".join(a.get("labels") or [])
+        if not resp:
+            continue
+        q = pergunta(i)
+        respondidas.append(f"- {q} → {resp}" if q else f"- {resp}")
+    if not respondidas:
+        return ""
+    if len(conversar) == 1:
+        linhas = [f"Sobre «{conversar[0]}» prefiro conversar antes de responder."]
+    elif conversar:
+        linhas = ["Sobre estas perguntas prefiro conversar antes de responder:"]
+        linhas.extend(f"- {q}" for q in conversar)
+    else:
+        linhas = ["Sobre uma das perguntas prefiro conversar antes de responder."]
+    linhas.append("Já respondi:")
+    linhas.extend(respondidas)
+    return "\n".join(linhas)
+
+
 def _pi_answer_fallback_text(a: dict) -> str:
     """Resposta em TEXTO pro fallback da pergunta do Pi (drive do picker falhou). Mesma filosofia
     do _askq_fallback_text do Claude: a resposta do usuario NUNCA se perde — vira mensagem normal."""
@@ -6423,6 +6464,23 @@ def answer(name: str, body: AnswerBody):
             _recusa_se_so_enfileirou(name, res)
             return {"ok": True, "fallback": True}
         return {"ok": True, "fallback": False}
+    # "Conversar sobre isso" junto de perguntas já respondidas: dirigir o picker perde as respostas
+    # — a TUI cancela tudo ao chegar nessa opção. Fecha por Escape e entrega o que ele escolheu como
+    # texto, o mesmo caminho do plano B do drive.
+    texto_conversar = _askq_conversar_text(answers, jsonl) if any(
+        a.get("kind") == "chat" for a in answers) else ""
+    if texto_conversar:
+        terminal.interrupt(name)      # Escape unico: fecha o picker (sem clear — input vazio)
+        _espera_picker_fechar(name)
+        res = _send_one(name, texto_conversar)
+        if not res["ok"]:
+            raise HTTPException(409, detail=erro("erro_drive_fallback_falhou",
+                                                 f"nao deu pra entregar a resposta por texto: {_erro_texto(res['error'])}",
+                                                 erro=res["error"]))
+        _recusa_se_so_enfileirou(name, res)
+        if jsonl:
+            clear_pending_askq(jsonl)
+        return {"ok": True, "fallback": True}
     try:
         terminal_input.answer_questions(name, answers)
     except ValueError as e:

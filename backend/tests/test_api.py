@@ -1799,6 +1799,66 @@ def test_askq_fallback_text_without_sidecar_and_chat_kind(monkeypatch):
     assert api_mod._askq_fallback_text([{"kind": "chat"}], None) == ""
 
 
+def test_askq_conversar_text_abre_pela_recusa_e_guarda_as_respostas(monkeypatch):
+    # 17/09/2026: com terminal, "Chat about this" cancela o picker INTEIRO — as duas primeiras
+    # respostas sumiam e o Claude so registrava "User declined to answer questions".
+    monkeypatch.setattr(api_mod, "read_pending_askq", lambda jsonl: AskQuestion(questions=[
+        AskQuestionItem(header="Cor", question="Cor favorita?", options=[AskOption(label="Azul")]),
+        AskQuestionItem(header="Num", question="Número favorito?", options=[AskOption(label="2")]),
+        AskQuestionItem(header="Bicho", question="Animal favorito?", options=[AskOption(label="Gato")]),
+    ]))
+    text = api_mod._askq_conversar_text([
+        {"kind": "option", "labels": ["Azul"]},
+        {"kind": "option", "labels": ["2"]},
+        {"kind": "chat", "chat_index": 2},
+    ], "/x/u.jsonl")
+    assert text.splitlines()[0] == "Sobre «Animal favorito?» prefiro conversar antes de responder."
+    assert "- Cor favorita? → Azul" in text and "- Número favorito? → 2" in text
+
+
+def test_askq_conversar_text_sem_resposta_a_preservar_e_vazio(monkeypatch):
+    # So "conversar": nao ha o que salvar, e a TUI ja tem a opcao nativa -> drive normal.
+    monkeypatch.setattr(api_mod, "read_pending_askq", lambda jsonl: None)
+    assert api_mod._askq_conversar_text([{"kind": "chat", "chat_index": 2}], "/x/u.jsonl") == ""
+
+
+def test_answer_conversar_fecha_o_picker_e_manda_as_respostas_por_texto(api_client):
+    info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
+    with patch.object(ti_mod, "answer_questions") as drive, \
+         patch("app.api.registry.list", return_value=[info]), \
+         patch.object(api_mod, "_askq_conversar_text", return_value="Sobre «Animal?» prefiro conversar antes de responder.\nJá respondi:\n- Cor? → Azul"), \
+         patch.object(api_mod, "_espera_picker_fechar", return_value=True), \
+         patch.object(api_mod.terminal, "interrupt") as intr, \
+         patch.object(api_mod, "_send_one",
+                      return_value={"ok": True, "error": None, "delivered": True}) as send, \
+         patch.object(api_mod, "clear_pending_askq") as clear:
+        r = api_client.post("/api/sessions/s1/answer", headers=_h(), json={"answers": [
+            {"kind": "option", "indices": [0], "labels": ["Azul"]},
+            {"kind": "chat", "chat_index": 2},
+        ]})
+    assert r.status_code == 200 and r.json()["fallback"] is True
+    drive.assert_not_called()     # dirigir o picker era o que perdia as respostas
+    intr.assert_called_once_with("s1")
+    assert "Azul" in send.call_args[0][1]
+    clear.assert_called_once()
+
+
+def test_answer_so_conversar_continua_dirigindo_o_picker(api_client):
+    info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
+    with patch.object(ti_mod, "answer_questions") as drive, \
+         patch("app.api.registry.list", return_value=[info]), \
+         patch.object(api_mod, "read_pending_askq", return_value=None), \
+         patch.object(api_mod.terminal, "interrupt") as intr, \
+         patch.object(api_mod, "_send_one") as send, \
+         patch.object(api_mod, "clear_pending_askq"):
+        r = api_client.post("/api/sessions/s1/answer", headers=_h(),
+                            json={"answers": [{"kind": "chat", "chat_index": 2}]})
+    assert r.status_code == 200 and r.json()["fallback"] is False
+    drive.assert_called_once()
+    intr.assert_not_called()
+    send.assert_not_called()
+
+
 def test_answer_drive_error_falls_back_to_text(api_client):
     # DriveError no drive -> Escape (interrupt) + resposta como texto (_send_one) + 200 fallback:true.
     info = SessionInfo(name="s1", cwd="/x", jsonl="/x/u.jsonl")
