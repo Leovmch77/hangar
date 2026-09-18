@@ -215,7 +215,11 @@ def read_file(cwd: str, path: str) -> dict:
 
 def read_at(alvo: Path, path: str) -> dict:
     """Le um alvo JA resolvido. A politica de caminho e de quem chama: a raiz da sessao no
-    `read_file`, a citacao no transcript no endpoint de arquivo externo."""
+    `read_file`, a citacao no transcript no endpoint de arquivo externo.
+
+    ATENCAO a quem for chamar isto de um lugar novo: nao ha guarda de caminho AQUI DENTRO — nem
+    contra `.git`, nem contra fuga de raiz. Passar um Path vindo do cliente sem provar antes de
+    onde ele pode vir reabre path traversal sem nenhum erro de tipo pra avisar."""
     if alvo.is_dir():
         raise FileError(400, "erro_arq_e_pasta", "isso e uma pasta")
     if not alvo.is_file():
@@ -258,7 +262,8 @@ def write_file(cwd: str, path: str, texto: str, digest_lido: str | None) -> dict
 
 
 def write_at(alvo: Path, path: str, texto: str, digest_lido: str | None) -> dict:
-    """Grava num alvo JA resolvido. A politica de caminho e de quem chama (ver `read_at`)."""
+    """Grava num alvo JA resolvido. A politica de caminho e de quem chama, e a ressalva do
+    `read_at` vale em dobro aqui: sem prova de origem do Path, isto escreve onde mandarem."""
     if alvo.is_dir():
         raise FileError(400, "erro_arq_e_pasta", "isso e uma pasta")
     if not alvo.is_file():

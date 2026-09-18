@@ -163,8 +163,11 @@ export class FilesStore {
     if (!atual || atual.path !== path) return 'erro_arq_inexistente';
     try {
       // Arquivo de fora da raiz grava pelo endpoint da citacao: o `files/write` recusaria o
-      // caminho absoluto antes de olhar o conteudo.
-      const gravar = this.externo ? writeCitedFile : writeFile;
+      // caminho absoluto antes de olhar o conteudo. `eraExterno` e capturado ANTES do await:
+      // `this.externo` e do arquivo que esta na tela AGORA, e trocar de aba com a gravacao em
+      // voo fazia a decisao de reler o diff usar a flag do arquivo errado.
+      const eraExterno = this.externo;
+      const gravar = eraExterno ? writeCitedFile : writeFile;
       const r = await gravar(this.sessao, path, texto, atual.digest);
       // So atualiza se ainda for o mesmo arquivo na tela (o usuario pode ter trocado no meio).
       if (this.conteudo?.path === path) {
@@ -178,7 +181,7 @@ export class FilesStore {
       this.rascunhos.delete(path);
       // O diff da tela envelheceu no instante da gravacao: reler e o que impede o visor de
       // afirmar um diff que nao existe mais. Externo nao tem diff (nem esta no repo da sessao).
-      if (!this.externo) void this.recarregarDiff(path);
+      if (!eraExterno) void this.recarregarDiff(path);
       return null;
     } catch (e) {
       return (e as Error)?.message || 'erro_arq_salvar_falhou';

@@ -1770,13 +1770,18 @@ export function readFile(name: string, path: string): Promise<FileContent> {
 // readFile — inclusive o digest, que e o que liga o botao de salvar no visor.
 export function readCitedFile(name: string, path: string): Promise<FileContent> {
   const q = new URLSearchParams({ path });
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/file/text?${q}`);
+  // O teto não é enfeite: o caminho citado pode estar num mount de rede ou num dispositivo lento,
+  // e sem ele a Promise nunca assenta — o visor fica com o esqueleto girando para sempre, sem
+  // erro e sem pista. Era o que o `fetch` cru do `abrirExterno` já garantia antes.
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/file/text?${q}`,
+    { signal: AbortSignal.timeout(30_000) });
 }
 
 export function writeCitedFile(name: string, path: string, text: string, digest: string | null): Promise<{ path: string; size: number; digest: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/file/text`, {
     method: 'POST',
     body: JSON.stringify({ path, text, digest }),
+    signal: AbortSignal.timeout(30_000),
   });
 }
 
