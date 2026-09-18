@@ -46,11 +46,11 @@ it('mostra a máquina rápida, alterna tokens/custo e preserva o período quando
     button(m.custos_estimativa_api()).click();
     await settle();
     expect(target.querySelector('svg')?.getAttribute('aria-label')).toContain(m.custos_estimativa_api());
-    button(m.custos_periodo_7d()).click();
+    button(m.custos_periodo_1d()).click();
     await settle();
     finishSlow(report('30d'));
     await settle();
-    expect(button(m.custos_periodo_7d()).getAttribute('aria-pressed')).toBe('true');
+    expect(button(m.custos_periodo_1d()).getAttribute('aria-pressed')).toBe('true');
     expect(target.querySelector('.loading-status')).toBeNull();
     expect(target.textContent).toContain(m.custos_fora_periodo_1());
     expect(target.querySelector('.overview')?.textContent).toContain('200');

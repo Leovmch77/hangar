@@ -9,13 +9,15 @@
     mergeUso, agruparPorPlugin, Aquecendo, projectLabel,
     type UsoServerResult, type MergedUso, type UsoBucket, type UsoReport, type UsoFiltros,
   } from '@hangar/core';
-  import { dec, tok } from '../lib/fmt';
+  import { dec, tok, money, money2 } from '../lib/fmt';
+  import { moeda as moedaApp } from '../lib/moeda.svelte';
 
   interface Props { onBack: () => void; }
   let { onBack }: Props = $props();
 
-  type Periodo = '7d' | '30d' | '90d' | 'all';
+  type Periodo = '1d' | '7d' | '30d' | '90d' | 'all';
   const PERIODOS: { id: Periodo; label: string }[] = [
+    { id: '1d', label: m.custos_periodo_1d() },
     { id: '7d', label: m.custos_periodo_7d() },
     { id: '30d', label: m.custos_periodo_30d() },
     { id: '90d', label: m.custos_periodo_90d() },
@@ -140,11 +142,15 @@
 
   const report = $derived(merged?.report ?? null);
   const vazioNoPeriodo = $derived(!!report && !atualizando && report.totals.chamadas === 0 && report.totals.ctx_chars === 0);
-  const tokensReais = (b: UsoBucket) => b.input + b.output + b.cache_write + b.cache_read;
+  const tokensSemCache = (b: UsoBucket) => b.input + b.output;
   const ctxPorChamada = (b: UsoBucket) => (b.chamadas > 0 ? b.ctx_tokens_est / b.chamadas : 0);
   const porSessao = (b: UsoBucket) => (b.sessions > 0 ? b.ctx_tokens_est / b.sessions : 0);
   const ctxPorSessaoTotal = $derived(report && report.totals.sessions > 0
     ? report.by_contexto.reduce((n, b) => n + b.ctx_tokens_est, 0) / report.totals.sessions : 0);
+  const currency = $derived(moedaApp.cur);
+  const taxaCambio = $derived(report?.usd_brl ?? null);
+  const moeda = (n: number) => money(n, currency, taxaCambio);
+  const moedaExata = (n: number) => money2(n, currency, taxaCambio);
 
   // ── Seleção + detalhe (consulta própria com `foco`) ──────────────────────────
   type Aba = 'skill' | 'agente' | 'plugin' | 'tool' | 'bash' | 'mcp' | 'imagem' | 'contexto';
@@ -184,7 +190,8 @@
   // ── Tabela com abas ──────────────────────────────────────────────────────────
   // Uma medida por aba, sempre em tokens (a conta é por assinatura, não por dólar):
   // `ocupados` — skill/plugin: tamanho do texto × respostas em que ele ficou no contexto;
-  // `tokens` — agente: tokens reais do transcript filho;
+  // `tokens` — agente: entrada sem cache + saída do transcript filho. Cache fica separado
+  // na seção principal de agentes, igual à tela de Custos;
   // `ctx` — o resto: o que o resultado ou a injeção colocou no contexto.
   type Medida = 'ocupados' | 'tokens' | 'ctx';
   const ABAS: { id: Aba; label: string; medida: Medida }[] = [
@@ -198,11 +205,11 @@
     { id: 'imagem', label: m.uso_aba_imagens(), medida: 'ctx' },
   ];
   const principal = (b: UsoBucket, md: Medida) =>
-    md === 'ocupados' ? (b.ocupados_tokens_est ?? 0) : md === 'tokens' ? tokensReais(b) : b.ctx_tokens_est;
+    md === 'ocupados' ? (b.ocupados_tokens_est ?? 0) : md === 'tokens' ? tokensSemCache(b) : b.ctx_tokens_est;
   // Por chamada: skill mostra o TAMANHO de cada carga; contexto, a média por sessão.
   const porChamadaDe = (b: UsoBucket, a: Aba, md: Medida) =>
     a === 'contexto' ? porSessao(b) : md === 'ocupados' ? ctxPorChamada(b) : b.chamadas > 0 ? principal(b, md) / b.chamadas : 0;
-  const rotuloMedida = (md: Medida) => (md === 'ocupados' ? m.uso_col_ocupados() : md === 'tokens' ? m.uso_col_tokens() : m.uso_col_ctx());
+  const rotuloMedida = (md: Medida) => (md === 'ocupados' ? m.uso_col_ocupados() : md === 'tokens' ? m.uso_col_tokens_sem_cache() : m.uso_col_ctx());
   function listaDa(a: Aba): UsoBucket[] {
     if (!report) return [];
     return ({ skill: report.by_skill, agente: report.by_agente, plugin: report.by_plugin, tool: report.by_tool,
@@ -311,9 +318,37 @@
   const maxFerramenta = $derived(topFerramenta?.chamadas || 1);
   const comandosBash = $derived([...(report?.by_bash ?? [])].sort((a, b) => b.chamadas - a.chamadas).slice(0, 5)
     .map((b) => `${b.key} ${dec(b.chamadas, 0)}`).join(', '));
-  const gruposAgente = $derived([...agruparPorPlugin(report?.by_agente ?? [], tokensReais, '@nativo')].sort(porChave('vezes')));
-  const maxAgente = $derived(gruposAgente[0]?.vezes || 1);
-  const TOP_NOMES = 4;
+
+  type EstatAgente = Pick<UsoBucket, 'chamadas' | 'sessions' | 'input' | 'output' | 'cache_write' | 'cache_read' | 'cost'
+    | 'cost_input' | 'cost_output' | 'cost_cache_write' | 'cost_cache_read'>;
+  const somarAgentes = (itens: EstatAgente[]): EstatAgente => itens.reduce((a, b) => ({
+    chamadas: a.chamadas + b.chamadas,
+    sessions: a.sessions + b.sessions,
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cache_write: a.cache_write + b.cache_write,
+    cache_read: a.cache_read + b.cache_read,
+    cost: a.cost + b.cost,
+    cost_input: a.cost_input + b.cost_input,
+    cost_output: a.cost_output + b.cost_output,
+    cost_cache_write: a.cost_cache_write + b.cost_cache_write,
+    cost_cache_read: a.cost_cache_read + b.cost_cache_read,
+  }), { chamadas: 0, sessions: 0, input: 0, output: 0, cache_write: 0, cache_read: 0, cost: 0,
+    cost_input: 0, cost_output: 0, cost_cache_write: 0, cost_cache_read: 0 });
+  const gruposAgente = $derived.by(() => {
+    const linhas = report?.by_agente ?? [];
+    const porKey = new Map(linhas.map((b) => [b.key, b]));
+    return agruparPorPlugin(linhas, (b) => b.cost, '@nativo').map((g) => {
+      const itens = g.itens.map((i) => ({
+        nome: i.nome,
+        keys: i.keys,
+        ...somarAgentes(i.keys.map((k) => porKey.get(k)).filter((b): b is UsoBucket => !!b)),
+      })).sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas || a.nome.localeCompare(b.nome));
+      return { plugin: g.plugin, itens, ...somarAgentes(itens) };
+    }).sort((a, b) => b.cost - a.cost || b.chamadas - a.chamadas || a.plugin.localeCompare(b.plugin));
+  });
+  const pluginAgenteTop = $derived(maiorPor(gruposAgente.filter((g) => g.plugin && !g.plugin.startsWith('@')), (g) => g.cost));
+  const agenteTop = $derived(maiorPor(gruposAgente.flatMap((g) => g.itens.map((i) => ({ ...i, grupo: g.plugin }))), (i) => i.cost));
   function abrirItem(a: Aba, key: string) { aba = a; selecionar(a, key); }
   let avancadoAberto = $state(localStorage.getItem('cp_uso_avancado') === '1');
   $effect(() => { localStorage.setItem('cp_uso_avancado', avancadoAberto ? '1' : '0'); });
@@ -384,7 +419,7 @@
     </div>
     <div class="toolbar">
       <span class="seg" role="group" aria-label={m.custos_periodo()}>
-        {#each PERIODOS as p}
+        {#each PERIODOS as p (p.id)}
           <button aria-pressed={period === p.id} onclick={() => (period = p.id)}>{p.label}</button>
         {/each}
       </span>
@@ -471,17 +506,17 @@
   {:else}
     <div class="respostas">
       <div class="resp">
-        <span class="q">{m.uso_resp_plugin_pesa()}</span>
+        <span class="q">{m.uso_resp_plugin_skills()}</span>
         {#if pluginTop}
           <strong>{nomeGrupo(pluginTop.plugin)}</strong>
-          <span class="a">{m.uso_resp_plugin_sub({ n: tok(pluginTop.peso), pct: dec((pluginTop.peso / pesoTotalSkills) * 100, 0) })}</span>
+          <span class="a">{m.uso_resp_plugin_skills_sub({ n: tok(pluginTop.peso), pct: dec((pluginTop.peso / pesoTotalSkills) * 100, 0) })}</span>
         {:else}<strong class="dim">—</strong>{/if}
       </div>
       <div class="resp">
-        <span class="q">{m.uso_resp_skill_pesa()}</span>
+        <span class="q">{m.uso_resp_skill_contexto()}</span>
         {#if skillPesada}
           <strong>{skillPesada.nome}</strong>
-          <span class="a">{m.uso_resp_grupo_tokens({ grupo: nomeGrupo(skillPesada.grupo), n: tok(skillPesada.peso) })}</span>
+          <span class="a">{m.uso_resp_grupo_contexto({ grupo: nomeGrupo(skillPesada.grupo), n: tok(skillPesada.peso) })}</span>
         {:else}<strong class="dim">—</strong>{/if}
       </div>
       <div class="resp">
@@ -489,6 +524,20 @@
         {#if skillUsada}
           <strong>{skillUsada.nome}</strong>
           <span class="a">{m.uso_resp_grupo_vezes({ grupo: nomeGrupo(skillUsada.grupo), n: dec(skillUsada.vezes, 0) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
+      </div>
+      <div class="resp">
+        <span class="q">{m.uso_resp_plugin_agentes()}</span>
+        {#if pluginAgenteTop}
+          <strong>{nomeGrupo(pluginAgenteTop.plugin)}</strong>
+          <span class="a">{m.uso_resp_agente_custo_sub({ custo: moeda(pluginAgenteTop.cost), n: dec(pluginAgenteTop.chamadas, 0) })}</span>
+        {:else}<strong class="dim">—</strong>{/if}
+      </div>
+      <div class="resp">
+        <span class="q">{m.uso_resp_agente_caro()}</span>
+        {#if agenteTop}
+          <strong>{agenteTop.nome}</strong>
+          <span class="a">{m.uso_resp_agente_custo_sub({ custo: moeda(agenteTop.cost), n: dec(agenteTop.chamadas, 0) })}</span>
         {:else}<strong class="dim">—</strong>{/if}
       </div>
       <div class="resp">
@@ -586,18 +635,49 @@
             {#if !gruposAgente.length}
               <p class="muted">{m.uso_vazio_secao()}</p>
             {:else}
-              <ol class="rk">
-                {#each gruposAgente as g (g.plugin)}
-                  {@const nomes = [...g.itens].sort(porChave('vezes'))}
-                  <li>
-                    <div class="rk-topo"><strong>{nomeGrupo(g.plugin)}</strong><b>{dec(g.vezes, 0)}</b></div>
-                    <span class="gbar"><i class="vezes" style="width: {(g.vezes / maxAgente) * 100}%"></i></span>
-                    <p class="rk-sub">
-                      {#each nomes.slice(0, TOP_NOMES) as i, n (i.nome)}{n ? ' · ' : ''}<button class="rk-nome" onclick={() => abrirItem('agente', i.keys[0])}>{i.nome}</button> <span class="dim">{dec(i.vezes, 0)}</span>{/each}{#if nomes.length > TOP_NOMES} · <span class="dim">{m.uso_mais_n({ n: nomes.length - TOP_NOMES })}</span>{/if}
-                    </p>
-                  </li>
-                {/each}
-              </ol>
+              <div class="scroll">
+                <table class="data agentes">
+                  <thead>
+                    <tr>
+                      <th>{m.uso_col_plugin_agente()}</th>
+                      <th class="n">{m.uso_col_custo_real()}</th>
+                      <th class="n">{m.uso_col_chamadas()}</th>
+                      <th class="n">{m.custos_input_sem_cache()}</th>
+                      <th class="n">{m.custos_output_total()}</th>
+                      <th class="n">{m.custos_tipo_cache_escrito()}</th>
+                      <th class="n">{m.custos_tipo_cache_lido()}</th>
+                      <th class="n">{m.uso_col_sessoes()}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each gruposAgente as g (g.plugin)}
+                      <tr class="grupo-agente">
+                        <td class="nome"><strong>{nomeGrupo(g.plugin)}</strong> <span class="dim">{m.uso_agentes_n({ n: g.itens.length })}</span></td>
+                        <td class="n">{moedaExata(g.cost)}</td>
+                        <td class="n">{dec(g.chamadas, 0)}</td>
+                        <td class="n">{@render tokenCusto(g.input, g.cost_input)}</td>
+                        <td class="n">{@render tokenCusto(g.output, g.cost_output)}</td>
+                        <td class="n">{@render tokenCusto(g.cache_write, g.cost_cache_write)}</td>
+                        <td class="n">{@render tokenCusto(g.cache_read, g.cost_cache_read)}</td>
+                        <td class="n">—</td>
+                      </tr>
+                      {#each g.itens as i (i.nome)}
+                        <tr class="click item-agente" aria-selected={selecionado?.aba === 'agente' && i.keys.includes(selecionado.key)} onclick={() => abrirItem('agente', i.keys[0])}>
+                          <td class="nome">{i.nome}</td>
+                          <td class="n">{moedaExata(i.cost)}</td>
+                          <td class="n">{dec(i.chamadas, 0)}</td>
+                          <td class="n">{@render tokenCusto(i.input, i.cost_input)}</td>
+                          <td class="n">{@render tokenCusto(i.output, i.cost_output)}</td>
+                          <td class="n">{@render tokenCusto(i.cache_write, i.cost_cache_write)}</td>
+                          <td class="n">{@render tokenCusto(i.cache_read, i.cost_cache_read)}</td>
+                          <td class="n">{dec(i.sessions, 0)}</td>
+                        </tr>
+                      {/each}
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+              <p class="nota">{m.uso_cache_legado_nota()}</p>
             {/if}
           </section>
         </div>
@@ -734,6 +814,10 @@
   </span>
 {/snippet}
 
+{#snippet tokenCusto(tokens: number, custo: number)}
+  <span class="token-custo"><span>{tok(tokens)}</span><small>{moedaExata(custo)}</small></span>
+{/snippet}
+
 {#snippet detalhe(b: UsoBucket)}
   <div class="detalhe">
     <div class="det-cab">
@@ -750,8 +834,12 @@
         <div><dt>{selecionado!.aba === 'skill' ? m.uso_col_origem_skill() : m.uso_col_origem_agente()}</dt><dd>{dec(b.pedidas, 0)} / {dec(b.chamadas - b.pedidas, 0)}</dd></div>
       {/if}
       {#if abaAtual.medida === 'tokens'}
-        <div><dt>{m.uso_detalhe_tokens()}</dt><dd>{tok(tokensReais(b))}</dd></div>
-        <div><dt>{m.uso_col_tok_chamada()}</dt><dd>{tok(porChamadaDe(b, selecionado!.aba, 'tokens'))}</dd></div>
+        <div><dt>{m.uso_col_custo_real()}</dt><dd>{moedaExata(b.cost)}</dd></div>
+        <div><dt>{m.custos_input_sem_cache()}</dt><dd>{@render tokenCusto(b.input, b.cost_input)}</dd></div>
+        <div><dt>{m.custos_output_total()}</dt><dd>{@render tokenCusto(b.output, b.cost_output)}</dd></div>
+        <div><dt>{m.custos_tipo_cache_escrito()}</dt><dd>{@render tokenCusto(b.cache_write, b.cost_cache_write)}</dd></div>
+        <div><dt>{m.custos_tipo_cache_lido()}</dt><dd>{@render tokenCusto(b.cache_read, b.cost_cache_read)}</dd></div>
+        <div><dt>{m.uso_col_tok_sem_cache_chamada()}</dt><dd>{tok(porChamadaDe(b, selecionado!.aba, 'tokens'))}</dd></div>
       {/if}
       {#if abaAtual.medida === 'ocupados'}
         <div title={m.uso_ocupados_nota()}><dt>{m.uso_col_ocupados()}</dt><dd>≈ {tok(b.ocupados_tokens_est ?? 0)}</dd></div>
@@ -840,7 +928,7 @@
   .sk-serie { height: 90px; }
 
   /* topo: cada cartão é uma pergunta respondida com um nome */
-  .respostas { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin: var(--space-2) 0 var(--space-5); }
+  .respostas { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); margin: var(--space-2) 0 var(--space-5); }
   .resp { display: flex; flex-direction: column; gap: 2px; min-width: 0; background: var(--surface-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
   .resp .q { font-size: var(--text-xs); color: var(--text-muted); }
   .resp strong { font-size: var(--text-lg); font-weight: 650; overflow-wrap: anywhere; }
@@ -873,7 +961,7 @@
   .gbar > i { display: block; height: 100%; border-radius: 0 3px 3px 0; }
   .nota { font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2); }
 
-  /* ferramentas e subagentes: nome e número em cima, barra embaixo */
+  /* ferramentas: nome e número em cima, barra embaixo */
   .rk { list-style: none; margin: 0; padding: 0; }
   .rk li { padding: 7px 0; border-bottom: 1px solid var(--border-subtle); }
   .rk li:last-child { border-bottom: 0; }
@@ -884,6 +972,11 @@
   .rk-sub { font-size: var(--text-xs); color: var(--text-secondary); margin-top: 5px; }
   .rk-nome { background: transparent; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
   .rk-nome:hover { color: var(--accent); }
+  table.agentes .grupo-agente td { background: var(--surface-raised); border-top-color: var(--border-default); }
+  table.agentes .grupo-agente td:first-child { border-left: 3px solid var(--accent); }
+  table.agentes .item-agente td.nome { padding-left: 28px; color: var(--text-secondary); }
+  .token-custo { display: inline-flex; flex-direction: column; align-items: flex-end; line-height: 1.2; }
+  .token-custo small { color: var(--text-muted); font-size: var(--text-2xs); }
 
   .painel { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-items: start; }
   .painel.com-detalhe { grid-template-columns: minmax(0, 1fr) 340px; }
@@ -897,7 +990,7 @@
   .cab h2 { font-size: var(--text-base); font-weight: 650; }
   .cab .hint { font-size: var(--text-xs); color: var(--text-secondary); max-width: 80ch; margin-top: 2px; }
   .cab .total { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-  .linha-graf { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+  .linha-graf { display: grid; grid-template-columns: 1fr; gap: var(--space-5); }
   .avancado { margin-bottom: var(--space-5); }
   .avancado > summary { cursor: pointer; font-size: var(--text-sm); color: var(--text-secondary); padding: var(--space-2) 0; margin-bottom: var(--space-2); }
   .avancado > summary:hover { color: var(--text-primary); }
@@ -913,8 +1006,6 @@
   .seg-pilha.apagada { opacity: 0.35; }
   .legenda { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   .legenda li { display: grid; grid-template-columns: 12px 1fr auto auto; gap: var(--space-2); align-items: center; font-size: var(--text-sm); }
-  .legenda.inline { display: flex; gap: var(--space-3); font-size: var(--text-xs); color: var(--text-secondary); }
-  .legenda.inline li { display: inline-flex; gap: 6px; }
   .legenda li.apagada { opacity: 0.45; }
   .legenda .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
   .legenda .lab { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

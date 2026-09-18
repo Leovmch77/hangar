@@ -16,7 +16,7 @@ from app.costs_sources import LOCAL, UsageRow, coletar_ou_aquecendo, rotulo_de_p
 from app.models import Applied, ComboRow, CostReport, DimBucket, KindBucket, RateInfo
 
 TIPOS = ("input", "output", "cache_write", "cache_read")
-PERIODOS = {"7d": 7, "30d": 30, "90d": 90}
+PERIODOS = {"1d": 1, "7d": 7, "30d": 30, "90d": 90}
 
 
 # _account_info NÃO mora mais aqui: virou costs_sources.account_info. Este módulo importa

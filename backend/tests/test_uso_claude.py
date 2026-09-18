@@ -217,6 +217,9 @@ def test_agente_liga_ao_transcript_filho_pelo_agentId(tmp_path, monkeypatch):
     assert ag["Explore"].chamadas == 1
     assert (ag["Explore"].input, ag["Explore"].output) == (1000, 100)
     assert ag["Explore"].cost == pytest.approx(1000 / 1e6 + 100 / 1e6 * 10)
+    assert ag["Explore"].cost_input == pytest.approx(1000 / 1e6)
+    assert ag["Explore"].cost_output == pytest.approx(100 / 1e6 * 10)
+    assert ag["Explore"].cost_cache_write == ag["Explore"].cost_cache_read == 0
     assert ag["general-purpose"].chamadas == 1 and ag["general-purpose"].cost == 0
 
 
@@ -236,6 +239,16 @@ def test_agente_pedido_ou_sozinho_pela_heuristica_do_prompt(tmp_path):
     r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all")
     ag = {b.key: b for b in r.by_agente}
     assert (ag["Explore"].chamadas, ag["Explore"].pedidas) == (3, 2)
+
+
+def test_filtro_plugin_inclui_agente_com_prefixo(tmp_path):
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("revise", "p1"),
+        _assistant([_tool_use("Agent", {"subagent_type": "ecc:typescript-reviewer", "prompt": "x"}, "t1")], "m1"),
+    ])
+    r = uso_report.montar(ct.varrer_uso(tmp_path), [], "all", plugin="ecc")
+    assert [(b.key, b.plugin, b.chamadas) for b in r.by_agente] == [("ecc:typescript-reviewer", "ecc", 1)]
+    assert [(b.key, b.chamadas) for b in r.by_plugin] == [("ecc", 1)]
 
 
 def test_contexto_mede_rendered_ou_content_e_ignora_stdout_de_hook(tmp_path):

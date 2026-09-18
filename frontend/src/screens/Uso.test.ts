@@ -22,8 +22,11 @@ const report = (period: string): Partial<UsoReport> => ({
     { ...zeroUso('pesada'), plugin: '@repo', sessions: 1, chamadas: 3, ctx_tokens_est: 4500, ocupados_tokens_est: 45000, respostas: 10 },
     ...Array.from({ length: 20 }, (_, i) => ({ ...zeroUso(`s${String(i).padStart(2, '0')}`), sessions: 1, chamadas: 5, ctx_tokens_est: 500, ocupados_tokens_est: 500, respostas: 1 })),
   ],
-  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000 },
-              { ...zeroUso('ecc:python-reviewer'), sessions: 1, chamadas: 2, input: 900 }],
+  by_agente: [{ ...zeroUso('Explore'), sessions: 1, chamadas: 7, pedidas: 3, input: 21000,
+                output: 3000, cache_read: 40000, cost: 4, cost_input: 1, cost_output: 2, cost_cache_read: 1 },
+              { ...zeroUso('ecc:python-reviewer'), sessions: 1, chamadas: 2, input: 900,
+                output: 500, cache_write: 8000, cache_read: 30000, cost: 9,
+                cost_input: 1, cost_output: 3, cost_cache_write: 4, cost_cache_read: 1 }],
   by_bash: [{ ...zeroUso('git'), chamadas: 60 }, { ...zeroUso('grep'), chamadas: 40 }],
   by_tool: [{ ...zeroUso('Bash'), sessions: 3, chamadas: 100, ctx_chars: 4000, ctx_tokens_est: 1000 },
             { ...zeroUso('Skill'), sessions: 1, chamadas: 50 }],
@@ -47,9 +50,13 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
   const grupos = () => [...target.querySelectorAll('.grupos > li > button strong')].map((s) => s.textContent);
   try {
     await settle();
+    const umDia = [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === m.custos_periodo_1d()) as HTMLButtonElement;
+    umDia.click();
+    await settle();
+    expect(umDia.getAttribute('aria-pressed')).toBe('true');
     // Topo: cada cartão responde com um nome. "@repo" pesa menos que superpowers e não é plugin.
     const respostas = [...target.querySelectorAll('.respostas .resp')].map((r) => r.querySelector('strong')?.textContent);
-    expect(respostas).toEqual(['superpowers', 'muitas', 'muitas', 'Bash']);
+    expect(respostas).toEqual(['superpowers', 'muitas', 'muitas', 'ecc', 'python-reviewer', 'Bash']);
     expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_ferramenta_sub({ pct: '100', n: '100' }));
     // Grupos por peso; só o primeiro abre sozinho; skill sem plugin cai em "sem plugin".
     expect(grupos()).toEqual(['superpowers', m.uso_grupo_repo(), m.uso_grupo_sem()]);
@@ -67,11 +74,15 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
     busca.value = ''; busca.dispatchEvent(new Event('input', { bubbles: true }));
     await settle();
     // Ferramentas sem Skill/Agent, com os comandos do Bash; subagentes agrupados pelo plugin.
-    const [ferramentas, agentes] = [...target.querySelectorAll('ol.rk')];
+    const [ferramentas] = [...target.querySelectorAll('ol.rk')];
     expect([...ferramentas.querySelectorAll('li strong')].map((s) => s.textContent)).toEqual(['Bash']);
     expect(ferramentas.textContent).toContain(m.uso_ferr_bash({ lista: 'git 60, grep 40' }));
-    expect([...agentes.querySelectorAll('.rk-topo strong')].map((s) => s.textContent)).toEqual([m.uso_grupo_nativo(), 'ecc']);
+    const agentes = target.querySelector('table.agentes')!;
+    expect([...agentes.querySelectorAll('.grupo-agente strong')].map((s) => s.textContent)).toEqual(['ecc', m.uso_grupo_nativo()]);
     expect(agentes.textContent).toContain('python-reviewer');
+    expect(agentes.textContent).toContain(m.custos_input_sem_cache());
+    expect(agentes.textContent).toContain(m.custos_tipo_cache_lido());
+    expect(agentes.textContent).toContain('30 mil');
     expect(target.textContent).not.toContain(m.uso_graf_areas());
     // Abrir outro grupo e clicar na skill abre o detalhe dela.
     ([...target.querySelectorAll('.grupos > li > button')].find((b) => b.textContent?.includes(m.uso_grupo_repo())) as HTMLButtonElement).click();

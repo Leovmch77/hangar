@@ -42,10 +42,11 @@
       : t === 'cache_write' ? b.cost_cache_write : b.cost_cache_read;
 
   // ── Estado ──────────────────────────────────────────────────────────────────
-  type Periodo = '7d' | '30d' | '90d' | 'all';
+  type Periodo = '1d' | '7d' | '30d' | '90d' | 'all';
   type Dim = 'provider' | 'source' | 'project' | 'model' | 'servidor';
 
   const PERIODOS: { id: Periodo; label: string; dias: number }[] = [
+    { id: '1d', label: m.custos_periodo_1d(), dias: 1 },
     { id: '7d', label: m.custos_periodo_7d(), dias: 7 },
     { id: '30d', label: m.custos_periodo_30d(), dias: 30 },
     { id: '90d', label: m.custos_periodo_90d(), dias: 90 },
@@ -774,7 +775,7 @@
   </div>
   <div class="period-toolbar">
     <span class="seg" role="group" aria-label={m.custos_periodo()}>
-      {#each PERIODOS as p}
+      {#each PERIODOS as p (p.id)}
         <button aria-pressed={period === p.id} onclick={() => (period = p.id)}>{p.label}</button>
       {/each}
     </span>

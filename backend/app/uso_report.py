@@ -77,7 +77,9 @@ _CHARS_POR_TOKEN_SKILL = 2.5
 
 def _zero() -> dict:
     return {"sessions": set(), "subs": set(), "chamadas": 0, "pedidas": 0, "ctx_chars": 0, "tokens_est": 0,
-            "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0, "plugin": "",
+            "input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "cost": 0.0,
+            "cost_input": 0.0, "cost_output": 0.0, "cost_cache_write": 0.0,
+            "cost_cache_read": 0.0, "plugin": "",
             "ocupados": 0, "respostas": 0, "regua": _CHARS_POR_TOKEN}
 
 
@@ -85,22 +87,28 @@ def _sessao(b: dict, l: UsoLinha) -> None:
     (b["subs"] if l.subagente else b["sessions"]).add(l.session_id)
 
 
-def _custo_real(l: UsoLinha) -> float:
+def _custos_reais(l: UsoLinha) -> dict[str, float]:
     if not (l.input or l.output or l.cache_write or l.cache_read):
-        return 0.0
+        return {}
     c = costs._custo_da_linha(UsageRow(
         ts=datetime.fromisoformat(l.dia).replace(tzinfo=LOCAL), source=l.fonte,
         provider="openai" if l.fonte == "codex" else "anthropic", model=l.model, project=l.cwd,
         session_id=l.session_id,
         input=l.input, output=l.output, cache_write=l.cache_write, cache_read=l.cache_read,
         cache_write_1h=l.cache_write_1h, fast=l.fast))
-    return sum(c.values()) if c else 0.0
+    return c or {}
+
+
+def _custo_real(l: UsoLinha) -> float:
+    return sum(_custos_reais(l).values())
 
 
 def _custo_dos_agentes(tokens: list[UsageRow]) -> dict[str, dict]:
     """agentId -> tokens e custo do transcript filho (`…/subagents/agent-<id>`)."""
     out: dict[str, dict] = defaultdict(lambda: {"input": 0, "output": 0, "cache_write": 0,
-                                                "cache_read": 0, "cost": 0.0})
+                                                "cache_read": 0, "cost": 0.0,
+                                                "cost_input": 0.0, "cost_output": 0.0,
+                                                "cost_cache_write": 0.0, "cost_cache_read": 0.0})
     for r in tokens:
         if _MARCA_SUBAGENTE not in r.session_id:
             continue
@@ -113,6 +121,8 @@ def _custo_dos_agentes(tokens: list[UsageRow]) -> dict[str, dict]:
         c = costs._custo_da_linha(r)
         if c:
             a["cost"] += sum(c.values())
+            for k, v in c.items():
+                a[f"cost_{k}"] += v
     return out
 
 
@@ -125,12 +135,23 @@ def _custo_linha(l: UsoLinha, agentes: dict[str, dict]) -> float:
     return 0.0
 
 
+def _custos_linha(l: UsoLinha, agentes: dict[str, dict]) -> dict[str, float]:
+    if l.tipo == "skill":
+        return {f"cost_{k}": v for k, v in _custos_reais(l).items()}
+    if l.tipo == "agente" and l.detalhe:
+        a = agentes.get(l.detalhe)
+        return {k: a[k] for k in ("cost_input", "cost_output", "cost_cache_write", "cost_cache_read")} if a else {}
+    return {}
+
+
 def _bucket(key: str, v: dict) -> UsoBucket:
     return UsoBucket(key=key, plugin=v["plugin"], sessions=len(v["sessions"]), subagentes=len(v["subs"]),
                      chamadas=v["chamadas"], pedidas=v["pedidas"], ctx_chars=v["ctx_chars"],
                      ctx_tokens_est=int(v["ctx_chars"] / v["regua"]) + v["tokens_est"],
                      input=v["input"], output=v["output"], cache_write=v["cache_write"],
                      cache_read=v["cache_read"], cost=v["cost"],
+                     cost_input=v["cost_input"], cost_output=v["cost_output"],
+                     cost_cache_write=v["cost_cache_write"], cost_cache_read=v["cost_cache_read"],
                      ocupados_tokens_est=int(v["ocupados"] / _CHARS_POR_TOKEN_SKILL),
                      respostas=v["respostas"])
 
@@ -167,6 +188,8 @@ def _somar_em(b: dict, l: UsoLinha, agentes: dict[str, dict], do_item: bool = Fa
         b["ctx_chars"] += l.ctx_chars
         b["tokens_est"] += l.tokens_est
     b["cost"] += _custo_linha(l, agentes)
+    for k, v in _custos_linha(l, agentes).items():
+        b[k] += v
     if do_item:
         b["ocupados"] += l.ocupados
         b["respostas"] += l.respostas
@@ -241,8 +264,10 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
            origens: dict[str, str] | None = None) -> UsoReport:
     contas, projetos, modelos, plugins_f = _lista(conta), _lista(projeto), _lista(modelo), _lista(plugin)
     if origens is not None:
-        uso = [replace(l, plugin=origens.get(l.nome, ORIGEM_EMBUTIDA)) if l.tipo == "skill" and not l.plugin else l
-               for l in uso]
+        uso = [replace(l, plugin=origens.get(l.nome, ORIGEM_EMBUTIDA))
+               if l.tipo == "skill" and not l.plugin else l for l in uso]
+    uso = [replace(l, plugin=plugin_de(l.nome)) if l.tipo == "agente" and not l.plugin else l
+           for l in uso]
 
     def filtrar(linhas: list[UsoLinha]) -> list[UsoLinha]:
         return [l for l in linhas
@@ -292,12 +317,16 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
             b["cache_write"] += l.cache_write
             b["cache_read"] += l.cache_read
             b["cost"] += _custo_real(l)
+            if l.tipo == "skill":
+                for k, v in _custos_reais(l).items():
+                    b[f"cost_{k}"] += v
         elif l.tipo == "agente" and l.detalhe:
             a = agentes.get(l.detalhe)
             if a:
-                for k in ("input", "output", "cache_write", "cache_read", "cost"):
+                for k in ("input", "output", "cache_write", "cache_read", "cost",
+                          "cost_input", "cost_output", "cost_cache_write", "cost_cache_read"):
                     b[k] += a[k]
-        if l.plugin and l.tipo in ("skill", "contexto"):
+        if l.plugin and l.tipo in ("skill", "contexto", "agente"):
             p = plugins[l.plugin]
             p["plugin"] = l.plugin
             _sessao(p, l)
@@ -311,6 +340,14 @@ def montar(uso: list[UsoLinha], tokens: list[UsageRow], period: str = "all",
                 p["cache_write"] += l.cache_write
                 p["cache_read"] += l.cache_read
                 p["cost"] += _custo_real(l)
+                for k, v in _custos_reais(l).items():
+                    p[f"cost_{k}"] += v
+            elif l.tipo == "agente" and l.detalhe:
+                a = agentes.get(l.detalhe)
+                if a:
+                    for k in ("input", "output", "cache_write", "cache_read", "cost",
+                              "cost_input", "cost_output", "cost_cache_write", "cost_cache_read"):
+                        p[k] += a[k]
         _somar_em(total, l, agentes)
 
     # Série diária: sob todos os filtros e, com `foco`, só do item de nome igual (qualquer

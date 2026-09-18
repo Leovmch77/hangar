@@ -455,6 +455,10 @@ class UsoBucket(BaseModel):
     cache_write: int = 0
     cache_read: int = 0
     cost: float = 0.0
+    cost_input: float = 0.0
+    cost_output: float = 0.0
+    cost_cache_write: float = 0.0
+    cost_cache_read: float = 0.0
     # Skill: tokens que o texto dela ocupou (tamanho × respostas em que esteve no contexto, até o
     # fim da sessão ou a compactação) e quantas respostas foram. Tamanho estimado, respostas exatas.
     ocupados_tokens_est: int = 0
