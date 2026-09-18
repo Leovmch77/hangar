@@ -3358,7 +3358,6 @@
   "uso_todas": "todas",
   "uso_carregando_primeira": "montando o painel…",
   "uso_n_de_m": "{n} de {m}",
-  "uso_resp_plugin_pesa": "Plugin que mais pesa",
   "uso_resp_plugin_sub": "≈ {n} tokens · {pct}% do peso das skills",
   "uso_resp_skill_pesa": "Skill que mais pesa",
   "uso_resp_grupo_tokens": "{grupo} · ≈ {n} tokens",

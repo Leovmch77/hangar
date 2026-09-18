@@ -46,7 +46,7 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
   });
   const target = document.body.appendChild(document.createElement('div'));
   const component = mount(Uso, { target, props: { onBack: vi.fn() } });
-  const nomes = () => [...target.querySelectorAll('table.data tr.click td.nome')].map((td) => td.firstChild?.textContent?.trim());
+  const nomes = () => [...target.querySelectorAll('table.data:not(.agentes) tr.click td.nome')].map((td) => td.firstChild?.textContent?.trim());
   const grupos = () => [...target.querySelectorAll('.grupos > li > button strong')].map((s) => s.textContent);
   try {
     await settle();
@@ -96,8 +96,8 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
     // "pesada" está fora da curva por carga: leva a marca. Skill mostra cargas e respostas, não custo.
     const linhaPesada = [...target.querySelectorAll('tr.click')].find((tr) => tr.textContent?.includes('pesada'))!;
     expect(linhaPesada.querySelector('.marca')).not.toBeNull();
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_respostas());
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_cargas());
+    expect(target.querySelector('table.data:not(.agentes) thead')?.textContent).toContain(m.uso_col_respostas());
+    expect(target.querySelector('table.data:not(.agentes) thead')?.textContent).toContain(m.uso_col_cargas());
     expect(target.textContent).not.toContain('R$');
     // 22 skills: 20 visíveis + mostrar mais 2.
     expect(target.textContent).toContain(m.uso_mostrar_mais({ n: 2 }));
@@ -109,7 +109,7 @@ it('monta o painel: respostas com nome, skills por plugin, ferramentas, subagent
     ([...target.querySelectorAll('[role="tab"]')].find((b) => b.textContent?.includes(m.uso_aba_tools())) as HTMLButtonElement).click();
     await settle();
     expect(nomes()).toEqual(['Bash', 'Skill']);                               // a aba mostra a tool crua
-    expect(target.querySelector('thead')?.textContent).toContain(m.uso_col_ctx());
+    expect(target.querySelector('table.data:not(.agentes) thead')?.textContent).toContain(m.uso_col_ctx());
   } finally { await unmount(component); target.remove(); localStorage.clear(); }
 });
 
@@ -137,7 +137,7 @@ it('clicar numa linha abre o detalhe com série própria (foco) sem refazer o re
     expect(det.textContent).toContain(m.uso_col_ocupados());                  // skill pesa pelo que ocupou
     expect(det.querySelector('svg.serie')).not.toBeNull();
     // Números da tela continuam lá (nada foi apagado durante o detalhe).
-    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_pesa());
+    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_skills());
     (det.querySelector('button') as HTMLButtonElement).click();
     await settle();
     expect(target.querySelector('.detalhe')).toBeNull();
@@ -228,7 +228,7 @@ it('202 "aquecendo" mostra o progresso e repergunta até o dado chegar', async (
     await vi.advanceTimersByTimeAsync(3000);
     await settle();
     expect(target.querySelector('.aquecendo')).toBeNull();
-    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_pesa());
+    expect(target.querySelector('.respostas')?.textContent).toContain(m.uso_resp_plugin_skills());
   } finally { vi.useRealTimers(); await unmount(component); target.remove(); localStorage.clear(); }
 });
 

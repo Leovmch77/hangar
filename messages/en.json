@@ -3358,7 +3358,6 @@
   "uso_todas": "all",
   "uso_carregando_primeira": "building the panel…",
   "uso_n_de_m": "{n} of {m}",
-  "uso_resp_plugin_pesa": "Heaviest plugin",
   "uso_resp_plugin_sub": "≈ {n} tokens · {pct}% of skill weight",
   "uso_resp_skill_pesa": "Heaviest skill",
   "uso_resp_grupo_tokens": "{grupo} · ≈ {n} tokens",

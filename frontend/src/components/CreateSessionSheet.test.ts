@@ -196,7 +196,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     // O create manda provider=claude com model/effort NULOS — o cenário do bloqueador morre aqui.
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false);
     unmount(comp);
   });
 
@@ -234,7 +234,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     await escolherNoCombo('#subagent-pick', 'sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet');
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false);
     unmount(comp);
   });
 
@@ -279,7 +279,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     expect(document.querySelector('#model-pick')!.textContent).toContain('sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null, null, false, null, false);
     unmount(comp);
   });
 
@@ -359,7 +359,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null);
+      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -395,7 +395,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -423,7 +423,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -670,13 +670,9 @@ describe('CreateSessionSheet — retomar conversa da pasta', () => {
     await escolherPasta();
     expect(api.getArchivePorCwd).toHaveBeenCalledWith('/tmp/x', null, 'claude');
 
-    (document.querySelector('.mais-cab') as HTMLElement).click();
-    await flush();
     (document.querySelector('.retomar-check input') as HTMLInputElement).click();
     await flush();
-    await (document.querySelector('#conversa-pick') as HTMLElement).click();
-    await tick();
-    const rotulos = [...document.querySelectorAll('.sel-item')].map((b) => b.textContent ?? '');
+    const rotulos = [...document.querySelectorAll('.conversas .conversa')].map((b) => b.textContent ?? '');
     expect(rotulos.some((t) => t.includes('esta da pra retomar'))).toBe(true);
     expect(rotulos.some((t) => t.includes('esta esta aberta'))).toBe(false);
     unmount(comp);
