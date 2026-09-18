@@ -144,6 +144,22 @@ test('dois botoes de rotulo IDENTICO somam a massa e o primeiro vale', () => {
   assert.ok(passo.confianca >= 0.6);
 });
 
+test('gemeos sem distribuicao caem no caminho de sempre, nao em massa zero', () => {
+  const gemeos = parsarSnapshot(`- RootWebArea "Hangar"
+  - button "Nova sessão" [ref=@e2]
+  - button "Nova sessão" [ref=@e21]`);
+  const r = {
+    operacao: { choice: 'CLICK', confidence: 0.9 },
+    concluido: { noul: 0.1 },
+    arriscado: { noul: 0.02 },
+    // Só `confidence`: somar um `probabilities` ausente dava 0 e barrava um alvo de 0.9.
+    click_target: { choice: 'e21', confidence: 0.9 },
+  };
+  const passo = decidir(r, gemeos);
+  assert.equal(passo.alvo, 'e21');
+  assert.equal(passo.confianca, 0.9);
+});
+
 test('rotulos DIFERENTES que dividem a massa continuam parando', () => {
   const r = {
     operacao: { choice: 'CLICK', confidence: 0.9 },

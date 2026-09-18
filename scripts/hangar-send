@@ -425,7 +425,7 @@ if sys.argv[12]:
 print(json.dumps(d))' \
            "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev")
     api POST /api/sessions "$body" >/dev/null
-    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]}${jev:+ [jev]} — fala com ela via: hangar-send $name \"msg\""
+    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
     exit 0
 fi
 

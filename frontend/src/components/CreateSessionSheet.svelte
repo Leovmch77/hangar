@@ -180,6 +180,8 @@
   // próximas, inclusive nas sessões que o CLI e o MCP abrem — e o localStorage não alcança
   // nenhum dos dois. Mexer aqui grava o padrão novo no create (ver `salvarPadraoJev`).
   let jev = $state(false);
+  // Guarda a releitura tardia do padrão (ver o reset) de passar por cima de uma escolha já feita.
+  let jevTocado = $state(false);
   let esforco = $state('');
   let modelos = $state<ModelOption[]>([]);
   let listaReduzida = $state(false);
@@ -587,7 +589,13 @@
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
       modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
-      jev = segredos.ligado('jev_padrao');
+      jev = segredos.ligado('jev_padrao'); jevTocado = false;
+      // A releitura existe porque o `segredos.carregar()` do App roda SEM await: abrir a folha
+      // logo no boot lia `valores` ainda vazio, e o interruptor nascia desligado com o padrão
+      // ligado no servidor — errado e calado. Só reaplica se a pessoa ainda não mexeu nele.
+      void segredos.carregar().then(() => {
+        if (open && !jevTocado) jev = segredos.ligado('jev_padrao');
+      });
       // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
       // gastava cota da origem sem ninguém ter escolhido isso de novo.
       resumoPorModelo = false;
@@ -698,8 +706,11 @@
     try {
       await patchConfig({ jev_padrao: jev });
       await segredos.carregar();
-    } catch {
+    } catch (e) {
       // O padrão é conforto: falhar aqui não pode impedir a sessão de nascer com a escolha feita.
+      // Mas silêncio TOTAL não serve: quem marcou espera que valha da próxima vez, e sem isto o
+      // checkbox voltaria ao valor antigo sem deixar rastro em lugar nenhum.
+      console.error('salvar jev_padrao falhou', e);
     }
   }
   const rotuloMotor = $derived(engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta());
@@ -1397,7 +1408,7 @@
               {#if temJev}
                 <div class="field">
                   <label class="retomar-check">
-                    <input type="checkbox" bind:checked={jev} />
+                    <input type="checkbox" bind:checked={jev} onchange={() => (jevTocado = true)} />
                     <span>{m.criar_jev()}</span>
                   </label>
                   <p class="hint">{m.criar_jev_ajuda()}</p>

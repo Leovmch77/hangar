@@ -77,7 +77,11 @@ function sinonimos(head, candidatos) {
   if (!vencedor) return null;
   const iguais = candidatos.filter((c) => c.papel === vencedor.papel && c.nome === vencedor.nome);
   if (iguais.length < 2) return null;
-  const p = head.probabilities ?? {};
+  // Sem distribuição não há massa a somar, e somar `{}` daria ZERO — trocando a `confidence` que o
+  // `forca()` usaria por um piso que nada alcança, e travando o laço justamente onde esta função
+  // existe pra destravar. Sem `probabilities`, o caminho é o de sempre.
+  const p = head.probabilities;
+  if (!p) return null;
   return { ref: iguais[0].ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
 }
 
