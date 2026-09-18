@@ -967,6 +967,33 @@
     </div>
   {/snippet}
 
+  {#snippet previaConversa()}
+    <!-- As ultimas msgs da conversa escolhida. Markdown RENDERIZADO — `**assim**` cru numa caixa
+         de leitura e sempre bug. Rola pro fim ao carregar. -->
+    <div class="previa-bloco">
+      <div class="previa-cab">
+        <span class="previa-titulo">{conversaAlvo?.ultima || conversaAlvo?.preview || m.arquivo_sem_mensagens()}</span>
+        <button type="button" class="previa-fechar" aria-label={m.criar_previa_fechar()}
+          onclick={() => (conversaEscolhida = '')}>✕</button>
+      </div>
+      <div class="previa" bind:this={previaEl}>
+        {#if previaCarregando}
+          <p class="previa-vazia">{m.comum_carregando()}</p>
+        {:else if previaErro}
+          <p class="previa-erro" role="alert">{m.criar_previa_erro()}</p>
+        {:else if !previa.length}
+          <p class="previa-vazia">{m.arquivo_sem_mensagens()}</p>
+        {:else}
+          {#each previa as ev (ev.id)}
+            <div class="previa-msg" class:eu={ev.kind === 'user_msg'}>
+              {@html renderMarkdown(ev.text ?? '')}
+            </div>
+          {/each}
+        {/if}
+      </div>
+    </div>
+  {/snippet}
+
   {#snippet formulario()}
     {#if isDesktop}
       <!-- O nome grande e o card duplicavam o que a lista à esquerda já mostra (a linha escolhida
@@ -1188,6 +1215,37 @@
         </div>
       {/if}
 
+      {#if retomaveis.length}
+        <!-- Comecar do zero e o caminho normal; continuar uma conversa da pasta e a excecao,
+             entao ela fica atras de um check e so entao mostra o seletor.
+             O rotulo de cada conversa e a ULTIMA msg — a 1a nao identifica nada meses depois. -->
+        <div class="field">
+          <label class="retomar-check">
+            <input type="checkbox" bind:checked={querRetomar} />
+            <span>{m.criar_retomar()}</span>
+          </label>
+          {#if querRetomar}
+            <!-- Caixa de altura fixa que rola: a lista inteira aberta empurrava modelo, esforco e
+                 permissao pra fora da tela. -->
+            <div class="conversas">
+              {#each retomaveis as c (c.session_id)}
+                <button type="button" class="conversa" class:on={conversaEscolhida === c.session_id}
+                  aria-pressed={conversaEscolhida === c.session_id} disabled={retomando !== null}
+                  onclick={() => (conversaEscolhida = conversaEscolhida === c.session_id ? '' : c.session_id)}>
+                  <span class="conversa-txt">{c.ultima || c.preview || m.arquivo_sem_mensagens()}</span>
+                  <span class="conversa-meta">{relativeTime(c.mtime)}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <!-- No desktop a previa vai pro painel da esquerda, que e maior: aqui ela espremeria os
+               campos do formulario. No celular nao ha painel esquerdo, entao fica no fluxo. -->
+          {#if conversaAlvo && !isDesktop}
+            {@render previaConversa()}
+          {/if}
+        </div>
+      {/if}
+
       {#if provider === 'omp' && !conversaAlvo}
         <div class="field">
           <label class="field-label" for="omp-profile">{m.criar_perfil_omp()}</label>
@@ -1269,7 +1327,7 @@
         <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
       {/if}
 
-      {#if temMotor || temSubagente || retomaveis.length}
+      {#if temMotor || temSubagente}
         <!-- O que quase ninguém muda fica recolhido, mas o resumo mostra o valor de cada um: a
              escolha nunca fica escondida, só a edição dela. -->
         <div class="mais" class:aberto={maisAberto}>
@@ -1280,7 +1338,6 @@
               <span class="mais-resumo">
                 {#if temMotor}<span class="mais-pill">{m.comum_motor()} <em>{rotuloMotor}</em></span>{/if}
                 {#if temSubagente}<span class="mais-pill">{m.criar_mais_subagentes()} <em>{rotuloSubagente}</em></span>{/if}
-                {#if retomaveis.length}<span class="mais-pill">{m.criar_mais_conversa()} <em>{querRetomar ? m.criar_mais_conversa_continuar() : m.criar_mais_conversa_nova()}</em></span>{/if}
               </span>
             {/if}
             <span class="chevron" class:chevron--open={maisAberto} aria-hidden="true">›</span>
@@ -1306,47 +1363,6 @@
                                value: valorModelo(mod), label: mod.name ?? mod.id }))]}
                     onchange={(v) => (subagente = v)} />
                   <p class="hint">{m.criar_subagente_ajuda()}</p>
-                </div>
-              {/if}
-              {#if retomaveis.length}
-                <!-- Comecar do zero e o caminho normal; continuar uma conversa da pasta e a excecao,
-                     entao ela fica atras de um check e so entao mostra o seletor.
-                     O rotulo de cada conversa e a ULTIMA msg — a 1a nao identifica nada meses depois. -->
-                <div class="field mais-largo">
-                  <label class="retomar-check">
-                    <input type="checkbox" bind:checked={querRetomar} />
-                    <span>{m.criar_retomar()}</span>
-                  </label>
-                  {#if querRetomar}
-                    <Select id="conversa-pick" ariaLabel={m.criar_retomar()} value={conversaEscolhida}
-                      disabled={retomando !== null}
-                      opcoes={[{ value: '', label: m.criar_retomar_escolha() },
-                               ...retomaveis.map((c) => ({
-                                 value: c.session_id,
-                                 label: c.ultima || c.preview || m.arquivo_sem_mensagens(),
-                                 hint: relativeTime(c.mtime),
-                               }))]}
-                      onchange={(v) => (conversaEscolhida = v)} />
-                  {/if}
-                  {#if conversaAlvo}
-                    <!-- Previa: as ultimas msgs da conversa. Markdown RENDERIZADO — `**assim**` cru
-                         numa caixa de leitura e sempre bug. Rola pro fim ao carregar. -->
-                    <div class="previa" bind:this={previaEl}>
-                      {#if previaCarregando}
-                        <p class="previa-vazia">{m.comum_carregando()}</p>
-                      {:else if previaErro}
-                        <p class="previa-erro" role="alert">{m.criar_previa_erro()}</p>
-                      {:else if !previa.length}
-                        <p class="previa-vazia">{m.arquivo_sem_mensagens()}</p>
-                      {:else}
-                        {#each previa as ev (ev.id)}
-                          <div class="previa-msg" class:eu={ev.kind === 'user_msg'}>
-                            {@html renderMarkdown(ev.text ?? '')}
-                          </div>
-                        {/each}
-                      {/if}
-                    </div>
-                  {/if}
                 </div>
               {/if}
             </div>
@@ -1436,7 +1452,13 @@
         <h2 class="sheet-title">{titulo}</h2>
         {@render cabecalhoBastao()}
         {@render chipsServidor()}
-        {@render escolha()}
+        <!-- Com uma conversa escolhida, este painel vira a leitura dela: e o lado largo da folha,
+             e a lista de pastas ja cumpriu o papel (a pasta esta escolhida). O ✕ volta pra lista. -->
+        {#if conversaAlvo}
+          {@render previaConversa()}
+        {:else}
+          {@render escolha()}
+        {/if}
       </aside>
       <section class="cs-pane cs-dir">
         {#if picked}
@@ -1688,6 +1710,83 @@
   }
   .retomar-check input { accent-color: var(--accent); }
 
+  .conversas {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+    max-height: 168px;
+    overflow-y: auto;
+    /* Bloco com rolagem propria: um .sr-only absoluto de dentro vazaria pra area rolavel do painel. */
+    position: relative;
+  }
+  .conversa {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    background: var(--surface-raised, var(--bg-surface));
+    text-align: left;
+    transition: border-color 160ms ease-out, background 160ms ease-out;
+  }
+  .conversa.on { border-color: var(--accent); background: var(--accent-dim); }
+  .conversa:disabled { opacity: 0.6; }
+  .conversa-txt {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-sm);
+    line-height: 1.45;
+    color: var(--text-primary);
+    /* Duas linhas: uma corta frase demais pra reconhecer a conversa, tres viram parede de texto. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .conversa-meta {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .previa-bloco {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-height: 0;
+    flex: 1;
+  }
+  .previa-cab {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+  .previa-titulo {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .previa-fechar {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-default);
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+  }
+  .previa-fechar:hover { color: var(--text-primary); }
+
   .previa {
     display: flex;
     flex-direction: column;
@@ -1875,7 +1974,6 @@
     padding: var(--space-3) var(--space-3) 0;
     border-top: 1px solid var(--border-subtle);
   }
-  .mais-largo { grid-column: 1 / -1; }
 
   /* O combo de config é o <button> dentro do Select.svelte: CSS escopado não o alcança (o atributo
      de escopo só cai nos elementos deste template), então a regra acima nunca casava e ele saía com
@@ -1993,6 +2091,10 @@
   }
   /* No pane a lista do scanner é quem rola; o pane em si fica travado. */
   .cs-esq { overflow: hidden; }
+
+  /* Lendo a conversa, quem rola é a prévia, e ela toma a altura toda do pane — o teto de 220px
+     existe pro celular, onde ela vive no meio do formulário. */
+  .cs-esq .previa { max-height: none; flex: 1; }
 
   /* CTA sempre à vista no desktop: os campos rolam, a ação cola no fundo do pane.
      Fundo sólido de propósito (chrome funcional, mesmo precedente do .rodape do ServerSettings):

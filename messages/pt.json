@@ -1929,6 +1929,7 @@
   "criar_retomar": "Continuar uma conversa desta pasta",
   "criar_retomar_escolha": "Escolha a conversa…",
   "criar_previa_erro": "Não consegui ler esta conversa — o que aparece aqui pode não ser o conteúdo dela.",
+  "criar_previa_fechar": "Fechar a leitura da conversa",
   "criar_retomar_acao": "Continuar conversa",
   "criar_nome_placeholder": "meu-projeto",
   "criar_provider_aria": "Provider da sessão",

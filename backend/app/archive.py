@@ -72,7 +72,7 @@ def _head_info(jsonl: Path, max_lines: int = 60) -> tuple[str, Optional[str]]:
                 if not preview:
                     for ev in parse_obj(obj):
                         if ev.kind == "user_msg" and ev.text:
-                            preview = _texto_simples(ev.text)[:100]
+                            preview = _cortar(_texto_simples(ev.text))
                             break
                 if preview and cwd:
                     break
@@ -135,6 +135,18 @@ def _parse(provider: str, obj: dict) -> list[ChatEvent]:
     return archive_providers.parse_obj(provider, obj)
 
 
+def _cortar(texto: str, limite: int = 120) -> str:
+    """Corte na palavra e com reticencias: quem le a lista precisa saber que a frase continua --
+    cortar no caractere 100 exato deixava 'fronte' e 'reenvi' parecendo a mensagem inteira."""
+    if len(texto) <= limite:
+        return texto
+    curto = texto[:limite]
+    espaco = curto.rfind(" ")
+    if espaco > limite // 2:
+        curto = curto[:espaco]
+    return curto.rstrip(" ,;:.") + "…"
+
+
 def _tail_info(jsonl: Path, provider: str = "claude") -> str:
     """Ultima msg (de quem for) da conversa. Duas passadas de tamanho crescente porque UMA entrada
     pode passar de 64KB sozinha (imagem colada, saida grande de ferramenta)."""
@@ -146,7 +158,7 @@ def _tail_info(jsonl: Path, provider: str = "claude") -> str:
                 continue
             for ev in reversed(_parse(provider, obj)):
                 if ev.kind in ("user_msg", "assistant_msg") and ev.text:
-                    return _texto_simples(ev.text)[:100]
+                    return _cortar(_texto_simples(ev.text))
         if do_inicio:
             break   # ja era o arquivo inteiro: aumentar o span nao traz mais nada
     return ""
