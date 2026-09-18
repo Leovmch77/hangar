@@ -152,7 +152,9 @@ export interface ChatEvent {
   queued_ts?: number | null;
   // `thinking` = resumo do raciocínio. Só chega quando a sessão foi aberta com o resumo ligado
   // (settings.json["showThinkingSummaries"]); no Pi e no Kimi o texto é o raciocínio cru.
-  kind: 'user_msg' | 'assistant_msg' | 'tool_use' | 'tool_result' | 'thinking';
+  // `notice` = aviso de sistema (turno interrompido e afins): o `text` traz um CÓDIGO
+  // (`interrupted`, `turn_aborted`), e a frase é da interface — o servidor não manda texto de tela.
+  kind: 'user_msg' | 'assistant_msg' | 'tool_use' | 'tool_result' | 'thinking' | 'notice';
   id: string;
   text?: string | null;
   tool_name?: string | null;

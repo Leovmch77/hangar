@@ -101,6 +101,12 @@ export function MessageList({
         if (ev.kind === 'assistant_msg') {
           return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
         }
+        if (ev.kind === 'notice') {
+          // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
+          // aviso novo do harness não sumir calado.
+          const conhecido = ev.text === 'interrupted' || ev.text === 'turn_aborted';
+          return <Text style={styles.notice}>{conhecido ? m.notice_interrupted() : ev.text}</Text>;
+        }
         return null;
       }
       default: {
@@ -170,6 +176,12 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.base.space[1],
     minHeight: 44,
     lineHeight: 44,
+  },
+  notice: {
+    fontSize: theme.base.text.xs,
+    color: theme.tokens.text.muted,
+    textAlign: 'center',
+    paddingVertical: theme.base.space[1],
   },
   pending: {
     opacity: 0.5,

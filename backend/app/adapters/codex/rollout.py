@@ -226,6 +226,10 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
             text = _blocks_text(payload.get("content"), "input_text")
             if _is_context_wrapper(text):
                 return []
+            if text.strip().startswith("<turn_aborted>"):
+                # Interrupção: o Codex injeta o aviso como fala do usuário, em inglês e com tag.
+                # Vira aviso, e a frase fica com a interface.
+                return [ChatEvent(kind="notice", id=_event_id(obj), text="turn_aborted")]
             return [ChatEvent(kind="user_msg", id=_event_id(obj), text=text)]
         if role == "assistant":
             text = _blocks_text(payload.get("content"), "output_text")

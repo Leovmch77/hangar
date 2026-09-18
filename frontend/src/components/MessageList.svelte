@@ -584,6 +584,11 @@
         {#if plan?.eventId === ev.id}
           <SessionPlanPreview {...planoProps()} />
         {/if}
+        {:else if ev.kind === 'notice'}
+          <!-- Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
+               aviso novo do harness não sumir calado. -->
+          <p class="notice">{ev.text === 'interrupted' || ev.text === 'turn_aborted'
+            ? m.notice_interrupted() : ev.text}</p>
         {:else if ev.kind === 'tool_use' && agentesRodandoIds.has(ev.tool_use_id ?? '')}
           <!-- Agent rodando: o cartão dele está grudado no fim; aqui ficaria em dobro. -->
         {:else if ev.kind === 'tool_use'}
@@ -847,6 +852,12 @@
 
   /* Msg da fila durável (evento sintetico "queued-"): mesma margem das demais, atenuada enquanto
      esta na fila. Acende sozinha quando o Claude fica idle (transition). */
+  .notice {
+    margin: var(--space-2) 0;
+    text-align: center;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
   .queued-row {
     display: flex;
     flex-direction: column;

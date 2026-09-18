@@ -40,6 +40,10 @@ _TAIL_WINDOW = 256 * 1024
 _IMAGE_SOURCE_RE = re.compile(r"^\[Image(?:\]|: [^\]]*\])$")   # entrada sintetica inteira = meta
 _IMAGE_MARKER_RE = re.compile(r"\[Image #\d+\]\s*")             # ruido na legenda -> remover
 
+# Interrupção: o Claude Code grava uma entrada "user" sintética com este texto. Não é fala de
+# ninguém — vira aviso, pra interface desenhar linha discreta em vez de bolha em inglês.
+_INTERRUPCAO_RE = re.compile(r"^\[Request interrupted by user[^\]]*\]$")
+
 
 def _first(content: list, type_name: str) -> Optional[dict]:
     for item in content:
@@ -362,6 +366,8 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
                 return []
             if _is_command_meta(content):
                 return []
+            if _INTERRUPCAO_RE.match(content.strip()):
+                return [ChatEvent(kind="notice", id=uid, text="interrupted")]
             cleaned = _strip_meta_blocks(content)
             if not cleaned or _IMAGE_SOURCE_RE.match(cleaned):
                 return []
@@ -387,6 +393,8 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             t = txt.get("text", "") if txt is not None else ""
             if _is_command_meta(t):
                 return []
+            if _INTERRUPCAO_RE.match(t.strip()):
+                return [ChatEvent(kind="notice", id=uid, text="interrupted")]
             cleaned = _strip_meta_blocks(t)
             if _IMAGE_SOURCE_RE.match(cleaned):
                 return []

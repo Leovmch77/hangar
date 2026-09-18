@@ -12,6 +12,16 @@ def test_session_meta_ignored():
     assert parse_rollout_obj(obj) == []
 
 
+def test_turno_abortado_vira_aviso():
+    # 18/09/2026: o Codex injeta o aviso de interrupção como fala do usuário, com tag XML e em
+    # inglês — no celular virava um bloco enorme que ninguém escreveu.
+    obj = {"timestamp": "t", "type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}
+    [ev] = parse_rollout_obj(obj)
+    assert ev.kind == "notice" and ev.text == "turn_aborted"
+
+
 def test_developer_message_ignored():
     obj = {"timestamp": "t", "type": "response_item",
            "payload": {"type": "message", "role": "developer",

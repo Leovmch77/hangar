@@ -19,6 +19,35 @@ def test_user_text_message():
     assert evs == [ChatEvent(kind="user_msg", id="u1", text="corrige o bug")]
 
 
+def test_interrupcao_vira_aviso_e_nao_bolha_do_usuario():
+    # O CLI grava a interrupção como entrada "user" sintética em inglês. Bolha ali dava a entender
+    # que a pessoa tinha digitado aquilo; agora é aviso, com a frase por conta da interface.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u9", "parentUuid": None,
+        "message": {"role": "user", "content": "[Request interrupted by user for tool use]"},
+    }))
+    assert evs == [ChatEvent(kind="notice", id="u9", text="interrupted")]
+
+
+def test_interrupcao_em_blocos_tambem_vira_aviso():
+    # Sem terminal o CLI grava o mesmo texto como LISTA de blocos (medido na 2.1.276) — só o ramo
+    # da string não bastava, e o aviso voltava a aparecer como bolha.
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u11", "parentUuid": None,
+        "message": {"role": "user",
+                    "content": [{"type": "text", "text": "[Request interrupted by user]"}]},
+    }))
+    assert evs == [ChatEvent(kind="notice", id="u11", text="interrupted")]
+
+
+def test_mensagem_que_so_cita_a_interrupcao_continua_bolha():
+    evs = parse_line(_line({
+        "type": "user", "uuid": "u10", "parentUuid": None,
+        "message": {"role": "user", "content": "por que apareceu [Request interrupted by user]?"},
+    }))
+    assert [e.kind for e in evs] == ["user_msg"]
+
+
 def test_mensagem_orientada_no_claude_sem_terminal_vira_bolha():
     # Formato gravado pelo CLI quando um `user` chega no stdin com turno em voo.
     [ev] = parse_line(_line({

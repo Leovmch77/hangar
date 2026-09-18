@@ -731,6 +731,7 @@
   "composer_interromper_msg": "This sends ESC and stops the current reply.",
   "composer_interromper": "Interrupt",
   "composer_interromper_aria": "Interrupt Claude",
+  "notice_interrupted": "You interrupted this turn",
   "composer_preview_rodando": "Project preview running",
   "composer_pareamento_sessoes": "Session pairing",
   "composer_parear_outra": "Pair with another session",

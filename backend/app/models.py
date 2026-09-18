@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
-ChatKind = Literal["user_msg", "assistant_msg", "tool_use", "tool_result", "thinking"]
+# `notice` = aviso de sistema (turno interrompido e afins). O `text` carrega um CÓDIGO, não uma
+# frase: quem escreve a frase é a interface, no idioma dela.
+ChatKind = Literal["user_msg", "assistant_msg", "tool_use", "tool_result", "thinking", "notice"]
 State = Literal["working", "idle", "awaiting_input", "dead"]
 
 # Surrogate SOLTO (sem par) num str vindo de json.loads. O json aceita "\ud83d" sozinho e o Python
