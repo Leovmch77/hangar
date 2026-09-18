@@ -43,6 +43,11 @@ def _isola(tmp_path, monkeypatch):
     # a suíte fica dependente de ordem.
     api._claude_models_cache.clear()
     api._engine_models_cache.clear()
+    # Sem isto a rota subiria um `claude` de verdade em todo teste de cache frio: o catálogo
+    # efêmero é subprocess. O padrão da suíte é "não veio", que é o ramo do fallback.
+    monkeypatch.setattr(api.claude_models, "listar",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            api.claude_models.ClaudeAusente("sem claude no teste")))
     yield
     api._claude_models_cache.clear()
     api._engine_models_cache.clear()
@@ -81,7 +86,28 @@ def test_claude_sem_cache_diz_que_a_lista_e_reduzida(cli):
     r = cli.get("/api/model-options", headers=AUTH, params={"provider": "claude"})
     assert r.status_code == 200
     assert r.json()["reduced"] is True
-    assert [m["id"] for m in r.json()["models"]] == ["opus", "sonnet", "haiku"]
+    assert [m["id"] for m in r.json()["models"]] == ["opus", "fable", "sonnet", "haiku"]
+
+
+def test_cache_frio_le_o_catalogo_efemero_e_cacheia(cli, monkeypatch):
+    """O ponto do `claude_models`: cache vencido não cai mais na lista reduzida enquanto o binário
+    responder — e a leitura seguinte já sai do cache, sem subir outro processo."""
+    chamadas = []
+
+    def falso(config_dir=None, *a, **k):
+        chamadas.append(config_dir)
+        return [{"value": "default", "displayName": "Default", "description": "d",
+                 "resolvedModel": "claude-opus-5[1m]"},
+                {"value": "fable", "displayName": "Fable", "description": "f"}]
+
+    monkeypatch.setattr(api.claude_models, "listar", falso)
+    r = cli.get("/api/model-options", headers=AUTH, params={"provider": "claude"})
+    assert r.status_code == 200
+    assert r.json()["reduced"] is False
+    assert [m["id"] for m in r.json()["models"]] == ["default", "fable"]
+    assert r.json()["models"][0]["active"] is True
+    cli.get("/api/model-options", headers=AUTH, params={"provider": "claude"})
+    assert len(chamadas) == 1
 
 
 def test_a_abertura_aproveita_o_cache_da_sessao_viva_em_qualquer_grafia(cli):

@@ -35,6 +35,7 @@ from app.fs import FsError, list_roots, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
+from app import claude_models
 from app import codex_models
 from app import model_args
 from app import filesearch, filetree, git_ops
@@ -6749,13 +6750,14 @@ _engine_models_cache: dict[str, tuple[float, list[dict]]] = {}
 # o `⎿ Kept model as …` (o Esc de saida) ficam no scrollback do tmux pra sempre. Nao aparece no chat
 # do app (entra no jsonl como `type: system`, que o transcript ignora), mas aparece pra quem estiver
 # com aquele terminal aberto: foi o que pareceu bug quando 5 leituras seguidas empilharam ali.
-# Sete dias, porque a lista muda quando a Anthropic lanca modelo ou o plano do usuario muda —
-# eventos de semanas, nao de horas. Uma hora (o valor antigo) fazia o `/model` reaparecer no
+# Trinta dias, porque a lista muda quando a Anthropic lanca modelo ou o plano do usuario muda —
+# eventos de meses, nao de horas; e cache vencido cai na lista reduzida, que e pior que uma lista
+# de algumas semanas atras. Uma hora (o valor antigo) fazia o `/model` reaparecer no
 # terminal do usuario "sozinho" no meio de sessoes longas, e cada restart do backend zerava o
 # cache em memoria e relia tudo de novo — dai o espelho em DISCO, dentro do proprio config dir
 # (`.hangar-models.json`): a leitura dirigida do picker vira acontecimento raro.
 # A chave e o config dir, nao a sessao: a lista vem da CONTA, e a mesma pra todas as sessoes dela.
-_CLAUDE_MODELS_TTL = 7 * 24 * 3600.0
+_CLAUDE_MODELS_TTL = 30 * 24 * 3600.0
 _claude_models_cache: dict[str, tuple[float, dict]] = {}
 
 
@@ -6768,7 +6770,12 @@ def _models_cache_get(chave: str) -> dict | None:
     if hit and time.monotonic() - hit[0] < _CLAUDE_MODELS_TTL:
         return hit[1]
     try:
-        bruto = json.loads(migracao_sidecars.caminho_de_leitura(_models_cache_path(chave)).read_text(encoding="utf-8"))
+        # Sem a ponte do nome antigo, ao contrário dos outros sidecars: `.claude-pocket-models.json`
+        # ficou SYMLINKADO pro ~/.claude dentro de toda conta (o `_NAO_LIGAR` do contas.py só
+        # conhece o nome novo), então lê-lo servia o cache da conta padrão pra todas as outras —
+        # o vazamento que `test_cache_de_outra_conta_nao_vaza` proíbe. Cache perdido custa uma
+        # leitura; cache de outra conta mente sobre quais modelos aquele login tem.
+        bruto = json.loads(_models_cache_path(chave).read_text(encoding="utf-8"))
         resp = bruto["resp"]
         if not isinstance(resp, dict) or time.time() - float(bruto["ts"]) >= _CLAUDE_MODELS_TTL:
             return None
@@ -6851,11 +6858,7 @@ async def model_options(name: str):
         meta = headless_sessions.load(name) or {}
         atual = (hl._sessions.get(name).model if hl._sessions.get(name) else None) or meta.get("model")
         return {"kind": "claude", "engine": None, "effort": meta.get("effort"),
-                "models": [{"id": m.get("value"), "name": m.get("displayName") or m.get("value"),
-                            "desc": m.get("description") or "",
-                            # Sem escolha gravada, a CLI usa o "default" dela.
-                            "active": (atual in (m.get("value"), m.get("resolvedModel"))) if atual else m.get("value") == "default"}
-                           for m in modelos if m.get("value")]}
+                "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
     _recusa_se_painel_aberto(name)
@@ -6942,11 +6945,25 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         return {"kind": "engine", "reduced": False,
                 "models": [{"id": m["id"], "context_length": m.get("context_length"),
                             "vision": m.get("vision")} for m in modelos]}
-    cacheado = _models_cache_get(_chave_config(config_dir))
+    chave = _chave_config(config_dir)
+    cacheado = _models_cache_get(chave)
     if cacheado is not None:
         return {**cacheado, "reduced": False}
+    try:
+        crus = await asyncio.to_thread(claude_models.listar, config_dir or None)
+    except claude_models.ClaudeIndisponivel as e:
+        # Fallback, nao 502: a lista reduzida abre a sessao, e recusar a tela inteira porque o
+        # catalogo nao veio seria pior que oferecer os aliases. O motivo vai pro log.
+        _log.warning("catalogo claude sem sessao falhou config_dir=%s: %s", chave, e)
+    else:
+        # Sem `effort`: quem sabe o nivel atual e a SESSAO, e aqui nao ha uma. A chave e a mesma do
+        # picker de proposito (a lista vem da conta, nao da sessao); nenhum leitor do cache usa o
+        # campo, e inventar um nivel aqui seria pior que a ausencia dele.
+        resp = {"kind": "claude", "engine": None, "models": claude_models.para_tela(crus)}
+        _models_cache_put(chave, resp)
+        return {**resp, "reduced": False}
     return {"kind": "claude", "reduced": True,
-            "models": [{"id": a} for a in ("opus", "sonnet", "haiku")]}
+            "models": [{"id": a} for a in ("opus", "fable", "sonnet", "haiku")]}
 
 
 @app.post("/api/sessions/{name}/engine/model", dependencies=[Depends(require_auth)])
