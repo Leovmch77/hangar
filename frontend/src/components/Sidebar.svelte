@@ -1894,7 +1894,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .sess-row.active .sess-main { color: var(--text-primary); }
   .sess-name {
     flex: 0 1 auto; min-width: min-content; max-width: 100%;
-    font-size: var(--text-sm); line-height: 1.25; overflow-wrap: anywhere;
+    /* break-word, nunca anywhere: com anywhere o min-content vira UMA letra e o nome empilha. */
+    font-size: var(--text-sm); line-height: 1.25; overflow-wrap: break-word;
   }
   .sess-main.untracked { opacity: 0.45; cursor: default; }
   /* Kimi "sem id" (pré-1º-prompt) ABRE o chat: cursor normal pra não mentir que a linha é inerte. */
