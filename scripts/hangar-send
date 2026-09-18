@@ -288,7 +288,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev]}"
     shift
     if [[ "$name" == *::* ]]; then
         echo "erro: '::' é reservado pro endereço servidor::sessao — escolha outro nome" >&2
@@ -299,7 +299,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--profile <nome>] [--headless] [--jev]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -319,9 +319,15 @@ if [[ "$1" == "--new" ]]; then
     # os valores aqui, senão o script envelhece separado do backend (mesma regra do --provider).
     # --profile: perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x.
     # Só com --provider omp; o backend recusa o resto e valida o nome.
-    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""
+    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            # --jev: a sessão nasce com a chave do Jev no ambiente, e aí o `hangar-preview objetivo`
+            # funciona nela. Sem a flag a chave não entra — é assim que se roda a mesma tarefa com
+            # e sem o Jev sem apagar a configuração.
+            --jev)
+                [[ -n "$jev" ]] && { echo "erro: --jev informado duas vezes" >&2; exit 2; }
+                jev="true"; shift ;;
             # --headless: sessão Claude ou Codex sem terminal (o mesmo campo da tela de criação).
             --headless)
                 [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
@@ -408,10 +414,12 @@ if sys.argv[10]:
     d["read_only"] = True
 if sys.argv[11]:
     d["headless"] = True
+if sys.argv[12]:
+    d["jev"] = True
 print(json.dumps(d))' \
-           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless")
+           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev")
     api POST /api/sessions "$body" >/dev/null
-    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]} — fala com ela via: hangar-send $name \"msg\""
+    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]}${jev:+ [jev]} — fala com ela via: hangar-send $name \"msg\""
     exit 0
 fi
 

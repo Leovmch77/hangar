@@ -216,3 +216,53 @@ def test_scan_roots_aceita_diretorios_e_vazio(tmp_path):
     assert rc.get("scan_roots") == str(a)
     rc.aplicar({"scan_roots": ""})       # vazio = volta ao env (resolve_scan_roots cai no CP_SCAN_ROOTS)
     assert rc.get("scan_roots") == ""
+
+
+def test_env_jev_desligado_leva_so_o_marcador():
+    """A chave NÃO entra numa sessão aberta com o recurso desligado — e o marcador vai mesmo assim,
+    pra o `hangar-preview objetivo` separar "desligado aqui" de "nunca configurado"."""
+    rc.aplicar({"jev_api_key": "ts-secreta", "jev_texto_cmd": "meu-llm"})
+    assert rc.env_jev(False) == {"HANGAR_JEV": "off"}
+
+
+def test_env_jev_ligado_leva_chave_e_o_texto_configurado():
+    rc.aplicar({"jev_api_key": "ts-secreta", "jev_texto_base_url": "https://llm.exemplo",
+                "jev_texto_api_key": "k", "jev_texto_modelo": "mini"})
+    env = rc.env_jev(True)
+    assert env["HANGAR_JEV"] == "on"
+    assert env["TYPESAFE_API_KEY"] == "ts-secreta"
+    assert env["JEV_TEXTO_BASE_URL"] == "https://llm.exemplo"
+    assert env["JEV_TEXTO_MODELO"] == "mini"
+    # Campo vazio não vira variável vazia: o CLI decide pela AUSÊNCIA, e "" ligaria o ramo errado.
+    assert "JEV_TEXTO_CMD" not in env
+
+
+def test_env_jev_ligado_sem_chave_cadastrada_nao_inventa_variavel():
+    assert rc.env_jev(True) == {"HANGAR_JEV": "on"}
+
+
+def test_function_hooks_desligado_nao_poe_variavel_nenhuma():
+    """Sem marcador `off`, ao contrário do Jev: a AUSÊNCIA da variável é o desligado, e é ela que o
+    Claude Code lê pra decidir se carrega plugin de function hook."""
+    assert rc.env_function_hooks() == {}
+
+
+def test_function_hooks_ligado_abre_o_portao():
+    rc.aplicar({"claude_function_hooks": True})
+    assert rc.env_function_hooks() == {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"}
+
+
+def test_function_hooks_le_a_configuracao_atual_e_nao_a_do_nascimento():
+    """Diferente do `jev`, que preserva a escolha da sessão: aqui não houve escolha por sessão, há
+    configuração de servidor — desligar e relançar tem que devolver a sessão sem o portão."""
+    rc.aplicar({"claude_function_hooks": True})
+    assert rc.env_function_hooks()
+    rc.aplicar({"claude_function_hooks": False})
+    assert rc.env_function_hooks() == {}
+
+
+def test_chaves_do_jev_nunca_voltam_inteiras():
+    """Cadastradas em SEGREDOS de propósito, e não pelo acaso de o nome ter `_key`."""
+    assert {"jev_api_key", "jev_texto_api_key"} <= rc.SEGREDOS
+    rc.aplicar({"jev_api_key": "ts-1234567890"})
+    assert rc.estado()["jev_api_key"]["valor"] != "ts-1234567890"

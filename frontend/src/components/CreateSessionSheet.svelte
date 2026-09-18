@@ -15,6 +15,7 @@
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
+  import { segredos } from '../lib/segredos.svelte';
   import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, getActiveId, serverColor, serverIdentidade } from '../lib/auth';
@@ -30,7 +31,7 @@
     onCreate: (name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                engine?: string | null, model?: string | null, effort?: string | null,
                permissionMode?: string | null, ompProfile?: string | null,
-               headless?: boolean, subagentModel?: string | null) => Promise<void>;
+               headless?: boolean, subagentModel?: string | null, jev?: boolean) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -175,6 +176,9 @@
   // GET /api/model-options (Task 4), que já traz contexto/👁 pros provedores que informam.
   let modelo = $state('');
   let subagente = $state('');
+  // Escolha da ABERTURA, e por isso nasce desligada a cada folha: o ponto é rodar a mesma tarefa
+  // com e sem, não deixar o recurso ligado sem ninguém lembrar.
+  let jev = $state(false);
   let esforco = $state('');
   let modelos = $state<ModelOption[]>([]);
   let listaReduzida = $state(false);
@@ -581,7 +585,7 @@
       // anterior sobrevive à reabertura quando o fetch de contas falha — o reset de carregarModelos
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
-      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
+      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false; jev = false;
       // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
       // gastava cota da origem sem ninguém ter escolhido isso de novo.
       resumoPorModelo = false;
@@ -677,6 +681,9 @@
   let maisAberto = $state(false);
   const temMotor = $derived(provider === 'claude' && Object.keys(motores).length > 0);
   const temSubagente = $derived(!conversaAlvo && !bastao && provider === 'claude' && !engine && modelos.length > 0);
+  // Sem chave cadastrada o interruptor não é um botão que falha, é um botão que não devia estar
+  // ali — mesmo critério do chip "Ouvir" (lib/segredos).
+  const temJev = $derived(!bastao && segredos.temChave('jev_api_key'));
   const rotuloMotor = $derived(engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta());
   const rotuloSubagente = $derived(subagente
     ? (modelos.find((mod) => valorModelo(mod) === subagente)?.name ?? subagente)
@@ -851,16 +858,18 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, true, (!engine && subagente) || null);
+                       esforco || null, permissao || null, null, true, (!engine && subagente) || null, jev);
       } else if (provider === 'claude' && !engine && subagente) {
         await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
-                       esforco || null, permissao || null, null, false, subagente);
+                       esforco || null, permissao || null, null, false, subagente, jev);
       } else {
         await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                        provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
                        provider === 'claude' ? (permissao || null) : null,
-                       // O 9º argumento só existe pro omp: os outros providers chamam como sempre chamaram.
-                       ...(provider === 'omp' ? [perfilOmp.trim() || null] : []));
+                       // Explícitos até o fim: a cadeia posicional passou a ter o `jev` no 12º, e
+                       // encurtá-la aqui faria o valor cair no argumento errado. `null`/`false` são
+                       // os mesmos valores que os defaults davam.
+                       provider === 'omp' ? (perfilOmp.trim() || null) : null, false, null, jev);
       }
       onClose();
     } catch (err) {
@@ -1327,7 +1336,7 @@
         <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
       {/if}
 
-      {#if temMotor || temSubagente}
+      {#if temMotor || temSubagente || temJev}
         <!-- O que quase ninguém muda fica recolhido, mas o resumo mostra o valor de cada um: a
              escolha nunca fica escondida, só a edição dela. -->
         <div class="mais" class:aberto={maisAberto}>
@@ -1338,6 +1347,7 @@
               <span class="mais-resumo">
                 {#if temMotor}<span class="mais-pill">{m.comum_motor()} <em>{rotuloMotor}</em></span>{/if}
                 {#if temSubagente}<span class="mais-pill">{m.criar_mais_subagentes()} <em>{rotuloSubagente}</em></span>{/if}
+                {#if temJev && jev}<span class="mais-pill">{m.criar_jev()}</span>{/if}
               </span>
             {/if}
             <span class="chevron" class:chevron--open={maisAberto} aria-hidden="true">›</span>
@@ -1363,6 +1373,15 @@
                                value: valorModelo(mod), label: mod.name ?? mod.id }))]}
                     onchange={(v) => (subagente = v)} />
                   <p class="hint">{m.criar_subagente_ajuda()}</p>
+                </div>
+              {/if}
+              {#if temJev}
+                <div class="field">
+                  <label class="retomar-check">
+                    <input type="checkbox" bind:checked={jev} />
+                    <span>{m.criar_jev()}</span>
+                  </label>
+                  <p class="hint">{m.criar_jev_ajuda()}</p>
                 </div>
               {/if}
             </div>

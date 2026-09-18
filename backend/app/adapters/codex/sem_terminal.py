@@ -15,7 +15,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from app import codex_contas
+from app import codex_contas, runtime_config
 from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
@@ -106,6 +106,9 @@ def _ambiente(meta: dict) -> dict:
     env["CP_SESSION_NAME"] = meta["name"]
     env["CP_SESSION_KEY"] = meta["key"]
     env[hl_adapter._MARCADOR_CANO] = meta["key"]
+    # Escolha da abertura, como no Claude sem terminal: marcador sempre, chave só com o recurso
+    # ligado. Herdar do backend daria o Jev a toda sessão.
+    env.update(runtime_config.env_jev(bool(meta.get("jev"))))
     return env
 
 

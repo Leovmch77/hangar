@@ -264,6 +264,10 @@ class Settings(BaseSettings):
     codex_voice_beta: bool = False
     # A preferência salva também é lida pelos instaladores, sem depender do backend em execução.
     claude_statusline_update: bool = True
+    # Portão de ACESSO ANTECIPADO do Claude Code: sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` ele nem
+    # lê plugin de function hook. Nasce desligado, e vale para sessão NOVA — a variável entra no
+    # ambiente do processo quando ele sobe.
+    claude_function_hooks: bool = False
     # Chave da Groq pra transcricao de audio (whisper-large-v3-turbo). Aceita CP_GROQ_API_KEY (padrao
     # do .env, com prefixo) OU GROQ_API_KEY (convencao do Groq/OpenAI SDK, ex: no Environment do systemd).
     # Vazio = transcricao desligada (o endpoint /transcribe responde 503). Ver docs/USAGE.md.

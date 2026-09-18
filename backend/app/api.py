@@ -1481,6 +1481,10 @@ class CreateBody(_StrictBody):
     permission_mode: str | None = None
     # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
     subagent_model: str | None = None
+    # Jev (typesafe.ai) no `hangar-preview objetivo`. Escolha da ABERTURA: ligado, a sessão nasce
+    # com a chave no ambiente; desligado (padrão), só com o marcador, e o verbo recusa. É o que
+    # permite rodar a mesma tarefa com e sem, sem apagar a configuração.
+    jev: bool = Field(default=False, strict=True)
     # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
     # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
     omp_profile: str | None = None
@@ -2079,6 +2083,8 @@ async def create_session(body: CreateBody):
                             _kw["permission_mode"] = body.permission_mode
                         if body.subagent_model is not None:
                             _kw["subagent_model"] = body.subagent_model
+                        if body.jev:
+                            _kw["jev"] = True
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
                         if body.read_only:
@@ -2106,6 +2112,8 @@ async def create_session(body: CreateBody):
             _kw2["permission_mode"] = body.permission_mode
         if body.subagent_model is not None:
             _kw2["subagent_model"] = body.subagent_model
+        if body.jev:
+            _kw2["jev"] = True
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt
         if body.omp_profile:

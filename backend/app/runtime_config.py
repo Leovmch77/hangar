@@ -37,6 +37,7 @@ EDITAVEIS: dict[str, type] = {
     "codex_memory_import": bool,   # leva as memórias do Claude pro Codex (opt-in: é o único
                                    # item da reconciliação que gasta cota, na consolidação)
     "claude_statusline_update": bool,  # permite ao instalador atualizar a barra do Claude Code
+    "claude_function_hooks": bool,     # portão de plugin de function hook (acesso antecipado)
     "editor": str,
     "elevenlabs_api_key": str,     # sintese de voz (ouvir a selecao)
     "elevenlabs_voice_id": str,    # id da voz escolhida na conta
@@ -77,6 +78,17 @@ EDITAVEIS: dict[str, type] = {
     # perimetro de quem PODE abrir o terminal, e um override por inteiro feito do celular tiraria
     # do ar a origem que o dono declarou no .env — inclusive a que ele esta usando pra editar.
     "term_origins": str,
+    # Jev (typesafe.ai), que decide a navegacao do `hangar-preview objetivo`. A chave fica aqui e
+    # nao no ambiente de quem sobe o servidor: a sessao so a recebe se tiver sido aberta com o
+    # recurso ligado, e trocar de chave nao pede reinicio.
+    "jev_api_key": str,
+    # LLM pequeno que escreve o valor de um campo que o chamador nao cobriu — OPCIONAL, e a mesma
+    # ordem de precedencia que o CLI ja usa: base_url + api_key + modelo (endpoint compativel com
+    # a OpenAI), senao cmd, senao o padrao do proprio CLI.
+    "jev_texto_base_url": str,
+    "jev_texto_api_key": str,
+    "jev_texto_modelo": str,
+    "jev_texto_cmd": str,
     # Raizes do seletor de pasta (fs-scanner), no MESMO formato "a,b" do CP_SCAN_ROOTS.
     # Override vale por inteiro (nao soma com o env); vazio = volta ao env. Ver
     # config.resolve_scan_roots, que le daqui primeiro.
@@ -85,7 +97,10 @@ EDITAVEIS: dict[str, type] = {
 
 # Campos que NUNCA voltam inteiros pro cliente: o app devolve mascarado (gsk_••••1234) pra você
 # conferir QUAL chave está lá sem poder copiá-la de volta.
-SEGREDOS = {"groq_api_key", "elevenlabs_api_key", "llm_api_key", "llm_briefing_api_key"}
+# Explícito mesmo quando o nome já casaria com `_PALAVRAS_DE_SEGREDO`: depender do acaso do nome
+# quebra calado no dia em que alguém renomeia o campo.
+SEGREDOS = {"groq_api_key", "elevenlabs_api_key", "llm_api_key", "llm_briefing_api_key",
+            "jev_api_key", "jev_texto_api_key"}
 
 # Campo que a tela edita mas que NÃO mora neste arquivo: a verdade é o `settings.json` do Claude
 # Code, porque quem o lê é o `claude` na largada da sessão. Guardar uma cópia aqui daria dois
@@ -129,6 +144,48 @@ def get(campo: str) -> Any:
         if campo in d:
             return d[campo]
     return getattr(settings, campo, None)
+
+
+# Campo daqui -> variável que o `hangar-preview` já lê hoje.
+_JEV_TEXTO = (
+    ("jev_texto_base_url", "JEV_TEXTO_BASE_URL"),
+    ("jev_texto_api_key", "JEV_TEXTO_API_KEY"),
+    ("jev_texto_modelo", "JEV_TEXTO_MODELO"),
+    ("jev_texto_cmd", "JEV_TEXTO_CMD"),
+)
+# Marcador do estado do recurso NA SESSÃO. Vai sempre, ligado ou desligado: sem ele o
+# `hangar-preview objetivo` não separa "desligado nesta sessão" de "nunca configurado", e as duas
+# pedem frases diferentes.
+MARCA_JEV = "HANGAR_JEV"
+
+
+def env_function_hooks() -> dict[str, str]:
+    """Portão de plugin de function hook, para sessão CLAUDE. Ao contrário do Jev, não há marcador
+    de desligado: a ausência da variável É o desligado, e é ela que o Claude Code lê.
+
+    Lê a configuração no momento em que a sessão SOBE — inclusive no relançamento. Não é escolha de
+    sessão que se preserva (isso é o `jev`), é configuração do servidor: sessão relançada reflete o
+    que está ligado agora."""
+    return {"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"} if get("claude_function_hooks") else {}
+
+
+def env_jev(ligado: bool) -> dict[str, str]:
+    """Ambiente do Jev pra uma sessão. Desligado, só o marcador — a chave não entra no processo.
+
+    A chave é segredo e, ligada, fica legível por quem já roda dentro daquela sessão. O ganho sobre
+    deixá-la no `settings.json` não é sigilo: é ser por sessão e por escolha, em vez de global e em
+    claro num arquivo que todas as contas compartilham."""
+    env = {MARCA_JEV: "on" if ligado else "off"}
+    if not ligado:
+        return env
+    chave = str(get("jev_api_key") or "").strip()
+    if chave:
+        env["TYPESAFE_API_KEY"] = chave
+    for campo, var in _JEV_TEXTO:
+        valor = str(get(campo) or "").strip()
+        if valor:
+            env[var] = valor
+    return env
 
 
 def override(campo: str) -> tuple[bool, Any]:

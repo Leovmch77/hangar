@@ -47,6 +47,7 @@
   // muda a tela — o mesmo caminho de "Sincronização automática", logo abaixo.
   let erroConfig = $state('');
   let trocandoStatusline = $state(false);
+  let trocandoFunctionHooks = $state(false);
   let opcoesDoCodex = $state<CodexOpcoes | null>(null);
   let erroOpcoesCodex = $state('');
   let trocandoOpcoesCodex = $state(false);
@@ -229,6 +230,28 @@
     if (consulta && !integracaoOcupada) {
       if (contaCodex === 'default') void consultarIntegracao(consulta, true);
       else void consultarConta(consulta, true);
+    }
+  }
+
+  // Mesma mecânica do interruptor da statusline: a gravação entra na fila das leituras, o valor da
+  // caixa só muda quando o servidor confirma, e a trava é do contexto — não do componente.
+  async function trocarFunctionHooks(ev: Event) {
+    const alvo = ev.currentTarget as HTMLInputElement;
+    const querido = alvo.checked;
+    alvo.checked = !querido;
+    const ctx = consulta;
+    if (!ctx || trocandoFunctionHooks) return;
+    trocandoFunctionHooks = true;
+    erroConfig = '';
+    const requisicao = ++ctx.reqConfig;
+    try {
+      const r = await (ctx.alvo ? patchConfigForServer(ctx.alvo, { claude_function_hooks: querido })
+                                : patchConfig({ claude_function_hooks: querido }));
+      if (consulta === ctx && requisicao === ctx.reqConfig) camposGravados = r.campos ?? camposGravados;
+    } catch (e) {
+      if (consulta === ctx) erroConfig = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (consulta === ctx) trocandoFunctionHooks = false;
     }
   }
 
@@ -652,7 +675,20 @@
               checked={!!campos.claude_statusline_update.valor}
               disabled={trocandoStatusline} onchange={trocarStatusline} />
           </label>
-        {:else if campos}
+        {/if}
+        {#if campos?.claude_function_hooks}
+          <label class="hs-item hs-opcao">
+            <span class="hs-item-txt">
+              <b>{m.harness_claude_function_hooks()}</b>
+              <span class="hs-ajuda" id="claude-function-hooks-ajuda">{m.harness_claude_function_hooks_ajuda()}</span>
+            </span>
+            <input id="claude-function-hooks" type="checkbox" class="switch"
+              aria-label={m.harness_claude_function_hooks()} aria-describedby="claude-function-hooks-ajuda"
+              checked={!!campos.claude_function_hooks.valor}
+              disabled={trocandoFunctionHooks} onchange={trocarFunctionHooks} />
+          </label>
+        {/if}
+        {#if !campos?.claude_statusline_update && campos}
           <!-- Backend que não conhece a chave diz o porquê, como a folha dizia: ficar mudo esconde
                justamente a opção que sumiu. -->
           <p class="hs-aviso" role="status">{m.harness_opcoes_indisponiveis()}</p>

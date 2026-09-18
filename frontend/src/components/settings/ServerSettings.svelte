@@ -67,6 +67,18 @@
       ajuda: m.config_server_marcar_travada_ajuda() },
     { chave: 'editor', rotulo: m.config_server_editor(), tipo: 'texto', secao: 'avancado',
       ajuda: m.config_server_editor_ajuda() },
+    // A ajuda diz ONDE a chave é usada, e é só um consumidor hoje. Havendo um segundo, a frase
+    // vira lista — não há registro de consumidores, e não precisa haver enquanto for um.
+    { chave: 'jev_api_key', rotulo: m.config_server_jev_chave(), tipo: 'segredo', secao: 'avancado',
+      ajuda: m.config_server_jev_chave_ajuda() },
+    { chave: 'jev_texto_base_url', rotulo: m.config_server_jev_texto_endpoint(), tipo: 'texto', secao: 'avancado',
+      ajuda: m.config_server_jev_texto_endpoint_ajuda() },
+    { chave: 'jev_texto_api_key', rotulo: m.config_server_jev_texto_chave(), tipo: 'segredo', secao: 'avancado',
+      ajuda: m.config_server_jev_texto_chave_ajuda() },
+    { chave: 'jev_texto_modelo', rotulo: m.config_server_jev_texto_modelo(), tipo: 'texto', secao: 'avancado',
+      ajuda: m.config_server_jev_texto_modelo_ajuda() },
+    { chave: 'jev_texto_cmd', rotulo: m.config_server_jev_texto_cmd(), tipo: 'texto', secao: 'avancado',
+      ajuda: m.config_server_jev_texto_cmd_ajuda() },
   ];
 
   const visiveis = $derived(CAMPOS.filter((c) => c.secao === secao));

@@ -173,11 +173,12 @@ async def unpair(ctx: Context) -> dict[str, Any]:
                       "claude/codex. A sessão nasce na MESMA conta de quem chama, e a resposta "
                       "devolve o `config_dir` usado — confira. `conta` (caminho do config dir) "
                       "força outra; pra conta que ainda precisa ser preparada, use o CLI "
-                      "(`hangar-send --new --conta <nome>`).")
+                      "(`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do "
+                      "Jev no ambiente, e só aí o `hangar-preview objetivo` funciona nela.")
 async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
                       model: str | None = None, effort: str | None = None, permissao: str | None = None,
                       headless: bool = False, read_only: bool = False,
-                      conta: str | None = None) -> dict[str, Any]:
+                      conta: str | None = None, jev: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     if headless and provider not in ("claude", "codex"):
@@ -199,7 +200,7 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
         info = await api.create_session(api.CreateBody(
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
             permission_mode=permissao, headless=headless, read_only=read_only,
-            config_dir=config_dir))
+            config_dir=config_dir, jev=jev))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,

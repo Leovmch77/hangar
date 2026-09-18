@@ -595,6 +595,9 @@ export interface CreateSessionBody {
   headless?: boolean;
   // CLAUDE_CODE_SUBAGENT_MODEL da sessão. Só claude na conta Anthropic (motor já define o seu).
   subagent_model?: string | null;
+  // Jev no `hangar-preview objetivo`: ligado, a sessão nasce com a chave no ambiente. Escolha da
+  // abertura — é assim que se roda a mesma tarefa com e sem, sem apagar a configuração.
+  jev?: boolean;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
@@ -619,6 +622,7 @@ export function createSession(
   codexAccount?: string | null,
   headless?: boolean,
   subagentModel?: string | null,
+  jev?: boolean,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
@@ -628,6 +632,7 @@ export function createSession(
   if (ompProfile) body.omp_profile = ompProfile;
   if (headless && (provider === 'claude' || provider === 'codex')) body.headless = true;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
+  if (jev) body.jev = true;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),

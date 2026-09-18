@@ -132,8 +132,22 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
     return cwd.replace("\\", "/") if windows else cwd
 
 
-def _env_subagente(modelo: str | None) -> dict:
-    return {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": modelo}} if modelo else {}
+def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude") -> dict:
+    env = runtime_config.env_jev(jev)
+    # Quem lê a variável é o binário `claude` — com ou sem motor, que só troca o provedor do modelo.
+    # Nos outros providers ela não seria lida por ninguém.
+    if provider == "claude":
+        env.update(runtime_config.env_function_hooks())
+    if modelo:
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = modelo
+    return {"env": env}
+
+
+def _jev_do_processo(pid: int | None) -> bool:
+    """O relancamento (troca de modelo, resume) le o estado do processo que vai morrer — mesma
+    tecnica do CLAUDE_CODE_SUBAGENT_MODEL. A CHAVE nao e copiada: e relida do runtime_config, pra
+    sessao ressuscitada nao ficar presa numa chave que ja foi trocada."""
+    return bool(pid) and procinfo._env_var_of(pid, runtime_config.MARCA_JEV) == "on"
 
 
 def _esperar_saida(pids: list[int], teto_s: float = 5.0) -> None:
@@ -1684,7 +1698,8 @@ class SessionRegistry:
                codex_account: str | None = None,
                read_only: bool = False,
                headless: bool = False,
-               subagent_model: str | None = None) -> SessionInfo:
+               subagent_model: str | None = None,
+               jev: bool = False) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -1708,9 +1723,10 @@ class SessionRegistry:
                 if engine:
                     raise ValueError("motor so vale para provider claude")
                 return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
-                                                   permission_mode, codex_account)
+                                                   permission_mode, codex_account, jev)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
-                                         effort, context_window, permission_mode, subagent_model)
+                                         effort, context_window, permission_mode, subagent_model,
+                                         jev)
         codex_home = None
         if provider == "codex":
             try:
@@ -1913,7 +1929,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
-        env_pane = {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": subagent_model}} if subagent_model else {}
+        env_pane = _env_sessao(subagent_model, jev, provider)
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")
@@ -1944,7 +1960,8 @@ class SessionRegistry:
     def _create_headless(self, name: str, cwd: str, config_dir: str | None,
                          resume_session_id: str | None, engine: str | None, model: str | None,
                          effort: str | None, context_window: int | None,
-                         permission_mode: str | None, subagent_model: str | None = None) -> SessionInfo:
+                         permission_mode: str | None, subagent_model: str | None = None,
+                         jev: bool = False) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -1976,7 +1993,7 @@ class SessionRegistry:
         meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
                                       model=model, effort=effort, context_window=context_window,
                                       permission_mode=permission_mode, previous_non_plan=anterior,
-                                      subagent_model=subagent_model)
+                                      subagent_model=subagent_model, jev=jev)
         PromptQueue(name).clear()
         ThenLink(name).clear()
         self._clear_pair(name)
@@ -1988,7 +2005,7 @@ class SessionRegistry:
 
     def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
                                model: str | None, effort: str | None, permission_mode: str | None,
-                               codex_account: str | None) -> SessionInfo:
+                               codex_account: str | None, jev: bool = False) -> SessionInfo:
         """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
         pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
         from app.adapters.codex import sem_terminal
@@ -2011,7 +2028,8 @@ class SessionRegistry:
         rollout = sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else ""
         codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
                             codex_home=codex_home, codex_account=codex_account,
-                            headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode)
+                            headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
+                            jev=jev)
         PromptQueue(name).clear()
         ThenLink(name).clear()
         self._clear_pair(name)
@@ -2047,7 +2065,7 @@ class SessionRegistry:
         _esperar_saida([int(cano_pid)] if cano_pid else [])
         self._forget(name)
         if not tmux.new_session(name, meta["cwd"], cmd, meta.get("config_dir"), provider="claude",
-                                **_env_subagente(meta.get("subagent_model"))):
+                                **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")))):
             headless_sessions.restaurar(meta)
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
         self._jsonl_cache[name] = jsonl
@@ -2098,6 +2116,7 @@ class SessionRegistry:
         janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
         subagente = procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL") if ag and not motor else None
+        jev = _jev_do_processo(ag)
         if motor:
             from app import engines
             if motor not in engines.listar():
@@ -2121,6 +2140,7 @@ class SessionRegistry:
                                           engine=motor, model=modelo, effort=esforco,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
+                                          jev=jev,
                                           previous_non_plan=(modo_permissao.ultimo_nao_plan(
                                               name, modo_permissao.modo_da_conta(str(cdir) if cdir else None))
                                               if permission_mode == "plan" else None))
@@ -2128,7 +2148,7 @@ class SessionRegistry:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
-                                    meta["config_dir"], provider="claude", **_env_subagente(subagente)):
+                                    meta["config_dir"], provider="claude", **_env_sessao(subagente, jev)):
                 _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
             raise
         self._jsonl_cache[name] = jsonl
@@ -2443,6 +2463,9 @@ class SessionRegistry:
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
         subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")
                      if ag and not motor and not motor_sumiu else None)
+        # Junto do resto que sai do /proc: depois do `kill_session` lá embaixo não há mais processo
+        # de onde ler, e a sessão ressuscitada nasceria com o Jev desligado sem ninguém pedir.
+        jev = _jev_do_processo(ag)
         proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
         jsonl = proj / f"{session_id}.jsonl"
         if not jsonl.exists():
@@ -2471,7 +2494,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
-        env_pane = {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": subagente}} if subagente else {}
+        env_pane = _env_sessao(subagente, jev)
         if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),

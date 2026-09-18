@@ -933,6 +933,12 @@ Os mods (function hooks, `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`) e o socket de me
 API muda sem aviso; o socket embrulha tudo como "mensagem de outra sessão" (`isMeta`, origem
 `peer`), não roda comando de barra e é o mesmo canal que o `SendMessage` nativo já usa.
 
+Isto vale para o HANGAR usar function hooks e continua valendo. Não confundir com o interruptor
+`claude_function_hooks` da tela de Harnesses (18/09/2026), que é outra coisa: ele só põe a variável
+no ambiente das sessões novas para que o plugin de quem USA o Hangar carregue. Quem assume o risco
+do acesso antecipado ali é o dono do plugin, e o texto da opção diz isso. Ver
+[plataforma.md](plataforma.md#function-hooks-configuração-do-servidor-e-por-isso-o-relançamento-relê).
+
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
 — duas armadilhas medidas em

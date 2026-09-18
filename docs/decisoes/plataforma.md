@@ -459,3 +459,59 @@ verbos; `.git/config` citado voltou 403 `erro_arq_area_do_git`. Na tela, pelo na
 embutido: o arquivo de fora da raiz abriu com o botão **Editar**, e o Salvar mudou o conteúdo no
 disco. Um primeiro teste com `/etc/hosts` deu 200 e parecia furo — era o transcript, que já o
 citava 5 vezes; a trava estava certa e o teste, errado.
+
+## Chave do Jev: no runtime_config, e na sessão só por escolha da abertura
+
+18/09/2026. O Jev (typesafe.ai) decide a navegação do `hangar-preview objetivo`, e a chave estava
+em claro no `~/.claude/settings.json` — que é symlink compartilhado por TODAS as contas. Ela passou
+para `runtime_config.EDITAVEIS` (`jev_api_key`, e o LLM pequeno opcional em `jev_texto_*`), no mesmo
+lugar e com o mesmo tratamento da chave da Groq: editável sem reiniciar o serviço, e listada em
+`SEGREDOS`, então volta mascarada e nunca inteira. O cadastro em `SEGREDOS` é EXPLÍCITO mesmo com a
+rede `_PALAVRAS_DE_SEGREDO` já cobrindo `_key`: depender do acaso do nome quebra calado no dia em
+que alguém renomeia o campo.
+
+**O que isso NÃO é:** sigilo. Numa sessão aberta com o recurso ligado a chave está no ambiente do
+processo e é legível por quem já roda lá dentro. O ganho é ser por sessão e por escolha, em vez de
+global e em claro num arquivo que todas as contas compartilham — e é assim que vale escrever, sem
+arredondar para "agora está seguro".
+
+**Ligar é escolha da ABERTURA**, pelo mecanismo que já existia para o `CLAUDE_CODE_SUBAGENT_MODEL`:
+`POST /api/sessions` ganhou `jev`, que vira `-e` no `tmux new-session` e chave do `env` do filho nos
+dois caminhos sem terminal. O marcador `HANGAR_JEV=on|off` vai SEMPRE — sem ele o verbo não separa
+"desligado nesta sessão" de "nunca configurado", e as duas pedem frases diferentes. Desligado é o
+padrão, e o relançamento (troca de modelo, resume) relê o marcador do `/proc` do processo que vai
+morrer, mas relê a CHAVE do runtime_config: sessão ressuscitada não fica presa numa chave trocada.
+
+Não dá para virar no meio da sessão, e foi a escolha: o pedido era rodar a mesma tarefa com e sem o
+Jev e comparar, o que acontece entre sessões. Virar ao vivo exigiria endpoint novo, estado por
+sessão e a chave atravessando mais uma fronteira. Ficaram de fora, pelo mesmo motivo, o registro de
+consumidores da chave e o override por sessão. A tela é só do front desktop neste primeiro momento,
+por decisão explícita — o app Expo fica para depois.
+
+## Function hooks: configuração do servidor, e por isso o relançamento relê
+
+18/09/2026. `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` é o portão de acesso antecipado sem o qual o
+Claude Code nem lê plugin de function hook. Estava no `~/.claude/settings.json`, onde vale para toda
+conta e toda sessão — inclusive as que não têm nada a ver. Virou `claude_function_hooks` em
+`runtime_config`, com interruptor no card do Claude na tela de Harnesses, ao lado do de atualizar a
+statusline, que é o precedente exato: booleano do runtime_config desenhado como `switch`, com a
+ajuda em `aria-describedby` e não dentro do nome.
+
+**Não é escolha por sessão, é configuração do servidor** — e isso muda duas coisas em relação ao
+`jev`, que mora ao lado e parece igual:
+
+- **Não há marcador `on|off`.** O `HANGAR_JEV` existe porque o `hangar-preview objetivo` precisa
+  separar "desligado nesta sessão" de "nunca configurado" em frases diferentes. Aqui não existe
+  "nunca configurado": a ausência da variável É o desligado, e é ela que o Claude Code lê. Copiar o
+  marcador por simetria criaria estado a mais sem nada para dizer.
+- **O relançamento relê a configuração ATUAL, não a do nascimento.** O `jev` preserva a escolha
+  original lendo o `/proc` do processo que vai morrer, porque houve uma escolha por sessão a
+  preservar. Aqui não houve: uma sessão relançada deve refletir o que está ligado agora.
+
+Continua valendo, porém, que a variável entra no ambiente quando o processo SOBE: ligar não muda
+sessão viva, e desligar também não. O texto do interruptor diz isso antes de qualquer outra coisa —
+sem essa frase a pessoa liga, olha a sessão aberta, não vê efeito e conclui que quebrou.
+
+Isto **não** reabre o que está em [harnesses.md](harnesses.md): lá a decisão é sobre o HANGAR usar
+function hooks para ler estado de sessão, e ela continua de pé. Este interruptor é o portão para o
+plugin de quem usa.

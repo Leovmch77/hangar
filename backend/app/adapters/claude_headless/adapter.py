@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, log_paths, model_args, pensamento
+from app import atomico, cotas, log_paths, model_args, pensamento, runtime_config
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -883,6 +883,12 @@ class ClaudeHeadlessAdapter:
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
         if meta.get("subagent_model"):
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = meta["subagent_model"]
+        # Escolha da abertura. O marcador vai sempre; a chave, só com o recurso ligado. Herdar do
+        # backend seria dar o Jev a TODA sessão sem terminal, que é o contrário do que se pediu.
+        env.update(runtime_config.env_jev(bool(meta.get("jev"))))
+        # Configuração do servidor, lida agora: sessão que sobe depois de alguém ligar o portão já
+        # nasce com ele, sem precisar recriar nada.
+        env.update(runtime_config.env_function_hooks())
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
         cano, proc = await subir_cano_processo(argv, cwd=meta["cwd"], env=env, key=meta["key"], log=log,
                                                tarefas=self._tarefas)

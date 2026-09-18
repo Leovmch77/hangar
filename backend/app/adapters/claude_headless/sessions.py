@@ -42,7 +42,8 @@ def _write(name: str, meta: dict) -> None:
 def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          engine: str | None = None, model: str | None = None, effort: str | None = None,
          context_window: int | None = None, permission_mode: str | None = None,
-         previous_non_plan: str | None = None, subagent_model: str | None = None) -> dict:
+         previous_non_plan: str | None = None, subagent_model: str | None = None,
+         jev: bool = False) -> dict:
     meta = {
         "name": name, "provider": "claude", "headless": True,
         # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
@@ -54,6 +55,9 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
         "model": model, "effort": effort, "context_window": context_window,
         "permission_mode": permission_mode, "previous_non_plan": previous_non_plan,
         "subagent_model": subagent_model,
+        # Escolhido na abertura: o adapter põe o ambiente do Jev no filho a partir daqui, e a
+        # troca para terminal o repassa pro `-e` do pane.
+        "jev": jev,
     }
     _write(name, meta)
     return meta
