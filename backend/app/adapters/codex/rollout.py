@@ -22,6 +22,11 @@ _CONTEXT_WRAPPER_RE = re.compile(
     r"# AGENTS\.md instructions(?: for |[ \t]*\r?\n\s*<INSTRUCTIONS>))")
 
 
+# Ancorado nas duas pontas: os blocos `input_text` da entrada são concatenados, e casar só o começo
+# transformaria em aviso uma mensagem real grudada no bloco de interrupção — perdendo o que ela diz.
+_TURNO_ABORTADO_RE = re.compile(r"^<turn_aborted>.*</turn_aborted>$", re.DOTALL)
+
+
 def _is_context_wrapper(text: str) -> bool:
     return bool(_CONTEXT_WRAPPER_RE.match(text.strip()))
 
@@ -226,7 +231,7 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
             text = _blocks_text(payload.get("content"), "input_text")
             if _is_context_wrapper(text):
                 return []
-            if text.strip().startswith("<turn_aborted>"):
+            if _TURNO_ABORTADO_RE.match(text.strip()):
                 # Interrupção: o Codex injeta o aviso como fala do usuário, em inglês e com tag.
                 # Vira aviso, e a frase fica com a interface.
                 return [ChatEvent(kind="notice", id=_event_id(obj), text="turn_aborted")]

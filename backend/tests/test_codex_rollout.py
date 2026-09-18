@@ -22,6 +22,15 @@ def test_turno_abortado_vira_aviso():
     assert ev.kind == "notice" and ev.text == "turn_aborted"
 
 
+def test_mensagem_real_grudada_no_aviso_nao_vira_aviso():
+    # Os blocos de texto da entrada são concatenados: casar só o começo faria a fala real sumir.
+    obj = {"timestamp": "t", "type": "response_item", "payload": {
+        "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "<turn_aborted>\nx\n</turn_aborted>\nfaz outra coisa"}]}}
+    [ev] = parse_rollout_obj(obj)
+    assert ev.kind == "user_msg" and "faz outra coisa" in (ev.text or "")
+
+
 def test_developer_message_ignored():
     obj = {"timestamp": "t", "type": "response_item",
            "payload": {"type": "message", "role": "developer",
