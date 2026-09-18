@@ -434,17 +434,17 @@
       values={filtros.conta ?? []} onchangeMulti={(v) => setFiltro('conta', v)}
       rotuloMulti={rotuloFiltro('conta', m.uso_todas(), (k) => listas.conta.find((b) => b.key === k)?.label ?? k)}
       opcoes={[{ value: '', label: m.uso_todas() },
-               ...listas.conta.map((b) => ({ value: b.key, label: b.label ?? b.key, title: b.key, hint: tok(tokensReais(b)) }))]} /></span>
+               ...listas.conta.map((b) => ({ value: b.key, label: b.label ?? b.key, title: b.key, hint: tok(tokensSemCache(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.projeto?.length}><Select ariaLabel={m.uso_projeto()} value="" onchange={() => {}} class="chipsel"
       values={filtros.projeto ?? []} onchangeMulti={(v) => setFiltro('projeto', v)}
       rotuloMulti={rotuloFiltro('projeto', m.uso_todos(), projectLabel)}
       opcoes={[{ value: '', label: m.uso_todos() },
-               ...listas.projeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key, hint: tok(tokensReais(b)) }))]} /></span>
+               ...listas.projeto.map((b) => ({ value: b.key, label: projectLabel(b.key), title: b.key, hint: tok(tokensSemCache(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.modelo?.length}><Select ariaLabel={m.uso_modelo()} value="" onchange={() => {}} class="chipsel"
       values={filtros.modelo ?? []} onchangeMulti={(v) => setFiltro('modelo', v)}
       rotuloMulti={rotuloFiltro('modelo', m.uso_todos(), (k) => k)}
       opcoes={[{ value: '', label: m.uso_todos() },
-               ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: tok(tokensReais(b)) }))]} /></span>
+               ...listas.modelo.map((b) => ({ value: b.key, label: b.key, hint: tok(tokensSemCache(b)) }))]} /></span>
     <span class="fsel" class:ativo={!!filtros.plugin?.length}><Select ariaLabel={m.uso_plugin()} value="" onchange={() => {}} class="chipsel"
       values={filtros.plugin ?? []} onchangeMulti={(v) => setFiltro('plugin', v)}
       rotuloMulti={rotuloFiltro('plugin', m.uso_todos(), nomeGrupo)}
