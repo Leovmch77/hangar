@@ -9,7 +9,8 @@ import * as m from '../paraglide/messages';
   import type { BoardRow, PendingMsg } from './Board.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { serverColor } from '../lib/auth';
-  import { pairColor } from '@hangar/core';
+  import { pairColor, canPair, type DropResult } from '@hangar/core';
+  import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import {
     canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox,
     MIN_SCALE, MAX_SCALE, PAD, GAP, CARD_W, CARD_H,
@@ -282,8 +283,51 @@ import * as m from '../paraglide/messages';
   });
   const bounds = $derived(canvasBounds(renderedBoxes));
 
-  // ── Drag pelo handle (o card em si é interativo — input/botões — então o drag tem faixa própria). ──
+  // ── Drag pelo handle (o card em si é interativo — input/botões — então o drag tem faixa própria).
+  // Aqui arrastar já MOVE o tile (tiles podem se sobrepor à vontade) — por isso não é o HTML5
+  // drag-and-drop da Sidebar/Board: é o mesmo pointerdown/move/up que já existia, com um hit-test
+  // extra contra a FAIXA DE CABEÇALHO (topo, ~34px) dos outros cards. Sobrepor o CORPO deles
+  // continua sendo só mover; só o cabeçalho (ou um grupo recolhido) vira alvo de pareamento. ──
+  const HEADER_HIT_H = 34;
   let drag: { key: string; x0: number; y0: number; box: CardBox } | null = null;
+  // Alvo sob o ponteiro DURANTE o arrasto — 'group' é um card recolhido (Step 2: não está no
+  // layout, então o alvo guarda a chave de um MEMBRO representante pra canPair/soltar).
+  let dropHover = $state<{ kind: 'card' | 'group'; key: string; gid?: string } | null>(null);
+
+  function planePoint(e: PointerEvent): { x: number; y: number } {
+    const rect = canvasEl?.getBoundingClientRect();
+    if (!canvasEl || !rect) return { x: 0, y: 0 };
+    return {
+      x: (e.clientX - rect.left + canvasEl.scrollLeft) / zoom,
+      y: (e.clientY - rect.top + canvasEl.scrollTop) / zoom,
+    };
+  }
+  function findDropTarget(px: number, py: number, dragKey: string) {
+    for (const row of visibleRows) {
+      const key = rowKey(row);
+      if (key === dragKey) continue;
+      const box = layout[key];
+      if (!box) continue;
+      if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + HEADER_HIT_H) {
+        return { kind: 'card' as const, key };
+      }
+    }
+    for (const g of collapsedCards) {
+      if (px >= g.x && px <= g.x + g.w && py >= g.y && py <= g.y + HEADER_HIT_H) {
+        const rep = g.members[0];
+        if (!rep) continue;
+        return { kind: 'group' as const, key: rowKey(rep), gid: g.gid };
+      }
+    }
+    return null;
+  }
+  // Mesma checagem que a Sidebar/Board usam pro destaque (Step 3): só avaliada pra quem está sob o
+  // ponteiro agora — evita rodar canPair pros ~dezenas de cards que não estão em jogo.
+  function avaliarDropCanvas(origemKey: string, alvo: BoardRow): DropResult | null {
+    const origem = rows.find((r) => rowKey(r) === origemKey);
+    return origem ? canPair(origem, alvo) : null;
+  }
+
   function dragStart(e: PointerEvent, key: string) {
     const b = layout[key];
     if (!b) return;
@@ -293,17 +337,50 @@ import * as m from '../paraglide/messages';
   }
   function dragMove(e: PointerEvent) {
     if (!drag) return;
-    if (!layout[drag.key]) { drag = null; return; }   // sessão morreu no meio do arrasto -> não grava entrada corrompida sem w/h
+    if (!layout[drag.key]) { drag = null; dropHover = null; return; }   // sessão morreu no meio do arrasto -> não grava entrada corrompida sem w/h
     layout = { ...layout, [drag.key]: {
       ...drag.box,
       x: Math.max(0, drag.box.x + (e.clientX - drag.x0) / zoom),
       y: Math.max(0, drag.box.y + (e.clientY - drag.y0) / zoom),
     } };
+    const p = planePoint(e);
+    dropHover = findDropTarget(p.x, p.y, drag.key);
   }
+  // Reúne o grupo recém-formado em volta de onde o usuário soltou — senão o tile fica empilhado
+  // por cima do alvo (Step 4). ponytail: espera a confirmação fechar E o pair_gid aparecer no
+  // sessionsStore (SSE); desiste depois de 4s — o grupo já formou de qualquer forma, só a reunião
+  // automática que não rodou, e o ⇱ do rótulo do grupo resolve na mão.
+  let pendingGather: { origemKey: string; anchorKey: string; beforeGid: string | null; at: number } | null = null;
+  $effect(() => {
+    // Dependências lidas SEMPRE, antes de qualquer return: pendingGather é variável comum (só o
+    // gatilho, não precisa ser $state), e um efeito que só lê pedido/rows dentro do `if` perde a
+    // inscrição neles na 1ª rodada (pendingGather nulo) e nunca mais reexecuta sozinho.
+    const pedidoAtual = arrastarGrupo.pedido;
+    void rows;
+    const pending = pendingGather;
+    if (!pending || pedidoAtual) return;
+    const origemNow = rows.find((r) => rowKey(r) === pending.origemKey);
+    const gk = origemNow ? gkeyOf(origemNow) : null;
+    if (gk && gk !== pending.beforeGid) {
+      pendingGather = null;
+      if (layout[pending.anchorKey]) gatherPair(pending.anchorKey, gk);
+    } else if (Date.now() - pending.at > 4000) {
+      pendingGather = null;
+    }
+  });
   function dragEnd() {
     if (!drag) return;
+    const trigger = drag;
+    const hit = dropHover;
     drag = null;
+    dropHover = null;
     saveLayout();
+    if (!hit) return;
+    const origem = rows.find((r) => rowKey(r) === trigger.key);
+    const alvo = rows.find((r) => rowKey(r) === hit.key);
+    if (!origem || !alvo || !canPair(origem, alvo).ok) return;
+    pendingGather = { origemKey: trigger.key, anchorKey: hit.key, beforeGid: gkeyOf(origem), at: Date.now() };
+    arrastarGrupo.soltar(hit.key);
   }
 
   // Empurra pra BAIXO (cascata) quem intersecta o card `key` — crescer um card não deixa mais
@@ -481,9 +558,14 @@ import * as m from '../paraglide/messages';
                 title={m.board_ver_so_grupo()}>◎</button>
       </div>
     {/each}
-    <!-- Grupo colapsado: um card compacto no lugar dos membros. -->
+    <!-- Grupo colapsado: um card compacto no lugar dos membros. Também é alvo de soltar (Step 2). -->
     {#each collapsedCards as g (g.gid)}
-      <div class="cv-gcard" style="left: {g.x}px; top: {g.y}px; width: {g.w}px; color: {g.color};">
+      {@const hoverAqui = dropHover?.kind === 'group' && dropHover.gid === g.gid}
+      {@const dropResultado = hoverAqui && g.members[0] ? avaliarDropCanvas(drag!.key, g.members[0]) : null}
+      {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+      <div class="cv-gcard" class:drop-alvo={dropResultado?.ok === true} class:drop-recusado={dropRecusa !== null}
+           title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
+           style="left: {g.x}px; top: {g.y}px; width: {g.w}px; color: {g.color};">
         <button class="cv-gcard-head" onclick={() => toggleCollapse(g.gid)}
                 title={m.board_expandir_grupo()}>
           ▸ <GroupGlyph size={13} /> {g.label ?? g.members.map((m) => m.name).join(' · ')}
@@ -502,7 +584,12 @@ import * as m from '../paraglide/messages';
       {@const key = rowKey(row)}
       {@const box = layout[key]}
       {#if box}
+        {@const hoverAqui = dropHover?.kind === 'card' && dropHover.key === key}
+        {@const dropResultado = hoverAqui ? avaliarDropCanvas(drag!.key, row) : null}
+        {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
         <div class="cv-card" class:paired={!!row.pair_gid}
+             class:drop-alvo={dropResultado?.ok === true} class:drop-recusado={dropRecusa !== null}
+             title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
              style="left: {box.x}px; top: {box.y}px; width: {box.w}px; height: {box.h}px;{row.pair_gid ? ` --pair-c: ${pairColor(gkeyOf(row)!)};` : ''}">
           <!-- Barra tingida com a COR DO GRUPO (pairColor): membros do mesmo pareamento se
                reconhecem de longe no canvas; sem par, barra neutra de sempre. -->
@@ -530,6 +617,7 @@ import * as m from '../paraglide/messages';
               onSendError={(m) => setSendError(key, m)}
               onOpen={() => onOpenSession(row.name, row.serverId)}
               onGatherPair={row.pair_gid ? () => gatherPair(key, gkeyOf(row)!) : null}
+              onLeavePair={row.pair_gid ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
             />
           </div>
           <!-- Alças de resize: faixas de 6px nas 4 bordas + 12px nos cantos. Decorativas (o teclado
@@ -668,6 +756,13 @@ import * as m from '../paraglide/messages';
   .cv-card.paired {
     outline: 1.5px solid color-mix(in srgb, var(--pair-c) 55%, transparent);
     outline-offset: 2px;
+  }
+  /* Alvo do arrasto (Step 3, mesma receita da Sidebar/Board): válido acende a borda de accent;
+     recusado avisa sem travar (não é HTML5 dnd, então nada impede soltar — dragEnd reconfere
+     canPair antes de abrir o diálogo) — só o motivo, no title do card/card recolhido. */
+  .cv-card.drop-alvo, .cv-gcard.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .cv-card.drop-recusado, .cv-gcard.drop-recusado {
+    cursor: not-allowed; outline: 2px dashed var(--text-muted); outline-offset: -2px;
   }
   /* Etiqueta do grupo: pill flutuante acima do membro mais alto, com as ações. A etiqueta invade
      ~4px do card de CIMA (GAP de 16 < altura do pill): container com pointer-events none — só os

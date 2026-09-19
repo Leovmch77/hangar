@@ -422,6 +422,7 @@
   "board_reunir_ancora": "group: anchor without position in layout",
   "board_reunir_membros": "Bring members side by side",
   "board_sair_foco": "Exit focus mode and show all sessions",
+  "board_sair_grupo": "Leave the group",
   "board_sem_conexao": "offline",
   "board_tempo_sessao": "session time",
   "board_trabalhando": "Working",

@@ -43,10 +43,14 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     fill?: boolean;
     // Canvas: clicar no chip 🤝 reúne o grupo em volta deste card. Board não passa → chip estático.
     onGatherPair?: (() => void) | null;
+    // Canvas: botão de sair do grupo — lá não existe área neutra pra soltar e pedir saída (a
+    // Sidebar/Board usam o fundo da lista/coluna). Opcional: sem prop, o botão não aparece.
+    onLeavePair?: (() => void) | null;
   }
   let {
     session, server, color, draft, onDraftChange,
     pending, updatePending, sendError, onSendError, onOpen, fill = false, onGatherPair = null,
+    onLeavePair = null,
   }: Props = $props();
 
   const TAIL = 15;
@@ -458,6 +462,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
                 style="background: color-mix(in srgb, {pc} 16%, transparent); color: {pc};"
                 title={m.board_pareada_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} /> {session.pair_peers.join(', ')}</span>
         {/if}
+        {#if onLeavePair}
+          <button class="bc-leave" onclick={(e) => { e.stopPropagation(); onLeavePair?.(); }}
+                  title={m.board_sair_grupo()} aria-label={m.board_sair_grupo()}>✕</button>
+        {/if}
       {/if}
       {#if meta?.costUsd != null}<span title={m.board_custo_sessao()}>💵 {money2(meta.costUsd, moeda.cur, moeda.rate)}</span>{/if}
       {#if meta?.sessionTime}<span title={m.board_tempo_sessao()}>⏱ {meta.sessionTime}</span>{/if}
@@ -705,6 +713,15 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     min-height: 0; min-width: 0; line-height: inherit;
   }
   .bc-chip-btn:hover { filter: brightness(1.2); }
+  /* Sair do grupo: ícone mudo ao lado do chip, só ganha cor de aviso no hover — não compete com o
+     chip (que carrega os nomes) nem com o resto da linha. */
+  .bc-leave {
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 18px; height: 18px; padding: 0; min-height: 0; min-width: 0;
+    border: 0; border-radius: 50%; background: none; cursor: pointer;
+    color: var(--text-muted); font-size: 11px; line-height: 1;
+  }
+  .bc-leave:hover { background: color-mix(in srgb, var(--error) 16%, transparent); color: var(--error); }
   .bc-problema { color: var(--warning); flex-shrink: 0; cursor: help; }
   .bc-time { margin-left: auto; }
   .bc-open { color: var(--text-muted); flex-shrink: 0; }
