@@ -303,18 +303,7 @@
       <button class="nav-btn" onclick={() => nativo?.forward?.(navKey)} disabled={!podeAvancar}
               aria-label={m.nav_avancar()} title={m.nav_avancar()}>→</button>
     {/if}
-    <form class="nav-form" onsubmit={(e) => { e.preventDefault(); ir(); }}>
-      <input
-        class="nav-url"
-        bind:this={campoUrl}
-        bind:value={endereco}
-        placeholder={m.nav_url_dica()}
-        aria-label={m.nav_url_dica()}
-        spellcheck="false"
-        autocapitalize="off"
-        autocomplete="off"
-      />
-    </form>
+    <!-- Junto das setas, à esquerda do endereço: é onde o Chrome põe, e é onde a mão procura. -->
     {#if carregando && nativo?.stop}
       <!-- Carregando: o ↻ vira ✕, como no Chrome. -->
       <button class="nav-btn" onclick={() => nativo?.stop?.(navKey)} aria-label={m.nav_parar()} title={m.nav_parar()}>✕</button>
@@ -327,6 +316,18 @@
         title={m.nav_recarregar()}
       >↻</button>
     {/if}
+    <form class="nav-form" onsubmit={(e) => { e.preventDefault(); ir(); }}>
+      <input
+        class="nav-url"
+        bind:this={campoUrl}
+        bind:value={endereco}
+        placeholder={m.nav_url_dica()}
+        aria-label={m.nav_url_dica()}
+        spellcheck="false"
+        autocapitalize="off"
+        autocomplete="off"
+      />
+    </form>
     {#if nativo?.importCookies}
       <button
         class="nav-btn"
