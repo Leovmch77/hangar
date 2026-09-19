@@ -30,7 +30,7 @@
   import SubagenteCard from './SubagenteCard.svelte';
   import { lerSubagenteCodex } from '../lib/subagenteCodex';
   import { transcriptImageUrl, uploadUrl } from '@hangar/core';
-  import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim } from '../lib/window';
+  import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim, nextAtBottom } from '../lib/window';
   import * as diag from '../lib/diag';
 
   interface Props {
@@ -166,10 +166,12 @@
   let extra = $state(0);       // eventos revelados ALEM da janela padrao (cresce ao rolar pro topo)
   let piso = 0;                // quanto do `extra` a TELA precisa pra ter rolagem (ver preencherTela)
 
+  let lastTop = 0;
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
-    atBottom = gap < 64; // threshold ~64px do fim
+    atBottom = nextAtBottom(atBottom, listEl.scrollTop, lastTop, gap);
+    lastTop = listEl.scrollTop;
     scrolledUp = gap > listEl.clientHeight; // mais de uma tela do fim = "muito pra cima" -> botao
     // Perto do topo + ainda ha eventos antigos fora da janela -> revela a proxima pagina.
     if (listEl.scrollTop < 200 && hasOlder) revealOlder();
@@ -460,7 +462,8 @@
     if (!listEl) return;
     cancelAnimationFrame(rafScroll);
     rafScroll = requestAnimationFrame(() => {
-      if (!listEl) return;
+      // A pessoa pode ter subido entre o effect e este quadro: não puxa de volta.
+      if (!listEl || !atBottom) return;
       const target = listEl.scrollHeight - listEl.clientHeight;
       if (Math.abs(listEl.scrollTop - target) > 2) listEl.scrollTop = target;
       sondarVazioNoFim();

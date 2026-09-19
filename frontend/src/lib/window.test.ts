@@ -1,5 +1,28 @@
 import { describe, it, expect } from 'vitest';
-import { precisaPreencher, mostrarIrPraoFim } from './window';
+import { precisaPreencher, mostrarIrPraoFim, nextAtBottom } from './window';
+
+describe('nextAtBottom', () => {
+  it('subir 20px durante o streaming solta do fim, mesmo dentro da folga de 64px', () => {
+    // O bug: gap=20 < 64 mantinha a lista colada e o próximo pedaço da prévia puxava de volta.
+    expect(nextAtBottom(true, 980, 1000, 20)).toBe(false);
+  });
+
+  it('conteúdo encolheu com a lista colada: scrollTop cai mas a folga segue ~0, continua colada', () => {
+    expect(nextAtBottom(true, 700, 1000, 0)).toBe(true);
+  });
+
+  it('solta e parada perto do fim: a prévia cresce sem evento de scroll e ninguém reencosta sozinho', () => {
+    expect(nextAtBottom(false, 980, 980, 300)).toBe(false);
+  });
+
+  it('descer até 64px do fim reencosta', () => {
+    expect(nextAtBottom(false, 990, 900, 40)).toBe(true);
+  });
+
+  it('descer e ainda estar longe do fim não muda nada', () => {
+    expect(nextAtBottom(false, 500, 400, 600)).toBe(false);
+  });
+});
 
 describe('mostrarIrPraoFim', () => {
   it('a faixa morta: janela congelada com evento novo e ainda sem uma tela rolada', () => {
