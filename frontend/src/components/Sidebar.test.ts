@@ -932,4 +932,30 @@ describe('Sidebar — arrastar sessão sobre sessão (Task 3)', () => {
     expect(arrastarGrupo.pedido).toBeNull();
     unmount(t.comp);
   });
+
+  it('soltar no fundo da lista com a origem num grupo pede o diálogo no modo sair', async () => {
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [
+      sess('sess-1', 'srv-a', { pair_gid: 'g1' }),
+    ] }]);
+    const t = montar();
+    await tick();
+    const row = t.el.querySelector<HTMLElement>('.sess-row')!;
+    const fundo = t.el.querySelector<HTMLElement>('.sess-list')!;
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+    fundo.dispatchEvent(new DragEvent('drop', { bubbles: true }));
+    expect(arrastarGrupo.pedido).toEqual({ modo: 'sair', origem: { serverId: 'srv-a', name: 'sess-1' } });
+    unmount(t.comp);
+  });
+
+  it('soltar no fundo da lista sem grupo não pede nada', async () => {
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [sess('sess-1', 'srv-a')] }]);
+    const t = montar();
+    await tick();
+    const row = t.el.querySelector<HTMLElement>('.sess-row')!;
+    const fundo = t.el.querySelector<HTMLElement>('.sess-list')!;
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+    fundo.dispatchEvent(new DragEvent('drop', { bubbles: true }));
+    expect(arrastarGrupo.pedido).toBeNull();
+    unmount(t.comp);
+  });
 });

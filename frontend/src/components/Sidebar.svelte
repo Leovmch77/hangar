@@ -811,7 +811,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
              class:awaiting={s.state === 'awaiting_input'} role="presentation"
              class:drop-alvo={dropResultado?.ok === true}
              class:drop-recusado={dropRecusa !== null}
-             title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
              draggable="true"
              ondragstart={(e) => onRowDragStart(e, s)}
              ondragend={onRowDragEnd}
@@ -837,9 +836,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               class:untracked-open={s.tracked === false && (s.provider === 'kimi' || s.provider === 'codex')}
               aria-pressed={model.selectMode ? model.selected.has(selKey) : undefined}
               aria-label={!expanded ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}` : undefined}
-              title={!expanded
-                ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
-                : (s.tracked === false ? untrackedReason(s.provider) : m.sessao_toque_renomear())}
+              title={dropRecusa !== null
+                ? mensagemRecusa(dropRecusa)
+                : (!expanded
+                  ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
+                  : (s.tracked === false ? untrackedReason(s.provider) : m.sessao_toque_renomear()))}
               onpointerdown={() => { if (!model.selectMode && !sidebarPin.collapsed) pressStart(rowKey); }}
               onpointerup={pressEnd}
               onpointerleave={pressEnd}
