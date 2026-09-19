@@ -46,3 +46,4 @@ export * from './cotaResumo';
 export * from './orquestracao';
 export * from './proposedPlan';
 export * from './credenciais';
+export * from './pairDrop';

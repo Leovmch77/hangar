@@ -10,7 +10,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 }
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
-import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica } from './api';
+import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
@@ -530,5 +530,21 @@ describe('cache curto dos catálogos dos seletores', () => {
     await setEngineModel('sessao-cat-3', { model: 'x' });
     await getModelOptions('sessao-cat-3');   // sem invalidação, este viria do cache (2 fetches)
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('pairSession', () => {
+  it('manda replace_task no corpo, default false quando o caller não passa', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    await pairSession('sessao', ['outra'], 'tarefa');
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init?.body as string)).toEqual({ peers: ['outra'], task: 'tarefa', replace_task: false });
+  });
+
+  it('repassa replaceTask=true (409 da API vira caminho de confirmar a troca)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    await pairSession('sessao', ['outra'], 'tarefa', true);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init?.body as string)).toEqual({ peers: ['outra'], task: 'tarefa', replace_task: true });
   });
 });

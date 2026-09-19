@@ -1268,10 +1268,15 @@ export async function steerSession(
 // warning: falha PARCIAL de aviso (algum membro sem o prompt do grupo) — o backend reporta de
 // propósito; descartar isso virava "sucesso" mudo com membro que não sabe que está no grupo.
 export interface PairResult { ok: boolean; warning: string | EnvelopeErro | null }
-export async function pairSession(name: string, peers: string[], task = ''): Promise<PairResult> {
+export async function pairSession(
+  name: string,
+  peers: string[],
+  task = '',
+  replaceTask = false,
+): Promise<PairResult> {
   return apiFetch<PairResult>(`/api/sessions/${encodeURIComponent(name)}/pair`, {
     method: 'POST',
-    body: JSON.stringify({ peers, task }),
+    body: JSON.stringify({ peers, task, replace_task: replaceTask }),
   });
 }
 
