@@ -58,7 +58,7 @@
   let tarefa = $state('');
   let busy = $state(false);
   let erro = $state<string | null>(null);
-  let conflito = $state<string | null>(null); // mensagem do 409 — presente ativa "Substituir a tarefa"
+  let conflito = $state<string | null>(null); // mensagem do 409: troca o botão de confirmar pelo de sobrescrever
 
   // Reinicia o formulário só quando um PEDIDO NOVO abre (a referência de `pedido` muda uma vez por
   // arrasto) — nunca a cada recompute do sessionsStore: um poll no meio da digitação não pode
@@ -144,6 +144,7 @@
         type="text"
         class="gd-tarefa"
         bind:value={tarefa}
+        oninput={() => { conflito = null; }}
         placeholder={m.grupo_drop_tarefa()}
         disabled={busy}
       />
@@ -155,7 +156,7 @@
       <div class="gd-acoes">
         <button type="button" class="gd-btn" onclick={fechar} disabled={busy}>{m.comum_cancelar()}</button>
         {#if conflito}
-          <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(true)} disabled={busy}>
+          <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(true)} disabled={busy || !!bloqueio}>
             {m.grupo_drop_substituir_tarefa()}
           </button>
         {:else}
