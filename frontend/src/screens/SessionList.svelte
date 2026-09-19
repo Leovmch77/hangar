@@ -214,6 +214,13 @@ import * as m from '../paraglide/messages';
     const origem = sessionByKey(arrastarGrupo.origem);
     return origem ? canPair(origem, alvo) : null;
   }
+  // Cabeçalho de um cluster de pareamento (recolhido ou não) também é alvo de agrupar (rodada de
+  // correção 1): sem representante, ele caía no "fundo" e soltar ali pedia SAÍDA do grupo da
+  // origem — nada a ver com o que a pessoa mirou. Representante = 1º membro (mesma regra do Canvas,
+  // `join_group` funde o grupo inteiro no backend, então soltar sobre QUALQUER membro basta).
+  function groupRep(gid: string): AggSession | null {
+    return model.flatRows.find((s) => s.pair_gid === gid) ?? null;
+  }
   // Alvo sob o dedo: hit-test real (document.elementFromPoint), não o pointer capture do handle —
   // capture só mantém o handle recebendo os eventos, a posição na tela é que decide quem está embaixo.
   // Cada linha marca a si mesma via data-session-key (no .pair-wrap, ver template).
@@ -264,7 +271,11 @@ import * as m from '../paraglide/messages';
       if (!dragActive) return;
       ghostX = e.clientX; ghostY = e.clientY;
       updateAutoScroll(e.clientY);
-      const hit = hitTest(e.clientX, e.clientY);
+      // Rodada de correção 1: com o dedo ainda sobre a alça (dentro da própria trilha aberta), o
+      // hit-test resolve pra própria linha de origem — canPair recusa por "same" e ela piscava
+      // como recusada antes de qualquer movimento real. Hit igual à origem conta como "sem alvo".
+      const hitRaw = hitTest(e.clientX, e.clientY);
+      const hit = hitRaw === dragChave(session) ? null : hitRaw;
       const alvoAtual = arrastarGrupo.alvo;
       if (hit) arrastarGrupo.entrarEm(hit);
       else if (alvoAtual) arrastarGrupo.sairDe(alvoAtual);
@@ -517,9 +528,19 @@ import * as m from '../paraglide/messages';
               {#if !model.collapsed.has(g.id)}
                 {#each clusterByPair(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
                   {#if item.kind === 'header'}
-                    <!-- Cluster de pareamento (Opção C): sub-header colapsável do grupo. -->
+                    {@const rep = groupRep(item.gid)}
+                    {@const dropAlvoAtual = !!rep && arrastarGrupo.alvo === dragChave(rep)}
+                    {@const dropResultado = dropAlvoAtual && rep ? avaliarDrop(rep) : null}
+                    {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+                    <!-- Cluster de pareamento (Opção C): sub-header colapsável do grupo — também alvo de
+                         soltar (rodada de correção 1): representante = 1º membro, mesmo canPair/destaque
+                         das linhas (sem representante, soltar aqui caía no "fundo" e pedia saída à toa). -->
                     <button class="pair-head" onclick={() => model.toggleGroup(`pair:${item.gid}`)}
-                            aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}>
+                            aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}
+                            class:drop-alvo={dropResultado?.ok === true}
+                            class:drop-recusado={dropRecusa !== null}
+                            data-session-key={rep ? dragChave(rep) : undefined}
+                            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
                       <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
                       <span class="pair-label"><GroupGlyph size={13} />&nbsp;<b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto">{pairResto(item.label)}</span>{/if}</span>
                 {#if pairAwaiting(item.gid) > 0}
@@ -566,8 +587,16 @@ import * as m from '../paraglide/messages';
                no mesmo repo. Sobrava so o chip dentro do card. -->
           {#each clusterByPair(model.flatRows) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
             {#if item.kind === 'header'}
+              {@const rep = groupRep(item.gid)}
+              {@const dropAlvoAtual = !!rep && arrastarGrupo.alvo === dragChave(rep)}
+              {@const dropResultado = dropAlvoAtual && rep ? avaliarDrop(rep) : null}
+              {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
               <button class="pair-head" onclick={() => model.toggleGroup(`pair:${item.gid}`)}
-                      aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}>
+                      aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}
+                      class:drop-alvo={dropResultado?.ok === true}
+                      class:drop-recusado={dropRecusa !== null}
+                      data-session-key={rep ? dragChave(rep) : undefined}
+                      title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
                 <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
                 <span class="pair-label"><GroupGlyph size={13} />&nbsp;<b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto">{pairResto(item.label)}</span>{/if}</span>
                 {#if pairAwaiting(item.gid) > 0}
@@ -860,9 +889,11 @@ import * as m from '../paraglide/messages';
     margin-left: calc(var(--space-4) + var(--space-2) - 2px);
   }
   /* Alvo do arrasto (Task 6, mesma receita da Sidebar/Board/Canvas): válido acende a borda de
-     accent; recusado avisa sem travar — soltar aqui não faz nada, dragEnd reconfere canPair. */
-  .pair-wrap.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .pair-wrap.drop-recusado { outline: 2px dashed var(--text-muted); outline-offset: -2px; }
+     accent; recusado avisa sem travar — soltar aqui não faz nada, dragEnd reconfere canPair.
+     .pair-head entra junto (rodada de correção 1): soltar no cabeçalho de um grupo pareia com o
+     representante (1º membro), mesmo destaque das linhas. */
+  .pair-wrap.drop-alvo, .pair-head.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .pair-wrap.drop-recusado, .pair-head.drop-recusado { outline: 2px dashed var(--text-muted); outline-offset: -2px; }
 
   /* Fantasma do arrasto: chip flutuante acima do dedo, fora do fluxo (não intercepta o hit-test). */
   .drag-ghost {

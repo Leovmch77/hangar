@@ -37,6 +37,26 @@ describe('resolveDrop', () => {
     expect(resolveDrop('srv-a::b', { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'none' });
     expect(resolveDrop(null, { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'none' });
   });
+
+  // Rodada de correção 1: o hit sobre a PRÓPRIA origem (dedo ainda sobre a alça, dentro da trilha
+  // aberta) não pode virar nem grupo nem saída — resolveDrop já cobre isso via canPair (reason
+  // 'same'); o filtro de UI (SessionList ignora o hit antes de destacar) é só pra não piscar.
+  it('solta sobre a própria origem -> nenhum alvo (canPair recusa "same")', () => {
+    const rows = [s('a', 'srv-a', { pair_gid: 'g1' })]; // com grupo: se caísse no "fundo" viraria 'leave'
+    expect(resolveDrop('srv-a::a', { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'none' });
+  });
+
+  // Cabeçalho de um cluster de pareamento (rodada de correção 1): a tela passa a chave do 1º
+  // membro do grupo como "hit" — pro resolveDrop isso é indistinguível de soltar sobre a linha dele.
+  it('solta sobre o representante de um grupo (cabeçalho recolhido) -> pede grupo, se canPair permite', () => {
+    const rows = [s('a'), s('rep', 'srv-a', { pair_gid: 'g1' }), s('outro', 'srv-a', { pair_gid: 'g1' })];
+    expect(resolveDrop('srv-a::rep', { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'pair', chave: 'srv-a::rep' });
+  });
+
+  it('solta sobre o cabeçalho do PRÓPRIO grupo (origem já é membro) -> não faz nada (same_group)', () => {
+    const rows = [s('origem', 'srv-a', { pair_gid: 'g1' }), s('rep', 'srv-a', { pair_gid: 'g1' })];
+    expect(resolveDrop('srv-a::rep', { serverId: 'srv-a', name: 'origem' }, rows)).toEqual({ kind: 'none' });
+  });
 });
 
 describe('dragChave', () => {
