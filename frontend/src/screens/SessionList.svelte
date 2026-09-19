@@ -18,7 +18,7 @@ import * as m from '../paraglide/messages';
   import AttentionFeed from '../components/AttentionFeed.svelte';
   import AccountMenu from '../components/AccountMenu.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
-  import { createSession } from '@hangar/core';
+  import { createSession, canPair, type DropResult } from '@hangar/core';
   import { listServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
   import type { AggSession, Provider } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
@@ -26,6 +26,8 @@ import * as m from '../paraglide/messages';
   import { createSessionListModel, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
   import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
   import { updateBadge } from '../lib/badge';
+  import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
+  import { dragChave, resolveDrop, autoScrollDir } from '../lib/dragToGroup';
 
   interface Props {
     onNavigateToChat: (name: string) => void;
@@ -197,6 +199,89 @@ import * as m from '../paraglide/messages';
   // Quantas do grupo esperam resposta: é o que precisa sobreviver com o cluster recolhido.
   function pairAwaiting(gid: string): number {
     return countAwaiting(model.flatRows.filter((s) => s.pair_gid === gid));
+  }
+
+  // ── Arrastar sessão sobre sessão -> pedido de grupo (Task 6, mesmo gesto da Sidebar/Board/Canvas,
+  // aqui por PONTEIRO em vez de HTML5 dnd: a linha já usa o ponteiro pro swipe/scroll/toque longo, e
+  // o gesto nasce só na alça dentro da trilha aberta — ver SessionCard). A alça repassa fase+evento
+  // cru; toda a mecânica (alvo sob o dedo, fantasma, auto-scroll) mora aqui, que é quem conhece a
+  // lista inteira e o container que rola. ──
+  function sessionByKey(c: ChaveSessao | null): AggSession | null {
+    if (!c) return null;
+    return model.flatRows.find((x) => x.serverId === c.serverId && x.name === c.name) ?? null;
+  }
+  function avaliarDrop(alvo: AggSession): DropResult | null {
+    const origem = sessionByKey(arrastarGrupo.origem);
+    return origem ? canPair(origem, alvo) : null;
+  }
+  // Alvo sob o dedo: hit-test real (document.elementFromPoint), não o pointer capture do handle —
+  // capture só mantém o handle recebendo os eventos, a posição na tela é que decide quem está embaixo.
+  // Cada linha marca a si mesma via data-session-key (no .pair-wrap, ver template).
+  function hitTest(clientX: number, clientY: number): string | null {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    return el?.closest<HTMLElement>('[data-session-key]')?.dataset.sessionKey ?? null;
+  }
+  let dragActive = $state(false);
+  let ghostX = $state(0);
+  let ghostY = $state(0);
+  let ghostLabel = $state('');
+  const AUTO_SCROLL_EDGE = 56;
+  const AUTO_SCROLL_SPEED = 12;
+  let autoScrollAtual: -1 | 0 | 1 = 0;
+  let autoScrollRaf: number | null = null;
+  // Perto do topo/rodapé da lista -> rola sozinho enquanto o dedo fica ali (sem isso não dá pra
+  // alcançar uma sessão fora da tela: a lista do celular é rolagem pura, sem paginação).
+  // Direção pura em dragToGroup.ts (autoScrollDir) — só a leitura do rect e o loop moram aqui.
+  function updateAutoScroll(clientY: number) {
+    const el = listEl;
+    if (!el) { autoScrollAtual = 0; return; }
+    const rect = el.getBoundingClientRect();
+    autoScrollAtual = autoScrollDir(clientY, rect.top, rect.bottom, AUTO_SCROLL_EDGE);
+    if (autoScrollAtual !== 0 && autoScrollRaf === null) runAutoScroll();
+  }
+  function runAutoScroll() {
+    autoScrollRaf = requestAnimationFrame(() => {
+      autoScrollRaf = null;
+      if (autoScrollAtual !== 0 && listEl && dragActive) {
+        listEl.scrollTop += autoScrollAtual * AUTO_SCROLL_SPEED;
+        runAutoScroll();
+      }
+    });
+  }
+  function stopAutoScroll() {
+    autoScrollAtual = 0;
+    if (autoScrollRaf !== null) { cancelAnimationFrame(autoScrollRaf); autoScrollRaf = null; }
+  }
+  function onCardGroupDrag(session: AggSession, phase: 'down' | 'move' | 'up' | 'cancel', e: PointerEvent) {
+    if (phase === 'down') {
+      dragActive = true;
+      ghostLabel = session.name;
+      ghostX = e.clientX; ghostY = e.clientY;
+      arrastarGrupo.comecar({ serverId: session.serverId, name: session.name });
+      return;
+    }
+    if (phase === 'move') {
+      if (!dragActive) return;
+      ghostX = e.clientX; ghostY = e.clientY;
+      updateAutoScroll(e.clientY);
+      const hit = hitTest(e.clientX, e.clientY);
+      const alvoAtual = arrastarGrupo.alvo;
+      if (hit) arrastarGrupo.entrarEm(hit);
+      else if (alvoAtual) arrastarGrupo.sairDe(alvoAtual);
+      return;
+    }
+    dragActive = false;
+    stopAutoScroll();
+    if (phase === 'cancel') { arrastarGrupo.cancelar(); return; }
+    // Decisão pura em dragToGroup.ts (resolveDrop): soltar sobre uma linha válida pede o diálogo em
+    // modo agrupar; sobre o fundo (nenhuma linha sob o dedo), pede saída SE a origem já tiver grupo
+    // — mesma regra da Sidebar/Board/Canvas.
+    const hit = hitTest(e.clientX, e.clientY);
+    const origemChave = arrastarGrupo.origem;   // capturado 1x: origem é getter, não estreita sozinho
+    const decisao = resolveDrop(hit, origemChave, model.flatRows);
+    if (decisao.kind === 'pair') arrastarGrupo.soltar(decisao.chave);
+    else if (decisao.kind === 'leave' && origemChave) arrastarGrupo.pedirSaida(origemChave);
+    else arrastarGrupo.cancelar();
   }
 
   function openSession(s: AggSession) {
@@ -444,7 +529,14 @@ import * as m from '../paraglide/messages';
                     </button>
                   {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
                     {@const session = item.session}
-                    <div class="pair-wrap" class:pair-member={!!item.gid}>
+                    {@const dropAlvoAtual = arrastarGrupo.alvo === dragChave(session)}
+                    {@const dropResultado = dropAlvoAtual ? avaliarDrop(session) : null}
+                    {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+                    <div class="pair-wrap" class:pair-member={!!item.gid}
+                         class:drop-alvo={dropResultado?.ok === true}
+                         class:drop-recusado={dropRecusa !== null}
+                         data-session-key={dragChave(session)}
+                         title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
                       <SessionCard
                         {session}
                         serverBadge={null}
@@ -454,6 +546,7 @@ import * as m from '../paraglide/messages';
                         onRename={(nv) => handleRename(session, nv)}
                         onGit={() => handleGit(session)}
                         onLoop={() => handleLoop(session)}
+                        onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
                         showProvider={model.showProviderTags}
                         selectMode={model.selectMode}
                         selected={model.selected.has(`${session.serverId}:${session.name}`)}
@@ -484,7 +577,14 @@ import * as m from '../paraglide/messages';
               </button>
             {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
               {@const session = item.session}
-              <div class="pair-wrap" class:pair-member={!!item.gid}>
+              {@const dropAlvoAtual = arrastarGrupo.alvo === dragChave(session)}
+              {@const dropResultado = dropAlvoAtual ? avaliarDrop(session) : null}
+              {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+              <div class="pair-wrap" class:pair-member={!!item.gid}
+                   class:drop-alvo={dropResultado?.ok === true}
+                   class:drop-recusado={dropRecusa !== null}
+                   data-session-key={dragChave(session)}
+                   title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
             <SessionCard
               {session}
               serverBadge={null}
@@ -494,6 +594,7 @@ import * as m from '../paraglide/messages';
               onRename={(nv) => handleRename(session, nv)}
               onGit={() => handleGit(session)}
               onLoop={() => handleLoop(session)}
+              onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
               showProvider={model.showProviderTags}
               selectMode={model.selectMode}
               selected={model.selected.has(`${session.serverId}:${session.name}`)}
@@ -506,6 +607,12 @@ import * as m from '../paraglide/messages';
       {/if}
     {/if}
   </div>
+
+  <!-- Fantasma do arrasto (Task 6): segue o dedo por cima de tudo (position: fixed), sem capturar
+       ponteiro — quem decide o alvo é o hit-test em hitTest(), não este elemento. -->
+  {#if dragActive}
+    <div class="drag-ghost" style="left: {ghostX}px; top: {ghostY}px;" aria-hidden="true">{ghostLabel}</div>
+  {/if}
 
   {#if model.selectMode}
     <!-- Composer compacto do broadcast (feature #9): so texto + enviar, sem anexos/slash-UI (isso
@@ -751,6 +858,32 @@ import * as m from '../paraglide/messages';
   .pair-wrap.pair-member {
     border-left: 2px solid var(--accent);
     margin-left: calc(var(--space-4) + var(--space-2) - 2px);
+  }
+  /* Alvo do arrasto (Task 6, mesma receita da Sidebar/Board/Canvas): válido acende a borda de
+     accent; recusado avisa sem travar — soltar aqui não faz nada, dragEnd reconfere canPair. */
+  .pair-wrap.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .pair-wrap.drop-recusado { outline: 2px dashed var(--text-muted); outline-offset: -2px; }
+
+  /* Fantasma do arrasto: chip flutuante acima do dedo, fora do fluxo (não intercepta o hit-test). */
+  .drag-ghost {
+    position: fixed;
+    z-index: 60;
+    top: 0;
+    left: 0;
+    transform: translate(-50%, -140%);
+    pointer-events: none;
+    max-width: 70vw;
+    padding: 6px 12px;
+    border-radius: var(--radius-full);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   }
 
   .session-list-screen {

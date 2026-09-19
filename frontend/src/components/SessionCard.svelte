@@ -28,6 +28,9 @@ import { textoProblema } from '../lib/problema';
     onRename?: (newName: string) => void;
     onGit?: () => void;
     onLoop?: () => void;
+    // Alça de arrastar-para-agrupar (Task 6): a mecânica de arrasto (fantasma, alvo sob o dedo,
+    // auto-scroll) mora na LISTA — aqui só plumbing de pointer capture, repassando fase+evento.
+    onGroupDrag?: (phase: 'down' | 'move' | 'up' | 'cancel', e: PointerEvent) => void;
     // Modo seleção do broadcast (feature #9): row vira checkbox (toque alterna); swipe/rename ficam
     // fora enquanto seleciona, pra não competir com o toque de marcar.
     selectMode?: boolean;
@@ -38,7 +41,7 @@ import { textoProblema } from '../lib/problema';
     showProvider?: boolean;
   }
   let {
-    session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onLoop,
+    session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onLoop, onGroupDrag,
     selectMode = false, selected = false, onToggleSelect, showProvider = false,
   }: Props = $props();
 
@@ -104,7 +107,9 @@ import { textoProblema } from '../lib/problema';
   // dominante. Git e Loop moraram na row-right ate aqui: 2 botoes de 40px + chip + chevron comiam
   // quase metade da largura e o cwd/nome viviam truncados no iPhone. Sao acoes raras -> swipe.
   const ACTION_W = 64;
-  const OPEN = $derived(session.cwd ? -2 * ACTION_W : -ACTION_W);
+  // Alça de arrastar-para-agrupar (Task 6) sempre entra na trilha, ao lado de Git (só com cwd) e
+  // Excluir (sempre) — a largura de abertura tem que contar o botão a mais.
+  const OPEN = $derived(-(session.cwd ? 3 : 2) * ACTION_W);
   let offset = $state(0);
   let startX = 0, startY = 0, startOffset = 0;
   let dragging = $state(false);
@@ -211,6 +216,25 @@ import { textoProblema } from '../lib/problema';
     longPressed = false;
   }
 
+  // Alça de arrastar-para-agrupar: pointer capture pra continuar recebendo move/up mesmo quando o
+  // dedo sai da area do botao (padrao ja usado no onDown da linha, so aqui o botao captura a si
+  // mesmo). Sem `dragging`/eixo pra decidir — a alca so serve pra isso, entao TODO movimento e drag.
+  function onHandleDown(e: PointerEvent) {
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    onGroupDrag?.('down', e);
+  }
+  function onHandleMove(e: PointerEvent) {
+    onGroupDrag?.('move', e);
+  }
+  function onHandleUp(e: PointerEvent) {
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    onGroupDrag?.('up', e);
+  }
+  function onHandleCancel(e: PointerEvent) {
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    onGroupDrag?.('cancel', e);
+  }
+
   // Tap na linha: toque longo (renomeou) nao navega; se aberto ou acabou de arrastar, fecha o swipe.
   function onRowClick() {
     if (selectMode) { if (!untracked) onToggleSelect?.(); return; }  // sem id -> nao entra no broadcast
@@ -228,6 +252,22 @@ import { textoProblema } from '../lib/problema';
        TRANSLUCIDA com papel de parede, e a trilha atras dela vazaria pela frente — inclusive a
        faixa vermelha do Excluir. Sai junto do `inert`, que ja escondia do teclado/leitor. -->
   <div class="swipe-actions" class:oculta={offset === 0} inert={offset !== OPEN}>
+    <!-- Alça de arrastar pra agrupar (Task 6): único gesto livre é a partir DAQUI — a linha já usa
+         o ponteiro pro swipe horizontal, a rolagem vertical e o toque longo. -->
+    <button
+      class="act grip"
+      onpointerdown={onHandleDown}
+      onpointermove={onHandleMove}
+      onpointerup={onHandleUp}
+      onpointercancel={onHandleCancel}
+      aria-label={m.grupo_arrastar_aria({ nome: session.name })}
+      title={m.grupo_arrastar_alca()}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="9" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/>
+        <circle cx="15" cy="6" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="15" cy="18" r="1.6"/>
+      </svg>
+    </button>
     {#if session.cwd}
       <button class="act git" onclick={() => { offset = 0; onGit?.(); }} aria-label={m.sessao_aria_git({ n: session.name })}>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -569,6 +609,16 @@ import { textoProblema } from '../lib/problema';
   }
   .swipe-actions .git { background: var(--bg-elevated); color: var(--text-secondary); }
   .swipe-actions .del { background: var(--error); color: #fff; }
+  /* Alça de arrastar (Task 6): touch-action none pra o navegador não brigar com o drag custom
+     (senão o gesto vira scroll/zoom nativo no meio do arrasto). Sem legenda embaixo (só ícone) —
+     "Arrastar para agrupar" não cabe nos 64px sem quebrar feio; o texto vive no aria-label/title. */
+  .swipe-actions .grip {
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    touch-action: none;
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
 
   .session-row {
     position: relative;
