@@ -58,12 +58,20 @@
       '.cm-gutterElement': { padding: '0 8px 0 6px' },
       '.cm-gutters': { backgroundColor: 'transparent', border: 'none', color: 'var(--text-muted)',
                        minWidth: '34px', fontSize: '11.5px' },
-      '.cm-activeLine': { backgroundColor: 'var(--bg-hover)' },
+      // Translúcida de propósito: a seleção é desenhada numa camada ATRÁS do texto, e uma linha
+      // ativa de fundo opaco passava por cima dela — duplo clique e arrasto selecionavam sem
+      // nada aparecer, justamente na linha em que a pessoa está.
+      '.cm-activeLine': { backgroundColor: 'var(--fill-subtle)' },
       '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--text-secondary)' },
       '.cm-content': { caretColor: 'var(--accent)' },
       '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)' },
-      '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection':
-        { backgroundColor: 'var(--accent-dim)' },
+      // O seletor comprido é o que a doc do CodeMirror manda: com o editor em foco o baseTheme
+      // dele pinta a seleção por `&.cm-focused > .cm-scroller > .cm-selectionLayer …`, mais
+      // específico que `.cm-selectionBackground` sozinho — a nossa cor perdia e valia o #233 de
+      // fábrica, quase invisível no painel escuro. 38% e não o `--accent-dim` (16%), que some
+      // sobre o vidro.
+      '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
+        { backgroundColor: 'color-mix(in srgb, var(--accent) 38%, transparent)' },
       '.cm-panels': { backgroundColor: 'var(--surface-raised)', color: 'var(--text-primary)' },
       '.cm-searchMatch': { backgroundColor: 'var(--accent-dim)' },
       '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'var(--accent)', color: 'var(--bg-base)' },
