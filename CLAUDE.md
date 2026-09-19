@@ -251,6 +251,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Aba que NASCE com a sessão fora da tela vem 0×0**, apesar da skill prometer 1280×800
   (`main.cjs:688` assume visível quando não há aba anterior). Saída: `layout 1280 800`;
   `layout desktop` não serve, porque limpa a emulação. Confira com `eval 'innerWidth'`.
+- **Arrastar sessão sobre sessão (Sidebar/Board/Canvas/celular) abre diálogo, nunca pareia
+  direto**, porque parear funde os grupos inteiros e sair avisa quem ficou — sem desfazer. No
+  Canvas o alvo é só a faixa de cabeçalho do card (tiles se sobrepõem livremente); no celular a
+  alça mora na trilha do swipe; em tablet na largura desktop o arrasto HTML5 não responde ao
+  toque, e ali o caminho é o `PairSheet` (também a alternativa exigida pela WCAG 2.2 SC 2.5.7).
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

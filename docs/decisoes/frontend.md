@@ -484,6 +484,47 @@ ainda devolve a URL **antiga**. O guarda agora conta navegação em voo (`isLoad
 espera `did-stop-loading`; `did-finish-load` não serve porque carga que **falha** não o emite, e a
 aba escondida ficaria sem medida nenhuma.
 
+## Arrastar sessão sobre sessão pra formar o grupo de trabalho (18/09/2026)
+
+Gesto nas quatro superfícies — Sidebar, Board, Canvas, lista do celular —, regra pura em
+`packages/core/src/pairDrop.ts` (`canPair`/`canLeave`), estado compartilhado em
+`frontend/src/lib/arrastarGrupo.svelte.ts` e um único `GrupoDropDialog.svelte` montado no
+`App.svelte`.
+
+- **Soltar não pareia direto: abre diálogo de confirmação.** `join_group` (`backend/app/pair.py`)
+  funde os grupos INTEIROS dos dois lados — não só origem e alvo, os pares de cada um também — e
+  escreve o texto do protocolo na conversa de cada membro resultante; não existe desfazer. Sair do
+  grupo confirma pelo mesmo motivo: o backend avisa quem saiu e quem ficou (`api.py:4138`). Por
+  isso o `GrupoDropDialog` lista todos os afetados, não só os dois nomes arrastados — a lista é a
+  união de `origemSessao`/`alvoSessao` com o `pair_peers` de cada um (`afetados`,
+  `GrupoDropDialog.svelte`), relida do `sessionsStore` a cada render em vez do objeto capturado no
+  clique: um SSE que mude o grupo (ou mate a sessão) enquanto o diálogo está aberto não pode
+  confirmar dado velho.
+- **No Canvas o alvo válido é só a faixa de cabeçalho do card (`HEADER_HIT_H = 34`, em
+  `canvasLayout.ts`), não o corpo inteiro.** Lá arrastar já significa MOVER o tile e tiles se
+  sobrepõem livremente — sobrepor corpos continua sendo só mover, senão qualquer reorganização
+  visual dispararia um pedido de parear. O hit-test (`findDropTarget`) varre cards e depois grupos
+  recolhidos na ordem INVERSA da lista recebida, que é a ordem de renderização: sem inverter, dois
+  cabeçalhos sobrepostos pareavam sempre com o card desenhado primeiro (o de BAIXO na tela), nunca
+  o que a pessoa está vendo por cima.
+- **No celular o arrasto sai de uma alça na trilha do swipe** (`SessionCard.svelte`), porque os
+  outros três gestos já estão ocupados: toque longo abre o menu de ações, swipe horizontal abre a
+  trilha, arrasto vertical é a rolagem da lista — não sobrava um gesto livre pra "arrastar a
+  linha". Duas rodadas de correção depois de escrito (`21b6bf3e`): o hit-test caindo sobre a
+  própria origem (dedo ainda dentro da trilha recém-aberta) tem que virar "sem alvo" em vez de
+  piscar como recusado antes de qualquer movimento real; e o cabeçalho de um cluster de pareamento
+  precisa resolver pra um membro representante (1º da lista), senão soltar ali caía no "fundo" da
+  lista e pedia SAÍDA do grupo da origem — nada a ver com o que a pessoa mirou.
+- **Limite aceito: em tablet na largura desktop (iPad com a `Sidebar`) o arrasto HTML5 não responde
+  ao toque, e não haverá gesto ali** — o caminho é o `PairSheet`. Esse mesmo `PairSheet` é também a
+  alternativa SEM arrasto exigida pela WCAG 2.2 SC 2.5.7 (todo atalho de arrastar precisa de um
+  caminho equivalente por clique/toque simples): o arrasto é atalho, nunca o único jeito de parear
+  ou sair de um grupo.
+- **Cross-server não entra pelo arrasto.** `canPair` recusa com `cross_server` quando origem ou
+  alvo já tem algum `pair_peers` com `::` (peer remoto) — o backend recusaria a mesma combinação
+  com `400 erro_pareamento_mistura_cross` (`pair.py:169`), então o front nem deixa tentar. Parear
+  entre máquinas continua só pelo `PairSheet`/`hangar-send`.
+
 ## A aba que NASCE com a sessão fora da tela vem 0×0
 
 17/09/2026. A skill promete que a página escondida é medida em 1280×800, e o desenho entrega isso:
