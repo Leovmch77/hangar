@@ -1074,6 +1074,19 @@ def test_rename_falha_usa_a_mesma_chave_da_sidebar(api_client):
     assert r.json()["detail"]["code"] == "sessao_falha_renomear"
 
 
+def test_rename_codex_sem_terminal_nao_exige_tmux(api_client):
+    with patch("app.api._codex_sem_terminal", side_effect=lambda n: n == "cc"), \
+         patch("app.api._session_exists", return_value=False) as occupied, \
+         patch("app.api.registry.rename") as rename, \
+         patch("app.tmux.has_session") as has_tmux:
+        r = api_client.post("/api/sessions/cc/rename", headers=_h(), json={"new": "cx"})
+    assert r.status_code == 200
+    assert r.json()["name"] == "cx"
+    occupied.assert_called_once_with("cx")
+    rename.assert_called_once_with("cc", "cx")
+    has_tmux.assert_not_called()
+
+
 def test_create_sem_terminal_sobe_o_processo_na_criacao(api_client):
     from app.models import SessionInfo
     info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)

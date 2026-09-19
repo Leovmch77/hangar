@@ -248,6 +248,26 @@ describe('Sidebar — renomear com a sidebar recolhida (round 7)', () => {
     unmount(t.comp);
   });
 
+  it('EXPANDIDA: teclas do nome não chegam aos atalhos da janela', async () => {
+    comUmaSessao();
+    const t = montar();
+    await tick();
+    abrirMenuDaAba();
+    await tick();
+    const renameBtn = [...document.querySelectorAll<HTMLButtonElement>('.ctx-menu button')]
+      .find((b) => b.textContent?.trim() === 'Renomear')!;
+    renameBtn.click();
+    await tick();
+    const input = document.querySelector<HTMLInputElement>('.sess-edit')!;
+    const outside = vi.fn();
+    window.addEventListener('keydown', outside);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    expect(outside).not.toHaveBeenCalled();
+    expect(document.querySelector('.sess-edit')).toBe(input);
+    window.removeEventListener('keydown', outside);
+    unmount(t.comp);
+  });
+
   // Round 2: foco/teclado de VERDADE no diálogo (não input.value + clique no botão).
   function abrirDialogoRename() {
     abrirMenuDaAba();

@@ -2299,11 +2299,12 @@ def _rename_session(name: str, body: RenameBody):
     new = sanitize_session_name(body.new)
     if not new:
         raise HTTPException(400, detail=erro("erro_nome_invalido", "nome invalido"))
-    if _headless(name):
-        # Sem pane: é só o sidecar (e o que é keyed por nome) que muda. `registry.rename` já
-        # recusa nome ocupado (tmux, Codex ou outra sem terminal).
+    if _headless(name) or _codex_sem_terminal(name):
+        # Sem pane: é só o sidecar (e o que é keyed por nome) que muda.
         if new == name:
             return {"ok": True, "name": name}
+        if _session_exists(new):
+            raise HTTPException(409, detail=erro("erro_nome_em_uso", "ja existe uma sessao com esse nome"))
         try:
             registry.rename(name, new)
         except ValueError as e:

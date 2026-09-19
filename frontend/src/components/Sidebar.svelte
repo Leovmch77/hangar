@@ -366,6 +366,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     });
   }
   function onEditKey(e: KeyboardEvent, old: string) {
+    // Teclas do nome não acionam atalhos da linha ou da janela.
+    e.stopPropagation();
     if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
     else if (e.key === 'Escape') { editValue = old; editing = null; }   // cancela (blur vira no-op)
   }
