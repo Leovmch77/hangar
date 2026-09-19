@@ -710,7 +710,9 @@
       // O padrão é conforto: falhar aqui não pode impedir a sessão de nascer com a escolha feita.
       // Mas silêncio TOTAL não serve: quem marcou espera que valha da próxima vez, e sem isto o
       // checkbox voltaria ao valor antigo sem deixar rastro em lugar nenhum.
-      console.error('salvar jev_padrao falhou', e);
+      // Identificador, não frase: esta árvore é varrida pela trava de i18n, e texto solto aqui
+      // sobe a linha de base dela — que só desce.
+      console.error('jev-padrao-salvar', e);
     }
   }
   const rotuloMotor = $derived(engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta());
