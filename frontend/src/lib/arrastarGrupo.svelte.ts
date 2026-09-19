@@ -48,7 +48,7 @@ function createArrastarGrupo() {
       alvo = null;
     },
     /** Pedido de saída não nasce de arrasto: é o clique direto num botão "sair do grupo". */
-    pedirSaida(s: ChaveSessao) { pedido = { modo: 'sair', origem: s }; },
+    pedirSaida(s: ChaveSessao) { pedido = { modo: 'sair', origem: s }; origem = null; alvo = null; },
     /** Cancela o arrasto em curso e/ou fecha o diálogo pendente. */
     cancelar() { origem = null; alvo = null; pedido = null; },
   };
