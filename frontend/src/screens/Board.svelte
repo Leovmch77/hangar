@@ -15,10 +15,11 @@
   import BoardCard from '../components/BoardCard.svelte';
   import RateStrip from '../components/RateStrip.svelte';
   import { serverColor } from '../lib/auth';
-  import { type State, type DropResult, canPair, canLeave } from '@hangar/core';
+  import { type State, canLeave } from '@hangar/core';
   import { stateColors } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
+  import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
+  import { createDragToGroup } from '../lib/dragToGroup';
 
   interface Props { onOpenSession: (name: string, serverId: string) => void }
   let { onOpenSession }: Props = $props();
@@ -68,60 +69,19 @@
 
   // ── Arrastar card sobre card -> pedido de grupo (Task 4, mesmo gesto da Sidebar/Task 3) ──
   // O wrapper draggable fica AQUI, fora do BoardCard: o mesmo componente serve o Canvas, onde o
-  // arrasto move o card no lugar (Task 5) em vez de pedir grupo.
-  function sessionByKey(c: ChaveSessao | null): BoardRow | null {
-    if (!c) return null;
-    return rows.find((x) => x.serverId === c.serverId && x.name === c.name) ?? null;
-  }
-  function avaliarDrop(alvo: BoardRow): DropResult | null {
-    const origem = sessionByKey(arrastarGrupo.origem);
-    return origem ? canPair(origem, alvo) : null;
-  }
+  // arrasto move o card no lugar (Task 5) em vez de pedir grupo. Mecânica em si (achado da revisão
+  // final: ~60 linhas quase idênticas às da Sidebar) mora em dragToGroup.ts, compartilhada.
+  const drag = createDragToGroup<BoardRow>(arrastarGrupo, () => rows);
+  // Origem nasce do CABEÇALHO (.bc-head): o wrapper cobre o card inteiro, corpo/campo/botões
+  // inclusive — sem isto, selecionar um trecho da conversa arrastando virava arrasto de sessão.
   function onCardDragStart(e: DragEvent, row: BoardRow) {
-    arrastarGrupo.comecar({ serverId: row.serverId, name: row.name });
-    e.dataTransfer?.setData('text/plain', row.name);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function onCardDragEnd() {
-    // soltar()/pedirSaida() já abriram o pedido; só limpa quando o drop saiu fora de qualquer alvo.
-    if (!arrastarGrupo.pedido) arrastarGrupo.cancelar();
-  }
-  function onCardDragEnter(e: DragEvent, row: BoardRow) {
-    arrastarGrupo.entrarEm(rowKey(row));
-    if (avaliarDrop(row)?.ok) e.preventDefault();
-  }
-  function onCardDragLeave(e: DragEvent, row: BoardRow) {
-    arrastarGrupo.sairDe(rowKey(row));
-  }
-  function onCardDragOver(e: DragEvent, row: BoardRow) {
-    if (!avaliarDrop(row)?.ok) return; // sem preventDefault o navegador já mostra o cursor de recusa
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  }
-  function onCardDrop(e: DragEvent, row: BoardRow) {
-    e.preventDefault();
-    if (!avaliarDrop(row)?.ok) return; // dragover já filtrou; reconfere pra não confiar cego no SO
-    arrastarGrupo.soltar(rowKey(row));
+    if (!(e.target as HTMLElement | null)?.closest('.bc-head')) { e.preventDefault(); return; }
+    drag.onDragStart(e, row);
   }
   // Fundo da coluna (fora de qualquer card): soltar aqui pede saída do grupo da origem — a coluna
   // é consequência do estado, nunca destino do drop.
   function isFundoAlvo(e: DragEvent): boolean {
     return !(e.target as HTMLElement | null)?.closest('.board-card-wrap');
-  }
-  function onColDragOver(e: DragEvent) {
-    if (!isFundoAlvo(e)) return;
-    const origem = sessionByKey(arrastarGrupo.origem);
-    if (!origem || !canLeave(origem)) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  }
-  function onColDrop(e: DragEvent) {
-    if (!isFundoAlvo(e)) return;
-    const chave = arrastarGrupo.origem;
-    const origem = sessionByKey(chave);
-    if (!chave || !origem || !canLeave(origem)) return;
-    e.preventDefault();
-    arrastarGrupo.pedirSaida(chave);
   }
 
   // Rascunhos IÇADOS: o card troca de coluna (remonta) justamente quando o Claude termina —
@@ -177,10 +137,12 @@
           <span class="col-title">{col.title}</span>
           <span class="col-count">{col.rows.length}</span>
         </header>
-        <div class="col-cards" ondragover={onColDragOver} ondrop={onColDrop}>
+        <div class="col-cards"
+             ondragover={(e) => drag.onBackgroundDragOver(e, isFundoAlvo)}
+             ondrop={(e) => drag.onBackgroundDrop(e, isFundoAlvo)}>
           {#each col.rows as row (rowKey(row))}
             {@const dropAlvoAtual = arrastarGrupo.alvo === rowKey(row)}
-            {@const dropResultado = dropAlvoAtual ? avaliarDrop(row) : null}
+            {@const dropResultado = dropAlvoAtual ? drag.avaliarDrop(row) : null}
             {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
             <div class="board-card-wrap"
                  class:drop-alvo={dropResultado?.ok === true}
@@ -188,11 +150,11 @@
                  title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
                  draggable="true"
                  ondragstart={(e) => onCardDragStart(e, row)}
-                 ondragend={onCardDragEnd}
-                 ondragenter={(e) => onCardDragEnter(e, row)}
-                 ondragleave={(e) => onCardDragLeave(e, row)}
-                 ondragover={(e) => onCardDragOver(e, row)}
-                 ondrop={(e) => onCardDrop(e, row)}>
+                 ondragend={drag.onDragEnd}
+                 ondragenter={(e) => drag.onTargetDragEnter(e, rowKey(row), row)}
+                 ondragleave={() => drag.onTargetDragLeave(rowKey(row))}
+                 ondragover={(e) => drag.onTargetDragOver(e, rowKey(row), row)}
+                 ondrop={(e) => drag.onTargetDrop(e, rowKey(row), row)}>
               <BoardCard
                 session={row}
                 server={servers.find((s) => s.id === row.serverId)!}
@@ -204,6 +166,7 @@
                 sendError={sendErrors.get(rowKey(row)) ?? ''}
                 onSendError={(m) => setSendError(rowKey(row), m)}
                 onOpen={() => onOpenSession(row.name, row.serverId)}
+                onLeavePair={canLeave(row) ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
               />
             </div>
           {/each}

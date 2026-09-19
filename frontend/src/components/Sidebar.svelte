@@ -20,9 +20,10 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
-  import type { SessionInfo, AggSession, Provider, DropResult } from '@hangar/core';
-  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, clusterByPair, untrackedReason, providerTag, canPair, canLeave } from '@hangar/core';
-  import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
+  import type { SessionInfo, AggSession, Provider } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, clusterByPair, untrackedReason, providerTag } from '@hangar/core';
+  import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
+  import { createDragToGroup, dragChave } from '../lib/dragToGroup';
   import { updateBadge } from '../lib/badge';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import { planBadge } from '@hangar/core';
@@ -269,63 +270,23 @@ import ConfirmDialog from './ConfirmDialog.svelte';
 
   // ── Arrastar sessão sobre sessão -> pedido de grupo (Task 3, referência pras outras 3 telas) ──
   // HTML5 DnD nativo, não pointer: já tem onpointerdown/up pro press-and-hold acima disputando o
-  // mesmo gesto de segurar a linha.
-  function sessionByKey(c: ChaveSessao | null): AggSession | null {
-    if (!c) return null;
-    return model.allSessions.find((x) => x.serverId === c.serverId && x.name === c.name) ?? null;
-  }
-  function avaliarDrop(alvo: AggSession): DropResult | null {
-    const origem = sessionByKey(arrastarGrupo.origem);
-    return origem ? canPair(origem, alvo) : null;
-  }
+  // mesmo gesto de segurar a linha. Mecânica em si (achado da revisão final: era ~60 linhas quase
+  // idênticas às do Board) mora em dragToGroup.ts, compartilhada.
+  const drag = createDragToGroup<AggSession>(arrastarGrupo, () => model.allSessions);
   function onRowDragStart(e: DragEvent, s: AggSession) {
     pressEnd(); // senão o timer do rename dispara em cima do arrasto e troca a linha por um <input>
-    arrastarGrupo.comecar({ serverId: s.serverId, name: s.name });
-    e.dataTransfer?.setData('text/plain', s.name);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-  function onRowDragEnd() {
-    // soltar()/pedirSaida() já abriram o pedido (e limparam o que precisavam); só limpa o
-    // arrasto quando NENHUM pedido nasceu (soltou fora de qualquer alvo válido).
-    if (!arrastarGrupo.pedido) arrastarGrupo.cancelar();
-  }
-  function onRowDragEnter(e: DragEvent, s: AggSession) {
-    arrastarGrupo.entrarEm(`${s.serverId}::${s.name}`);
-    if (avaliarDrop(s)?.ok) e.preventDefault();
-  }
-  function onRowDragLeave(e: DragEvent, s: AggSession) {
-    arrastarGrupo.sairDe(`${s.serverId}::${s.name}`);
-  }
-  function onRowDragOver(e: DragEvent, s: AggSession) {
-    if (!avaliarDrop(s)?.ok) return; // sem preventDefault o navegador já mostra o cursor de recusa
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  }
-  function onRowDrop(e: DragEvent, s: AggSession) {
-    e.preventDefault();
-    // Alvo inválido não devia nem disparar 'drop' (o navegador só entrega quando o dragover
-    // anterior deu preventDefault) — confere de novo pra não confiar cego no gesto do SO.
-    if (!avaliarDrop(s)?.ok) return;
-    arrastarGrupo.soltar(`${s.serverId}::${s.name}`);
+    drag.onDragStart(e, s);
   }
   // Fundo da lista (fora de qualquer linha/cabeçalho): soltar aqui pede saída do grupo da origem.
+  // O cabeçalho de cluster pareado (.pair-head) é um alvo de PAREAR (ver template), não fundo.
   function isFundoAlvo(e: DragEvent): boolean {
-    return !(e.target as HTMLElement | null)?.closest('.sess-row, button, input');
+    return !(e.target as HTMLElement | null)?.closest('.sess-row, .pair-head, button, input');
   }
-  function onListDragOver(e: DragEvent) {
-    if (!isFundoAlvo(e)) return;
-    const origem = sessionByKey(arrastarGrupo.origem);
-    if (!origem || !canLeave(origem)) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  }
-  function onListDrop(e: DragEvent) {
-    if (!isFundoAlvo(e)) return;
-    const chave = arrastarGrupo.origem;
-    const origem = sessionByKey(chave);
-    if (!chave || !origem || !canLeave(origem)) return;
-    e.preventDefault();
-    arrastarGrupo.pedirSaida(chave);
+  // Representante de um cluster pareado, pro cabeçalho virar alvo de soltar — mesma regra do
+  // celular (SessionList.svelte, groupRep): join_group funde o grupo inteiro, então basta o 1º
+  // membro pra avaliar canPair/soltar.
+  function groupRep(gid: string): AggSession | null {
+    return model.allSessions.find((s) => s.pair_gid === gid) ?? null;
   }
 
   function onMainClick(name: string, serverId: string, tracked: boolean | undefined, provider?: SessionInfo['provider']) {
@@ -695,7 +656,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   {/if}
 
   <nav class="sess-list" class:compact aria-label={m.lista_titulo()}
-       ondragover={onListDragOver} ondrop={onListDrop}>
+       ondragover={(e) => drag.onBackgroundDragOver(e, isFundoAlvo)}
+       ondrop={(e) => drag.onBackgroundDrop(e, isFundoAlvo)}>
     <!-- A fila "Precisa de você" migrou para o chrome global do DesktopShell: continua visível
          em Conversa/Quadro/Canvas e deixa de duplicar conteúdo no topo da lista. -->
 
@@ -764,9 +726,25 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                Cabeçalho leve + barra de accent nos membros: dentro de uma caixa tingida o realce
                de quem espera resposta sumia. -->
           {@const pairAwaiting = countAwaiting(g.sessions.filter((x) => x.pair_gid === item.gid))}
+          {@const rep = groupRep(item.gid)}
+          {@const repChave = rep ? dragChave(rep) : ''}
+          {@const dropAlvoAtual = arrastarGrupo.alvo === repChave}
+          {@const dropResultado = dropAlvoAtual && rep ? drag.avaliarDrop(rep) : null}
+          {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+          <!-- Também alvo de soltar (rodada de correção 2, mesmo comportamento do celular): sem
+               representante, o header caía em isFundoAlvo e soltar aqui pedia SAÍDA à toa — não
+               agrupava, não avisava nada. Representante = 1º membro (join_group funde o grupo
+               inteiro no backend, então soltar sobre QUALQUER membro basta). -->
           <button class="pair-head" class:recolhido={model.collapsed.has(`pair:${item.gid}`)}
+                  class:drop-alvo={dropResultado?.ok === true}
+                  class:drop-recusado={dropRecusa !== null}
                   onclick={() => model.toggleGroup(`pair:${item.gid}`)}
-                  aria-expanded={!model.collapsed.has(`pair:${item.gid}`)} title={m.sessao_grupo_pareado({ label: item.label })}>
+                  ondragenter={(e) => rep && drag.onTargetDragEnter(e, repChave, rep)}
+                  ondragleave={() => repChave && drag.onTargetDragLeave(repChave)}
+                  ondragover={(e) => rep && drag.onTargetDragOver(e, repChave, rep)}
+                  ondrop={(e) => rep && drag.onTargetDrop(e, repChave, rep)}
+                  aria-expanded={!model.collapsed.has(`pair:${item.gid}`)}
+                  title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: item.label })}>
             <span class="grp-chevron" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
             <span class="pair-head-glifo"><GroupGlyph size={13} /></span>
             <!-- Código curto em destaque e o resto do assunto em cinza: o rótulo é o resumo do
@@ -804,7 +782,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
              (button) e nos botoes irmaos. O hover aqui e decoracao redundante (a resposta ja esta no
              chat), entao nao pede equivalente de teclado. -->
         {@const dropAlvoAtual = arrastarGrupo.alvo === rowKey}
-        {@const dropResultado = dropAlvoAtual ? avaliarDrop(s) : null}
+        {@const dropResultado = dropAlvoAtual ? drag.avaliarDrop(s) : null}
         {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
         <div class="sess-row" class:active={s.serverId === activeId && s.name === currentSession}
              class:pair-member={!!item.gid} class:pair-last={!!item.ultimo}
@@ -813,11 +791,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
              class:drop-recusado={dropRecusa !== null}
              draggable="true"
              ondragstart={(e) => onRowDragStart(e, s)}
-             ondragend={onRowDragEnd}
-             ondragenter={(e) => onRowDragEnter(e, s)}
-             ondragleave={(e) => onRowDragLeave(e, s)}
-             ondragover={(e) => onRowDragOver(e, s)}
-             ondrop={(e) => onRowDrop(e, s)}
+             ondragend={drag.onDragEnd}
+             ondragenter={(e) => drag.onTargetDragEnter(e, rowKey, s)}
+             ondragleave={() => drag.onTargetDragLeave(rowKey)}
+             ondragover={(e) => drag.onTargetDragOver(e, rowKey, s)}
+             ondrop={(e) => drag.onTargetDrop(e, rowKey, s)}
              onmouseenter={(e) => hpEnter(e, s.name, s.serverId)} onmouseleave={hpLeave}>
 
           {#if editing === rowKey}
@@ -1745,6 +1723,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      (o navegador já nega sozinho por falta de preventDefault) — só o motivo, no title da linha. */
   .sess-row.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .sess-row.drop-recusado { cursor: not-allowed; outline: 2px dashed var(--text-muted); outline-offset: -2px; }
+  /* Mesma receita no cabeçalho do cluster pareado (rodada de correção 2): ele também é alvo. */
+  .pair-head.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .pair-head.drop-recusado { cursor: not-allowed; outline: 2px dashed var(--text-muted); outline-offset: -2px; }
   /* Sessão aguardando resposta: realce âmbar — o olho acha sem ler chip por chip. Realce é EXCEÇÃO
      (só awaiting): a barra carrega o sinal e o tint fica no mínimo, pra não virar fundo colorido.
      Só na sidebar EXPANDIDA: no rail de 56px a barra descentralizaria as iniciais (que já vêm
