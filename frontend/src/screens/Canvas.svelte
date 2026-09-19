@@ -9,7 +9,7 @@ import * as m from '../paraglide/messages';
   import type { BoardRow, PendingMsg } from './Board.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { serverColor } from '../lib/auth';
-  import { pairColor, canPair, type DropResult } from '@hangar/core';
+  import { pairColor, canPair, canLeave, type DropResult } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import {
     canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox, planePoint, findDropTarget,
@@ -291,7 +291,9 @@ import * as m from '../paraglide/messages';
   // A geometria pura (planePoint/findDropTarget) mora em canvasLayout.ts, testada lá — este arquivo
   // só monta as listas na ORDEM DE RENDERIZAÇÃO (findDropTarget varre invertido: quem foi
   // desenhado por último vence, senão cabeçalhos sobrepostos pareavam com o card de baixo). ──
-  let drag: { key: string; x0: number; y0: number; box: CardBox } | null = null;
+  // $state: lido no template (:559, :583 via drag!.key) — variável comum aqui disparava
+  // non_reactive_update no compilador Svelte 5.
+  let drag = $state<{ key: string; x0: number; y0: number; box: CardBox } | null>(null);
   // Alvo sob o ponteiro DURANTE o arrasto — 'group' é um card recolhido (Step 2: não está no
   // layout, então o alvo guarda a chave de um MEMBRO representante pra canPair/soltar).
   let dropHover = $state<CanvasDropTarget | null>(null);
@@ -306,6 +308,10 @@ import * as m from '../paraglide/messages';
   function dragStart(e: PointerEvent, key: string) {
     const b = layout[key];
     if (!b) return;
+    // Sem isto o soltar() do arrastarGrupo nunca abria o pedido: soltar só monta o pedido quando
+    // `origem` já está preenchida, e aqui nunca tinha entrado (achado da revisão final).
+    const origem = rows.find((r) => rowKey(r) === key);
+    if (origem) arrastarGrupo.comecar({ serverId: origem.serverId, name: origem.name });
     drag = { key, x0: e.clientX, y0: e.clientY, box: { ...b } };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
@@ -370,10 +376,12 @@ import * as m from '../paraglide/messages';
     drag = null;
     dropHover = null;
     saveLayout();
-    if (!hit) return;
+    // Tile só reposicionado (sem alvo válido): desfaz o comecar() de dragStart, senão a origem
+    // fica pendurada no store compartilhado até o próximo arrasto de QUALQUER tela.
+    if (!hit) { arrastarGrupo.cancelar(); return; }
     const origem = rows.find((r) => rowKey(r) === trigger.key);
     const alvo = rows.find((r) => rowKey(r) === hit.key);
-    if (!origem || !alvo || !canPair(origem, alvo).ok) return;
+    if (!origem || !alvo || !canPair(origem, alvo).ok) { arrastarGrupo.cancelar(); return; }
     pendingGather = { origemKey: trigger.key, alvoKey: hit.key, at: Date.now() };
     arrastarGrupo.soltar(hit.key);
   }
@@ -612,7 +620,7 @@ import * as m from '../paraglide/messages';
               onSendError={(m) => setSendError(key, m)}
               onOpen={() => onOpenSession(row.name, row.serverId)}
               onGatherPair={row.pair_gid ? () => gatherPair(key, gkeyOf(row)!) : null}
-              onLeavePair={row.pair_gid ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
+              onLeavePair={canLeave(row) ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
             />
           </div>
           <!-- Alças de resize: faixas de 6px nas 4 bordas + 12px nos cantos. Decorativas (o teclado
