@@ -19,6 +19,53 @@ export const MAX_SCALE = 1.5;
 export interface CanvasPoint { x: number; y: number }
 export interface CanvasConnection { from: CanvasPoint; to: CanvasPoint; path: string }
 
+// Alvo de "soltar pra parear" no arrasto livre do canvas (Task 5): a faixa de CABEÇALHO (topo) de
+// cada card, não o corpo inteiro — sobrepor o corpo continua sendo só mover. Vale também pro card
+// de grupo recolhido (decisão mantida de propósito: ali o card compacto inteiro É o cabeçalho).
+export const HEADER_HIT_H = 34;
+
+export type CanvasDropTarget =
+  | { kind: 'card'; key: string }
+  | { kind: 'group'; gid: string; key: string };   // key = um membro representante (canPair/soltar)
+
+/** Converte um ponto de TELA (clientX/Y) pra coordenada do PLANO do canvas (unidade pré-zoom,
+ *  a mesma de CardBox) — ABSOLUTA, via o retângulo do container rolável + o scroll atual (não
+ *  incremental como o delta que o próprio drag usa pra mover o tile). */
+export function planePoint(
+  clientX: number, clientY: number,
+  rect: { left: number; top: number }, scrollLeft: number, scrollTop: number, zoom: number,
+): CanvasPoint {
+  return { x: (clientX - rect.left + scrollLeft) / zoom, y: (clientY - rect.top + scrollTop) / zoom };
+}
+
+/** Alvo de pareamento sob o ponto (px,py), ou null fora de qualquer cabeçalho. Varre `cards` e
+ *  `groups` na ordem INVERSA da lista recebida (== ordem de renderização): cards e grupos
+ *  recolhidos têm o mesmo z-index no Canvas, então quem foi desenhado por ÚLTIMO fica visualmente
+ *  por CIMA — sem inverter, dois cabeçalhos sobrepostos pareavam com o card de BAIXO, que a pessoa
+ *  nem está vendo. `cards` é sempre varrido antes de `groups`: o Canvas desenha os cards
+ *  individuais DEPOIS dos compactos, então qualquer card individual já fica acima de qualquer
+ *  grupo recolhido — não precisa intercalar as duas listas por posição de tela. */
+export function findDropTarget(
+  px: number, py: number, dragKey: string,
+  cards: { key: string; box: CardBox }[],
+  groups: { gid: string; key: string; box: CardBox }[],
+): CanvasDropTarget | null {
+  for (let i = cards.length - 1; i >= 0; i--) {
+    const { key, box } = cards[i];
+    if (key === dragKey) continue;
+    if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + HEADER_HIT_H) {
+      return { kind: 'card', key };
+    }
+  }
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const { gid, key, box } = groups[i];
+    if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + HEADER_HIT_H) {
+      return { kind: 'group', gid, key };
+    }
+  }
+  return null;
+}
+
 export function canvasBounds(boxes: CardBox[]): CardBox {
   if (boxes.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
   const x = Math.min(...boxes.map((box) => box.x));

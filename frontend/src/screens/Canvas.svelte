@@ -12,9 +12,9 @@ import * as m from '../paraglide/messages';
   import { pairColor, canPair, type DropResult } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import {
-    canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox,
+    canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox, planePoint, findDropTarget,
     MIN_SCALE, MAX_SCALE, PAD, GAP, CARD_W, CARD_H,
-    type CanvasLayout, type CardBox,
+    type CanvasLayout, type CardBox, type CanvasDropTarget,
   } from '../lib/canvasLayout';
 
   interface Props { onOpenSession: (name: string, serverId: string) => void }
@@ -287,40 +287,15 @@ import * as m from '../paraglide/messages';
   // Aqui arrastar já MOVE o tile (tiles podem se sobrepor à vontade) — por isso não é o HTML5
   // drag-and-drop da Sidebar/Board: é o mesmo pointerdown/move/up que já existia, com um hit-test
   // extra contra a FAIXA DE CABEÇALHO (topo, ~34px) dos outros cards. Sobrepor o CORPO deles
-  // continua sendo só mover; só o cabeçalho (ou um grupo recolhido) vira alvo de pareamento. ──
-  const HEADER_HIT_H = 34;
+  // continua sendo só mover; só o cabeçalho (ou um grupo recolhido) vira alvo de pareamento.
+  // A geometria pura (planePoint/findDropTarget) mora em canvasLayout.ts, testada lá — este arquivo
+  // só monta as listas na ORDEM DE RENDERIZAÇÃO (findDropTarget varre invertido: quem foi
+  // desenhado por último vence, senão cabeçalhos sobrepostos pareavam com o card de baixo). ──
   let drag: { key: string; x0: number; y0: number; box: CardBox } | null = null;
   // Alvo sob o ponteiro DURANTE o arrasto — 'group' é um card recolhido (Step 2: não está no
   // layout, então o alvo guarda a chave de um MEMBRO representante pra canPair/soltar).
-  let dropHover = $state<{ kind: 'card' | 'group'; key: string; gid?: string } | null>(null);
+  let dropHover = $state<CanvasDropTarget | null>(null);
 
-  function planePoint(e: PointerEvent): { x: number; y: number } {
-    const rect = canvasEl?.getBoundingClientRect();
-    if (!canvasEl || !rect) return { x: 0, y: 0 };
-    return {
-      x: (e.clientX - rect.left + canvasEl.scrollLeft) / zoom,
-      y: (e.clientY - rect.top + canvasEl.scrollTop) / zoom,
-    };
-  }
-  function findDropTarget(px: number, py: number, dragKey: string) {
-    for (const row of visibleRows) {
-      const key = rowKey(row);
-      if (key === dragKey) continue;
-      const box = layout[key];
-      if (!box) continue;
-      if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + HEADER_HIT_H) {
-        return { kind: 'card' as const, key };
-      }
-    }
-    for (const g of collapsedCards) {
-      if (px >= g.x && px <= g.x + g.w && py >= g.y && py <= g.y + HEADER_HIT_H) {
-        const rep = g.members[0];
-        if (!rep) continue;
-        return { kind: 'group' as const, key: rowKey(rep), gid: g.gid };
-      }
-    }
-    return null;
-  }
   // Mesma checagem que a Sidebar/Board usam pro destaque (Step 3): só avaliada pra quem está sob o
   // ponteiro agora — evita rodar canPair pros ~dezenas de cards que não estão em jogo.
   function avaliarDropCanvas(origemKey: string, alvo: BoardRow): DropResult | null {
@@ -343,14 +318,25 @@ import * as m from '../paraglide/messages';
       x: Math.max(0, drag.box.x + (e.clientX - drag.x0) / zoom),
       y: Math.max(0, drag.box.y + (e.clientY - drag.y0) / zoom),
     } };
-    const p = planePoint(e);
-    dropHover = findDropTarget(p.x, p.y, drag.key);
+    const rect = canvasEl?.getBoundingClientRect();
+    if (!canvasEl || !rect) { dropHover = null; return; }
+    const p = planePoint(e.clientX, e.clientY, rect, canvasEl.scrollLeft, canvasEl.scrollTop, zoom);
+    // Mesma ordem do template ({#each visibleRows}/{#each collapsedCards}): é essa ordem que diz
+    // quem foi desenhado por último (findDropTarget varre invertido a partir dela).
+    const cards = visibleRows.flatMap((row) => {
+      const box = layout[rowKey(row)];
+      return box ? [{ key: rowKey(row), box }] : [];
+    });
+    const groups = collapsedCards.flatMap((g) =>
+      g.members[0] ? [{ gid: g.gid, key: rowKey(g.members[0]), box: { x: g.x, y: g.y, w: g.w, h: g.h } }] : [],
+    );
+    dropHover = findDropTarget(p.x, p.y, drag.key, cards, groups);
   }
   // Reúne o grupo recém-formado em volta de onde o usuário soltou — senão o tile fica empilhado
   // por cima do alvo (Step 4). ponytail: espera a confirmação fechar E o pair_gid aparecer no
   // sessionsStore (SSE); desiste depois de 4s — o grupo já formou de qualquer forma, só a reunião
   // automática que não rodou, e o ⇱ do rótulo do grupo resolve na mão.
-  let pendingGather: { origemKey: string; anchorKey: string; beforeGid: string | null; at: number } | null = null;
+  let pendingGather: { origemKey: string; alvoKey: string; at: number } | null = null;
   $effect(() => {
     // Dependências lidas SEMPRE, antes de qualquer return: pendingGather é variável comum (só o
     // gatilho, não precisa ser $state), e um efeito que só lê pedido/rows dentro do `if` perde a
@@ -360,10 +346,19 @@ import * as m from '../paraglide/messages';
     const pending = pendingGather;
     if (!pending || pedidoAtual) return;
     const origemNow = rows.find((r) => rowKey(r) === pending.origemKey);
-    const gk = origemNow ? gkeyOf(origemNow) : null;
-    if (gk && gk !== pending.beforeGid) {
+    const alvoNow = rows.find((r) => rowKey(r) === pending.alvoKey);
+    // Sessão de origem/alvo sumida (morreu, foi ocultada) -> nada pra reunir, desiste sem esperar
+    // o teto de 4s.
+    if (!origemNow || !alvoNow) { pendingGather = null; return; }
+    // Exige o MESMO gid do alvo deste arrasto, não só "gid mudou": se a origem entrar em OUTRO
+    // grupo por outro caminho (outra aba, celular, a Sidebar pareando a mesma sessão) enquanto o
+    // diálogo estava aberto, "mudou" seria verdade sem ter nada a ver com este drop — e reuniria
+    // membros de um grupo errado.
+    const gOrigem = gkeyOf(origemNow);
+    const gAlvo = gkeyOf(alvoNow);
+    if (gOrigem && gOrigem === gAlvo) {
       pendingGather = null;
-      if (layout[pending.anchorKey]) gatherPair(pending.anchorKey, gk);
+      if (layout[pending.alvoKey]) gatherPair(pending.alvoKey, gAlvo);
     } else if (Date.now() - pending.at > 4000) {
       pendingGather = null;
     }
@@ -379,7 +374,7 @@ import * as m from '../paraglide/messages';
     const origem = rows.find((r) => rowKey(r) === trigger.key);
     const alvo = rows.find((r) => rowKey(r) === hit.key);
     if (!origem || !alvo || !canPair(origem, alvo).ok) return;
-    pendingGather = { origemKey: trigger.key, anchorKey: hit.key, beforeGid: gkeyOf(origem), at: Date.now() };
+    pendingGather = { origemKey: trigger.key, alvoKey: hit.key, at: Date.now() };
     arrastarGrupo.soltar(hit.key);
   }
 

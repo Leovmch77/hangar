@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox, MIN_W, MIN_H, CARD_W, CARD_H, GAP, PAD, type CanvasLayout } from './canvasLayout';
+import {
+  canvasBounds, connectBoxes, fitCanvasScale, placeNew, resizeBox, planePoint, findDropTarget,
+  MIN_W, MIN_H, CARD_W, CARD_H, GAP, PAD, HEADER_HIT_H, type CanvasLayout,
+} from './canvasLayout';
 
 const row = (key: string, serverId: string, pairGid: string | null = null) => ({ key, serverId, pairGid });
 
@@ -123,5 +126,58 @@ describe('canvasBounds', () => {
       { x: 100, y: 300, w: 200, h: 100 },
       { x: 500, y: 200, w: 100, h: 250 },
     ])).toEqual({ x: 100, y: 200, w: 500, h: 250 });
+  });
+});
+
+describe('planePoint', () => {
+  it('sem zoom nem scroll: ponto de tela == ponto do plano, deslocado só pelo retângulo do container', () => {
+    expect(planePoint(120, 80, { left: 20, top: 10 }, 0, 0, 1)).toEqual({ x: 100, y: 70 });
+  });
+
+  it('zoom reduzido amplia a distância em unidades de plano (1px de tela = 1/zoom de plano)', () => {
+    expect(planePoint(100, 0, { left: 0, top: 0 }, 0, 0, 0.5)).toEqual({ x: 200, y: 0 });
+  });
+
+  it('scroll soma antes de dividir pelo zoom — rolar a página não desloca o alvo sob o cursor', () => {
+    // clientX=100 seria x=100 sem rolar; com scrollLeft=300 o mesmo ponto de tela está 300px mais
+    // adiante no plano (zoom 1: 100 + 300 = 400).
+    expect(planePoint(100, 0, { left: 0, top: 0 }, 300, 0, 1)).toEqual({ x: 400, y: 0 });
+  });
+});
+
+describe('findDropTarget', () => {
+  const card = (key: string, x: number, y: number, w = 300, h = 200) => ({ key, box: { x, y, w, h } });
+
+  it('ponto no cabeçalho (topo, < HEADER_HIT_H) pareia com o card', () => {
+    const cards = [card('a', 0, 0), card('b', 400, 0)];
+    expect(findDropTarget(410, HEADER_HIT_H - 1, 'a', cards, [])).toEqual({ kind: 'card', key: 'b' });
+  });
+
+  it('ponto no corpo (abaixo da faixa de cabeçalho) não pareia — só mover', () => {
+    const cards = [card('a', 0, 0), card('b', 400, 0)];
+    expect(findDropTarget(410, HEADER_HIT_H + 1, 'a', cards, [])).toBeNull();
+  });
+
+  it('o próprio card arrastado nunca é alvo de si mesmo', () => {
+    const cards = [card('a', 0, 0)];
+    expect(findDropTarget(10, 10, 'a', cards, [])).toBeNull();
+  });
+
+  it('card recolhido (grupo) também é alvo, pela mesma faixa de cabeçalho', () => {
+    const groups = [{ gid: 'g1', key: 'a::líder', box: { x: 0, y: 0, w: 300, h: 100 } }];
+    expect(findDropTarget(10, 10, 'x', [], groups)).toEqual({ kind: 'group', gid: 'g1', key: 'a::líder' });
+  });
+
+  it('dois cabeçalhos sobrepostos: vence o desenhado por ÚLTIMO (visualmente por cima) — o de baixo some do hit-test', () => {
+    // Mesmo retângulo pros dois; 'baixo' é o primeiro da lista (renderizado antes, portanto sob os
+    // demais no mesmo z-index), 'cima' é o último (renderizado depois, por cima na tela).
+    const cards = [card('baixo', 0, 0), card('cima', 0, 0)];
+    expect(findDropTarget(10, 10, 'x', cards, [])).toEqual({ kind: 'card', key: 'cima' });
+  });
+
+  it('card individual sempre vence grupo recolhido na mesma posição (cards são desenhados depois)', () => {
+    const cards = [card('a', 0, 0)];
+    const groups = [{ gid: 'g1', key: 'g::líder', box: { x: 0, y: 0, w: 300, h: 200 } }];
+    expect(findDropTarget(10, 10, 'x', cards, groups)).toEqual({ kind: 'card', key: 'a' });
   });
 });
