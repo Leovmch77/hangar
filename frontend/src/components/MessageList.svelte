@@ -170,7 +170,7 @@
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
-    atBottom = nextAtBottom(atBottom, listEl.scrollTop, lastTop, gap);
+    atBottom = nextAtBottom(listEl.scrollTop, lastTop, gap);
     lastTop = listEl.scrollTop;
     scrolledUp = gap > listEl.clientHeight; // mais de uma tela do fim = "muito pra cima" -> botao
     // Perto do topo + ainda ha eventos antigos fora da janela -> revela a proxima pagina.

@@ -4,28 +4,28 @@ import { precisaPreencher, mostrarIrPraoFim, nextAtBottom } from './window';
 describe('nextAtBottom', () => {
   it('subir 20px durante o streaming solta do fim, mesmo dentro da folga de 64px', () => {
     // O bug: gap=20 < 64 mantinha a lista colada e o próximo pedaço da prévia puxava de volta.
-    expect(nextAtBottom(true, 980, 1000, 20)).toBe(false);
+    expect(nextAtBottom(980, 1000, 20)).toBe(false);
   });
 
   it('o primeiro passo de uma rolagem suave, 2px pra cima colada no fim, já solta', () => {
-    expect(nextAtBottom(true, 998, 1000, 2)).toBe(false);
+    expect(nextAtBottom(998, 1000, 2)).toBe(false);
   });
 
   it('conteúdo encolheu com a lista colada: scrollTop cai mas a folga segue ~0, continua colada', () => {
-    expect(nextAtBottom(true, 700, 1000, 0.5)).toBe(true);   // meio pixel do arredondamento
-    expect(nextAtBottom(true, 700, 1000, 0)).toBe(true);
+    expect(nextAtBottom(700, 1000, 0.5)).toBe(true);   // meio pixel do arredondamento
+    expect(nextAtBottom(700, 1000, 0)).toBe(true);
   });
 
-  it('solta e parada perto do fim: a prévia cresce sem evento de scroll e ninguém reencosta sozinho', () => {
-    expect(nextAtBottom(false, 980, 980, 300)).toBe(false);
+  it('longe do fim nunca é "no fim", subindo, descendo ou sem ter se mexido', () => {
+    // O terceiro caso é o da MessageList.ancora: a lista aparece a 3500px do fim sem evento de
+    // subida antes. Uma regra que só soltasse ao SUBIR deixava a janela seguir a cauda ali.
+    expect(nextAtBottom(900, 1000, 300)).toBe(false);
+    expect(nextAtBottom(500, 400, 600)).toBe(false);
+    expect(nextAtBottom(1000, 0, 3500)).toBe(false);
   });
 
   it('descer até 64px do fim reencosta', () => {
-    expect(nextAtBottom(false, 990, 900, 40)).toBe(true);
-  });
-
-  it('descer e ainda estar longe do fim não muda nada', () => {
-    expect(nextAtBottom(false, 500, 400, 600)).toBe(false);
+    expect(nextAtBottom(990, 900, 40)).toBe(true);
   });
 });
 

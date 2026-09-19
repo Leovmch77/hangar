@@ -41,10 +41,12 @@ export function mostrarIrPraoFim(scrolledUp: boolean, windowEnd: number, len: nu
  * conteúdo encolhe com a lista colada: ali o navegador prende no fim e a folga segue 0 (mais o
  * meio pixel do arredondamento). O corte fica em 1 e não mais alto porque a rolagem suave começa
  * em passos de 1 a 3px, e o primeiro deles já tem que soltar.
- * Reencostar é chegar a 64px do fim descendo ou parado; longe do fim sem subir, nada muda. */
-export function nextAtBottom(atBottom: boolean, top: number, lastTop: number, gap: number): boolean {
-  if (top < lastTop - 1 && gap > 1) return false;
-  return gap < 64 ? true : atBottom;
+ * A mais de 64px do fim nunca é "no fim", em qualquer direção: é a regra que já existia, e a
+ * janela congelada de quem lê histórico depende dela. Reencostar é chegar a menos de 64px do fim
+ * descendo ou parado. */
+export function nextAtBottom(top: number, lastTop: number, gap: number): boolean {
+  if (gap >= 64) return false;
+  return !(top < lastTop - 1 && gap > 1);
 }
 
 /** A janela cabe INTEIRA na tela e ainda ha evento antigo fora dela?
