@@ -1046,8 +1046,16 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
         stream = _pi_stream() if _pi_stream else None
         parse = stream.feed_events if stream else _parse
 
+        barrados: set[str] = set()
+
         def _absorve(ts: float, i: int, evs: list[ChatEvent]) -> None:
             for ev in evs:
+                # Cada reenvio de um prompt barrado grava outra entrada com o MESMO id "held:". O
+                # SSE junta por id; a lista do historico nao, e id repetido quebra o {#each} do front.
+                if ev.id.startswith("held:"):
+                    if ev.id in barrados:
+                        continue
+                    barrados.add(ev.id)
                 # ts do proprio evento quando ha (o parser do Pi preenche): um user_msg retido sai
                 # junto com a linha seguinte, e herdar o ts DELA o tiraria de ordem.
                 ets = ev.ts or ts
@@ -1133,6 +1141,18 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
     return [ev for _, _, ev in items]
 
 
+def _marca_do_codigo() -> int:
+    # Os mesmos bytes em disco rendem outra resposta quando o PARSER muda. Sem isto o 304 segura
+    # no cliente o historico lido pelo codigo antigo ate a conversa andar de novo.
+    try:
+        return max(p.stat().st_mtime_ns for p in Path(__file__).parent.rglob("*.py"))
+    except (OSError, ValueError):
+        return 0
+
+
+_CODIGO = _marca_do_codigo()
+
+
 def historico_etag(name: str, jsonl: str, provider: str, limit: int | None) -> str | None:
     """Validador do que `merged_history` devolveria, por METADADO -- sem ler os arquivos.
 
@@ -1154,4 +1174,4 @@ def historico_etag(name: str, jsonl: str, provider: str, limit: int | None) -> s
     t = marca(jsonl)
     if t == "-":
         return None
-    return f'"{t}-{marca(_queue_dir() / f"{_sanitize(name)}.jsonl")}-{provider}-{limit}"'
+    return f'"{t}-{marca(_queue_dir() / f"{_sanitize(name)}.jsonl")}-{provider}-{limit}-{_CODIGO}"'

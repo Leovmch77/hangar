@@ -198,6 +198,9 @@ class ChatEvent(BaseModel):
     # renderiza IGUAL a uma aceita, e "some sem aviso" vira "parece que foi" — que é pior, porque o
     # usuário acha que mandou.
     desistiu: Optional[bool] = None
+    # Só em bolha "held:": o que o hook escreveu ao barrar o prompt. Sem isto a pessoa vê "não
+    # chegou" e não tem como saber que o motivo é um hook quebrado.
+    hook_error: Optional[str] = None
     # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
     queued_delivered: Optional[bool] = None
     # Só em bolha da fila: o relógio da ENTRADA (epoch), pra ordenar no front quando ela chega ao

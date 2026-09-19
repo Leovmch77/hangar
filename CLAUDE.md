@@ -262,7 +262,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 **Antes de mexer em** `backend/app/adapters/` (claude_headless, codex, kimi, omp, pi), `codex_*.py`,
 `engines.py`, `model_picker.py`, `permission_mode.py`, `skill_bridge.py`, `omp_dirs.py`, `loop.py`,
 `terminal_input.py`, `state.py`, statusline/prévia, hooks de estado, ou em sessão sem terminal:
-**leia a seção "Regras vigentes" de `docs/decisoes/harnesses.md`**. São 38 regras, e cada uma já
+**leia a seção "Regras vigentes" de `docs/decisoes/harnesses.md`**. São 39 regras, e cada uma já
 custou um bug calado.
 
 ### Windows → [`docs/decisoes/windows.md`](docs/decisoes/windows.md)

@@ -827,6 +827,7 @@
   "composer_fala_video": "video speech: \"{texto}\"",
   "msg_nao_chegou_reenvie": "didn't reach the session — resend",
   "msg_descartar_perdida": "discard",
+  "msg_barrado_por_hook": "a hook blocked this prompt:",
   "erro_fila_entrada_nao_encontrada": "that message is no longer in the queue",
   "msg_aria_mensagens": "Messages",
   "msg_ir_ultima": "Go to last message",

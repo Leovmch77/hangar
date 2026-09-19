@@ -111,4 +111,24 @@ def test_entrada_antiga_sem_sufixo_vira_a_nova_no_lugar(tmp_path):
     data = json.loads(settings.read_text())
     entradas = [h["command"] for b in data["hooks"]["UserPromptSubmit"] for h in b["hooks"]
                 if hi._refers_to(h.get("command"), "state_hook.py", por_nome=True)]
-    assert entradas == [hi._STATE_COMMAND]
+    assert entradas == [hi._falha_avisa(hi._STATE_COMMAND, "UserPromptSubmit")]
+
+
+def test_falha_de_hook_vira_aviso_no_contexto_so_onde_o_modelo_le(tmp_path):
+    # `|| exit 0` engolia a falha inteira: hook sumido ou quebrado nao aparecia em lugar nenhum.
+    # Em SessionStart/UserPromptSubmit o stdout entra no contexto, entao o shell avisa no lugar.
+    for ev in ("SessionStart", "UserPromptSubmit"):
+        cmd = hi._falha_avisa(hi._STATE_COMMAND, ev)
+        assert "|| exit 0" not in cmd and "AVISE O USUARIO" in cmd
+        # o aviso nao pode roubar a identidade do hook: o _sync_hook acha a entrada pelo .py
+        assert hi._script_of(cmd) == hi.STATE_HOOK
+    # nos demais eventos o stdout nao chega a ninguem: segue o `exit 0`
+    assert hi._falha_avisa(hi._STATE_COMMAND, "Stop") == hi._STATE_COMMAND
+    # hook que bloqueia de proposito (guard_tmux) nao tem o sufixo e nao e tocado
+    assert hi._falha_avisa('"py" "/x/guard_tmux.py"', "UserPromptSubmit") == '"py" "/x/guard_tmux.py"'
+
+    # script sumido: o prompt nao trava (codigo 0) e o aviso sai
+    import subprocess
+    sumido = hi._falha_avisa(f'"python3" "{tmp_path}/state_hook.py" || exit 0', "UserPromptSubmit")
+    r = subprocess.run(sumido, shell=True, capture_output=True, text=True)
+    assert r.returncode == 0 and "O hook state_hook do Hangar falhou" in r.stdout

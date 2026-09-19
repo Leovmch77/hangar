@@ -121,6 +121,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   turno continua trabalhando.
 - **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
   o instalador preserva o que está lá.
+- **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
+  `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
+  entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
+  `|| exit 0`. O aviso não pode conter token terminado em `.py` — é por ele que o instalador
+  reconhece a própria entrada. **Prompt barrado por hook (de qualquer origem) vira bolha "não
+  chegou" com o erro do hook**, seja recado ou fala da pessoa.
 
 ## Troca de provider durante o SSE
 
@@ -1598,3 +1604,29 @@ na montagem e o mostra também no layout compacto do PWA.
 Frontend (`frontend/src/`): `screens/` (Chat, Board, …), `components/` (MessageList, NavBar, Composer,
 bubbles, sheets, Spinner/Lottie, …), `lib/` (`api.ts` SSE client, `activity.ts`, `markdown.ts`,
 `format.ts`, `types.ts`), `app.css` (design tokens + shared keyframes).
+
+## Hook que falha: nem bloqueia, nem some (19/09/2026)
+
+**O que aconteceu.** Uma sessão registrou um hook pessoal em `SessionStart`/`UserPromptSubmit`,
+abriu uma sessão de teste (o que copiou o `settings.json` para a conta `claude-200-5`), depois
+renomeou o script e corrigiu só o principal. A cópia ficou chamando `python3 <arquivo sumido>`,
+que sai com código 2 — e código 2 em `UserPromptSubmit` barra o prompt. As três sessões da conta
+pararam de receber mensagem. O Claude Code mostrou o erro no terminal e o gravou no transcript
+como entrada `system`; o Hangar só transformava essa entrada em bolha quando o texto era recado
+(`[de: …]`), então a fala da pessoa sumia do chat, e sem terminal o erro não aparecia em lugar
+nenhum. Achar a causa dependeu de outra sessão ler o `settings.json` da conta.
+
+**O que mudou.**
+- `transcript._blocked_prompt`: todo prompt barrado vira bolha `held:` com `desistiu=True` e o
+  texto do hook em `hook_error`. Conferido no transcript real: 4 falas, 9 entradas (os reenvios).
+- `pqueue.merged_history` junta as entradas de mesmo id `held:` — o SSE já juntava por id, a
+  lista do histórico não, e a tela mostrava 9 bolhas para 4 falas.
+- `pqueue.historico_etag` leva a data do código do backend: com o validador só por metadado do
+  arquivo, o `304` segurava no cliente o histórico lido pelo parser antigo enquanto a conversa
+  não andasse. Medido na mesma sessão: backend devolvendo 4, tela mostrando 9 até o ETag mudar.
+- `hook_installer._falha_avisa`: nos dois eventos cujo stdout entra no contexto, `|| exit 0`
+  virou `|| echo "<aviso>"`. Provado em `sh`, `bash` e `fish`: script presente sai 0 sem aviso,
+  script sumido sai 0 com aviso. JSON em aspas simples foi descartado por não rodar no `cmd`.
+
+**O que o aviso NÃO pega.** Falha engolida dentro do script (`state_hook.py` e `nav_hook.py`
+embrulham tudo em `except` e saem com 0). O aviso cobre script sumido, Python sumido e crash.

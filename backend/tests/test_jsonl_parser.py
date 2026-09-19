@@ -527,16 +527,27 @@ def test_system_com_embrulho_nativo_vira_bubble_normalizada(monkeypatch):
     assert ev.text == "[de: desc2-cap] corpo do recado"
 
 
+def test_system_fala_da_pessoa_bloqueada_vira_bubble_com_o_erro_do_hook():
+    # Hook quebrado barra TODO prompt da conta. Sem a bolha a fala some da conversa e, sem
+    # terminal, o erro do hook nao aparece em lugar nenhum.
+    [ev] = parse_line(_line({"type": "system", "uuid": "u4", "timestamp": "2026-08-18T00:36:42Z",
+                             "content": _SYSTEM_BLOQUEADO.replace(
+                                 "[de: desc2-exec2] RODADA 3 ENTREGUE — texto do reporte aqui.",
+                                 "Tá aí ainda?")}))
+    assert (ev.kind, ev.text, ev.desistiu) == ("user_msg", "Tá aí ainda?", True)
+    assert ev.id.startswith("held:")
+    assert ev.hook_error.startswith('["/home/jefferson/wt-desc/t8/backend/.venv/bin/python"')
+    assert ev.hook_error.endswith("No such file or directory")
+
+
 def test_system_ruido_de_tooling_nao_vira_bubble():
-    # system carrega ruido de verdade: /model, avisos do harness, fala do usuario bloqueada sem
-    # recado, e o aviso de recado SEGURADO (preview truncado, sem o texto). Nenhum vira conversa —
-    # o filtro e pelo FORMATO do recado, nunca pelo tipo.
+    # system carrega ruido de verdade: /model, avisos do harness e o aviso de recado SEGURADO
+    # (preview truncado, sem o texto). Nenhum vira conversa — o filtro e pelo FORMATO da entrega
+    # bloqueada, nunca pelo tipo.
     assert parse_line(_line({"type": "system", "content": None})) == []
     assert parse_line(_line({"type": "system", "content": "Held peer message — from uds:/x.sock "
                           "[verified pid 1] (peer claims name: cap-c4); preview: «de: desc2-rev2 "
                           "Parecer...» — not delivered to Claude (1 held)."})) == []
-    assert parse_line(_line({"type": "system", "content": "UserPromptSubmit operation blocked by hook:\n"
-                          "[x]\n\nOriginal prompt: Vê a minha última msg"})) == []
     assert parse_line(_line({"type": "system", "content": "o usuario citou 'Original prompt: [de: x] y' "
                           "num aviso qualquer"})) == []
 

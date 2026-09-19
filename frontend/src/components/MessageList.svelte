@@ -551,6 +551,12 @@
                   <button type="button" class="queued-descartar" onclick={() => onDescartarFila(ev.id.slice('queued-'.length))}>{m.msg_descartar_perdida()}</button>
                 {/if}
               </div>
+              {#if ev.hook_error}
+                <div class="hook-erro">
+                  <p>{m.msg_barrado_por_hook()}</p>
+                  <pre>{ev.hook_error}</pre>
+                </div>
+              {/if}
             {/if}
           </div>
         {:else if sub}
@@ -883,6 +889,19 @@
     display: flex; align-items: center; gap: var(--space-2);
   }
   .queued-perdida p { margin: 0; }
+  /* `relative`: bloco com overflow proprio (ver CLAUDE.md, regra do .sr-only). */
+  .hook-erro {
+    position: relative;
+    margin: 2px 0 0 var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+  }
+  .hook-erro p { margin: 0; color: var(--error); }
+  .hook-erro pre {
+    margin: 2px 0 0; max-height: 8em; overflow: auto;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+    font-family: var(--font-mono);
+  }
   .queued-descartar {
     min-height: 0; padding: 2px 8px; border-radius: var(--radius-sm);
     font-size: var(--text-xs); color: var(--text-secondary);

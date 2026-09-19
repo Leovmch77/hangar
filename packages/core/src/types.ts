@@ -170,6 +170,7 @@ export interface ChatEvent {
   image_count?: number | null;   // imagens coladas no terminal -> busca lazy em /transcript-image
   desistiu?: boolean | null;     // só em bolhas "queued-" e "held-" (não em evento real): entrega
                                  // dada como perdida — a TUI engoliu as teclas ou o hook barrou o prompt
+  hook_error?: string | null;    // só em bolha "held:": o que o hook escreveu ao barrar o prompt
 }
 
 export interface StateEvent {

@@ -18,7 +18,24 @@ HOOK = str((Path(__file__).parent.parent / "hooks" / "askq_capture.py").resolve(
 # depois perdeu o .venv — incidente de 17/08/2026 na maquina de casa) fazia o Claude Code recusar
 # TODO prompt da maquina com "operation blocked by hook". Vale em sh e no cmd do Windows.
 _FALHA_NAO_BLOQUEIA = " || exit 0"
-_COMMAND = f'"{sys.executable}" "{HOOK}"{_FALHA_NAO_BLOQUEIA}'
+# Nestes dois eventos o stdout de um hook que sai com 0 entra no contexto do modelo: a falha deixa
+# de sumir calada sem voltar a bloquear o prompt. Quem imprime e o shell, entao vale ate com o
+# script ou o Python sumido. Texto puro e ASCII: JSON em aspas simples nao roda no cmd do Windows.
+_EVENTOS_COM_CONTEXTO = {"SessionStart", "UserPromptSubmit"}
+
+
+def _falha_avisa(command: str, event: str) -> str:
+    """O command com o sufixo de falha do evento: aviso onde o modelo le, `exit 0` no resto."""
+    if event not in _EVENTOS_COM_CONTEXTO or not command.endswith(_FALHA_NAO_BLOQUEIA):
+        return command
+    # Nome sem `.py`: o _script_of acha o script pelo ultimo token que termina assim.
+    nome = os.path.basename(_script_of(command)).removesuffix(".py")
+    return (f'{command.removesuffix(_FALHA_NAO_BLOQUEIA)} || echo "[hangar] O hook {nome} do Hangar '
+            f'falhou em {event} e foi ignorado. AVISE O USUARIO agora: parte do app pode estar sem '
+            f'estado, pareamento ou navegador. Para ver o erro, rode o comando do hook a mao."')
+
+
+_COMMAND =f'"{sys.executable}" "{HOOK}"{_FALHA_NAO_BLOQUEIA}'
 _MATCHER = "AskUserQuestion"
 
 
@@ -186,7 +203,7 @@ def _ensure_event_hook(
     data = _load_settings(settings_path)
     if data is None:
         return False
-    if not _sync_hook(data, event, command, matcher=matcher, por_nome=por_nome):
+    if not _sync_hook(data, event, _falha_avisa(command, event), matcher=matcher, por_nome=por_nome):
         return False
     _write(settings_path, data)
     return True

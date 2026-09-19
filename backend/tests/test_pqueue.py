@@ -119,6 +119,22 @@ def test_merged_history_dedup_is_ts_aware(tmp_path):
     assert "queued-e2" in ids          # posterior ao commit -> ainda pendente, nao some
 
 
+def test_merged_history_junta_as_tentativas_do_mesmo_prompt_barrado(tmp_path):
+    # Hook quebrado + 3 reenvios = 3 entradas system com o MESMO id "held:". Id repetido na lista
+    # quebra o {#each} do front; fica a 1a tentativa, que e onde a bolha nasce.
+    import json
+    barrado = ("UserPromptSubmit operation blocked by hook:\n[python3 /x/h.py]: can't open file\n\n\n"
+               "Original prompt: Tá aí ainda?")
+    j = tmp_path / "t.jsonl"
+    j.write_text("".join(
+        json.dumps({"type": "system", "uuid": f"u{n}", "timestamp": f"2026-01-01T00:0{n}:00Z",
+                    "content": barrado}) + "\n" for n in range(3)), encoding="utf-8")
+    PromptQueue("s")
+    [ev] = pqueue.merged_history("s", str(j))
+    assert ev.id.startswith("held:") and ev.desistiu is True
+    assert ev.ts == pqueue._ts_of_line(j.read_text(encoding="utf-8").splitlines()[0])
+
+
 def test_merged_history_dedup_ts_race(tmp_path, monkeypatch):
     # Corrida REAL do envio (regressao de eb0f303): o send_prompt digita o texto + Enter e o Claude
     # Code grava o prompt no jsonl NA HORA; o append da fila so roda depois (_send_one). Carimbando
