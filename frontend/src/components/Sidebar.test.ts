@@ -115,6 +115,7 @@ import { sidebarBridge } from '../lib/sidebarBridge';
 import { navMode } from '../lib/navMode.svelte';
 import { ctxPanel } from '../lib/ctxPanel.svelte';
 import { fecharNav, marcarNavAberto } from '../lib/navegadorPanel.svelte';
+import { arrastarGrupo } from '../lib/arrastarGrupo.svelte';
 import * as api from '@hangar/core';
 import * as m from '../paraglide/messages';
 import type { AggSession } from '@hangar/core';
@@ -859,6 +860,76 @@ describe('Sidebar — passagem de bastão: em que MODO a folha de criar abre', (
     sidebarBridge.openCreate();                    // caminho das abas, com a sidebar recolhida
     await tick();
     expect(modo()).toBe('');
+    unmount(t.comp);
+  });
+});
+
+// Arrasto (Task 3): gesto de arrastar uma linha sobre outra pra abrir o pedido de grupo — a
+// PRIMEIRA das quatro telas (Board/Canvas/celular repetem o mesmo padrão depois).
+describe('Sidebar — arrastar sessão sobre sessão (Task 3)', () => {
+  function comStore(specs: Array<{ id: string; label: string; sessions: unknown[] }>) {
+    storeState.servers.length = 0;
+    storeState.byServer.length = 0;
+    for (const sp of specs) {
+      storeState.servers.push({ id: sp.id, label: sp.label, baseUrl: 'http://' + sp.id, token: 'x' });
+      storeState.byServer.push({
+        server: { id: sp.id, label: sp.label },
+        sessions: sp.sessions,
+        error: null, loaded: true,
+      });
+    }
+  }
+  const sess = (name: string, serverId: string, extra: Record<string, unknown> = {}) =>
+    ({ name, serverId, state: 'idle', ...extra });
+
+  // O store do arrasto é singleton (módulo, não prop) — sobrevive ao unmount e vazaria pro
+  // próximo teste sem isto.
+  afterEach(() => arrastarGrupo.cancelar());
+
+  it('dragstart numa linha + drop noutra pede o diálogo com origem e alvo certos', async () => {
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [
+      sess('sess-1', 'srv-a'),
+      sess('sess-2', 'srv-a'),
+    ] }]);
+    const t = montar();
+    await tick();
+    const rows = t.el.querySelectorAll<HTMLElement>('.sess-row');
+    expect(rows).toHaveLength(2);
+    rows[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+    expect(arrastarGrupo.origem).toEqual({ serverId: 'srv-a', name: 'sess-1' });
+    rows[1].dispatchEvent(new DragEvent('drop', { bubbles: true }));
+    expect(arrastarGrupo.pedido).toEqual({
+      modo: 'agrupar',
+      origem: { serverId: 'srv-a', name: 'sess-1' },
+      alvo: { serverId: 'srv-a', name: 'sess-2' },
+    });
+    unmount(t.comp);
+  });
+
+  it('drop em linha do mesmo grupo não pede nada', async () => {
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [
+      sess('sess-1', 'srv-a', { pair_gid: 'g1' }),
+      sess('sess-2', 'srv-a', { pair_gid: 'g1' }),
+    ] }]);
+    const t = montar();
+    await tick();
+    const rows = t.el.querySelectorAll<HTMLElement>('.sess-row');
+    rows[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+    rows[1].dispatchEvent(new DragEvent('drop', { bubbles: true }));
+    expect(arrastarGrupo.pedido).toBeNull();
+    unmount(t.comp);
+  });
+
+  it('ondragend sem pedido aberto limpa a origem (soltou fora de qualquer alvo)', async () => {
+    comStore([{ id: 'srv-a', label: 'Servidor A', sessions: [sess('sess-1', 'srv-a')] }]);
+    const t = montar();
+    await tick();
+    const row = t.el.querySelector<HTMLElement>('.sess-row')!;
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true }));
+    expect(arrastarGrupo.origem).not.toBeNull();
+    row.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+    expect(arrastarGrupo.origem).toBeNull();
+    expect(arrastarGrupo.pedido).toBeNull();
     unmount(t.comp);
   });
 });
