@@ -59,6 +59,9 @@
   let busy = $state(false);
   let erro = $state<string | null>(null);
   let conflito = $state<string | null>(null); // mensagem do 409: troca o botão de confirmar pelo de sobrescrever
+  // true quando o backend já fez a fusão/saída mas o `warning` diz que o aviso não chegou a
+  // alguém do grupo — a ação está feita, só resta fechar (ver template).
+  let avisoFalhou = $state(false);
 
   // Reinicia o formulário só quando um PEDIDO NOVO abre (a referência de `pedido` muda uma vez por
   // arrasto) — nunca a cada recompute do sessionsStore: um poll no meio da digitação não pode
@@ -71,13 +74,23 @@
       busy = false;
       erro = null;
       conflito = null;
+      avisoFalhou = false;
     });
   });
 
-  function fechar() { arrastarGrupo.cancelar(); }
+  // Esc/fundo do ModalDialog chamam isto sem saber de `busy` — com um pairSession/unpairSession em
+  // voo, soltar o pedido aqui jogaria o resultado (warning, 409, erro) no vazio. Só dissolve quando
+  // não há chamada pendente; enquanto busy, o botão Cancelar já fica desabilitado pelo mesmo motivo.
+  function fechar() {
+    if (busy) return;
+    arrastarGrupo.cancelar();
+  }
 
   async function confirmarAgrupar(substituir: boolean) {
     if (pedido?.modo !== 'agrupar' || busy) return;
+    // Identidade capturada ANTES do await: se um arrasto novo abrir outro pedido enquanto esta
+    // chamada está em voo, a resposta da chamada VELHA não pode mexer no diálogo do pedido novo.
+    const pedidoEmVoo = pedido;
     const o = origemSessao;
     const a = alvoSessao;
     if (!o || !a) { erro = mensagemRecusa('dead'); return; }
@@ -87,13 +100,16 @@
     erro = null;
     try {
       const res = await withServer(a.serverId, () => pairSession(a.name, [o.name], tarefa.trim(), substituir));
+      if (pedido !== pedidoEmVoo) return;
       if (res.warning) {
         conflito = null;
+        avisoFalhou = true;
         erro = formataErro(res.warning) ?? String(res.warning);
       } else {
         arrastarGrupo.cancelar();
       }
     } catch (e) {
+      if (pedido !== pedidoEmVoo) return;
       if (e instanceof Error && (e as { status?: number }).status === 409) {
         conflito = e.message;
       } else {
@@ -101,24 +117,31 @@
         erro = e instanceof Error && e.message ? e.message : m.grupo_drop_falhou();
       }
     } finally {
-      busy = false;
+      if (pedido === pedidoEmVoo) busy = false;
     }
   }
 
   async function confirmarSair() {
     if (pedido?.modo !== 'sair' || busy) return;
+    const pedidoEmVoo = pedido; // mesmo motivo do confirmarAgrupar
     const o = origemSessao;
     if (!o) { erro = mensagemRecusa('dead'); return; }
     busy = true;
     erro = null;
     try {
       const res = await withServer(o.serverId, () => unpairSession(o.name));
-      if (res.warning) erro = formataErro(res.warning) ?? String(res.warning);
-      else arrastarGrupo.cancelar();
+      if (pedido !== pedidoEmVoo) return;
+      if (res.warning) {
+        avisoFalhou = true;
+        erro = formataErro(res.warning) ?? String(res.warning);
+      } else {
+        arrastarGrupo.cancelar();
+      }
     } catch (e) {
+      if (pedido !== pedidoEmVoo) return;
       erro = e instanceof Error && e.message ? e.message : m.grupo_drop_sair_falhou();
     } finally {
-      busy = false;
+      if (pedido === pedidoEmVoo) busy = false;
     }
   }
 </script>
@@ -126,12 +149,14 @@
 {#if pedido}
   <ModalDialog
     open={true}
-    ariaLabel={pedido.modo === 'agrupar' ? m.grupo_drop_titulo() : m.grupo_drop_sair_titulo()}
+    ariaLabel={pedido.modo === 'agrupar'
+      ? (avisoFalhou ? m.grupo_drop_titulo_feito() : m.grupo_drop_titulo())
+      : (avisoFalhou ? m.grupo_drop_sair_titulo_feito() : m.grupo_drop_sair_titulo())}
     onClose={fechar}
     className="grupo-drop"
   >
     {#if pedido.modo === 'agrupar'}
-      <h2 class="gd-title">{m.grupo_drop_titulo()}</h2>
+      <h2 class="gd-title">{avisoFalhou ? m.grupo_drop_titulo_feito() : m.grupo_drop_titulo()}</h2>
 
       <div class="gd-afetadas">
         <p class="gd-label">{m.grupo_drop_afetadas()}</p>
@@ -140,33 +165,39 @@
         </ul>
       </div>
 
-      <input
-        type="text"
-        class="gd-tarefa"
-        bind:value={tarefa}
-        oninput={() => { conflito = null; }}
-        placeholder={m.grupo_drop_tarefa()}
-        disabled={busy}
-      />
+      {#if !avisoFalhou}
+        <input
+          type="text"
+          class="gd-tarefa"
+          bind:value={tarefa}
+          oninput={() => { conflito = null; }}
+          placeholder={m.grupo_drop_tarefa()}
+          disabled={busy}
+        />
+      {/if}
 
       {#if erro}<p class="gd-erro">{erro}</p>{/if}
       {#if conflito}<p class="gd-erro">{conflito}</p>{/if}
       {#if bloqueio && !erro && !conflito}<p class="gd-erro">{bloqueio}</p>{/if}
 
       <div class="gd-acoes">
-        <button type="button" class="gd-btn" onclick={fechar} disabled={busy}>{m.comum_cancelar()}</button>
-        {#if conflito}
-          <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(true)} disabled={busy || !!bloqueio}>
-            {m.grupo_drop_substituir_tarefa()}
-          </button>
+        {#if avisoFalhou}
+          <button type="button" class="gd-btn gd-primary" onclick={fechar}>{m.sessao_fechar()}</button>
         {:else}
-          <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(false)} disabled={busy || !!bloqueio}>
-            {m.grupo_drop_confirmar()}
-          </button>
+          <button type="button" class="gd-btn" onclick={fechar} disabled={busy}>{m.comum_cancelar()}</button>
+          {#if conflito}
+            <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(true)} disabled={busy || !!bloqueio}>
+              {m.grupo_drop_substituir_tarefa()}
+            </button>
+          {:else}
+            <button type="button" class="gd-btn gd-primary" onclick={() => confirmarAgrupar(false)} disabled={busy || !!bloqueio}>
+              {m.grupo_drop_confirmar()}
+            </button>
+          {/if}
         {/if}
       </div>
     {:else}
-      <h2 class="gd-title">{m.grupo_drop_sair_titulo()}</h2>
+      <h2 class="gd-title">{avisoFalhou ? m.grupo_drop_sair_titulo_feito() : m.grupo_drop_sair_titulo()}</h2>
 
       {#if quemFica.length}
         <div class="gd-afetadas">
@@ -181,10 +212,14 @@
       {#if bloqueio && !erro}<p class="gd-erro">{bloqueio}</p>{/if}
 
       <div class="gd-acoes">
-        <button type="button" class="gd-btn" onclick={fechar} disabled={busy}>{m.comum_cancelar()}</button>
-        <button type="button" class="gd-btn gd-danger" onclick={confirmarSair} disabled={busy || !!bloqueio}>
-          {m.grupo_drop_sair_confirmar()}
-        </button>
+        {#if avisoFalhou}
+          <button type="button" class="gd-btn gd-danger" onclick={fechar}>{m.sessao_fechar()}</button>
+        {:else}
+          <button type="button" class="gd-btn" onclick={fechar} disabled={busy}>{m.comum_cancelar()}</button>
+          <button type="button" class="gd-btn gd-danger" onclick={confirmarSair} disabled={busy || !!bloqueio}>
+            {m.grupo_drop_sair_confirmar()}
+          </button>
+        {/if}
       </div>
     {/if}
   </ModalDialog>

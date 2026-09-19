@@ -143,6 +143,75 @@ describe('GrupoDropDialog — modo agrupar', () => {
     expect(arrastarGrupo.pedido).toBeNull();
     unmount(comp);
   });
+
+  it('Esc durante o pairSession em voo não descarta o resultado (warning chega e fica na tela)', async () => {
+    storeState.rows = [
+      sess({ name: 'origem', serverId: 'srv1' }),
+      sess({ name: 'alvo', serverId: 'srv1' }),
+    ];
+    let resolver!: (v: { ok: boolean; warning: string | null }) => void;
+    api.pairSession.mockReturnValue(new Promise((r) => { resolver = r; }));
+    const comp = montar();
+
+    arrastarGrupo.comecar({ serverId: 'srv1', name: 'origem' });
+    arrastarGrupo.soltar('srv1::alvo');
+    await tick();
+
+    clicarBotao(m.grupo_drop_confirmar());
+    await tick();
+
+    // Esc enquanto a chamada está em voo (busy): o fechar() do diálogo ignora, o pedido continua aberto.
+    document.querySelector('.grupo-drop')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
+    await tick();
+    expect(arrastarGrupo.pedido).not.toBeNull();
+
+    resolver({ ok: true, warning: 'não chegou pra fulano' });
+    await flush();
+
+    // Resultado não caiu no vazio: o warning aparece e a tela avisa que a ação já foi concluída.
+    expect(document.body.textContent).toContain('não chegou pra fulano');
+    expect(document.body.textContent).toContain(m.grupo_drop_titulo_feito());
+    expect(arrastarGrupo.pedido).not.toBeNull();
+
+    // Só agora (sem busy) o fechar dissolve o pedido.
+    clicarBotao(m.sessao_fechar());
+    expect(arrastarGrupo.pedido).toBeNull();
+    unmount(comp);
+  });
+
+  it('resposta de um pedido velho não mexe no diálogo do pedido novo (identidade do pedido em voo)', async () => {
+    storeState.rows = [
+      sess({ name: 'origem', serverId: 'srv1' }),
+      sess({ name: 'alvo', serverId: 'srv1' }),
+      sess({ name: 'outra', serverId: 'srv1' }),
+    ];
+    let resolverVelho!: (v: { ok: boolean; warning: string | null }) => void;
+    api.pairSession.mockReturnValueOnce(new Promise((r) => { resolverVelho = r; }));
+    const comp = montar();
+
+    arrastarGrupo.comecar({ serverId: 'srv1', name: 'origem' });
+    arrastarGrupo.soltar('srv1::alvo');
+    await tick();
+    clicarBotao(m.grupo_drop_confirmar());
+    await tick();
+
+    // Um arrasto novo (outra sessão) chega e derruba o pedido velho ainda em voo — simula o
+    // usuário abrindo outro drop antes da resposta do primeiro voltar.
+    arrastarGrupo.cancelar();
+    arrastarGrupo.comecar({ serverId: 'srv1', name: 'outra' });
+    arrastarGrupo.soltar('srv1::alvo');
+    await tick();
+    const pedidoNovo = arrastarGrupo.pedido;
+
+    // Resposta do pedido VELHO chega agora: não pode fechar nem escrever erro no pedido NOVO.
+    resolverVelho({ ok: true, warning: 'aviso do pedido velho' });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('aviso do pedido velho');
+    expect(arrastarGrupo.pedido).toBe(pedidoNovo);
+    unmount(comp);
+  });
 });
 
 describe('GrupoDropDialog — modo sair', () => {

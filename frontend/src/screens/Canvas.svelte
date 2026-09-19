@@ -339,9 +339,11 @@ import * as m from '../paraglide/messages';
     dropHover = findDropTarget(p.x, p.y, drag.key, cards, groups);
   }
   // Reúne o grupo recém-formado em volta de onde o usuário soltou — senão o tile fica empilhado
-  // por cima do alvo (Step 4). ponytail: espera a confirmação fechar E o pair_gid aparecer no
-  // sessionsStore (SSE); desiste depois de 4s — o grupo já formou de qualquer forma, só a reunião
-  // automática que não rodou, e o ⇱ do rótulo do grupo resolve na mão.
+  // por cima do alvo (Step 4). ponytail: sem timer — o efeito só reavalia quando pedido/rows mudam
+  // (SSE trazendo o pair_gid novo, por exemplo); o teto de 4s abaixo só é conferido nessas
+  // reavaliações, então "desiste" quando a PRÓXIMA mudança cair depois do teto, não sozinho aos 4s.
+  // O grupo já formou de qualquer forma nesse caso, só a reunião automática que não rodou, e o ⇱
+  // do rótulo do grupo resolve na mão.
   let pendingGather: { origemKey: string; alvoKey: string; at: number } | null = null;
   $effect(() => {
     // Dependências lidas SEMPRE, antes de qualquer return: pendingGather é variável comum (só o
@@ -564,7 +566,8 @@ import * as m from '../paraglide/messages';
     <!-- Grupo colapsado: um card compacto no lugar dos membros. Também é alvo de soltar (Step 2). -->
     {#each collapsedCards as g (g.gid)}
       {@const hoverAqui = dropHover?.kind === 'group' && dropHover.gid === g.gid}
-      {@const dropResultado = hoverAqui && g.members[0] ? avaliarDropCanvas(drag!.key, g.members[0]) : null}
+      {@const dragKey = drag?.key}
+      {@const dropResultado = hoverAqui && dragKey && g.members[0] ? avaliarDropCanvas(dragKey, g.members[0]) : null}
       {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
       <div class="cv-gcard" class:drop-alvo={dropResultado?.ok === true} class:drop-recusado={dropRecusa !== null}
            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
@@ -588,7 +591,8 @@ import * as m from '../paraglide/messages';
       {@const box = layout[key]}
       {#if box}
         {@const hoverAqui = dropHover?.kind === 'card' && dropHover.key === key}
-        {@const dropResultado = hoverAqui ? avaliarDropCanvas(drag!.key, row) : null}
+        {@const dragKey = drag?.key}
+        {@const dropResultado = hoverAqui && dragKey ? avaliarDropCanvas(dragKey, row) : null}
         {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
         <div class="cv-card" class:paired={!!row.pair_gid}
              class:drop-alvo={dropResultado?.ok === true} class:drop-recusado={dropRecusa !== null}

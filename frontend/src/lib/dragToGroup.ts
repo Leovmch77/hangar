@@ -5,9 +5,9 @@
 // regra da Sidebar/Board/Canvas: soltar sobre uma linha válida pede o diálogo em modo agrupar;
 // soltar no fundo (nenhuma linha sob o dedo) pede saída SE a origem já tiver grupo.
 import { canPair, canLeave, type SessionInfo, type DropResult } from '@hangar/core';
+import type { ChaveSessao } from './arrastarGrupo.svelte';
 
 type SessaoComServidor = SessionInfo & { serverId: string };
-export interface ChaveSessao { serverId: string; name: string }
 
 export type DropDecision =
   | { kind: 'pair'; chave: string }

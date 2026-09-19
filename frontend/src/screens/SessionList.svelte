@@ -91,6 +91,8 @@ import * as m from '../paraglide/messages';
       // Captura a posição na SAÍDA (cinto-e-suspensório do onscroll; cleanup roda antes do DOM
       // sair). Saindo no MEIO da fase de restore, o scrollTop está parcial — mantém o alvo original.
       off();
+      // Sair no meio de um arrasto não pode deixar o requestAnimationFrame do auto-scroll encadeado.
+      stopAutoScroll();
     };
   });
 
