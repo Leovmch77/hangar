@@ -637,7 +637,8 @@ export function createSession(
   if (headless && (provider === 'claude' || provider === 'codex')) body.headless = true;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
-  if (jevGateway) body.jev_gateway = true;
+  // `false` viaja: ausente herda o `jev_gateway_padrao` do servidor, e desmarcar é uma escolha.
+  if (jevGateway !== undefined) body.jev_gateway = jevGateway;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),

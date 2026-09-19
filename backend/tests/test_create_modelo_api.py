@@ -21,6 +21,13 @@ def _auth(monkeypatch):
     monkeypatch.setattr(settings, "auth_token", TOKEN)
 
 
+@pytest.fixture(autouse=True)
+def _config_isolada(tmp_path, monkeypatch):
+    # Sem isto a suíte lê a config editável REAL da máquina: com `jev_padrao` ligado no servidor
+    # de quem roda, o `create` ganha `jev=True` e os testes que conferem os argumentos falham.
+    monkeypatch.setattr(api.runtime_config, "_backend_config_base", lambda: tmp_path)
+
+
 def test_model_invalido_devolve_400():
     r = TestClient(app).post("/api/sessions", headers=AUTH, json={
         "name": "x", "cwd": "/tmp", "model": "k3; touch /tmp/x"})
@@ -385,3 +392,30 @@ def test_escolha_explicita_vence_o_padrao_nos_dois_sentidos(monkeypatch):
 def test_sem_padrao_e_sem_escolha_o_jev_fica_desligado(monkeypatch):
     monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
     assert api._jev_efetivo(None) is False
+
+
+def _corpo(**kw):
+    return CreateBody(name="x", cwd="/tmp/x", **kw)
+
+
+def test_padrao_do_jev_gateway_so_pega_onde_ele_cabe_e_com_ele_no_ar(monkeypatch):
+    """Ligar o padrão não pode quebrar a criação de quem o gateway não atende: ali a sessão nasce
+    direta, em silêncio. Pedido explícito é outra história — o registry recusa onde não cabe."""
+    monkeypatch.setattr(api.runtime_config, "get", lambda campo: campo == "jev_gateway_padrao")
+    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: "http://127.0.0.1:1")
+    assert api._jev_gateway_efetivo(_corpo()) is True
+    assert api._jev_gateway_efetivo(_corpo(provider="codex", headless=True)) is True
+    assert api._jev_gateway_efetivo(_corpo(provider="codex")) is False        # com terminal
+    assert api._jev_gateway_efetivo(_corpo(engine="deepseek")) is False        # motor já usa a URL
+    assert api._jev_gateway_efetivo(_corpo(provider="pi")) is False
+    assert api._jev_gateway_efetivo(_corpo(jev_gateway=False)) is False        # --sem-jev-gateway
+    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: None)
+    assert api._jev_gateway_efetivo(_corpo()) is False                         # gateway parado
+    assert api._jev_gateway_efetivo(_corpo(jev_gateway=True)) is True          # explícito segue adiante
+
+
+def test_sem_padrao_o_jev_gateway_so_entra_pedido(monkeypatch):
+    monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
+    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: "http://127.0.0.1:1")
+    assert api._jev_gateway_efetivo(_corpo()) is False
+    assert api._jev_gateway_efetivo(_corpo(jev_gateway=True)) is True

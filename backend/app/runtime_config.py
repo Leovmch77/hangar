@@ -91,6 +91,9 @@ EDITAVEIS: dict[str, type] = {
     # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
     # continua vencendo naquela sessao, sem mexer neste padrao.
     "jev_padrao": bool,
+    # O mesmo padrão, para o jev-gateway. Só pega onde o gateway vale (claude na conta Anthropic,
+    # codex sem terminal) e com ele respondendo — nos outros casos a sessão nasce direta, sem erro.
+    "jev_gateway_padrao": bool,
     # LLM pequeno que escreve o valor de um campo que o chamador nao cobriu — OPCIONAL, e a mesma
     # ordem de precedencia que o CLI ja usa: base_url + api_key + modelo (endpoint compativel com
     # a OpenAI), senao cmd, senao o padrao do proprio CLI.

@@ -42,7 +42,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   com URL de terceiro) e Codex sem terminal (`-c` do provedor em `sem_terminal.argv`, com
   `requires_openai_auth=true`). Motor nunca: ele já usa a URL. Na criação, gateway parado recusa;
   em relançamento a sessão sobe direto e o log avisa — nunca apontar para porta fechada. A tela só
-  mostra a opção onde `GET /api/jev-gateway` diz que ele responde.
+  mostra a opção onde `GET /api/jev-gateway` diz que ele responde. O padrão do servidor
+  (`jev_gateway_padrao`, que a caixa grava) só pega onde o gateway cabe e com ele no ar: nos
+  outros casos a sessão nasce direta e calada, nunca recusada — recusa é só para pedido explícito.
 - **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
   `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
 - **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
