@@ -228,6 +228,14 @@ import * as m from '../paraglide/messages';
     const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
     return el?.closest<HTMLElement>('[data-session-key]')?.dataset.sessionKey ?? null;
   }
+  // "fundo" só conta DENTRO da lista (mesma régua da Sidebar/Board: .sess-list / .col-cards) — sem
+  // isto, soltar sobre a barra de cima ou o botão de nova sessão (fora de qualquer linha, então
+  // hitTest também devolve null ali) abria o diálogo de SAIR à toa.
+  function dentroDaLista(clientX: number, clientY: number): boolean {
+    if (!listEl) return false;
+    const r = listEl.getBoundingClientRect();
+    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+  }
   let dragActive = $state(false);
   let ghostX = $state(0);
   let ghostY = $state(0);
@@ -288,6 +296,7 @@ import * as m from '../paraglide/messages';
     // modo agrupar; sobre o fundo (nenhuma linha sob o dedo), pede saída SE a origem já tiver grupo
     // — mesma regra da Sidebar/Board/Canvas.
     const hit = hitTest(e.clientX, e.clientY);
+    if (hit === null && !dentroDaLista(e.clientX, e.clientY)) { arrastarGrupo.cancelar(); return; }
     const origemChave = arrastarGrupo.origem;   // capturado 1x: origem é getter, não estreita sozinho
     const decisao = resolveDrop(hit, origemChave, model.flatRows);
     if (decisao.kind === 'pair') arrastarGrupo.soltar(decisao.chave);
