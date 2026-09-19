@@ -26,6 +26,7 @@
   import TtsBar from './components/TtsBar.svelte';
   import TtsSelectionPill from './components/TtsSelectionPill.svelte';
   import CodeOverlay from './components/CodeOverlay.svelte';
+  import GrupoDropDialog from './components/GrupoDropDialog.svelte';
   import { iniciarCodeActions } from './lib/codeActions.svelte';
 
   // Deep-link do push (feature #5): a notif abre '/?server=<id>&session=<name>' — o router so olha
@@ -594,6 +595,10 @@
     <TtsSelectionPill />
   {/if}
   <CodeOverlay />
+  <!-- Confirmação do arrasto de sessão sobre sessão (agrupar/sair): montada UMA vez aqui, reagindo
+       a arrastarGrupo.pedido — as quatro superfícies que arrastam (Sidebar/Board/Canvas/celular,
+       Task 3+) só chamam arrastarGrupo.soltar/pedirSaida, sem montar o diálogo cada uma. -->
+  <GrupoDropDialog />
 
   {#if cfg && telaEfetiva && route.name !== 'login' && route.name !== 'loading'}
     <SettingsModal
