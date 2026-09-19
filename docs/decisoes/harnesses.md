@@ -471,8 +471,14 @@ pelo gateway sem mudança (200 em todos os turnos) e a busca de tools sobrevive 
 `ENABLE_TOOL_SEARCH=true` — a lista foi de 12 para 13 tools depois de `ToolSearch` carregar a
 `NotebookEdit`. Com a busca ligada o Claude Code manda ~12 tools de topo, não as ~280: o resto
 fica adiado atrás do `ToolSearch`. O gateway só SUGERE no Claude (`hint`: raciocínio ligado e
-cache impedem forçar `tool_choice`), então ali o ganho esperado é acerto de tool, não custo; não
-medido aqui. Sessões de teste com e sem terminal nasceram com a URL e o marcador
+cache impedem forçar `tool_choice`), então ali o ganho esperado é acerto de tool, não custo.
+Medido no mesmo dia em depuração (`claude-fable-5-1` high, 7 bugs plantados e 16 testes, uma
+execução por lado, tokens somados do `usage` do transcript por `message.id`): com o gateway 17
+pedidos ao modelo contra 9, entrada 1.082.854 contra 630.157 (+72%), saída 3.671 contra 3.158
+(+16%), 2min53 contra 55s; os dois lados fecharam 16/16. O lado sem gateway agrupou duas edições
+por turno, o com gateway fez uma por turno — hipótese: a sugestão nomeia UMA tool e puxa o modelo
+para uma chamada por turno. Uma execução não separa isso de variação entre rodadas; é por isso
+que a opção nasce desligada. Sessões de teste com e sem terminal nasceram com a URL e o marcador
 `HANGAR_JEV_GATEWAY=on`; a sem a opção nasceu sem nenhuma das três variáveis; motor + gateway
 volta 409. Por que sondar a porta na subida: provedor apontando para porta
 fechada é sessão que nasce e nunca fala com o modelo. Não conferido: `thread/resume` de uma
