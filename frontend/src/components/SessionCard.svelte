@@ -229,10 +229,12 @@ import { textoProblema } from '../lib/problema';
   function onHandleUp(e: PointerEvent) {
     (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
     onGroupDrag?.('up', e);
+    offset = 0;   // fecha a trilha do swipe (mesmo gesto do botão Git) — sem isto ficava aberta pós-drop
   }
   function onHandleCancel(e: PointerEvent) {
     (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
     onGroupDrag?.('cancel', e);
+    offset = 0;
   }
 
   // Tap na linha: toque longo (renomeou) nao navega; se aberto ou acabou de arrastar, fecha o swipe.
