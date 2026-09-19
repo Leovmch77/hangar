@@ -7,7 +7,12 @@ describe('nextAtBottom', () => {
     expect(nextAtBottom(true, 980, 1000, 20)).toBe(false);
   });
 
+  it('o primeiro passo de uma rolagem suave, 2px pra cima colada no fim, já solta', () => {
+    expect(nextAtBottom(true, 998, 1000, 2)).toBe(false);
+  });
+
   it('conteúdo encolheu com a lista colada: scrollTop cai mas a folga segue ~0, continua colada', () => {
+    expect(nextAtBottom(true, 700, 1000, 0.5)).toBe(true);   // meio pixel do arredondamento
     expect(nextAtBottom(true, 700, 1000, 0)).toBe(true);
   });
 

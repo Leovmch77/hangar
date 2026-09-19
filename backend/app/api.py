@@ -2117,7 +2117,9 @@ async def create_session(body: CreateBody):
                             _kw["subagent_model"] = body.subagent_model
                         if _jev_efetivo(body.jev):
                             _kw["jev"] = True
-                        if _jev_gateway_efetivo(body):
+                        # Em thread: com o padrão ligado ele sonda a porta do gateway, e socket
+                        # bloqueante no laço pararia o SSE de todas as sessões.
+                        if await asyncio.to_thread(_jev_gateway_efetivo, body):
                             _kw["jev_gateway"] = True
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
@@ -2148,7 +2150,7 @@ async def create_session(body: CreateBody):
             _kw2["subagent_model"] = body.subagent_model
         if _jev_efetivo(body.jev):
             _kw2["jev"] = True
-        if _jev_gateway_efetivo(body):
+        if await asyncio.to_thread(_jev_gateway_efetivo, body):
             _kw2["jev_gateway"] = True
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt

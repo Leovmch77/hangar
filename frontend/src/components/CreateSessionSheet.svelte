@@ -706,7 +706,11 @@
   let gatewayNoAr = $state({ claude: false, codex: false });
   $effect(() => {
     const s = codexServer;
-    if (!open || !s) { gatewayNoAr = { claude: false, codex: false }; return; }
+    // Zera ANTES de perguntar: trocar o servidor-alvo com a folha aberta deixava a resposta do
+    // servidor anterior valendo até a nova chegar, e a caixa aparecia pra quem não tem o gateway.
+    gatewayNoAr = { claude: false, codex: false };
+    if (!open) return;
+    // Sem servidor-alvo na lista (instalação de um servidor só), `getJevGateway` pergunta ao ativo.
     let vivo = true;
     getJevGateway(s).then((r) => { if (vivo) gatewayNoAr = r; })
       .catch(() => { if (vivo) gatewayNoAr = { claude: false, codex: false }; });

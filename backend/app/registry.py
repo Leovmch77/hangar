@@ -134,13 +134,17 @@ def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
 
 
 def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
-                nome: str | None = None, jev_gateway: bool = False) -> dict:
+                nome: str | None = None, jev_gateway: bool = False,
+                engine: str | None = None) -> dict:
     env = runtime_config.env_jev(jev)
     # Quem lê a variável é o binário `claude` — com ou sem motor, que só troca o provedor do modelo.
     # Nos outros providers ela não seria lida por ninguém.
     if provider == "claude":
         env.update(runtime_config.env_function_hooks())
-        env.update(runtime_config.env_jev_gateway(jev_gateway))
+        # Motor já usa a ANTHROPIC_BASE_URL pro provedor dele. A criação recusa a combinação; a
+        # guarda aqui é pra um relançamento nunca vazar a URL do gateway pra dentro de um motor.
+        if not engine:
+            env.update(runtime_config.env_jev_gateway(jev_gateway))
         # Endereço e token do caminho nativo de entrada. Só com nome: o pane precisa
         # saber por qual sessão ele responde, e é o nome que a fila usa.
         if nome:
@@ -1948,7 +1952,8 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
-        env_pane = _env_sessao(subagent_model, jev, provider, nome=name, jev_gateway=jev_gateway)
+        env_pane = _env_sessao(subagent_model, jev, provider, nome=name, jev_gateway=jev_gateway,
+                               engine=engine)
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")
@@ -2087,7 +2092,8 @@ class SessionRegistry:
         self._forget(name)
         if not tmux.new_session(name, meta["cwd"], cmd, meta.get("config_dir"), provider="claude",
                                 **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")),
-                                              jev_gateway=bool(meta.get("jev_gateway")))):
+                                              jev_gateway=bool(meta.get("jev_gateway")),
+                                              engine=meta.get("engine"))):
             headless_sessions.restaurar(meta)
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
         self._jsonl_cache[name] = jsonl
@@ -2172,7 +2178,7 @@ class SessionRegistry:
                     "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
                                     meta["config_dir"], provider="claude",
-                                    **_env_sessao(subagente, jev, jev_gateway=jev_gateway)):
+                                    **_env_sessao(subagente, jev, jev_gateway=jev_gateway, engine=motor)):
                 _log.error("troca para sem terminal: sidecar e pane falharam, sessao %s ficou sem nada", name)
             raise
         self._jsonl_cache[name] = jsonl
@@ -2519,7 +2525,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         tmux.kill_session(name)
         self._forget(name)
-        env_pane = _env_sessao(subagente, jev, jev_gateway=jev_gateway)
+        env_pane = _env_sessao(subagente, jev, jev_gateway=jev_gateway, engine=motor)
         if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
             raise ValueError("falha ao relançar a sessao")
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),

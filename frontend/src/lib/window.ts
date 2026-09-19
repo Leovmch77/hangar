@@ -37,11 +37,13 @@ export function mostrarIrPraoFim(scrolledUp: boolean, windowEnd: number, len: nu
  *
  * Subir solta NA HORA, por menor que seja o passo. Com a folga de 64px valendo também pra soltar, a
  * prévia (que cresce várias vezes por segundo) puxava de volta toda rolada curta e a pessoa tinha
- * que brigar com a lista. `gap > 2` separa quem sobe do scrollTop que diminui sozinho quando o
- * conteúdo encolhe com a lista colada: ali o navegador prende no fim e a folga segue ~0.
+ * que brigar com a lista. `gap > 1` separa quem sobe do scrollTop que diminui sozinho quando o
+ * conteúdo encolhe com a lista colada: ali o navegador prende no fim e a folga segue 0 (mais o
+ * meio pixel do arredondamento). O corte fica em 1 e não mais alto porque a rolagem suave começa
+ * em passos de 1 a 3px, e o primeiro deles já tem que soltar.
  * Reencostar é chegar a 64px do fim descendo ou parado; longe do fim sem subir, nada muda. */
 export function nextAtBottom(atBottom: boolean, top: number, lastTop: number, gap: number): boolean {
-  if (top < lastTop - 1 && gap > 2) return false;
+  if (top < lastTop - 1 && gap > 1) return false;
   return gap < 64 ? true : atBottom;
 }
 

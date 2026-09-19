@@ -416,6 +416,16 @@ def test_padrao_do_jev_gateway_so_pega_onde_ele_cabe_e_com_ele_no_ar(monkeypatch
 
 def test_sem_padrao_o_jev_gateway_so_entra_pedido(monkeypatch):
     monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
-    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: "http://127.0.0.1:1")
+    sonda = Mock(return_value="http://127.0.0.1:1")
+    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", sonda)
     assert api._jev_gateway_efetivo(_corpo()) is False
     assert api._jev_gateway_efetivo(_corpo(jev_gateway=True)) is True
+    # Quem nunca ligou nada não paga nem a sondagem da porta na criação.
+    sonda.assert_not_called()
+
+
+def test_porta_do_jev_gateway_invalida_avisa_no_log(monkeypatch, caplog):
+    monkeypatch.setenv("JEV_CLAUDE_PORT", "8789x")
+    with caplog.at_level("WARNING", logger="hangar.runtime_config"):
+        assert api.runtime_config.jev_gateway_origin("claude") is None
+    assert "JEV_CLAUDE_PORT" in caplog.text

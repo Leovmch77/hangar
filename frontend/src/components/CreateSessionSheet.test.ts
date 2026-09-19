@@ -57,6 +57,9 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   // o POST é a ação, e os testes abaixo afirmam que ele NÃO acontece quando a folha recusa.
   getBastao: vi.fn(async () => '# dossiê'),
   passarBastao: vi.fn(),
+  // jev-gateway: fora do ar por padrão (a caixa fica escondida), como em quem não o instalou.
+  getJevGateway: vi.fn(async () => ({ claude: false, codex: false })),
+  patchConfig: vi.fn(async () => ({ campos: {} })),
 }));
 vi.mock('./FolderScanner.svelte', () => ({
   default: createRawSnippet(() => ({ render: () => '<div />' })),
@@ -235,6 +238,38 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false, undefined);
+    unmount(comp);
+  });
+
+  it('jev-gateway no ar: a caixa aparece, o valor vai EXPLÍCITO e vira o padrão do servidor', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    vi.mocked(api.getJevGateway).mockResolvedValue({ claude: true, codex: true });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    (document.querySelector('.mais-cab') as HTMLElement).click();
+    await flush();
+    const caixa = [...document.querySelectorAll<HTMLLabelElement>('.mais-corpo .retomar-check')]
+      .find((l) => l.textContent?.includes(m.criar_jev_gateway()))!.querySelector('input')!;
+    expect(caixa.checked).toBe(false);
+    caixa.click();
+    await flush();
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(api.patchConfig).toHaveBeenCalledWith({ jev_gateway_padrao: true });
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false, true);
+    vi.mocked(api.getJevGateway).mockResolvedValue({ claude: false, codex: false });
+    unmount(comp);
+  });
+
+  it('jev-gateway fora do ar: a caixa não existe e nada sobre ele é enviado', async () => {
+    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    (document.querySelector('.mais-cab') as HTMLElement).click();
+    await flush();
+    expect(document.body.textContent).not.toContain(m.criar_jev_gateway());
     unmount(comp);
   });
 

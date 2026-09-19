@@ -213,8 +213,14 @@ def jev_gateway_origin(cliente: str) -> str | None:
     var, padrao = _JEV_GATEWAY_PORTAS[cliente]
     try:
         porta = int(os.environ.get(var) or padrao)
+    except ValueError:
+        # Porta digitada errada não pode parecer "gateway parado": a caixa some da tela e o padrão
+        # nunca pega, sem nada dizer por quê.
+        _log.warning("%s invalido (%r): o jev-gateway fica indisponivel ate corrigir", var, os.environ.get(var))
+        return None
+    try:
         socket.create_connection(("127.0.0.1", porta), timeout=0.3).close()
-    except (OSError, ValueError):
+    except OSError:
         return None
     return f"http://127.0.0.1:{porta}"
 

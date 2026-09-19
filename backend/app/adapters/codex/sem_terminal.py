@@ -134,7 +134,10 @@ async def subir(meta: dict, tarefas: set | None = None) -> dict:
     if shutil.which("codex") is None:
         raise RuntimeError("binário não encontrado: codex")
     log = codex_sessions._dir() / f"cano-{meta['key'][:16]}.log"
-    cano, _ = await hl_adapter.subir_cano_processo(argv(meta), cwd=meta["cwd"], env=_ambiente(meta),
+    # `argv` sonda a porta do jev-gateway: em thread, pra socket bloqueante não segurar o laço que
+    # todas as sessões dividem.
+    comando = await asyncio.to_thread(argv, meta)
+    cano, _ = await hl_adapter.subir_cano_processo(comando, cwd=meta["cwd"], env=_ambiente(meta),
                                                    key=meta["key"], log=log, tarefas=tarefas)
     codex_sessions.update(meta["name"], cano=cano)
     return cano
