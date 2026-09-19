@@ -3,12 +3,17 @@
 // preview) e não pode ganhar extensão de código sem mudar o que a bolha desenha.
 import type { ChatEvent } from './types';
 
-// Lista FECHADA: regex aberta ("qualquer extensão") casa `repo.git` em URL e some com `config.py`
-// solto em prosa — os dois lados errados.
+// Lista FECHADA no RELATIVO: regex aberta ("qualquer extensão") casa `repo.git` em URL e some com
+// `config.py` solto em prosa — os dois lados errados.
 const _EXTS = 'svelte|tsx|ts|jsx|js|mjs|cjs|py|pas|dfm|cs|dart|md|json|yaml|yml|toml|scss|css|html|sql|sh|fish|ps1|env|lock|txt|csv|xml|ini|cfg|conf';
 const _ESPECIAIS = 'Dockerfile|Makefile';
+// No ABSOLUTO a extensão é aberta: `/` ou `~/` na frente já diz que é caminho, e a lista fechada
+// escondia `servidor-smb.auth`, `.log`, `.service` — o arquivo citado não virava link nem entrava
+// nos citados. Exige um caractere de nome antes do ponto e letra depois dele, pra `~/.hangar` e
+// `/usr/lib/python3.14` (pastas) não virarem arquivo.
+const _EXT_ABERTA = `[^/\\s"'\`)\\].]\\.[A-Za-z][A-Za-z0-9_-]{0,11}`;
 // Absoluto (/ ou ~/): não exige pasta. Lookbehind tira o "/" de dentro de URL e o "./" do relativo.
-const _ABS_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\s"'\`)\\]]*?(?:\\.(?:${_EXTS})|/(?:${_ESPECIAIS})))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'g');
+const _ABS_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\s"'\`)\\]]*?(?:\\.(?:${_EXTS})|${_EXT_ABERTA}|/(?:${_ESPECIAIS})))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'g');
 // Relativo: exige `dir/nome.ext` (mesma regra do _REL_RE do format.ts) — `app.main` não casa.
 const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+(?:[\\w.-]+\\.(?:${_EXTS})|(?:${_ESPECIAIS})))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'g');
 

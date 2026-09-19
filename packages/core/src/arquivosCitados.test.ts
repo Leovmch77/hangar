@@ -18,6 +18,17 @@ it('recupera o caminho pelo nome em ferramentas, resultados e mensagens sem mist
 });
 
 describe('parseCodePaths', () => {
+  it('caminho absoluto aceita qualquer extensão; pasta com ponto e versão não viram arquivo', () => {
+    // O caso relatado: `.auth` fora da lista fechada não virava link nem entrava nos citados.
+    expect(parseCodePaths('criei /home/u/.config/acme/servidor-smb.auth.'))
+      .toEqual(['/home/u/.config/acme/servidor-smb.auth']);
+    expect(parseCodePaths('veja ~/x/log.qslog e /etc/foo.service:12'))
+      .toEqual(['~/x/log.qslog', '/etc/foo.service']);
+    expect(parseCodePaths('fica em /home/u/.hangar, ~/.claude e /usr/lib/python3.14')).toEqual([]);
+    // No relativo a lista segue fechada: prosa com barra e ponto não pode virar arquivo.
+    expect(parseCodePaths('mexi em pasta/arquivo.auth')).toEqual([]);
+  });
+
   it('absoluto e ~ casam sem pasta; relativo exige dir/; prosa e URL não casam', () => {
     expect(parseCodePaths('leia /abs/x.py e ~/.claude/x.md')).toEqual(['/abs/x.py', '~/.claude/x.md']);
     expect(parseCodePaths('mexi em backend/app/api.py e no app.main; config.py solto')).toEqual(['backend/app/api.py']);
