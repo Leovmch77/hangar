@@ -15,9 +15,10 @@
   import BoardCard from '../components/BoardCard.svelte';
   import RateStrip from '../components/RateStrip.svelte';
   import { serverColor } from '../lib/auth';
-  import { type State } from '@hangar/core';
+  import { type State, type DropResult, canPair, canLeave } from '@hangar/core';
   import { stateColors } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
+  import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
 
   interface Props { onOpenSession: (name: string, serverId: string) => void }
   let { onOpenSession }: Props = $props();
@@ -64,6 +65,64 @@
 
   // Chave do estado içado: a MESMA pros rascunhos, ecos e erros.
   const rowKey = (r: BoardRow) => `${r.serverId}::${r.name}`;
+
+  // ── Arrastar card sobre card -> pedido de grupo (Task 4, mesmo gesto da Sidebar/Task 3) ──
+  // O wrapper draggable fica AQUI, fora do BoardCard: o mesmo componente serve o Canvas, onde o
+  // arrasto move o card no lugar (Task 5) em vez de pedir grupo.
+  function sessionByKey(c: ChaveSessao | null): BoardRow | null {
+    if (!c) return null;
+    return rows.find((x) => x.serverId === c.serverId && x.name === c.name) ?? null;
+  }
+  function avaliarDrop(alvo: BoardRow): DropResult | null {
+    const origem = sessionByKey(arrastarGrupo.origem);
+    return origem ? canPair(origem, alvo) : null;
+  }
+  function onCardDragStart(e: DragEvent, row: BoardRow) {
+    arrastarGrupo.comecar({ serverId: row.serverId, name: row.name });
+    e.dataTransfer?.setData('text/plain', row.name);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+  function onCardDragEnd() {
+    // soltar()/pedirSaida() já abriram o pedido; só limpa quando o drop saiu fora de qualquer alvo.
+    if (!arrastarGrupo.pedido) arrastarGrupo.cancelar();
+  }
+  function onCardDragEnter(e: DragEvent, row: BoardRow) {
+    arrastarGrupo.entrarEm(rowKey(row));
+    if (avaliarDrop(row)?.ok) e.preventDefault();
+  }
+  function onCardDragLeave(e: DragEvent, row: BoardRow) {
+    arrastarGrupo.sairDe(rowKey(row));
+  }
+  function onCardDragOver(e: DragEvent, row: BoardRow) {
+    if (!avaliarDrop(row)?.ok) return; // sem preventDefault o navegador já mostra o cursor de recusa
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  }
+  function onCardDrop(e: DragEvent, row: BoardRow) {
+    e.preventDefault();
+    if (!avaliarDrop(row)?.ok) return; // dragover já filtrou; reconfere pra não confiar cego no SO
+    arrastarGrupo.soltar(rowKey(row));
+  }
+  // Fundo da coluna (fora de qualquer card): soltar aqui pede saída do grupo da origem — a coluna
+  // é consequência do estado, nunca destino do drop.
+  function isFundoAlvo(e: DragEvent): boolean {
+    return !(e.target as HTMLElement | null)?.closest('.board-card-wrap');
+  }
+  function onColDragOver(e: DragEvent) {
+    if (!isFundoAlvo(e)) return;
+    const origem = sessionByKey(arrastarGrupo.origem);
+    if (!origem || !canLeave(origem)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  }
+  function onColDrop(e: DragEvent) {
+    if (!isFundoAlvo(e)) return;
+    const chave = arrastarGrupo.origem;
+    const origem = sessionByKey(chave);
+    if (!chave || !origem || !canLeave(origem)) return;
+    e.preventDefault();
+    arrastarGrupo.pedirSaida(chave);
+  }
 
   // Rascunhos IÇADOS: o card troca de coluna (remonta) justamente quando o Claude termina —
   // o texto que você estava digitando não pode morrer com o card.
@@ -118,20 +177,35 @@
           <span class="col-title">{col.title}</span>
           <span class="col-count">{col.rows.length}</span>
         </header>
-        <div class="col-cards">
+        <div class="col-cards" ondragover={onColDragOver} ondrop={onColDrop}>
           {#each col.rows as row (rowKey(row))}
-            <BoardCard
-              session={row}
-              server={servers.find((s) => s.id === row.serverId)!}
-              color={serverColor(row.serverId)}
-              draft={drafts.get(rowKey(row)) ?? ''}
-              onDraftChange={(t) => drafts.set(rowKey(row), t)}
-              pending={pendings.get(rowKey(row)) ?? []}
-              updatePending={(fn) => updatePending(rowKey(row), fn)}
-              sendError={sendErrors.get(rowKey(row)) ?? ''}
-              onSendError={(m) => setSendError(rowKey(row), m)}
-              onOpen={() => onOpenSession(row.name, row.serverId)}
-            />
+            {@const dropAlvoAtual = arrastarGrupo.alvo === rowKey(row)}
+            {@const dropResultado = dropAlvoAtual ? avaliarDrop(row) : null}
+            {@const dropRecusa = dropResultado && !dropResultado.ok ? dropResultado.reason : null}
+            <div class="board-card-wrap"
+                 class:drop-alvo={dropResultado?.ok === true}
+                 class:drop-recusado={dropRecusa !== null}
+                 title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}
+                 draggable="true"
+                 ondragstart={(e) => onCardDragStart(e, row)}
+                 ondragend={onCardDragEnd}
+                 ondragenter={(e) => onCardDragEnter(e, row)}
+                 ondragleave={(e) => onCardDragLeave(e, row)}
+                 ondragover={(e) => onCardDragOver(e, row)}
+                 ondrop={(e) => onCardDrop(e, row)}>
+              <BoardCard
+                session={row}
+                server={servers.find((s) => s.id === row.serverId)!}
+                color={serverColor(row.serverId)}
+                draft={drafts.get(rowKey(row)) ?? ''}
+                onDraftChange={(t) => drafts.set(rowKey(row), t)}
+                pending={pendings.get(rowKey(row)) ?? []}
+                updatePending={(fn) => updatePending(rowKey(row), fn)}
+                sendError={sendErrors.get(rowKey(row)) ?? ''}
+                onSendError={(m) => setSendError(rowKey(row), m)}
+                onOpen={() => onOpenSession(row.name, row.serverId)}
+              />
+            </div>
           {/each}
           {#if col.rows.length === 0}
             {#if loading}
@@ -190,6 +264,14 @@
     font-variant-numeric: tabular-nums;
   }
   .col-cards { flex: 1; overflow-y: auto; padding: var(--space-2) 2px; display: flex; flex-direction: column; gap: var(--space-2); }
+  /* O wrapper de arrasto (Task 4) virou o flex item da coluna no lugar do .bcard — herda o
+     flex-shrink: 0 que evitava a coluna espremer os cards pra caber. */
+  .board-card-wrap { flex-shrink: 0; border-radius: var(--radius-lg); }
+  /* Alvo do arrasto: válido acende a borda de accent; recusado avisa sem travar o drop (o
+     navegador já nega sozinho por falta de preventDefault) — só o motivo, no title do wrapper.
+     Mesma receita da Sidebar (Task 3); sem tingir o fundo aqui porque o .bcard é opaco por cima. */
+  .board-card-wrap.drop-alvo { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .board-card-wrap.drop-recusado { cursor: not-allowed; outline: 2px dashed var(--text-muted); outline-offset: -2px; }
   .col-empty { color: var(--text-muted); text-align: center; padding: var(--space-8) var(--space-4); }
   .col-empty-icon {
     display: grid; place-items: center; width: 40px; height: 40px; margin: 0 auto var(--space-3);
