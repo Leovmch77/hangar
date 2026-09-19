@@ -251,7 +251,8 @@
     const ro = new ResizeObserver(sync);
     if (ancora) ro.observe(ancora);
     const mo = new MutationObserver(sync);
-    mo.observe(document.body, { childList: true });
+    // O portal pode anexar o backdrop antes de montar o dialog dentro dele.
+    mo.observe(document.body, { childList: true, subtree: true });
     // Reexibe o view DESTA sessão (sem url: não recarrega — o view pode ter navegado por cliques).
     // Se o main não o tem mais (shell reiniciou), ok:false e o front recria com a url salva.
     void abrirNativo(undefined).then((r) => {
