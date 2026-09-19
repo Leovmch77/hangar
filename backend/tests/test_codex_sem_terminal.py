@@ -370,3 +370,16 @@ def test_politica_por_modo():
     assert sem_terminal.politica("qualquer coisa") == sem_terminal.politica(sem_terminal.MODO_PADRAO)
     assert '-c' in sem_terminal.argv({"permission_mode": "Full Access"})
     assert 'approval_policy="never"' in sem_terminal.argv({"permission_mode": "Full Access"})
+
+
+def test_jev_gateway_so_entra_pedido_e_com_gateway_de_pe(monkeypatch):
+    monkeypatch.setattr(sem_terminal, "_jev_gateway", lambda: "http://127.0.0.1:8790")
+    com = sem_terminal.argv({"jev_gateway": True})
+    assert 'model_provider="jev-gateway"' in com
+    assert 'model_providers.jev-gateway.base_url="http://127.0.0.1:8790/v1"' in com
+    assert "model_providers.jev-gateway.requires_openai_auth=true" in com
+    # O `jev` do navegador é outra escolha: sozinho, nunca liga o gateway.
+    assert not any("jev-gateway" in a for a in sem_terminal.argv({"jev": True}))
+
+    monkeypatch.setattr(sem_terminal, "_jev_gateway", lambda: None)
+    assert not any("jev-gateway" in a for a in sem_terminal.argv({"jev_gateway": True, "name": "cx"}))

@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import socket
 import tempfile
 import threading
 from pathlib import Path
@@ -7,6 +9,8 @@ from typing import Any
 
 from app import atomico
 from app.config import _backend_config_base, settings
+
+_log = logging.getLogger("hangar.runtime_config")
 
 # Configuração editável em RUNTIME.
 #
@@ -190,6 +194,41 @@ def env_jev(ligado: bool) -> dict[str, str]:
         valor = str(get(campo) or "").strip()
         if valor:
             env[var] = valor
+    return env
+
+
+MARCA_JEV_GATEWAY = "HANGAR_JEV_GATEWAY"
+# Portas e variáveis são as do próprio jev-gateway (`jev-claude`/`jev-codex`), pra quem já o
+# configurou não ter que repetir nada aqui.
+_JEV_GATEWAY_PORTAS = {"claude": ("JEV_CLAUDE_PORT", 8789), "codex": ("JEV_CODEX_PORT", 8790)}
+
+
+def jev_gateway_origin(cliente: str) -> str | None:
+    """Origem do jev-gateway daquele cliente, se ele está escutando nesta máquina. O Hangar não
+    instala nem sobe o gateway: só detecta. Parado, nada aponta pra ele — sessão apontada pra
+    porta fechada nasce e nunca fala com o modelo."""
+    var, padrao = _JEV_GATEWAY_PORTAS[cliente]
+    try:
+        porta = int(os.environ.get(var) or padrao)
+        socket.create_connection(("127.0.0.1", porta), timeout=0.3).close()
+    except (OSError, ValueError):
+        return None
+    return f"http://127.0.0.1:{porta}"
+
+
+def env_jev_gateway(ligado: bool) -> dict[str, str]:
+    """Ambiente que põe uma sessão CLAUDE atrás do jev-gateway. O marcador vai sempre que a
+    sessão pediu, pra escolha sobreviver a um relançamento com o gateway fora do ar; o desvio só
+    entra com ele respondendo. `ENABLE_TOOL_SEARCH` porque o Claude Code desliga a busca de tools
+    sozinho quando a URL não é da Anthropic, e aqui o destino final continua sendo ela."""
+    if not ligado:
+        return {}
+    env = {MARCA_JEV_GATEWAY: "on"}
+    origem = jev_gateway_origin("claude")
+    if origem:
+        env.update(ANTHROPIC_BASE_URL=origem, ENABLE_TOOL_SEARCH="true")
+    else:
+        _log.warning("jev-gateway pedido mas não responde; sessão Claude sobe sem ele")
     return env
 
 

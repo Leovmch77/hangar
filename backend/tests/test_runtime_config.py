@@ -266,3 +266,15 @@ def test_chaves_do_jev_nunca_voltam_inteiras():
     assert {"jev_api_key", "jev_texto_api_key"} <= rc.SEGREDOS
     rc.aplicar({"jev_api_key": "ts-1234567890"})
     assert rc.estado()["jev_api_key"]["valor"] != "ts-1234567890"
+
+
+def test_jev_gateway_so_desvia_a_sessao_que_pediu_e_com_ele_no_ar(monkeypatch):
+    monkeypatch.setattr(rc, "jev_gateway_origin", lambda cliente: "http://127.0.0.1:8789")
+    # Quem não pediu não ganha NADA: nem a URL, nem o marcador.
+    assert rc.env_jev_gateway(False) == {}
+    assert rc.env_jev_gateway(True) == {
+        rc.MARCA_JEV_GATEWAY: "on", "ANTHROPIC_BASE_URL": "http://127.0.0.1:8789",
+        "ENABLE_TOOL_SEARCH": "true"}
+    # Gateway fora do ar: o marcador fica (a escolha sobrevive ao relançamento), a URL não.
+    monkeypatch.setattr(rc, "jev_gateway_origin", lambda cliente: None)
+    assert rc.env_jev_gateway(True) == {rc.MARCA_JEV_GATEWAY: "on"}

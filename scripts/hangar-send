@@ -43,7 +43,11 @@
 #                                  --jev / --sem-jev liga ou desliga o Jev naquela sessão: com ele,
 #                                  `hangar-preview objetivo` navega e preenche tela sozinho. Sem
 #                                  nenhum dos dois vale o padrão do servidor (tela de Configurações).
-#   hangar-send --help                 esta ajuda (o cabeçalho deste arquivo).
+#                                  --jev-gateway (claude sem --engine, ou codex --headless) faz a
+#                                  escolha de tool de cada turno passar pelo jev-gateway local, que
+#                                  precisa estar no ar (o Hangar não o instala; sem ele, recusa). É
+#                                  outra coisa que o --jev: aqui a conversa vai para a TypeSafe.
+#   hangar-send --help                esta ajuda (o cabeçalho deste arquivo).
 #
 # OUTRA CONTA: cada conta é um config dir próprio (~/.claude-<nome>), com skills/hooks symlinkados
 # do ~/.claude e credenciais + transcritos separados. `hangar-conta --list` mostra as configuradas,
@@ -322,9 +326,13 @@ if [[ "$1" == "--new" ]]; then
     # os valores aqui, senão o script envelhece separado do backend (mesma regra do --provider).
     # --profile: perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x.
     # Só com --provider omp; o backend recusa o resto e valida o nome.
-    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""
+    cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""; jev_gateway=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            # --jev-gateway: a escolha de tool do turno passa pelo jev-gateway (o backend valida onde vale).
+            # Separado do --jev: este manda a conversa do turno para a TypeSafe.
+            --jev-gateway)
+                jev_gateway="1"; shift ;;
             # --jev / --sem-jev: a sessão nasce (ou não) com a chave do Jev no ambiente, e é ela que
             # faz o `hangar-preview objetivo` funcionar. SEM nenhum dos dois vale o padrão do
             # servidor — por isso existe o `--sem-jev`: com o padrão ligado, não haveria outro jeito
@@ -422,10 +430,12 @@ if sys.argv[12]:
     # "true"/"false", nunca ausente-por-omissao: o campo AUSENTE no corpo e o que faz o backend
     # aplicar o padrao do servidor, e mandar `false` cru apagaria esse padrao em todo uso do CLI.
     d["jev"] = sys.argv[12] == "true"
+if sys.argv[13]:
+    d["jev_gateway"] = True
 print(json.dumps(d))' \
-           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev")
+           "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$jev_gateway")
     api POST /api/sessions "$body" >/dev/null
-    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
+    echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]}${jev_gateway:+ [jev-gateway]} — fala com ela via: hangar-send $name \"msg\""
     exit 0
 fi
 

@@ -85,10 +85,27 @@ def modos_para_tela(atual: str | None) -> dict:
             "current": atual}
 
 
+def _jev_gateway() -> str | None:
+    return runtime_config.jev_gateway_origin("codex")
+
+
 def argv(meta: dict) -> list[str]:
     approval, sandbox = politica(meta.get("permission_mode"))
-    return ["codex", "app-server", "--stdio",
-            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
+    cmd = ["codex", "app-server", "--stdio",
+           "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
+    # O gateway manda a conversa do turno à TypeSafe, então é escolha própria da abertura, separada
+    # do `jev` do navegador. `requires_openai_auth` mantém o login do Codex; o gateway só repassa.
+    gateway = _jev_gateway() if meta.get("jev_gateway") else None
+    if gateway:
+        provedor = {"name": '"jev-gateway"', "base_url": f'"{gateway}/v1"',
+                    "wire_api": '"responses"', "requires_openai_auth": "true"}
+        cmd += ["-c", 'model_provider="jev-gateway"']
+        for campo, valor in provedor.items():
+            cmd += ["-c", f"model_providers.jev-gateway.{campo}={valor}"]
+    elif meta.get("jev_gateway"):
+        _log.warning("codex %s: jev-gateway pedido mas não responde; sessão sobe sem ele",
+                     meta.get("name"))
+    return cmd
 
 
 def _ambiente(meta: dict) -> dict:

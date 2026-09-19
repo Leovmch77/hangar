@@ -1989,6 +1989,8 @@
   "criar_subagente_ajuda": "Subagents on a cheaper model use less quota.",
   "criar_jev": "Jev in the browser",
   "criar_jev_ajuda": "Jev is a small model that drives the built-in browser: instead of clicking field by field, `hangar-preview objetivo \"...\"` describes the task and it decides each step — finding the button, picking from a list, filling the form. On, the session starts with the key and the verb works in it; off, it refuses and the rest of the browser is unchanged. The choice here becomes the default for new sessions, including the ones opened by hangar-send and by MCP.",
+  "criar_jev_gateway": "Jev picks the tools (gateway)",
+  "criar_jev_gateway_ajuda": "On every turn, this machine's jev-gateway asks Jev which tool the session should call. On Codex it forces the choice; on Claude it only suggests, because the API does not allow forcing with thinking on. It pays off in debugging, with many short turns; when building a screen or feature it barely changes usage and adds about 1 s per turn. On, the recent conversation history — including command output and file contents — goes to TypeSafe. This is not \"Jev in the browser\": neither turns the other on. This option only shows when jev-gateway is answering on the server's machine; Hangar does not install it.",
   "criar_modo_exec": "Where it runs",
   "criar_modo_exec_tmux": "In a terminal",
   "criar_modo_exec_tmux_resumo": "Opens in tmux. You can see the screen and continue from the terminal.",

@@ -1989,6 +1989,8 @@
   "criar_subagente_ajuda": "Subagentes num modelo mais barato gastam menos cota.",
   "criar_jev": "Jev no navegador",
   "criar_jev_ajuda": "O Jev é um modelo pequeno que dirige o navegador embutido: em vez de clicar campo por campo, `hangar-preview objetivo \"...\"` descreve a tarefa e ele decide cada passo — achar o botão, escolher da lista, preencher o formulário. Ligado, a sessão nasce com a chave e o verbo funciona nela; desligado, ele recusa e o resto do navegador continua igual. A escolha aqui vira o padrão das próximas sessões, inclusive das abertas pelo hangar-send e pelo MCP.",
+  "criar_jev_gateway": "Jev escolhe as tools (gateway)",
+  "criar_jev_gateway_ajuda": "A cada turno, o jev-gateway desta máquina pergunta ao Jev qual tool a sessão deve chamar. No Codex ele força a escolha; no Claude só sugere, porque a API não deixa forçar com o raciocínio ligado. Rende em depuração, com muitos turnos curtos; em criação de tela ou feature quase não muda o consumo e soma perto de 1 s por turno. Ligado, o histórico recente da conversa — com resultado de comando e conteúdo de arquivo — vai para a TypeSafe. Não é o \"Jev no navegador\": um não liga o outro. Esta opção só aparece com o jev-gateway respondendo na máquina do servidor; o Hangar não o instala.",
   "criar_modo_exec": "Onde roda",
   "criar_modo_exec_tmux": "No terminal",
   "criar_modo_exec_tmux_resumo": "Abre no tmux. Dá pra ver a tela e seguir a conversa pelo terminal.",

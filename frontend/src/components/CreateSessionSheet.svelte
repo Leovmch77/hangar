@@ -6,7 +6,7 @@
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
   import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, patchConfig,
-    type CodexAccount } from '@hangar/core';
+    getJevGateway, type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
@@ -31,7 +31,8 @@
     onCreate: (name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                engine?: string | null, model?: string | null, effort?: string | null,
                permissionMode?: string | null, ompProfile?: string | null,
-               headless?: boolean, subagentModel?: string | null, jev?: boolean) => Promise<void>;
+               headless?: boolean, subagentModel?: string | null, jev?: boolean,
+               jevGateway?: boolean) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -182,6 +183,9 @@
   let jev = $state(false);
   // Guarda a releitura tardia do padrão (ver o reset) de passar por cima de uma escolha já feita.
   let jevTocado = $state(false);
+  // jev-gateway: nasce sempre desligado e não tem padrão de servidor — manda a conversa do turno
+  // para a TypeSafe, então é escolha de cada abertura.
+  let jevGateway = $state(false);
   let esforco = $state('');
   let modelos = $state<ModelOption[]>([]);
   let listaReduzida = $state(false);
@@ -589,7 +593,7 @@
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
       modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
-      jev = segredos.ligado('jev_padrao'); jevTocado = false;
+      jev = segredos.ligado('jev_padrao'); jevTocado = false; jevGateway = false;
       // A releitura existe porque o `segredos.carregar()` do App roda SEM await: abrir a folha
       // logo no boot lia `valores` ainda vazio, e o interruptor nascia desligado com o padrão
       // ligado no servidor — errado e calado. Só reaplica se a pessoa ainda não mexeu nele.
@@ -694,6 +698,22 @@
   // Sem chave cadastrada o interruptor não é um botão que falha, é um botão que não devia estar
   // ali — mesmo critério do chip "Ouvir" (lib/segredos).
   const temJev = $derived(!bastao && segredos.temChave('jev_api_key'));
+  // Só onde o jev-gateway já responde na máquina do servidor-alvo: o Hangar não o instala, e caixa
+  // que só serve pra dar erro não aparece. Backend antigo (sem a rota) cai no catch = escondida.
+  let gatewayNoAr = $state({ claude: false, codex: false });
+  $effect(() => {
+    const s = codexServer;
+    if (!open || !s) { gatewayNoAr = { claude: false, codex: false }; return; }
+    let vivo = true;
+    getJevGateway(s).then((r) => { if (vivo) gatewayNoAr = r; })
+      .catch(() => { if (vivo) gatewayNoAr = { claude: false, codex: false }; });
+    return () => { vivo = false; };
+  });
+  // O bastão cria por rota própria, que não leva o campo. Codex: só sem terminal (com terminal o
+  // app-server não recebe o provedor). Claude: só na conta Anthropic — motor já usa a URL dele.
+  const temJevGateway = $derived(!bastao && (
+    (provider === 'codex' && semTerminal && gatewayNoAr.codex) ||
+    (provider === 'claude' && !engine && gatewayNoAr.claude)));
 
   /** Guarda a escolha do interruptor como padrão das próximas sessões, quando ela mudou.
    *
@@ -834,8 +854,12 @@
     const baton = bastao;
     const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
       model: modelo || null, effort: esforco || null,
+      // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
+      // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
+      ...(temJev ? { jev } : {}),
       ...(provider === 'codex' && semTerminal
-        ? { headless: true, permission_mode: permissao || null } : {}) };
+        ? { headless: true, permission_mode: permissao || null,
+            ...(temJevGateway && jevGateway ? { jev_gateway: true } : {}) } : {}) };
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -851,6 +875,7 @@
         if (!server || !account) return;
         codexProgress = m.codex_ui_abrindo_sessao();
         if (!baton) {
+          await salvarPadraoJev();
           const result = await createSessionForServer(server, body);
           if (g !== codexGeneration || !open || codexAccount !== account) return;
           onClose();
@@ -890,10 +915,12 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, true, (!engine && subagente) || null, jev);
+                       esforco || null, permissao || null, null, true, (!engine && subagente) || null, jev,
+                       temJevGateway && jevGateway);
       } else if (provider === 'claude' && !engine && subagente) {
         await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
-                       esforco || null, permissao || null, null, false, subagente, jev);
+                       esforco || null, permissao || null, null, false, subagente, jev,
+                       temJevGateway && jevGateway);
       } else {
         await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                        provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
@@ -901,7 +928,8 @@
                        // Explícitos até o fim: a cadeia posicional passou a ter o `jev` no 12º, e
                        // encurtá-la aqui faria o valor cair no argumento errado. `null`/`false` são
                        // os mesmos valores que os defaults davam.
-                       provider === 'omp' ? (perfilOmp.trim() || null) : null, false, null, jev);
+                       provider === 'omp' ? (perfilOmp.trim() || null) : null, false, null, jev,
+                       temJevGateway && jevGateway);
       }
       onClose();
     } catch (err) {
@@ -1368,7 +1396,7 @@
         <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
       {/if}
 
-      {#if temMotor || temSubagente || temJev}
+      {#if temMotor || temSubagente || temJev || temJevGateway}
         <!-- O que quase ninguém muda fica recolhido, mas o resumo mostra o valor de cada um: a
              escolha nunca fica escondida, só a edição dela. -->
         <div class="mais" class:aberto={maisAberto}>
@@ -1380,6 +1408,7 @@
                 {#if temMotor}<span class="mais-pill">{m.comum_motor()} <em>{rotuloMotor}</em></span>{/if}
                 {#if temSubagente}<span class="mais-pill">{m.criar_mais_subagentes()} <em>{rotuloSubagente}</em></span>{/if}
                 {#if temJev && jev}<span class="mais-pill">{m.criar_jev()}</span>{/if}
+                {#if temJevGateway && jevGateway}<span class="mais-pill">{m.criar_jev_gateway()}</span>{/if}
               </span>
             {/if}
             <span class="chevron" class:chevron--open={maisAberto} aria-hidden="true">›</span>
@@ -1414,6 +1443,15 @@
                     <span>{m.criar_jev()}</span>
                   </label>
                   <p class="hint">{m.criar_jev_ajuda()}</p>
+                </div>
+              {/if}
+              {#if temJevGateway}
+                <div class="field">
+                  <label class="retomar-check">
+                    <input type="checkbox" bind:checked={jevGateway} />
+                    <span>{m.criar_jev_gateway()}</span>
+                  </label>
+                  <p class="hint">{m.criar_jev_gateway_ajuda()}</p>
                 </div>
               {/if}
             </div>

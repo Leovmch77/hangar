@@ -598,6 +598,9 @@ export interface CreateSessionBody {
   // Jev no `hangar-preview objetivo`: ligado, a sessão nasce com a chave no ambiente. Escolha da
   // abertura — é assim que se roda a mesma tarefa com e sem, sem apagar a configuração.
   jev?: boolean;
+  // jev-gateway: a escolha de tool de cada turno passa pelo Jev. Claude na conta Anthropic ou Codex
+  // sem terminal, e é outra coisa que o `jev` acima — aqui a conversa do turno vai para a TypeSafe.
+  jev_gateway?: boolean;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
@@ -623,6 +626,7 @@ export function createSession(
   headless?: boolean,
   subagentModel?: string | null,
   jev?: boolean,
+  jevGateway?: boolean,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
@@ -633,6 +637,7 @@ export function createSession(
   if (headless && (provider === 'claude' || provider === 'codex')) body.headless = true;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
+  if (jevGateway) body.jev_gateway = true;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
@@ -1391,6 +1396,13 @@ export function pensamentoEmPt(textos: string[]): Promise<{ textos: string[] }> 
   return apiFetch('/api/pensamento/pt', {
     method: 'POST', body: JSON.stringify({ textos }), signal: AbortSignal.timeout(30000),
   });
+}
+
+// Por cliente, se o jev-gateway responde na máquina do servidor. O Hangar só detecta; sem ele a
+// tela de criação nem mostra a opção. `s` ausente = servidor ativo.
+export function getJevGateway(s?: Server | null): Promise<{ claude: boolean; codex: boolean }> {
+  return s ? apiFetchForServer(s, '/api/jev-gateway')
+           : apiFetch('/api/jev-gateway', { signal: AbortSignal.timeout(8000) });
 }
 
 export function getConfigForServer(s: Server): Promise<ConfigServidor> {

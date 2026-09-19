@@ -196,7 +196,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     // O create manda provider=claude com model/effort NULOS — o cenário do bloqueador morre aqui.
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false, false);
     unmount(comp);
   });
 
@@ -234,7 +234,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     await escolherNoCombo('#subagent-pick', 'sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false, false);
     unmount(comp);
   });
 
@@ -279,7 +279,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     expect(document.querySelector('#model-pick')!.textContent).toContain('sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null, null, false, null, false);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null, null, false, null, false, false);
     unmount(comp);
   });
 
@@ -359,7 +359,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null, null, false, null, false);
+      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null, null, false, null, false, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -395,7 +395,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -423,7 +423,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
