@@ -698,7 +698,12 @@ class ClaudeHeadlessAdapter:
                 if not isinstance(e, _CanoOcupado):
                     # Ocupado é passageiro (a religada resolve): gravar o problema o deixaria na
                     # lista depois de a sessão voltar.
-                    await asyncio.to_thread(self._matar, sess)
+                    try:
+                        await asyncio.to_thread(self._matar, sess)
+                    except Exception as stop_error:
+                        self._problemas[name] = ("headless_nao_subiu", str(stop_error)[:300])
+                        _log.exception("claude headless: falha ao encerrar após erro de subida name=%s", name)
+                        raise
                     self._problemas[name] = ("headless_nao_subiu", str(e)[:300])
                 raise
             self._garantir_vigia()

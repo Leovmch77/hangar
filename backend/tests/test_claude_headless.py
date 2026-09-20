@@ -417,8 +417,17 @@ def test_sessao_parada_aceita_na_hora_e_sobe_em_segundo_plano(sidecar, monkeypat
     assert chamadas == [{"esperar_pronta": False}]
 
 
-def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, monkeypatch):
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, monkeypatch, stop_fails):
     ad = ClaudeHeadlessAdapter()
+    expected = "binário"
+    if stop_fails:
+        saved = S.update("s1", cano={"pid": 4242})
+        expected = "taskkill falhou"
+
+        def fail_stop(sess):
+            raise RuntimeError(expected)
+        monkeypatch.setattr(ad, "_matar", fail_stop)
 
     async def spawn_quebra(sess, **kw):
         raise RuntimeError("binário não encontrado: claude")
@@ -431,7 +440,9 @@ def test_subida_em_segundo_plano_que_falha_aparece_no_chat_ja_aberto(sidecar, mo
         ad.acordar("s1")
         await asyncio.gather(*ad._tarefas)
         ev = await asyncio.wait_for(gen.__anext__(), 3)
-        assert ev.problema == "headless_nao_subiu" and "binário" in (ev.problema_detalhe or "")
+        assert ev.problema == "headless_nao_subiu" and expected in (ev.problema_detalhe or "")
+        if stop_fails:
+            assert S.load("s1") == saved
         await gen.aclose()
     _run(fluxo())
 
