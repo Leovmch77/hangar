@@ -100,7 +100,11 @@ class HookState:
             sid, pid = str(o["sessionId"]), int(o["pid"])
             nativo = str(o["status"])
             ts = float(o.get("statusUpdatedAt") or o["updatedAt"]) / 1000.0
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            if str(path) in self._registro_arquivo:
+                _log.warning("registro nativo ilegível em %s (%s); usando marcador ou pane",
+                             path, type(exc).__name__)
+            self._remover_registro(path, notify=notify)
             return
         # O mapa FORA do try, de proposito. Enquanto o `_ESTADO_REGISTRO[nativo]` ficava la dentro,
         # um status novo da TUI (foi o caso do "shell") virava KeyError, caia no `except` e o
@@ -110,6 +114,7 @@ class HookState:
         # status desconhecido (nao por arquivo) basta pra achar isso em minutos, sem encher o log.
         state = _ESTADO_REGISTRO.get(nativo)
         if state is None:
+            self._remover_registro(path, notify=notify)
             if nativo not in _REGISTRO_DESCONHECIDOS:
                 _REGISTRO_DESCONHECIDOS.add(nativo)
                 _log.warning(

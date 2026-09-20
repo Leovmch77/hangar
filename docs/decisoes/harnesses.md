@@ -993,6 +993,15 @@ pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `
 do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
 manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
 
+Em 19/09/2026, a reprodução com registro `idle` seguido de JSON parcial, status desconhecido
+ou arquivo ausente mostrou que o cache anterior continuava vencendo o marcador `working`.
+A leitura inválida agora remove essa entrada e notifica a mudança para o fallback; o próximo
+registro válido volta a ser usado. Os testes cobrem também essa recuperação.
+
+Na mesma investigação, o encerramento Windows passou a rodar fora do event loop nas rotas
+assíncronas de Claude/Codex sem terminal. Falha do `taskkill` ou PID ainda vivo impede abrir o
+substituto; a recarga mantém a sessão em memória e o encerramento/troca restaura seu sidecar.
+
 O socket de mensagens (`/run/user/<uid>/cc-socks/<pid>.sock`, JSON por linha, `auth` com o
 `peerToken` de `sessions/<pid>.<sha>.key`) foi medido no mesmo dia e ficou de fora: embrulha tudo
 como "mensagem de outra sessão" (`isMeta`, origem `peer`), não roda comando de barra e é o mesmo
@@ -1104,6 +1113,15 @@ diálogo de confiança e morte continuam sendo do pane.
   texto com `agent_id` (subagente) nunca é publicado. Sessão Claude já aberta não relê hooks →
   segue no pane até reiniciar; a raspagem inteira do `extract_assistant_text` vira plano B, não
   código morto. Codex nunca raspou pane (app-server).
+
+  Em 19/09/2026, no WinBoat, oito deltas concorrentes com leitura retardada preservaram apenas
+  um; segurar o destino aberto por 100 ms também fez perder uma atualização. O hook agora
+  serializa o ciclo pelo `msvcrt` no Windows, usa `atomico.substituir` para a janela de leitura
+  concorrente e registra a classe da falha sem conteúdo da conversa. A espera da trava usa
+  tentativas curtas: o `LK_LOCK` impunha um segundo por tentativa. O `Stop` usa a mesma trava.
+
+  O `/btw` também confere que o diálogo fechou após Esc. Tecla recusada, captura ilegível ou
+  diálogo ainda aberto viram erro; não se repete Esc às cegas, pois poderia abortar o turno.
 
 ## O diálogo de confiança do Claude Code, e as três coisas que ele derrubava
 

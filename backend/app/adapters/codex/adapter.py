@@ -781,7 +781,7 @@ class CodexAdapter:
             # Desistiu: o motivo da última queda fica em _problemas; o watch_sessions continua
             # passando, mas sem spawn nem log a cada 2s. Só ação do usuário (encerrar) reabre.
             return None
-        sem_terminal.matar(meta)
+        await asyncio.to_thread(sem_terminal.matar, meta)
         try:
             cano = await sem_terminal.subir(meta)
             ligado = await sem_terminal.conectar(cano, esperar=10.0)
@@ -830,7 +830,7 @@ class CodexAdapter:
                 raise
         except Exception as exc:
             self._falhas_subida[name] = falhas + 1
-            sem_terminal.matar(codex_sessions.load(name))
+            await asyncio.to_thread(sem_terminal.matar, codex_sessions.load(name))
             codex_sessions.update(name, cano=None)
             self._problemas[name] = ("codex_headless_nao_subiu", str(exc)[:300])
             if falhas + 1 >= self.TETO_SUBIDAS:

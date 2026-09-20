@@ -2086,7 +2086,11 @@ class SessionRegistry:
         cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists())
         headless_sessions.marcar_troca(name)
         headless_sessions.delete(name)
-        hl.close_sync(name, meta)
+        try:
+            hl.close_sync(name, meta)
+        except Exception:
+            headless_sessions.restaurar(meta, preserve_process=True)
+            raise
         cano_pid = (meta.get("cano") or {}).get("pid")
         _esperar_saida([int(cano_pid)] if cano_pid else [])
         self._forget(name)
@@ -2283,7 +2287,11 @@ class SessionRegistry:
             # meta vai junto: é nele que mora o pid do cano, que vive fora do backend.
             meta = headless_sessions.load(name)
             headless_sessions.delete(name)
-            get_adapter(CLAUDE_HEADLESS).close_sync(name, meta)
+            try:
+                get_adapter(CLAUDE_HEADLESS).close_sync(name, meta)
+            except Exception:
+                headless_sessions.restaurar(meta, preserve_process=True)
+                raise
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()

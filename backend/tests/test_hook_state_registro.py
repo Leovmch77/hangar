@@ -3,6 +3,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from app import hook_state
 
 PID_MORTO = 2 ** 22 - 7  # acima de qualquer pid_max real desta suite
@@ -92,6 +94,34 @@ def test_registro_status_desconhecido_nao_vale(tmp_path):
     hs = hook_state.HookState()
     hs.load_existing([tmp_path])
     assert hs.get_state("aaa")[0] == "working"
+
+
+@pytest.mark.parametrize("failure", ["partial", "unknown", "missing"])
+def test_invalid_native_update_releases_cached_state(tmp_path, failure):
+    _marcador(tmp_path, "aaa", "working")
+    f = _registro(tmp_path, os.getpid(), "aaa", "idle")
+    hs = hook_state.HookState()
+    hs.load_existing([tmp_path])
+    transitions = []
+    hs.on_transition = lambda sid, state: transitions.append((sid, state))
+    assert hs.get_state("aaa")[0] == "idle"
+
+    if failure == "partial":
+        f.write_text("{", encoding="utf-8")
+    elif failure == "unknown":
+        _registro(tmp_path, os.getpid(), "aaa", "unknown-test-status")
+    else:
+        f.unlink()
+    hs._apply_registro(f, notify=True)
+
+    assert hs.get_state("aaa")[0] == "working"
+    assert transitions == [("aaa", "working")]
+    assert hs.shells("aaa") == []
+
+    _registro(tmp_path, os.getpid(), "aaa", "waiting")
+    hs._apply_registro(f, notify=True)
+    assert hs.get_state("aaa")[0] == "awaiting_input"
+    assert transitions[-1] == ("aaa", "awaiting_input")
 
 
 def test_registro_removido_volta_ao_marcador(tmp_path):

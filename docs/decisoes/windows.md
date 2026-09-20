@@ -42,6 +42,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Python e psmux come uma contrabarra quando o argumento vai entre aspas, a comparação falha e o
   reconcile redigita. Olhe `REQUEUE` no log antes de responder.
 
+## Esc após teclas de controle no ConPTY
+
+Em 19/09/2026, no WinBoat com psmux 3.3.7 e Claude Code 2.1.278, o `/btw` respondeu mas não
+fechou. `send-keys Escape`, `Esc` e o byte ESC cru retornaram sucesso, mantendo o diálogo
+aberto; anexar um cliente também não resolveu. A sequência Win32 de pressionar/soltar Esc
+fechou o mesmo diálogo em 304 ms. `tmux.send_keys` usa esse formato no Windows para os dois
+nomes da tecla, preservando o caminho POSIX e a confirmação de fechamento do `/btw`.
+
+A causa é documentada no [teste de regressão #588 do psmux](https://github.com/psmux/psmux/blob/master/tests-rs/test_issue588_win32_input_escape.rs):
+após receber uma sequência de teclado Win32, o ConPTY pode reter o ESC isolado esperando
+continuação, em vez de entregá-lo como tecla. O formato completo funciona nos dois estados.
+
+Na instalação normal do WinBoat (8765), após reiniciar o backend, o `/btw` enviado pela janela
+nativa retornou 200 em 6.799 ms, exibiu a resposta e deixou o terminal sem o diálogo. Um envio
+normal multilinha em seguida retornou 200 em 3.454 ms, exibiu as duas linhas pedidas com acentos
+e voltou a `idle`. Tempos do diário da API, até os cabeçalhos; não são o tempo total da resposta.
+Essa validação não determina a causa da falha intermitente anterior em `linha.prova`.
+
 ## Process info lives in `app/procinfo.py` — the only OS-bound layer.
 
 Nine functions

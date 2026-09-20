@@ -56,6 +56,20 @@ def _rodape(name: str) -> str:
     return _pane_tail(tmux.capture_pane(name, lines=60), _RODAPE_LINHAS)
 
 
+def _close_overlay(name: str) -> None:
+    if not tmux.send_keys(name, "Escape"):
+        raise BtwError(502, "erro_btw_overlay_aberto", "não consegui fechar o /btw no terminal")
+    deadline = time.monotonic() + _PRAZO_ABRIR
+    while True:
+        time.sleep(_POLL)
+        pane = tmux.capture_pane(name, lines=60)
+        if pane.strip() and _ABERTO not in _pane_tail(pane, _RODAPE_LINHAS):
+            return
+        if time.monotonic() >= deadline:
+            # Não repetir Esc: o diálogo pode já ter fechado e a tecla interromperia o turno.
+            raise BtwError(502, "erro_btw_overlay_aberto", "não consegui confirmar o fechamento do /btw")
+
+
 def _limpar_composer_as_cegas(name: str) -> None:
     """Às cegas: com a tela desalinhada a leitura não vê o resto, e o próximo envio normal sairia
     grudado nele. C-u num composer vazio não faz nada."""
@@ -213,7 +227,7 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
             if not aberto and decorrido > _PRAZO_ABRIR:
                 raise BtwError(409, "erro_btw_nao_abriu", "o /btw não abriu no terminal da sessão")
             if decorrido > timeout:
-                tmux.send_keys(name, "Escape")
+                _close_overlay(name)
                 raise BtwError(504, "erro_btw_sem_resposta", "o /btw não respondeu a tempo")
 
         with _COPIA_LOCK:
@@ -236,8 +250,7 @@ def perguntar(name: str, pergunta: str, timeout: float = 60.0) -> dict:
             resposta = _resposta_do_pane(name, pergunta)
             fonte = "pane"
             _log.warning("btw de %r: o buffer do OSC 52 não trouxe a resposta; resposta lida do pane", name)
-        tmux.send_keys(name, "Escape")
-        time.sleep(_SETTLE)  # overlay ainda fechando engolia o próximo `/btw` digitado em seguida
+        _close_overlay(name)
     resposta = resposta.rstrip("\n")
     if not resposta:
         raise BtwError(502, "erro_btw_ilegivel", "o /btw respondeu, mas não consegui ler a resposta")

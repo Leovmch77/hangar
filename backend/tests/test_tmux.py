@@ -141,10 +141,25 @@ def test_send_keys_literal_uses_dashdash():
     assert run.call_args[0][0] == ["tmux", "send-keys", "-t", "=cc:", "-l", "--", "echo hi"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows usa o formato de evento de teclado para Esc")
 def test_send_keys_named_key():
     with patch.object(tmux, "RUN", return_value=MagicMock(returncode=0)) as run:
         tmux.send_keys("cc", "Escape")
     assert run.call_args[0][0] == ["tmux", "send-keys", "-t", "=cc:", "Escape"]
+
+
+@pytest.mark.parametrize("key", ["Escape", "Esc"])
+def test_windows_escape_uses_press_and_release_records(monkeypatch, key):
+    monkeypatch.setattr(tmux, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(tmux, "_pane_target", lambda name: "=cc:")
+    with patch.object(tmux, "_run", return_value=MagicMock(returncode=0)) as run:
+        assert tmux.send_keys("cc", key)
+    assert run.call_args.args[0] == [
+        "tmux", "send-keys", "-t", "=cc:", "-l", "--",
+        "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_",
+    ]
+    with patch.object(tmux, "_run", return_value=MagicMock(returncode=1)):
+        assert not tmux.send_keys("cc", key)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="no Windows o Enter vai como tecla nomeada, nao como `-l -- \r` (tmux.py ramifica)")

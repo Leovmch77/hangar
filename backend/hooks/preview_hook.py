@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ponytail: hook minimo — le o JSON do evento no stdin e grava o sidecar de PREVIA. SEM stdout.
-# Falha em silencio (nunca trava o prompt). Espelha o padrao do state_hook.py. Usado pelo backend.
+# Falha avisa sem bloquear o prompt. Usado pelo backend.
 #
 # E o publicador de previa do CLAUDE CODE — o par do scripts/pi/hangar-state.ts do Pi, pelo MESMO
 # contrato (<config>/.hangar-preview/<stem>.json = {"text","ts"}), que preview.read_sidecar
@@ -16,12 +16,15 @@
 #    proximos nao podem entrelacar bytes (a mesma armadilha ja medida na statusline).
 # O acumulo entre eventos vive no PROPRIO sidecar (message_id + parts por index gravados junto):
 # cada processo le o arquivo, encaixa o delta no index dele se a mensagem e a mesma, ou recomeca
-# se e outra. Sem trava (Windows) um delta perdido so encurta a previa ate o proximo evento —
-# best-effort, como o pane.
+# se e outra. A trava cobre todo o ciclo de leitura e publicação nos dois sistemas.
+import errno
 import json
 import os
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from app.atomico import substituir
 
 _SUBDIR = ".hangar-preview"
 
@@ -30,25 +33,37 @@ def _publicar(base: str, stem: str, payload: dict) -> None:
     d = os.path.join(base, _SUBDIR)
     os.makedirs(d, exist_ok=True)
     tmp = os.path.join(d, f"{stem}.json.{os.getpid()}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False)
-    os.replace(tmp, os.path.join(d, stem + ".json"))
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        substituir(tmp, os.path.join(d, stem + ".json"))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _trava(base: str, stem: str):
-    """Serializa o le-cola-grava entre processos do hook (um por evento). Sem isto, dois deltas
-    consecutivos podiam ler o MESMO sidecar antes de qualquer um gravar — e o que perdesse a
-    corrida sumia do MEIO da mensagem ate o Stop zerar (achado da review). Devolve o arquivo
-    travado (a trava morre com o processo) ou None no Windows, que segue best-effort — la nao ha
-    fcntl, e prever previa ocasionalmente curta e melhor que nao publicar."""
-    try:
-        import fcntl
-    except ImportError:
-        return None
+    """Serializa os deltas e o Stop; o sistema libera a trava ao sair do processo."""
     d = os.path.join(base, _SUBDIR)
     os.makedirs(d, exist_ok=True)
-    fh = open(os.path.join(d, stem + ".lock"), "w")
-    fcntl.flock(fh, fcntl.LOCK_EX)
+    fh = open(os.path.join(d, stem + ".lock"), "a+b")
+    if os.name == "nt":
+        import msvcrt
+        fh.seek(0)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    fh.close()
+                    raise
+                # LK_LOCK espera um segundo por tentativa, atrasando deltas concorrentes.
+                time.sleep(0.01)
+    else:
+        import fcntl
+        fcntl.flock(fh, fcntl.LOCK_EX)
     return fh
 
 
@@ -116,6 +131,6 @@ try:
             texto = "".join(parts[k] for k in sorted(parts, key=int))
             _publicar(base, stem, {"text": texto, "ts": time.time(), "message_id": mid,
                                    "parts": parts})
-except Exception:
-    pass
+except Exception as exc:
+    print(f"hangar: preview_hook falhou ({type(exc).__name__})", file=sys.stderr)
 sys.exit(0)

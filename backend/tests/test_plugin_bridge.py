@@ -2,6 +2,7 @@
 da resposta do app. O resto (envio por `fill`) depende de tmux e é conferido no uso real."""
 import asyncio
 import threading
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -75,7 +76,7 @@ def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypat
 
     monkeypatch.setattr(pb, "ligado", lambda: True)
     (raiz,) = pb.raizes_dos_plugins()
-    assert raiz.endswith("plugins/hangar")
+    assert Path(raiz).parts[-2:] == ("plugins", "hangar")
     assert get_adapter("claude").spawn_command("/tmp/p", "sid")[:5] == [
         "claude", "--session-id", "sid", "--plugin-dir", raiz]
     env = pb.env_da_sessao("s1")

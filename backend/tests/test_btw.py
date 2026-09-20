@@ -60,6 +60,8 @@ class TmuxFalso:
             self.digitado = ""
             return True
         self.teclas.append(keys)
+        if keys == "Escape":
+            self.telas = [_tela("❯ ")]
         if keys == "c" and self.buffer_apos_c:
             # O OSC 52 do psmux vira DOIS buffers iguais (medido).
             for _ in range(2 if self.modo == "psmux" else 1):
@@ -122,6 +124,19 @@ def test_le_a_resposta_do_buffer_e_fecha_o_overlay(falso):
     assert r["question"] == "list fruits"
     assert f.teclas == ["C-u", "/btw list fruits", "Enter", "c", "Escape"]
     assert f.buffers == []
+
+
+@pytest.mark.parametrize("failure", ["not_sent", "still_open", "unreadable"])
+def test_close_failure_is_not_reported_as_success(monkeypatch, failure):
+    keys = []
+    monkeypatch.setattr(btw.tmux, "send_keys", lambda name, key: keys.append(key) or failure != "not_sent")
+    monkeypatch.setattr(btw.tmux, "capture_pane", lambda *a, **k: "" if failure == "unreadable" else RODAPE_PRONTO)
+    monkeypatch.setattr(btw, "_PRAZO_ABRIR", 0)
+    monkeypatch.setattr(btw.time, "sleep", lambda _: None)
+    with pytest.raises(btw.BtwError) as error:
+        btw._close_overlay("s")
+    assert error.value.code == "erro_btw_overlay_aberto"
+    assert keys == ["Escape"]
 
 
 def test_psmux_le_o_buffer_da_sessao_e_apaga_as_duas_copias(falso):

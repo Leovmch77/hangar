@@ -64,9 +64,9 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
     return meta
 
 
-def restaurar(meta: dict) -> None:
-    """Regrava um sidecar apagado (troca de modo que falhou), sem o cano que já morreu."""
-    _write(meta["name"], {**meta, "cano": None})
+def restaurar(meta: dict, *, preserve_process: bool = False) -> None:
+    """Regrava o sidecar; preserva o cano apenas quando seu encerramento falhou."""
+    _write(meta["name"], meta if preserve_process else {**meta, "cano": None})
 
 
 # Troca terminal ⇄ sem terminal: por alguns segundos nenhum dos dois lados existe, e os monitores

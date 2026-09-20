@@ -634,21 +634,16 @@ class ClaudeHeadlessAdapter:
         """Encerra o processo e sobe outro com `--resume`, na mesma conversa. Quem chama já
         garantiu sessão ociosa e nada em aberto (a rota); parada, só acorda."""
         sess = self._sessions.get(name)
-        try:
-            if sess is not None and sess.vivo:
-                pid = ((sess.meta or {}).get("cano") or {}).get("pid")
-                await self._encerrar(sess)
-                _esquecer_cano(name, pid)
-        finally:
-            # Mesmo com o encerrar falhando no meio, a sessão não pode ficar sem processo e sem
-            # ninguém subindo outro. `acordar` é assíncrono; a subida tem trava por nome (`_ligar`),
-            # então um segundo recarregar no meio só encontra a mesma subida.
-            self.acordar(name)
+        if sess is not None and sess.vivo:
+            pid = ((sess.meta or {}).get("cano") or {}).get("pid")
+            await self._encerrar(sess)
+            _esquecer_cano(name, pid)
+        self.acordar(name)
 
     async def _encerrar(self, sess: _Sessao) -> None:
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
         sem o pop ela seguiria "viva" e o próximo prompt não subiria outro processo."""
-        self._matar(sess)
+        await asyncio.to_thread(self._matar, sess)
         if self._sessions.get(sess.name) is sess:
             self._sessions.pop(sess.name, None)
         if sess.leitor is not None:
@@ -703,7 +698,7 @@ class ClaudeHeadlessAdapter:
                 if not isinstance(e, _CanoOcupado):
                     # Ocupado é passageiro (a religada resolve): gravar o problema o deixaria na
                     # lista depois de a sessão voltar.
-                    self._matar(sess)
+                    await asyncio.to_thread(self._matar, sess)
                     self._problemas[name] = ("headless_nao_subiu", str(e)[:300])
                 raise
             self._garantir_vigia()
@@ -799,7 +794,11 @@ class ClaudeHeadlessAdapter:
         if pid is None:
             return      # nunca ligou num cano: não há o que matar
         sess.encerrando = True
-        _matar_grupo(int(pid), sess.name)
+        try:
+            _matar_grupo(int(pid), sess.name)
+        except Exception:
+            sess.encerrando = False
+            raise
 
     def _argv(self, sid: str, *, resume: bool, model=None, effort=None, permission_mode=None,
               permitir_bypass: bool = False) -> list[str]:
@@ -915,7 +914,7 @@ class ClaudeHeadlessAdapter:
         ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
         if ligado is None:
             cauda = _cauda(log)
-            _matar_grupo(proc.pid, sess.name)
+            await asyncio.to_thread(_matar_grupo, proc.pid, sess.name)
             hl_sessions.update(sess.name, cano=None)
             raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
         sess.proc, snap = ligado
@@ -1739,16 +1738,19 @@ class ClaudeHeadlessAdapter:
 
         Os dicionários são do event loop: mexer neles daqui é corrida. A retirada vai pro loop
         por `call_soon_threadsafe`; o sinal pode sair já, é só `os.kill`."""
-        _limpar_rastros_do_cano(meta)
         sess = self._sessions.get(name)
         if sess is None:
-            PushPreviewSource._sources.pop(name, None)
-            self._problemas.pop(name, None)
-            self._problemas_lidos.discard(name)
             pid = ((meta or {}).get("cano") or {}).get("pid")
             if pid is not None:
                 _matar_grupo(int(pid), name)
+            _limpar_rastros_do_cano(meta)
+            PushPreviewSource._sources.pop(name, None)
+            self._problemas.pop(name, None)
+            self._problemas_lidos.discard(name)
             return
+
+        self._matar(sess, meta)
+        _limpar_rastros_do_cano(meta)
 
         def _retirar() -> None:
             if self._sessions.get(name) is sess:
@@ -1766,7 +1768,6 @@ class ClaudeHeadlessAdapter:
             _retirar()
         else:
             loop.call_soon_threadsafe(_retirar)
-        self._matar(sess, meta)
 
     def rename(self, old: str, new: str) -> None:
         sess = self._sessions.pop(old, None)
@@ -2026,19 +2027,23 @@ def _matar_grupo(pid: int, name: str) -> None:
     """SIGTERM no grupo do cano (cano + claude, que é filho dele no mesmo grupo). Idempotente."""
     if os.name == "nt":
         import subprocess
+        if not pid_vivo(pid):
+            return
         exe = shutil.which("taskkill")
         if exe is None:
-            _log.warning("claude headless: taskkill não encontrado; cano name=%s pid=%s segue vivo", name, pid)
-            return
+            raise RuntimeError("taskkill não encontrado; o processo da sessão segue vivo")
         try:
             r = subprocess.run([exe, "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            _log.warning("claude headless: taskkill falhou name=%s pid=%s", name, pid, exc_info=True)
-            return
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("não foi possível encerrar o processo da sessão") from exc
         # 128 = processo não existe (já morreu): não é falha. Outro código é.
         if r.returncode not in (0, 128):
-            _log.warning("claude headless: taskkill rc=%s name=%s pid=%s: %s", r.returncode, name, pid,
-                         (r.stderr or b"").decode(errors="replace").strip()[:200])
+            raise RuntimeError(f"taskkill falhou ao encerrar a sessão (código {r.returncode})")
+        deadline = time.monotonic() + 2
+        while pid_vivo(pid):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("o processo da sessão continua vivo após taskkill")
+            time.sleep(0.02)
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)

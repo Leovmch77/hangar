@@ -4,6 +4,8 @@ stream-json medido contra a CLI (docs/research/claude-sem-terminal-monocode.md).
 import asyncio
 import base64
 import json
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,6 +54,66 @@ def adapter(sidecar):
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_reload_keeps_session_when_termination_fails_off_loop(adapter, monkeypatch):
+    session = adapter._sessions["s1"]
+    owner_thread = threading.get_ident()
+    def fail_stop(sess):
+        assert threading.get_ident() != owner_thread
+        raise RuntimeError("process still alive")
+    monkeypatch.setattr(adapter, "_matar", fail_stop)
+    monkeypatch.setattr(adapter, "acordar", lambda name: pytest.fail("reopened without stopping"))
+    with pytest.raises(RuntimeError, match="process still alive"):
+        _run(adapter.recarregar("s1"))
+    assert adapter._sessions["s1"] is session
+
+
+def test_kill_failure_preserves_process_identity(adapter, monkeypatch):
+    from app import adapters
+    from app.registry import SessionRegistry
+    meta = S.update("s1", cano={"pid": 4242})
+    session = adapter._sessions["s1"]
+    session.meta = meta
+    monkeypatch.setattr(adapters, "get_adapter", lambda provider: adapter)
+    def fail_stop(*args):
+        raise RuntimeError("process still alive")
+    monkeypatch.setattr(A, "_matar_grupo", fail_stop)
+    with pytest.raises(RuntimeError, match="process still alive"):
+        SessionRegistry().kill("s1")
+    assert S.load("s1") == meta
+    assert adapter._sessions["s1"] is session
+    assert not session.encerrando
+
+
+def test_codex_replacement_waits_for_termination_off_loop(monkeypatch):
+    from app.adapters.codex.adapter import CodexAdapter
+    from app.adapters.codex import sem_terminal
+    owner_thread = threading.get_ident()
+    def fail_stop(meta):
+        assert threading.get_ident() != owner_thread
+        raise RuntimeError("process still alive")
+    monkeypatch.setattr(sem_terminal, "matar", fail_stop)
+    monkeypatch.setattr(sem_terminal, "subir", lambda meta: pytest.fail("spawn before stop"))
+    with pytest.raises(RuntimeError, match="process still alive"):
+        _run(CodexAdapter()._subir_sem_terminal("s1", {}))
+
+
+@pytest.mark.parametrize("failure", ["exit_code", "timeout", "still_alive"])
+def test_windows_termination_failure_is_reported(monkeypatch, failure):
+    import subprocess
+    monkeypatch.setattr(A, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(A.shutil, "which", lambda exe: "taskkill")
+    monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
+    def kill(*args, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("taskkill", 10)
+        return subprocess.CompletedProcess([], 1 if failure == "exit_code" else 0)
+    monkeypatch.setattr(subprocess, "run", kill)
+    clock = iter((0, 3))
+    monkeypatch.setattr(A.time, "monotonic", lambda: next(clock))
+    with pytest.raises(RuntimeError):
+        A._matar_grupo(4242, "s1")
 
 
 def test_prompt_vai_pro_stdin_e_turno_fecha_no_result(adapter):

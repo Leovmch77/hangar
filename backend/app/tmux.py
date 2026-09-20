@@ -1034,6 +1034,10 @@ def send_keys(name: str, keys: str, literal: bool = False) -> bool:
     fica com o comportamento de antes."""
     if literal:
         return _send_literal(_pane_target(name), keys)
+    if os.name == "nt" and keys in ("Escape", "Esc"):
+        # Após teclas de controle, o ConPTY pode reter ESC cru como início de uma sequência.
+        sequence = "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_"
+        return _run(["tmux", "send-keys", "-t", _pane_target(name), "-l", "--", sequence]).returncode == 0
     # Enter SEMPRE como CR cru (-l), nunca como nome de tecla: com `extended-keys on` no servidor
     # tmux (necessário pro Shift+Enter do Pi), o send-keys "Enter" pode sair codificado no protocolo
     # estendido (CSI-u/modifyOtherKeys) pra apps que o negociaram — e o composer do Claude Code

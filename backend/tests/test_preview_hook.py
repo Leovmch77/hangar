@@ -4,7 +4,11 @@ Payloads copiados do shape REAL medido em 17/08/2026 (claude 2.1.233, TUI intera
 INCREMENTAIS com index crescente e final no ultimo — nao o que a doc sugere, o que o hook manda.
 """
 import json, os, subprocess, sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import pytest
 
 HOOK = str(Path(__file__).resolve().parent.parent / "hooks" / "preview_hook.py")
 
@@ -141,3 +145,73 @@ def test_stdin_quebrado_sai_zero_sem_escrever(tmp_path):
     r = subprocess.run([sys.executable, HOOK], input=b"{nao e json", env=env, timeout=10)
     assert r.returncode == 0
     assert not (tmp_path / ".hangar-preview").exists()
+
+
+def test_concurrent_deltas_keep_every_part(tmp_path):
+    _run(_md("start ", 0), tmp_path)
+    code = """
+import json, runpy, sys, time
+original = json.load
+def slow_read(*args, **kwargs):
+    data = original(*args, **kwargs)
+    time.sleep(0.1)
+    return data
+json.load = slow_read
+runpy.run_path(sys.argv[1], run_name='__main__')
+"""
+    def publish(index):
+        subprocess.run([sys.executable, "-c", code, HOOK],
+                       input=json.dumps(_md(f"part-{index} ", index)).encode(),
+                       env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)}, check=True, timeout=15)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(publish, range(1, 9)))
+    assert _sidecar(tmp_path, "abc")["text"] == "start " + "".join(f"part-{i} " for i in range(1, 9))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows recusa substituir destino aberto")
+def test_reader_does_not_drop_preview_update(tmp_path):
+    _run(_md("start ", 0), tmp_path)
+    ready = tmp_path / "replacing"
+    code = """
+import os, pathlib, runpy, sys
+original = os.replace
+def replace(*args, **kwargs):
+    pathlib.Path(sys.argv[2]).touch()
+    return original(*args, **kwargs)
+os.replace = replace
+runpy.run_path(sys.argv[1], run_name='__main__')
+"""
+    process = subprocess.Popen([sys.executable, "-c", code, HOOK, str(ready)], stdin=subprocess.PIPE,
+                               env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)})
+    try:
+        with (tmp_path / ".hangar-preview" / "abc.json").open("rb"):
+            process.stdin.write(json.dumps(_md("finish", 1)).encode())
+            process.stdin.close()
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            time.sleep(0.1)
+        assert process.wait(timeout=5) == 0
+        assert _sidecar(tmp_path, "abc")["text"] == "start finish"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_failed_preview_write_reports_error_without_content(tmp_path):
+    code = """
+import os, runpy, sys
+def denied(*args, **kwargs):
+    raise PermissionError('private-content')
+os.replace = denied
+runpy.run_path(sys.argv[1], run_name='__main__')
+"""
+    result = subprocess.run([sys.executable, "-c", code, HOOK],
+                            input=json.dumps(_md("private-content", 0)).encode(), capture_output=True,
+                            env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)}, timeout=5)
+    assert result.returncode == 0 and not result.stdout
+    assert b"PermissionError" in result.stderr
+    assert b"private-content" not in result.stderr
+    assert not list((tmp_path / ".hangar-preview").glob("*.tmp"))
