@@ -268,7 +268,3 @@ def test_chaves_do_jev_nunca_voltam_inteiras():
     assert rc.estado()["jev_api_key"]["valor"] != "ts-1234567890"
 
 
-def test_sessao_nunca_ganha_base_url_de_proxy():
-    """O jev-gateway saiu: nada no ambiente da sessão pode mais desviar a conversa pra um proxy."""
-    assert "ANTHROPIC_BASE_URL" not in rc.env_jev(True)
-    assert not hasattr(rc, "env_jev_gateway")

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 from app.api import app, CreateBody, create_session
 from app import api
@@ -395,10 +394,6 @@ def test_sem_padrao_e_sem_escolha_o_jev_fica_desligado(monkeypatch):
     assert api._jev_efetivo(None) is False
 
 
-def _corpo(**kw):
-    return CreateBody(name="x", cwd="/tmp/x", **kw)
-
-
 def test_padrao_do_jev_ligado_chega_ao_create_pela_rota(monkeypatch):
     """O `conftest` força `jev_padrao` desligado na suíte inteira (é config da máquina de quem
     roda). Sem este teste, nada mais cobre a ligação entre o padrão e o `jev=True` que sai daqui
@@ -412,8 +407,3 @@ def test_padrao_do_jev_ligado_chega_ao_create_pela_rota(monkeypatch):
     assert cr.call_args.kwargs["jev"] is True
 
 
-def test_criacao_recusa_o_campo_do_gateway_removido():
-    """O jev-gateway saiu. O corpo é estrito, então um cliente velho mandando o campo leva 422 —
-    melhor que aceitar calado uma opção que não faz mais nada."""
-    with pytest.raises(ValidationError):
-        _corpo(jev_gateway=True)

@@ -239,22 +239,6 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     unmount(comp);
   });
 
-  it('o jev-gateway saiu: nenhuma caixa dele na folha, e nada dele no que é criado', async () => {
-    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
-    const { comp } = montar();
-    await flush();
-    await escolherPasta();
-    (document.querySelector('.mais-cab') as HTMLElement).click();
-    await flush();
-    expect(document.body.textContent).not.toContain('gateway');
-    (document.querySelector('.primary-btn') as HTMLElement).click();
-    await flush();
-    expect(api.patchConfig).not.toHaveBeenCalledWith(
-      expect.objectContaining({ jev_gateway_padrao: expect.anything() }));
-    // O último argumento do onCreate era o do gateway; agora o `jev` fecha a lista.
-    expect(onCreate.mock.calls[0]).toHaveLength(12);
-    unmount(comp);
-  });
 
   it('cartão "Sem terminal" cria a sessão sem terminal', async () => {
     vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));

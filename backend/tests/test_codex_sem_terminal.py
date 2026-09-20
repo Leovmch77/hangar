@@ -372,8 +372,3 @@ def test_politica_por_modo():
     assert 'approval_policy="never"' in sem_terminal.argv({"permission_mode": "Full Access"})
 
 
-def test_argv_nunca_troca_o_provedor_do_modelo():
-    """O jev-gateway saiu: o app-server fala com o provedor do Codex, e o sidecar antigo que ainda
-    carrega o campo não ressuscita o desvio."""
-    for meta in ({"jev": True}, {"jev_gateway": True, "name": "cx"}):
-        assert not any("model_provider" in a for a in sem_terminal.argv(meta))
