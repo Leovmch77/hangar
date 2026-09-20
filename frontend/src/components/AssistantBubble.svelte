@@ -2,7 +2,7 @@
   import { renderMarkdown } from '../lib/markdown';
   import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
-  import { parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
+  import { fileKind, parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { textoFalavelComCodigo } from '../lib/speakable';
   import { abrirComTexto } from '../lib/ttsSelection.svelte';
@@ -85,7 +85,9 @@
   const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia, { fileLinks: !!sessionName })) : '');
   const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName }));
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
-  const codePaths = $derived(new Set(parseCodePaths(text)));
+  // Mídia/html/pdf fica de fora dos caminhos de código: com extensão aberta no absoluto o
+  // `parseCodePaths` também casa `.png`, e o filtro abaixo apagava a miniatura.
+  const codePaths = $derived(new Set(parseCodePaths(text).filter((p) => !fileKind(p))));
   const fileRefs = $derived(!preview && sessionName
     ? parseFilePaths(text).filter((ref) => !codePaths.has(ref.path)) : []);
   // Midia remota (URL http) -> preview inline; nao depende do backend/sessionName.

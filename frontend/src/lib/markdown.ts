@@ -5,7 +5,7 @@
  */
 
 import * as m from '../paraglide/messages';
-import { parseCodeReferences, svgIcone } from '@hangar/core';
+import { fileKind, parseCodeReferences, svgIcone } from '@hangar/core';
 
 function escapeHtml(str: string): string {
   return str
@@ -40,11 +40,13 @@ function renderInline(input: string, opts: MarkdownOptions): string {
       if (link && path && !path.startsWith('#') && !path.startsWith('?') && !path.includes('://')) {
         const suffix = /:(\d+)(?::\d+)?$/.exec(path);
         const line = suffix ? Number(suffix[1]) : null;
-        return { path: suffix ? path.slice(0, suffix.index) : path,
-          line: line && Number.isSafeInteger(line) ? line : null };
+        const alvo = suffix ? path.slice(0, suffix.index) : path;
+        return fileKind(alvo) ? null
+          : { path: alvo, line: line && Number.isSafeInteger(line) ? line : null };
       }
-      return ref && ref.start === 0 && ref.end === candidate.length
-        ? { path: path.slice(0, path.length - (ref.end - ref.path.length)), line: ref.line } : null;
+      if (!ref || ref.start !== 0 || ref.end !== candidate.length) return null;
+      const cru = path.slice(0, path.length - (ref.end - ref.path.length));
+      return fileKind(cru) ? null : { path: cru, line: ref.line };
     };
     // Protege links e código antes de procurar caminhos soltos, sem tocar em atributos HTML.
     source = source.replace(/`([^`]+)`|\[([^\]]+)\]\((<[^>]+>|[^)]+)\)|(https?:\/\/[^\s<]+)/g,
@@ -55,6 +57,8 @@ function renderInline(input: string, opts: MarkdownOptions): string {
       });
     const refs = parseCodeReferences(source);
     for (const ref of refs.reverse()) {
+      // Mídia, html e pdf não viram chip: o anexo da bolha já desenha miniatura e visor pra eles.
+      if (fileKind(ref.path)) continue;
       source = source.slice(0, ref.start) + chip(ref.path, ref.line) + source.slice(ref.end);
     }
   }

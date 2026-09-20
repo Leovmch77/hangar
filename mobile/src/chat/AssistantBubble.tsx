@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, lerTabelaMarkdown, parseCodePaths, parseFilePaths } from '@hangar/core';
+import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, parseCodePaths, parseFilePaths } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { TableChart } from './TableChart';
 import { ArquivoChip } from './ArquivoChip';
@@ -86,8 +86,9 @@ export const AssistantBubble = memo(function AssistantBubble({
   const refs = useMemo(() => parseFilePaths(text), [text]);
   const hasRefs = refs.length > 0 && !!sessionName;
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram
-  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos.
-  const codigos = useMemo(() => parseCodePaths(text), [text]);
+  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `fileKind` tira a mídia daqui:
+  // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
+  const codigos = useMemo(() => parseCodePaths(text).filter((p) => !fileKind(p)), [text]);
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
   const tabelas = useMemo(() => lerTabelaMarkdown(text), [text]);
   const [pref, setPref] = useState(() => getTableChartPref());
