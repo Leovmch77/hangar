@@ -7,9 +7,7 @@ sessão com TUI: quem sobe o servidor e abre a thread é o backend, e as aprova�
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import logging
 import os
 import shutil
 import uuid
@@ -20,8 +18,6 @@ from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
 from app.adapters.codex.lancador import CLIENT_INFO
-
-_log = logging.getLogger("hangar.codex.sem_terminal")
 
 
 class Ocupada(RuntimeError):
@@ -85,27 +81,10 @@ def modos_para_tela(atual: str | None) -> dict:
             "current": atual}
 
 
-def _jev_gateway() -> str | None:
-    return runtime_config.jev_gateway_origin("codex")
-
-
 def argv(meta: dict) -> list[str]:
     approval, sandbox = politica(meta.get("permission_mode"))
-    cmd = ["codex", "app-server", "--stdio",
-           "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
-    # O gateway manda a conversa do turno à TypeSafe, então é escolha própria da abertura, separada
-    # do `jev` do navegador. `requires_openai_auth` mantém o login do Codex; o gateway só repassa.
-    gateway = _jev_gateway() if meta.get("jev_gateway") else None
-    if gateway:
-        provedor = {"name": '"jev-gateway"', "base_url": f'"{gateway}/v1"',
-                    "wire_api": '"responses"', "requires_openai_auth": "true"}
-        cmd += ["-c", 'model_provider="jev-gateway"']
-        for campo, valor in provedor.items():
-            cmd += ["-c", f"model_providers.jev-gateway.{campo}={valor}"]
-    elif meta.get("jev_gateway"):
-        _log.warning("codex %s: jev-gateway pedido mas não responde; sessão sobe sem ele",
-                     meta.get("name"))
-    return cmd
+    return ["codex", "app-server", "--stdio",
+            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
 
 
 def _ambiente(meta: dict) -> dict:
@@ -134,9 +113,7 @@ async def subir(meta: dict, tarefas: set | None = None) -> dict:
     if shutil.which("codex") is None:
         raise RuntimeError("binário não encontrado: codex")
     log = codex_sessions._dir() / f"cano-{meta['key'][:16]}.log"
-    # `argv` sonda a porta do jev-gateway: em thread, pra socket bloqueante não segurar o laço que
-    # todas as sessões dividem.
-    comando = await asyncio.to_thread(argv, meta)
+    comando = argv(meta)
     cano, _ = await hl_adapter.subir_cano_processo(comando, cwd=meta["cwd"], env=_ambiente(meta),
                                                    key=meta["key"], log=log, tarefas=tarefas)
     codex_sessions.update(meta["name"], cano=cano)

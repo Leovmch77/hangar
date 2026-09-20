@@ -272,9 +272,6 @@ class Settings(BaseSettings):
     # `runtime_config.EDITAVEIS`, porque sem ele o campo responde `None` — e um interruptor que
     # nasce sem valor nenhum na tela não sabe dizer se está ligado ou desligado.
     jev_padrao: bool = False
-    # O mesmo, para o jev-gateway. Nasce desligado: ligado, toda sessão nova onde ele vale manda a
-    # conversa do turno para a TypeSafe.
-    jev_gateway_padrao: bool = False
     # Chave da Groq pra transcricao de audio (whisper-large-v3-turbo). Aceita CP_GROQ_API_KEY (padrao
     # do .env, com prefixo) OU GROQ_API_KEY (convencao do Groq/OpenAI SDK, ex: no Environment do systemd).
     # Vazio = transcricao desligada (o endpoint /transcribe responde 503). Ver docs/USAGE.md.

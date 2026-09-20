@@ -35,16 +35,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Só `on-request` e `never` existem (`untrusted` morreu); o sandbox vai no `-c` da subida e trocar
   de modo reabre o servidor ocioso. Pedido do servidor sem tela recebe `-32601` + nota, nunca
   sucesso vazio. Um cliente por cano.
-- **Sessão só passa pelo `jev-gateway` com `jev_gateway` pedido na criação E o gateway escutando;
-  o Hangar detecta, nunca instala nem sobe.** É campo próprio, nunca o `jev` do navegador: o
-  gateway manda a conversa do turno para a TypeSafe, o do navegador não. Vale para Claude na conta
-  Anthropic (`ANTHROPIC_BASE_URL` + `ENABLE_TOOL_SEARCH=true`, que o Claude Code desliga sozinho
-  com URL de terceiro) e Codex sem terminal (`-c` do provedor em `sem_terminal.argv`, com
-  `requires_openai_auth=true`). Motor nunca: ele já usa a URL. Na criação, gateway parado recusa;
-  em relançamento a sessão sobe direto e o log avisa — nunca apontar para porta fechada. A tela só
-  mostra a opção onde `GET /api/jev-gateway` diz que ele responde. O padrão do servidor
-  (`jev_gateway_padrao`, que a caixa grava) só pega onde o gateway cabe e com ele no ar: nos
-  outros casos a sessão nasce direta e calada, nunca recusada — recusa é só para pedido explícito.
+- **Nada no Hangar desvia a conversa da sessão para um proxy.** O `ANTHROPIC_BASE_URL` e o
+  `model_provider` do Codex são do motor e do provedor, e o Hangar não os aponta para mais nada.
+  Ligar o Jev numa sessão é só a chave no ambiente, para o `hangar-preview objetivo`. Por que o
+  `jev-gateway` saiu: [superado.md](superado.md#o-jev-gateway-como-caminho-da-conversa).
 - **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
   `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
 - **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
@@ -445,47 +439,6 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   por uma sessão inexistente seria pior. O nível fica o do `config.toml` e a sessão carrega
   `codex_esforco_nao_aplicado` como problema visível — perder a escolha calado é justamente o bug
   que esta entrada conserta.
-
-## Sessão só passa pelo `jev-gateway` com `jev_gateway` pedido na criação
-
-19/09/2026, codex-cli 0.154.0, jev-gateway 0.2.2 (commit `5dde234`, checkout em
-`~/.local/share/jev-gateway`, serviço `jev-gateway-codex.service` na porta 8790, destino
-`https://chatgpt.com/backend-api/codex`). O gateway pergunta ao Jev (typesafe.ai) qual tool o
-turno pede e, com confiança, força `tool_choice` ou responde "sem tool"; o resto passa intacto.
-
-Medido numa sessão descartável (`gpt-5.6-luna`, esforço low, login ChatGPT): turno 1 saiu
-`forced exec` (confiança 0,89, Jev em 885 ms), turno 2 `none` (confiança 1,0, 443 ms), os dois com
-200 do provedor. O app-server sobe com `model_provider="jev-gateway"` e o bloco
-`model_providers.jev-gateway.*` por `-c`; nada em `~/.codex` muda.
-
-Por que campo próprio (`jev_gateway`, `hangar-send --jev-gateway`) e não o `jev`: a primeira
-versão pegou carona no `jev`, que é a caixa "Jev no navegador" da criação e só põe a chave no
-ambiente para o `hangar-preview objetivo`. Quem marcava aquilo para o navegador levava o gateway
-junto sem aviso, e o gateway envia à TypeSafe o histórico recente do turno, com resultado de tool.
-No Codex 0.154 as tools vêm embrulhadas numa `exec` de JavaScript: o gateway vê 3 tools de topo
-(`exec`, `wait`, `request_user_input`) e a escolha real acontece dentro do script, fora do alcance
-dele. Medido em criação de tela (`gpt-5.6-sol` high, uma execução por lado): saída +0,9%, entrada
-−11,8%, tempo +8%; o ganho que o benchmark do gateway mostra no Codex é em depuração.
-
-Claude (19/09/2026, Claude Code 2.1, `claude-haiku-4-5`, assinatura claude.ai, serviço
-`jev-gateway-claude.service` na 8789 para `https://api.anthropic.com/v1`): a assinatura passa
-pelo gateway sem mudança (200 em todos os turnos) e a busca de tools sobrevive ao proxy com
-`ENABLE_TOOL_SEARCH=true` — a lista foi de 12 para 13 tools depois de `ToolSearch` carregar a
-`NotebookEdit`. Com a busca ligada o Claude Code manda ~12 tools de topo, não as ~280: o resto
-fica adiado atrás do `ToolSearch`. O gateway só SUGERE no Claude (`hint`: raciocínio ligado e
-cache impedem forçar `tool_choice`), então ali o ganho esperado é acerto de tool, não custo.
-Medido no mesmo dia em depuração (`claude-fable-5-1` high, 7 bugs plantados e 16 testes, uma
-execução por lado, tokens somados do `usage` do transcript por `message.id`): com o gateway 17
-pedidos ao modelo contra 9, entrada 1.082.854 contra 630.157 (+72%), saída 3.671 contra 3.158
-(+16%), 2min53 contra 55s; os dois lados fecharam 16/16. O lado sem gateway agrupou duas edições
-por turno, o com gateway fez uma por turno — hipótese: a sugestão nomeia UMA tool e puxa o modelo
-para uma chamada por turno. Uma execução não separa isso de variação entre rodadas; é por isso
-que a opção nasce desligada. Sessões de teste com e sem terminal nasceram com a URL e o marcador
-`HANGAR_JEV_GATEWAY=on`; a sem a opção nasceu sem nenhuma das três variáveis; motor + gateway
-volta 409. Por que sondar a porta na subida: provedor apontando para porta
-fechada é sessão que nasce e nunca fala com o modelo. Não conferido: `thread/resume` de uma
-thread criada com o gateway numa subida sem ele, e o caminho com terminal (`codex --remote`), que
-não recebe os `-c`.
 
 ## Modelo de uma sessão Claude Code: a lista NUNCA é constante
 

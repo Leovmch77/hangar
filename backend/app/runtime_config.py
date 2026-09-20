@@ -1,7 +1,5 @@
 import json
-import logging
 import os
-import socket
 import tempfile
 import threading
 from pathlib import Path
@@ -9,8 +7,6 @@ from typing import Any
 
 from app import atomico
 from app.config import _backend_config_base, settings
-
-_log = logging.getLogger("hangar.runtime_config")
 
 # Configuração editável em RUNTIME.
 #
@@ -91,9 +87,6 @@ EDITAVEIS: dict[str, type] = {
     # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
     # continua vencendo naquela sessao, sem mexer neste padrao.
     "jev_padrao": bool,
-    # O mesmo padrão, para o jev-gateway. Só pega onde o gateway vale (claude na conta Anthropic,
-    # codex sem terminal) e com ele respondendo — nos outros casos a sessão nasce direta, sem erro.
-    "jev_gateway_padrao": bool,
     # LLM pequeno que escreve o valor de um campo que o chamador nao cobriu — OPCIONAL, e a mesma
     # ordem de precedencia que o CLI ja usa: base_url + api_key + modelo (endpoint compativel com
     # a OpenAI), senao cmd, senao o padrao do proprio CLI.
@@ -197,47 +190,6 @@ def env_jev(ligado: bool) -> dict[str, str]:
         valor = str(get(campo) or "").strip()
         if valor:
             env[var] = valor
-    return env
-
-
-MARCA_JEV_GATEWAY = "HANGAR_JEV_GATEWAY"
-# Portas e variáveis são as do próprio jev-gateway (`jev-claude`/`jev-codex`), pra quem já o
-# configurou não ter que repetir nada aqui.
-_JEV_GATEWAY_PORTAS = {"claude": ("JEV_CLAUDE_PORT", 8789), "codex": ("JEV_CODEX_PORT", 8790)}
-
-
-def jev_gateway_origin(cliente: str) -> str | None:
-    """Origem do jev-gateway daquele cliente, se ele está escutando nesta máquina. O Hangar não
-    instala nem sobe o gateway: só detecta. Parado, nada aponta pra ele — sessão apontada pra
-    porta fechada nasce e nunca fala com o modelo."""
-    var, padrao = _JEV_GATEWAY_PORTAS[cliente]
-    try:
-        porta = int(os.environ.get(var) or padrao)
-    except ValueError:
-        # Porta digitada errada não pode parecer "gateway parado": a caixa some da tela e o padrão
-        # nunca pega, sem nada dizer por quê.
-        _log.warning("%s invalido (%r): o jev-gateway fica indisponivel ate corrigir", var, os.environ.get(var))
-        return None
-    try:
-        socket.create_connection(("127.0.0.1", porta), timeout=0.3).close()
-    except OSError:
-        return None
-    return f"http://127.0.0.1:{porta}"
-
-
-def env_jev_gateway(ligado: bool) -> dict[str, str]:
-    """Ambiente que põe uma sessão CLAUDE atrás do jev-gateway. O marcador vai sempre que a
-    sessão pediu, pra escolha sobreviver a um relançamento com o gateway fora do ar; o desvio só
-    entra com ele respondendo. `ENABLE_TOOL_SEARCH` porque o Claude Code desliga a busca de tools
-    sozinho quando a URL não é da Anthropic, e aqui o destino final continua sendo ela."""
-    if not ligado:
-        return {}
-    env = {MARCA_JEV_GATEWAY: "on"}
-    origem = jev_gateway_origin("claude")
-    if origem:
-        env.update(ANTHROPIC_BASE_URL=origem, ENABLE_TOOL_SEARCH="true")
-    else:
-        _log.warning("jev-gateway pedido mas não responde; sessão Claude sobe sem ele")
     return env
 
 

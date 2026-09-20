@@ -44,6 +44,38 @@ outra instância sem encerrar a anterior. Em 12/09/2026, esse fluxo foi substitu
 que aguarda o filho, recuperação nativa e vigia HTTP com parada seletiva. Evidência e limites
 da validação em [instalacao.md](instalacao.md#a-tarefa-windows-acompanha-o-processo-até-ele-terminar).
 
+## O jev-gateway como caminho da conversa
+
+Entre 19 e 20/09/2026 o Hangar sabia pôr uma sessão atrás do `jev-gateway` (projeto externo,
+checkout em `~/.local/share/jev-gateway`): `ANTHROPIC_BASE_URL` no Claude, `model_provider` por
+`-c` no Codex sem terminal, campo `jev_gateway` na criação, `--jev-gateway` no `hangar-send`,
+caixa na folha e padrão por servidor. O gateway perguntava ao Jev qual tool o turno pedia e, com
+confiança, forçava `tool_choice` (Codex) ou sugeria (`hint`, no Claude, porque raciocínio ligado e
+cache impedem forçar).
+
+Saiu em 20/09/2026 por decisão do Jefferson, e o motivo é de desenho, não de medição: para
+escolher UMA tool, a conversa inteira do turno passava por um terceiro. Preço desproporcional ao
+que se ganhava — e o que se ganhava, medido, era pouco ou negativo:
+
+- **Codex** (0.154.0, `gpt-5.6-sol` high, criação de tela, uma execução por lado): saída +0,9%,
+  entrada −11,8%, tempo +8%. As tools vêm embrulhadas numa `exec` de JavaScript, então o gateway
+  via 3 tools de topo e a escolha real acontecia dentro do script, fora do alcance dele.
+- **Claude** (Claude Code 2.1, `claude-fable-5-1` high, depuração com 7 bugs plantados e 16 testes,
+  uma execução por lado, tokens somados do `usage` por `message.id`): 17 pedidos ao modelo contra
+  9, entrada 1.082.854 contra 630.157 (**+72%**), saída 3.671 contra 3.158 (+16%), 2min53 contra
+  55s. Os dois lados fecharam 16/16. Uma execução por lado não separa isso de variação entre
+  rodadas — era por isso que a opção nascia desligada.
+
+Duas coisas que a remoção também leva embora: a sonda de porta antes de subir a sessão (provedor
+apontando para porta fechada é sessão que nasce e nunca fala com o modelo) e a degradação calada
+no relançamento, que trocava o regime de custo sem nada na tela dizer em qual regime a sessão
+estava. Ficou por conferir, e agora não será: `thread/resume` de uma thread criada com o gateway
+numa subida sem ele.
+
+O `jev` da sessão CONTINUA — é outra coisa: só põe a chave da TypeSafe no ambiente, para o
+`hangar-preview objetivo` navegar sozinho. Regra atual em
+[harnesses.md](harnesses.md#regras-vigentes).
+
 ## Function hooks fora do Hangar
 
 Em 14/09/2026 os function hooks do Claude Code foram medidos e deixados de fora: a API é de

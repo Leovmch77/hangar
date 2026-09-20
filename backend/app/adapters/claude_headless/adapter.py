@@ -899,12 +899,6 @@ class ClaudeHeadlessAdapter:
         # Escolha da abertura. O marcador vai sempre; a chave, só com o recurso ligado. Herdar do
         # backend seria dar o Jev a TODA sessão sem terminal, que é o contrário do que se pediu.
         env.update(runtime_config.env_jev(bool(meta.get("jev"))))
-        # Motor já usa a ANTHROPIC_BASE_URL pro provedor dele; o registry recusa a combinação na
-        # criação, e aqui ela é ignorada pra um sidecar antigo ou editado não quebrar o motor.
-        if not meta.get("engine"):
-            # Em thread: sonda a porta do gateway, e este laço é o de todas as sessões sem terminal.
-            env.update(await asyncio.to_thread(
-                runtime_config.env_jev_gateway, bool(meta.get("jev_gateway"))))
         # Configuração do servidor, lida agora: sessão que sobe depois de alguém ligar o portão já
         # nasce com ele, sem precisar recriar nada.
         env.update(runtime_config.env_function_hooks())

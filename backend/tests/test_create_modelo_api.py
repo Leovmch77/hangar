@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.api import app, CreateBody, create_session
 from app import api
@@ -398,34 +399,8 @@ def _corpo(**kw):
     return CreateBody(name="x", cwd="/tmp/x", **kw)
 
 
-def test_padrao_do_jev_gateway_so_pega_onde_ele_cabe_e_com_ele_no_ar(monkeypatch):
-    """Ligar o padrão não pode quebrar a criação de quem o gateway não atende: ali a sessão nasce
-    direta, em silêncio. Pedido explícito é outra história — o registry recusa onde não cabe."""
-    monkeypatch.setattr(api.runtime_config, "get", lambda campo: campo == "jev_gateway_padrao")
-    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: "http://127.0.0.1:1")
-    assert api._jev_gateway_efetivo(_corpo()) is True
-    assert api._jev_gateway_efetivo(_corpo(provider="codex", headless=True)) is True
-    assert api._jev_gateway_efetivo(_corpo(provider="codex")) is False        # com terminal
-    assert api._jev_gateway_efetivo(_corpo(engine="deepseek")) is False        # motor já usa a URL
-    assert api._jev_gateway_efetivo(_corpo(provider="pi")) is False
-    assert api._jev_gateway_efetivo(_corpo(jev_gateway=False)) is False        # --sem-jev-gateway
-    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", lambda c: None)
-    assert api._jev_gateway_efetivo(_corpo()) is False                         # gateway parado
-    assert api._jev_gateway_efetivo(_corpo(jev_gateway=True)) is True          # explícito segue adiante
-
-
-def test_sem_padrao_o_jev_gateway_so_entra_pedido(monkeypatch):
-    monkeypatch.setattr(api.runtime_config, "get", lambda _campo: False)
-    sonda = Mock(return_value="http://127.0.0.1:1")
-    monkeypatch.setattr(api.runtime_config, "jev_gateway_origin", sonda)
-    assert api._jev_gateway_efetivo(_corpo()) is False
-    assert api._jev_gateway_efetivo(_corpo(jev_gateway=True)) is True
-    # Quem nunca ligou nada não paga nem a sondagem da porta na criação.
-    sonda.assert_not_called()
-
-
-def test_porta_do_jev_gateway_invalida_avisa_no_log(monkeypatch, caplog):
-    monkeypatch.setenv("JEV_CLAUDE_PORT", "8789x")
-    with caplog.at_level("WARNING", logger="hangar.runtime_config"):
-        assert api.runtime_config.jev_gateway_origin("claude") is None
-    assert "JEV_CLAUDE_PORT" in caplog.text
+def test_criacao_recusa_o_campo_do_gateway_removido():
+    """O jev-gateway saiu. O corpo é estrito, então um cliente velho mandando o campo leva 422 —
+    melhor que aceitar calado uma opção que não faz mais nada."""
+    with pytest.raises(ValidationError):
+        _corpo(jev_gateway=True)

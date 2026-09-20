@@ -1490,12 +1490,6 @@ class CreateBody(_StrictBody):
     # a escolha feita uma vez vale pros três caminhos de criação. `false` explícito continua
     # desligando aquela sessão mesmo com o padrão ligado.
     jev: bool | None = Field(default=None, strict=True)
-    # jev-gateway: a escolha de tool do turno passa pelo Jev. Claude na conta Anthropic ou Codex sem
-    # terminal, e só com o gateway respondendo nesta máquina (o registry recusa o resto). Separado
-    # do `jev` acima porque manda a conversa do turno para a TypeSafe, e o do navegador não manda.
-    # AUSENTE (None) herda o `jev_gateway_padrao` do servidor, como o `jev`; `false` desliga só
-    # aquela sessão.
-    jev_gateway: bool | None = Field(default=None, strict=True)
     # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
     # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
     omp_profile: str | None = None
@@ -1513,18 +1507,6 @@ def _jev_efetivo(pedido: bool | None) -> bool:
     desembocam todos no `create_session` — resolver em cada um faria o padrão valer em dois e
     faltar no terceiro sem ninguém perceber."""
     return bool(runtime_config.get("jev_padrao")) if pedido is None else pedido
-
-
-def _jev_gateway_efetivo(body: "CreateBody") -> bool:
-    """jev-gateway desta sessão. Pedido explícito vale como veio, e o registry recusa onde não cabe.
-    O PADRÃO do servidor é outra coisa: ele só pega onde o gateway vale e com ele respondendo —
-    senão ligar o padrão quebraria a criação de Pi, Kimi, motor e de tudo com o gateway parado."""
-    if body.jev_gateway is not None:
-        return body.jev_gateway
-    if not runtime_config.get("jev_gateway_padrao"):
-        return False
-    cabe = (body.provider == "claude" and not body.engine) or (body.provider == "codex" and body.headless)
-    return bool(cabe) and runtime_config.jev_gateway_origin(body.provider) is not None
 
 
 class TtsBody(_StrictBody):
@@ -2117,10 +2099,6 @@ async def create_session(body: CreateBody):
                             _kw["subagent_model"] = body.subagent_model
                         if _jev_efetivo(body.jev):
                             _kw["jev"] = True
-                        # Em thread: com o padrão ligado ele sonda a porta do gateway, e socket
-                        # bloqueante no laço pararia o SSE de todas as sessões.
-                        if await asyncio.to_thread(_jev_gateway_efetivo, body):
-                            _kw["jev_gateway"] = True
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
                         if body.read_only:
@@ -2150,8 +2128,6 @@ async def create_session(body: CreateBody):
             _kw2["subagent_model"] = body.subagent_model
         if _jev_efetivo(body.jev):
             _kw2["jev"] = True
-        if await asyncio.to_thread(_jev_gateway_efetivo, body):
-            _kw2["jev_gateway"] = True
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt
         if body.omp_profile:
@@ -4958,13 +4934,6 @@ async def _auto_update_loop():
         except Exception:                            # noqa: BLE001 — sem rede/sem tmux é comum
             _log.exception("auto-update: tick falhou")
         await asyncio.sleep(_AUTO_UPDATE_INTERVALO)
-
-
-@app.get("/api/jev-gateway", dependencies=[Depends(require_auth)])
-def get_jev_gateway():
-    """Por cliente, se o jev-gateway responde NESTA máquina. O Hangar não o instala nem sobe: a
-    tela de criação só oferece a opção onde ele já está de pé."""
-    return {c: runtime_config.jev_gateway_origin(c) is not None for c in ("claude", "codex")}
 
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])

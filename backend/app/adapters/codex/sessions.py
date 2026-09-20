@@ -94,8 +94,7 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
          codex_home: str | Path | None = None,
          codex_account: str | None = None,
          headless: bool = False, key: str | None = None,
-         permission_mode: str | None = None, jev: bool = False,
-         jev_gateway: bool = False) -> None:
+         permission_mode: str | None = None, jev: bool = False) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -127,8 +126,7 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
     if headless:
         # Sem terminal: o app-server roda atrás de um cano (sem_terminal.py). `key` é a chave do
         # cano (varredura de órfãos) e `permission_mode` o modo do app, que vira sandbox/approval.
-        meta.update(headless=True, key=key, permission_mode=permission_mode, cano=None, jev=jev,
-                    jev_gateway=jev_gateway)
+        meta.update(headless=True, key=key, permission_mode=permission_mode, cano=None, jev=jev)
     with _locked(name):
         _write(name, meta)
 

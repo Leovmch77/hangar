@@ -192,9 +192,8 @@ import * as m from '../paraglide/messages';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean, subagentModel?: string | null, jev?: boolean,
-                              jevGateway?: boolean) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev, jevGateway);
+                              headless?: boolean, subagentModel?: string | null, jev?: boolean) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev);
   }
 
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê

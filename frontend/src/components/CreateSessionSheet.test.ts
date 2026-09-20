@@ -57,8 +57,6 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   // o POST é a ação, e os testes abaixo afirmam que ele NÃO acontece quando a folha recusa.
   getBastao: vi.fn(async () => '# dossiê'),
   passarBastao: vi.fn(),
-  // jev-gateway: fora do ar por padrão (a caixa fica escondida), como em quem não o instalou.
-  getJevGateway: vi.fn(async () => ({ claude: false, codex: false })),
   patchConfig: vi.fn(async () => ({ campos: {} })),
 }));
 vi.mock('./FolderScanner.svelte', () => ({
@@ -199,7 +197,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     // O create manda provider=claude com model/effort NULOS — o cenário do bloqueador morre aqui.
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false, undefined);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false);
     unmount(comp);
   });
 
@@ -237,39 +235,24 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     await escolherNoCombo('#subagent-pick', 'sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false, undefined);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, 'sonnet', false);
     unmount(comp);
   });
 
-  it('jev-gateway no ar: a caixa aparece, o valor vai EXPLÍCITO e vira o padrão do servidor', async () => {
+  it('o jev-gateway saiu: nenhuma caixa dele na folha, e nada dele no que é criado', async () => {
     vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
-    vi.mocked(api.getJevGateway).mockResolvedValue({ claude: true, codex: true });
     const { comp } = montar();
     await flush();
     await escolherPasta();
     (document.querySelector('.mais-cab') as HTMLElement).click();
     await flush();
-    const caixa = [...document.querySelectorAll<HTMLLabelElement>('.mais-corpo .retomar-check')]
-      .find((l) => l.textContent?.includes(m.criar_jev_gateway()))!.querySelector('input')!;
-    expect(caixa.checked).toBe(false);
-    caixa.click();
-    await flush();
+    expect(document.body.textContent).not.toContain('gateway');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(api.patchConfig).toHaveBeenCalledWith({ jev_gateway_padrao: true });
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false, true);
-    vi.mocked(api.getJevGateway).mockResolvedValue({ claude: false, codex: false });
-    unmount(comp);
-  });
-
-  it('jev-gateway fora do ar: a caixa não existe e nada sobre ele é enviado', async () => {
-    vi.mocked(api.listClaudeConfigs).mockRejectedValue(new Error('fora do ar'));
-    const { comp } = montar();
-    await flush();
-    await escolherPasta();
-    (document.querySelector('.mais-cab') as HTMLElement).click();
-    await flush();
-    expect(document.body.textContent).not.toContain(m.criar_jev_gateway());
+    expect(api.patchConfig).not.toHaveBeenCalledWith(
+      expect.objectContaining({ jev_gateway_padrao: expect.anything() }));
+    // O último argumento do onCreate era o do gateway; agora o `jev` fecha a lista.
+    expect(onCreate.mock.calls[0]).toHaveLength(12);
     unmount(comp);
   });
 
@@ -314,7 +297,7 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     expect(document.querySelector('#model-pick')!.textContent).toContain('sonnet');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null, null, false, null, false, undefined);
+    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, 'sonnet', null, null, null, false, null, false);
     unmount(comp);
   });
 
@@ -394,7 +377,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null, null, false, null, false, undefined);
+      'x', '/tmp/x', '/home/x/.claude-nova', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -430,7 +413,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false, undefined);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
@@ -458,7 +441,7 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate).toHaveBeenCalledWith(
-      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false, undefined);
+      'x', '/tmp/x', '/home/x/.claude', 'claude', null, null, null, null, null, false, null, false);
     vi.mocked(api.modelOptions).mockRestore();
     unmount(comp);
   });
