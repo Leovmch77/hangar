@@ -2481,7 +2481,7 @@ class SessionRegistry:
         # Junto do resto que sai do /proc: depois do `kill_session` lá embaixo não há mais processo
         # de onde ler, e a sessão ressuscitada nasceria com o Jev desligado sem ninguém pedir.
         jev = _jev_do_processo(ag)
-        proj =((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
+        proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
         jsonl = proj / f"{session_id}.jsonl"
         if not jsonl.exists():
             raise ValueError("transcript nao encontrado")

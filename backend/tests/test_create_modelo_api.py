@@ -399,6 +399,19 @@ def _corpo(**kw):
     return CreateBody(name="x", cwd="/tmp/x", **kw)
 
 
+def test_padrao_do_jev_ligado_chega_ao_create_pela_rota(monkeypatch):
+    """O `conftest` força `jev_padrao` desligado na suíte inteira (é config da máquina de quem
+    roda). Sem este teste, nada mais cobre a ligação entre o padrão e o `jev=True` que sai daqui
+    para o `registry.create` — só a função isolada ficaria testada."""
+    monkeypatch.setattr(api.runtime_config, "get", lambda campo: campo == "jev_padrao")
+    with patch("app.api.registry.create",
+               return_value=SessionInfo(name="j", cwd="/tmp", provider="claude")) as cr:
+        r = TestClient(app).post("/api/sessions", headers=AUTH,
+                                 json={"name": "j", "cwd": "/tmp", "provider": "claude"})
+    assert r.status_code == 200
+    assert cr.call_args.kwargs["jev"] is True
+
+
 def test_criacao_recusa_o_campo_do_gateway_removido():
     """O jev-gateway saiu. O corpo é estrito, então um cliente velho mandando o campo leva 422 —
     melhor que aceitar calado uma opção que não faz mais nada."""
