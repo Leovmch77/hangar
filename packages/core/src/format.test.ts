@@ -1039,4 +1039,14 @@ describe('parseFilePaths', () => {
     expect(parseFilePaths(t)).toEqual([]);
     expect(parseFilePaths('veja `/tmp/a b.png` aqui').map((r) => r.path)).toEqual(['/tmp/a b.png']);
   });
+
+  it('pontuação colada no fim da frase não engole o caminho', () => {
+    // Mesmo fim de caminho que o `_ABS_RE` de arquivosCitados: quem suprime o chip e quem desenha
+    // a miniatura têm de concordar, senão "salvei em /tmp/x.png." some das duas.
+    expect(parseFilePaths('Salvei em /tmp/print.png.').map((r) => r.path)).toEqual(['/tmp/print.png']);
+    expect(parseFilePaths('Aqui: /tmp/foto.jpg; pronto').map((r) => r.path)).toEqual(['/tmp/foto.jpg']);
+    expect(parseFilePaths('Veja /tmp/foto.jpg: pronto').map((r) => r.path)).toEqual(['/tmp/foto.jpg']);
+    expect(parseFilePaths('Veja sub/dir/foto.png.').map((r) => r.path)).toEqual(['sub/dir/foto.png']);
+    expect(parseFilePaths('backup /tmp/a.png.bak aqui')).toEqual([]);
+  });
 });

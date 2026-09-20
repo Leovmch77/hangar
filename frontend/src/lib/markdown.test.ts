@@ -51,6 +51,17 @@ describe('citações de arquivo inline', () => {
     expect(renderMarkdown('src/main.ts')).not.toContain('file-citation');
   });
 
+  it('deixa mídia fora do chip, sem devolver markdown cru', () => {
+    // A bolha desenha miniatura e visor pra imagem/vídeo/pdf — virar chip roubava isso dela.
+    const solto = renderMarkdown('Captura em /tmp/print.png agora.', { fileLinks: true });
+    expect(solto).toBe('<p>Captura em /tmp/print.png agora.</p>');
+    const link = renderMarkdown('[foto](/tmp/print.png)', { fileLinks: true });
+    expect(link).toBe('<p>foto</p>');
+    const crase = renderMarkdown('Veja `/tmp/print.png`.', { fileLinks: true });
+    expect(crase).toBe('<p>Veja <code>/tmp/print.png</code>.</p>');
+    expect(renderMarkdown('Doc em /tmp/a.pdf.', { fileLinks: true })).not.toContain('file-citation');
+  });
+
   it('escapa caminhos e recusa protocolos executáveis', () => {
     const html = renderMarkdown('[arquivo](</tmp/a&<b>.py:4>) [x](javascript:alert(1)) <script>alert(1)</script>', { fileLinks: true });
     expect(html).not.toContain('<script>');

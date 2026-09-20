@@ -349,12 +349,15 @@ const _EXTS = Object.keys(EXT_KIND).join('|');
 // O lookahead inclui `*`: path citado em **negrito** ("**/tmp/x.jpg**") parava de casar e a imagem
 // nunca era servida (bug real de 2026-08-03 — o path existia, o endpoint 200, e nada renderizava).
 // Crase fecha o path: sem isso "`/proc/x`, … e `foto.png`" vira UM caminho da frase inteira.
-const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|[\\s)\\]"'\`,*])`, 'gi');
+// O lookahead casa o do `_ABS_RE` de arquivosCitados.ts de proposito: quem decide "vira chip de
+// codigo" e quem decide "vira miniatura" precisa enxergar o MESMO fim de caminho. Divergiu uma vez
+// e "salvei em /tmp/x.png." (ponto final colado) perdeu os dois — nem chip nem imagem.
+const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'gi');
 // Caminho RELATIVO com DIRETORIO (./x.png, ../a/x.png, sub/dir/x.png) — jeito comum do Claude citar
 // arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
 // absoluto nem de dentro de URL).
-const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|[\\s)\\]"'\`,:*])`, 'gi');
+const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'gi');
 
 export interface FileRef { path: string; name: string; kind: FileKind; url?: string; }
 

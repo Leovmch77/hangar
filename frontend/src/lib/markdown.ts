@@ -40,18 +40,21 @@ function renderInline(input: string, opts: MarkdownOptions): string {
       if (link && path && !path.startsWith('#') && !path.startsWith('?') && !path.includes('://')) {
         const suffix = /:(\d+)(?::\d+)?$/.exec(path);
         const line = suffix ? Number(suffix[1]) : null;
-        const alvo = suffix ? path.slice(0, suffix.index) : path;
-        return fileKind(alvo) ? null
-          : { path: alvo, line: line && Number.isSafeInteger(line) ? line : null };
+        return { path: suffix ? path.slice(0, suffix.index) : path,
+          line: line && Number.isSafeInteger(line) ? line : null };
       }
-      if (!ref || ref.start !== 0 || ref.end !== candidate.length) return null;
-      const cru = path.slice(0, path.length - (ref.end - ref.path.length));
-      return fileKind(cru) ? null : { path: cru, line: ref.line };
+      return ref && ref.start === 0 && ref.end === candidate.length
+        ? { path: path.slice(0, path.length - (ref.end - ref.path.length)), line: ref.line } : null;
     };
     // Protege links e código antes de procurar caminhos soltos, sem tocar em atributos HTML.
     source = source.replace(/`([^`]+)`|\[([^\]]+)\]\((<[^>]+>|[^)]+)\)|(https?:\/\/[^\s<]+)/g,
       (whole, code: string | undefined, label: string | undefined, target: string | undefined) => {
         const ref = reference(code ?? target ?? '', target !== undefined);
+        // Mídia não vira chip (o anexo já desenha miniatura), mas também não pode cair no fallback:
+        // ali `[foto](/a/b.png)` sairia com a sintaxe markdown à mostra. Fica o rótulo, ou o código.
+        if (ref && fileKind(ref.path)) {
+          return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : escapeHtml(label ?? ref.path));
+        }
         if (ref) return chip(ref.path, ref.line);
         return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : renderInline(whole, {}));
       });
