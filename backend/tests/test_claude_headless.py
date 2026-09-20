@@ -323,6 +323,61 @@ def test_vigia_encerra_o_cano_da_ociosa(adapter, monkeypatch):
     assert mortos == ["s1"] and "s1" not in adapter._sessions and sess.name == "s1"
 
 
+def test_prompt_waits_for_idle_shutdown_and_uses_new_process(adapter, monkeypatch):
+    old = adapter._sessions["s1"]
+    old.ativa_em -= A._OCIOSA_S + 1
+    old.meta["cano"] = {"pid": 4242}
+    release = threading.Event()
+    delivered_to = []
+    monkeypatch.setattr(A, "_VIGIA_S", 0)
+    monkeypatch.setattr(adapter, "_garantir_vigia", lambda: None)
+
+    async def spawn(sess, **kwargs):
+        sess.proc = _Proc()
+        return True
+
+    async def write(sess, obj):
+        delivered_to.append(sess)
+
+    monkeypatch.setattr(adapter, "_spawn", spawn)
+    monkeypatch.setattr(adapter, "_write", write)
+
+    async def flow():
+        stopping = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def stop(*args):
+            loop.call_soon_threadsafe(stopping.set)
+            assert release.wait(5)
+
+        monkeypatch.setattr(A, "_matar_grupo", stop)
+
+        async def send():
+            async with adapter.delivery_lock("s1"):
+                return await adapter.send_prompt("s1", "mensagem durante o encerramento")
+
+        watcher = asyncio.create_task(adapter._vigiar_ociosas())
+        prompt = None
+        try:
+            await asyncio.wait_for(stopping.wait(), 2)
+            prompt = asyncio.create_task(send())
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(prompt), 0.05)
+            assert not delivered_to
+            release.set()
+            assert await asyncio.wait_for(prompt, 2) == "sent"
+            assert delivered_to == [adapter._sessions["s1"]]
+            assert delivered_to[0] is not old
+        finally:
+            release.set()
+            tasks = [watcher] + ([prompt] if prompt is not None else [])
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    _run(flow())
+
+
 def test_flag_de_exibicao_do_pensamento_segue_a_chave_do_settings(adapter, monkeypatch):
     from app import pensamento
     monkeypatch.setattr(pensamento, "ler", lambda: True)

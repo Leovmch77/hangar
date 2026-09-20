@@ -715,10 +715,11 @@ class ClaudeHeadlessAdapter:
             await asyncio.sleep(_VIGIA_S)
             for sess in list(self._sessions.values()):
                 try:
-                    if await self._pode_estacionar(sess):
-                        _log.info("claude headless: estacionando sessão ociosa name=%s parada=%ds",
-                                  sess.name, int(time.monotonic() - sess.ativa_em))
-                        await self._encerrar(sess)
+                    async with self.delivery_lock(sess.name):
+                        if await self._pode_estacionar(sess):
+                            _log.info("claude headless: estacionando sessão ociosa name=%s parada=%ds",
+                                      sess.name, int(time.monotonic() - sess.ativa_em))
+                            await self._encerrar(sess)
                 except Exception:
                     _log.exception("claude headless: vigia de ociosas falhou name=%s", sess.name)
 
@@ -738,7 +739,7 @@ class ClaudeHeadlessAdapter:
         fila = await asyncio.to_thread(PromptQueue(sess.name).load)
         if any(not r.get("delivered") for r in fila):
             return False
-        # Um prompt pode ter chegado durante a leitura da fila; daqui ao encerrar não há await.
+        # Reconfere a atividade após a leitura da fila.
         return (not sess.in_progress and sess.state == "idle"
                 and time.monotonic() - sess.ativa_em >= _OCIOSA_S)
 
