@@ -261,7 +261,7 @@ def test_move_conversation_leva_jsonl_e_pasta_irma(tmp_path, monkeypatch):
     assert not (tmp_path / "-home-u-proj" / SID).exists()
     assert archive.conta_de("-home-u-proj", SID) == str(cdir)
     # Ja esta na conta pedida: nada a fazer.
-    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is None
+    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is False
     # Destino ja tem o uuid: recusa em vez de sobrescrever.
     _write_transcript(tmp_path / "-home-u-proj", text="homonima")
     with pytest.raises(FileExistsError):

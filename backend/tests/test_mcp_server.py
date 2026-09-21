@@ -77,7 +77,7 @@ async def test_sem_identidade_e_erro_nao_cli(identidade):
         assert res.is_error and "sessao_desconhecida" in res.content[0].text
 
 
-async def test_enviar_prefixa_de_e_recusa_caminho_nativo(identidade, monkeypatch):
+async def test_enviar_prefixa_de_e_nao_recusa_caminho_nativo(identidade, monkeypatch):
     from app import api
     enviados = []
 
@@ -92,16 +92,18 @@ async def test_enviar_prefixa_de_e_recusa_caminho_nativo(identidade, monkeypatch
         res = await s.call_tool("enviar", {"alvo": "outra", "texto": "oi"})
         assert not res.is_error and res.structured_content["steered"] is True
         assert enviados == [("outra", "[de: eu] oi", True)]
+        # Socket nativo nos dois lados: o backend escolhe o transporte, a tool nunca devolve o
+        # envio pro modelo fazer por SendMessage.
         uds["valor"] = "/tmp/x.sock"
         res = await s.call_tool("enviar", {"alvo": "outra", "texto": "oi"})
-        assert res.is_error and "SendMessage" in res.content[0].text
-        res = await s.call_tool("enviar", {"alvo": "outra", "texto": "oi", "tmux": True})
         assert not res.is_error and len(enviados) == 2
+        res = await s.call_tool("enviar", {"alvo": "outra", "texto": "oi", "tmux": True})
+        assert not res.is_error and len(enviados) == 3
         res = await s.call_tool("enviar", {"alvo": "eu", "texto": "oi", "tmux": True})
-        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 2
+        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 3
         monkeypatch.setattr(settings, "server_id", "srv1")
         res = await s.call_tool("enviar", {"alvo": "srv1::eu", "texto": "oi"})
-        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 2
+        assert res.is_error and "é esta sessão" in res.content[0].text and len(enviados) == 3
 
 
 async def test_sessoes_marca_a_propria(identidade, monkeypatch):

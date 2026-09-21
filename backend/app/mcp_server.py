@@ -134,7 +134,7 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
 
 @mcp.tool(description="Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: "
                       "chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um "
-                      "`[grupo: …]` com isto. `pulados` lista quem não recebeu (mande por SendMessage).")
+                      "`[grupo: …]` com isto. O backend escolhe o transporte pra cada membro.")
 async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)

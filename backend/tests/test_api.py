@@ -3291,7 +3291,9 @@ def test_group_estourou_esquece_fora_da_janela(monkeypatch):
 # Task 6: --group respeita o caminho nativo
 # ---------------------------------------------------------------------------
 
-def test_group_message_pula_peers_com_socket_quando_remetente_e_nativo(api_client):
+def test_group_message_nao_pula_ninguem_quando_remetente_e_nativo(api_client):
+    # O transporte é do backend: membro com socket nativo recebe por ele ou pela escada seguinte,
+    # nunca fica de fora pro modelo mandar por outra ferramenta.
     with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
          patch("app.registry.inbox_socket_of", side_effect=lambda n: "/run/b.sock" if n == "b" else None), \
          patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
@@ -3299,8 +3301,8 @@ def test_group_message_pula_peers_com_socket_quando_remetente_e_nativo(api_clien
         r = api_client.post("/api/sessions/a/group-message",
                             json={"text": "terminei", "remetente_nativo": True}, headers=_h())
     assert r.status_code == 200
-    assert r.json()["pulados"] == ["b"]
-    assert [c.args[0] for c in sp.call_args_list] == ["c"]
+    assert r.json()["pulados"] == []
+    assert sorted(c.args[0] for c in sp.call_args_list) == ["b", "c"]
 
 
 def test_group_message_forcar_tmux_entrega_a_todos(api_client):
