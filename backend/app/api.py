@@ -3105,12 +3105,24 @@ def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
     info = _RECADOS_NATIVOS.pop(mid, None)
     diag.registrar("recado.nativo.recibo", "aviso", sessao=info[1] if info else None,
                    detalhe=f"{estado} {detalhe}".strip())
-    if not info or _loop_servidor is None or estado in ("delivered", "released", ""):
+    if estado in ("delivered", "released", ""):
+        return
+    if not info or _loop_servidor is None:
+        # Sem correlacao (recibo de antes do restart, ou msg_id ja purgado) ou sem loop: o aviso
+        # nao tem pra quem ir, mas a recusa nao pode virar silencio.
+        _log.warning("recibo nativo %s sem destino: msg_id=%s info=%s loop=%s detalhe=%s",
+                     estado, mid, bool(info), _loop_servidor is not None, detalhe)
         return
     remetente, alvo, inicio = info
     aviso = (f"[painel: hangar] Seu recado para {alvo} ({inicio!r}) foi {estado}"
              f"{': ' + detalhe if detalhe else ''}. Ele não chegou ao modelo de lá.")
-    asyncio.run_coroutine_threadsafe(_enviar(remetente, aviso), _loop_servidor)
+    fut = asyncio.run_coroutine_threadsafe(_enviar(remetente, aviso), _loop_servidor)
+
+    def _feito(f) -> None:
+        # Remetente pode ter fechado entre o envio e o recibo: o aviso nao chega, mas fica no log.
+        if (exc := f.exception()) is not None:
+            _log.warning("aviso de recibo nao entregue a %s: %r", remetente, exc)
+    fut.add_done_callback(_feito)
 
 
 def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
@@ -6279,6 +6291,11 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         except FileExistsError:
             raise HTTPException(409, detail=erro("erro_conversa_ja_na_conta",
                                                  "a conta destino ja tem esta conversa"))
+        except OSError as e:
+            _log.exception("mover conversa %s para %s falhou", session_id, cfg)
+            raise HTTPException(500, detail=erro("erro_mover_conversa",
+                                                 f"nao consegui mover a conversa de conta: {e}",
+                                                 erro=str(e)))
     try:
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
@@ -6286,7 +6303,12 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
                                resume_session_id=session_id, engine=body.engine, **extras)
     except ValueError as e:
         if mover:
-            move_conversation(project, session_id, mover[0])
+            # Sessao nao nasceu: a conversa volta pra conta de origem. Falha aqui nao pode
+            # esconder o 409 original, mas tambem nao pode passar calada.
+            try:
+                move_conversation(project, session_id, mover[0])
+            except OSError:
+                _log.exception("conversa %s ficou em %s: rollback do move falhou", session_id, cfg)
         raise HTTPException(409, str(e))
 
 

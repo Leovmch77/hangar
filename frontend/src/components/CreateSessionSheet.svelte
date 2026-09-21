@@ -688,15 +688,29 @@
     querRetomar ? retomaveis.find((c) => c.session_id === conversaEscolhida) ?? null : null);
   // Escolher a conversa leva o seletor de conta pra conta dona dela: e o proprio seletor que diz
   // "em qual conta continuar". Trocar a conta DEPOIS disso vira mover (o botao avisa).
+  // Conta que estava no seletor ANTES de a conversa puxá-lo pra conta dela: volta quando a
+  // escolha some (desmarcar, desligar o check, trocar de pasta). Sem isto uma sessão NOVA
+  // criada em seguida nascia calada na conta da conversa desmarcada.
+  let contaAntesDaEscolha = $state<string | null>(null);
   function escolherConversa(c: ArchiveEntry) {
     if (conversaEscolhida === c.session_id) { conversaEscolhida = ''; return; }
     conversaEscolhida = c.session_id;
     if (c.provider === 'claude' && c.config_dir && c.config_dir !== selectedConfig
         && configs.some((k) => k.path === c.config_dir)) {
+      if (contaAntesDaEscolha === null) contaAntesDaEscolha = selectedConfig;
       selectedConfig = c.config_dir;
       carregarModelos();
     }
   }
+  $effect(() => {
+    if (conversaAlvo || contaAntesDaEscolha === null) return;
+    const volta = contaAntesDaEscolha;
+    contaAntesDaEscolha = null;
+    if (volta !== selectedConfig && (volta === null || configs.some((k) => k.path === volta))) {
+      selectedConfig = volta;
+      carregarModelos();
+    }
+  });
   const contaDaEscolhida = $derived(
     conversaAlvo?.provider === 'claude' ? conversaAlvo.conta || null : null);
   const vaiMover = $derived(
@@ -1295,10 +1309,10 @@
                  permissao pra fora da tela. -->
             <!-- Lista emoldurada com divisorias, nao cards soltos: numa caixa que rola, a linha
                  cortada no fim so parece "rolagem" quando ha moldura; solta, parece bug. -->
-            <div class="conversas" role="listbox" aria-label={m.criar_retomar_escolha()}>
+            <div class="conversas" role="group" aria-label={m.criar_retomar_escolha()}>
               {#each retomaveis as c (c.session_id)}
                 {@const on = conversaEscolhida === c.session_id}
-                <button type="button" class="conversa" class:on role="option" aria-selected={on}
+                <button type="button" class="conversa" class:on aria-pressed={on}
                   disabled={retomando !== null} onclick={() => escolherConversa(c)}>
                   <span class="conversa-main">
                     <span class="conversa-txt">{c.ultima || c.preview || m.arquivo_sem_mensagens()}</span>

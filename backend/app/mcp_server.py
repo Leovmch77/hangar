@@ -124,7 +124,7 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
     # `tmux` fica aceito por compatibilidade: o backend já escolhe o transporte (socket nativo,
     # plugin, tmux, fila) e nunca devolve o envio pro modelo fazer por outra ferramenta.
     # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro.
-    texto = texto.removeprefix(f"[de: {eu}]").lstrip()
+    texto = re.sub(rf"^\s*\[de:\s*{re.escape(eu)}\]\s*", "", texto)
     try:
         resp = await api.input_prompt(alvo, api.InputBody(text=f"[de: {eu}] {texto}", steer=True))
     except HTTPException as e:

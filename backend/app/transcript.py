@@ -78,7 +78,9 @@ _META_BLOCK_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL
 # Texto COLADO no composer (o hangar-send entrega por paste-buffer, entao todo recado cai aqui):
 # o CLI grava embrulhado em <pasted_content id="…">…</pasted_content>. O envelope e marcacao do
 # harness, nao conversa — fica so o conteudo, que e o que a pessoa (ou a sessao-irma) escreveu.
-_PASTED_RE = re.compile(r"<pasted_content\b[^>]*>\n?(.*?)\n?</pasted_content\b[^>]*>", re.DOTALL)
+# O id se repete na tag de fechamento e e exigido igual: texto da pessoa que so CITE as tags nao
+# tem esse par casado e continua inteiro.
+_PASTED_RE = re.compile(r'<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_content id="\1">', re.DOTALL)
 
 # task-id de uma <task-notification> (fim de agente/workflow em background). A notificacao fica
 # fora do chat (e ruido), mas o painel de Atividade precisa do sinal de termino: viram um
@@ -238,7 +240,7 @@ def _is_command_meta(text: str) -> bool:
 
 
 def _strip_meta_blocks(text: str) -> str:
-    return _PASTED_RE.sub(r"\1", _META_BLOCK_RE.sub("", text)).strip()
+    return _PASTED_RE.sub(r"\2", _META_BLOCK_RE.sub("", text)).strip()
 
 
 def parse_line(line: str) -> list[ChatEvent]:
@@ -275,11 +277,13 @@ class RewriteFilter:
         except ValueError:
             return True
         if ts < self._max - self._JANELA_S:
+            _log.debug("reescrita do --resume: descartando %s de %s (max %.0f)", obj.get("type"), t, self._max)
             return False
         conteudo = json.dumps((obj.get("message") or {}).get("content"), sort_keys=True,
                               ensure_ascii=False)
         fp = (t, hashlib.md5(conteudo.encode("utf-8")).hexdigest())
         if fp in self._recentes:
+            _log.debug("reescrita do --resume: descartando repeticao exata de %s em %s", obj.get("type"), t)
             return False
         self._recentes[fp] = ts
         if ts > self._max:

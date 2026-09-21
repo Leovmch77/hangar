@@ -266,3 +266,22 @@ def test_move_conversation_leva_jsonl_e_pasta_irma(tmp_path, monkeypatch):
     _write_transcript(tmp_path / "-home-u-proj", text="homonima")
     with pytest.raises(FileExistsError):
         archive.move_conversation("-home-u-proj", SID, None)
+
+
+def test_move_conversation_nao_deixa_metade_em_cada_conta(tmp_path, monkeypatch):
+    # A pasta irma nao move (ex.: EXDEV): o jsonl volta pra origem e o erro sobe.
+    cdir = _conta(tmp_path, monkeypatch, "conta-b", "Trabalho")
+    _write_transcript(tmp_path / "-home-u-proj")
+    (tmp_path / "-home-u-proj" / SID / "tool-results").mkdir(parents=True)
+    real = os.replace
+
+    def _falha_na_pasta(src, dst):
+        if str(src).endswith(SID):
+            raise OSError(18, "Invalid cross-device link")
+        return real(src, dst)
+    monkeypatch.setattr(archive.os, "replace", _falha_na_pasta)
+    with pytest.raises(OSError):
+        archive.move_conversation("-home-u-proj", SID, str(cdir))
+    assert (tmp_path / "-home-u-proj" / f"{SID}.jsonl").is_file()
+    assert (tmp_path / "-home-u-proj" / SID / "tool-results").is_dir()
+    assert not (cdir / "projects" / "-home-u-proj" / f"{SID}.jsonl").exists()

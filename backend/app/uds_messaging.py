@@ -169,8 +169,10 @@ class Inbox:
             try:
                 q = json.loads(linha)
             except ValueError:
+                _log.warning("inbox nativo: linha que nao e JSON descartada: %r", linha[:120])
                 continue
             if not isinstance(q, dict):
+                _log.warning("inbox nativo: quadro que nao e objeto descartado: %r", linha[:120])
                 continue
             if q.get("type") == "peer_message_status" or q.get("action") == "peer_message_status":
                 mid = q.get("orig_msg_id") or q.get("msg_id") or ""

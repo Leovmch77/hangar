@@ -426,7 +426,13 @@ def move_conversation(project: str, session_id: str, config_dir: Optional[str]) 
     os.replace(de / f"{session_id}.jsonl", para / f"{session_id}.jsonl")
     irma = de / session_id
     if irma.is_dir():
-        os.replace(irma, para / session_id)
+        try:
+            os.replace(irma, para / session_id)
+        except OSError:
+            # Sem a pasta irma o jsonl na conta nova perde tool-results e subagentes: melhor a
+            # conversa inteira na origem do que metade em cada conta.
+            os.replace(para / f"{session_id}.jsonl", de / f"{session_id}.jsonl")
+            raise
     return True
 
 
