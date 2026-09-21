@@ -161,7 +161,8 @@ def levantar_estados(s: Settings) -> dict:
     # Duas portas podem servir a interface: a do serviço separado do front (`front_port`, quando
     # existe) e a do próprio backend, que serve o `dist`. Testar SÓ a primeira acusava de "não
     # responde" uma máquina em que o app abre normalmente pela segunda — o caso de quem não sobe o
-    # serviço do front. Quem responder primeiro é o endereço que a linha mostra.
+    # serviço do front. A linha mostra a PRIMEIRA DA LISTA que respondeu — a porta do front tem
+    # precedência —, não a que respondeu mais rápido.
     portas = [porta_do_front(s)]
     if s.port not in portas:
         portas.append(s.port)

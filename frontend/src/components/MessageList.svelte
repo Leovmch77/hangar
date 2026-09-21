@@ -30,7 +30,7 @@
   import SubagenteCard from './SubagenteCard.svelte';
   import { lerSubagenteCodex } from '../lib/subagenteCodex';
   import { transcriptImageUrl, uploadUrl } from '@hangar/core';
-  import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim, nextAtBottom } from '../lib/window';
+  import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim, nextAtBottom, renovarGesto } from '../lib/window';
   import * as diag from '../lib/diag';
 
   interface Props {
@@ -175,7 +175,12 @@
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
-    atBottom = nextAtBottom(atBottom, listEl.scrollTop, lastTop, gap, performance.now() < gestoAte);
+    const agora = performance.now();
+    const gesto = agora < gestoAte;
+    // Movimento que continua (arraste da barra, inércia do trackpad) segue sendo gesto: sem isto
+    // ele expirava no meio e a lista voltava a se achar colada.
+    gestoAte = renovarGesto(agora, gestoAte);
+    atBottom = nextAtBottom(atBottom, listEl.scrollTop, lastTop, gap, gesto);
     lastTop = listEl.scrollTop;
     scrolledUp = gap > listEl.clientHeight; // mais de uma tela do fim = "muito pra cima" -> botao
     // Perto do topo + ainda ha eventos antigos fora da janela -> revela a proxima pagina.

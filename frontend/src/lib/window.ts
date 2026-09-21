@@ -45,6 +45,16 @@ export function mostrarIrPraoFim(scrolledUp: boolean, windowEnd: number, len: nu
  * sozinha (um resultado de ferramenta longo passa de 64px entre um quadro e outro), e soltar por
  * distância fazia a lista parar de acompanhar justo quem estava no fim lendo a resposta nascer.
  * Sem gesto, a folga só REENCOSTA (chegou a menos de 64px do fim), nunca solta. */
+/** Janela do gesto, renovada enquanto os eventos de scroll continuam chegando dentro dela.
+ *
+ *  Sem renovar, um arraste lento da barra passa dos 400ms do toque inicial e volta a contar como
+ *  crescimento de conteúdo no meio do movimento: aí basta a folga roçar os 64px uma vez (o
+ *  repique perto do fim) para a lista se declarar colada e puxar a pessoa de volta no próximo
+ *  pedaço da resposta — o bug de origem, na direção contrária. */
+export function renovarGesto(agora: number, ate: number, janela = 400): number {
+  return agora < ate ? agora + janela : ate;
+}
+
 export function nextAtBottom(atBottom: boolean, top: number, lastTop: number, gap: number, gesto: boolean): boolean {
   if (gesto && top < lastTop - 1 && gap > 1) return false;   // subiu de verdade
   if (gap < 64) return true;                                  // encostou no fim

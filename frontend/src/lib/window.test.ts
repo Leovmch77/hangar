@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { precisaPreencher, mostrarIrPraoFim, nextAtBottom } from './window';
+import { precisaPreencher, mostrarIrPraoFim, nextAtBottom, renovarGesto } from './window';
 
 describe('nextAtBottom', () => {
   it('subir 20px durante o streaming solta do fim, mesmo dentro da folga de 64px', () => {
@@ -34,6 +34,21 @@ describe('nextAtBottom', () => {
 
   it('descer até 64px do fim reencosta', () => {
     expect(nextAtBottom(false, 990, 900, 40, true)).toBe(true);
+  });
+});
+
+describe('renovarGesto', () => {
+  it('arraste que continua dentro da janela estica a janela', () => {
+    // 1000 = toque; cada evento de scroll seguinte renova, então um arraste de barra que dura
+    // segundos nunca deixa de ser gesto.
+    expect(renovarGesto(1200, 1400)).toBe(1600);
+    expect(renovarGesto(1550, 1600)).toBe(1950);
+  });
+
+  it('parou: depois da janela vencida nada renova', () => {
+    // É o que impede o crescimento da resposta de se passar por gesto.
+    expect(renovarGesto(2000, 1400)).toBe(1400);
+    expect(renovarGesto(1400, 1400)).toBe(1400);
   });
 });
 

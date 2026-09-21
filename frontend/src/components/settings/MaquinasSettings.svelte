@@ -183,6 +183,9 @@
     removerLadoDeLaFalhou = false;
     emEdicao = null; avisoRemocao = ''; logoutMsg = '';
     idRemotoErro = {}; idRemotoSalvando = '';
+    // O reinício e o "salvo" também pertencem à máquina que saiu da tela: sem isto o sucesso (ou
+    // o erro) de reiniciar a anterior ficava à vista no detalhe da nova.
+    reiniciando = false; reinicioErro = ''; reinicioFeito = false; idSalvo = false;
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -374,21 +377,31 @@
   const reinicioPeloShell = (): ReinicioShell | undefined =>
     (window as { hangar?: { reiniciarServico?: ReinicioShell } }).hangar?.reiniciarServico;
   // Só faz sentido no computador que RODA o serviço: o systemd do shell é o desta máquina, e
-  // mandar reiniciar daqui um servidor remoto reiniciaria o errado.
-  const podeReiniciarPorFora = $derived(!apiTarget && !!reinicioPeloShell());
+  // mandar reiniciar daqui um servidor remoto reiniciaria o errado — o daqui, que está de pé.
+  // "Servidor ativo" NÃO basta: o ativo pode ser a máquina de outro canto, alcançada por
+  // Tailscale. A prova de que é o daqui é o endereço ser loopback.
+  const EH_LOOPBACK = /^(localhost|127(\.\d+){3}|\[?::1\]?)$/i;
+  const alvoEhLocal = $derived.by(() => {
+    try { return EH_LOOPBACK.test(new URL(resolvedServer?.baseUrl ?? window.location.origin).hostname); }
+    catch { return false; }
+  });
+  const podeReiniciarPorFora = $derived(alvoEhLocal && !!reinicioPeloShell());
 
   async function reiniciarServico() {
     if (reiniciando) return;
+    const meu = geracao;   // resposta tardia não escreve na máquina que entrou na tela depois
     reiniciando = true;
     reinicioErro = '';
     reinicioFeito = false;
     try {
       await reiniciarServidorEm(apiTarget);
+      if (meu !== geracao) return;
       reinicioFeito = true;
     } catch (e) {
+      if (meu !== geracao) return;
       reinicioErro = msgErro(e);
     } finally {
-      reiniciando = false;
+      if (meu === geracao) reiniciando = false;
     }
   }
 
@@ -396,19 +409,22 @@
   async function reiniciarPorFora() {
     const ponte = reinicioPeloShell();
     if (!ponte || reiniciando) return;
+    const meu = geracao;
     reiniciando = true;
     reinicioErro = '';
     reinicioFeito = false;
     try {
       const r = await ponte();
+      if (meu !== geracao) return;
       if (r.ok) reinicioFeito = true;
       else reinicioErro = r.motivo === 'sem_systemd' || r.motivo === 'plataforma'
         ? m.maquinas_servico_sem_systemd()
         : `${m.maquinas_servico_shell_falhou()} ${r.detalhe ?? ''}`.trim();
     } catch (e) {
+      if (meu !== geracao) return;
       reinicioErro = msgErro(e);
     } finally {
-      reiniciando = false;
+      if (meu === geracao) reiniciando = false;
     }
   }
 
