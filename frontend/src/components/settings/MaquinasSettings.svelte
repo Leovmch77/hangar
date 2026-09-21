@@ -555,10 +555,6 @@
     return { texto: `${NOME_TIPO[melhor.tipo]()} · ${melhor.tempo_ms ?? 0} ms`, farol: 'ok' as const };
   });
   const esteNoAparelho = $derived(!!resolvedServer && servers.some((s) => s.id === resolvedServer.id));
-  // Remover a ÚNICA máquina cadastrada é logout disfarçado: a lista fica vazia e o app volta pro
-  // login. Quem quer isso tem o "Sair" na própria tela, com o nome certo — aqui o botão só oferece
-  // um caminho que ninguém escolheria sabendo o que faz.
-  const podeRemoverEste = $derived(esteNoAparelho && servers.length > 1);
 
   let removerPeerId = $state<string | null>(null);
   function removerPeerConfirmado() { const id = removerPeerId; removerPeerId = null; if (id) void removerPeer(id); }
@@ -708,9 +704,9 @@
     {/snippet}
   </AcessoSettings>
 
-  <!-- Tirar o servidor escolhido deste aparelho é a mesma remoção de sempre. Com uma máquina só
-       na lista o botão não aparece: ali ele é o "Sair" com outro nome. -->
-  {#if podeRemoverEste}
+  <!-- Tirar o servidor escolhido deste aparelho é a mesma remoção de sempre; sendo o último, o
+       diálogo avisa que isso desloga — e é o ÚNICO caminho pra tirar a última máquina. -->
+  {#if esteNoAparelho}
     <div class="sv-rodape">
       <button type="button" class="sv-remover-este" onclick={() => abrirRemocao(resolvedServer?.id ?? '')} disabled={logoutInFlight}>{m.servidores_remover_deste_aparelho()}</button>
     </div>
