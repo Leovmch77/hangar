@@ -167,10 +167,15 @@
   let piso = 0;                // quanto do `extra` a TELA precisa pra ter rolagem (ver preencherTela)
 
   let lastTop = 0;
+  // Janela em que um evento de scroll conta como GESTO da pessoa. Roda do dedo, toque, teclado e
+  // barra de rolagem passam por aqui; escrita de `scrollTop` e crescimento do conteúdo, não. É o
+  // que separa "subi pra ler o histórico" (solta) de "a resposta cresceu" (continua acompanhando).
+  let gestoAte = 0;
+  function marcarGesto() { gestoAte = performance.now() + 400; }
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
-    atBottom = nextAtBottom(listEl.scrollTop, lastTop, gap);
+    atBottom = nextAtBottom(atBottom, listEl.scrollTop, lastTop, gap, performance.now() < gestoAte);
     lastTop = listEl.scrollTop;
     scrolledUp = gap > listEl.clientHeight; // mais de uma tela do fim = "muito pra cima" -> botao
     // Perto do topo + ainda ha eventos antigos fora da janela -> revela a proxima pagina.
@@ -476,6 +481,10 @@
   style="--dock-h: {dockH}px"
   bind:this={listEl}
   onscroll={onScroll}
+  onwheel={marcarGesto}
+  ontouchmove={marcarGesto}
+  onpointerdown={marcarGesto}
+  onkeydown={marcarGesto}
   aria-label={m.msg_aria_mensagens()}
 >
   <div class="messages-inner">

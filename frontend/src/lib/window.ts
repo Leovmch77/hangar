@@ -41,12 +41,14 @@ export function mostrarIrPraoFim(scrolledUp: boolean, windowEnd: number, len: nu
  * conteúdo encolhe com a lista colada: ali o navegador prende no fim e a folga segue 0 (mais o
  * meio pixel do arredondamento). O corte fica em 1 e não mais alto porque a rolagem suave começa
  * em passos de 1 a 3px, e o primeiro deles já tem que soltar.
- * A mais de 64px do fim nunca é "no fim", em qualquer direção: é a regra que já existia, e a
- * janela congelada de quem lê histórico depende dela. Reencostar é chegar a menos de 64px do fim
- * descendo ou parado. */
-export function nextAtBottom(top: number, lastTop: number, gap: number): boolean {
-  if (gap >= 64) return false;
-  return !(top < lastTop - 1 && gap > 1);
+ * Quem solta a lista é o GESTO da pessoa, não a distância: a resposta em streaming abre a folga
+ * sozinha (um resultado de ferramenta longo passa de 64px entre um quadro e outro), e soltar por
+ * distância fazia a lista parar de acompanhar justo quem estava no fim lendo a resposta nascer.
+ * Sem gesto, a folga só REENCOSTA (chegou a menos de 64px do fim), nunca solta. */
+export function nextAtBottom(atBottom: boolean, top: number, lastTop: number, gap: number, gesto: boolean): boolean {
+  if (gesto && top < lastTop - 1 && gap > 1) return false;   // subiu de verdade
+  if (gap < 64) return true;                                  // encostou no fim
+  return gesto ? false : atBottom;                            // longe: só o gesto solta
 }
 
 /** A janela cabe INTEIRA na tela e ainda ha evento antigo fora dela?
