@@ -4,7 +4,7 @@
   import { checkPeer, descobrirMaquinas, getIdentificador, setIdentificador, listarPeers, removerPeerDoisLados,
            type MaquinaDescoberta, type PeerView } from '../../lib/peers';
   import { registrarPeerDoisLados, type LadoState } from '../../lib/registrarPeerDoisLados';
-  import { unirMaquinas, type LinhaMaquina } from '../../lib/maquinas';
+  import { unirMaquinas, type LinhaMaquina, type MotivoSemId } from '../../lib/maquinas';
   import { sessionsStore } from '../../lib/sessionsStore.svelte';
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import ModalDialog from '../ModalDialog.svelte';
@@ -159,10 +159,13 @@
   // máquina nova (ou token trocado) volta a ser perguntada.
   const cacheIds = new Map<string, string | null>();
   let idsNavegador = $state<Record<string, string | null>>({});   // Server.id → identificador
+  // POR QUE faltou, quando faltou. "Não responde" e "responde sem identificador" pedem ações
+  // opostas (esperar a máquina voltar / preencher um campo) e saíam na mesma frase ambígua.
+  let motivosId = $state<Record<string, MotivoSemId>>({});
   let idsCarregando = $state(false);
   let emEdicao = $state<Server | null>(null);        // ServerEditSheet
   let removerLadoDeLaFalhou = $state(false);         // aviso depois de remover peer
-  const linhas = $derived(unirMaquinas(servers, idsNavegador, peers, resolvedServer?.id ?? null));
+  const linhas = $derived(unirMaquinas(servers, idsNavegador, peers, resolvedServer?.id ?? null, motivosId));
 
   // Geração da carga em voo: a resposta de um alvo que a aba já não mostra não escreve na
   // tela. Sem isto, trocar de servidor com uma chamada pendente deixa o dado do anterior
@@ -178,6 +181,7 @@
     corrigeId = null; corrigeUrl = '';
     removerLadoDeLaFalhou = false;
     emEdicao = null; avisoRemocao = ''; logoutMsg = '';
+    idRemotoErro = {}; idRemotoSalvando = '';
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -241,15 +245,55 @@
     idsCarregando = true;
     const pares = await Promise.all(servers.map(async (s) => {
       const k = `${s.id}:${s.token}`;
-      if (cacheIds.has(k)) return [s.id, cacheIds.get(k)!] as const;
+      if (cacheIds.has(k)) return [s.id, cacheIds.get(k)!, 'vazio' as MotivoSemId] as const;
       let id: string | null = null;
-      try { id = (await getIdentificador(s)).identificador || null; } catch { id = null; }
+      let motivo: MotivoSemId = 'vazio';
+      try {
+        id = (await getIdentificador(s)).identificador || null;
+      } catch (e) {
+        // 401 é o token deste aparelho recusado, não a máquina fora do ar — a mesma distinção que
+        // a volta do peer já faz. Qualquer outra falha é rede: ela não respondeu.
+        id = null;
+        motivo = (e as Error & { status?: number }).status === 401 ? 'token' : 'sem_resposta';
+      }
       if (id) cacheIds.set(k, id);   // só sucesso entra no cache — fracasso não trava sem identificador pra sempre
-      return [s.id, id] as const;
+      return [s.id, id, motivo] as const;
     }));
     if (meu !== geracao) return;
-    idsNavegador = Object.fromEntries(pares);
+    idsNavegador = Object.fromEntries(pares.map(([id, valor]) => [id, valor]));
+    motivosId = Object.fromEntries(pares.map(([id, , motivo]) => [id, motivo]));
     idsCarregando = false;
+  }
+
+  // Identificador de OUTRA máquina, gravado daqui (PUT no .env dela). Sem isto, o aviso "está sem
+  // identificador" não tinha campo nenhum: só trocando o servidor da tela inteira. O erro é POR
+  // linha — uma gravação recusada não pode apagar o erro de outra.
+  let idRemotoSalvando = $state('');   // Server.id em voo ('' = nenhum)
+  let idRemotoErro = $state<Record<string, string>>({});
+  async function salvarIdentificadorRemoto(linha: LinhaMaquina, valor: string) {
+    const alvo = linha.navegador;
+    if (!alvo || idRemotoSalvando) return;
+    if (valor && !ID_OK.test(valor)) { idRemotoErro = { ...idRemotoErro, [alvo.id]: ID_DICA() }; return; }
+    const meu = geracao;
+    idRemotoSalvando = alvo.id;
+    idRemotoErro = { ...idRemotoErro, [alvo.id]: '' };
+    try {
+      const r = await setIdentificador(alvo, valor);
+      if (meu !== geracao) return;
+      // O cache é por (servidor, token): sem invalidar, a tela seguiria mostrando o nome antigo
+      // até o token mudar. E o identificador é a chave que casa navegador com peer, então a
+      // medição dos dois lados roda de novo com o nome novo.
+      cacheIds.delete(`${alvo.id}:${alvo.token}`);
+      if (r.identificador) cacheIds.set(`${alvo.id}:${alvo.token}`, r.identificador);
+      idsNavegador = { ...idsNavegador, [alvo.id]: r.identificador || null };
+      motivosId = { ...motivosId, [alvo.id]: 'vazio' };
+      await checarLista(meu);
+    } catch (e) {
+      if (meu !== geracao) return;
+      idRemotoErro = { ...idRemotoErro, [alvo.id]: msgErro(e) };
+    } finally {
+      if (meu === geracao) idRemotoSalvando = '';
+    }
   }
 
   // Mede os dois lados de cada peer: a IDA (este servidor -> peer) e a VOLTA pelo endereço que o
@@ -272,7 +316,7 @@
           .then((deLa) => {
             const eu = deLa.find((x) => x.id === meuId);
             if (!eu) return { lado: 'volta', estado: 'nao_configurado', motivo: 'registro' } as LadoState;
-            return checkPeer(nav, eu.base_url, meuId).then((r) => ({ lado: 'volta', ...r, url: eu.base_url }) as LadoState & { url: string });
+            return checkPeer(nav, eu.base_url, meuId).then((r) => ({ lado: 'volta', ...r, url: eu.base_url }) as LadoState);
           })
           .catch((e) => {
             // 401 é o token DESTE aparelho para aquela máquina recusado, não a máquina fora do ar —
@@ -286,9 +330,11 @@
       estados[p.id] = { lados: [ida, volta], ok: ida.estado === 'ok' && volta.estado === 'ok' };
       // Decisão 5 da spec: a correção de endereço abre também na montagem, quando a volta falhou
       // de verdade e este navegador tem o token para re-registrar.
-      if (volta.estado === 'falhou' && linha?.navegador && !corrigeId) {
+      // `estranho` entra junto de `falhou`: o endereço guardado lá responde como OUTRA máquina,
+      // e é exatamente o caso que este bloco conserta — sem isto ele só dizia "só de ida".
+      if ((volta.estado === 'falhou' || volta.estado === 'estranho') && linha?.navegador && !corrigeId) {
         corrigeId = p.id;
-        corrigeUrl = (volta as { url?: string }).url ?? p.base_url;
+        corrigeUrl = volta.url ?? p.base_url;
       }
     }));
   }
@@ -339,7 +385,8 @@
       if (meu !== geracao) return;
       peers = lista;
       estados[r.id] = { lados: r.lados, ok: r.ok };
-      if (!r.ok) { corrigeId = r.id; corrigeUrl = r.base_url; }
+      // O bloco edita o endereço DESTA máquina (o que a volta bate), não o do peer.
+      if (!r.ok) { corrigeId = r.id; corrigeUrl = r.meu_endereco; }
     } catch (e) {
       if (meu !== geracao) return;
       estados[id] = { lados: [], ok: false };   // sai do "testando": a listagem que falhou não deixa estado preso
@@ -347,16 +394,19 @@
     }
   }
 
-  // "Testar de novo": re-registra e re-testa o peer no ENDEREÇO DIGITADO (o bloco de correção
-  // existe justamente para testar um endereço novo). Só fecha quando o par fecha; senão o estado
-  // novo fica à vista. O token vem do NAVEGADOR: só há bloco de correção em linha com navegador.
+  // "Testar de novo": re-registra e re-testa com o ENDEREÇO DIGITADO no lugar certo. A pergunta
+  // do bloco é "qual endereço o X deve usar para chegar aqui?", então o que se digita é o
+  // endereço DESTA máquina, para gravar LÁ — era passado como base_url do PEER, e o botão mexia
+  // no lado oposto ao que a frase promete. Só fecha quando o par fecha; senão o estado novo fica
+  // à vista. O token vem do NAVEGADOR: só há bloco de correção em linha com navegador.
   async function testarDeNovo(linha: LinhaMaquina) {
     const meu = geracao;
     const url = corrigeUrl.trim();
     if (!/^https?:\/\//.test(url)) { peersErro = m.url_invalida(); return; }
     peersErro = '';
     try {
-      const r = await registrarPeerDoisLados(apiTarget, { id: linha.identificador!, base_url: url, token: linha.navegador!.token });
+      const alvo = { id: linha.identificador!, base_url: linha.peer?.base_url ?? linha.navegador!.baseUrl, token: linha.navegador!.token };
+      const r = await registrarPeerDoisLados(apiTarget, alvo, url);
       if (meu !== geracao) return;
       const lista = await listarPeers(apiTarget);
       if (meu !== geracao) return;
@@ -594,6 +644,8 @@
   carregando={idsCarregando || peersCarregando}
   corrige={corrigeId ? { id: corrigeId, url: corrigeUrl } : null}
   {onAcompanhar} {onFalar}
+  idSalvando={idRemotoSalvando} idErro={idRemotoErro}
+  onSalvarIdentificador={(l, v) => void salvarIdentificadorRemoto(l, v)}
   onEditar={(l) => (emEdicao = l.navegador)}
   onCorrige={(u) => { if (u === null) fecharCorrige(); else corrigeUrl = u; }}
   onTestarDeNovo={testarDeNovo}

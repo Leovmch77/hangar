@@ -13,6 +13,12 @@ export interface LadoState {
   lado: 'ida' | 'volta';
   estado: 'ok' | 'estranho' | 'falhou' | 'recusou' | 'nao_configurado';
   motivo?: string;
+  // Quem atendeu no endereço testado. Só interessa no `estranho`: é o nome da máquina ERRADA,
+  // e sem ele a tela diz que algo está torto sem dizer o que atendeu.
+  identificador?: string;
+  // Endereço medido. Na volta é o que o PEER guardou desta máquina — não dá para deduzir da
+  // linha, e é justamente o que o bloco de correção conserta.
+  url?: string;
   tempo_ms?: number | null;
 }
 
@@ -24,6 +30,9 @@ export interface RegistroPeerResult {
   lados: LadoState[];
   // Endereço alternativo pedido: preenchido quando um lado falhou (o bloco de correção).
   endereco_alternativo?: string;
+  // O endereço do DONO gravado no peer — o que o bloco de correção edita. Devolvido porque pode
+  // não ser a URL que este navegador usa (ver `enderecoDoDono`).
+  meu_endereco: string;
 }
 
 /** Faz a gravação E o teste dos dois lados. `dono` é o servidor que a aba está editando;
@@ -31,6 +40,9 @@ export interface RegistroPeerResult {
 export async function registrarPeerDoisLados(
   dono: Server | null,
   alvo: { id: string; base_url: string; token: string },
+  // Endereço do DONO a gravar no peer. Vem preenchido do bloco de correção ("qual endereço o X
+  // deve usar para chegar aqui?"); vazio, é resolvido por `enderecoDoDono`.
+  meuEndereco = '',
 ): Promise<RegistroPeerResult> {
   // 1) Grava o peer no DONO (o lado que a aba edita): o vínculo local. `dono` null = modo
   //    global — o cliente `gravarPeer(null, …)` usa o servidor ATIVO (mesmo contrato do
@@ -46,6 +58,7 @@ export async function registrarPeerDoisLados(
       ok: false,
       id: alvo.id,
       base_url: alvo.base_url,
+      meu_endereco: meuEndereco || (dono?.baseUrl ?? getBaseUrl()),
       lados: [{ lado: 'ida', estado: 'falhou', motivo: String((e as Error)?.message ?? e) }],
     };
   }
@@ -53,8 +66,8 @@ export async function registrarPeerDoisLados(
   // 2) Resolve a identidade do DONO — o que o peer precisa guardar para chamar esta máquina
   //    de volta: o nome REAL do backend (CP_SERVER_ID), não o rótulo local do celular.
   const remoto: Server = { id: alvo.id, label: alvo.id, baseUrl: alvo.base_url, token: alvo.token };
-  const meuBase = dono?.baseUrl ?? getBaseUrl();
   const meuToken = dono?.token ?? getToken() ?? '';
+  const meuBase = meuEndereco || (await enderecoDoDono(dono));
   let meuId = '';
   try { meuId = (await getIdentificador(dono)).identificador ?? ''; } catch { meuId = ''; }
 
@@ -90,5 +103,40 @@ export async function registrarPeerDoisLados(
   }
 
   const ok = lados.every((l) => l.estado === 'ok');
-  return { ok, id: alvo.id, base_url: alvo.base_url, lados };
+  return { ok, id: alvo.id, base_url: alvo.base_url, meu_endereco: meuBase, lados };
+}
+
+const LOOPBACK = /^(localhost|127(\.\d+){3}|\[?::1\]?)$/i;
+
+function ehLoopback(url: string): boolean {
+  try { return LOOPBACK.test(new URL(url).hostname); } catch { return false; }
+}
+
+/** Endereço do DONO para o PEER guardar — o que a volta vai bater.
+ *
+ *  O padrão continua sendo a URL que este navegador usa: ela é a única medida de verdade que o
+ *  aparelho tem. A exceção é o loopback, e ela não é uma heurística: `http://127.0.0.1:8765`
+ *  gravado no peer aponta para o PRÓPRIO peer, então a volta bate nele mesmo, volta com o
+ *  identificador dele e o par nunca fecha — com o agravante de parecer registrado. Nesse caso
+ *  quem responde é o servidor, por `/api/alcance`: ele mediu por quais endereços chegam nele. */
+async function enderecoDoDono(dono: Server | null): Promise<string> {
+  const base = dono?.baseUrl ?? getBaseUrl();
+  if (!ehLoopback(base)) return base;
+  const token = dono?.token ?? getToken() ?? '';
+  try {
+    const res = await fetch(`${base}/api/alcance`, {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return base;
+    const alcance = (await res.json()) as { enderecos?: { tipo: string; url: string; estado: string; tempo_ms: number | null }[] };
+    const melhor = (alcance.enderecos ?? [])
+      .filter((e) => e.estado === 'ok' && e.tipo !== 'nesta_maquina' && !ehLoopback(e.url))
+      .sort((a, b) => (a.tempo_ms ?? 0) - (b.tempo_ms ?? 0))[0];
+    return melhor?.url ?? base;
+  } catch {
+    // Servidor sem a rota ou fora do ar: grava o que se sabe. A volta vira estado nomeado na
+    // tela — melhor que recusar o registro inteiro por causa de uma medição.
+    return base;
+  }
 }

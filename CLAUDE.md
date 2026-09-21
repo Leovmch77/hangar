@@ -308,6 +308,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   fonte que levou 429 espera 10 min antes de insistir.
 - **Redefinição guardada do Codex só vale com a janela de 7 dias em 100%.** O backend relê a cota
   antes de consumir, usa UUID idempotente por tentativa e força nova leitura após resultado definitivo.
+- **Registro de peer nunca grava um endereço loopback, e endereço torto tem frase própria.**
+  `127.0.0.1` gravado no outro lado aponta para ele mesmo: a volta bate nele, volta com o nome
+  dele e o par falha PARECENDO registrado. Loopback → o endereço sai de `/api/alcance` do dono.
+  `estranho` (atendeu OUTRA máquina) é tipo próprio antes do `parcial` e abre a correção; e
+  "sem identificador" separa token recusado, máquina fora do ar e nome vazio — este último com
+  campo no detalhe de qualquer servidor com token aqui.
 - **Servidor que não responde é marcado como DESLIGADO na primeira falha de rede, e só volta a ser
   procurado quando a pessoa mandar** — sem retomada por tempo, e a marca é gravada (o iOS recarrega
   o PWA sozinho e apagaria um contador em memória). Erro HTTP não conta: a máquina respondeu.
