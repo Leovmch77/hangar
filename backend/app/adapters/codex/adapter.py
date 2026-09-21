@@ -1313,8 +1313,11 @@ class CodexAdapter:
                 problem_updated = sess.get("turn_problem") != turn_problem
                 sess["turn_problem"] = turn_problem
             elif method == "turn/started" or response_started or \
+                    (current_turn and method == "item/started"
+                     and (params.get("item") or {}).get("type") != "userMessage") or \
                     (method == "turn/completed" and sess.get("turn_problem", ("",))[0] == "codex_sem_conexao"):
-                # Reconectou (a resposta chegou) ou o turno fechou sem erro: o aviso não vale mais.
+                # Reconectou (chegou resposta ou qualquer item novo, inclusive só ferramenta) ou o
+                # turno fechou sem erro: o aviso não vale mais.
                 problem_updated = sess.pop("turn_problem", None) is not None
             if method == "turn/started":
                 buf = ""  # novo turno -- zera pra nao vazar o texto do turno anterior

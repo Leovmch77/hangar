@@ -134,6 +134,15 @@ async def test_provedor_fora_do_ar_aparece_e_some_quando_a_resposta_chega(watchi
     assert (await asyncio.wait_for(anext(stream), 1)).problema is None
 
 
+async def test_reconectar_so_com_ferramenta_tambem_tira_o_aviso(watching):
+    _, queue, stream = watching
+    await queue.put(retrying())
+    assert (await asyncio.wait_for(anext(stream), 1)).problema == "codex_sem_conexao"
+    await queue.put({"method": "item/started", "params": {"threadId": "thread", "turnId": "turn",
+                                                          "item": {"type": "commandExecution", "id": "c1"}}})
+    assert (await asyncio.wait_for(anext(stream), 1)).problema is None
+
+
 async def test_turno_que_falha_fica_marcado_ate_o_proximo_turno(watching):
     _, queue, stream = watching
     await queue.put(retrying("unexpected status 501\n<html>"))

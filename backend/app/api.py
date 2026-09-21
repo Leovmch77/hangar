@@ -2224,6 +2224,12 @@ async def recarregar_sessao(name: str):
                 await codex.restart(name)
             except ValueError as exc:
                 raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal", str(exc)))
+            except Exception as exc:
+                # A sessão antiga já saiu da memória; o motivo fica em `problema` e o
+                # watch_sessions tenta de novo. Quem clicou precisa saber que não voltou.
+                _log.warning("codex: reiniciar falhou name=%s: %s", name, exc)
+                raise HTTPException(502, detail=erro("erro_codex_nao_reiniciou",
+                                                     f"o Codex não subiu de novo: {str(exc)[:200]}"))
         return {"ok": True}
     if info.provider != "claude" or not _headless(name):
         raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
