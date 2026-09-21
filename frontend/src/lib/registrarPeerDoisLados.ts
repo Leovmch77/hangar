@@ -8,6 +8,7 @@
 import type { Server } from './auth';
 import { getBaseUrl, getToken } from './auth';
 import { checkPeer, getIdentificador, gravarPeer } from './peers';
+import { alcanceDoServidor } from './alcance';
 
 export interface LadoState {
   lado: 'ida' | 'volta';
@@ -106,10 +107,22 @@ export async function registrarPeerDoisLados(
   return { ok, id: alvo.id, base_url: alvo.base_url, meu_endereco: meuBase, lados };
 }
 
-const LOOPBACK = /^(localhost|127(\.\d+){3}|\[?::1\]?)$/i;
+// `0.0.0.0` entra junto do loopback: gravado num peer ele também resolve para a máquina que leu o
+// endereço, e não para quem o escreveu.
+const LOOPBACK = /^(localhost|127(\.\d+){3}|0\.0\.0\.0|\[?::1\]?)$/i;
 
 function ehLoopback(url: string): boolean {
   try { return LOOPBACK.test(new URL(url).hostname); } catch { return false; }
+}
+
+// O peer guarda um endereço de API; `/api/alcance` devolve os endereços da TELA (porta do front,
+// que é `front_port or port`). Onde as duas diferem, o candidato aponta para o front e o peer bate
+// no Vite. Candidato sem porta é proxy (Tailscale/público) e serve os dois — esse passa.
+function serveDeApi(candidato: string, base: string): boolean {
+  try {
+    const c = new URL(candidato).port;
+    return !c || c === new URL(base).port;
+  } catch { return false; }
 }
 
 /** Endereço do DONO para o PEER guardar — o que a volta vai bater.
@@ -124,14 +137,9 @@ async function enderecoDoDono(dono: Server | null): Promise<string> {
   if (!ehLoopback(base)) return base;
   const token = dono?.token ?? getToken() ?? '';
   try {
-    const res = await fetch(`${base}/api/alcance`, {
-      signal: AbortSignal.timeout(8000),
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return base;
-    const alcance = (await res.json()) as { enderecos?: { tipo: string; url: string; estado: string; tempo_ms: number | null }[] };
-    const melhor = (alcance.enderecos ?? [])
-      .filter((e) => e.estado === 'ok' && e.tipo !== 'nesta_maquina' && !ehLoopback(e.url))
+    const alcance = await alcanceDoServidor(dono ?? { id: '', label: '', baseUrl: base, token });
+    const melhor = alcance.enderecos
+      .filter((e) => e.estado === 'ok' && e.tipo !== 'nesta_maquina' && !ehLoopback(e.url) && serveDeApi(e.url, base))
       .sort((a, b) => (a.tempo_ms ?? 0) - (b.tempo_ms ?? 0))[0];
     return melhor?.url ?? base;
   } catch {
