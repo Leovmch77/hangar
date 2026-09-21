@@ -1972,6 +1972,8 @@
   "criar_previa_erro": "Couldn't read this conversation — what's shown here may not be its content.",
   "criar_previa_fechar": "Close the conversation preview",
   "criar_retomar_acao": "Continue conversation",
+  "criar_retomar_em": "Continue in {conta}",
+  "criar_retomar_mover": "Move to {conta} and continue",
   "criar_nome_placeholder": "my-project",
   "criar_provider_aria": "Session provider",
   "criar_conta_aria": "Account",

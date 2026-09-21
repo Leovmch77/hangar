@@ -25,7 +25,8 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
-                 pensamento_pt, plugin_bridge, procinfo, quem_chama, tmux)
+                 pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
+                 uds_messaging)
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -90,7 +91,7 @@ from app import runner
 from app import projects
 from app import archive_providers
 from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
-                         list_conversations, list_folders, tail_events)
+                         list_conversations, list_folders, move_conversation, tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
 from app import pair
@@ -284,6 +285,10 @@ async def _lifespan(app: FastAPI):
     # abas os 40 acabam e a API inteira congela, sem erro e sem log. Watcher parado nao gasta CPU,
     # so o slot, entao subir o teto e barato.
     anyio.to_thread.current_default_thread_limiter().total_tokens = 200
+    # Inbox do socket nativo: é o endereço de resposta dos recados que o backend escreve nos
+    # sockets do Claude; sem ele o recibo de retenção/recusa não tem pra onde voltar.
+    if uds_messaging.INBOX.ligar(_ao_recibo_nativo):
+        _log.info("inbox nativo ligado em %s", uds_messaging.INBOX.path)
     # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
     # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
     # backend religa e recupera o que estava em aberto (turno, permissão pendente).
@@ -3039,6 +3044,75 @@ def _erro_texto(e) -> str:
     return e if isinstance(e, str) else (e.get("msg") if isinstance(e, dict) else str(e))
 
 
+# Recados escritos no socket nativo, por msg_id: (remetente, alvo, começo do texto). Só serve pro
+# recibo de retenção/recusa que o receptor devolve no inbox do backend (uds_messaging.INBOX).
+_RECADOS_NATIVOS: dict[str, tuple[str, str, str]] = {}
+
+
+def _sessao_claude_de(name: str) -> tuple[Optional[str], Optional[str]]:
+    """(session_id, config_dir) da sessão Claude `name`, com ou sem terminal; (None, None) se não der."""
+    meta = headless_sessions.load(name)
+    if meta:
+        return meta.get("session_id"), meta.get("config_dir")
+    from app import tmux as _tmux
+    cwd = next((p["cwd"] for p in _tmux.list_panes_active() if p["name"] == name), "")
+    jsonl, _ = registry.resolve_tracked(name, cwd)
+    if not jsonl:
+        return None, None
+    p = Path(jsonl)
+    return p.stem, str(p.parent.parent.parent)
+
+
+def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str]) -> str:
+    """`from-mode` do envelope nativo: a classe (bypass/prompting) do REMETENTE quando conhecida;
+    senão a do alvo, que é o que o caminho pelo tmux sempre fez (sem checagem nenhuma)."""
+    def _modo(n: str) -> str:
+        m = headless_sessions.load(n)
+        if m and m.get("permission_mode"):
+            return str(m["permission_mode"])
+        return permission_mode.ultimo_nao_plan(n, padrao="")
+    modo = _modo(remetente) or _modo(alvo) or permission_mode.modo_da_conta(cfg_alvo)
+    return "bypass" if "bypass" in modo.lower() else "prompting"
+
+
+def _enviar_nativo(name: str, text: str) -> Optional[str]:
+    """msg_id se o recado foi ESCRITO no socket nativo do Claude de `name`; None = não é recado
+    ([de:/grupo:/painel:]), sessão sem socket, ou o socket não aceitou — quem chama cai pro
+    próximo degrau (plugin, tmux, fila). Só recado vai por aqui: a fala da pessoa continua
+    entrando como prompt dela, nunca embrulhada como mensagem de outra sessão."""
+    remetente, corpo = uds_messaging.separar_prefixo(text)
+    if remetente is None:
+        return None
+    try:
+        sid, cfg = _sessao_claude_de(name)
+        sock = uds_messaging.socket_da_sessao(sid, cfg) if sid else None
+        if not sock:
+            return None
+        mid = uds_messaging.enviar(sock, text, remetente, _classe_modo(remetente, name, cfg))
+    except Exception:                                # noqa: BLE001
+        _log.warning("socket nativo falhou name=%s; caindo pro caminho de sempre", name, exc_info=True)
+        return None
+    _RECADOS_NATIVOS[mid] = (remetente, name, corpo[:80])
+    if len(_RECADOS_NATIVOS) > 500:
+        for k in list(_RECADOS_NATIVOS)[:100]:
+            _RECADOS_NATIVOS.pop(k, None)
+    return mid
+
+
+def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
+    """Recibo `peer_message_status` do receptor (retido/recusado): avisa a sessão remetente pelo
+    caminho normal. Roda na thread do inbox; o envio vai pro loop do servidor."""
+    info = _RECADOS_NATIVOS.pop(mid, None)
+    diag.registrar("recado.nativo.recibo", "aviso", sessao=info[1] if info else None,
+                   detalhe=f"{estado} {detalhe}".strip())
+    if not info or _loop_servidor is None or estado in ("delivered", "released", ""):
+        return
+    remetente, alvo, inicio = info
+    aviso = (f"[painel: hangar] Seu recado para {alvo} ({inicio!r}) foi {estado}"
+             f"{': ' + detalhe if detalhe else ''}. Ele não chegou ao modelo de lá.")
+    asyncio.run_coroutine_threadsafe(_enviar(remetente, aviso), _loop_servidor)
+
+
 def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     """Sequencia UNICA de envio de prompt: send_prompt + registro na fila duravel + confirmacao/drain.
     Usada pelo /input (uma sessao) e pelo /broadcast (loop por N sessoes) — o broadcast NAO reimplementa
@@ -3115,14 +3189,19 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     # meta, e depende do menu que só existe na TUI. Ninguém ouvindo = pane, como sempre.
     # `deliverable` antes de tudo: o rascunho entra pela API do engine, mas o Enter é tecla, e
     # tecla em overlay navega o menu em vez de submeter. Mesmo gate do caminho de sempre.
-    pelo_plugin = (provider == "claude" and not stripped.startswith("/")
+    # Escada de entrega, um degrau só depois que o anterior não deu: socket nativo do Claude
+    # (recado de sessão-irmã, entra no meio do turno) → plugin sem tecla → tmux → fila.
+    nativo = _enviar_nativo(name, text) if provider == "claude" and not stripped.startswith("/") else None
+    if nativo:
+        _log.info("SEND name=%s pelo socket nativo msg_id=%s text=%r", name, nativo, text[:80])
+    pelo_plugin = (not nativo and provider == "claude" and not stripped.startswith("/")
                    and plugin_bridge.aguardando(name)
                    and terminal_input.deliverable(name)
                    and plugin_bridge.entregar(name, text))
     if pelo_plugin:
         _log.info("SEND name=%s pelo plugin (sem tecla) text=%r", name, text[:80])
     try:
-        result = "sent" if pelo_plugin else terminal.send_prompt(
+        result = "sent" if (nativo or pelo_plugin) else terminal.send_prompt(
             name, text, provider, pane_id=pane_id,
             **({"msg_id": entry["id"]} if entry is not None else {}))
         # DIAG: correlaciona o send com o jsonl pra onde ESTE nome resolve AGORA -> pega o cross-wire
@@ -3227,7 +3306,7 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
             # entrada (e sem SSE aberto nao havia gatilho nenhum). O drain re-checa deliverable.
             threading.Thread(target=_drain_session, args=(name,), daemon=True).start()
     # delivered: digitou AGORA na TUI ("sent"); False = ficou na fila durável (sessão ocupada/overlay).
-    return {"ok": True, "error": None, "delivered": result == "sent",
+    return {"ok": True, "error": None, "delivered": result == "sent", "native": bool(nativo),
             **({"entry_id": entry["id"]} if track_entry and entry is not None else {})}
 
 
@@ -3290,6 +3369,21 @@ async def _send_one_headless(name: str, text: str, *, track_entry: bool = False)
     async with adapter.delivery_lock(name):
         if not await asyncio.to_thread(_session_exists, name):
             return {"ok": False, "error": erro("erro_sessao_inexistente", "sessao nao encontrada")}
+        # Recado de sessão-irmã vai pelo socket nativo do `claude` filho do cano quando ele existe
+        # (entra no meio do turno); a fila registra como entregue pra bolha e dedup.
+        if not text.lstrip().startswith("/") and (mid := await asyncio.to_thread(_enviar_nativo, name, text)):
+            _log.info("SEND name=%s pelo socket nativo (sem terminal) msg_id=%s text=%r", name, mid, text[:80])
+            try:
+                q = PromptQueue(name)
+                entry = await _send_thread(q.append, text, delivered=True)
+                # Confirmada na hora: o CLI grava o recado no transcript assim que lê o socket, e
+                # sem o carimbo a entrada da fila ficava em dobro com a linha do transcript até o
+                # reconcile do idle (medido: bolha duplicada na sessão sem terminal).
+                await _send_thread(q.confirm_delivered, lambda r: r.get("id") == entry["id"])
+            except OSError:
+                _log.exception("append na fila falhou (recado já no socket) name=%s", name)
+                return {"ok": True, "error": None, "delivered": True, "native": True}
+            return {"ok": True, "error": None, "delivered": True, "native": True, "entry_id": entry["id"]}
         res = await _send_one_codex_locked(name, text, track_entry=track_entry, chave=CLAUDE_HEADLESS)
     if res.get("ok") and not res.get("delivered"):
         # Parada: o prompt já está na fila e a resposta sai agora; a sessão sobe e entrega depois.
@@ -3434,7 +3528,9 @@ async def input_prompt(name: str, body: InputBody):
             except OSError:
                 _log.exception("recibo ilegivel apos orientacao name=%s entry=%s steered=%s", name, entry_id, steered)
     # A orientação confirmada também conta como entrega, sem redigitar o recado na TUI.
-    return {"ok": True, "delivered": res.get("delivered", False) or steered, "steered": steered}
+    # `native` = escrito no socket do Claude do destino: entra no meio do turno dele, sem tecla.
+    return {"ok": True, "delivered": res.get("delivered", False) or steered, "steered": steered,
+            "native": bool(res.get("native"))}
 
 
 @app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth)])
@@ -3791,15 +3887,12 @@ async def group_message(name: str, body: GroupMsgBody):
                                              f"mais de {_GROUP_MAX_NA_JANELA} avisos de grupo em "
                                              f"{_GROUP_JANELA_S}s — parece loop; espere ou responda 1:1",
                                              max=_GROUP_MAX_NA_JANELA, janela=_GROUP_JANELA_S))
-    from app.registry import inbox_socket_of
+    # `pulados` fica vazio de propósito: o backend entrega a cada membro pela escada do _send_one
+    # (socket nativo primeiro); nunca devolve o trabalho pro modelo fazer por SendMessage.
     pulados: list[str] = []
-    if body.remetente_nativo and not body.forcar_tmux:
-        for p in membros:
-            if not peers.is_remote(p) and await asyncio.to_thread(inbox_socket_of, p):
-                pulados.append(p)
     text = f"[grupo: {name}] {body.text}"
     results: dict[str, dict] = {}
-    for p in [x for x in membros if x not in pulados]:
+    for p in membros:
         if not await _send_thread(_session_exists, p):
             results[p] = {"ok": False, "error": erro("erro_sessao_inexistente", "sessão não encontrada"), "delivered": False}
             continue
@@ -6089,8 +6182,9 @@ class ResumeArchivedBody(_StrictBody):
     # /proc pra descobrir o motor de entao (ver registry._engine_of); quem retoma escolhe de novo.
     # Sem escolha, volta na conta Anthropic (comportamento de hoje).
     engine: str | None = None
-    # A CONTA dona do transcript. Sem isto o resume nascia sempre na conta padrao, e um `claude
-    # --resume <uuid>` de outra conta morre na hora com "No conversation found with session ID".
+    # A CONTA em que a conversa continua. Omitida, e a dona do transcript (descoberta no disco). Outra
+    # conta: o transcript MUDA de conta antes do `--resume`, porque rodado na conta errada ele morre
+    # na hora com "No conversation found with session ID".
     config_dir: str | None = None
     # Agente dono da conversa. Pi e Kimi retomam com o comando DELES (`pi --session-id`,
     # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
@@ -6106,7 +6200,6 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
     # uuid EXISTENTE (nao um novo transcript). Nome derivado do basename do cwd, igual ao
     # CreateSessionSheet do front; colisao suffixa -2/-3... (mesmo esquema, do lado do backend pq aqui
     # nao ha form pro usuario escolher nome).
-    from app import tmux
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     if body.provider != "claude" and body.provider not in archive_providers.PROVIDERS:
@@ -6126,11 +6219,25 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
     # ele quem devolve o 400/404 -- duplicar a recusa so daria duas mensagens pro mesmo caso.
     # So o Claude tem conta: Pi e Kimi guardam transcript fora do config dir.
     cfg = body.config_dir
-    if cfg is None and body.provider == "claude":
+    # Conta pedida diferente da dona: a conversa MUDA de conta, mas so no fim, depois de toda
+    # recusa possivel -- mover e depois negar deixaria a conversa fora do lugar por um 409.
+    # `mover` guarda a conta de origem (o "None" da conta do processo tambem e origem valida).
+    mover: tuple[str | None] | None = None
+    if body.provider == "claude":
         try:
-            cfg = conta_de(project, session_id)
+            dona = conta_de(project, session_id)
+            if cfg is None:
+                cfg = dona
+            elif dona != cfg:
+                # Conversa ABERTA nao muda de conta: o processo dela ainda escreve no arquivo, e o
+                # rename deixaria ele gravando num inode que a lista nao acha mais.
+                origem_jsonl = os.path.realpath(str(archive_jsonl(project, session_id, dona)))
+                if any(s.jsonl and os.path.realpath(s.jsonl) == origem_jsonl for s in registry.list()):
+                    raise HTTPException(409, detail=erro("erro_conversa_viva",
+                                                         "conversa aberta nao muda de conta"))
+                mover = (dona,)
         except (ValueError, FileNotFoundError):
-            cfg = None
+            pass
     origem_codex_account = body.codex_account
     try:
         if body.provider == "codex":
@@ -6147,7 +6254,7 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             origem_codex_account = owner.id
             cwd = archive_cwd(project, session_id, cfg, body.provider, origem_codex_account)
         else:
-            cwd = archive_cwd(project, session_id, cfg, body.provider)
+            cwd = archive_cwd(project, session_id, mover[0] if mover else cfg, body.provider)
     except codex_accounts.AccountError as e:
         raise _erro_conta_codex(e) from None
     except ValueError:
@@ -6160,18 +6267,26 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
     base = sanitize_session_name(Path(cwd).name) or "sessao"
     name, i = base, 2
-    # As MESMAS duas fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um
-    # nome ja usado por uma sessao Codex viva passava por aqui e o conflito estourava la dentro,
-    # como um 409 com a mensagem de outro assunto.
-    while tmux.has_session(name) or codex_sessions.exists(name):
+    # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
+    # ja usado por uma sessao Codex ou sem terminal passava por aqui e o conflito estourava la
+    # dentro, como um 409 com a mensagem de outro assunto.
+    while _nome_ocupado(name):
         name = f"{base}-{i}"
         i += 1
+    if mover:
+        try:
+            move_conversation(project, session_id, cfg)
+        except FileExistsError:
+            raise HTTPException(409, detail=erro("erro_conversa_ja_na_conta",
+                                                 "a conta destino ja tem esta conversa"))
     try:
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
         return registry.create(name, cwd, config_dir=cfg, provider=body.provider,
                                resume_session_id=session_id, engine=body.engine, **extras)
     except ValueError as e:
+        if mover:
+            move_conversation(project, session_id, mover[0])
         raise HTTPException(409, str(e))
 
 

@@ -121,12 +121,10 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
         except peers.PeerError as e:
             raise ToolError(str(e)) from e
         return {"alvo": alvo, **(resp or {})}
-    if not tmux:
-        uds = (await api.peer_address(alvo)).get("uds")
-        if uds:
-            raise ToolError(f"recusado: '{alvo}' é sessão Claude desta máquina e o caminho nativo "
-                             "alcança os dois lados. Use SendMessage (o alvo aparece no ListAgents); "
-                             "se não aparecer, repita com tmux=true.")
+    # `tmux` fica aceito por compatibilidade: o backend já escolhe o transporte (socket nativo,
+    # plugin, tmux, fila) e nunca devolve o envio pro modelo fazer por outra ferramenta.
+    # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro.
+    texto = texto.removeprefix(f"[de: {eu}]").lstrip()
     try:
         resp = await api.input_prompt(alvo, api.InputBody(text=f"[de: {eu}] {texto}", steer=True))
     except HTTPException as e:

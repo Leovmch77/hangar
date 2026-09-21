@@ -16,7 +16,7 @@ from watchfiles import awatch
 from app import atomico
 from app.config import settings
 from app.models import ChatEvent, dumps_safe, scrub_surrogates
-from app.transcript import parse_obj
+from app.transcript import RewriteFilter, parse_obj
 
 _log = logging.getLogger("hangar.pqueue")
 
@@ -1045,6 +1045,8 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
             return  # sessao nova: jsonl ainda nao existe -> historico vazio (limpo), nao 500
         stream = _pi_stream() if _pi_stream else None
         parse = stream.feed_events if stream else _parse
+        # Reescrita do `--resume` (ver transcript.RewriteFilter): so o Claude regrava o jsonl.
+        reescrita = RewriteFilter() if provider == "claude" else None
 
         barrados: set[str] = set()
 
@@ -1073,6 +1075,8 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
                 try:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
+                    continue
+                if reescrita is not None and not reescrita.keep(obj):
                     continue
                 evs = parse(obj)
                 # ts ANTES do `continue`: com o parser do Pi a 1a linha util e um user_msg que fica

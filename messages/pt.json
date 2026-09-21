@@ -1972,6 +1972,8 @@
   "criar_previa_erro": "Não consegui ler esta conversa — o que aparece aqui pode não ser o conteúdo dela.",
   "criar_previa_fechar": "Fechar a leitura da conversa",
   "criar_retomar_acao": "Continuar conversa",
+  "criar_retomar_em": "Continuar em {conta}",
+  "criar_retomar_mover": "Mover para {conta} e continuar",
   "criar_nome_placeholder": "meu-projeto",
   "criar_provider_aria": "Provider da sessão",
   "criar_conta_aria": "Conta",

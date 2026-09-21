@@ -686,6 +686,22 @@
   let querRetomar = $state(false);
   const conversaAlvo = $derived(
     querRetomar ? retomaveis.find((c) => c.session_id === conversaEscolhida) ?? null : null);
+  // Escolher a conversa leva o seletor de conta pra conta dona dela: e o proprio seletor que diz
+  // "em qual conta continuar". Trocar a conta DEPOIS disso vira mover (o botao avisa).
+  function escolherConversa(c: ArchiveEntry) {
+    if (conversaEscolhida === c.session_id) { conversaEscolhida = ''; return; }
+    conversaEscolhida = c.session_id;
+    if (c.provider === 'claude' && c.config_dir && c.config_dir !== selectedConfig
+        && configs.some((k) => k.path === c.config_dir)) {
+      selectedConfig = c.config_dir;
+      carregarModelos();
+    }
+  }
+  const contaDaEscolhida = $derived(
+    conversaAlvo?.provider === 'claude' ? conversaAlvo.conta || null : null);
+  const vaiMover = $derived(
+    !!conversaAlvo && conversaAlvo.provider === 'claude' && !!conversaAlvo.config_dir
+    && !!selectedConfig && conversaAlvo.config_dir !== selectedConfig);
 
   let diferencaAberta = $state(false);
   let maisAberto = $state(false);
@@ -723,7 +739,10 @@
     : m.criar_subagente_padrao());
 
   $effect(() => {
-    const cwd = picked, cfg = selectedConfig, prov = provider, account = codexAccount, server = codexServer;
+    // `selectedConfig` fica de fora de proposito: a lista vem de TODAS as contas (a conversa que
+    // se procura pode estar em qualquer uma), e escolher uma conversa muda a conta selecionada —
+    // ler a conta aqui faria o effect rodar de novo e desfazer a escolha recem-feita.
+    const cwd = picked, prov = provider, account = codexAccount, server = codexServer;
     void targetServer;   // apiFetch le o servidor ativo na hora: trocar de alvo re-busca
     const seq = ++retSeq;
     // A escolha e da pasta/conta ANTERIOR; carrega-la adiante retomaria outra conversa.
@@ -737,7 +756,7 @@
       return;
     }
     (prov === 'codex' ? getArchivePorCwd(cwd, null, prov, account, server)
-      : getArchivePorCwd(cwd, prov === 'claude' ? cfg : null, prov))
+      : getArchivePorCwd(cwd, null, prov))
       // Conversa ABERTA sai da lista: retomar nao se aplica a ela, e como sao as mais recentes
       // elas ocupariam o topo empurrando pra baixo justamente as que da pra continuar. Quem quer
       // uma sessao viva clica nela na barra lateral.
@@ -1274,13 +1293,22 @@
           {#if querRetomar}
             <!-- Caixa de altura fixa que rola: a lista inteira aberta empurrava modelo, esforco e
                  permissao pra fora da tela. -->
-            <div class="conversas">
+            <!-- Lista emoldurada com divisorias, nao cards soltos: numa caixa que rola, a linha
+                 cortada no fim so parece "rolagem" quando ha moldura; solta, parece bug. -->
+            <div class="conversas" role="listbox" aria-label={m.criar_retomar_escolha()}>
               {#each retomaveis as c (c.session_id)}
-                <button type="button" class="conversa" class:on={conversaEscolhida === c.session_id}
-                  aria-pressed={conversaEscolhida === c.session_id} disabled={retomando !== null}
-                  onclick={() => (conversaEscolhida = conversaEscolhida === c.session_id ? '' : c.session_id)}>
-                  <span class="conversa-txt">{c.ultima || c.preview || m.arquivo_sem_mensagens()}</span>
-                  <span class="conversa-meta">{relativeTime(c.mtime)}</span>
+                {@const on = conversaEscolhida === c.session_id}
+                <button type="button" class="conversa" class:on role="option" aria-selected={on}
+                  disabled={retomando !== null} onclick={() => escolherConversa(c)}>
+                  <span class="conversa-main">
+                    <span class="conversa-txt">{c.ultima || c.preview || m.arquivo_sem_mensagens()}</span>
+                    <span class="conversa-meta">
+                      <!-- O separador vai numa expressao: " · " solto no template perde o espaco no
+                           build e vira "Conta·agora". -->
+                      {#if c.conta}<span class="conversa-conta">{c.conta}</span>{' · '}{/if}{relativeTime(c.mtime)}
+                    </span>
+                  </span>
+                  <span class="conversa-check" aria-hidden="true">{on ? '✓' : ''}</span>
                 </button>
               {/each}
             </div>
@@ -1485,7 +1513,10 @@
         {#if conversaAlvo}
           {@const alvo = conversaAlvo}
           <button class="primary-btn" onclick={() => retomar(alvo)} disabled={retomando !== null}>
-            {retomando ? m.criar_criando() : m.criar_retomar_acao()}
+            {retomando ? m.criar_criando()
+              : vaiMover ? m.criar_retomar_mover({ conta: contaSelecionada?.label ?? '' })
+              : contaDaEscolhida ? m.criar_retomar_em({ conta: contaDaEscolhida })
+              : m.criar_retomar_acao()}
           </button>
         {:else}
           <button class="primary-btn" onclick={create} disabled={loading || contextBusy || codexUnavailable || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
@@ -1770,43 +1801,72 @@
   .conversas {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
     margin-top: var(--space-2);
-    max-height: 168px;
+    /* Cinco linhas inteiras (44px cada + divisoria); a sexta ja aparece cortada, e e isso que
+       diz "rola". Um valor solto cortava a linha no meio do texto. */
+    max-height: calc(5 * 45px + 2px);
     overflow-y: auto;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--surface-inset);
     /* Bloco com rolagem propria: um .sr-only absoluto de dentro vazaria pra area rolavel do painel. */
     position: relative;
   }
   .conversa {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border-default);
-    background: var(--surface-raised, var(--bg-surface));
+    min-height: 44px;
+    padding: var(--space-1) var(--space-3);
+    border: 0;
+    border-bottom: 1px solid var(--border-subtle);
+    border-radius: 0;
+    background: transparent;
     text-align: left;
-    transition: border-color 160ms ease-out, background 160ms ease-out;
+    transition: background 120ms var(--ease-out, ease-out);
   }
-  .conversa.on { border-color: var(--accent); background: var(--accent-dim); }
+  .conversa:last-child { border-bottom: 0; }
+  .conversa:hover:not(:disabled) { background: var(--bg-hover); }
+  .conversa.on { background: var(--accent-dim); }
+  .conversa.on .conversa-txt { color: var(--text-primary); }
   .conversa:disabled { opacity: 0.6; }
-  .conversa-txt {
+  .conversa-main {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .conversa-txt {
     font-size: var(--text-sm);
-    line-height: 1.45;
+    line-height: 1.35;
     color: var(--text-primary);
-    /* Duas linhas: uma corta frase demais pra reconhecer a conversa, tres viram parede de texto. */
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
   }
   .conversa-meta {
-    flex-shrink: 0;
     font-size: var(--text-xs);
+    line-height: 1.35;
     color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conversa-conta {
+    display: inline-block;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .conversa-check {
+    flex-shrink: 0;
+    width: 1em;
+    color: var(--accent);
+    font-size: var(--text-sm);
+    text-align: center;
   }
 
   .previa-bloco {

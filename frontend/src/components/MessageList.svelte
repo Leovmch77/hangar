@@ -522,9 +522,18 @@
                 ? img.filenames.slice(0, Math.max(0, img.filenames.length - ev.image_count))
                 : img.filenames)
             : []}
-          <ImageBubble caption={img ? img.caption : ev.text ?? ''}
-                       srcs={[...enviadas.map((f) => uploadUrl(sessionName, f)),
-                              ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i))]} />
+          {@const srcs = [...enviadas.map((f) => uploadUrl(sessionName, f)),
+                          ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i))]}
+          {#if peer}
+            <!-- Recado de sessao-irma COM captura: continua sendo recado (chip "de: X", markdown),
+                 so que com as miniaturas em cima. Sem este ramo a foto vencia e o recado saia
+                 como bolha tua, com o "[de: X]" cru no texto. -->
+            <UserBubble text={peer.text} ts={ev.ts} from={peer.from} scope={peer.scope} {srcs}
+                        onForward={onForward ? () => onForward(forwardText) : null}
+                        onOpenPeer={onOpenSession ? () => onOpenSession(peer.from) : null} />
+          {:else}
+            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} />
+          {/if}
         {:else if ev.id.startsWith('queued-') || ev.id.startsWith('held:')}
           <!-- Msg da fila durável ("queued-") ou recado preso em entrega bloqueada ("held:", o
                harness registrou o texto de um UserPromptSubmit que hook barrou e o agente NUNCA

@@ -284,10 +284,24 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     transição de hook e o peer já ocioso nunca receberia. O dict de classe (`_pair_ausencias`) é
     limpo com `pop(n, None)`, nunca `del` — as 4 instâncias varrem concorrentemente e outra thread
     pode já ter tirado a mesma chave.
-  - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429) — só no que
-    passa pelo backend: peer com `inbox_socket_of` é devolvido em `pulados` e vai por `SendMessage`
-    (o script sai 3 listando quem falta); o socket do Claude Code está fora do alcance do backend.
-    `--group --tmux` força o antigo.
+  - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429). Todo membro
+    recebe pelo backend (escada abaixo); `pulados` fica vazio e é mantido só por compatibilidade.
+  - **Recado de sessão-irmã: o backend escreve no socket nativo do Claude Code; o modelo nunca
+    escolhe transporte.** Escada em `_send_one`/`_send_one_headless`: socket nativo → plugin sem
+    tecla → tmux → fila; `hangar-send` só imprime "entregue"/"na fila"/erro. Até 21/09/2026 o
+    script RECUSAVA (código 3) quando os dois lados tinham socket e mandava o modelo usar
+    `SendMessage`; a `tardis-control` leu a recusa como entrega e um kick-off pra sessão
+    recém-nascida se perdeu. A frase "o socket do Claude Code está fora do alcance do backend"
+    era suposição: medido em 21/09/2026 com um socket falso capturando o `SendMessage`, o quadro é
+    uma linha JSON (`{"msgV":1,"msg_id","type":"user","message":{"role","content":"<cross-session-message
+    from=… from-name=… from-mode=…>…</cross-session-message>"},"priority":"next","from":"uds:…"}`),
+    sem autenticação no Linux (token só no Windows), e um cliente Python entregou numa sessão viva
+    (`app/uds_messaging.py`). O pid/socket vem do registro do próprio CLI
+    (`<config>/sessions/<pid>.json`, campo `messagingSocketPath`), que cobre a sessão sem terminal —
+    `inbox_socket_of` pelo pane devolvia `null` nela. `from` é endereço de RESPOSTA: o backend liga
+    `cc-socks/<pid>.sock` próprio pra receber `peer_message_status` (retido/recusado) e avisa a
+    remetente com `[painel: hangar]`. O recado vai com o prefixo `[de: X]` no corpo e o parser não
+    o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
   - Contrato do grupo dissolvido vai pra `~/.hangar/pair-arquivo/`, não pro `unlink`.
   - **Teste que chega em `SessionRegistry.list()` ou num `pair.leave()` de último membro isola
     `pair.settings.projects_dir`, zera `SessionRegistry._pair_ausencias`, anula

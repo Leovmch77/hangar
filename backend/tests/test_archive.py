@@ -245,3 +245,24 @@ def test_archive_por_cwd_filtra_provider_antes_do_limite(tmp_path, monkeypatch):
     entries = archive.list_conversations("-repo", set(), cap=12, codex_account="work",
                                          provider="codex")
     assert [entry.session_id for entry in entries] == [sid]
+
+
+def test_move_conversation_leva_jsonl_e_pasta_irma(tmp_path, monkeypatch):
+    # Retomar numa conta que nao e a dona: a conversa muda de conta inteira (jsonl + <uuid>/) e
+    # some da origem -- copia deixaria a mesma conversa listada duas vezes.
+    cdir = _conta(tmp_path, monkeypatch, "conta-b", "Trabalho")
+    _write_transcript(tmp_path / "-home-u-proj")
+    (tmp_path / "-home-u-proj" / SID / "tool-results").mkdir(parents=True)
+
+    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is True
+    assert (cdir / "projects" / "-home-u-proj" / f"{SID}.jsonl").is_file()
+    assert (cdir / "projects" / "-home-u-proj" / SID / "tool-results").is_dir()
+    assert not (tmp_path / "-home-u-proj" / f"{SID}.jsonl").exists()
+    assert not (tmp_path / "-home-u-proj" / SID).exists()
+    assert archive.conta_de("-home-u-proj", SID) == str(cdir)
+    # Ja esta na conta pedida: nada a fazer.
+    assert archive.move_conversation("-home-u-proj", SID, str(cdir)) is None
+    # Destino ja tem o uuid: recusa em vez de sobrescrever.
+    _write_transcript(tmp_path / "-home-u-proj", text="homonima")
+    with pytest.raises(FileExistsError):
+        archive.move_conversation("-home-u-proj", SID, None)
