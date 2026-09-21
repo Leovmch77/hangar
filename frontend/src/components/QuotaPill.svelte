@@ -170,6 +170,11 @@
                 {#if c.velha && c.idade_s != null}
                   <span class="qp-idade">{m.cota_idade({ n: formatarIntervalo(c.idade_s) })}</span>
                 {/if}
+                {#if c.loginVenceDias != null}
+                  <span class="qp-vence" class:alerta={c.loginVenceDias <= 3} title={m.contas_login_vence_hint()}>
+                    {c.loginVenceDias > 0 ? m.contas_login_vence({ n: c.loginVenceDias }) : m.contas_login_vencido()}
+                  </span>
+                {/if}
               </div>
               {#if c.janelas.length === 0}
                 <div class="qp-vazio">
@@ -284,6 +289,8 @@
   /* A conta-base do app (a que sessão nova nasce usando): o mesmo ponto da faixa do rodapé. */
   .qp-base { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
   .qp-idade { color: var(--text-muted); font-weight: 400; }
+  .qp-vence { margin-left: auto; color: var(--text-muted); font-weight: 400; font-size: var(--text-2xs); white-space: nowrap; }
+  .qp-vence.alerta { color: var(--warning); font-weight: 600; }
 
   .qp-jan { margin-top: 6px; }
   .qp-jan-linha { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }

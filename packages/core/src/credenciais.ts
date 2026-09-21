@@ -59,7 +59,7 @@ export interface Credencial {
   apelido?: string | null;
   ativa: boolean;
   path?: string | null;
-  login?: { estado: 'ok' | 'indisponivel'; loggedIn?: boolean | null; email?: string | null; plano?: string | null; motivo?: string | null } | null;
+  login?: { estado: 'ok' | 'indisponivel'; loggedIn?: boolean | null; email?: string | null; plano?: string | null; motivo?: string | null; refreshExpiresAt?: number | null } | null;
   base_url?: string | null;
   chave_mascarada?: string | null;
   usos: string[];

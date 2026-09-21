@@ -47,6 +47,8 @@ export interface ContaCota {
   /** Motivo cru do backend (`sessao-viva`, `login-necessario`, …). É CÓDIGO, não texto de tela:
    *  quem escolhe a frase é `motivoParado` aqui embaixo. */
   motivo: string | null;
+  /** Dias até o refresh token vencer (teto). null = não é Claude ou o arquivo não traz o prazo. */
+  loginVenceDias: number | null;
 }
 
 export const LIMIAR_ALERTA = 80;
@@ -84,6 +86,8 @@ export function faixaDeCota(contas: CotaConta[]): ContaCota[] | null {
       velha: c.idade_s != null && c.idade_s > VELHA_APOS_S,
       idade_s: c.idade_s ?? null,
       motivo: c.motivo ?? null,
+      loginVenceDias: c.refresh_expires_at != null
+        ? Math.ceil((c.refresh_expires_at - Date.now() / 1000) / 86400) : null,
     });
   }
   return linhas.length > 0 ? linhas : null;

@@ -84,10 +84,13 @@ export default function Contas() {
     if (auth === 'unknown') return codexCliAusente(credential) ? m.codex_ui_cli_ausente() : m.codex_ui_unknown();
     if (auth === 'none' || credential.login?.loggedIn === false) return m.contas_nao_conectada();
     if (auth === 'api_key') return m.contas_tipo_chave();
-    if (credential.login?.email && credential.login.plano) {
-      return m.contas_email_plano({ email: credential.login.email, max: credential.login.plano });
-    }
-    return credential.apelido || credential.nome_natural || credential.nome;
+    const base = credential.login?.email && credential.login.plano
+      ? m.contas_email_plano({ email: credential.login.email, max: credential.login.plano })
+      : credential.apelido || credential.nome_natural || credential.nome;
+    const exp = credential.login?.refreshExpiresAt;
+    if (exp == null) return base;
+    const dias = Math.ceil((exp - Date.now() / 1000) / 86400);
+    return `${base} · ${dias > 0 ? m.contas_login_vence({ n: dias }) : m.contas_login_vencido()}`;
   };
   // Só conta adicional (~/.codex-<nome>); a padrão é o ~/.codex da máquina e o backend recusa.
   const removeAccount = (account: CodexAccount) => {

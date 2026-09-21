@@ -14,6 +14,7 @@ export type EstadoLogin = {
   email?: string | null;
   plano?: string | null; // subscriptionType cru ("max"/"pro"/...) — dado do servidor
   motivo?: string | null;
+  refreshExpiresAt?: number | null; // epoch em segundos; só o /login estende
 };
 
 export type EstadoLimite = {
@@ -99,6 +100,8 @@ export interface CotaConta {
   ts?: number | null;
   idade_s?: number | null;
   motivo?: string | null;
+  /** Só Claude: vencimento do refresh token (epoch em segundos). */
+  refresh_expires_at?: number | null;
 }
 
 export async function listarCotas(alvo: Server | null): Promise<CotaConta[]> {

@@ -96,6 +96,11 @@ def _epoch(oauth: dict | None, campo: str) -> float | None:
     return v / 1000.0
 
 
+def refresh_expires_at(dir_conta: Path) -> float | None:
+    """Vencimento do refresh token em segundos — o prazo que só um `/login` novo estende."""
+    return _epoch(_oauth(dir_conta), "refreshTokenExpiresAt")
+
+
 def _assinatura(dir_conta: Path) -> tuple[float, float | None]:
     """(mtime do arquivo, vencimento em segundos). É o par que diz se a renovação aconteceu."""
     try:

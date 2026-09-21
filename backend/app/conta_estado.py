@@ -54,6 +54,9 @@ class EstadoLogin(BaseModel):
     email: str | None = None
     plano: str | None = None   # subscriptionType cru ("max"/"pro"/...) — dado do servidor
     motivo: str | None = None
+    # Vencimento do refresh token (epoch em SEGUNDOS). O refresh automático do CLI renova só o
+    # access token; passado este prazo a conta exige /login de novo, e nada além dele estende.
+    refreshExpiresAt: float | None = None
 
 
 class EstadoLimite(BaseModel):
@@ -243,6 +246,8 @@ def _login_de(cfg) -> EstadoLogin:
         if hit is not None and agora - hit[0] < _LOGIN_TTL:
             return hit[1]
     estado = _estado_login(_auth_status(Path(cfg.path)))
+    if estado.loggedIn:
+        estado.refreshExpiresAt = renova_token.refresh_expires_at(Path(cfg.path))
     with _login_lock:
         _login_cache[cfg.path] = (time.monotonic(), estado)
     return estado

@@ -86,6 +86,12 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
     const n = nomeMotorDe(c);
     return n ? contas.some((x) => x.id === `kimi:${n}`) : false;
   };
+  // Dias até o refresh token vencer (teto, como o CLI conta). null = arquivo sem o prazo.
+  const diasLoginDe = (c: Credencial): number | null => {
+    const exp = c.login?.refreshExpiresAt;
+    if (exp == null || !c.login?.loggedIn) return null;
+    return Math.ceil((exp - Date.now() / 1000) / 86400);
+  };
   // Provedor = o HOST do endereço, não a URL inteira: o caminho (/coding/v1) é ruído na linha e
   // URL inválida não pode derrubar a tela.
   const hostDe = (url: string | null | undefined) => {
@@ -846,7 +852,22 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
   {/if}
 
   {#if carregando}
-    <p class="ct-aviso">{m.comum_carregando()}</p>
+    <!-- Esqueleto na altura do card real (ícone + nome + duas sublinhas): a lista nasce no lugar
+         em vez de pular quando o dado chega. -->
+    <div class="ct-skel" aria-busy="true" aria-label={m.comum_carregando()}>
+      {#each [0, 1, 2, 3] as k (k)}
+        <div class="ct-card ct-skel-item">
+          <div class="ct-top">
+            <span class="ct-skel-ico"></span>
+            <span class="ct-skel-txt">
+              <span class="ct-skel-bar" style="width: 42%"></span>
+              <span class="ct-skel-bar ct-skel-bar--sub" style="width: 66%"></span>
+              <span class="ct-skel-bar ct-skel-bar--sub" style="width: 28%"></span>
+            </span>
+          </div>
+        </div>
+      {/each}
+    </div>
   {:else if erro}
     <p class="ct-aviso erro" role="alert">{erro}</p>
   {:else}
@@ -1003,7 +1024,26 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
                 {/if}
               {/if}
             {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && conta.login.loggedIn && conta.login.email}
-              <span class="ct-sub">{conta.login.email}</span>
+              {@const dias = diasLoginDe(conta)}
+              {#if dias == null}
+                <span class="ct-sub">{conta.login.email}</span>
+              {:else}
+                <!-- O prazo mora na linha do e-mail, não em linha própria: é um detalhe da
+                     conexão, não outra identidade. O "?" abre a explicação — o vencimento é
+                     regra do Claude Code, não algo que o app pudesse renovar sozinho. -->
+                <details class="ct-vence-l">
+                  <summary class="ct-sub-l" aria-label={m.contas_login_vence_ajuda_aria()}>
+                    <!-- O separador mora com o e-mail: no compacto os dois somem juntos e o prazo
+                         não fica com um "·" pendurado na frente. -->
+                    <span class="ct-sub">{conta.login.email} ·</span>
+                    <span class="ct-sub ct-vence-txt" class:fraco={dias > 3} class:ct-vence={dias <= 3}>
+                      {dias > 0 ? m.contas_login_vence({ n: dias }) : m.contas_login_vencido()}
+                    </span>
+                    <span class="ct-ajuda-q" aria-hidden="true">?</span>
+                  </summary>
+                  <span class="ct-ajuda">{m.contas_login_vence_hint()}</span>
+                </details>
+              {/if}
             {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && !conta.login.loggedIn}
               <span class="ct-sub fraco">{m.contas_nao_conectada()}</span>
             {/if}
@@ -1058,6 +1098,15 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
                 aria-label={m.contas_entrar_titulo({ nome: conta.nome })}
                 disabled={!!loginDe || loginIniciando}
                 onclick={() => iniciarEntrar(conta)}>{m.contas_entrar()}</button>
+            {/if}
+            <!-- Mesmo fluxo do Entrar (login_conta compara o token anterior e confirma pela
+                 credencial nova): renovar É entrar de novo, só muda o momento. -->
+            {#if conta.tipo === 'claude' && conta.login?.estado === 'ok' && conta.login.loggedIn
+                 && conta.cota?.estado !== 'expirada' && (diasLoginDe(conta) ?? Infinity) <= 3}
+              <button type="button" class="ct-acao primaria"
+                aria-label={m.contas_entrar_titulo({ nome: conta.nome })}
+                disabled={!!loginDe || loginIniciando}
+                onclick={() => iniciarEntrar(conta)}>{m.contas_renovar_login()}</button>
             {/if}
 
             {#if motor}
@@ -1330,6 +1379,18 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
   /* Cards separados por credencial (não uma caixa com divisórias): cada um é uma unidade de
      leitura — identidade em cima (ícone · nome · ações) e as barras de limite em largura cheia
      embaixo. `.compacta` troca o card por uma linha de escaneamento. */
+  .ct-skel { display: flex; flex-direction: column; gap: var(--space-2); }
+  .ct-skel-item { pointer-events: none; }
+  .ct-skel-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+  .ct-skel-ico, .ct-skel-bar {
+    display: block; border-radius: 6px;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--text-muted) 14%, transparent) 25%, color-mix(in srgb, var(--text-muted) 28%, transparent) 50%, color-mix(in srgb, var(--text-muted) 14%, transparent) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .ct-skel-ico { width: 30px; height: 30px; border-radius: var(--radius-full); flex-shrink: 0; }
+  .ct-skel-bar { height: 12px; }
+  .ct-skel-bar--sub { height: 9px; }
   .ct-lista { display: flex; flex-direction: column; gap: var(--space-2); }
   .ct-lista.compacta { gap: var(--space-1); }
   .ct-card { position: relative; background: var(--surface-card);
@@ -1418,6 +1479,27 @@ import { apagarConta, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineF
   }
   .ct-sub { flex-shrink: 0; color: var(--text-secondary); font-size: var(--text-xs); }
   .ct-sub.fraco { color: var(--text-muted); }
+  .ct-sub.ct-vence { color: var(--warning); }
+  /* <details> nativo, como a ajuda do MotorForm: teclado e estado de graça. A linha inteira é o
+     summary; o "?" só marca que há explicação atrás. */
+  .ct-vence-l { min-width: 0; }
+  /* No compacto o subtítulo some (modo de escaneamento), MENOS o prazo do login: é o único dado
+     dali que pede uma ação com data marcada. Fica só ele — e-mail e explicação continuam sendo
+     detalhe do modo completo. */
+  .compacta .ct-vence-l > .ct-sub-l { display: flex; }
+  .compacta .ct-vence-l .ct-vence-txt { display: inline; }
+  /* Sem a explicação, o "?" seria um botão morto: os dois somem juntos. */
+  .compacta .ct-ajuda, .compacta .ct-ajuda-q { display: none; }
+  .compacta .ct-vence-l > summary { cursor: default; }
+  .ct-vence-l > summary { list-style: none; cursor: pointer; }
+  .ct-vence-l > summary::-webkit-details-marker { display: none; }
+  .ct-ajuda-q {
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    width: 16px; height: 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-full);
+    color: var(--text-muted); font-size: 10px; line-height: 1;
+  }
+  .ct-vence-l[open] .ct-ajuda-q { color: var(--text-primary); }
+  .ct-ajuda { display: block; margin-top: var(--space-1); font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; }
   /* O modelo é um id de máquina (`kimi-k3`), como o caminho no disco: monoespaçado. */
   .ct-modelo { font-family: var(--font-mono); }
   /* O que a credencial serve ("roda o Claude Code", "cota pelo painel"): texto, não pílula. */

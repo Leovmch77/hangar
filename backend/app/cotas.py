@@ -117,6 +117,9 @@ class CotaConta(BaseModel):
     idade_s: float | None = None
     motivo: str | None = None
     reset_credits: ResetCredits | None = None
+    # Só Claude: vencimento do refresh token (segundos). Preenchido na saída, não no cache — o
+    # /login muda o arquivo e a leitura é barata.
+    refresh_expires_at: float | None = None
 
 
 # Resultado cru de um leitor: (estado, janelas, motivo).
@@ -913,7 +916,9 @@ def listar_cotas(forcar: bool = False) -> list[CotaConta]:
             c = hit[1]
             saida.append(c.model_copy(update={
                 "label": nomes.get(c.id) or c.label,
-                "idade_s": (agora - c.ts) if c.ts is not None else None}))
+                "idade_s": (agora - c.ts) if c.ts is not None else None,
+                "refresh_expires_at": renova_token.refresh_expires_at(Path(c.id[len("claude:"):]))
+                                      if c.provedor == "claude" else None}))
     return saida
 
 
