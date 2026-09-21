@@ -225,6 +225,7 @@ class _Sessao:
         self.tokens_msg_chars = 0     # caracteres da mensagem em voo, até o real chegar
         self.pensando_desde: float | None = None
         self.pensou_s = 0.0
+        self.compactando = False
         self.ativa_em = time.monotonic()   # último evento da CLI ou prompt nosso (estacionar)
         # Input da tool em voo (partial_json acumulado): o rótulo mostra o alvo antes dela rodar.
         self.tool_nome: str | None = None
@@ -238,6 +239,7 @@ class _Sessao:
         self.tokens_fechados = self.tokens_msg_chars = 0
         self.tokens_msg = self.pensando_desde = None
         self.pensou_s = 0.0
+        self.compactando = False
 
     def fechar_mensagem(self) -> None:
         self.tokens_fechados += self._tokens_da_mensagem()
@@ -1326,16 +1328,21 @@ class ClaudeHeadlessAdapter:
             if status == "compacting":
                 # A CLI repete este status a cada 30s enquanto resume; o fim vem como
                 # `status: null` (com compact_result) e como o `compact_boundary` abaixo.
+                # Fase própria, não o texto do rótulo: um "Pensando…" no meio não pode
+                # deixar o fim sem efeito.
+                sess.compactando = True
                 sess.label = "Compactando…"
-            elif status is None and "permissionMode" not in ev and sess.label == "Compactando…":
+            elif status is None and "permissionMode" not in ev and sess.compactando:
+                sess.compactando = False
                 sess.label = None
-            elif status == "requesting" and sess.in_progress:
+            elif status == "requesting" and sess.in_progress and not sess.compactando:
                 sess.label = "Pensando…"
         elif sub == "thinking_tokens":
-            if sess.in_progress:
+            if sess.in_progress and not sess.compactando:
                 sess.label = "Pensando…"
         elif sub == "compact_boundary":
-            if sess.label == "Compactando…":
+            if sess.compactando:
+                sess.compactando = False
                 sess.label = None
         elif sub == "task_started":
             # Subagente (tool Agent/skill que forka): o rótulo passa a dizer o que ELE faz, que é

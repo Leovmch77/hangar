@@ -283,18 +283,21 @@ api() { printf '%s' "$3" > "$BODY_FILE"; printf '%s' "$RESPONSE"; }
     assert expected in result.stdout
 
 
-def test_cli_claude_nativo_entrega_pelo_backend_sem_recusar():
+def test_cli_claude_nativo_entrega_pelo_backend_sem_recusar(tmp_path):
     # O transporte é do backend: com socket nativo dos dois lados o script segue mandando por
     # /input e relata a entrega, nunca devolve o envio pro modelo fazer por outra ferramenta.
     source = (Path(__file__).parents[2] / "scripts/hangar-send").read_text()
     tail = source[source.index("forcar_tmux=0\n"):]
     program = '''set -e
 set -- destino recado
-api() { printf '%s' '{"ok": true, "delivered": true, "steered": true, "native": true}'; }
+api() { printf '%s\\n' "$1 $2" "$3" > "$BODY_FILE"; printf '%s' '{"ok": true, "delivered": true, "steered": true, "native": true}'; }
 me() { echo origem; }
 ''' + tail
-    result = subprocess.run(["bash", "-c", program], env={**os.environ,
-        "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/origem"}, capture_output=True, text=True)
-    assert result.returncode == 0
-    assert "SendMessage" not in result.stderr
+    body_file = tmp_path / "body.txt"
+    result = subprocess.run(["bash", "-c", program], env={**os.environ, "BODY_FILE": str(body_file)},
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    chamada, corpo = body_file.read_text().splitlines()
+    assert chamada == "POST /api/sessions/destino/input"
+    assert json.loads(corpo) == {"text": "[de: origem] recado", "steer": True}
     assert "entregue agora -> destino (no socket do Claude dele" in result.stdout

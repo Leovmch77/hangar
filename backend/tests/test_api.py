@@ -3292,10 +3292,9 @@ def test_group_estourou_esquece_fora_da_janela(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_group_message_nao_pula_ninguem_quando_remetente_e_nativo(api_client):
-    # O transporte é do backend: membro com socket nativo recebe por ele ou pela escada seguinte,
-    # nunca fica de fora pro modelo mandar por outra ferramenta.
+    # `remetente_nativo` não tira ninguém da entrega: `pulados` fica vazio e cada membro passa
+    # pela escada do backend (aqui, sem sessão headless nem socket, todos caem no tmux).
     with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.registry.inbox_socket_of", side_effect=lambda n: "/run/b.sock" if n == "b" else None), \
          patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
          patch("app.pqueue.PromptQueue.append"):
         r = api_client.post("/api/sessions/a/group-message",

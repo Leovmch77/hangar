@@ -152,9 +152,14 @@ def test_compactacao_aparece_no_rotulo_e_some_no_fim(adapter):
         await adapter._on_event(sess, {"type": "system", "subtype": "status", "status": None,
                                        "permissionMode": "bypassPermissions"})
         assert sess.label == "Compactando…"
+        # "Pensando…" no meio (a chamada do resumo também é uma chamada) não troca o rótulo nem
+        # impede o fim de limpá-lo.
+        await adapter._on_event(sess, {"type": "system", "subtype": "status", "status": "requesting"})
+        await adapter._on_event(sess, {"type": "system", "subtype": "thinking_tokens", "tokens": 10})
+        assert sess.label == "Compactando…"
         await adapter._on_event(sess, {"type": "system", "subtype": "status", "status": None,
                                        "compact_result": {"trigger": "manual"}})
-        assert sess.label is None
+        assert sess.label is None and not sess.compactando
         await adapter._on_event(sess, {"type": "system", "subtype": "status", "status": "compacting"})
         await adapter._on_event(sess, {"type": "system", "subtype": "compact_boundary",
                                        "compact_metadata": {"trigger": "auto"}})
