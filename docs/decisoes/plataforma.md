@@ -356,6 +356,36 @@ a conta padrão tinha zero e uma conta adicional tinha duas; ambas ainda possuí
 - `nothingToReset` e `noCredit` são resultados sem sucesso. Todo resultado definitivo força nova
   leitura da credencial; falha nessa releitura preserva a informação de que o consumo já ocorreu.
 
+## Registro de peer nunca grava loopback, e o endereço torto tem frase própria
+
+(`frontend/src/lib/registrarPeerDoisLados.ts`, `lib/maquinas.ts`,
+`components/settings/{ListaMaquinas,DetalheServidor,MaquinasSettings}.svelte`, 21/09/2026.)
+Ligar "Recados entre sessões" entre duas máquinas desta malha deixava o par pela metade, e a tela
+só dizia "Recados só de ida". Medido nas duas pontas: a viana guardava
+`casa -> http://127.0.0.1:8765`, e `GET /api/peers/check` NELA devolvia
+`{"estado":"estranho","identificador":"viana"}` — ela batia em si mesma. Com o endereço do
+Tailscale a mesma chamada devolvia `{"estado":"ok","identificador":"casa","tempo_ms":35}`.
+
+A causa é que o registro gravava no peer a URL que o NAVEGADOR usa para o dono (`meuBase =
+dono.baseUrl`). No desktop essa URL é `http://127.0.0.1:8765`, que do outro lado do fio é o
+próprio peer. **O padrão continua sendo a URL do navegador — ela é a única medida de verdade que
+o aparelho tem —, mas loopback nunca: aí quem responde é `/api/alcance` do dono, que já mediu por
+onde chegam nele.** Não é heurística de rede: loopback gravado num peer é errado por construção,
+e falha PARECENDO registrado.
+
+Três frases separadas onde havia uma. `estranho` ganhou tipo próprio (`ida_outra_maquina` /
+`volta_outra_maquina`) antes do `parcial`, que é o balde genérico e engolia o único modo de falha
+que se conserta trocando um endereço em vez de esperar a máquina voltar — e o bloco de correção
+agora abre nele. E "não responde ou não tem identificador" virou três: o 401 é o token deste
+aparelho recusado, a falha de rede é a máquina fora do ar, e o identificador vazio é um campo
+para preencher — que passou a existir no detalhe de QUALQUER servidor com token aqui, gravando o
+`CP_SERVER_ID` no `.env` dele. Antes, o aviso não tinha campo nenhum: era preciso trocar o
+servidor da tela inteira para preencher o nome de outra máquina.
+
+Um terceiro erro apareceu junto: o bloco de correção pergunta "qual endereço o X deve usar para
+chegar aqui?" e gravava a resposta como `base_url` do PRÓPRIO X — consertava o lado oposto ao que
+a frase promete. O endereço digitado é o do dono, e vai no peer.
+
 ## Servidor que não responde esfria; o interruptor manual não bastava
 
 (`packages/core/src/esfriamento.ts`, `api.ts`, `frontend/src/lib/sessionsStore.svelte.ts`,
