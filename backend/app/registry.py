@@ -118,7 +118,12 @@ def _decorate_plan(info) -> None:
 
 
 def sanitize_cwd(cwd: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    # O Claude indexa pelo cwd sem separador final ("/home/x/" e "C:\\x\\" caem em "-home-x" e
+    # "C--x"); só a raiz ("/", "C:\\") mantém o seu.
+    limpo = cwd.rstrip("/\\")
+    if not limpo or limpo.endswith(":"):
+        limpo = cwd
+    return re.sub(r"[^A-Za-z0-9]", "-", limpo)
 
 
 _pretrust_lock = threading.Lock()

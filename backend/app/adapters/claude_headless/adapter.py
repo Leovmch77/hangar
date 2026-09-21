@@ -49,7 +49,6 @@ from app.transcript import ChatEvent, TranscriptTailer
 _log = logging.getLogger("hangar.claude_headless")
 
 # Mesma regra de app.registry.sanitize_cwd (duplicada pelo mesmo motivo do adapters/claude.py).
-_SANITIZE_RE = re.compile(r"[^A-Za-z0-9]")
 
 # Chave interna do adapter no registro de providers. O `provider` da sessão continua "claude"
 # (é Claude para o front, comandos, estatísticas e cotas); só o transporte é outro.
@@ -303,7 +302,8 @@ class ClaudeHeadlessAdapter:
 
     def transcript_path(self, cwd: str, session_id: str, config_dir: str | None = None) -> str:
         base = (Path(config_dir) / "projects") if config_dir else Path(settings.projects_dir)
-        return str(base / _SANITIZE_RE.sub("-", cwd) / f"{session_id}.jsonl")
+        from app.registry import sanitize_cwd   # local: registry importa os adapters
+        return str(base / sanitize_cwd(cwd) / f"{session_id}.jsonl")
 
     def transcript_path_de(self, meta: dict) -> str:
         return self.transcript_path(meta["cwd"], meta["session_id"], meta.get("config_dir"))
