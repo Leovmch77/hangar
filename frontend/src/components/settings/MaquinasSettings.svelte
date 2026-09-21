@@ -185,7 +185,7 @@
     idRemotoErro = {}; idRemotoSalvando = '';
     // O reinício e o "salvo" também pertencem à máquina que saiu da tela: sem isto o sucesso (ou
     // o erro) de reiniciar a anterior ficava à vista no detalhe da nova.
-    reiniciando = false; reinicioErro = ''; reinicioFeito = false; idSalvo = false;
+    reiniciando = false; reinicioErro = ''; reinicioFeito = false; reinicioRecusado = false; idSalvo = false;
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -371,6 +371,7 @@
   let reiniciando = $state(false);
   let reinicioErro = $state('');
   let reinicioFeito = $state(false);
+  let reinicioRecusado = $state(false);   // 409: o servidor respondeu dizendo que não faz
   // Ponte do shell Electron (shell/preload.cjs). Lida na hora, não no import: o preload injeta
   // `window.hangar` antes da página, mas uma const de topo congelaria `undefined` nos testes.
   type ReinicioShell = () => Promise<{ ok: boolean; motivo?: string; detalhe?: string }>;
@@ -393,13 +394,20 @@
     reiniciando = true;
     reinicioErro = '';
     reinicioFeito = false;
+    reinicioRecusado = false;
     try {
       await reiniciarServidorEm(apiTarget);
       if (meu !== geracao) return;
       reinicioFeito = true;
     } catch (e) {
       if (meu !== geracao) return;
-      reinicioErro = msgErro(e);
+      // 409 é o servidor RECUSANDO com motivo (topologia que não reinicia sozinha, atualização já
+      // rodando) — ele respondeu. Chamar isso de "falha na conexão" e sugerir que está travado
+      // manda a pessoa pro caminho errado; aqui vale a frase do próprio backend.
+      reinicioRecusado = (e as { status?: number }).status === 409;
+      reinicioErro = reinicioRecusado && e instanceof Error
+        ? e.message.replace(/^\d{3}:\s*/, '')
+        : msgErro(e);
     } finally {
       if (meu === geracao) reiniciando = false;
     }
@@ -413,6 +421,7 @@
     reiniciando = true;
     reinicioErro = '';
     reinicioFeito = false;
+    reinicioRecusado = false;
     try {
       const r = await ponte();
       if (meu !== geracao) return;
@@ -665,8 +674,8 @@
       </div>
       {#if reinicioErro}
         <p class="id-erro" role="alert">{reinicioErro}</p>
-        <p class="ss-legenda">{m.maquinas_servico_travado()}</p>
-        {#if podeReiniciarPorFora}
+        {#if !reinicioRecusado}<p class="ss-legenda">{m.maquinas_servico_travado()}</p>{/if}
+        {#if podeReiniciarPorFora && !reinicioRecusado}
           <div class="id-acoes">
             <button type="button" class="btn" onclick={reiniciarPorFora} disabled={reiniciando}>{m.maquinas_servico_pelo_app()}</button>
           </div>
