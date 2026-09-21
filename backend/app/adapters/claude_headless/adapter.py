@@ -1322,13 +1322,21 @@ class ClaudeHeadlessAdapter:
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
                 self._reaplicar_base_do_plano(sess)
-            if ev.get("status") == "requesting" and sess.in_progress:
+            status = ev.get("status")
+            if status == "compacting":
+                # A CLI repete este status a cada 30s enquanto resume; o fim vem como
+                # `status: null` (com compact_result) e como o `compact_boundary` abaixo.
+                sess.label = "Compactando…"
+            elif status is None and "permissionMode" not in ev and sess.label == "Compactando…":
+                sess.label = None
+            elif status == "requesting" and sess.in_progress:
                 sess.label = "Pensando…"
         elif sub == "thinking_tokens":
             if sess.in_progress:
                 sess.label = "Pensando…"
-        elif sub and sub.startswith("compact"):
-            sess.label = "Compactando…"
+        elif sub == "compact_boundary":
+            if sess.label == "Compactando…":
+                sess.label = None
         elif sub == "task_started":
             # Subagente (tool Agent/skill que forka): o rótulo passa a dizer o que ELE faz, que é
             # o que o terminal mostra em vez de "Agent…" parado até o fim.
