@@ -596,9 +596,16 @@
         {:else if ev.kind === 'notice'}
           <!-- Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
                aviso novo do harness não sumir calado. -->
+          {#if ev.text === 'hook_prompt'}
+            <div class="notice notice-hook">
+              <p>{m.notice_hook_prompt()}</p>
+              {#if ev.hook_error}<p class="notice-hook-texto">{ev.hook_error}</p>{/if}
+            </div>
+          {:else}
           <p class="notice">{ev.text === 'interrupted' || ev.text === 'turn_aborted'
             ? m.notice_interrupted()
             : ev.text === 'compacted' ? m.notice_compacted() : ev.text}</p>
+          {/if}
         {:else if ev.kind === 'tool_use' && agentesRodandoIds.has(ev.tool_use_id ?? '')}
           <!-- Agent rodando: o cartão dele está grudado no fim; aqui ficaria em dobro. -->
         {:else if ev.kind === 'tool_use'}
@@ -867,6 +874,13 @@
     text-align: center;
     font-size: 0.78rem;
     color: var(--text-muted);
+  }
+  .notice-hook p { margin: 0; }
+  .notice-hook .notice-hook-texto {
+    max-width: 60ch;
+    margin-inline: auto;
+    opacity: 0.8;
+    text-wrap: balance;
   }
   .queued-row {
     display: flex;

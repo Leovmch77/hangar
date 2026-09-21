@@ -201,6 +201,24 @@ def map_state(notif: dict) -> MappedState:
     return MappedState()
 
 
+def _turn_problem(notif: dict) -> Optional[tuple[str, str]]:
+    """(código, detalhe) quando a notification diz que o turno não anda: `error` com nova
+    tentativa, ou turno fechado como `failed`. Sem isto a sessão fica "trabalhando" calada."""
+    method = notif.get("method")
+    params = notif.get("params") or {}
+    if method == "error":
+        erro = params.get("error") or {}
+        codigo = "codex_sem_conexao" if params.get("willRetry") else "headless_turno_erro"
+    elif method == "turn/completed" and (params.get("turn") or {}).get("status") == "failed":
+        erro = (params.get("turn") or {}).get("error") or {}
+        codigo = "headless_turno_erro"
+    else:
+        return None
+    # O detalhe pode ser a página HTML de erro do provedor: só a primeira linha serve na faixa.
+    detalhe = str(erro.get("additionalDetails") or erro.get("message") or "").strip()
+    return codigo, detalhe.split("\n")[0][:300]
+
+
 def _fmt_tok(n: float) -> str:
     """Formata contagem de tokens com sufixo k/M (ex: 14389 -> "14k"), como o parseStatusLine do
     front ja entende (frontend/src/lib/statusline.ts toNumber). Sem sufixo abaixo de 1000."""
@@ -793,10 +811,19 @@ class CodexAdapter:
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
                 result = None
                 if meta.get("thread_id"):
+                    retomada = {"threadId": meta["thread_id"], "cwd": meta.get("cwd"),
+                                "approvalPolicy": approval, "sandbox": sandbox}
                     try:
-                        result = await client.request("thread/resume", {
-                            "threadId": meta["thread_id"], "cwd": meta.get("cwd"),
-                            "approvalPolicy": approval, "sandbox": sandbox})
+                        try:
+                            result = await client.request("thread/resume", retomada)
+                        except RuntimeError as exc:
+                            if "Model provider" not in str(exc) or "not found" not in str(exc):
+                                raise
+                            # A conversa guarda o provedor em que nasceu; se ele saiu da config, o
+                            # resume recusa e o histórico ficaria preso. Volta pro provedor nativo.
+                            # ponytail: "openai" fixo; ler o padrão do config.toml se alguém usar outro.
+                            _log.warning("codex sem terminal: provedor da thread sumiu name=%s: %s", name, exc)
+                            result = await client.request("thread/resume", {**retomada, "modelProvider": "openai"})
                     except RuntimeError as exc:
                         # Thread aberta por RPC que nunca teve turno não tem rollout, e o resume
                         # a recusa: nada a perder, abre outra.
@@ -857,6 +884,19 @@ class CodexAdapter:
         _log.info("codex sem terminal: subiu name=%s thread=%s cano=%s", name, thread_id,
                   (meta.get("cano") or {}).get("pid"))
         return client
+
+    async def restart(self, name: str) -> None:
+        """Mata o app-server da sessão sem terminal e sobe outro na mesma conversa. É a saída de
+        um turno que nunca fecha: o que estava em voo se perde, o histórico fica."""
+        async with self._locks.setdefault(name, asyncio.Lock()):
+            meta = codex_sessions.load(name)
+            if not meta or not meta.get("headless"):
+                raise ValueError("reiniciar só vale para sessão Codex sem terminal")
+            sess = self._sessions.pop(name, None)
+            if sess is not None:
+                await sess["client"].close()
+            self._falhas_subida.pop(name, None)
+            await self._subir_sem_terminal(name, meta)
 
     async def warm_sessions(self) -> None:
         """Reconecta sidecars Codex em série, sem atrasar a subida do backend."""
@@ -989,7 +1029,9 @@ class CodexAdapter:
         aprovacao = self._aprovacao_pendente(sess)
         if aprovacao is not None:
             state = "awaiting_input"
+        problema = sess.get("turn_problem") or (None, None)
         return StateEvent(session=name, state=state,
+                          problema=problema[0], problema_detalhe=problema[1],
                           status_line=self._status_line(sess), codex_mode=sess.get("mode"),
                           codex_buffering=sess.get("codex_buffering", False),
                           codex_question=question, headless=bool(sess.get("headless")),
@@ -1006,8 +1048,8 @@ class CodexAdapter:
         return None
 
     def problema_de(self, name: str) -> str | None:
-        """Código do problema da sessão sem terminal que não sobe (pra lista)."""
-        p = self._problemas.get(name)
+        """Código do problema da sessão (não subiu, ou o turno em voo não fala com o provedor)."""
+        p = self._problemas.get(name) or (self._sessions.get(name) or {}).get("turn_problem")
         return p[0] if p else None
 
     def aprovacao_pendente(self, name: str) -> tuple[str | None, list[str] | None]:
@@ -1265,6 +1307,15 @@ class CodexAdapter:
                 sess["effort"] = sess["default_effort"] = settings.get("effort")
                 sess["mode"] = (settings.get("collaborationMode") or {}).get("mode", "default")
                 sess["settings_revision"] = sess.get("settings_revision", 0) + 1
+            turn_problem = _turn_problem(notif) if current_turn else None
+            problem_updated = False
+            if turn_problem is not None:
+                problem_updated = sess.get("turn_problem") != turn_problem
+                sess["turn_problem"] = turn_problem
+            elif method == "turn/started" or response_started or \
+                    (method == "turn/completed" and sess.get("turn_problem", ("",))[0] == "codex_sem_conexao"):
+                # Reconectou (a resposta chegou) ou o turno fechou sem erro: o aviso não vale mais.
+                problem_updated = sess.pop("turn_problem", None) is not None
             if method == "turn/started":
                 buf = ""  # novo turno -- zera pra nao vazar o texto do turno anterior
                 # guarda o turnId do turno em voo (turn/interrupt exige threadId+turnId).
@@ -1322,7 +1373,7 @@ class CodexAdapter:
             if mapped.rate_limits is not None:
                 sess["rate_limits"] = mapped.rate_limits
             question_updated = async_updated or method in ("item/tool/requestUserInput", "serverRequest/resolved")
-            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated and not buffering_updated:
+            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated and not buffering_updated and not problem_updated:
                 # Neutro (method desconhecido) ou so preview_delta: StateEvent nao tem campo de
                 # preview -> nada a emitir aqui (o preview ja foi empurrado acima, fora do
                 # StateEvent -- efeito colateral adicional, nao substitui).

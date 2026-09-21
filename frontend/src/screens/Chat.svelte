@@ -959,6 +959,18 @@
     recargaDispensada = true;
     try { localStorage.setItem(recargaKey, '1'); } catch { /* sem storage: vale só nesta aba */ }
   }
+  // Codex preso tentando falar com o provedor: o turno nunca fecha, então reinicia trabalhando.
+  async function reiniciarCodex() {
+    if (recarregando) return;
+    recarregando = true;
+    try {
+      await recarregarSessao(sessionName);
+    } catch (err) {
+      mostrarAviso(err);
+    } finally {
+      recarregando = false;
+    }
+  }
   async function recarregar() {
     if (recarregando || currentState !== 'idle') return;
     recarregando = true;
@@ -3067,6 +3079,11 @@
       {#if faixaProblema}
         <div class="faixa-problema" role="status">
           <span class="faixa-problema-texto" title={faixaProblema}>{faixaProblema}</span>
+          {#if stateEvent?.problema === 'codex_sem_conexao' && sessionHeadless}
+            <button type="button" class="sse-retry" disabled={recarregando} onclick={reiniciarCodex}>
+              {recarregando ? m.chat_problema_reiniciando() : m.chat_problema_reiniciar()}
+            </button>
+          {/if}
           <button type="button" class="faixa-problema-fechar" aria-label={m.chat_problema_dispensar()}
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>

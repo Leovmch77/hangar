@@ -128,6 +128,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
   `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
   entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
+- **Turno do Codex que não fala com o provedor vira `problema` no estado**, não "trabalhando"
+  calado: `error` com `willRetry` é `codex_sem_conexao`, turno `failed` é `headless_turno_erro`.
+  Some quando a resposta chega ou outro turno começa. Sem terminal a faixa oferece Reiniciar, e
+  a retomada cai no provedor nativo quando o da thread não existe mais. Medição:
+  [provedor fora do ar](#codex-provedor-fora-do-ar-o-turno-nunca-fecha).
+- **Hook de fim de turno que reabre o turno vira aviso (`notice` `hook_prompt`), nunca fala da
+  pessoa.** No Codex é a mensagem de usuário `<hook_prompt …>`; no Claude, o anexo
+  `hook_additional_context` de `Stop`. O de `UserPromptSubmit` fica fora: vem em todo prompt.
+  Nenhum dos dois grava o nome do script — quem se identifica é o texto do próprio hook.
   `|| exit 0`. O aviso não pode conter token terminado em `.py` — é por ele que o instalador
   reconhece a própria entrada. **Prompt barrado por hook (de qualquer origem) vira bolha "não
   chegou" com o erro do hook**, seja recado ou fala da pessoa.
@@ -428,6 +437,31 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
 (`codex/adapter._subir_sem_terminal`, medido 15/09/2026): o `ThreadStartParams` do app-server tem
   `model` e **não** tem campo de esforço — quem tem é o `TurnStartParams`, e o `send_prompt` não
   manda escolha nenhuma de propósito (com TUI, reenviar sobrescreveria uma troca feita no
+## Codex: provedor fora do ar, o turno nunca fecha
+
+Medido em 21/09/2026, codex-cli 0.154.0, `app-server --stdio` com `model_provider` apontando para
+uma porta local. A sessão `tardis-control` nasceu em 19/09 com o `jev-gateway` (`127.0.0.1:8790`)
+na linha de comando; o gateway saiu em 20/09 e ela ficou dois turnos "trabalhando" sem resposta
+(um de 638s, até ser interrompido). O `map_state` descartava tudo que o Codex dizia a respeito.
+
+- **Porta que recusa a conexão:** `error` com `willRetry: true`, `message: "Reconnecting...
+  waiting for network"`, `additionalDetails: "Connection failed: error sending request"`, em
+  10s, 19s, 32s, 55s, 98s, 161s, 224s — sem teto. Nunca vem `turn/completed`.
+- **Porta que responde erro HTTP (501):** `error` "Reconnecting... 1/5" a "5/5" com `willRetry`,
+  depois `thread/status/changed` `systemError`, `error` final e `turn/completed` com
+  `turn.status: "failed"` e `turn.error.message`, tudo em ~31s. O `additionalDetails` é a página
+  HTML inteira do provedor — por isso só a primeira linha vira detalhe.
+
+Sem terminal não há TUI mostrando o "Reconnecting", então a faixa é o único lugar onde isso
+aparece — e ela leva o botão Reiniciar (`POST /recarregar`, que no Codex vale com a sessão
+trabalhando: mata o cano e sobe outro na mesma thread).
+
+Reiniciar sozinho não bastava: `thread/resume` de uma thread cujo provedor saiu da config responde
+`-32600 failed to load configuration: Model provider `x` not found`, e a subida desistia em três
+tentativas. Com `"modelProvider": "openai"` no mesmo pedido a thread volta e o turno seguinte
+responde. O `-c model_provider=…` da linha de comando do processo antigo não sobrevive à subida
+nova, que é montada pelo `sem_terminal` de hoje.
+
   terminal). Resultado: o nível escolhido na tela de criação era descartado calado e a thread
   ficava no `model_reasoning_effort` do `config.toml`. Sonda contra o app-server: `thread/start`
   com `model=gpt-5.6-luna` aplicou o modelo e devolveu `reasoningEffort: medium`, o do config.

@@ -2216,6 +2216,15 @@ async def recarregar_sessao(name: str):
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider == "codex":
+        # No Codex é a saída de um turno que nunca fecha, então vale com a sessão trabalhando.
+        codex = get_adapter("codex")
+        async with codex.delivery_lock(name):
+            try:
+                await codex.restart(name)
+            except ValueError as exc:
+                raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal", str(exc)))
+        return {"ok": True}
     if info.provider != "claude" or not _headless(name):
         raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
                                              "recarregar só vale para sessão Claude sem terminal"))

@@ -115,3 +115,32 @@ async def test_resposta_de_outro_turno_nao_apaga_aviso_atual(watching, event):
     await queue.put(notice())
     await queue.put({"method": "thread/tokenUsage/updated", "params": {"threadId": "thread", "tokenUsage": {"total": {"totalTokens": 2}}}})
     assert (await asyncio.wait_for(anext(stream), 1)).codex_buffering
+
+
+def retrying(details="Connection failed: error sending request"):
+    return {"method": "error", "params": {"threadId": "thread", "turnId": "turn", "willRetry": True, "error": {
+        "message": "Reconnecting... waiting for network", "additionalDetails": details}}}
+
+
+async def test_provedor_fora_do_ar_aparece_e_some_quando_a_resposta_chega(watching):
+    adapter, queue, stream = watching
+    await queue.put(retrying())
+    state = await asyncio.wait_for(anext(stream), 1)
+    assert (state.state, state.problema) == ("working", "codex_sem_conexao")
+    assert state.problema_detalhe == "Connection failed: error sending request"
+    assert adapter.problema_de("cx") == "codex_sem_conexao"
+    await queue.put(retrying())   # a mesma tentativa de novo não reemite
+    await queue.put({"method": "item/agentMessage/delta", "params": {"threadId": "thread", "delta": "Oi"}})
+    assert (await asyncio.wait_for(anext(stream), 1)).problema is None
+
+
+async def test_turno_que_falha_fica_marcado_ate_o_proximo_turno(watching):
+    _, queue, stream = watching
+    await queue.put(retrying("unexpected status 501\n<html>"))
+    assert (await asyncio.wait_for(anext(stream), 1)).problema_detalhe == "unexpected status 501"
+    await queue.put({"method": "turn/completed", "params": {"threadId": "thread", "turn": {
+        "id": "turn", "status": "failed", "error": {"message": "unexpected status 501"}}}})
+    state = await asyncio.wait_for(anext(stream), 1)
+    assert (state.state, state.problema) == ("idle", "headless_turno_erro")
+    await queue.put({"method": "turn/started", "params": {"threadId": "thread", "turn": {"id": "next"}}})
+    assert (await asyncio.wait_for(anext(stream), 1)).problema is None

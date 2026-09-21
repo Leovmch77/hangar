@@ -336,6 +336,13 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             texto = _strip_meta_blocks(texto)
             if texto:
                 return [ChatEvent(kind="user_msg", id=uid, text=texto, ts=_ts(obj))]
+        if isinstance(att, dict) and att.get("type") == "hook_additional_context" and att.get("hookEvent") == "Stop":
+            # Contexto devolvido no Stop reabre o turno: sem o aviso, a resposta seguinte aparece
+            # sem motivo. Só o Stop — o de UserPromptSubmit vem em todo prompt e seria ruído.
+            conteudo = att.get("content")
+            texto = "\n".join(c for c in conteudo if isinstance(c, str)) if isinstance(conteudo, list) else str(conteudo or "")
+            if texto.strip():
+                return [ChatEvent(kind="notice", id=uid, text="hook_prompt", hook_error=texto.strip(), ts=_ts(obj))]
         return []
 
     msg = obj.get("message")

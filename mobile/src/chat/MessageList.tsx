@@ -106,7 +106,9 @@ export function MessageList({
           // aviso novo do harness não sumir calado.
           const conhecido = ev.text === 'interrupted' || ev.text === 'turn_aborted';
           const frase = conhecido ? m.notice_interrupted()
-            : ev.text === 'compacted' ? m.notice_compacted() : ev.text;
+            : ev.text === 'compacted' ? m.notice_compacted()
+            : ev.text === 'hook_prompt' ? [m.notice_hook_prompt(), ev.hook_error].filter(Boolean).join('\n')
+            : ev.text;
           return <Text style={styles.notice}>{frase}</Text>;
         }
         return null;

@@ -25,6 +25,8 @@ _CONTEXT_WRAPPER_RE = re.compile(
 # Ancorado nas duas pontas: os blocos `input_text` da entrada são concatenados, e casar só o começo
 # transformaria em aviso uma mensagem real grudada no bloco de interrupção — perdendo o que ela diz.
 _TURNO_ABORTADO_RE = re.compile(r"^<turn_aborted>.*</turn_aborted>$", re.DOTALL)
+# Hook de Stop que devolve `block`: o Codex reabre o turno e grava o motivo como fala do usuário.
+_HOOK_PROMPT_RE = re.compile(r"^<hook_prompt\b[^>]*>(.*)</hook_prompt>$", re.DOTALL)
 
 
 def _is_context_wrapper(text: str) -> bool:
@@ -235,6 +237,11 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
                 # Interrupção: o Codex injeta o aviso como fala do usuário, em inglês e com tag.
                 # Vira aviso, e a frase fica com a interface.
                 return [ChatEvent(kind="notice", id=_event_id(obj), text="turn_aborted")]
+            hook = _HOOK_PROMPT_RE.match(text.strip())
+            if hook:
+                # Não é fala da pessoa: vira aviso, com o que o hook escreveu como detalhe.
+                return [ChatEvent(kind="notice", id=_event_id(obj), text="hook_prompt",
+                                  hook_error=hook.group(1).strip())]
             return [ChatEvent(kind="user_msg", id=_event_id(obj), text=text)]
         if role == "assistant":
             text = _blocks_text(payload.get("content"), "output_text")
