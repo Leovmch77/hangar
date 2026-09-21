@@ -36,6 +36,7 @@ _ID = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+$")
 _ESPELHO_ANTIGO = ".hangar-hooks.json"
 # Rodada parcial/erro só é refeita depois disto (a abertura seguinte de sessão a dispara).
 _RETENTATIVA = 300
+_HOOK_IMPORT_POLICY = b"claude-only-hooks-v1"
 
 
 def sincronizacao_ligada() -> bool:
@@ -101,16 +102,18 @@ def copiar_memorias(origem: Path, destino: Path) -> list[str]:
     return erros
 
 
-def _e_hook_do_app(command: object) -> bool:
-    """Hook do próprio Hangar (backend/hooks/): cada harness recebe o seu pelo instalador dele
-    (codex_hook_installer aqui), então ele não atravessa pelo importador do Codex."""
+def _skip_imported_hook(command: object) -> bool:
+    """O Codex recebe hooks do Hangar pelo instalador e não usa a triagem do Claude."""
     if not isinstance(command, str):
         return False
     normalizado = command.replace("\\", "/")
     # O guard fica sob ~/.claude/hooks para caber na allowlist do Pi, mas continua sendo hook do
     # Hangar. No Codex ele recebe uma entrada própria, com a sintaxe do shell daquele harness.
     return ("backend/hooks/" in normalizado
-            or bool(re.search(r"(?:^|/)guard_tmux\.py(?:[\"'\s;]|$)", normalizado)))
+            or bool(re.search(r"(?:^|/)guard_tmux\.py(?:[\"'\s;]|$)", normalizado))
+            or bool(re.search(
+                r"(?:^|[/\"'\s])(?:skill-suggester|jev-command-gate|jev-answer-check)\.py(?:[\"'\s;|&]|$)",
+                normalizado)))
 
 
 def sem_hooks_do_app(hooks: dict) -> dict:
@@ -126,7 +129,7 @@ def sem_hooks_do_app(hooks: dict) -> dict:
             if not isinstance(grupo, dict) or not isinstance(grupo.get("hooks"), list):
                 restantes.append(grupo)
                 continue
-            proprios = [h for h in grupo["hooks"] if not (isinstance(h, dict) and _e_hook_do_app(h.get("command")))]
+            proprios = [h for h in grupo["hooks"] if not (isinstance(h, dict) and _skip_imported_hook(h.get("command")))]
             if proprios or not grupo["hooks"]:
                 restantes.append({**grupo, "hooks": proprios})
         if restantes:
@@ -943,6 +946,7 @@ class IntegracaoCodex:
     def fingerprint(self, *, fontes: bool = False) -> str:
         h = hashlib.sha256()
         h.update(b"instrucoes-nativas-v1-ecc-keep-v1-marketplace-skills-v1")
+        h.update(_HOOK_IMPORT_POLICY)
         caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
         caminhos.append(self.home / ".claude/ecc-slim-keep.txt")
         caminhos.extend(self.home / ".claude" / nome for nome in ("CLAUDE.md", "CLAUDE.MD"))

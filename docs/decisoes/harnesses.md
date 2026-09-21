@@ -29,6 +29,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Integração nativa do Codex: o Codex converte, o backend decide quando, o lançador só avisa.**
   Dois gatilhos, e só: abertura de sessão Codex e o botão Reconciliar. Nunca gravar confiança
   para autoaprovar hooks. Fonte inválida nunca significa remoção.
+- **Triagem do Claude não atravessa a importação para o Codex.** `skill-suggester.py`,
+  `jev-command-gate.py` e `jev-answer-check.py` são excluídos pelo nome exato do arquivo,
+  inclusive em caminhos Windows. O manifesto anterior retira só entradas já importadas;
+  hooks nativos e nomes desconhecidos permanecem. A política entra na assinatura da fonte
+  para invalidar o cache da próxima reconciliação.
 - **Codex sem terminal: o app-server é do CANO, em stdio.** O backend abre a thread na criação e
   religa pelo snapshot (aprovação pendente volta). `initialize` repetido responde "Already
   initialized" e é sucesso; thread sem turno não tem rollout e o `resume` a recusa — abre outra.
@@ -123,11 +128,6 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   título igual.
 - **O aviso de espera vem de `model/safetyBuffering/updated`**, não de temporizador local — o
   turno continua trabalhando.
-- **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
-  o instalador preserva o que está lá.
-- **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
-  `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
-  entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
 - **Turno do Codex que não fala com o provedor vira `problema` no estado**, não "trabalhando"
   calado: `error` com `willRetry` é `codex_sem_conexao`, turno `failed` é `headless_turno_erro`.
   Some quando a resposta chega ou outro turno começa. Sem terminal a faixa oferece Reiniciar, e
@@ -137,6 +137,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   pessoa.** No Codex é a mensagem de usuário `<hook_prompt …>`; no Claude, o anexo
   `hook_additional_context` de `Stop`. O de `UserPromptSubmit` fica fora: vem em todo prompt.
   Nenhum dos dois grava o nome do script — quem se identifica é o texto do próprio hook.
+- **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
+  o instalador preserva o que está lá.
+- **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
+  `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
+  entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
   `|| exit 0`. O aviso não pode conter token terminado em `.py` — é por ele que o instalador
   reconhece a própria entrada. **Prompt barrado por hook (de qualquer origem) vira bolha "não
   chegou" com o erro do hook**, seja recado ou fala da pessoa.
@@ -432,11 +437,6 @@ Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   `set_permission_mode` (grava o sidecar). Conferido ao vivo: aprovou, "Modo: Bypass", o README
   editado sem nenhum cartão de permissão.
 
-## Codex sem terminal: `thread/start` leva o modelo, o esforço precisa de outro pedido
-
-(`codex/adapter._subir_sem_terminal`, medido 15/09/2026): o `ThreadStartParams` do app-server tem
-  `model` e **não** tem campo de esforço — quem tem é o `TurnStartParams`, e o `send_prompt` não
-  manda escolha nenhuma de propósito (com TUI, reenviar sobrescreveria uma troca feita no
 ## Codex: provedor fora do ar, o turno nunca fecha
 
 Medido em 21/09/2026, codex-cli 0.154.0, `app-server --stdio` com `model_provider` apontando para
@@ -462,6 +462,11 @@ tentativas. Com `"modelProvider": "openai"` no mesmo pedido a thread volta e o t
 responde. O `-c model_provider=…` da linha de comando do processo antigo não sobrevive à subida
 nova, que é montada pelo `sem_terminal` de hoje.
 
+## Codex sem terminal: `thread/start` leva o modelo, o esforço precisa de outro pedido
+
+(`codex/adapter._subir_sem_terminal`, medido 15/09/2026): o `ThreadStartParams` do app-server tem
+  `model` e **não** tem campo de esforço — quem tem é o `TurnStartParams`, e o `send_prompt` não
+  manda escolha nenhuma de propósito (com TUI, reenviar sobrescreveria uma troca feita no
   terminal). Resultado: o nível escolhido na tela de criação era descartado calado e a thread
   ficava no `model_reasoning_effort` do `config.toml`. Sonda contra o app-server: `thread/start`
   com `model=gpt-5.6-luna` aplicou o modelo e devolveu `reasoningEffort: medium`, o do config.

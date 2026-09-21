@@ -10,7 +10,7 @@ from app.codex_integracao import IntegracaoCodex, sem_hooks_do_app, sincronizaca
 
 ESTADO = '"/repo/backend/.venv/bin/python" "/repo/backend/hooks/state_hook.py" || true'
 RTK_PIPE = "rtk hook claude | python3 /repo/scripts/codex-hook-allow.py"
-PESSOAL = "python3 /home/x/.claude/hooks/skill-suggester.py"
+PESSOAL = "python3 /home/x/.claude/hooks/personal-hook.py"
 
 
 def _grupo(*comandos, **extras):
@@ -74,6 +74,65 @@ def test_hooks_do_app_nao_vao_pro_importador_os_do_usuario_vao():
     assert sem_hooks_do_app(hooks) == {"SessionStart": [_grupo(PESSOAL)],
                                        "PreToolUse": [_grupo("rtk hook claude", matcher="Bash")],
                                        "Estranho": "não é lista"}
+
+
+@pytest.mark.parametrize("name", ["skill-suggester.py", "jev-command-gate.py", "jev-answer-check.py"])
+@pytest.mark.parametrize("command", ['python3 /home/x/.claude/hooks/{}',
+                                     r'& "C:\Python\python.exe" "C:\Users\x\.claude\hooks\{}" ; exit 0',
+                                     'python3 "{}"'])
+def test_claude_only_hooks_are_filtered_by_exact_basename(name, command):
+    native = "python3 /home/x/.codex/hooks/jev-codex-observer.py"
+    unknown = f"python3 /hooks/custom-{name}"
+    backup = f"python3 /hooks/{name}.bak"
+    hooks = {"PreToolUse": [_grupo(command.format(name), native, unknown, backup,
+                                 matcher="Bash", timeout=10)],
+             "Stop": [_grupo(command.format(name))]}
+    expected = {"PreToolUse": [_grupo(native, unknown, backup, matcher="Bash", timeout=10)]}
+    assert sem_hooks_do_app(hooks) == expected
+    assert len(hooks["PreToolUse"][0]["hooks"]) == 4, "a fonte não é alterada"
+    assert sem_hooks_do_app(expected) == expected
+
+
+def test_filtered_hooks_remove_only_previously_imported_entries(tmp_path):
+    home = _home(tmp_path)
+    imported = {"hooks": {"PreToolUse": [_grupo(
+        "python3 /home/x/.codex/hooks/skill-suggester.py",
+        "python3 /home/x/.codex/hooks/jev-command-gate.py", PESSOAL, matcher="Bash")],
+        "Stop": [_grupo("python3 /home/x/.codex/hooks/jev-answer-check.py")]}}
+    native = _grupo("python3 /native/jev-answer-check.py",
+                    "python3 /native/jev-codex-observer.py", matcher="Bash")
+    current = {"hooks": {"PreToolUse": [*imported["hooks"]["PreToolUse"], native],
+                         "Stop": imported["hooks"]["Stop"]}}
+    path = home / ".codex/hooks.json"
+    path.write_text(json.dumps(current))
+    service = IntegracaoCodex(home, home / ".codex")
+    service._estado = codex_integracao._snapshot()
+    record = {"hooks": imported}
+    source = {"hooks": sem_hooks_do_app(imported["hooks"])}
+    service._hooks(source, record)
+    assert json.loads(path.read_text()) == {"hooks": {
+        "PreToolUse": [_grupo(PESSOAL, matcher="Bash"), native]}}
+    assert record["hooks"] == source
+    assert service._estado["confianca_pendente"] is True
+    raw, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    service._estado = codex_integracao._snapshot()
+    service._hooks(source, record)
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == (raw, mtime)
+    assert service._estado["confianca_pendente"] is False
+
+
+def test_hook_import_policy_change_invalidates_reconciliation_cache(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setattr(codex_integracao, "_REPO", tmp_path / "repo")
+    service = IntegracaoCodex(home, home / ".codex")
+    policy = codex_integracao._HOOK_IMPORT_POLICY
+    monkeypatch.setattr(codex_integracao, "_HOOK_IMPORT_POLICY", b"")
+    _registro(service, fingerprint=service.fingerprint())
+    assert service.precisa_reconciliar() is False
+    monkeypatch.setattr(codex_integracao, "_HOOK_IMPORT_POLICY", policy)
+    assert service.precisa_reconciliar() is True
+    _registro(service, fingerprint=service.fingerprint())
+    assert service.precisa_reconciliar() is False
 
 
 def test_instalador_acrescenta_uma_vez_e_nao_reescreve_entrada_existente(tmp_path):
