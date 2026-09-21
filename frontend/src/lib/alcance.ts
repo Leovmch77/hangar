@@ -69,10 +69,16 @@ export async function pareamentoDoServidor(s: Server, endereco: TipoEndereco): P
 // Frase de estado POR LINHA, derivada dos mocks (estados 1 e 3): o ok varia conforme o
 // tipo (wifi / 4G / nesta máquina), falhou e testando são fixos, "não configurado" é
 // neutro de propósito — não estar configurado não é defeito.
-export function fraseDeEstado(e: EnderecoAlcance): string {
+export function fraseDeEstado(e: EnderecoAlcance, bindLoopback = ''): string {
   if (e.estado === 'nao_configurado') return m.acesso_publico_sem_valor();
   if (e.estado === 'testando') return m.acesso_testando();
-  if (e.estado === 'falhou') return m.acesso_falhou_endereco();
+  // Endereço da LAN fechado com o bind em loopback não é defeito, é consequência da escolha da
+  // máquina: dizer "não está escutando neste endereço" manda procurar um problema que não existe.
+  if (e.estado === 'falhou') {
+    return e.tipo === 'rede_local' && bindLoopback
+      ? m.acesso_fechado_loopback({ endereco: bindLoopback })
+      : m.acesso_falhou_endereco();
+  }
   const tempo = `${e.tempo_ms ?? 0} ms`;
   switch (e.tipo) {
     case 'rede_local':

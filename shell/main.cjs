@@ -1075,6 +1075,21 @@ ipcMain.handle('hangar:relaunch', () => {
   app.exit(0);
 });
 
+// Reinício do serviço POR FORA dele. O botão da tela de Máquinas pede pelo próprio backend, e
+// serviço travado não atende o próprio pedido — aqui quem manda é o systemd, então trava não
+// impede. Só Linux/systemd: nas outras topologias quem sobe e desce o serviço é o instalador, e
+// inventar um kill no processo de alguém seria pior que recusar (mesma regra do atualizar.py).
+ipcMain.handle('hangar:reiniciar-servico', async () => {
+  if (process.platform !== 'linux') return { ok: false, motivo: 'plataforma' };
+  const { execFile } = require('child_process');
+  return new Promise((res) => {
+    execFile('systemctl', ['--user', 'restart', 'hangar-backend.service'], { timeout: 30000 }, (err) => {
+      if (!err) return res({ ok: true });
+      res({ ok: false, motivo: err.code === 'ENOENT' ? 'sem_systemd' : 'falhou', detalhe: String(err.message || err) });
+    });
+  });
+});
+
 ipcMain.handle('hangar:pick-folder', async (ev) => {
   const win = BrowserWindow.fromWebContents(ev.sender);
   const r = await (win ? dialog.showOpenDialog(win, { properties: ['openDirectory'] })

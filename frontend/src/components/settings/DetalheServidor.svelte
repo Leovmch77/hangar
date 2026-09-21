@@ -182,6 +182,12 @@
   /* Quem rola é o miolo, não o diálogo: o vidro do ModalDialog é um ::before do tamanho da caixa, e
      com o próprio diálogo rolando a parte de baixo do conteúdo ficava sem fundo. */
   :global(.modal-backdrop .modal-dialog.sd-dialogo) { width: min(520px, 94vw); max-height: 90dvh; overflow: hidden; display: flex; flex-direction: column; container-type: inline-size; }
+  /* Tela grande: o diálogo usa a largura que sobra. Aqui a medida é da JANELA mesmo, não de um
+     painel — é um sobreposto em cima de tudo. Abaixo de 900px nada muda, então celular e PWA
+     seguem com os mesmos 520px de sempre. */
+  @media (min-width: 900px) {
+    :global(.modal-backdrop .modal-dialog.sd-dialogo) { width: min(760px, 88vw); }
+  }
   :global(.sd-rolagem) { position: relative; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-5); }
   .mq-linha { display: flex; flex-direction: column; }
   .sd-cab { display: flex; align-items: flex-start; gap: var(--space-3); margin-bottom: var(--space-3); }

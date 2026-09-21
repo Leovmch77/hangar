@@ -9,6 +9,7 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import ModalDialog from '../ModalDialog.svelte';
   import { alcanceDoServidor, type AlcanceDoServidor, type TipoEndereco } from '../../lib/alcance';
+  import { reiniciarServidorEm } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
@@ -339,9 +340,13 @@
     }));
   }
 
-  // Enter salva; blur salva SÓ se mudou (sair do campo sem tocar não re-PUTa o mesmo valor).
+  // Salvar é um BOTÃO, não o blur: este campo grava o CP_SERVER_ID no .env, e o nome é o que as
+  // outras máquinas usam pra chegar aqui. Gravar por sair do campo não avisa nem deixa desfazer.
+  const idMudou = $derived(identificador.trim() !== idOriginal);
+  let idSalvo = $state(false);
+  function desfazerIdentificador() { identificador = idOriginal; idErro = ''; }
   function salvarIdentificador() {
-    if (idSalvando) return;   // gravação em voo: Enter e blur não abrem uma segunda (linha 82)
+    if (idSalvando) return;   // gravação em voo: Enter e botão não abrem uma segunda (linha 82)
     const valor = identificador.trim();
     if (valor === idOriginal) return;
     if (valor && !ID_OK.test(valor)) {
@@ -352,9 +357,59 @@
     idErro = '';
     const meu = geracao;
     void setIdentificador(apiTarget, valor)
-      .then((r) => { if (meu !== geracao) return; identificador = r.identificador; idOriginal = r.identificador; })
+      .then((r) => { if (meu !== geracao) return; identificador = r.identificador; idOriginal = r.identificador; idSalvo = true; })
       .catch((e) => { if (meu !== geracao) return; idErro = msgErro(e); })
       .finally(() => { if (meu === geracao) idSalvando = false; });
+  }
+
+  // Reinício do serviço: o que faz valer Identificador, Escuta em e as outras chaves do .env. O
+  // pedido passa pelo PRÓPRIO serviço; travado, ele não chega, e aí a saída é o app do computador
+  // (o shell reinicia por fora). Fora do systemd o backend recusa com 409 e a tela diz isso.
+  let reiniciando = $state(false);
+  let reinicioErro = $state('');
+  let reinicioFeito = $state(false);
+  // Ponte do shell Electron (shell/preload.cjs). Lida na hora, não no import: o preload injeta
+  // `window.hangar` antes da página, mas uma const de topo congelaria `undefined` nos testes.
+  type ReinicioShell = () => Promise<{ ok: boolean; motivo?: string; detalhe?: string }>;
+  const reinicioPeloShell = (): ReinicioShell | undefined =>
+    (window as { hangar?: { reiniciarServico?: ReinicioShell } }).hangar?.reiniciarServico;
+  // Só faz sentido no computador que RODA o serviço: o systemd do shell é o desta máquina, e
+  // mandar reiniciar daqui um servidor remoto reiniciaria o errado.
+  const podeReiniciarPorFora = $derived(!apiTarget && !!reinicioPeloShell());
+
+  async function reiniciarServico() {
+    if (reiniciando) return;
+    reiniciando = true;
+    reinicioErro = '';
+    reinicioFeito = false;
+    try {
+      await reiniciarServidorEm(apiTarget);
+      reinicioFeito = true;
+    } catch (e) {
+      reinicioErro = msgErro(e);
+    } finally {
+      reiniciando = false;
+    }
+  }
+
+  // Serviço travado: o pedido HTTP não chega nele. Aqui quem manda é o systemd, pelo shell.
+  async function reiniciarPorFora() {
+    const ponte = reinicioPeloShell();
+    if (!ponte || reiniciando) return;
+    reiniciando = true;
+    reinicioErro = '';
+    reinicioFeito = false;
+    try {
+      const r = await ponte();
+      if (r.ok) reinicioFeito = true;
+      else reinicioErro = r.motivo === 'sem_systemd' || r.motivo === 'plataforma'
+        ? m.maquinas_servico_sem_systemd()
+        : `${m.maquinas_servico_shell_falhou()} ${r.detalhe ?? ''}`.trim();
+    } catch (e) {
+      reinicioErro = msgErro(e);
+    } finally {
+      reiniciando = false;
+    }
   }
 
   // Estados de checagem por peer: id -> {lados, ok, testando?} — testando é o gesto de registrar
@@ -475,10 +530,18 @@
     return { texto: `${NOME_TIPO[melhor.tipo]()} · ${melhor.tempo_ms ?? 0} ms`, farol: 'ok' as const };
   });
   const esteNoAparelho = $derived(!!resolvedServer && servers.some((s) => s.id === resolvedServer.id));
+  // Remover a ÚNICA máquina cadastrada é logout disfarçado: a lista fica vazia e o app volta pro
+  // login. Quem quer isso tem o "Sair" na própria tela, com o nome certo — aqui o botão só oferece
+  // um caminho que ninguém escolheria sabendo o que faz.
+  const podeRemoverEste = $derived(esteNoAparelho && servers.length > 1);
 
   let removerPeerId = $state<string | null>(null);
   function removerPeerConfirmado() { const id = removerPeerId; removerPeerId = null; if (id) void removerPeer(id); }
 
+  // Largura do PAINEL, não da janela: esta tela mora dentro do modal de config, e é a coluna dele
+  // que decide se cabe lista + detalhe lado a lado. Medida por observador porque o template
+  // precisa ramificar — a consulta de contêiner sozinha só muda CSS, e aqui muda quem desenha o
+  // detalhe (coluna, no largo; folha, no estreito).
   // ✕ da linha: tira a máquina dos DOIS lados de uma vez (peer do servidor e entrada deste
   // navegador). Cada caixa desligada já fazia um lado; isto é os dois com uma confirmação.
   let removerLinha = $state<LinhaMaquina | null>(null);
@@ -524,42 +587,17 @@
   }
 </script>
 
-<div class="sv-topo">
-  <button type="button" class="sv-btn" onclick={() => { addEndereco = ''; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
-  <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
-</div>
-{#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
-{#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
-
-{#if resolvedServer}
-  <!-- O servidor escolhido no seletor vira um cartão só; o detalhe dele traz identificador,
-       endereços e o avançado. Ele não se repete na lista de baixo. -->
-  <button type="button" class="sv-este" onclick={() => (esteAberto = true)}
-          aria-label={m.servidores_abrir_aria({ nome: resolvedServer.label })}>
-    <span class="sv-farol" class:ok={resumoTexto.farol === 'ok'} class:nao={resumoTexto.farol === 'nao'} aria-hidden="true">
-      {resumoTexto.farol === 'test' ? '◌' : '●'}
-    </span>
-    <span class="sv-txt">
-      <span class="sv-nome">{resolvedServer.label}{#if identificador}<span class="sv-id">{identificador}</span>{/if}</span>
-      <span class="sv-estado">{m.peers_esta_maquina()} · {resumoTexto.texto}</span>
-      {#if idCarregado && !identificador && !idErro}<span class="sv-estado aviso">{m.servidores_sem_identificador_curto()}</span>{/if}
-      {#if resumo?.loopback && resumoTexto.farol === 'ok'}<span class="sv-estado aviso">{m.acesso_alerta_loopback_1({ endereco: resumo.bind })}</span>{/if}
-      {#if origemRecusada}<span class="sv-estado aviso">{m.servidores_origem_recusada_curto()}</span>{/if}
-    </span>
-    <span class="sv-chev" aria-hidden="true">›</span>
-  </button>
-  {#if idErro && !esteAberto}<p class="id-erro" role="alert">{idErro}</p>{/if}
-{/if}
-
-{#if resolvedServer && esteAberto}
-  <ModalDialog open={true} ariaLabel={resolvedServer.label} onClose={() => (esteAberto = false)} className="sd-dialogo">
+{#snippet detalheEste(comFechar: boolean)}
+  {#if resolvedServer}
   <div class="sd-rolagem">
   <div class="sv-cab">
     <div class="sv-cab-txt">
       <h2 class="sv-cab-nome">{resolvedServer.label}</h2>
       <span class="sv-cab-sub">{m.peers_esta_maquina()}</span>
     </div>
-    <button type="button" class="sv-fechar" onclick={() => (esteAberto = false)} aria-label={m.sessao_fechar()}>✕</button>
+    {#if comFechar}
+      <button type="button" class="sv-fechar" onclick={() => (esteAberto = false)} aria-label={m.sessao_fechar()}>✕</button>
+    {/if}
   </div>
   <!-- Identificador (Task 5): é o CP_SERVER_ID, gravado no .env — o mesmo que o hangar-send usa
        no endereço de resposta srv::sessao. Vazio = pareamento entre servidores recusado. -->
@@ -581,12 +619,44 @@
            autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck={false}
            disabled={!idCarregado}
            readonly={idSalvando}
-           onkeydown={(e) => { idErro = ''; if (e.key === 'Enter' && !idSalvando) salvarIdentificador(); }}
-           onblur={salvarIdentificador} />
+           oninput={() => { idErro = ''; idSalvo = false; }}
+           onkeydown={(e) => { if (e.key === 'Enter' && !idSalvando) salvarIdentificador(); }} />
   </div>
+  {#if idMudou || idSalvando}
+    <div class="id-acoes">
+      <button type="button" class="btn primario" onclick={salvarIdentificador} disabled={idSalvando}>
+        {idSalvando ? m.config_motores_salvando() : m.ctx_salvar()}
+      </button>
+      <button type="button" class="btn" onclick={desfazerIdentificador} disabled={idSalvando}>{m.comum_desfazer()}</button>
+    </div>
+  {:else if idSalvo}
+    <p class="id-ok" role="status">{m.maquinas_id_salvo()}</p>
+  {/if}
   {#if idErro}<p class="id-erro" role="alert">{idErro}</p>{/if}
 
   <AcessoSettings alvo={resolvedServer} parte="detalhe">
+    {#snippet antesAvancado()}
+      <!-- Reiniciar NÃO é avançado: é o gesto que faz valer o identificador, o endereço de escuta e as
+           outras chaves do .env, e até agora o único caminho pra ele no app estava escondido no fluxo
+           de atualização. Por isso fica no corpo do detalhe, não dentro do Avançado. -->
+      <p class="ss-secao">{m.maquinas_servico()}</p>
+      <p class="ss-legenda">{m.maquinas_servico_ajuda()}</p>
+      <div class="id-acoes">
+        <button type="button" class="btn primario" onclick={reiniciarServico} disabled={reiniciando}>
+          {reiniciando ? m.maquinas_servico_reiniciando() : m.maquinas_servico_reiniciar()}
+        </button>
+        {#if reinicioFeito}<span class="id-ok" role="status">{m.maquinas_servico_pedido()}</span>{/if}
+      </div>
+      {#if reinicioErro}
+        <p class="id-erro" role="alert">{reinicioErro}</p>
+        <p class="ss-legenda">{m.maquinas_servico_travado()}</p>
+        {#if podeReiniciarPorFora}
+          <div class="id-acoes">
+            <button type="button" class="btn" onclick={reiniciarPorFora} disabled={reiniciando}>{m.maquinas_servico_pelo_app()}</button>
+          </div>
+        {/if}
+      {/if}
+    {/snippet}
     {#snippet avancado()}
       <!-- Origens do terminal: mora junto dos endereços porque a pergunta é "de qual endereço o
            app pode abrir um terminal neste servidor". Quem tem um servidor só nunca precisa disso
@@ -609,17 +679,51 @@
           </div>
         {/if}
       {/if}
+
     {/snippet}
   </AcessoSettings>
 
-  <!-- Tirar o servidor escolhido deste aparelho é a mesma remoção de sempre; sendo o último, o
-       diálogo avisa que isso desloga. -->
-  {#if esteNoAparelho}
+  <!-- Tirar o servidor escolhido deste aparelho é a mesma remoção de sempre. Com uma máquina só
+       na lista o botão não aparece: ali ele é o "Sair" com outro nome. -->
+  {#if podeRemoverEste}
     <div class="sv-rodape">
       <button type="button" class="sv-remover-este" onclick={() => abrirRemocao(resolvedServer?.id ?? '')} disabled={logoutInFlight}>{m.servidores_remover_deste_aparelho()}</button>
     </div>
   {/if}
   </div>
+  {/if}
+{/snippet}
+
+<div class="sv-topo">
+  <button type="button" class="sv-btn" onclick={() => { addEndereco = ''; showAdd = true; }}>+ {m.maquinas_adicionar()}</button>
+  <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
+</div>
+{#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
+{#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
+
+{#if resolvedServer}
+  <!-- O servidor escolhido no seletor vira um cartão só; o detalhe dele traz identificador,
+       endereços e o avançado. Ele não se repete na lista de baixo. -->
+  <button type="button" class="sv-este" onclick={() => (esteAberto = true)}
+          aria-label={m.servidores_abrir_aria({ nome: resolvedServer.label })}>
+    <span class="sv-farol" class:ok={resumoTexto.farol === 'ok'} class:nao={resumoTexto.farol === 'nao'} aria-hidden="true">
+      {resumoTexto.farol === 'test' ? '◌' : '●'}
+    </span>
+    <span class="sv-txt">
+      <span class="sv-nome">{resolvedServer.label}{#if identificador}<span class="sv-id">{identificador}</span>{/if}</span>
+      <span class="sv-estado">{m.peers_esta_maquina()} · {resumoTexto.texto}</span>
+      {#if idCarregado && !identificador && !idErro}<span class="sv-estado aviso">{m.servidores_sem_identificador_curto()}</span>{/if}
+      {#if origemRecusada}<span class="sv-estado aviso">{m.servidores_origem_recusada_curto()}</span>{/if}
+    </span>
+    <span class="sv-chev" aria-hidden="true">›</span>
+  </button>
+  {#if idErro && !esteAberto}<p class="id-erro" role="alert">{idErro}</p>{/if}
+{/if}
+
+
+{#if resolvedServer && esteAberto}
+  <ModalDialog open={true} ariaLabel={resolvedServer.label} onClose={() => (esteAberto = false)} className="sd-dialogo">
+    {@render detalheEste(true)}
   </ModalDialog>
 {/if}
 
@@ -739,6 +843,8 @@
   .sv-btn.primario { background: var(--accent); border-color: var(--accent); color: #fff; }
   .sv-btn:disabled { opacity: 0.45; }
 
+  /* Painel largo: lista fixa à esquerda, detalhe à direita. Estreito: uma coluna só, como o
+     celular sempre foi — as duas regras moram aqui porque é a MESMA tela nos dois tamanhos. */
   .sv-este { display: flex; align-items: center; gap: var(--space-3); width: 100%; min-height: 60px; padding: var(--space-3);
              text-align: left; color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-md); }
   .sv-este:hover { background: var(--bg-hover); }
@@ -797,6 +903,7 @@
   .id-erro { margin: 0 0 var(--space-2) var(--space-2); font-size: var(--text-xs); color: var(--error); }
   .id-linha { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); margin: 0 0 var(--space-3); }
   .id-ok { font-size: var(--text-xs); color: var(--text-secondary); }
+  .id-acoes { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
   .btn {
     height: 40px; padding: 0 var(--space-4);
     border-radius: var(--radius-md);
