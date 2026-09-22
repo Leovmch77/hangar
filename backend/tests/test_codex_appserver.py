@@ -160,14 +160,20 @@ async def test_recoverable_read_errors_stop_at_the_cap():
             self.tentativas += 1
             raise ValueError("Separator is not found, and chunk exceed the limit")
 
-    reader = _ReaderSempreValueError()
-    client = _client_with(reader, _FakeWriter())
+    contador = _ContadorDeLogs(teto=_MAX_FALHAS_LEITURA + 2)
+    logger_alvo = logging.getLogger("app.adapters.codex.appserver")
+    logger_alvo.addHandler(contador)
+    try:
+        reader = _ReaderSempreValueError()
+        client = _client_with(reader, _FakeWriter())
 
-    await asyncio.wait_for(client._reader_task, timeout=2)
-    assert reader.tentativas == _MAX_FALHAS_LEITURA
-    assert client.closed is True
+        await asyncio.wait_for(client._reader_task, timeout=2)
+        assert reader.tentativas == _MAX_FALHAS_LEITURA
+        assert client.closed is True
 
-    await client.close()
+        await client.close()
+    finally:
+        logger_alvo.removeHandler(contador)
 
 
 async def test_oversized_line_processed_and_reader_stays_alive():
