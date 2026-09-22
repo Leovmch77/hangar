@@ -545,3 +545,12 @@ layout, `snapshot` e `shot` de uma tela sem dimensão.
 `setDeviceMetricsOverride` direto). `layout desktop` NÃO serve — ele cai no ramo que limpa a
 emulação e devolve o tamanho real, que é zero. Confira com `eval 'innerWidth'` antes de concluir
 que a página está vazia.
+
+## Navegador embutido com janela estreita
+
+22/09/2026. Em uma janela Electron de 758×366 com outra conversa aberta, `hangar-preview open`
+registrava o pedido de uma sessão Codex sem terminal, mas nenhum navegador nascia. A identidade
+estava correta: abaixo de 820px o `DesktopShell` não montava, e o chat sozinho não mantinha o SSE
+da lista que entrega os pedidos `nav`. O `App` agora retém o `sessionsStore` enquanto a ponte nativa
+existe e o login/sync permite entrar. O contador existente compartilha a conexão com as telas.
+Conferido no mesmo app e largura: o pedido passou a criar o navegador de uma sessão fora da tela.

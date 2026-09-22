@@ -236,6 +236,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
+- **O shell autenticado mantém a lista SSE mesmo com janela estreita ou outra tela aberta.**
+  Pedidos de navegador de outras sessões chegam por ela; reutilize o `sessionsStore` compartilhado.
 - **Aba escondida que NAVEGA para de compor quadro, e aí o Chromium engole mousedown e keydown.**
   Reemitir a mesma medida não ressuscita; quem reancora é uma medida DIFERENTE (ou um `shot`). Por
   isso `click`/`press` conferem a entrega com ouvinte em captura, reancoram, tentam UMA vez e só
@@ -328,6 +330,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   é a mesma para o `GET` e para o `POST` de `/file/text`. A mecânica de ler e gravar é a do
   `filetree` (`read_at`/`write_at`): digest da leitura, tmp+rename, `.git` fora por componente
   do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
+- **HTML servido como arquivo executa isolado e sem o token na URL do documento interno.**
+  Arquivos citados e uploads usam `file_response`; SVG/XML mantêm o MIME com scripts bloqueados.
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o

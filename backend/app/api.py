@@ -2,7 +2,6 @@ import anyio.to_thread
 import asyncio
 import json
 import logging
-import mimetypes
 import os
 import re
 import secrets
@@ -40,6 +39,7 @@ from app import claude_models
 from app import codex_models
 from app import model_args
 from app import filesearch, filetree, git_ops
+from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
 from app import orq, orq_md, orq_papeis, orq_politica
@@ -2995,7 +2995,7 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 @app.get("/api/sessions/events", dependencies=[Depends(require_auth)])
 async def sessions_events():
     from app.sse import list_events
-    return EventSourceResponse(list_events())
+    return EventSourceResponse(list_events(), send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])
@@ -3031,7 +3031,8 @@ async def events(name: str, request: Request):
     # estado, fonte do preview). Sem isto TODA sessao caia no default "claude" do merged_events e o
     # SSE do Codex nunca ligava (chat vazio, sem estado ao vivo).
     return EventSourceResponse(
-        merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset))
+        merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset),
+        send_timeout=30)
 
 
 def _erro_texto(e) -> str:
@@ -5437,7 +5438,7 @@ def serve_upload(name: str, filename: str):
         path = resolve_upload(info.cwd, _id_upload(info), filename)
     except UploadError as e:
         raise HTTPException(e.status, e.detail)
-    return FileResponse(path)
+    return file_response(path)
 
 
 @app.get("/api/sessions/{name}/uploads", dependencies=[Depends(require_auth)])
@@ -6402,15 +6403,14 @@ def _resolver_citado(name: str, path: str) -> str:
 def serve_file(name: str, path: str, request: Request):
     # FileResponse trata Range -> <video> faz seek/streaming.
     real = _resolver_citado(name, path)
-    media = mimetypes.guess_type(real)[0] or "application/octet-stream"
     st = os.stat(real)
-    etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+    etag = f'"isolated-{st.st_mtime_ns:x}-{st.st_size:x}"'
     cabecalhos = {"etag": etag, "cache-control": _CACHE_ARQUIVO}
     # Depois da trava do transcript, nunca antes: 304 e resposta sobre um arquivo, e quem nao pode
     # ver o arquivo tambem nao pode saber que ele mudou.
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cabecalhos)
-    return FileResponse(real, media_type=media, headers=cabecalhos)
+    return file_response(real, headers=cabecalhos)
 
 
 # Arquivo CITADO na conversa, como texto editavel. O par com `/files/read` e `/files/write` da

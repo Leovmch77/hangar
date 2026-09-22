@@ -159,11 +159,13 @@
     <div class="nav-right">
       {#if onOpenTerminal}
         <button class="nav-btn terminal-btn" class:alert={terminalAlert} onclick={onOpenTerminal} aria-label={m.ctx_terminal()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="2.5" y="4" width="19" height="16" rx="2"/>
-            <path d="M6.5 9l3 3-3 3"/>
-            <line x1="12.5" y1="15" x2="17" y2="15"/>
-          </svg>
+          <span class="animated-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.5" y="4" width="19" height="16" rx="2"/>
+              <path d="M6.5 9l3 3-3 3"/>
+              <line x1="12.5" y1="15" x2="17" y2="15"/>
+            </svg>
+          </span>
         </button>
       {/if}
       {#if onOpenNavegador}
@@ -196,13 +198,15 @@
       {/if}
       {#if onOpenActivity}
         <button class="nav-btn activity-btn" class:running={activityRunning} onclick={onOpenActivity} aria-label={m.ctx_atividade()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polyline points="3 5 4.5 6.5 7 4"/>
-            <polyline points="3 11.5 4.5 13 7 10.5"/>
-            <line x1="10" y1="5.5" x2="20" y2="5.5"/>
-            <line x1="10" y1="12" x2="20" y2="12"/>
-            <line x1="10" y1="18.5" x2="20" y2="18.5"/>
-          </svg>
+          <span class="animated-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="3 5 4.5 6.5 7 4"/>
+              <polyline points="3 11.5 4.5 13 7 10.5"/>
+              <line x1="10" y1="5.5" x2="20" y2="5.5"/>
+              <line x1="10" y1="12" x2="20" y2="12"/>
+              <line x1="10" y1="18.5" x2="20" y2="18.5"/>
+            </svg>
+          </span>
           {#if activityBadge > 0}<span class="activity-badge">{activityBadge}</span>{/if}
         </button>
       {/if}
@@ -445,11 +449,12 @@
   /* Padronização Terminal/Rodar: ambos PARTEM do --accent da .nav-btn (mesma variante visual);
      apenas os ESTADOS colorem — terminal alert e run running. Antes o Terminal era
      --text-secondary por default e parecia peso diferente do Rodar na mesma fileira. */
+  .animated-icon { display: inline-flex; flex-shrink: 0; }
+
   .terminal-btn.alert { color: var(--accent); }
-  .terminal-btn.alert svg { animation: breathe 1.4s ease-in-out infinite; }
-  .terminal-btn.alert svg { animation: breathe 1.4s ease-in-out infinite; }
+  .terminal-btn.alert .animated-icon { animation: breathe 1.4s ease-in-out infinite; }
   @media (prefers-reduced-motion: reduce) {
-    .terminal-btn.alert svg { animation: none; }
+    .terminal-btn.alert .animated-icon { animation: none; }
   }
 
   .run-btn { position: relative; }
@@ -464,16 +469,15 @@
     color: var(--text-secondary);
   }
 
-  /* Workflow/agent vivo: icone tinge de accent e "respira" (liveness). transform no svg nao causa
-     reflow. prefers-reduced-motion -> so a cor, sem animar. */
+  /* O span permite compor a animação sem repintar o SVG a cada quadro. */
   .activity-btn.running { color: var(--accent); }
-  .activity-btn.running svg { animation: breathe 1.5s ease-in-out infinite; }
+  .activity-btn.running .animated-icon { animation: breathe 1.5s ease-in-out infinite; }
   @keyframes breathe {
     0%, 100% { opacity: 0.55; transform: scale(0.92); }
     50%      { opacity: 1;    transform: scale(1.05); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .activity-btn.running svg { animation: none; }
+    .activity-btn.running .animated-icon { animation: none; }
   }
 
   /* Ponto do "⋯": mesma familia do .activity-badge, sem numero (o numero exato mora na sheet). */

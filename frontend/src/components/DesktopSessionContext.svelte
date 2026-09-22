@@ -392,11 +392,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     <div class="ctx-actions" role="toolbar" aria-label={m.ctx_painel_titulo()}>
       {#if onOpenTerminal}
         <button class="ctx-action terminal-btn" class:alert={terminalAlert} onclick={onOpenTerminal} aria-label={m.ctx_terminal()}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="2.5" y="4" width="19" height="16" rx="2"/>
-            <path d="M6.5 9l3 3-3 3"/>
-            <line x1="12.5" y1="15" x2="17" y2="15"/>
-          </svg>
+          <span class="animated-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2.5" y="4" width="19" height="16" rx="2"/>
+              <path d="M6.5 9l3 3-3 3"/>
+              <line x1="12.5" y1="15" x2="17" y2="15"/>
+            </svg>
+          </span>
           <span>{m.ctx_terminal()}</span>
         </button>
       {/if}
@@ -981,9 +983,11 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     line-height: 1;
   }
 
+  .animated-icon { display: inline-flex; flex-shrink: 0; }
+
   .terminal-btn { color: var(--text-secondary); }
   .terminal-btn.alert { color: var(--accent); }
-  .terminal-btn.alert svg { animation: breathe 1.4s ease-in-out infinite; }
+  .terminal-btn.alert .animated-icon { animation: breathe 1.4s ease-in-out infinite; }
 
   .run-btn { position: relative; }
   .run-btn.running { color: var(--success); }
@@ -997,7 +1001,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     50%      { opacity: 1;    transform: scale(1.05); }
   }
   @media (prefers-reduced-motion: reduce) {
-    .terminal-btn.alert svg { animation: none; }
+    .terminal-btn.alert .animated-icon { animation: none; }
   }
 
   /* Turno ativo: hairline accent varrendo o TOPO do painel (a irma da work-sweep da NavBar).

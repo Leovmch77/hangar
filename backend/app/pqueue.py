@@ -921,8 +921,18 @@ class PromptQueue:
         seen: dict[str, tuple[bool | None, bool | None, bool]] = {}
         inicio: float = time.time()
         primeira: bool = True
+        last_marker = object()
 
         def emit_new() -> list[ChatEvent]:
+            nonlocal last_marker
+            try:
+                stat = self.path.stat()
+            except FileNotFoundError:
+                marker = None
+            else:
+                marker = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            if marker == last_marker:
+                return []
             evs = []
             for entry in self.load():
                 eid = str(entry.get("id"))
@@ -948,6 +958,8 @@ class PromptQueue:
                 if min_ts and not _da_sessao_atual(entry, min_ts):
                     continue
                 evs.append(event)
+            # O marcador anterior à leitura evita perder uma gravação concorrente.
+            last_marker = marker
             return evs
 
         # emit_new() faz read_text do sidecar -> roda no threadpool pra nao bloquear o loop. As chamadas

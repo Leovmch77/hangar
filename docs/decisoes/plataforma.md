@@ -559,3 +559,14 @@ sem essa frase a pessoa liga, olha a sessão aberta, não vê efeito e conclui q
 Isto **não** reabre o que está em [harnesses.md](harnesses.md): lá a decisão é sobre o HANGAR usar
 function hooks para ler estado de sessão, e ela continua de pé. Este interruptor é o portão para o
 plugin de quem usa.
+
+## Documentos ativos sem acesso ao token
+
+22/09/2026. O visualizador usava uma URL com o token principal e `allow-scripts`: o HTML podia
+ler a própria URL mesmo sem `allow-same-origin`. A abertura em nova aba também perdia o sandbox.
+Arquivos citados e uploads agora usam `file_response`: HTML/XHTML ficam num iframe com URL `data:`,
+sem mesma origem nem referrer, dentro de uma página confiável. A codificação base64 é transmitida
+em blocos; SVG/XML continuam como arquivos, com scripts bloqueados por CSP. O ETag dos arquivos
+citados mudou para invalidar respostas antigas na revalidação; cache fresco anterior dura até 60s.
+No navegador embutido, o HTML executou JavaScript, mas não leu token pela URL, baseURI ou referrer,
+nem acessou a página pai ou o armazenamento. Sem mudanças na autorização de caminhos.
