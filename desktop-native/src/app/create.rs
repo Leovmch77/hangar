@@ -228,6 +228,8 @@ struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelop
 /// escrito. Cada resposta volta com o número do pedido; a de um pedido velho (outra pasta, outro provider) cai.
 pub(in crate::app) struct NewSession {
     link: Link,
+    compact: bool,
+    compact_folders: Rc<std::cell::Cell<bool>>,
     roots: Remote<Vec<Root>>,
     root: Option<Root>,
     /// A pasta listada à esquerda.
@@ -333,7 +335,8 @@ impl NewSession {
             }),
         ];
         Self {
-            link, roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
+            link, compact: false, compact_folders: Default::default(),
+            roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -358,14 +361,19 @@ impl NewSession {
         self.link.runtime.spawn(work(self.link.api.clone(), send));
     }
 
-    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_roots(&mut self, cx: &mut Context<Self>) {
         let seq = self.roots.start();
         self.request(cx, move |api, send| Box::pin(async move {
             let last = tokio::task::spawn_blocking(crate::appearance::last_root).await.ok().flatten();
             send(CreateReply::Roots(seq, api.server_read(&["fs", "roots"], &[], 15).await, last)).await
         }));
-        self.load_providers(cx);
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_roots(cx);
+        if !self.compact { self.load_providers(cx); }
         self.load_configs(cx);
+        if self.compact { return; }
         self.load_extras(cx);
         // A continuação trabalha na mesma árvore: a pasta da origem já vem escolhida. Sem pasta conhecida, o nome sai já e a
         // pasta fica por escolher.
@@ -411,6 +419,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
+        if self.compact { self.picked = Some(path.clone()); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -438,6 +447,11 @@ impl NewSession {
     fn pick(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating { return; }
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
+        if self.compact {
+            self.compact_folders.set(false);
+            cx.notify();
+            return;
+        }
         let seq = self.sessions.start();
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Sessions(seq, api.sessions().await)).await }));
         self.load_archive(window, cx);
@@ -1002,8 +1016,81 @@ impl NewSession {
     }
 }
 
+impl NewSession {
+    fn render_compact(&self, cx: &mut Context<Self>) -> Div {
+        let field = |title: String, body: AnyElement| div().flex_1().min_w_0().flex().flex_col().gap_2()
+            .child(div().text_sm().text_color(theme::muted()).child(title)).child(body);
+        let loading = |id| div().id(id).role(Role::Status).aria_label(tr("loading"))
+            .child(Skeleton::new(id).w_full().h_8().rounded_md()).into_any_element();
+        let account = match (&self.configs.value, &self.config_pick) {
+            _ if self.configs.loading || self.configs.value.is_none() => loading("new-chat-accounts-loading"),
+            (Some(Err(error)), _) => alert("new-chat-accounts-error", error.clone()).into_any_element(),
+            (Some(Ok(list)), _) if list.is_empty() => muted(tr("new_chat_no_accounts")).into_any_element(),
+            (_, Some((pick, _))) => Select::new(pick).accessibility_label(tr("create_claude_account")).into_any_element(),
+            _ => div().into_any_element(),
+        };
+        let model = if self.configs.loading || self.models.loading || self.models.value.is_none() {
+            loading("new-chat-models-loading")
+        } else if let Some(Err(error)) = self.models.value.as_ref() {
+            alert("new-chat-models-error", format!("{}: {error}", tr("create_models_failed"))).into_any_element()
+        } else {
+            div().children(self.model_pick.as_ref().map(|(pick, _)| Select::new(pick).accessibility_label(tr("create_model"))))
+                .into_any_element()
+        };
+        let folders_ready = !self.roots.loading && self.roots.ok().is_some_and(|roots| !roots.is_empty());
+        let folder_button = Button::new("new-chat-folder").outline().w_full().min_w_0().icon(IconName::Folder)
+                .label(self.picked.as_deref().map(basename).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| tr("new_chat_folder")))
+                .tooltip(self.picked.clone().unwrap_or_else(|| tr("new_chat_folder"))).accessibility_label(tr("new_chat_folder"))
+                .disabled(!folders_ready);
+        let folder = folder_button.selected(self.compact_folders.get()).on_click(cx.listener(|this, _, window, cx| {
+            let open = !this.compact_folders.get();
+            this.compact_folders.set(open);
+            if open { this.query.update(cx, |input, cx| input.focus(window, cx)); }
+            cx.notify();
+        }));
+        let roots_note = match &self.roots.value {
+            Some(Err(error)) if !self.roots.loading => Some(alert("new-chat-roots-error", format!("{} {error}", tr("create_roots_failed"))).into_any_element()),
+            Some(Ok(list)) if list.is_empty() && !self.roots.loading => Some(muted(tr("new_chat_no_roots")).into_any_element()),
+            _ => None,
+        };
+        let failed = self.roots.value.as_ref().is_some_and(Result::is_err)
+            || self.configs.value.as_ref().is_some_and(Result::is_err) || self.models.value.as_ref().is_some_and(Result::is_err);
+        div().w_full().max_w(rems(42.)).flex().flex_col().gap_4()
+            .child(div().text_xl().font_weight(FontWeight::MEDIUM).child(tr("new_chat_title")))
+            .child(div().flex().gap_4().items_start()
+                .child(field(tr("create_claude_account"), account))
+                .child(popup::anchor(field(tr("new_chat_folder"), div().child(folder).children(roots_note).into_any_element()).relative(), "new-chat-folder")))
+            .child(div().p_4().rounded_xl().border_1().border_color(theme::border()).bg(theme::boxed())
+                .child(field(tr("create_model"), model)))
+            .when(failed, |el| el.child(Button::new("new-chat-retry").ghost().label(tr("retry"))
+                .disabled(self.roots.loading || self.configs.loading || self.models.loading)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    // Repetir só a leitura que falhou preserva conta e subpasta já escolhidas.
+                    if this.roots.value.as_ref().is_some_and(Result::is_err) { this.load_roots(cx); }
+                    if this.configs.value.as_ref().is_some_and(Result::is_err) { this.load_configs(cx); }
+                    else if this.models.value.as_ref().is_some_and(Result::is_err) { this.load_models(window, cx); }
+                    cx.notify();
+                }))))
+    }
+
+    pub(super) fn render_compact_folders(&self, cx: &mut Context<Self>) -> Div {
+        div().w(rems(28.)).max_w_full().flex().flex_col().gap_3()
+            .child(self.render_roots(cx))
+            .child(Input::new(&self.query).small().cleanable(true).aria_label(tr("create_search")))
+            .children(self.root.as_ref().map(|root| div().flex().flex_wrap().gap_1()
+                .children(crumbs(root, &self.dir).into_iter().map(|(text, path)|
+                    Button::new(SharedString::from(format!("new-chat-crumb-{path}"))).ghost().small().label(text)
+                        .on_click(cx.listener(move |this, _, window, cx| this.drill(path.clone(), window, cx)))))))
+            // ponytail: lista mínima de 6rem; janela menor exige seletor em página própria.
+            .child(div().flex_basis(rems(12.)).flex_shrink_1().min_h(rems(6.)).relative().flex().flex_col().child(self.render_rows(cx)))
+            .child(Button::new("new-chat-use-folder").outline().label(tr("create_use_folder"))
+                .on_click(cx.listener(|this, _, window, cx| this.pick(this.dir.clone(), window, cx))))
+    }
+}
+
 impl Render for NewSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.compact { return self.render_compact(cx); }
         // Topo, margem de baixo do kit e o preenchimento do diálogo: o resto da janela, até a altura do web.
         let height = (window.viewport_size().height - px(DIALOG_TOP + 16. + 32.)).min(px(760.)).max(px(320.));
         let right = match self.picked.clone() {
@@ -1019,6 +1106,26 @@ impl Render for NewSession {
 }
 
 impl Hangar {
+    pub(super) fn render_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(api) = self.api.clone() else {
+            return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
+        };
+        if self.new_chat.as_ref().is_none_or(|view| view.read(cx).link.connection != self.connection) {
+            let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection };
+            self.new_chat_folders.set(false);
+            self.new_chat = Some(cx.new(|cx| {
+                let mut view = NewSession::new(link, None, window, cx);
+                view.compact = true;
+                view.compact_folders = self.new_chat_folders.clone();
+                cx.defer_in(window, |view, window, cx| view.load(window, cx));
+                view
+            }));
+        }
+        // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca.
+        div().flex_1().min_h_0().flex().items_center().justify_center().p_6()
+            .child(self.new_chat.as_ref().unwrap().clone()).into_any_element()
+    }
+
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
@@ -1041,10 +1148,13 @@ impl Hangar {
     }
 
     pub(super) fn receive_create(&mut self, dialog: EntityId, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entity) = self.new_session.clone().filter(|d| d.entity_id() == dialog) else { return };
+        let Some(entity) = self.new_session.iter().chain(self.new_chat.iter()).find(|d| d.entity_id() == dialog).cloned() else { return };
+        let compact = entity.read(cx).compact;
         let Some(Opened { session, notes, warning }) = entity.update(cx, |d, cx| d.receive(reply, window, cx)) else { return };
-        self.new_session = None;
-        window.close_dialog(cx);
+        if compact { self.new_chat = None; } else {
+            self.new_session = None;
+            window.close_dialog(cx);
+        }
         let readable = session.readable();
         self.select(session, window, cx);
         // O fechar devolveu o foco ao botão que abriu; a sessão nova é onde se escreve em seguida, como no clique na aba.

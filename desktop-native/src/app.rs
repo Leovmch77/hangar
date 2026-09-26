@@ -371,6 +371,9 @@ pub struct Hangar {
     turn_seen: Option<Instant>,
     /// Envio entregue que o turno ainda não pegou: "Enviando…" segue até o estado virar trabalhando ou o prazo passar.
     sent_until: Option<(SessionKey, Instant)>,
+    new_chat: Option<Entity<create::NewSession>>,
+    /// A tela escreve; a camada da raiz lê.
+    new_chat_folders: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl Drop for Hangar {
@@ -463,6 +466,8 @@ impl Hangar {
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            new_chat: None,
+            new_chat_folders: Default::default(),
         }
     }
 
@@ -3865,7 +3870,7 @@ impl Hangar {
                     self.schedule_scroll(window, cx);
                 }
             }
-        } else { content = content.child(div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session"))); }
+        } else { content = content.child(self.render_new_chat(window, cx)); }
         content.into_any_element()
     }
 
