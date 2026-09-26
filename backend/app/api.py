@@ -1819,24 +1819,28 @@ async def logout_claude_config(nome: str):
         raise HTTPException(404, detail=erro("erro_conta_inexistente", f"conta {nome} não existe", nome=nome))
     alvo = Path(conta.path)
     pasta = alvo.name.removeprefix(".claude-")
-    if alvo.resolve() == _backend_config_base().resolve():
-        raise HTTPException(409, detail=erro("erro_conta_ativa_backend",
-                                 "esta conta é a configuração ativa do backend — não dá pra "
-                                 "mexer nela por aqui"))
+
+    def _sair():
+        try:
+            conta_estado._auth_logout(alvo)
+        except RuntimeError as e:
+            raise HTTPException(502, detail=erro("erro_logout_nao_confirmado", str(e))) from None
+        conta_estado.esquecer_conta(conta.path)
+        estado = conta_estado._estado_login(conta_estado._auth_status(alvo))
+        if estado.estado != "ok" or estado.loggedIn:
+            raise HTTPException(502, detail=erro("erro_logout_nao_confirmado",
+                                     "a conta não apareceu deslogada depois do logout"))
 
     def _checar_e_sair():
+        # A config ativa do backend (~/.claude) não é conta criada pelo hangar, então não tem
+        # trava de ciclo; sair dela só tira o login, é o caminho pra entrar com outra.
+        if alvo.resolve() == _backend_config_base().resolve():
+            _sair()
+            return
         with contas.ciclo_conta(pasta):
             if contas.caminho(pasta).resolve() != alvo.resolve():
                 raise contas.ContaError(404, f"{alvo} não é uma conta criada pelo hangar")
-            try:
-                conta_estado._auth_logout(alvo)
-            except RuntimeError as e:
-                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado", str(e))) from None
-            conta_estado.esquecer_conta(conta.path)
-            estado = conta_estado._estado_login(conta_estado._auth_status(alvo))
-            if estado.estado != "ok" or estado.loggedIn:
-                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado",
-                                         "a conta não apareceu deslogada depois do logout"))
+            _sair()
 
     try:
         await asyncio.to_thread(_checar_e_sair)
