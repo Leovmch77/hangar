@@ -43,12 +43,13 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 33] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 34] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
     ("settings_text_color", Some("settings_text_color_desc")), ("settings_background", None),
     ("settings_background_scope", None), ("settings_image", Some("settings_image_desc")),
+    ("settings_background_effect", None),
     ("settings_transparency", Some("settings_transparency_desc")), ("settings_surface_material", Some("settings_surface_material_desc")), ("settings_solidity", None),
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
@@ -398,6 +399,8 @@ impl Hangar {
     /// (a força da tinta é de cada modo).
     pub(super) fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = appearance::get();
+        let shown = self.backdrop.as_ref().is_some_and(|(_, image)| crate::effects::shows(image, current.background_effect, !theme::is_dark()));
+        if current.background == Background::Image && (!shown || self.backdrop_pending) { self.refresh_backdrop(window, cx); }
         for (knob, state) in self.settings_ui.sliders.clone() {
             state.update(cx, |slider, cx| slider.set_value(knob.read(&current) as f32, window, cx));
         }
@@ -784,10 +787,31 @@ impl Hangar {
                 next.surface_material = if index == 0 { SurfaceMaterial::Glass } else { SurfaceMaterial::Opaque };
                 this.apply_appearance(next, true, cx);
             }, cx);
+        let effect_owner = cx.entity().downgrade();
+        let effect_label = crate::effects::CHOICES.iter().find(|(effect, _)| *effect == a.background_effect).unwrap().1;
+        let background_effect = Button::new("background-effect").outline().small()
+            .label(tr(effect_label)).icon(IconName::ChevronDown).disabled(busy.is_some())
+            .accessibility_label(format!("{}: {}", tr("settings_background_effect"), tr(effect_label)))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                crate::effects::CHOICES.iter().fold(sidebar::menu_style(menu), |menu, &(effect, label)| {
+                    let owner = effect_owner.clone();
+                    menu.item(PopupMenuItem::new(tr(label)).checked(effect == a.background_effect).on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |this, cx| {
+                            if this.backdrop_busy.is_some() { return; }
+                            let mut next = appearance::get();
+                            if next.background != Background::Image || next.background_effect == effect { return; }
+                            next.background_effect = effect;
+                            this.apply_appearance(next, true, cx);
+                            this.refresh_backdrop(window, cx);
+                        });
+                    }))
+                })
+            });
         let background_box = settings_box()
             .child(self.row(IconName::Image, "settings_background", busy.map(|b| b.note()), true, background))
             .child(self.row(IconName::Layers, "settings_background_scope", None, true, background_scope))
             .child(self.row_with(IconName::Image, "settings_image", image_description, true, image_actions.into_any_element()))
+            .when(a.background == Background::Image, |el| el.child(self.row(IconName::Image, "settings_background_effect", None, busy.is_none(), background_effect.into_any_element())))
             .child(self.slider_row(IconName::Layers, "settings_transparency",
                 Some(tr(if see_through { "settings_transparency_desc" } else { "settings_transparency_off" })), Knob::Transparency, see_through, &a, cx))
             .child(self.row(IconName::Layers, "settings_surface_material", Some(tr("settings_surface_material_desc")), true, surface_material))

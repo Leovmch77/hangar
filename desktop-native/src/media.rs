@@ -42,7 +42,7 @@ fn limits() -> Limits {
 }
 
 /// Decodifica com limite de memória e reduz ao lado pedido; `None` = bytes que não são imagem legível.
-fn decode(bytes: &[u8], w: u32, h: u32) -> Option<Arc<RenderImage>> {
+pub(crate) fn decode(bytes: &[u8], w: u32, h: u32, effect: Option<(crate::effects::BackgroundEffect, bool)>) -> Option<Arc<RenderImage>> {
     let format = sniff(bytes)?;
     // GIF aqui guarda só o 1º quadro; quem anima é `animated`.
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
@@ -51,13 +51,13 @@ fn decode(bytes: &[u8], w: u32, h: u32) -> Option<Arc<RenderImage>> {
     let orientation = decoder.orientation().ok()?;
     let mut picture = DynamicImage::from_decoder(decoder).ok()?;
     picture.apply_orientation(orientation);
-    Some(Arc::new(RenderImage::new(vec![Frame::new(fit(picture, w, h))])))
+    Some(Arc::new(RenderImage::new(vec![Frame::new(fit(picture, w, h, effect))])))
 }
 
 /// Guarda só a miniatura; o original é buscado de novo em Abrir/Salvar. GIF dentro do teto anima.
 pub fn thumbnail(bytes: &[u8]) -> Option<Arc<RenderImage>> {
     if sniff(bytes) == Some(ImageFormat::Gif) && let Some(frames) = animated(bytes) { return Some(Arc::new(RenderImage::new(frames))); }
-    decode(bytes, THUMB_W, THUMB_H)
+    decode(bytes, THUMB_W, THUMB_H, None)
 }
 
 /// Quadros do GIF reduzidos, com o atraso de cada um; `None` = um quadro só, ilegível ou acima do teto (fica o 1º quadro).
@@ -69,7 +69,7 @@ fn animated(bytes: &[u8]) -> Option<Vec<Frame>> {
         let frame = frame.ok()?;
         // Atraso quase zero corre como o navegador corre: 100 ms.
         let delay = match frame.delay().numer_denom_ms() { (n, d) if n < 20 * d.max(1) => Delay::from_numer_denom_ms(100, 1), _ => frame.delay() };
-        let pixels = fit(DynamicImage::ImageRgba8(frame.into_buffer()), GIF_W, GIF_H);
+        let pixels = fit(DynamicImage::ImageRgba8(frame.into_buffer()), GIF_W, GIF_H, None);
         total += pixels.len();
         if total > GIF_BUDGET || frames.len() >= GIF_FRAMES { return None; }
         frames.push(Frame::from_parts(pixels, 0, 0, delay));
@@ -78,7 +78,7 @@ fn animated(bytes: &[u8]) -> Option<Vec<Frame>> {
 }
 
 /// Imagem de fundo ou papel de parede, reduzida ao tamanho de uma tela grande.
-pub fn backdrop(bytes: &[u8]) -> Option<Arc<RenderImage>> { decode(bytes, BACKDROP_SIDE, BACKDROP_SIDE) }
+pub fn backdrop(bytes: &[u8]) -> Option<Arc<RenderImage>> { decode(bytes, BACKDROP_SIDE, BACKDROP_SIDE, None) }
 
 /// Bloqueante: valida o arquivo escolhido e guarda uma cópia em `dest`, trocando a anterior só se tudo deu certo.
 /// O erro volta como chave de tradução.
@@ -114,9 +114,12 @@ pub fn grain() -> Arc<RenderImage> {
 }
 
 // Reduz ao teto pedido e converte para BGRA, que é o que a GPUI desenha.
-fn fit(picture: DynamicImage, w: u32, h: u32) -> RgbaImage {
-    let picture = if picture.width() > w || picture.height() > h { picture.thumbnail(w, h) } else { picture };
+fn fit(picture: DynamicImage, w: u32, h: u32, effect: Option<(crate::effects::BackgroundEffect, bool)>) -> RgbaImage {
+    let styled = effect.is_some_and(|(e, _)| e != crate::effects::BackgroundEffect::None);
+    let (w, h) = if styled { (w.min(2048), h.min(2048)) } else { (w, h) };
+    let picture = if styled || picture.width() > w || picture.height() > h { picture.thumbnail(w, h) } else { picture };
     let mut pixels = picture.into_rgba8();
+    if let Some((effect, light)) = effect { pixels = crate::effects::apply(pixels, effect, light); }
     for pixel in pixels.chunks_exact_mut(4) { pixel.swap(0, 2); }
     pixels
 }
