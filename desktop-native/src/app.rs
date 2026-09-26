@@ -34,9 +34,10 @@ mod shortcuts;
 mod side;
 mod sidebar;
 mod subagent;
+mod dictation;
 mod sync;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -119,6 +120,7 @@ enum Payload {
     HeadlessPlan(SessionKey, controls::PlanOutcome),
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
+    Dictation(u64, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
@@ -380,6 +382,7 @@ pub struct Hangar {
     switch_seq: u64,
     switch_draft: Option<String>,
     ready_sessions: Option<Vec<SessionInfo>>,
+    dictation: dictation::Dictation,
 }
 
 impl Drop for Hangar {
@@ -391,6 +394,7 @@ impl Drop for Hangar {
 impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::watch_system(window, cx);
+        Self::watch_dictation(window, cx);
         let saved = load_connection();
         let (saved_address, saved_token) = saved.clone().unwrap_or_else(|| ("http://127.0.0.1:8765".into(), String::new()));
         let address = cx.new(|cx| InputState::new(window, cx).default_value(saved_address).placeholder(tr("server")));
@@ -415,7 +419,8 @@ impl Hangar {
         // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
         cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, None), KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-shift-c", CopyLastReply, None), KeyBinding::new("ctrl-f", FocusSettingsSearch, None),
-            KeyBinding::new("secondary-down", NextSession, None), KeyBinding::new("secondary-up", PreviousSession, None)]);
+            KeyBinding::new("secondary-down", NextSession, None), KeyBinding::new("ctrl-space", ToggleDictation, None),
+            KeyBinding::new("secondary-up", PreviousSession, None)]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
@@ -474,6 +479,7 @@ impl Hangar {
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
             new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            dictation: Default::default(),
         }
     }
 
@@ -1019,6 +1025,7 @@ impl Hangar {
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
+            Payload::Dictation(seq, result) => { self.receive_dictation(seq, result, window, cx); return; }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }
@@ -4113,6 +4120,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();
                 if let Some(text) = this.last_reply().filter(|_| !page_open) { cx.write_to_clipboard(ClipboardItem::new_string(text)); }
