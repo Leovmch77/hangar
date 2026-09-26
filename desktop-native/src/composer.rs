@@ -330,6 +330,16 @@ pub fn slash_query(text: &str) -> Option<&str> {
     (!rest.chars().any(char::is_whitespace)).then_some(rest)
 }
 
+/// Menção sob o cursor; e-mail e comandos não abrem a busca de arquivos.
+pub fn mention_query(text: &str, cursor: usize) -> Option<(std::ops::Range<usize>, &str)> {
+    if slash_query(text).is_some() { return None; }
+    let before = text.get(..cursor)?;
+    let start = before.rfind(char::is_whitespace).map_or(0, |at| at + before[at..].chars().next().unwrap().len_utf8());
+    let query = before.get(start..)?.strip_prefix('@')?;
+    if query.contains('@') { return None; }
+    Some((start..cursor, query))
+}
+
 pub fn suggestions<'a>(commands: &'a [CommandInfo], query: &str) -> Vec<&'a CommandInfo> {
     let token = query.to_lowercase();
     let mut ranked: Vec<(u8, &CommandInfo)> = commands.iter().filter_map(|c| {
@@ -433,6 +443,22 @@ mod tests {
         let names: Vec<_> = suggestions(&list, "c").iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["clear", "compact"]);
         assert_eq!(typed_command(&list, "/clear já").map(|c| c.name.as_str()), Some("clear"));
+    }
+
+    #[test]
+    fn mentions_preserve_unicode_and_surrounding_text() {
+        let text = "ação @src depois";
+        let cursor = text.find(" depois").unwrap();
+        let (range, query) = mention_query(text, cursor).unwrap();
+        assert_eq!(query, "src");
+        let mut replaced = text.to_owned();
+        replaced.replace_range(range, "@src/main.rs");
+        assert_eq!(replaced, "ação @src/main.rs depois");
+        assert_eq!(mention_query("@", 1), Some((0..1, "")));
+        assert!(mention_query("a@b", 3).is_none());
+        assert!(mention_query("/co", 3).is_none());
+        assert!(mention_query("@src ", 5).is_none());
+        assert!(mention_query("é", 1).is_none());
     }
 
     #[test]
