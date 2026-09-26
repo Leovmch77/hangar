@@ -8,4 +8,8 @@ Origem: crate `gpui-component` 0.6.6 do crates.io (repositório `longbridge/gpui
 - Com apresentação opt-in, a primeira seta para baixo, a volta ao início e a entrada no submenu por ←/→ escolhem a primeira ação disponível, pulando títulos. Sem opt-in, permanece a seleção original do kit.
 - A verificação de teclado e atualização com submenu aberto é feita na prova real do app. Os testes originais do crate foram preservados; o crate copiado não faz parte do workspace de testes do app.
 
+- `src/text/style.rs` e `src/text/compat.rs`: `inline_code_font_family` opcional no estilo,
+  repassada ao gpui-base e incluída no `PartialEq`. Sem escolha local, preserva o tema.
+  Motivo: as prévias de Nova sessão mantêm a fonte antiga ao mudar a fonte global de código.
+
 Ao atualizar gpui-kit, reaplicar na nova versão ou remover esta cópia quando a API equivalente existir no kit.

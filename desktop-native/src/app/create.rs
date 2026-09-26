@@ -773,7 +773,12 @@ impl NewSession {
             Some(Ok(None)) => muted(tr("create_baton_preview_empty")).into_any_element(),
             // Títulos no tamanho do texto, como no web: é um documento lido numa caixa pequena, não uma página.
             Some(Ok(Some(view))) => div().text_sm().text_color(theme::muted()).child(TextView::new(view).selectable(true).scrollable(false)
-                .style(gpui_kit::component::text::TextViewStyle::default().heading_font_size(|_, _| px(14.)))).into_any_element(),
+                .style({
+                    let (font, size) = theme::original_code_typography(cx);
+                    gpui_kit::component::text::TextViewStyle::default().heading_font_size(|_, _| px(14.))
+                        .code_block(StyleRefinement::default().font_family(font.clone()).text_size(size))
+                        .inline_code_font_family(font)
+                })).into_any_element(),
         };
         let this = cx.entity().downgrade();
         Some(div().flex().flex_col().gap(px(16.))

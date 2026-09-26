@@ -25,4 +25,9 @@ Mudanças, todas marcadas com "Modified for Hangar":
    Motivo: o kit não tem gancho para o recuo do marcador nem para a faixa de linguagem; só o estilo da conversa
    do app liga os dois.
 
+3. `src/text/style.rs` e `src/text/node.rs`: `inline_code_font_family`, opcional e desligada
+   por padrão, permite que uma view preserve a fonte dos trechos de código quando o tema muda.
+   O campo participa do `PartialEq` e da medição dos mesmos trechos que desenha.
+   Motivo: as prévias de Nova sessão mantêm sua tipografia própria.
+
 Ao subir a versão do gpui-kit, reaplicar estas mudanças na versão nova, ou remover a cópia se o kit já trouxer o conserto.

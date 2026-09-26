@@ -3,7 +3,7 @@
 //! As páginas de configuração usam a navegação lateral e mostram o conteúdo do servidor conectado.
 use super::*;
 use std::{cell::Cell, rc::Rc};
-use crate::appearance::{self, Appearance, Background, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
+use crate::appearance::{self, Appearance, Background, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
     ThemeMode, ThinkingTools, ToolLook, Wallpaper};
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}};
@@ -43,7 +43,7 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 27] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 29] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
@@ -51,7 +51,8 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 27] = [
     ("settings_transparency", Some("settings_transparency_desc")), ("settings_solidity", None),
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
-    ("settings_font", None), ("settings_text_size", None), ("settings_line_height", None), ("settings_column", None),
+    ("settings_font", None), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
+    ("settings_code_size", None), ("settings_line_height", None), ("settings_column", None),
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
     ("settings_collapsed_nav", None), ("settings_sidebar_height", Some("settings_only_floating")),
 ];
@@ -138,22 +139,22 @@ const LIVE_WIDTH: f32 = 360.;
 const LIVE_VISIBLE: [f32; 2] = [120., 40.];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Size, Line, Column }
+enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Size, CodeSize, Line, Column }
 
 impl Knob {
-    const ALL: [Knob; 8] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Size, Knob::Line, Knob::Column];
+    const ALL: [Knob; 9] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Size, Knob::CodeSize, Knob::Line, Knob::Column];
 
     // A força da tinta é do modo que está na tela (escuro ou claro), como a cor.
     fn read(self, a: &Appearance) -> u16 {
         match self { Knob::TintStrength => a.colors(theme::is_dark()).tint_strength, Knob::Transparency => a.transparency, Knob::Solidity => a.solidity,
             Knob::SheetSolidity => a.sheet_solidity, Knob::Contrast => a.text_contrast,
-            Knob::Size => a.text_size, Knob::Line => a.line_height, Knob::Column => a.column }
+            Knob::Size => a.text_size, Knob::CodeSize => a.code_size, Knob::Line => a.line_height, Knob::Column => a.column }
     }
 
     fn write(self, a: &mut Appearance, value: u16) {
         match self { Knob::TintStrength => a.colors_mut(theme::is_dark()).tint_strength = value, Knob::Transparency => a.transparency = value,
             Knob::Solidity => a.solidity = value, Knob::SheetSolidity => a.sheet_solidity = value, Knob::Contrast => a.text_contrast = value,
-            Knob::Size => a.text_size = value, Knob::Line => a.line_height = value, Knob::Column => a.column = value }
+            Knob::Size => a.text_size = value, Knob::CodeSize => a.code_size = value, Knob::Line => a.line_height = value, Knob::Column => a.column = value }
     }
 
     fn range(self) -> (f32, f32) {
@@ -161,6 +162,7 @@ impl Knob {
             Knob::TintStrength => (5., 100.),
             Knob::Transparency | Knob::Solidity | Knob::SheetSolidity | Knob::Contrast => (0., 100.),
             Knob::Size | Knob::Line | Knob::Column => (50., 150.),
+            Knob::CodeSize => (16., 48.),
         }
     }
 }
@@ -368,8 +370,8 @@ impl Hangar {
         appearance::set(next);
         theme::sync_kit(None, cx);
         // Quem muda as linhas ou o desenho delas refaz a conversa: a lista guarda a altura de cada linha.
-        if (before.tool_look, before.task_list, before.thinking_tools, before.table_chart)
-            != (next.tool_look, next.task_list, next.thinking_tools, next.table_chart) {
+        if (before.tool_look, before.task_list, before.thinking_tools, before.table_chart, before.code_font, before.code_size)
+            != (next.tool_look, next.task_list, next.thinking_tools, next.table_chart, next.code_font, next.code_size) {
             self.sync_rows(cx);
             self.list_state.remeasure();
             self.restyle_subagent(cx);
@@ -789,9 +791,17 @@ impl Hangar {
 
         let font = segmented("font", &[tr("settings_font_system"), tr("settings_font_mono")], if a.font == Font::Mono { 1 } else { 0 }, true,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.font = if index == 1 { Font::Mono } else { Font::System }; this.apply_appearance(next, true, cx); }, cx);
+        let code_font = segmented("code-font", &[tr("settings_code_font_jetbrains"), tr("settings_code_font_system")],
+            if a.code_font == CodeFont::System { 1 } else { 0 }, true,
+            |this: &mut Hangar, index, _: &mut Window, cx| {
+                let mut next = appearance::get(); next.code_font = if index == 1 { CodeFont::System } else { CodeFont::JetBrainsMono };
+                this.apply_appearance(next, true, cx);
+            }, cx);
         let text_box = settings_box()
             .child(self.row(IconName::Type, "settings_font", None, true, font))
             .child(self.slider_row(IconName::Type, "settings_text_size", None, Knob::Size, true, &a, cx))
+            .child(self.row(IconName::Type, "settings_code_font", Some(tr("settings_code_font_desc")), true, code_font))
+            .child(self.slider_row(IconName::Type, "settings_code_size", None, Knob::CodeSize, true, &a, cx))
             .child(self.slider_row(IconName::SlidersHorizontal, "settings_line_height", None, Knob::Line, true, &a, cx))
             .child(self.slider_row(IconName::PanelLeft, "settings_column", None, Knob::Column, true, &a, cx));
 
@@ -891,11 +901,17 @@ impl Hangar {
     fn slider_row(&self, icon: IconName, title: &'static str, description: Option<String>, knob: Knob, enabled: bool, a: &Appearance,
         cx: &mut Context<Self>) -> Div {
         let state = self.settings_ui.slider(knob);
+        let value = match knob {
+            Knob::Column => format!("{:.0} px", column_width()),
+            Knob::CodeSize => format!("{} px", (a.code_size as f32 / 2.).to_string().replace('.', &tr("decimal"))),
+            _ => knob.read(a).to_string(),
+        };
         let control = div().w(px(230.)).flex().items_center()
             .child(self.slider_edge(knob, false, enabled, cx))
             .child(Slider::new(state).flex_1().bg(theme::accent()).text_color(theme::text()).disabled(!enabled))
             .child(self.slider_edge(knob, true, enabled, cx))
-            .child(div().w(px(28.)).text_right().text_size(px(12.5)).text_color(theme::muted()).child(knob.read(a).to_string()));
+            .child(div().w(px(60.)).flex_shrink_0().text_right().text_size(px(12.5))
+                .text_color(theme::muted()).child(value));
         self.row(icon, title, description, enabled, control.into_any_element())
     }
 }

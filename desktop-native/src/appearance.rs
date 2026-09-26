@@ -13,6 +13,10 @@ pub enum Font { System, Mono }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CodeFont { JetBrainsMono, System }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SidebarHeight { Full, Content }
 
 /// Onde ficam as sessões: na barra lateral ou numa faixa de abas no topo, que tira a barra lateral.
@@ -157,6 +161,9 @@ pub struct Appearance {
     /// Contas e modelos em uma linha por conta, sem barras: escolha deste aparelho, como no web.
     pub accounts_compact: bool,
     pub sidebar_group: SidebarGroup,
+    pub code_font: CodeFont,
+    /// Meio pixel por unidade, para permitir 12,5 px sem arredondar o controle.
+    pub code_size: u16,
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
@@ -165,7 +172,8 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
-    language: Language::System, currency: Currency::Usd, accounts_compact: false, sidebar_group: SidebarGroup::None };
+    language: Language::System, currency: Currency::Usd, accounts_compact: false, sidebar_group: SidebarGroup::None,
+    code_font: CodeFont::JetBrainsMono, code_size: 25 };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -178,6 +186,7 @@ impl Appearance {
             background: self.background, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
+            code_font: self.code_font,
             ..Self::default() }
     }
 
@@ -204,6 +213,7 @@ impl Appearance {
         self.text_contrast = self.text_contrast.min(100);
         for colors in [&mut self.dark, &mut self.light] { colors.tint_strength = colors.tint_strength.clamp(5, 100); }
         for v in [&mut self.text_size, &mut self.line_height, &mut self.column] { *v = (*v).clamp(50, 150); }
+        self.code_size = self.code_size.clamp(16, 48);
         // O limite de cima depende da janela e é aplicado ao desenhar; aqui só o que nunca vale.
         for v in &mut self.live_corner { *v = if v.is_finite() { v.max(0.) } else { 16. }; }
         self
@@ -290,6 +300,18 @@ mod tests {
         assert_eq!(parsed.solidity, 70);
         assert_eq!(parsed.dark.tint_strength, 40);
         assert_eq!((parsed.theme, parsed.palette), (ThemeMode::Dark, Palette::Classic));
+        assert_eq!((parsed.code_font, parsed.code_size), (CodeFont::JetBrainsMono, 25));
+    }
+
+    #[test]
+    fn code_font_round_trips_and_size_is_bounded_independently() {
+        let saved = Appearance { code_font: CodeFont::System, code_size: 31, ..Appearance::default() };
+        let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!((loaded.code_font, loaded.code_size, loaded.text_size), (CodeFont::System, 31, 100));
+        assert_eq!((Appearance { code_size: 0, ..saved }.clamped().code_size,
+            Appearance { code_size: 900, ..saved }.clamped().code_size), (16, 48));
+        let reset = saved.reset_keeping_choices();
+        assert_eq!((reset.code_font, reset.code_size), (CodeFont::System, 25));
     }
 
     #[test]

@@ -1732,7 +1732,9 @@ fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHig
     let mut font_family = None;
     if mark.code {
         highlight = highlight.highlight(node_cx.style.inline_code_highlight());
-        font_family = Some(cx.theme().tokens.typography.mono.clone());
+        // Modified for Hangar: an explicit view font survives global appearance changes.
+        font_family = Some(node_cx.style.inline_code_font_family().cloned()
+            .unwrap_or_else(|| cx.theme().tokens.typography.mono.clone()));
     }
     if let Some(color) = mark.highlight {
         highlight.background_color = Some(color);

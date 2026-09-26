@@ -314,6 +314,7 @@ pub(super) fn resolve_component_style(
     let is_dark = themed.is_dark() || legacy.is_dark;
 
     let mut style = themed
+        .with_inline_code_font_family(legacy.inline_code_font_family.clone())
         .with_paragraph_gap(legacy.paragraph_gap)
         .with_heading_base_font_size(legacy.heading_base_font_size)
         .with_code_block(code_block)

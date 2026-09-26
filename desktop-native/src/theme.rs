@@ -1,5 +1,5 @@
 use gpui_kit::{component::{Theme, ThemeMode as KitMode}, *};
-use std::sync::{RwLock, atomic::{AtomicBool, Ordering}};
+use std::sync::{OnceLock, RwLock, atomic::{AtomicBool, Ordering}};
 use crate::appearance::{self, Background as Backdrop, DesktopText, Palette, Panels, Reading, Swatch, ThemeMode};
 
 // Cores dos mocks aprovados (Task 12): o padrão é "Colados", opaco; "Caixa solta" deixa passar o que está
@@ -8,6 +8,16 @@ use crate::appearance::{self, Background as Backdrop, DesktopText, Palette, Pane
 pub const MONO: &str = "JetBrainsMono Nerd Font";
 /// Sans embutida no binário (`assets/fonts`), a "Sistema" das configurações.
 pub const SANS: &str = "Geist";
+pub const CODE_MONO: &str = "JetBrains Mono";
+
+/// Guarda a escolha resolvida pelo kit antes de aplicar a preferência de código.
+pub fn original_code_typography(cx: &App) -> (SharedString, Pixels) {
+    static ORIGINAL: OnceLock<(SharedString, Pixels)> = OnceLock::new();
+    ORIGINAL.get_or_init(|| {
+        let theme = Theme::global(cx);
+        (theme.mono_font_family.clone(), theme.mono_font_size)
+    }).clone()
+}
 
 /// Um conjunto completo de cores: as quatro fixas (Clássico/Neutro × escuro/claro) e a do desktop.
 /// `float_*` são as superfícies da caixa solta, que ficam sobre o fundo transparente.
@@ -383,6 +393,8 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
 
 /// Leva modo claro/escuro, destaque e fonte para os componentes do gpui-kit (entrada, menus, botão primário).
 pub fn sync_kit(window: Option<&mut Window>, cx: &mut App) {
+    let (original_font, _) = original_code_typography(cx);
+    let appearance = appearance::get();
     let dark = is_dark();
     if Theme::global(cx).is_dark() != dark {
         Theme::change(if dark { KitMode::Dark } else { KitMode::Light }, window, cx);
@@ -398,6 +410,11 @@ pub fn sync_kit(window: Option<&mut Window>, cx: &mut App) {
     theme.tokens.primary_active = theme.primary_active.into();
     theme.ring = accent_focus();
     theme.font_family = SANS.into();
+    theme.mono_font_family = match appearance.code_font {
+        appearance::CodeFont::JetBrainsMono => CODE_MONO.into(),
+        appearance::CodeFont::System => original_font,
+    };
+    theme.mono_font_size = px(appearance.code_size as f32 / 2.);
     Theme::sync_base(cx);
 }
 
