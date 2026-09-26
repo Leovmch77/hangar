@@ -63,12 +63,13 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent) }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), Folders }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
         // Sem o compositor na tela, o gatilho não foi desenhado e o painel não tem onde se prender.
         let page = self.settings.is_some() && !self.settings_ui.live;
+        if !page && self.selected.is_none() && self.api.is_some() && self.new_chat_folders.get() { return Some(Floating::Folders); }
         if page || !self.selected.as_ref().is_some_and(|s| s.readable()) { return None; }
         if let Some(open) = self.ctl_snapshot() { return Some(Floating::Controls(open)); }
         if self.command_panel { return Some(Floating::Commands); }
@@ -77,7 +78,8 @@ impl Hangar {
 
     /// Fecha o painel aberto sobre o compositor; diz se havia um.
     pub(super) fn close_popups(&mut self) -> bool {
-        let open = self.controls_open() || self.command_panel || self.recent.is_some();
+        let folders = self.new_chat_folders.replace(false);
+        let open = folders || self.controls_open() || self.command_panel || self.recent.is_some();
         self.close_controls();
         self.command_panel = false;
         self.recent = None;
@@ -99,6 +101,12 @@ impl Hangar {
                 let content = self.render_recent(cx);
                 self.recent = live;
                 ("attach-recent".to_owned(), Align::Start, true, content)
+            }
+            Floating::Folders => {
+                let room = anchor_bounds("new-chat-folder").map(|t|
+                    (window.viewport_size().height - t.bottom()).max(t.top()) - px(16.)).unwrap_or(px(0.));
+                ("new-chat-folder".to_owned(), Align::Start, true,
+                    self.new_chat.clone().map(|view| view.update(cx, |view, cx| view.render_compact_folders(cx).p_3().max_h(room).into_any_element())))
             }
         };
         let trigger = anchor_bounds(&anchor)?;
