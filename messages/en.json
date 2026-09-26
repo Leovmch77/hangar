@@ -5148,6 +5148,7 @@
   "native_create_step_opening": "Opening the session",
   "native_create_step_message": "Queueing the handover message",
   "native_create_step_time": "{passo} · {segundos} s",
+  "native_new_chat_sending": "Creating the session and sending the message…",
   "native_create_account_notes": "account: {n}",
   "native_create_found_in_list": "The create reply didn't arrive whole; the session was found in the server's list.",
   "native_create_models_reduced": "Shortened list — open a session on this account once for the app to learn its models.",

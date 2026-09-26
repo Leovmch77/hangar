@@ -5148,6 +5148,7 @@
   "native_create_step_opening": "Abrindo a sessão",
   "native_create_step_message": "Deixando o recado de continuação na fila",
   "native_create_step_time": "{passo} · {segundos} s",
+  "native_new_chat_sending": "Criando a sessão e enviando a mensagem…",
   "native_create_account_notes": "conta: {n}",
   "native_create_found_in_list": "A resposta da criação não chegou inteira; a sessão foi achada na lista do servidor.",
   "native_create_models_reduced": "Lista reduzida — abra uma sessão nesta conta uma vez para o app aprender os modelos dela.",

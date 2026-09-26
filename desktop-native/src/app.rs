@@ -1373,6 +1373,16 @@ impl Hangar {
 
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            let text = self.composer.read(cx).value().to_string();
+            if text.trim().is_empty() { return; }
+            if let Some(view) = self.new_chat.clone() {
+                let selection = self.selection;
+                view.update(cx, |view, cx| view.create(Some((selection, text)), cx));
+                cx.notify();
+            }
+            return;
+        }
         if !self.can_send() { return; }
         let Some(key) = self.selected_key() else { return; };
         let text = self.composer.read(cx).value().to_string();
@@ -2777,6 +2787,9 @@ impl Hangar {
 
     #[allow(clippy::too_many_arguments)]
     fn render_composer(&mut self, readable: bool, busy: bool, steer: bool, queued: usize, sending: bool, stopping: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let new_chat = self.selected.is_none() && self.new_chat.is_some();
+        let creating = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).creating);
+        let can_create = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).can_create(cx));
         let key = self.selected_key();
         let text = self.composer.read(cx).value().to_string();
         let uploading = key.as_ref().and_then(|key| self.uploading.get(key)).map(|batch| {
@@ -2803,11 +2816,11 @@ impl Hangar {
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
         }
         let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working";
-        let blocked = sending || uploading.is_some() || !self.chat_online || !self.history_installed;
+        let blocked = if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).appearance(false).disabled(!readable).on_paste(move |item, _, cx| {
+        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat) || creating).on_paste(move |item, _, cx| {
             paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
@@ -2869,7 +2882,7 @@ impl Hangar {
                 .when_some(cost, |el, cost| el.child(div().flex_shrink_0().child("·")).child(div().flex_shrink_0().child(cost)))
         });
 
-        let send_label = tr(if sending || uploading.is_some() { "sending" } else { "send" });
+        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() { "sending" } else { "send" });
         let action = if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
@@ -3892,6 +3905,12 @@ impl Hangar {
         let stop_note = selected_key.as_ref().and_then(|key| self.stop_feedback.get(key)).cloned();
         let prethread_open = self.prethread_key().is_some();
         let mut content = div().w_full().flex().flex_col();
+        if let Some(view) = self.new_chat.as_ref().filter(|_| self.selected.is_none()) {
+            let view = view.read(cx);
+            let note = if view.creating { Some(tr("new_chat_sending")) } else { view.error.clone() };
+            content = content.when_some(note, |el, note| el.child(in_column(div().py_2().text_sm()
+                .text_color(if view.creating { theme::muted() } else { theme::warning() }).child(note))));
+        }
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
@@ -3920,7 +3939,7 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .when(self.selected.is_some(), |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx)));
+            .when(self.selected.is_some() || self.api.is_some(), |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx)));
         self.measured_bottom(content.into_any_element())
     }
 }
@@ -3993,7 +4012,8 @@ impl Render for Hangar {
             .when(floating && page.is_none(), |el| el.p(px(10.)).gap(px(10.)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();
-                if !this.connection_dialog && !page_open && this.selected.as_ref().is_some_and(|s| s.readable()) {
+                if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(|s| s.readable())
+                    || this.selected.is_none() && this.api.is_some()) {
                     this.composer.update(cx, |input, cx| input.focus(window, cx));
                 }
             }))
