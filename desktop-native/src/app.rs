@@ -3577,23 +3577,55 @@ impl Hangar {
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
         let focus = self.tab_focus.get(&name);
-        let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
+        let focused = focus.is_some_and(|f| f.contains_focused(window, cx));
+        let hovered = self.sidebar.hover.as_deref() == Some(name.as_str());
+        let menu_open = self.sidebar.button_menu.as_deref() == Some(name.as_str());
+        let show_menu = hovered || focused || menu_open;
+        let outcome = selected.then(|| self.selected_key()).flatten().and_then(|key| self.delivery.outcome(&key));
+        let queued = selected && self.history_installed && self.queued_count() > 0;
+        let state = conversation_row_state(&session, outcome, queued);
+        let color = theme::conversation_status(state);
+        let status_label = tr(&format!("sidebar_state_{state}"));
         let meta = place(&session, host);
-        let label = format!("{name} · {meta} · {}", tr(&format!("chip_{state}")));
+        let label = format!("{name} · {meta} · {status_label}");
         let branch = session.branch.clone().filter(|b| !b.is_empty() && !compact);
         let time = || div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
+        let status = || {
+            let glyph = if state == "working" {
+                self.working_mark_slot(panes::Area::Nav, format!("conversation-mark-{name}"), 13., color)
+            } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
+            div().flex_shrink_0().flex().items_center().gap(px(4.)).text_size(px(10.)).line_height(px(14.)).text_color(color)
+                .child(div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph))
+                .when(!compact, |el| el.child(status_label.clone()))
+        };
+        let weak = cx.weak_entity();
+        let menu = || {
+            let (weak, target) = (weak.clone(), name.clone());
+            Button::new(SharedString::from(format!("conversation-menu-{name}"))).ghost().xsmall()
+                .icon(chrome::small_icon(IconName::Ellipsis, 13., theme::muted())).h(px(18.)).px(px(4.)).rounded(px(5.))
+                // No hover fica fora do Tab; com foco na linha o botão está visível e acessível pelo teclado.
+                .tab_stop(focused)
+                .accessibility_label(tr("sidebar_options").replace("{n}", &name)).tooltip(tr("sidebar_options_tip"))
+                .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), session.clone()))
+                .on_open_change(move |open, _, cx| { let _ = weak.update(cx, |this, cx| {
+                    let hover = this.sidebar.hover.take();
+                    this.button_menu(target.clone(), *open, cx);
+                    this.sidebar.hover = hover;
+                }); })
+        };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
-            .when(compact, |el| el.child(div().w(px(13.)).flex_shrink_0().flex().justify_center()
-                .child(div().size(px(6.)).rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }))))
+            .when(compact, |el| el.child(status()))
             .child(chrome::provider_glyph(&session.provider, 13.))
             .child(chrome::small_icon(IconName::Folder, 13., theme::muted()))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
-            .when(compact, |el| el.child(time()));
+            .when(compact, |el| el.child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
+                .when(show_menu, |el| el.child(menu()))).child(time()));
         let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
+        let hover_name = name.clone();
         div().id(SharedString::from(format!("conversation-row-{name}"))).relative().flex_shrink_0()
             .h(px(if compact { 29. } else if branch.is_some() { 61. } else { 45. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
@@ -3601,11 +3633,18 @@ impl Hangar {
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(selection))
             .when(!selected, |el| el.hover(|el| el.bg(hover)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered { this.sidebar.hover = Some(hover_name.clone()); }
+                else if this.sidebar.hover.as_deref() == Some(hover_name.as_str()) { this.sidebar.hover = None; }
+                this.redraw(panes::Area::Nav, cx);
+            }))
             .role(Role::Button).aria_selected(selected).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .when(!compact, |el| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(8.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
-                .child(div().flex_1().min_w_0().truncate().child(meta)).child(time())))
+                .child(div().flex_1().min_w_0().truncate().child(meta))
+                .child(div().h(px(14.)).flex_shrink_0().flex().items_center()
+                    .map(|el| if show_menu { el.child(menu()) } else if state == "idle" { el.child(time()) } else { el.child(status()) }))))
             .child(title)
             .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
@@ -3616,9 +3655,15 @@ impl Hangar {
                 this.select(open.clone(), window, cx);
                 cx.stop_propagation();
             }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                let hover = this.sidebar.hover.take();
+                this.start_menu(menu_name.clone(), cx);
+                this.sidebar.hover = hover;
+            }))
             .on_click(cx.listener(move |this, _, window, cx| {
+                let hover = this.sidebar.hover.take();
                 this.hide_preview();
+                this.sidebar.hover = hover;
                 this.select(session.clone(), window, cx);
                 if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
             }))
@@ -3726,6 +3771,17 @@ impl Hangar {
             .context_menu(sidebar::session_menu(weak, menu_session))
             .into_any_element()
     }
+}
+
+fn conversation_row_state(session: &SessionInfo, outcome: Option<&SendOutcome>, queued: bool) -> &'static str {
+    if matches!(outcome, Some(SendOutcome::Rejected(_))) { "failed" }
+    else if session.problema.as_ref().is_some_and(|problem| !problem.trim().is_empty()) { "problem" }
+    else if session.limited == Some(true) { "limited" }
+    else if matches!(outcome, Some(SendOutcome::Uncertain)) { "uncertain" }
+    else if queued { "queued" }
+    else { match session.state.as_str() {
+        "working" => "working", "awaiting_input" => "input", "idle" => "idle", "dead" => "dead", _ => "unknown",
+    } }
 }
 
 fn kind_of<'a>(items: &[Item], index: usize, events: &'a [ChatEvent]) -> Option<&'a str> {
@@ -4261,7 +4317,10 @@ impl Render for Hangar {
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
                 (None, Some(bar)) if tabs => el.flex_col().child(bar)
                     .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),
-                (None, sidebar) => el.children(sidebar).child(content).when_some(side, |el, side| el.child(side)),
+                (None, sidebar) => el.children(sidebar)
+                    .when(page.is_none() && appearance::get().navigation == appearance::Navigation::Conversations,
+                        |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
+                    .child(content).when_some(side, |el, side| el.child(side)),
             })
             .children(live)
             .children(self.render_preview(window))
@@ -4290,6 +4349,27 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::time::Duration;
+
+    #[test]
+    fn conversation_corner_preserves_delivery_truth_and_session_warnings() {
+        use super::{conversation_row_state, SendOutcome, SessionInfo};
+        let mut session = SessionInfo { state: "working".into(), ..Default::default() };
+        assert_eq!(conversation_row_state(&session, None, false), "working");
+        assert_eq!(conversation_row_state(&session, None, true), "queued");
+        assert_eq!(conversation_row_state(&session, Some(&SendOutcome::Queued), false), "working");
+        assert_eq!(conversation_row_state(&session, Some(&SendOutcome::Uncertain), true), "uncertain");
+        assert_eq!(conversation_row_state(&session, Some(&SendOutcome::Rejected("no".into())), true), "failed");
+        session.limited = Some(true);
+        assert_eq!(conversation_row_state(&session, None, true), "limited");
+        session.problema = Some("broken config".into());
+        assert_eq!(conversation_row_state(&session, None, true), "problem");
+        session.problema = Some(" ".into());
+        session.limited = None;
+        for (state, expected) in [("idle", "idle"), ("awaiting_input", "input"), ("dead", "dead"), ("other", "unknown")] {
+            session.state = state.into();
+            assert_eq!(conversation_row_state(&session, None, false), expected);
+        }
+    }
 
     #[test]
     fn system_notifications_require_live_transitions_and_confirmed_preferences() {
