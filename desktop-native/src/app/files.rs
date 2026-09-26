@@ -59,6 +59,37 @@ fn file_failure(error: &Failure) -> String {
     }
 }
 
+fn file_language(path: &str) -> &'static str {
+    let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    match extension.as_str() {
+        "rs" => "rust",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "tsx",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "py" => "python",
+        "json" => "json",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "sh" | "bash" | "zsh" => "bash",
+        "css" => "css",
+        "html" | "htm" => "html",
+        "vue" => "html",
+        "svelte" => "svelte",
+        "sql" => "sql",
+        "c" | "h" | "cc" | "cpp" | "hpp" => "cpp",
+        "java" => "java",
+        "cs" => "csharp",
+        "kt" => "kotlin",
+        "go" => "go",
+        "rb" => "ruby",
+        "lua" => "lua",
+        "swift" => "swift",
+        "php" => "php",
+        _ => "text",
+    }
+}
+
 impl Files {
     pub fn new(window: &mut Window, cx: &mut Context<Hangar>) -> Self {
         cx.bind_keys([
@@ -146,8 +177,7 @@ impl Hangar {
         let Some(ix) = self.files.tabs.iter().position(|tab| tab.id == id) else { return };
         let path = &self.files.tabs[ix].path;
         self.files.tabs[ix].content = Some(result.map(|content| {
-            let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("txt");
-            let editor = cx.new(|cx| EditorState::new(window, cx).language(extension).default_value(content.text.clone()).soft_wrap(true));
+            let editor = cx.new(|cx| EditorState::new(window, cx).language(file_language(path)).default_value(content.text.clone()).soft_wrap(true));
             let changed = cx.subscribe_in(&editor, window, move |this: &mut Self, _, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     if let Some(tab) = this.files.tabs.iter_mut().find(|tab| tab.id == id) {
@@ -369,6 +399,28 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_language_maps_compiled_grammars_and_plain_text() {
+        for (path, expected) in [
+            ("main.rs", "rust"), ("app.ts", "typescript"), ("view.tsx", "tsx"),
+            ("app.js", "javascript"), ("script.py", "python"), ("data.json", "json"),
+            ("config.toml", "toml"), ("config.yml", "yaml"), ("README.md", "markdown"),
+            ("run.sh", "bash"), ("app.css", "css"), ("index.html", "html"),
+            ("App.svelte", "svelte"), ("query.sql", "sql"), ("main.c", "cpp"),
+            ("header.h", "cpp"), ("main.cc", "cpp"), ("main.cpp", "cpp"),
+            ("header.hpp", "cpp"), ("Main.java", "java"), ("Program.cs", "csharp"),
+            ("Main.kt", "kotlin"), ("Main.kts", "text"), ("main.go", "go"),
+            ("main.rb", "ruby"), ("main.lua", "lua"), ("Main.swift", "swift"),
+            ("index.php", "php"), ("README.markdown", "markdown"),
+            ("run.zsh", "bash"), ("App.vue", "html"),
+            ("sample.unknown", "text"), ("config.jsonc", "text"),
+            ("notes.mdx", "text"), ("theme.scss", "text"),
+            ("types.pyi", "text"), ("main.pas", "text"), ("main.dart", "text"),
+        ] {
+            assert_eq!(super::file_language(path), expected, "{path}");
+        }
+    }
+
     #[test]
     fn editing_requires_a_complete_read_and_digest() {
         let mut content: super::Content = serde_json::from_value(serde_json::json!({
