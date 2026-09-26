@@ -13,6 +13,7 @@ mod media;
 mod mend;
 mod status;
 mod tables;
+mod ws;
 mod theme;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};
 use std::{borrow::Cow, sync::Arc};
