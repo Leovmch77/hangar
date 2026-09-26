@@ -11,6 +11,7 @@ mod i18n;
 mod interaction;
 mod media;
 mod mend;
+mod term_view;
 mod status;
 mod tables;
 mod ws;
