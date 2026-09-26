@@ -45,6 +45,18 @@ pub(super) struct Scan { entries: Vec<Entry>, error: Option<String> }
 struct Probe { disponivel: bool }
 
 #[derive(Clone, Debug, Deserialize)]
+pub(super) struct Checkout { current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
+
+fn checkout_of(result: Result<Value, Failure>) -> Result<Option<Checkout>, String> {
+    match result {
+        Err(error) if error.status == Some(404)
+            || (error.status == Some(409) && error.detail.contains("not a git repository")) => Ok(None),
+        Err(error) => Err(Hangar::fetch_failure(&error)),
+        Ok(value) => serde_json::from_value(value).map(Some).map_err(|_| tr("invalid_response")),
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
 struct ConfigDir { path: String, label: String, #[serde(default)] active: bool }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -96,6 +108,7 @@ pub(super) enum CreateReply {
     Roots(u64, Result<Value, Failure>, Option<String>),
     /// A pasta já convertida na tarefa do tokio: a lista grande não é lida na thread da janela.
     Scan(u64, Result<Scan, String>),
+    Branches(u64, Result<Option<Checkout>, String>),
     Sessions(u64, Result<Vec<SessionInfo>, Failure>),
     Providers(u64, Result<Value, Failure>),
     Configs(u64, Result<Value, Failure>),
@@ -249,6 +262,9 @@ pub(in crate::app) struct NewSession {
     query: Entity<InputState>,
     /// A pasta escolhida: é ela que o formulário configura.
     picked: Option<String>,
+    checkout: Remote<Option<Checkout>>,
+    branch: String,
+    branch_pick: Option<Picker>,
     sessions: Remote<Vec<SessionInfo>>,
     same_folder: bool,
     name: Entity<InputState>,
@@ -347,6 +363,7 @@ impl NewSession {
             link, compact: false, compact_folders: Default::default(), servers: Remote::default(), servers_error: None,
             switching: false, switch_error: None,
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
+            checkout: Remote::default(), branch: String::new(), branch_pick: None,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -482,7 +499,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
-        if self.compact { self.picked = Some(path.clone()); }
+        if self.compact { self.picked = Some(path.clone()); self.load_branches(cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -512,6 +529,7 @@ impl NewSession {
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
         if self.compact {
             self.compact_folders.set(false);
+            self.load_branches(cx);
             cx.notify();
             return;
         }
@@ -574,11 +592,26 @@ impl NewSession {
             && self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).is_some_and(|a| a.auth.status == "connected"))
     }
 
+    fn load_branches(&mut self, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        if !self.compact { return; }
+        let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
+        let root = root.path.clone();
+        let seq = self.checkout.start();
+        (self.checkout.value, self.branch_pick, self.branch) = (None, None, String::new());
+        self.request(cx, move |api, send| Box::pin(async move {
+            let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
+            send(CreateReply::Branches(seq, checkout_of(result))).await;
+        }));
+        cx.notify();
+    }
+
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.creating && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
             && (!self.compact || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())
-                && !self.models.loading && self.models.ok().is_some()))
+                && !self.models.loading && self.models.ok().is_some()
+                && !self.checkout.loading))
     }
 
     pub(super) fn create(&mut self, first: Option<(u64, String)>, cx: &mut Context<Self>) {
@@ -586,8 +619,10 @@ impl NewSession {
         let Some(cwd) = self.picked.clone() else { return };
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
+        let requested_branch = (self.compact && !self.branch.is_empty()).then(|| self.branch.clone());
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
+        if self.compact && !self.branch.is_empty() { body["branch"] = json!(self.branch); }
         match provider {
             "claude" => {
                 body["config_dir"] = json!(self.config);
@@ -662,7 +697,7 @@ impl NewSession {
                 None => {
                     let result = api.server_send(reqwest::Method::POST, &["sessions"], Some(body), 120).await;
                     poll.abort();
-                    opened(&api, result, &name, &cwd).await
+                    opened(&api, result, &name, &cwd, requested_branch.as_deref()).await
                 }
             };
             match (first, opened) {
@@ -687,6 +722,22 @@ impl NewSession {
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
+            CreateReply::Branches(seq, result) => {
+                if !self.compact || !self.checkout.finish(seq, result) { return None; }
+                if let Some(Some(checkout)) = self.checkout.ok() {
+                    let current = checkout.current.as_ref().map(|branch| format!("{} · {branch}", tr("create_checkout_current")))
+                        .unwrap_or_else(|| tr("create_checkout_current"));
+                    let mut choices = vec![ModelChoice { id: String::new(), label: current, hint: String::new() }];
+                    choices.extend(checkout.branches.iter().chain(&checkout.remotes).map(|branch| ModelChoice {
+                        id: branch.clone(), label: branch.clone(), hint: if checkout.current.as_ref() == Some(branch) {
+                            tr("create_checkout_current")
+                        } else { tr("create_checkout_worktree") },
+                    }));
+                    self.branch_pick = Some(picker(choices, Some(0), |this, branch, _, _| {
+                        if !this.creating { this.branch = branch; }
+                    }, window, cx));
+                }
+            }
             CreateReply::Sessions(seq, result) => {
                 if seq != self.sessions.seq { return None; }
                 let Some(path) = self.picked.clone() else { return None };
@@ -762,7 +813,7 @@ type Sender = Arc<dyn Fn(CreateReply) -> Pin<Box<dyn Future<Output = ()> + Send>
 
 /// A resposta do POST vira a sessão a abrir. Queda depois de mandar, ou resposta boa ilegível, não diz se ela nasceu: a lista
 /// responde, pelo nome que o backend dá (a mesma limpeza) e pela pasta, e o aviso diz que foi achada assim.
-async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str) -> Result<Opened, String> {
+async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str, branch: Option<&str>) -> Result<Opened, String> {
     match result {
         Ok(value) => {
             let accounts: Vec<&str> = value.get("avisos").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect())
@@ -770,10 +821,10 @@ async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
             let notes = if accounts.is_empty() { Vec::new() } else { vec![tr("create_account_notes").replace("{n}", &accounts.join(" · "))] };
             match serde_json::from_value(value.clone()) {
                 Ok(session) => Ok(Opened { session, notes, warning: None }),
-                Err(_) => found(api, name, cwd, tr("invalid_response")).await,
+                Err(_) => found(api, name, cwd, branch, tr("invalid_response")).await,
             }
         }
-        Err(error) if error.uncertain && error.status.is_none() => found(api, name, cwd, tr("connection_failed")).await,
+        Err(error) if error.uncertain && error.status.is_none() => found(api, name, cwd, branch, tr("connection_failed")).await,
         Err(error) => Err(Hangar::fetch_failure(&error)),
     }
 }
@@ -783,10 +834,10 @@ async fn opened(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
 async fn handed(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str) -> Result<Opened, String> {
     let value = match result {
         Ok(value) => value,
-        Err(error) if error.uncertain && error.status.is_none() => return found(api, name, cwd, tr("connection_failed")).await,
+        Err(error) if error.uncertain && error.status.is_none() => return found(api, name, cwd, None, tr("connection_failed")).await,
         Err(error) => return Err(Hangar::fetch_failure(&error)),
     };
-    let Some(created) = value.get("name").and_then(Value::as_str).map(str::to_owned) else { return found(api, name, cwd, tr("invalid_response")).await };
+    let Some(created) = value.get("name").and_then(Value::as_str).map(str::to_owned) else { return found(api, name, cwd, None, tr("invalid_response")).await };
     let warning = value.get("aviso").and_then(Value::as_str).filter(|a| !a.is_empty()).map(|a| tr("create_baton_summary_failed").replace("{motivo}", a));
     let listed = match api.sessions().await {
         Ok(list) => list.into_iter().find(|s| s.name == created),
@@ -799,10 +850,25 @@ async fn handed(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
     Ok(Opened { session, notes, warning })
 }
 
-async fn found(api: &Api, name: &str, cwd: &str, failure: String) -> Result<Opened, String> {
+// A worktree nasce ao lado do repositório, mesmo quando se escolhe uma subpasta dele.
+fn created_here(session: &SessionInfo, name: &str, cwd: &str, branch: Option<&str>) -> bool {
+    if session.name != name { return false; }
+    match branch {
+        None => session.cwd.as_deref() == Some(cwd),
+        Some(branch) => session.branch.as_deref() == Some(branch) && session.cwd.as_deref().is_some_and(|path| {
+            if path == cwd { return true; }
+            let path = path.replace('\\', "/");
+            let Some(origin) = path.strip_suffix(&format!("-{name}")) else { return false };
+            let cwd = cwd.replace('\\', "/");
+            cwd == origin || cwd.starts_with(&format!("{origin}/"))
+        }),
+    }
+}
+
+async fn found(api: &Api, name: &str, cwd: &str, branch: Option<&str>, failure: String) -> Result<Opened, String> {
     let clean = sanitize(name);
     let list = api.sessions().await.map_err(|_| failure.clone())?;
-    list.into_iter().find(|s| s.name == clean && s.cwd.as_deref() == Some(cwd))
+    list.into_iter().find(|s| created_here(s, &clean, cwd, branch))
         .map(|session| Opened { session, notes: vec![tr("create_found_in_list")], warning: None }).ok_or(failure)
 }
 
@@ -1142,6 +1208,26 @@ impl NewSession {
             .into_any_element()
     }
 
+    fn render_checkout(&self, cx: &mut Context<Self>) -> Div {
+        let row = div().flex().flex_col().gap_2();
+        if self.checkout.loading {
+            return row.child(div().id("new-chat-branches-status").role(Role::Status).child(tr("create_checkout_loading")))
+                .child(Skeleton::new("new-chat-branches-loading").w_full().h_8().rounded_md());
+        }
+        if let Some(Err(error)) = &self.checkout.value {
+            return row.child(alert("new-chat-branches-error", tr("create_checkout_failed").replace("{reason}", error)))
+                .child(Button::new("new-chat-branches-retry").ghost().label(tr("retry"))
+                    .on_click(cx.listener(|this, _, _, cx| this.load_branches(cx))));
+        }
+        let Some(Some(checkout)) = self.checkout.ok() else { return row };
+        let worktree = !self.branch.is_empty() && checkout.current.as_ref() != Some(&self.branch);
+        row.child(label(tr("create_checkout_branch")))
+            .children(self.branch_pick.as_ref().map(|(pick, _)| Select::new(pick).disabled(self.creating)
+                .accessibility_label(tr("create_checkout_branch"))))
+            .child(muted(tr(if worktree { "create_checkout_worktree_help" } else { "create_checkout_current_help" })))
+            .when(checkout.dirty, |row| row.child(muted(tr("create_checkout_dirty"))))
+    }
+
     fn render_compact(&self, cx: &mut Context<Self>) -> Div {
         let field = |title: String, body: AnyElement| div().flex_1().min_w_0().flex().flex_col().gap_2()
             .child(div().text_sm().text_color(theme::muted()).child(title)).child(body);
@@ -1186,6 +1272,8 @@ impl NewSession {
             .child(div().flex().gap_4().items_start()
                 .child(field(tr("create_claude_account"), account))
                 .child(popup::anchor(field(tr("new_chat_folder"), div().child(folder).children(roots_note).into_any_element()).relative(), "new-chat-folder")))
+            .when(self.checkout.loading || self.checkout.value.as_ref().is_some_and(|value| !matches!(value, Ok(None))),
+                |el| el.child(self.render_checkout(cx)))
             .child(div().p_4().rounded_xl().border_1().border_color(theme::border()).bg(theme::boxed())
                 .child(field(tr("create_model"), model)))
             .when(failed, |el| el.child(Button::new("new-chat-retry").ghost().label(tr("retry"))
@@ -1328,6 +1416,34 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     use super::{Failure, HashSet, Root, basename, crumbs, json, rel_path, sanitize, scan_of, successor, tr, unique_name};
+
+    #[test]
+    fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {
+        let failure = |status, detail: &str| Err(Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false });
+        assert!(super::checkout_of(failure(404, "Not Found")).unwrap().is_none());
+        assert!(super::checkout_of(failure(409, "fatal: not a git repository (or any of the parent directories): .git")).unwrap().is_none());
+        assert_eq!(super::checkout_of(failure(409, "fatal: bad config")).unwrap_err(), "fatal: bad config");
+        assert!(super::checkout_of(Ok(json!({}))).is_err());
+        let checkout = super::checkout_of(Ok(json!({"current": "main", "branches": ["main", "feature"],
+            "remotes": ["remote-feature"], "dirty": true}))).unwrap().unwrap();
+        assert_eq!(checkout.current.as_deref(), Some("main"));
+        assert_eq!(checkout.branches, ["main", "feature"]);
+        assert_eq!(checkout.remotes, ["remote-feature"]);
+        assert!(checkout.dirty);
+        let mut pending = super::Remote::default();
+        let old = pending.start();
+        let current = pending.start();
+        assert!(pending.finish(current, Ok(None)));
+        assert!(!pending.finish(old, Ok(Some(checkout))));
+        assert!(matches!(pending.ok(), Some(None)));
+        let created = super::SessionInfo { name: "api".into(), cwd: Some("/projects/repo-api".into()),
+            branch: Some("feature".into()), ..Default::default() };
+        assert!(super::created_here(&created, "api", "/projects/repo/src", Some("feature")));
+        assert!(!super::created_here(&created, "api", "/projects/repo/src", None));
+        assert!(!super::created_here(&created, "api", "/other/repo", Some("feature")));
+        assert!(!super::created_here(&created, "api", "/projects/other-repo", Some("feature")));
+        assert!(!super::created_here(&created, "api", "/projects/repo", Some("main")));
+    }
 
     #[test]
     fn the_successor_takes_the_next_free_letter() {
