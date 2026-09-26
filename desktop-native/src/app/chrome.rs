@@ -356,15 +356,19 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
     let pressed = Rc::new(Cell::new(false));
     // Cada botão despacha a partir de um nó dentro dele, como o rodapé do kit: pelo foco, uma superfície que o
     // tomasse deixaria o botão mudo. O nó não entra na ordem do Tab.
-    let (cancel_from, ok_from) = (cx.focus_handle(), cx.focus_handle());
-    window.open_alert_dialog(cx, move |alert, _, _| {
+    let (cancel_from, ok_from, cancel_focus) = (cx.focus_handle(), cx.focus_handle(), cx.focus_handle());
+    let initial_focus = cancel_focus.clone();
+    window.open_dialog(cx, move |dialog, _, _| {
         let (act, confirm) = (act.clone(), pressed.clone());
         let (press, cancel_from, ok_from) = (pressed.clone(), cancel_from.clone(), ok_from.clone());
         let anchor = |from: &FocusHandle| div().absolute().size_0().track_focus(from);
-        alert.title(SharedString::from(title.clone())).description(SharedString::from(description.clone()))
+        super::popup::dialog(dialog).w(px(360.)).close_button(false)
+            .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
+            .child(div().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().child(description.clone()))
             .footer(DialogFooter::new()
-                .child(Button::new("cancel").label(crate::i18n::tr("cancel")).child(anchor(&cancel_from))
-                    .on_click(move |_, window, cx| cancel_from.dispatch_action(&Cancel, window, cx)))
+                .child(InitialFocusButton { id: "cancel".into(), focus: cancel_focus.clone(),
+                    button: Button::new("cancel").label(crate::i18n::tr("cancel")).child(anchor(&cancel_from))
+                        .on_click(move |_, window, cx| cancel_from.dispatch_action(&Cancel, window, cx)) })
                 .child(Button::new("ok").label(ok.clone()).with_variant(variant).child(anchor(&ok_from))
                     .on_click(move |_, window, cx| {
                         press.set(true);
@@ -375,6 +379,19 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
                 if confirm.take() { act(window, cx) } else { super::machines::enter_to_focused(event, window, cx) }
             })
     });
+    window.on_next_frame(move |window, cx| initial_focus.focus(window, cx));
+}
+
+#[derive(IntoElement)]
+struct InitialFocusButton { id: ElementId, focus: FocusHandle, button: Button }
+
+impl RenderOnce for InitialFocusButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        window.with_id(std::any::type_name::<Button>(), |window| {
+            window.use_keyed_state(self.id, cx, move |_, _| self.focus);
+        });
+        self.button
+    }
 }
 
 /// Rótulo de seção (lista e painel): 12px, peso médio, sem caixa alta, como no mock.

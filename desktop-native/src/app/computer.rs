@@ -7,6 +7,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::link::Link;
 use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem};
 use serde::Deserialize;
+use std::rc::Rc;
 
 #[derive(Clone, Deserialize)]
 struct AgentExe { path: String, exists: bool, size: u64 }
@@ -434,7 +435,9 @@ impl Hangar {
         window.open_dialog(cx, move |surface, _, cx| {
             let busy = dialog.read(cx).busy.is_some();
             let (owner, me) = (owner.clone(), dialog.entity_id());
-            surface.w(px(600.)).title(tr("computer_control_new_target")).child(dialog.clone())
+            popup::dialog(surface).w(px(600.))
+                .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("computer_control_new_target")))
+                .child(dialog.clone())
                 .keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(super::machines::enter_to_focused)
                 .on_close(move |_, _, cx| { let _ = owner.update(cx, |this, _| {
@@ -744,8 +747,12 @@ impl Hangar {
         } else { input_row("computer_control_target", &form.agent_config, busy || !self.computer.enabled) };
         page = page.child(self.mark(div().flex().items_end().gap_2()
                 .child(div().flex_1().min_w_0().child(target))
-                .child(Button::new("computer-new-target").outline().small().label(tr("computer_control_new_target"))
-                    .disabled(busy || !self.computer.enabled).on_click(cx.listener(|this, _, window, cx| this.open_computer_target(window, cx)))), "computer_control_target"))
+                .child(machines::FocusOnClick { id: "computer-new-target".into(),
+                    button: Button::new("computer-new-target").outline().small().label(tr("computer_control_new_target"))
+                        .disabled(busy || !self.computer.enabled),
+                    open: Rc::new({ let owner = cx.entity().downgrade(); move |window, cx| {
+                        let _ = owner.update(cx, |this, cx| this.open_computer_target(window, cx));
+                    } }) }), "computer_control_target"))
             .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_target_hint")))
             .child(self.render_computer_llm(state, form, cx))
             .child(div().flex().child(Button::new("computer-save").primary().small()
