@@ -4,6 +4,7 @@
 use super::*;
 use std::cell::RefCell;
 use gpui_kit::base::{Align, Placement, Positioner};
+use gpui_kit::component::dialog::Dialog;
 
 const FADE: Duration = Duration::from_millis(140);
 
@@ -132,6 +133,12 @@ fn layer(trigger: Bounds<Pixels>, align: Align, surface: AnyElement, visible: f3
         .when(!leaving, |el| el.child(div().id("popup-scrim").absolute().inset_0().occlude().on_any_mouse_down(dismiss)))
         .child(if leaving { placed } else { placed.occlude() }.child(surface))
         .into_any_element()
+}
+
+/// O mesmo cartão para confirmações e formulários; o kit continua cuidando do foco, da altura e da rolagem.
+pub(super) fn dialog(surface: Dialog) -> Dialog {
+    surface.p(px(20.)).rounded(px(16.)).bg(theme::raised())
+        .border_color(theme::glass_border())
 }
 
 /// Título de seção do popover, em caixa alta miúda; a tecla, quando há, fica à direita.
