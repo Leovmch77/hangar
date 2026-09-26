@@ -101,6 +101,13 @@ pub fn is_dark() -> bool {
     }
 }
 
+/// Superfície, seleção, hover e divisória exclusivos da barra de conversas.
+pub fn conversation_sidebar() -> (Hsla, Hsla, Hsla, Hsla) {
+    let colors = if is_dark() { [0x181818, 0x2f2f2f, 0x313131, 0x242424] }
+        else { [0xf7f7f7, 0xe3e3e3, 0xeaeaea, 0xd9d9d9] };
+    (rgb(colors[0]).into(), rgb(colors[1]).into(), rgb(colors[2]).into(), rgb(colors[3]).into())
+}
+
 /// O Desktop está pintando agora com a paleta do papel de parede (não caiu no Automático).
 pub fn desktop_painting() -> bool { desktop_active().is_some() }
 

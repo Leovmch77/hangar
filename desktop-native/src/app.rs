@@ -3407,6 +3407,8 @@ impl Hangar {
     /// Barra lateral do mock: marca, escopo, seções "Aguardando você" e "Sessões", rodapé com o servidor e a engrenagem.
     fn render_sidebar(&self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let a = crate::appearance::get();
+        let conversations = a.navigation == appearance::Navigation::Conversations;
+        let (surface, _, _, border) = theme::conversation_sidebar();
         let floating = a.panels == crate::appearance::Panels::Floating;
         let fit_content = floating && a.sidebar_height == crate::appearance::SidebarHeight::Content;
         let host = self.server_label(cx);
@@ -3417,7 +3419,8 @@ impl Hangar {
         let mut children: Vec<AnyElement> = Vec::new();
         let rows = |list: &[&SessionInfo], children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
             let selected = selected_name == Some(session.name.as_str());
-            children.push(self.render_session_row((*session).clone(), selected, &host, window, cx));
+            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, &host, window, cx) }
+                else { self.render_session_row((*session).clone(), selected, &host, window, cx) });
         };
         if !layout.waiting.is_empty() {
             children.push(section(tr("sidebar_awaiting"), Some(layout.waiting.len())).into_any_element());
@@ -3435,6 +3438,8 @@ impl Hangar {
         }
         let empty = self.sessions.iter().all(|s| self.sidebar.hidden().contains(&s.name));
         let list = div().id("session-list").min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col().gap(px(2.))
+            // A borda do painel já ocupa parte do recuo externo de oito pixels.
+            .when(conversations, |el| el.pl(px(if floating { 7. } else { 8. })).pr(px(7.)))
             .when(!fit_content, |el| el.flex_1())
             .when(empty && self.list_error.is_none(), |el| el.child(div().p_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))))
@@ -3443,11 +3448,12 @@ impl Hangar {
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
-        div().w(px(284.)).flex_shrink_0().flex().flex_col().bg(theme::chrome())
+        div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
             // A linha da janela estica os filhos; "Só o conteúdo" precisa soltar a barra do fundo.
             .map(|el| if fit_content { el.max_h_full().self_start() } else { el.h_full() })
             .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
+            .when(conversations, |el| el.border_color(border))
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(16., theme::accent()))
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
@@ -3564,6 +3570,59 @@ impl Hangar {
                 .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx))))
             .into_any_element()
+    }
+
+    fn render_conversation_row(&self, session: SessionInfo, selected: bool, host: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let compact = appearance::get().sidebar_compact;
+        let (_, selection, hover, _) = theme::conversation_sidebar();
+        let name = session.name.clone();
+        let focus = self.tab_focus.get(&name);
+        let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
+        let meta = place(&session, host);
+        let label = format!("{name} · {meta} · {}", tr(&format!("chip_{state}")));
+        let branch = session.branch.clone().filter(|b| !b.is_empty() && !compact);
+        let time = || div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
+            .children(session.last_activity.map(side::since));
+        let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
+            .when(compact, |el| el.child(div().w(px(13.)).flex_shrink_0().flex().justify_center()
+                .child(div().size(px(6.)).rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }))))
+            .child(chrome::provider_glyph(&session.provider, 13.))
+            .child(chrome::small_icon(IconName::Folder, 13., theme::muted()))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
+            .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
+                .child(format!("? {}", session.pending_questions))))
+            .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
+            .when(compact, |el| el.child(time()));
+        let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
+        div().id(SharedString::from(format!("conversation-row-{name}"))).relative().flex_shrink_0()
+            .h(px(if compact { 29. } else if branch.is_some() { 61. } else { 45. }))
+            .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
+            .when_some(focus, |el, focus| el.track_focus(focus))
+            .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
+            .when(selected, |el| el.bg(selection))
+            .when(!selected, |el| el.hover(|el| el.bg(hover)))
+            .role(Role::Button).aria_selected(selected).aria_label(label.clone())
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+            .when(!compact, |el| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(8.))
+                .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
+                .child(div().flex_1().min_w_0().truncate().child(meta)).child(time())))
+            .child(title)
+            .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(4.))
+                .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
+                .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
+                .child(div().flex_1().min_w_0().truncate().child(branch))))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.tab_focus.get(&open.name).is_some_and(|f| f.is_focused(window)) { return; }
+                this.select(open.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.hide_preview();
+                this.select(session.clone(), window, cx);
+                if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+            }))
+            .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element()
     }
 
     /// Linha de 3 níveis do mock: pasta @ servidor e tempo; selo, nome e estado; pergunta pendente ou branch com o diff.
@@ -4081,7 +4140,7 @@ impl Render for Hangar {
         let nav = if page.is_some() { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
-            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(284.)).h_full().flex_shrink_0()
+            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(appearance::get().navigation.sidebar_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
