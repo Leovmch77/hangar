@@ -137,7 +137,16 @@ impl Hangar {
             runtime.spawn(async move {
                 let result = match appearance::image_path() {
                     None => Err("backdrop_not_saved"),
-                    Some(dest) => tokio::task::spawn_blocking(move || media::adopt_backdrop(&source, &dest)).await.unwrap_or(Err("backdrop_invalid")),
+                    Some(dest) => tokio::task::spawn_blocking(move || {
+                        let previous = appearance::image_name();
+                        let name = source.file_name().map(|name| name.to_string_lossy().into_owned());
+                        appearance::save_image_name(name.as_deref()).map_err(|_| "backdrop_not_saved")?;
+                        let result = media::adopt_backdrop(&source, &dest);
+                        if result.is_err() && let Err(error) = appearance::save_image_name(previous.as_deref()) {
+                            eprintln!("background name rollback: {error}");
+                        }
+                        result
+                    }).await.unwrap_or(Err("backdrop_invalid")),
                 };
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::BackdropPicked(result.map_err(Failure::local)) }).await;
             });
@@ -173,9 +182,18 @@ impl Hangar {
         self.runtime.spawn(async move {
             let result = match appearance::image_path() {
                 None => Ok(()),
-                Some(path) => tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-                    _ => Ok(()),
+                Some(path) => tokio::task::spawn_blocking(move || {
+                    let previous = appearance::image_name();
+                    appearance::save_image_name(None).map_err(|error| error.to_string())?;
+                    match std::fs::remove_file(&path) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            if let Err(rollback) = appearance::save_image_name(previous.as_deref()) {
+                                return Err(format!("{error}; background name rollback: {rollback}"));
+                            }
+                            Err(error.to_string())
+                        }
+                        _ => Ok(()),
+                    }
                 }).await.unwrap_or_else(|e| Err(e.to_string())),
             };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::BackdropRemoved(result) }).await;
@@ -202,7 +220,7 @@ impl Hangar {
         cx.notify();
     }
 
-    /// Camada atrás de tudo: imagem com véu, véu sobre a área de trabalho, luz e grão. O Liso não desenha nada.
+    /// Camada no contêiner do escopo escolhido: imagem com véu, luz e grão. O Liso não desenha nada.
     pub(super) fn render_backdrop(&self, window: &Window) -> Option<AnyElement> {
         let a = appearance::get();
         let image = self.backdrop.as_ref().map(|(_, image)| image.clone());

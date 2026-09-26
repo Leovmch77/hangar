@@ -3929,9 +3929,14 @@ impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
         let floating = theme::is_floating();
+        let chat_background = appearance::get().background_scope == appearance::BackgroundScope::Chat;
+        let desktop_window = appearance::get().background == appearance::Background::Desktop
+            && appearance::get().wallpaper == appearance::Wallpaper::Window;
         // Página de Configurações ocupa a janela; a caixa ao vivo deixa a janela da conversa por baixo.
         let page = self.settings.filter(|_| !self.settings_ui.live);
         let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
+        let cutout = chat_background && page.is_none() && (desktop_window || floating);
+        let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
 
         // Sessão sem conversa não tem stream próprio: o estado é o da lista.
         let header_state = if self.chat_online && self.chat.state.state.is_empty() { "loading".to_owned() }
@@ -3944,6 +3949,12 @@ impl Render for Hangar {
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
+            .when(chat_background, |el| el.bg(theme::window_fill()))
+            .when(cutout, |el| {
+                let bounds = chat_bounds.clone();
+                el.child(canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {}).absolute().inset_0())
+            })
+            .when(chat_background, |el| el.children(self.render_backdrop(window)))
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
                 .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(selected_name.clone().unwrap_or_else(|| tr("title"))))
@@ -3962,11 +3973,14 @@ impl Render for Hangar {
             .child(self.pane_element(panes::Area::Bottom, StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())), cx))
             .children(self.render_file_view(cx));
         let nav = if page.is_some() { None }
-            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0(), cx)) }
-            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(284.)).h_full().flex_shrink_0(), cx)) };
+            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
+                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
+            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(284.)).h_full().flex_shrink_0()
+                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
         let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0()
+            .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
             .when(self.activity_tab(), |el| el.child(self.activity_mark_float(cx)))
@@ -3987,8 +4001,24 @@ impl Render for Hangar {
                 .child(Button::new("connect").primary().label(tr("connect")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx)))));
 
         let live = self.settings_live().then(|| self.render_live(window, cx));
-        div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex().bg(theme::window_fill()).text_color(theme::text()).text_base()
-            .children(self.render_backdrop(window))
+        div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
+            .bg(if !chat_background { theme::window_fill() }
+                else if cutout { transparent_black().into() }
+                else { theme::background().alpha(1.).into() })
+            .text_color(theme::text()).text_base()
+            // O recorte medido deixa o desktop aparecer só no chat, inclusive entre as caixas soltas.
+            .when(cutout, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                let chat = chat_bounds.get();
+                for (start, end) in [
+                    (bounds.origin, point(bounds.right(), chat.top())),
+                    (point(bounds.left(), chat.bottom()), bounds.bottom_right()),
+                    (point(bounds.left(), chat.top()), point(chat.left(), chat.bottom())),
+                    (point(chat.right(), chat.top()), point(bounds.right(), chat.bottom())),
+                ] {
+                    window.paint_quad(fill(Bounds::from_corners(start, end), theme::background().alpha(1.)));
+                }
+            }).absolute().inset_0()))
+            .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
             .when(floating && page.is_none(), |el| el.p(px(10.)).gap(px(10.)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
