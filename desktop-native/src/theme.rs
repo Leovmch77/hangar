@@ -108,6 +108,19 @@ pub fn conversation_sidebar() -> (Hsla, Hsla, Hsla, Hsla) {
     (rgb(colors[0]).into(), rgb(colors[1]).into(), rgb(colors[2]).into(), rgb(colors[3]).into())
 }
 
+/// Estados da barra de conversas sobre a superfície neutra nos dois temas.
+pub fn conversation_status(state: &str) -> Hsla {
+    let dark = is_dark();
+    if state == "idle" { return faint(); }
+    rgb(match state {
+        "input" => if dark { 0x70b0ff } else { 0x155eae },
+        "failed" | "problem" | "dead" => if dark { 0xff8585 } else { 0xb42323 },
+        "queued" | "uncertain" => if dark { 0xfbbf24 } else { 0x874b00 },
+        "limited" => if dark { 0xc98cff } else { 0x7433ad },
+        _ => if dark { 0xa0a0a0 } else { 0x565656 },
+    }).into()
+}
+
 /// O Desktop está pintando agora com a paleta do papel de parede (não caiu no Automático).
 pub fn desktop_painting() -> bool { desktop_active().is_some() }
 
