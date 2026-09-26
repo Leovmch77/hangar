@@ -2996,8 +2996,9 @@ impl Hangar {
             .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx)));
         let recent_btn = popup::anchor(div(), "attach-recent").child(chrome::icon_button("attach-recent", IconName::RotateCcwClock, tr("attach_recent"), cx)
             .disabled(!readable || uploading.is_some()).selected(self.recent.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_recent(cx))));
+        let (microphone, dictation_strip) = self.render_dictation(readable, cx);
         let control_row = div().flex().items_center().gap_1()
-            .child(commands).child(attach).child(recent_btn)
+            .child(commands).child(attach).child(recent_btn).child(microphone)
             .child(div().flex_1())
             .when(steer_text, |el| el.child(chrome::pill_button("steer-text", cx).label(tr("steer_text")).disabled(blocked)
                 .on_click(cx.listener(|this, _, window, cx| this.submit(true, false, window, cx)))))
@@ -3010,6 +3011,7 @@ impl Hangar {
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
                 .child(tr("attach_progress").replace("{done}", &done.to_string()).replace("{total}", &total.to_string()))))
             .child(field)
+            .children(dictation_strip)
             .child(control_row);
         div().id("composer").relative().flex_shrink_0().w_full().px(px(36.)).pb(px(10.)).flex().justify_center()
             .when(readable, |el| el.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(theme::accent_dim()))
