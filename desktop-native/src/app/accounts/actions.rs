@@ -412,7 +412,7 @@ impl Hangar {
             let (hangar, confirm) = (hangar.clone(), add.clone());
             // Criando: o diálogo não fecha, para a resposta ter onde aparecer. O Enter do diálogo cria a conta em vez
             // de fechá-lo: fechar sem criar parecia ter dado certo.
-            dialog.w(px(540.)).title(title).child(add.clone()).keyboard(!saving).overlay_closable(!saving).close_button(!saving)
+            popup::dialog(dialog).w(px(540.)).title(title).child(add.clone()).keyboard(!saving).overlay_closable(!saving).close_button(!saving)
                 .on_ok(move |_, window, cx| { confirm.update(cx, |add, cx| add.create(window, cx)); false })
                 .on_close(move |_, _, cx| { let _ = hangar.update(cx, |this, _| this.accounts.add = None); })
         });

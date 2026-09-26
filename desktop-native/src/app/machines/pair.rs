@@ -68,7 +68,7 @@ impl Hangar {
         let weak = hangar.downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let weak = weak.clone();
-            dialog.w(px(560.)).child(body.clone()).on_ok(enter_to_focused)
+            popup::dialog(dialog).w(px(560.)).child(body.clone()).on_ok(enter_to_focused)
                 .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
                     let pair = &mut this.machines.pair;
                     (pair.open, pair.seq) = (false, pair.seq + 1);

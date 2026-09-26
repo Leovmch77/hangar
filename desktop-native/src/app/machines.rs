@@ -362,7 +362,7 @@ impl Hangar {
         // Fechado pela pessoa, o detalhe deixa de ser o diálogo do topo: um Remover que volta depois não fecha outro diálogo.
         window.open_dialog(cx, move |dialog, _, _| {
             let (weak, id) = (weak.clone(), id.clone());
-            dialog.w(px(600.)).child(detail.clone()).on_ok(enter_to_focused)
+            popup::dialog(dialog).w(px(600.)).child(detail.clone()).on_ok(enter_to_focused)
                 .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
                     if this.machines.peer_open.as_deref() == Some(id.as_str()) { this.machines.peer_open = None; }
                 }); })
@@ -660,7 +660,7 @@ impl Hangar {
         let hangar = cx.entity();
         let detail = cx.new(|cx| MachineDetail { _observe: cx.observe(&hangar, |_, _, cx| cx.notify()), hangar: hangar.downgrade() });
         // Enter no diálogo é o "confirmar" do kit, que fecharia o detalhe; aqui Enter só salva o identificador (no campo dele).
-        window.open_dialog(cx, move |dialog, _, _| dialog.w(px(600.)).child(detail.clone()).on_ok(enter_to_focused));
+        window.open_dialog(cx, move |dialog, _, _| popup::dialog(dialog).w(px(600.)).child(detail.clone()).on_ok(enter_to_focused));
     }
 
     pub(super) fn render_machines(&mut self, cx: &mut Context<Self>) -> AnyElement {

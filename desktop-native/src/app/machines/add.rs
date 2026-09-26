@@ -480,7 +480,7 @@ impl Hangar {
             // Em voo o diálogo não fecha: ele é o único lugar onde a resposta aparece, como o `fechar()` do web.
             let busy = add.read(cx).busy;
             let (weak, confirm, me) = (weak.clone(), add.clone(), add.entity_id());
-            dialog.w(px(600.)).title(tr("machines_add_device")).child(add.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
+            popup::dialog(dialog).w(px(600.)).title(tr("machines_add_device")).child(add.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(move |_, window, cx| { confirm.update(cx, |add, cx| add.primary(window, cx)); false })
                 .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
                     if this.machines.add.as_ref().is_some_and(|a| a.entity_id() == me) { this.machines.add = None; }
