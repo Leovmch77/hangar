@@ -29,6 +29,7 @@ mod popup;
 mod rows;
 mod files;
 mod settings;
+mod mention;
 mod server_config;
 mod shortcuts;
 mod side;
@@ -124,6 +125,7 @@ enum Payload {
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
     FileView(files::FileReply),
+    Mentions(u64, Result<Vec<String>, Failure>),
     // Resumo do bastão (`GET …/bastao/dossie`), amarrado ao estado da tela que o pediu e ao número do pedido.
     Dossier(EntityId, u64, Result<String, Failure>),
 }
@@ -324,6 +326,7 @@ pub struct Hangar {
     commands: HashMap<String, Result<Vec<CommandInfo>, String>>,
     suggest_pick: usize,
     suggest_dismissed: Option<String>,
+    mention: mention::Mention,
     command_panel: bool,
     command_search: Entity<InputState>,
     confirm: Option<Confirm>,
@@ -410,13 +413,16 @@ impl Hangar {
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true));
         let input_subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
             match event {
-                InputEvent::PressEnter { secondary: false, shift: false } if !this.connection_dialog => this.submit(false, false, window, cx),
+                InputEvent::PressEnter { secondary: false, shift: false } if !this.connection_dialog => {
+                    if !this.accept_mention(window, cx) { this.submit(false, false, window, cx); }
+                }
                 // A lista de comandos acompanha o que se digita.
                 // Texto e sugestões só aparecem na faixa de baixo.
                 InputEvent::Change => { this.suggest_pick = 0; this.redraw(panes::Area::Bottom, cx); }
                 _ => {}
             }
         });
+        cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
         // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
         cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, None), KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("ctrl-shift-c", CopyLastReply, None), KeyBinding::new("ctrl-f", FocusSettingsSearch, None),
@@ -468,6 +474,7 @@ impl Hangar {
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, command_search, confirm: None,
+            mention: Default::default(),
             terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
@@ -681,6 +688,7 @@ impl Hangar {
 
     /// O que é da conexão atual sai da tela e os pedidos em voo passam a ser descartados. Serve à troca de servidor e ao Sair.
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mention.close();
         if self.switch_draft.is_none() { self.return_server = None; self.active_token.clear(); }
         self.connection += 1;
         self.selection += 1;
@@ -859,6 +867,7 @@ impl Hangar {
         let selection = self.selection;
         let (mut rows, mut visible, mut tail) = (false, true, false);
         match payload {
+            Payload::Mentions(seq, result) => { self.receive_mentions(seq, result, cx); }
             Payload::Sessions(Ok(sessions)) => {
                 self.list_error = None;
                 if let Some((address, token)) = self.unsaved_connection.take() {
@@ -2905,6 +2914,7 @@ impl Hangar {
         // botão moram na camada da raiz (`popup.rs`), presos ao botão.
         let floating: Vec<AnyElement> = confirm.map(|el| chrome::popover(el, false)).into_iter()
             .chain((!suggestions.is_empty()).then(|| chrome::popover(self.render_suggestions(&suggestions, cx), false)))
+            .chain(self.render_mentions(cx).map(|el| chrome::popover(el, false)))
             .collect();
         let status = self.status();
         let repo = status.as_ref().and_then(|s| s.repo.clone()).filter(|_| readable);
@@ -3014,6 +3024,7 @@ impl Hangar {
     }
 
     fn move_suggestion(&mut self, step: isize, cx: &mut Context<Self>) {
+        if self.move_mention(step, cx) { cx.stop_propagation(); return; }
         let count = self.visible_suggestions(cx).len();
         if count == 0 { return; }
         self.suggest_pick = (self.suggest_pick as isize + step).rem_euclid(count as isize) as usize;
@@ -3024,6 +3035,7 @@ impl Hangar {
     // Tab completa o comando destacado; com o campo vazio aceita a sugestão do terminal; senão segue a navegação.
     // Na captura, só `stop_propagation` impede o Tab de chegar também à troca de foco.
     fn tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.accept_mention(window, cx) { cx.stop_propagation(); return; }
         let suggestions = self.visible_suggestions(cx);
         if let Some(command) = suggestions.get(self.suggest_pick.min(suggestions.len().saturating_sub(1))) {
             let name = command.name.clone();
@@ -3039,6 +3051,7 @@ impl Hangar {
     // Esc fecha o que está aberto sobre o campo; sem nada aberto e com a sessão trabalhando, pede para interromper.
     fn escape(&mut self, cx: &mut Context<Self>) {
         if self.confirm.is_some() { self.confirm = None; }
+        else if self.mention_is_open(cx) { self.mention.close(); }
         else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
         else if self.close_popups() {}
         else if self.can_interrupt() { self.confirm = Some(Confirm::Stop); }
