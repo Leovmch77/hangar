@@ -1,6 +1,6 @@
 //! Configurações do app nativo: página que ocupa a janela, como no Zeron. A barra lateral vira a
 //! navegação das seções; o conteúdo fica no centro, em linhas com ícone, título e controle à direita.
-//! Aparência, Geral, Diário de uso, Sobre e Contas e modelos funcionam; as demais páginas dizem que chegam depois, sem fingir.
+//! As páginas de configuração usam a navegação lateral e mostram o conteúdo do servidor conectado.
 use super::*;
 use std::{cell::Cell, rc::Rc};
 use crate::appearance::{self, Appearance, Background, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
@@ -569,13 +569,6 @@ impl Hangar {
             .child(header)
             .child(div().id("live-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
                 .px(px(12.)).pb(px(14.)).child(body))
-            .into_any_element()
-    }
-
-    fn render_page_soon(&self, page: Page) -> AnyElement {
-        div().flex().flex_col()
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(page.title()))
-            .child(div().mt(px(6.)).text_color(theme::muted()).child(tr("settings_soon")))
             .into_any_element()
     }
 
