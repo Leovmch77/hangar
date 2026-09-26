@@ -2,6 +2,7 @@
 use gpui_kit::{component::{ActiveTheme, Icon, Sizable, StyledExt, button::*}, prelude::FluentBuilder, *};
 use gpui_kit::assets::IconName;
 use crate::theme;
+use crate::appearance::{self, SurfaceMaterial};
 use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
 /// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. O `Spinner`/`Skeleton` do
@@ -340,10 +341,53 @@ pub fn provider_glyph(provider: &str, size: f32) -> Div {
         .text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph)
 }
 
+const GLASS_BLUR: Pixels = px(16.);
+
+/// O cartão pinta o desfoque antes do seu conteúdo, sobre o que já foi desenhado atrás dele.
+pub fn paint_glass(bounds: Bounds<Pixels>, radius: Pixels, window: &mut Window) {
+    window.paint_layer(bounds, |window| window.paint_backdrop_blur(bounds, Corners::all(radius), GLASS_BLUR));
+}
+
+pub struct Glass { child: AnyElement, radius: Pixels }
+
+impl Glass {
+    pub fn new(child: impl IntoElement, radius: Pixels) -> Self { Self { child: child.into_any_element(), radius } }
+}
+
+impl IntoElement for Glass {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for Glass {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        window.paint_layer(bounds, |window| {
+            window.paint_backdrop_blur(bounds, Corners::all(self.radius), GLASS_BLUR);
+            self.child.paint(window, cx);
+        });
+    }
+}
+
 /// Superfície dos popovers do compositor: mesma borda de vidro e sombra `--elev-2` do web.
 pub fn popover(content: AnyElement, narrow: bool) -> AnyElement {
-    div().when(narrow, |el| el.w(px(380.))).rounded(px(12.)).border_1().border_color(theme::glass_border()).bg(theme::raised())
-        .shadow(theme::popover_shadow()).child(content).into_any_element()
+    let surface = div().when(narrow, |el| el.w(px(380.))).rounded(px(12.)).border_1().border_color(theme::glass_border())
+        .bg(theme::popup_fill(theme::raised())).shadow(theme::popover_shadow()).child(content);
+    if appearance::get().surface_material == SurfaceMaterial::Glass { Glass::new(surface, px(12.)).into_any_element() }
+    else { surface.into_any_element() }
 }
 
 /// Alerta de sim ou não. O Enter do kit confirma o alerta ao descer a tecla, com o foco onde estiver: no Cancelar, Enter

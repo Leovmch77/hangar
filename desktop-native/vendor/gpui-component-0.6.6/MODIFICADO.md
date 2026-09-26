@@ -12,4 +12,8 @@ Origem: crate `gpui-component` 0.6.6 do crates.io (repositório `longbridge/gpui
   repassada ao gpui-base e incluída no `PartialEq`. Sem escolha local, preserva o tema.
   Motivo: as prévias de Nova sessão mantêm a fonte antiga ao mudar a fonte global de código.
 
+- `src/dialog/dialog.rs`: `background_painter` opcional pinta o fundo após o layout e antes
+  do conteúdo, cobrindo todo o cartão. Sem opt-in, o fundo original permanece. Motivo:
+  permitir vidro desfocado no diálogo do app sem alterar o comportamento do kit.
+
 Ao atualizar gpui-kit, reaplicar na nova versão ou remover esta cópia quando a API equivalente existir no kit.

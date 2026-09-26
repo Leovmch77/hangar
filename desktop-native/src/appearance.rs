@@ -57,6 +57,10 @@ pub enum BackgroundScope { Chat, Everywhere }
 #[serde(rename_all = "snake_case")]
 pub enum Wallpaper { Window, Glass }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceMaterial { Glass, Opaque }
+
 /// O que segura o texto da conversa sobre o fundo; Automática liga o Texto só com imagem ou desktop atrás.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,6 +138,7 @@ pub struct Appearance {
     pub light: ModeColors,
     /// Quanto do que está atrás da janela aparece na caixa solta, 0–100.
     pub transparency: u16,
+    pub surface_material: SurfaceMaterial,
     /// Opacidade das caixas na caixa solta, 0–100.
     pub solidity: u16,
     pub background: Background,
@@ -172,7 +177,7 @@ pub struct Appearance {
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
-    desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, solidity: 70,
+    desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, live_corner: [16., 16.],
@@ -188,6 +193,7 @@ impl Appearance {
     /// "Voltar ao padrão" do web: não mexe em tema, fonte, fundo, painéis nem no jeito da conversa.
     pub fn reset_keeping_choices(self) -> Self {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
+            surface_material: self.surface_material,
             background: self.background, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
@@ -325,6 +331,7 @@ mod tests {
         assert_eq!(parsed.panels, Panels::Floating);
         assert_eq!(parsed.text_size, 150);
         assert_eq!(parsed.solidity, 70);
+        assert_eq!(parsed.surface_material, SurfaceMaterial::Glass);
         assert_eq!(parsed.dark.tint_strength, 40);
         assert_eq!((parsed.theme, parsed.palette), (ThemeMode::Dark, Palette::Classic));
         assert_eq!((parsed.code_font, parsed.code_size), (CodeFont::JetBrainsMono, 25));
@@ -353,6 +360,14 @@ mod tests {
                 assert_eq!(loaded.reset_keeping_choices().background_scope, scope);
             }
         }
+    }
+
+    #[test]
+    fn surface_material_round_trips_and_survives_appearance_reset() {
+        let saved = Appearance { surface_material: SurfaceMaterial::Opaque, ..Appearance::default() };
+        let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(loaded.surface_material, SurfaceMaterial::Opaque);
+        assert_eq!(loaded.reset_keeping_choices().surface_material, SurfaceMaterial::Opaque);
     }
 
     #[test]
