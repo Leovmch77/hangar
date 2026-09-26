@@ -31,6 +31,7 @@ impl Hangar {
     /// Carrega o que o fundo escolhido desenha. Sem imagem a desenhar, solta a da tela.
     pub(super) fn refresh_backdrop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.backdrop_seq += 1;
+        self.backdrop_pending = true;
         let seq = self.backdrop_seq;
         let a = appearance::get();
         let tx = self.tx.clone();
@@ -41,8 +42,9 @@ impl Hangar {
         match (a.background, a.wallpaper) {
             (Background::Image, _) => {
                 let Some(path) = appearance::image_path() else { return self.fail_backdrop(tr("backdrop_missing"), window, cx) };
+                let light = !theme::is_dark();
                 self.runtime.spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || media::load_backdrop(&path)).await
+                    let result = tokio::task::spawn_blocking(move || crate::effects::load(&path, a.background_effect, light)).await
                         .unwrap_or(Err("backdrop_invalid")).map(|image| Some((FILE_IMAGE, image))).map_err(Failure::local);
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Backdrop(seq, result) }).await;
                 });
@@ -66,6 +68,7 @@ impl Hangar {
                 });
             }
             _ => {
+                self.backdrop_pending = false;
                 self.set_backdrop(None, window, cx);
                 self.backdrop_note = None;
             }
@@ -80,6 +83,7 @@ impl Hangar {
             if let Ok(Some((_, image))) = result { cx.drop_image(image, Some(window)); }
             return;
         }
+        self.backdrop_pending = false;
         match result {
             Ok(None) => {}
             Ok(Some(next)) => {
@@ -100,6 +104,7 @@ impl Hangar {
 
     /// Diz por que o fundo não desenha a imagem e cai no legível: Liso para a Imagem, Janela para o Vidro.
     fn fail_backdrop(&mut self, reason: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.backdrop_pending = false;
         self.set_backdrop(None, window, cx);
         let key = if appearance::get().background == Background::Image { "settings_image_fallback" } else { "settings_wallpaper_fallback" };
         let note = tr(key).replace("{reason}", &reason);
@@ -160,9 +165,14 @@ impl Hangar {
                 let mut next = appearance::get();
                 next.background = Background::Image;
                 self.apply_appearance(next, true, cx);
-                self.backdrop_seq += 1;
-                self.set_backdrop(Some((FILE_IMAGE, image)), window, cx);
                 self.backdrop_note = None;
+                if next.background_effect == crate::effects::BackgroundEffect::None {
+                    self.backdrop_seq += 1;
+                    self.backdrop_pending = false;
+                    self.set_backdrop(Some((FILE_IMAGE, image)), window, cx);
+                }
+                // Com efeito, a foto crua não vai à tela: a anterior fica até a variante chegar.
+                else { self.refresh_backdrop(window, cx); }
             }
             // O fundo de antes continua; o motivo aparece na página e numa notificação.
             Err(error) => {

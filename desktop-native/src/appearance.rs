@@ -148,6 +148,7 @@ pub struct Appearance {
     /// Opacidade das caixas na caixa solta, 0–100.
     pub solidity: u16,
     pub background: Background,
+    pub background_effect: crate::effects::BackgroundEffect,
     pub background_scope: BackgroundScope,
     pub wallpaper: Wallpaper,
     pub reading: Reading,
@@ -185,7 +186,7 @@ pub struct Appearance {
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
-    background: Background::Plain, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
+    background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
@@ -201,7 +202,7 @@ impl Appearance {
     pub fn reset_keeping_choices(self) -> Self {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
             surface_material: self.surface_material,
-            background: self.background, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
+            background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
             code_font: self.code_font,

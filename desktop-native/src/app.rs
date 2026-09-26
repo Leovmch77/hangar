@@ -349,6 +349,7 @@ pub struct Hangar {
     // Pedidos numerados: resposta de pedido anterior ao último é descartada.
     palette_seq: u64,
     backdrop_seq: u64,
+    backdrop_pending: bool,
     // Imagem do fundo na tela (arquivo escolhido ou papel de parede) e a assinatura dos bytes dela.
     backdrop: Option<(u64, Arc<RenderImage>)>,
     // Por que o fundo não desenha a imagem escolhida.
@@ -480,7 +481,7 @@ impl Hangar {
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
-            palette_seq: 0, backdrop_seq: 0, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
+            palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             system_notifications: SystemNotifications::default(),
