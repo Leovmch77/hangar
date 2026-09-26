@@ -103,6 +103,7 @@ pub(super) enum CreateReply {
     /// Passo da criação em voo; `None` é consulta que falhou, e o passo anterior fica.
     Step(u64, Option<String>),
     Created(u64, Result<Opened, String>),
+    CreatedWithInput(u64, u64, String, Result<Delivery, Failure>, Result<Opened, String>),
     /// O catálogo de modelos e o último modelo e esforço lembrados para a chave dele.
     Models(u64, Result<Value, Failure>, (String, String)),
     Engines(u64, Result<Value, Failure>),
@@ -266,10 +267,10 @@ pub(in crate::app) struct NewSession {
     choosing: bool,
     choose_error: Option<String>,
     create_seq: u64,
-    creating: bool,
+    pub(super) creating: bool,
     started: Option<Instant>,
     step: String,
-    error: Option<String>,
+    pub(super) error: Option<String>,
     /// O relógio do "passo · N s": anda sozinho a cada segundo, mesmo sem resposta do backend.
     clock: Option<Task<()>>,
     models: Remote<Catalog>,
@@ -573,15 +574,17 @@ impl NewSession {
             && self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).is_some_and(|a| a.auth.status == "connected"))
     }
 
-    fn can_create(&self, cx: &App) -> bool {
-        !self.creating && self.picked.is_some() && !self.sessions.loading && !self.name.read(cx).value().trim().is_empty()
+    pub(super) fn can_create(&self, cx: &App) -> bool {
+        !self.creating && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
+            && (!self.compact || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())
+                && !self.models.loading && self.models.ok().is_some()))
     }
 
-    fn create(&mut self, cx: &mut Context<Self>) {
-        if !self.can_create(cx) { return; }
+    pub(super) fn create(&mut self, first: Option<(u64, String)>, cx: &mut Context<Self>) {
+        if !self.can_create(cx) || self.compact != first.is_some() { return; }
         let Some(cwd) = self.picked.clone() else { return };
-        let name = self.name.read(cx).value().trim().to_owned();
+        let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
@@ -628,6 +631,14 @@ impl NewSession {
             if !this.update(cx, |this, cx| { cx.notify(); this.creating }).unwrap_or(false) { break; }
         }));
         self.request(cx, move |api, send| Box::pin(async move {
+            if first.is_some() {
+                let sessions = match api.sessions().await {
+                    Ok(sessions) => sessions,
+                    Err(error) => { send(CreateReply::Created(seq, Err(Hangar::fetch_failure(&error)))).await; return; }
+                };
+                name = unique_name(&name, &sessions.into_iter().map(|session| session.name).collect());
+                body["name"] = json!(name);
+            }
             // O padrão do Jev muda só aqui, ao criar; falhar nele não impede a sessão de nascer com a escolha feita.
             if let Some((on, true)) = jev
                 && let Err(error) = api.server_send(reqwest::Method::POST, &["config"], Some(json!({"jev_padrao": on})), 8).await {
@@ -654,7 +665,13 @@ impl NewSession {
                     opened(&api, result, &name, &cwd).await
                 }
             };
-            send(CreateReply::Created(seq, opened)).await
+            match (first, opened) {
+                (Some((selection, text)), Ok(opened)) => {
+                    let result = api.send(&opened.session.name, &text).await;
+                    send(CreateReply::CreatedWithInput(seq, selection, text, result, Ok(opened))).await;
+                }
+                (_, opened) => send(CreateReply::Created(seq, opened)).await,
+            }
         }));
         cx.notify();
     }
@@ -730,7 +747,7 @@ impl NewSession {
                 if seq != self.create_seq || !self.creating { return None; }
                 if let Some(step) = step { self.step = step; }
             }
-            CreateReply::Created(seq, result) => {
+            CreateReply::Created(seq, result) | CreateReply::CreatedWithInput(seq, _, _, _, result) => {
                 if seq != self.create_seq || !self.creating { return None; }
                 (self.creating, self.resuming, self.started, self.clock) = (false, false, None, None);
                 match result { Ok(opened) => return Some(opened), Err(error) => self.error = Some(error) }
@@ -1070,7 +1087,7 @@ impl NewSession {
                 .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
             None => Button::new("create-submit").primary().w_full()
                 .label(tr(if busy { "create_creating" } else if self.baton.is_some() { "create_baton_submit" } else { "create_submit" }))
-                .loading(busy).disabled(!can && !busy).on_click(cx.listener(|this, _, _, cx| this.create(cx))),
+                .loading(busy).disabled(!can && !busy).on_click(cx.listener(|this, _, _, cx| this.create(None, cx))),
         };
         let footer = div().flex_shrink_0().pt(px(12.)).border_t_1().border_color(theme::border()).flex().flex_col().gap(px(8.))
             .when_some(self.error.clone(), |el, error| el.child(alert("create-error", error)))
@@ -1230,6 +1247,7 @@ impl Hangar {
                 cx.defer_in(window, |view, window, cx| view.load(window, cx));
                 view
             }));
+            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         }
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca.
         div().flex_1().min_h_0().flex().items_center().justify_center().p_6()
@@ -1261,15 +1279,30 @@ impl Hangar {
     pub(super) fn receive_create(&mut self, dialog: EntityId, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entity) = self.new_session.iter().chain(self.new_chat.iter()).find(|d| d.entity_id() == dialog).cloned() else { return };
         let compact = entity.read(cx).compact;
+        let first = match &reply {
+            CreateReply::CreatedWithInput(_, selection, text, result, _) => Some((*selection, text.clone(), result.clone())),
+            _ => None,
+        };
         let Some(Opened { session, notes, warning }) = entity.update(cx, |d, cx| d.receive(reply, window, cx)) else { return };
+        if let Some((_, text, result)) = &first
+            && let Some(key) = self.server.as_deref().and_then(|server| SessionKey::new(server, &session)) {
+            self.drafts.entry(key.clone()).or_insert_with(|| text.clone());
+            if result.is_err() && self.selected_key().as_ref() == Some(&key) && self.composer.read(cx).value().is_empty() {
+                self.composer.update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+            }
+            self.delivery.begin(key.clone(), text.clone(), HashSet::new());
+            self.receive_sent(key, text.clone(), text.clone(), result.clone(), window, cx);
+        }
         if compact { self.new_chat = None; } else {
             self.new_session = None;
             window.close_dialog(cx);
         }
         let readable = session.readable();
-        self.select(session, window, cx);
+        // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
+        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
+        if current { self.select(session, window, cx); }
         // O fechar devolveu o foco ao botão que abriu; a sessão nova é onde se escreve em seguida, como no clique na aba.
-        if readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
+        if current && readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
         for note in notes { window.push_notification(Notification::info(note), cx); }
         // Fica até ser fechado, como o `alert` do web: quem pediu o resumo do modelo tem de saber que recebeu o do Hangar.
         if let Some(warning) = warning { window.push_notification(Notification::warning(warning).autohide(false), cx); }
