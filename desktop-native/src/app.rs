@@ -115,6 +115,7 @@ enum Payload {
     Computer(computer::ComputerReply),
     // Diálogo Nova sessão: a resposta vai ao diálogo que a pediu, se ele ainda for o aberto.
     Create(EntityId, create::CreateReply),
+    ServerSwitch(u64, String, String, Result<Vec<SessionInfo>, Failure>),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
@@ -374,6 +375,11 @@ pub struct Hangar {
     new_chat: Option<Entity<create::NewSession>>,
     /// A tela escreve; a camada da raiz lê.
     new_chat_folders: std::rc::Rc<std::cell::Cell<bool>>,
+    return_server: Option<(String, String)>,
+    active_token: String,
+    switch_seq: u64,
+    switch_draft: Option<String>,
+    ready_sessions: Option<Vec<SessionInfo>>,
 }
 
 impl Drop for Hangar {
@@ -467,7 +473,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
-            new_chat_folders: Default::default(),
+            new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
         }
     }
 
@@ -589,17 +595,25 @@ impl Hangar {
                 return;
             }
         };
-        self.unsaved_connection = Some((address, token));
+        let reconnect = self.switch_draft.is_none() && self.return_server.is_some()
+            && self.api.as_ref().is_some_and(|current| current.identity() == api.identity());
+        let kept = if reconnect { self.return_server.clone() } else { None };
+        // A escolha temporária da Nova conversa não muda o servidor salvo para a próxima abertura.
+        self.unsaved_connection = (self.switch_draft.is_none() && !reconnect).then(|| (address, token.clone()));
         if let Some(key) = self.selected_key() { self.drafts.insert(key, self.composer.read(cx).value().to_string()); }
         self.drop_connection(window, cx);
+        if kept.is_some() { self.return_server = kept; }
+        self.active_token = token;
+        if let Some(draft) = self.switch_draft.take() { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
         self.api = Some(api.clone());
         self.server = Some(api.identity());
         self.connection_dialog = false;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
         let connection = self.connection;
+        let ready_sessions = self.ready_sessions.take();
         self.list_task = Some(self.runtime.spawn(async move {
-            let result = api.sessions().await;
+            let result = match ready_sessions { Some(sessions) => Ok(sessions), None => api.sessions().await };
             let fatal = result.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403)));
             if tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await.is_err() || fatal { return; }
             forward_stream(api, None, connection, None, tx).await;
@@ -613,6 +627,32 @@ impl Hangar {
         self.refresh_desktop_palette(cx);
         let a = appearance::get();
         if a.background == appearance::Background::Desktop && a.wallpaper == appearance::Wallpaper::Glass { self.refresh_backdrop(window, cx); }
+        cx.notify();
+    }
+
+    fn switch_server(&mut self, id: String, address: String, known_token: Option<String>, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        if api.identity().trim_end_matches('/') == address.trim_end_matches('/') { return; }
+        self.switch_seq += 1;
+        let seq = self.switch_seq;
+        if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_started(cx)); }
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = async {
+                let token = match known_token {
+                    Some(token) => token,
+                    None => api.server_read(&["peers", &id, "token"], &[], 15).await?
+                        .get("token").and_then(Value::as_str).filter(|s| !s.is_empty())
+                        .ok_or_else(|| Failure::local("invalid_response"))?.to_owned(),
+                };
+                let target = Api::new(&address, &token)?;
+                let sessions = target.sessions().await?;
+                Ok((token, sessions))
+            }.await;
+            let (token, sessions) = match result { Ok((token, sessions)) => (token, Ok(sessions)), Err(error) => (String::new(), Err(error)) };
+            let _ = tx.send(Envelope { connection, selection: None,
+                payload: Payload::ServerSwitch(seq, address, token, sessions) }).await;
+        });
         cx.notify();
     }
 
@@ -632,6 +672,7 @@ impl Hangar {
 
     /// O que é da conexão atual sai da tela e os pedidos em voo passam a ser descartados. Serve à troca de servidor e ao Sair.
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switch_draft.is_none() { self.return_server = None; self.active_token.clear(); }
         self.connection += 1;
         self.selection += 1;
         self.revision += 1;
@@ -953,6 +994,25 @@ impl Hangar {
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
+            Payload::ServerSwitch(seq, address, token, result) => {
+                if seq != self.switch_seq { return; }
+                if self.selected.is_some() {
+                    if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_finished(None, cx)); }
+                    return;
+                }
+                if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_finished(result.as_ref().err().map(Self::setting_failure), cx)); }
+                if let Ok(sessions) = result {
+                    if self.return_server.is_none() {
+                        self.return_server = self.api.as_ref().map(|api| (api.identity(), self.active_token.clone()));
+                    }
+                    self.switch_draft = Some(self.composer.read(cx).value().to_string());
+                    self.ready_sessions = Some(sessions);
+                    self.address.update(cx, |input, cx| input.set_value(address, window, cx));
+                    self.token.update(cx, |input, cx| input.set_value(token, window, cx));
+                    self.connect(window, cx);
+                }
+                return;
+            }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Sidebar(reply) => {
                 if matches!(&reply, sidebar::SidebarReply::Wrote(_, sidebar::Write::Mute(_), _)) { self.load_notification_preferences(); }

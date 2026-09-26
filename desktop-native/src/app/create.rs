@@ -222,7 +222,11 @@ fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: 
 
 /// A conexão da abertura. Guardada no diálogo porque as respostas chegam com o `Hangar` em atualização, e o pedido seguinte
 /// (a pasta da raiz que chegou) não pode passar por ele.
-struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64 }
+struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
+    owner: WeakEntity<Hangar>, return_server: Option<(String, String)> }
+
+#[derive(Clone)]
+struct ServerChoice { id: String, label: String, address: String, token: Option<String> }
 
 /// O diálogo "Nova sessão". Entidade própria: o diálogo é desenhado durante o desenho da janela, quando o `Hangar` não pode ser
 /// escrito. Cada resposta volta com o número do pedido; a de um pedido velho (outra pasta, outro provider) cai.
@@ -230,6 +234,10 @@ pub(in crate::app) struct NewSession {
     link: Link,
     compact: bool,
     compact_folders: Rc<std::cell::Cell<bool>>,
+    servers: Remote<Vec<ServerChoice>>,
+    servers_error: Option<String>,
+    switching: bool,
+    switch_error: Option<String>,
     roots: Remote<Vec<Root>>,
     root: Option<Root>,
     /// A pasta listada à esquerda.
@@ -335,7 +343,8 @@ impl NewSession {
             }),
         ];
         Self {
-            link, compact: false, compact_folders: Default::default(),
+            link, compact: false, compact_folders: Default::default(), servers: Remote::default(), servers_error: None,
+            switching: false, switch_error: None,
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
@@ -369,7 +378,60 @@ impl NewSession {
         }));
     }
 
+    fn load_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let seq = self.servers.start();
+        let (api, origin) = (self.link.api.clone(), self.link.return_server.clone());
+        let current = api.identity();
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.link.runtime.spawn(async move { let _ = done.send(api.server_read(&["peers"], &[], 15).await); });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result.await.unwrap_or_else(|_| Err(Failure::local("network_error")));
+            let _ = this.update_in(cx, |this, _, cx| {
+                if seq != this.servers.seq { return; }
+                let mut choices = vec![ServerChoice { id: current.clone(),
+                    label: current.trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/').to_owned(),
+                    address: current.clone(), token: None }];
+                if let Some((address, token)) = origin {
+                    if address.trim_end_matches('/') != current.trim_end_matches('/') {
+                        choices.push(ServerChoice { id: address.clone(), label: address.trim_end_matches('/').to_owned(), address, token: Some(token) });
+                    }
+                }
+                this.servers_error = result.map_err(|error| Hangar::setting_failure(&error)).and_then(|value| {
+                    let list = value.as_array().ok_or_else(|| tr("invalid_response"))?;
+                    for item in list {
+                        let (Some(id), Some(address)) = (item.get("id").and_then(Value::as_str), item.get("base_url").and_then(Value::as_str)) else {
+                            return Err(tr("invalid_response"));
+                        };
+                        if item.get("enabled").and_then(Value::as_bool) == Some(false) || address.trim_end_matches('/') == current.trim_end_matches('/') { continue; }
+                        if let Some(choice) = choices.iter_mut().find(|choice| choice.address.trim_end_matches('/') == address.trim_end_matches('/')) {
+                            choice.label = id.to_owned();
+                        } else {
+                            choices.push(ServerChoice { id: id.to_owned(), label: id.to_owned(), address: address.to_owned(), token: None });
+                        }
+                    }
+                    Ok(())
+                }).err();
+                this.servers.finish(seq, Ok(choices));
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    pub(super) fn switch_started(&mut self, cx: &mut Context<Self>) {
+        self.switching = true;
+        self.switch_error = None;
+        cx.notify();
+    }
+
+    pub(super) fn switch_finished(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        self.switching = false;
+        self.switch_error = error;
+        cx.notify();
+    }
+
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact { self.load_servers(window, cx); }
         self.load_roots(cx);
         if !self.compact { self.load_providers(cx); }
         self.load_configs(cx);
@@ -1017,6 +1079,47 @@ impl NewSession {
 }
 
 impl NewSession {
+    fn render_servers(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.servers.loading || self.servers.value.is_none() {
+            return div().id("new-chat-servers-loading").role(Role::Status).aria_label(tr("loading"))
+                .child(Skeleton::new("new-chat-servers-loading").w_full().h_8().rounded_md()).into_any_element();
+        }
+        let Some(choices) = self.servers.ok() else {
+            let error = self.servers.value.as_ref().and_then(|value| value.as_ref().err()).cloned().unwrap_or_default();
+            return div().flex().items_center().gap_2()
+                .child(alert("new-chat-servers-error", error))
+                .child(Button::new("new-chat-servers-retry").ghost().label(tr("retry"))
+                    .on_click(cx.listener(|this, _, window, cx| this.load_servers(window, cx)))).into_any_element();
+        };
+        if choices.len() == 1 && self.servers_error.is_none() { return div().into_any_element(); }
+        let current = self.link.api.identity();
+        div().flex().flex_col().gap_2()
+            .children(self.servers_error.as_ref().map(|error| div().flex().items_center().gap_2()
+                .child(alert("new-chat-servers-error", error.clone()))
+                .child(Button::new("new-chat-servers-retry").ghost().label(tr("retry"))
+                    .on_click(cx.listener(|this, _, window, cx| this.load_servers(window, cx))))))
+            .when(choices.len() > 1, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("new_chat_server"))))
+            .child(div().flex().flex_wrap().gap_2().children(choices.iter().cloned().map(|choice| {
+                let selected = choice.address.trim_end_matches('/') == current.trim_end_matches('/');
+                let owner = self.link.owner.clone();
+                Button::new(SharedString::from(format!("new-chat-server-{}", choice.id))).outline().small()
+                    .label(choice.label.clone()).selected(selected).disabled(self.switching)
+                    .when(!selected, |button| button.on_click(cx.listener(move |_, _, window, cx| {
+                        let (id, address, token) = (choice.id.clone(), choice.address.clone(), choice.token.clone());
+                        let owner = owner.clone();
+                        chrome::confirm_alert(window, cx, tr("new_chat_switch_title").replace("{server}", &choice.label),
+                            tr("new_chat_switch_description"), tr("new_chat_switch_action"), ButtonVariant::Primary,
+                            move |_, cx| {
+                                let _ = owner.update(cx, |app, cx| app.switch_server(id.clone(), address.clone(), token.clone(), cx));
+                                true
+                            });
+                    })))
+            })))
+            .when(self.switching, |el| el.child(div().id("new-chat-switching").role(Role::Status).child(tr("loading"))))
+            .children(self.switch_error.as_ref().map(|error| alert("new-chat-switch-error", error.clone())))
+            .into_any_element()
+    }
+
     fn render_compact(&self, cx: &mut Context<Self>) -> Div {
         let field = |title: String, body: AnyElement| div().flex_1().min_w_0().flex().flex_col().gap_2()
             .child(div().text_sm().text_color(theme::muted()).child(title)).child(body);
@@ -1057,6 +1160,7 @@ impl NewSession {
             || self.configs.value.as_ref().is_some_and(Result::is_err) || self.models.value.as_ref().is_some_and(Result::is_err);
         div().w_full().max_w(rems(42.)).flex().flex_col().gap_4()
             .child(div().text_xl().font_weight(FontWeight::MEDIUM).child(tr("new_chat_title")))
+            .child(self.render_servers(cx))
             .child(div().flex().gap_4().items_start()
                 .child(field(tr("create_claude_account"), account))
                 .child(popup::anchor(field(tr("new_chat_folder"), div().child(folder).children(roots_note).into_any_element()).relative(), "new-chat-folder")))
@@ -1111,7 +1215,8 @@ impl Hangar {
             return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
         };
         if self.new_chat.as_ref().is_none_or(|view| view.read(cx).link.connection != self.connection) {
-            let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection };
+            let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
+                owner: cx.entity().downgrade(), return_server: self.return_server.clone() };
             self.new_chat_folders.set(false);
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
@@ -1129,7 +1234,8 @@ impl Hangar {
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
-        let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection };
+        let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
+            owner: cx.entity().downgrade(), return_server: self.return_server.clone() };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
