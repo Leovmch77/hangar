@@ -191,7 +191,12 @@ impl NewSession {
             Some(Ok(lines)) if lines.is_empty() => muted(tr("create_no_messages")).into_any_element(),
             Some(Ok(lines)) => div().flex().flex_col().gap(px(8.)).children(lines.iter().map(|line| div().p(px(10.)).rounded(px(8.)).text_sm()
                 .when(line.mine, |el| el.bg(theme::accent_dim()).ml(px(32.))).when(!line.mine, |el| el.bg(theme::inset()).mr(px(32.)))
-                .child(TextView::new(&line.view).selectable(true).scrollable(false)))).into_any_element(),
+                .child(TextView::new(&line.view).selectable(true).scrollable(false).style({
+                    let (font, size) = theme::original_code_typography(cx);
+                    gpui_kit::component::text::TextViewStyle::default()
+                        .code_block(StyleRefinement::default().font_family(font.clone()).text_size(size))
+                        .inline_code_font_family(font)
+                })))).into_any_element(),
         };
         div().flex_1().min_h_0().flex().flex_col().gap(px(8.))
             .child(div().flex().items_center().gap(px(8.))

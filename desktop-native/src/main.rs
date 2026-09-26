@@ -43,10 +43,11 @@ impl AssetSource for AppAssets {
     }
 }
 
-const FONTS: [&[u8]; 5] = [
+const FONTS: [&[u8]; 6] = [
     include_bytes!("../assets/fonts/Geist-Regular.ttf"), include_bytes!("../assets/fonts/Geist-Medium.ttf"),
     include_bytes!("../assets/fonts/Geist-SemiBold.ttf"), include_bytes!("../assets/fonts/Geist-Bold.ttf"),
     include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+    include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
 ];
 
 /// Só para medir: HANGAR_NATIVE_WINDOW=LxA abre a janela nesse tamanho lógico. Sem a variável, 1180×800.

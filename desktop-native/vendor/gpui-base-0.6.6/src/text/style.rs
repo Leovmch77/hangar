@@ -30,6 +30,7 @@ pub struct TextViewStyle {
     // Modified for Hangar: both off by default, so every existing view keeps the kit's look.
     list_marker_width: Option<Pixels>,
     code_language_band: Option<SharedString>,
+    inline_code_font_family: Option<SharedString>,
 }
 
 impl PartialEq for TextViewStyle {
@@ -58,6 +59,7 @@ impl PartialEq for TextViewStyle {
             && self.is_dark == other.is_dark
             && self.list_marker_width == other.list_marker_width
             && self.code_language_band == other.code_language_band
+            && self.inline_code_font_family == other.inline_code_font_family
     }
 }
 
@@ -103,6 +105,7 @@ impl TextViewStyle {
             is_dark,
             list_marker_width: None,
             code_language_band: None,
+            inline_code_font_family: None,
         }
     }
 
@@ -182,6 +185,16 @@ impl TextViewStyle {
     pub fn with_inline_code(mut self, style: HighlightStyle) -> Self {
         self.inline_code = style;
         self
+    }
+
+    /// Modified for Hangar: keeps a view's inline font independent of the global code font.
+    pub fn with_inline_code_font_family(mut self, family: Option<SharedString>) -> Self {
+        self.inline_code_font_family = family;
+        self
+    }
+
+    pub fn inline_code_font_family(&self) -> Option<&SharedString> {
+        self.inline_code_font_family.as_ref()
     }
 
     /// Sets the style refinement for the table container (the bordered wrapper
@@ -357,6 +370,8 @@ mod tests {
         assert!(base != base.clone().with_dark(true));
         assert!(base != base.clone().with_list_marker_width(Some(px(20.))));
         assert!(base != base.clone().with_code_language_band(Some("code".into())));
+        assert!(base.inline_code_font_family().is_none());
+        assert!(base != base.clone().with_inline_code_font_family(Some("monospace".into())));
     }
 
     #[test]
