@@ -1,12 +1,15 @@
 //! Grade de terminal alimentada por bytes; o painel da sessão é dono do redesenho.
+use std::{cell::RefCell, rc::Rc};
 use alacritty_terminal::{
-    event::VoidListener,
-    grid::Dimensions,
-    term::{Config, Term, cell::{Cell, Flags}, color::COUNT},
+    event::{Event, EventListener},
+    grid::{Dimensions, Scroll},
+    index::{Column, Line, Point as TermPoint, Side},
+    selection::{Selection, SelectionRange, SelectionType},
+    term::{Config, Term, TermMode, cell::{Cell, Flags}, color::COUNT},
     vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb},
 };
 use gpui_kit::{App, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ShapedLine, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle,
+    IntoElement, KeyDownEvent, LayoutId, Pixels, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle,
     Window, fill, font, point, px, relative, rgb, size};
 
 const TERM_FONT: &str = "JetBrains Mono";
@@ -26,25 +29,49 @@ impl Dimensions for GridSize {
     fn columns(&self) -> usize { self.cols }
 }
 
+#[derive(Clone, Default)]
+struct Output(Rc<RefCell<Vec<Vec<u8>>>>);
+
+impl Output {
+    fn push(&self, bytes: &[u8]) { self.0.borrow_mut().push(bytes.to_vec()); }
+    fn drain(&self) -> Vec<Vec<u8>> { self.0.borrow_mut().drain(..).collect() }
+}
+
+impl EventListener for Output {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event { self.push(text.as_bytes()); }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct Snapshot {
     cells: Vec<Cell>,
     colors: [Option<Rgb>; COUNT],
     cursor: alacritty_terminal::term::RenderableCursor,
+    selection: Option<SelectionRange>,
     offset: usize,
     cols: usize,
     rows: usize,
 }
 
 pub struct TermView {
-    term: Term<VoidListener>,
+    term: Term<Output>,
     parser: Processor,
+    output: Output,
+    cell_width: f32,
+    selection_anchor: Option<TermPoint>,
+    wheel_remainder: f32,
+    fixture_loopback: bool,
 }
+
+pub struct KeyResult { pub handled: bool, pub redraw: bool }
 
 impl TermView {
     pub fn new(cols: usize, rows: usize) -> Self {
         let size = GridSize { cols: cols.max(2), rows: rows.max(1) };
-        Self { term: Term::new(Config::default(), &size, VoidListener), parser: Processor::new() }
+        let output = Output::default();
+        Self { term: Term::new(Config::default(), &size, output.clone()), parser: Processor::new(),
+            output, cell_width: FONT_SIZE * 0.6, selection_anchor: None, wheel_remainder: 0., fixture_loopback: false }
     }
 
     /// A fixture é opt-in; nenhum dado da sessão real entra nesta vista de prova.
@@ -52,6 +79,7 @@ impl TermView {
         let Some(path) = std::env::var_os("HANGAR_NATIVE_TERM_FIXTURE") else { return Ok(None) };
         let bytes = std::fs::read(path)?;
         let mut view = Self::new(cols, rows);
+        view.fixture_loopback = true;
         view.feed(&bytes);
         Ok(Some(view))
     }
@@ -61,11 +89,19 @@ impl TermView {
         if bytes.is_empty() { return false; }
         let before = self.snapshot();
         self.parser.advance(&mut self.term, bytes);
+        if self.fixture_loopback {
+            for reply in self.output.drain() {
+                self.parser.advance(&mut self.term, &reply);
+                let escaped: String = reply.iter().flat_map(|byte| std::ascii::escape_default(*byte)).map(char::from).collect();
+                self.parser.advance(&mut self.term, format!("\r\n[terminal] {escaped}\r\n").as_bytes());
+            }
+        }
         let after = self.snapshot();
         let cursor_changed = if before.cursor.shape == CursorShape::Hidden && after.cursor.shape == CursorShape::Hidden {
             false
         } else { before.cursor != after.cursor };
         before.cols != after.cols || before.rows != after.rows || before.offset != after.offset
+            || before.selection != after.selection
             || before.colors != after.colors || cursor_changed
             || !before.cells.iter().zip(&after.cells).all(|(a, b)| {
                 const PAINTED: Flags = Flags::from_bits_retain(Flags::INVERSE.bits() | Flags::BOLD.bits() | Flags::DIM.bits()
@@ -82,6 +118,7 @@ impl TermView {
             cells: visible.display_iter.map(|indexed| indexed.cell.clone()).collect(),
             colors: std::array::from_fn(|index| visible.colors[index]),
             cursor: visible.cursor,
+            selection: visible.selection,
             offset: visible.display_offset,
             cols: self.term.grid().columns(),
             rows: self.term.grid().screen_lines(),
@@ -91,6 +128,166 @@ impl TermView {
     pub fn element(&self) -> impl IntoElement {
         TerminalGrid { snapshot: self.snapshot(), foreground: crate::theme::text(), background: crate::theme::background() }
     }
+
+    /// A T66 envia cada bloco drenado pelo mesmo WebSocket do terminal.
+    pub fn take_output(&self) -> Vec<Vec<u8>> { self.output.drain() }
+
+    fn send_input(&mut self, bytes: &[u8]) -> bool {
+        if self.fixture_loopback {
+            let mut echo = Vec::with_capacity(bytes.len());
+            for byte in bytes {
+                match *byte {
+                    b'\r' => echo.extend_from_slice(b"\r\n"),
+                    0x7f => echo.extend_from_slice(b"\x08 \x08"),
+                    _ => echo.push(*byte),
+                }
+            }
+            self.feed(&echo)
+        } else { self.output.push(bytes); false }
+    }
+
+    pub fn resize_to_bounds(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
+        let cell_width = window.text_system().shape_line("M".into(), px(FONT_SIZE),
+            &[TextRun { len: 1, font: font(TERM_FONT), color: crate::theme::text(), ..Default::default() }], None).width;
+        self.cell_width = f32::from(cell_width).max(1.);
+        let cols = (f32::from(bounds.size.width) / self.cell_width).floor().max(2.) as usize;
+        let rows = (f32::from(bounds.size.height) / LINE_HEIGHT).floor().max(1.) as usize;
+        self.resize_grid(cols, rows)
+    }
+
+    fn resize_grid(&mut self, cols: usize, rows: usize) -> bool {
+        if self.term.grid().columns() == cols && self.term.grid().screen_lines() == rows { return false; }
+        self.term.resize(GridSize { cols, rows });
+        true
+    }
+
+    /// A T66 impede a propagação se handled e redesenha apenas se redraw.
+    pub fn key_down(&mut self, event: &KeyDownEvent) -> KeyResult {
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.shift && matches!(key, "pageup" | "pagedown") {
+            return KeyResult { handled: true, redraw: self.scroll(if key == "pageup" { Scroll::PageUp } else { Scroll::PageDown }) };
+        }
+        let Some(bytes) = key_bytes(event, self.term.mode().contains(TermMode::APP_CURSOR)) else {
+            return KeyResult { handled: false, redraw: false };
+        };
+        let redraw = self.term.grid().display_offset() != 0;
+        self.term.scroll_display(Scroll::Bottom);
+        let echoed = self.send_input(&bytes);
+        KeyResult { handled: true, redraw: redraw || echoed }
+    }
+
+    pub fn paste(&mut self, text: &str) -> bool {
+        let redraw = self.term.grid().display_offset() != 0;
+        self.term.scroll_display(Scroll::Bottom);
+        if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(text.replace('\x1b', "").as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            let echoed = self.send_input(&bytes);
+            redraw || echoed
+        } else {
+            let echoed = self.send_input(text.as_bytes());
+            redraw || echoed
+        }
+    }
+
+    pub fn scroll_lines(&mut self, lines: i32) -> bool { self.scroll(Scroll::Delta(lines)) }
+
+    pub fn scroll_wheel(&mut self, event: &ScrollWheelEvent) -> bool {
+        self.wheel_remainder += f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
+        let lines = self.wheel_remainder.trunc() as i32;
+        self.wheel_remainder -= lines as f32;
+        self.scroll_lines(lines)
+    }
+
+    fn scroll(&mut self, amount: Scroll) -> bool {
+        let before = self.term.grid().display_offset();
+        self.term.scroll_display(amount);
+        before != self.term.grid().display_offset()
+    }
+
+    fn point_at(&self, x: f32, y: f32) -> TermPoint {
+        let col = (x / self.cell_width).floor().max(0.) as usize;
+        let row = (y / LINE_HEIGHT).floor().max(0.) as i32;
+        TermPoint::new(Line(row.min(self.term.grid().screen_lines() as i32 - 1)
+            - self.term.grid().display_offset() as i32), Column(col.min(self.term.grid().columns() - 1)))
+    }
+
+    /// Coordenadas relativas à grade; click_count >= 2 seleciona a palavra.
+    pub fn mouse_down(&mut self, x: f32, y: f32, click_count: usize) -> bool {
+        let point = self.point_at(x, y);
+        let before = self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term));
+        self.term.selection = Some(Selection::new(if click_count >= 2 { SelectionType::Semantic }
+            else { SelectionType::Simple }, point, Side::Left));
+        self.selection_anchor = Some(point);
+        before != self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term))
+    }
+
+    pub fn mouse_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(anchor) = self.selection_anchor else { return false; };
+        let point = self.point_at(x, y);
+        let before = self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term));
+        let kind = self.term.selection.as_ref().map_or(SelectionType::Simple, |selection| selection.ty);
+        let reverse = point < anchor;
+        let mut selection = Selection::new(kind, anchor, if reverse { Side::Right } else { Side::Left });
+        selection.update(point, if reverse { Side::Left } else { Side::Right });
+        self.term.selection = Some(selection);
+        before != self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term))
+    }
+
+    pub fn mouse_up(&mut self) { self.selection_anchor = None; }
+
+    /// O chamador decide quando copiar; a fixture nunca toca a área de transferência.
+    pub fn selected_text(&self) -> Option<String> { self.term.selection_to_string() }
+}
+
+fn key_bytes(event: &KeyDownEvent, app_cursor: bool) -> Option<Vec<u8>> {
+    let stroke = &event.keystroke;
+    let mods = stroke.modifiers;
+    if mods.platform { return None; }
+    let key = stroke.key.as_str();
+    let modifier = 1 + u8::from(mods.shift) + 2 * u8::from(mods.alt) + 4 * u8::from(mods.control);
+    let csi = |tail: &str| if modifier == 1 { format!("\x1b[{tail}") }
+        else { format!("\x1b[1;{modifier}{tail}") };
+    let sequence = match key {
+        "enter" => "\r".to_string(), "backspace" => "\x7f".to_string(), "tab" if mods.shift => "\x1b[Z".to_string(),
+        "tab" => "\t".to_string(), "escape" => "\x1b".to_string(),
+        "space" if mods.control => "\0".to_string(), "space" => " ".to_string(),
+        "up" | "down" | "right" | "left" => {
+            let suffix = match key { "up" => "A", "down" => "B", "right" => "C", _ => "D" };
+            if modifier == 1 && app_cursor { format!("\x1bO{suffix}") } else { csi(suffix) }
+        },
+        "home" | "end" => {
+            let suffix = if key == "home" { "H" } else { "F" };
+            if modifier == 1 && app_cursor { format!("\x1bO{suffix}") } else { csi(suffix) }
+        },
+        "insert" | "delete" | "pageup" | "pagedown" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11" | "f12" => {
+            let number = match key { "insert" => 2, "delete" => 3, "pageup" => 5, "pagedown" => 6,
+                "f5" => 15, "f6" => 17, "f7" => 18, "f8" => 19, "f9" => 20, "f10" => 21, "f11" => 23, _ => 24 };
+            if modifier == 1 { format!("\x1b[{number}~") } else { format!("\x1b[{number};{modifier}~") }
+        },
+        "f1" | "f2" | "f3" | "f4" => {
+            let suffix = match key { "f1" => "P", "f2" => "Q", "f3" => "R", _ => "S" };
+            if modifier == 1 { format!("\x1bO{suffix}") } else { csi(suffix) }
+        },
+        _ if mods.control && !event.prefer_character_input => {
+            let letter = key.bytes().next().filter(|_| key.len() == 1)?.to_ascii_uppercase();
+            let code = match letter { b'A'..=b'Z' => letter - b'A' + 1, b' ' | b'@' => 0,
+                b'[' => 27, b'\\' => 28, b']' => 29, b'^' => 30, b'_' => 31, b'?' => 127, _ => return None };
+            String::from_utf8(vec![code]).ok()?
+        },
+        _ if mods.alt && !event.prefer_character_input && key.chars().count() == 1 =>
+            if mods.shift { key.to_uppercase() } else { key.to_string() },
+        _ => stroke.key_char.clone().or_else(|| (key.chars().count() == 1).then(|| key.to_string()))?,
+    };
+    let mut bytes = Vec::with_capacity(sequence.len() + 1);
+    if mods.alt && !event.prefer_character_input
+        && (key.chars().count() == 1 || matches!(key, "enter" | "backspace" | "tab" | "escape" | "space")) {
+        bytes.push(0x1b);
+    }
+    bytes.extend_from_slice(sequence.as_bytes());
+    Some(bytes)
 }
 
 fn indexed_rgb(index: u8) -> u32 {
@@ -230,7 +427,11 @@ impl Element for TerminalGrid {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for (row, cells) in self.snapshot.cells.chunks(self.snapshot.cols).enumerate() {
                 for (col, cell) in cells.iter().enumerate() {
-                    let (_, fill_color) = cell_colors(cell, &self.snapshot.colors, self.foreground, self.background);
+                    let (_, mut fill_color) = cell_colors(cell, &self.snapshot.colors, self.foreground, self.background);
+                    let cell_point = TermPoint::new(Line(row as i32 - self.snapshot.offset as i32), Column(col));
+                    if self.snapshot.selection.as_ref().is_some_and(|selection| selection.contains(cell_point)) {
+                        fill_color = Some(crate::theme::accent_dim());
+                    }
                     if let Some(color) = fill_color {
                         let origin = point(bounds.origin.x + *cell_width * col as f32, bounds.origin.y + line_height * row as f32);
                         window.paint_quad(fill(Bounds { origin, size: size(*cell_width, line_height) }, color));
@@ -277,6 +478,12 @@ impl Element for TerminalGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::{Keystroke, Modifiers, ScrollDelta};
+
+    fn key(name: &str, ch: Option<&str>, modifiers: Modifiers) -> KeyDownEvent {
+        KeyDownEvent { keystroke: Keystroke { key: name.into(), key_char: ch.map(str::to_string), modifiers },
+            is_held: false, prefer_character_input: false }
+    }
 
     #[test]
     fn ansi_grid_keeps_colors_cursor_clear_wrap_and_wide_cells() {
@@ -303,5 +510,91 @@ mod tests {
         assert!(view.snapshot().cells.iter().all(|cell| cell.c == ' '));
         assert!(view.feed(b"\x1b[?25l"));
         assert!(!view.feed(b"\x1b[2;2H"));
+    }
+
+    #[test]
+    fn keys_and_terminal_replies_share_the_output_queue() {
+        let mut view = TermView::new(8, 3);
+        let cases = [
+            ("a", Some("a"), Modifiers::default(), b"a".as_slice()),
+            ("enter", None, Modifiers::default(), b"\r"),
+            ("backspace", None, Modifiers::default(), b"\x7f"),
+            ("tab", None, Modifiers::default(), b"\t"),
+            ("up", None, Modifiers::default(), b"\x1b[A"),
+            ("a", Some("a"), Modifiers { control: true, ..Default::default() }, b"\x01"),
+            ("space", None, Modifiers { control: true, ..Default::default() }, b"\0"),
+            ("x", Some("x"), Modifiers { alt: true, ..Default::default() }, b"\x1bx"),
+            ("f", Some("ƒ"), Modifiers { alt: true, ..Default::default() }, b"\x1bf"),
+            ("a", Some("A"), Modifiers { alt: true, shift: true, ..Default::default() }, b"\x1bA"),
+            ("enter", None, Modifiers { alt: true, ..Default::default() }, b"\x1b\r"),
+            ("f1", None, Modifiers::default(), b"\x1bOP"),
+            ("f5", None, Modifiers::default(), b"\x1b[15~"),
+            ("f12", None, Modifiers::default(), b"\x1b[24~"),
+            ("left", None, Modifiers { control: true, ..Default::default() }, b"\x1b[1;5D"),
+            ("tab", None, Modifiers { shift: true, ..Default::default() }, b"\x1b[Z"),
+        ];
+        for (name, ch, modifiers, expected) in cases {
+            assert!(view.key_down(&key(name, ch, modifiers)).handled, "{name}");
+            assert_eq!(view.take_output(), vec![expected.to_vec()], "{name}");
+        }
+        view.feed(b"\x1b[?1h\x1b[?2004h");
+        assert_eq!(key_bytes(&key("up", None, Modifiers::default()), true), Some(b"\x1bOA".to_vec()));
+        view.paste("oi\x1b[201~fim");
+        assert_eq!(view.take_output(), vec![b"\x1b[200~oi[201~fim\x1b[201~".to_vec()]);
+        view.feed(b"\x1b[6n");
+        assert_eq!(view.take_output(), vec![b"\x1b[1;1R".to_vec()]);
+    }
+
+    #[test]
+    fn resize_selection_and_history_keep_visible_content() {
+        let mut view = TermView::new(10, 2);
+        view.feed(b"alpha beta\r\nsecond\r\nthird");
+        assert!(view.scroll_lines(1));
+        assert_eq!(view.snapshot().offset, 1);
+        assert!(!view.scroll_lines(0));
+        view.scroll_lines(-1);
+        for _ in 0..3 {
+            assert!(!view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }));
+        }
+        assert!(view.scroll_wheel(&ScrollWheelEvent { delta: ScrollDelta::Lines(point(0., 0.25)), ..Default::default() }));
+        assert!(view.key_down(&key("z", Some("z"), Modifiers::default())).redraw);
+        assert_eq!(view.snapshot().offset, 0);
+        assert!(view.resize_grid(12, 3));
+        assert!(view.snapshot().cells.iter().any(|cell| cell.c == 't'));
+        assert!(!view.resize_grid(12, 3));
+        assert!(view.mouse_down(2., 0., 2));
+        assert_eq!(view.selected_text().as_deref(), Some("alpha"));
+        view.mouse_up();
+        assert!(view.mouse_down(0., 0., 1));
+        assert!(view.mouse_drag(36., 0.));
+        assert_eq!(view.selected_text().as_deref(), Some("alpha"));
+        view.mouse_up();
+        view.mouse_down(36., 0., 1);
+        assert!(view.mouse_drag(0., 0.));
+        assert_eq!(view.selected_text().as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn fixture_echoes_input_and_prints_terminal_replies() {
+        let mut view = TermView::new(40, 4);
+        view.fixture_loopback = true;
+        assert!(view.key_down(&key("a", Some("a"), Modifiers::default())).redraw);
+        assert_eq!(view.snapshot().cells[0].c, 'a');
+        assert!(view.take_output().is_empty());
+        view.feed(b"\x1b[6n\x1b[c");
+        let visible: String = view.snapshot().cells.iter().map(|cell| cell.c).collect();
+        assert!(visible.contains("[terminal] \\x1b[1;2R"));
+        assert!(visible.contains("[terminal] \\x1b[?6c"));
+
+        let mut input = TermView::new(40, 4);
+        input.fixture_loopback = true;
+        for (name, ch) in [("a", Some("a")), ("b", Some("b")), ("c", Some("c")),
+            ("backspace", None), ("d", Some("d")), ("enter", None), ("o", Some("o")), ("k", Some("k"))] {
+            assert!(input.key_down(&key(name, ch, Modifiers::default())).handled);
+        }
+        let cells = input.snapshot().cells;
+        let lines: Vec<String> = cells.chunks(40).map(|row| row.iter().map(|cell| cell.c)
+            .collect::<String>().trim_end().to_string()).collect();
+        assert_eq!(&lines[..2], &["abd", "ok"]);
     }
 }
