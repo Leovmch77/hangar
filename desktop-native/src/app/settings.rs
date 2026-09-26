@@ -3,7 +3,7 @@
 //! As páginas de configuração usam a navegação lateral e mostram o conteúdo do servidor conectado.
 use super::*;
 use std::{cell::Cell, rc::Rc};
-use crate::appearance::{self, Appearance, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
+use crate::appearance::{self, Appearance, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, SurfaceMaterial, Swatch,
     ThemeMode, ThinkingTools, ToolLook, Wallpaper};
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip};
@@ -43,13 +43,13 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 31] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 32] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
     ("settings_text_color", Some("settings_text_color_desc")), ("settings_background", None),
     ("settings_background_scope", None), ("settings_image", Some("settings_image_desc")),
-    ("settings_transparency", Some("settings_transparency_desc")), ("settings_solidity", None),
+    ("settings_transparency", Some("settings_transparency_desc")), ("settings_surface_material", Some("settings_surface_material_desc")), ("settings_solidity", None),
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
     ("settings_font", None), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
@@ -777,12 +777,20 @@ impl Hangar {
             }, cx);
         // Com imagem ou área de trabalho atrás, a Transparência é o véu e vale também nos painéis colados.
         let see_through = floating || a.busy_background();
+        let surface_material = segmented("surface-material", &[tr("settings_surface_glass"), tr("settings_surface_opaque")],
+            if a.surface_material == SurfaceMaterial::Glass { 0 } else { 1 }, true,
+            |this: &mut Hangar, index, _: &mut Window, cx| {
+                let mut next = appearance::get();
+                next.surface_material = if index == 0 { SurfaceMaterial::Glass } else { SurfaceMaterial::Opaque };
+                this.apply_appearance(next, true, cx);
+            }, cx);
         let background_box = settings_box()
             .child(self.row(IconName::Image, "settings_background", busy.map(|b| b.note()), true, background))
             .child(self.row(IconName::Layers, "settings_background_scope", None, true, background_scope))
             .child(self.row_with(IconName::Image, "settings_image", image_description, true, image_actions.into_any_element()))
             .child(self.slider_row(IconName::Layers, "settings_transparency",
                 Some(tr(if see_through { "settings_transparency_desc" } else { "settings_transparency_off" })), Knob::Transparency, see_through, &a, cx))
+            .child(self.row(IconName::Layers, "settings_surface_material", Some(tr("settings_surface_material_desc")), true, surface_material))
             .child(self.slider_row(IconName::Layers, "settings_solidity", Some(tr("settings_only_floating")), Knob::Solidity, floating, &a, cx))
             // Nada a escolher aqui: a linha diz de quem é o desfoque; o botão (mouse ou teclado) abre onde ligar.
             .child(self.row(IconName::Layers, "settings_blur",

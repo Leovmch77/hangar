@@ -137,8 +137,14 @@ fn layer(trigger: Bounds<Pixels>, align: Align, surface: AnyElement, visible: f3
 
 /// O mesmo cartão para confirmações e formulários; o kit continua cuidando do foco, da altura e da rolagem.
 pub(super) fn dialog(surface: Dialog) -> Dialog {
-    surface.p(px(20.)).rounded(px(16.)).bg(theme::raised())
-        .border_color(theme::glass_border())
+    let surface = surface.p(px(20.)).rounded(px(16.)).bg(theme::popup_fill(theme::raised()))
+        .border_color(theme::glass_border());
+    if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
+        surface.bg(transparent_black()).border_color(transparent_black()).background_painter(|bounds, window, _| {
+            chrome::paint_glass(bounds, px(16.), window);
+            window.paint_quad(quad(bounds, px(16.), theme::popup_fill(theme::raised()), px(1.), theme::glass_border(), BorderStyle::Solid));
+        })
+    } else { surface }
 }
 
 /// Título de seção do popover, em caixa alta miúda; a tecla, quando há, fica à direita.

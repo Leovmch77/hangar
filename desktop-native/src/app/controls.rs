@@ -643,7 +643,7 @@ impl Hangar {
             }
             cx.stop_propagation();
         });
-        Some(div().p(px(popup::INSET)).rounded_md().bg(theme::raised()).flex().flex_col().gap(px(2.))
+        Some(div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
             .when_some(self.controls.focus.as_ref(), |el, focus| el.track_focus(&focus.0).on_key_down(keys))
             .child(popup::title(tr(&format!("ctl_{}_title", ctl.key())), Some("esc")))
             .child(body).into_any_element())

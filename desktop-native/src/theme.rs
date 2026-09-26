@@ -1,6 +1,6 @@
 use gpui_kit::{component::{Theme, ThemeMode as KitMode}, *};
 use std::sync::{OnceLock, RwLock, atomic::{AtomicBool, Ordering}};
-use crate::appearance::{self, Background as Backdrop, DesktopText, Palette, Panels, Reading, Swatch, ThemeMode};
+use crate::appearance::{self, Background as Backdrop, DesktopText, Palette, Panels, Reading, SurfaceMaterial, Swatch, ThemeMode};
 
 // Cores dos mocks aprovados (Task 12): o padrão é "Colados", opaco; "Caixa solta" deixa passar o que está
 // atrás da janela nas medidas de Transparência e Solidez. O nome de cada função diz o papel, não a cor.
@@ -272,6 +272,16 @@ pub fn panel_shadow() -> Vec<BoxShadow> {
 pub fn popover_shadow() -> Vec<BoxShadow> {
     let alpha = if colors().dark { 0.4 } else { 0.16 };
     vec![BoxShadow { color: hsla(0., 0., 0., alpha), offset: point(px(0.), px(8.)), blur_radius: px(28.), spread_radius: px(0.), inset: false }]
+}
+/// A tinta mantém o texto legível sobre o conteúdo desfocado; Opaco conserva o fundo anterior.
+pub fn popup_fill(color: Hsla) -> Hsla {
+    if appearance::get().surface_material == SurfaceMaterial::Glass {
+        color.alpha(0.78)
+    } else { color }
+}
+pub fn popup_content_fill() -> Hsla {
+    if appearance::get().surface_material == SurfaceMaterial::Glass { transparent_black() }
+    else { raised() }
 }
 pub fn card_shadow() -> Vec<BoxShadow> { panel_shadow() }
 pub fn border() -> Hsla { hex(colors().line, if floating() { 0.09 } else { 0.08 }) }

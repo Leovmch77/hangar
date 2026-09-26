@@ -2219,16 +2219,18 @@ impl Hangar {
 
     /// "Ir para o fim" flutuando no pé da conversa, centrada na coluna, só enquanto ela está solta e longe do fim.
     fn render_jump_pill(&self, cx: &mut Context<Self>) -> AnyElement {
-        // Hover opaco também, um toque da cor do texto sobre o fundo: o `hover()` do tema é translúcido na caixa solta.
-        let hover = theme::elevated().blend(theme::text().alpha(0.06));
+        // O hover usa o mesmo material da pílula; o `hover()` do tema é translúcido na caixa solta.
+        let glass = appearance::get().surface_material == appearance::SurfaceMaterial::Glass;
+        let fill = theme::popup_fill(theme::elevated());
+        let hover = fill.blend(theme::text().alpha(0.06));
         let pill = Button::new("jump-latest")
-            .custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::text()).hover(hover).active(hover))
-            // O variante pinta a cor misturada com transparente; opaco vem daqui, senão o texto da conversa aparece através.
+            .custom(ButtonCustomVariant::new(cx).color(fill).foreground(theme::text()).hover(hover).active(hover))
             // `elevated`, um degrau acima da conversa: com `raised` a pílula sumia no fundo.
-            .bg(theme::elevated()).h(px(30.)).pl(px(11.)).pr(px(13.)).rounded(px(15.)).border_1().border_color(theme::border_strong())
+            .bg(fill).h(px(30.)).pl(px(11.)).pr(px(13.)).rounded(px(15.)).border_1().border_color(theme::border_strong())
             .shadow(theme::popover_shadow()).text_size(px(13.))
             .icon(Icon::new(IconName::ArrowDown).size(px(13.)).text_color(theme::faint())).label(tr("latest"))
             .on_click(cx.listener(|this, _, _, cx| this.follow_engage(cx)));
+        let pill = if glass { chrome::Glass::new(pill, px(15.)).into_any_element() } else { pill.into_any_element() };
         let wrap = div().absolute().left_0().right_0().bottom(px(16.)).flex().justify_center().child(pill);
         if cx.reduce_motion() { return wrap.into_any_element(); }
         wrap.with_animation("jump-latest-in", Animation::new(WORKING_FADE).with_easing(chrome::ease_out),
@@ -2750,7 +2752,7 @@ impl Hangar {
                     .on_click(cx.listener(move |this, _, _, cx| this.reattach(name.clone(), cx)))
             })).into_any_element(),
         };
-        Some(div().p(px(popup::INSET)).rounded_md().bg(theme::raised()).flex().flex_col().gap(px(2.))
+        Some(div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
             .child(popup::title(tr("recent_title"), Some("esc")))
             .child(div().id("recent-list").max_h(px(220.)).overflow_y_scroll().child(body))
             .into_any_element())
@@ -2798,7 +2800,7 @@ impl Hangar {
                 }
             }
         };
-        div().p(px(popup::INSET)).rounded_md().bg(theme::raised()).flex().flex_col().gap(px(2.))
+        div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
             .child(popup::title(tr("commands"), Some("esc")))
             .child(div().px(px(4.)).pb(px(4.)).child(Input::new(&self.command_search)))
             .child(div().id("command-list").max_h(px(360.)).overflow_y_scroll().child(body))
@@ -2843,7 +2845,7 @@ impl Hangar {
 
     fn render_suggestions(&self, suggestions: &[CommandInfo], cx: &mut Context<Self>) -> AnyElement {
         let active = self.suggest_pick.min(suggestions.len().saturating_sub(1));
-        div().flex().flex_col().rounded_md().bg(theme::raised()).p_1()
+        div().flex().flex_col().rounded_md().bg(theme::popup_content_fill()).p_1()
             .children(suggestions.iter().enumerate().map(|(n, command)| {
                 let picked = command.clone();
                 Button::new(SharedString::from(format!("suggest-{}", command.name))).ghost().small().w_full().selected(n == active)
@@ -4077,7 +4079,7 @@ impl Render for Hangar {
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
-            .p(px(20.)).bg(theme::raised()).border_1().border_color(theme::glass_border()).rounded(px(16.))
+            .p(px(20.)).bg(theme::popup_fill(theme::raised())).border_1().border_color(theme::glass_border()).rounded(px(16.))
             .shadow_xl().overflow_y_scroll().occlude().flex().flex_col().gap_4()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -4202,7 +4204,9 @@ impl Render for Hangar {
                     cx.stop_propagation();
                 }))
                 .flex().items_start().justify_center().pt(dialog_top)
-                .child(dialog.focus_trap("connection-dialog", &self.connection_focus)))
+                .child(if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
+                    chrome::Glass::new(dialog.focus_trap("connection-dialog", &self.connection_focus), px(16.)).into_any_element()
+                } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() }))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
     }
 }

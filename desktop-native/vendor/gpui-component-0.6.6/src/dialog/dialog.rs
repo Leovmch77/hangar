@@ -2,10 +2,10 @@ use gpui_base::TestSupportExt as _;
 use std::{rc::Rc, sync::LazyLock, time::Duration};
 
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, BoxShadow, ClickEvent, Edges,
+    Action, Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, Edges,
     FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
     SharedString, StyleRefinement, Styled, Window, WindowControlArea, anchored, div, hsla, point,
-    prelude::FluentBuilder, px,
+    canvas, prelude::FluentBuilder, px,
 };
 use gpui_base::{ElementExt as _, TextSelectionScopeId};
 use rust_i18n::t;
@@ -156,6 +156,7 @@ impl RenderOnce for DialogButton {
 }
 
 type ContentBuilderFn = Rc<dyn Fn(DialogContent, &mut Window, &mut App) -> DialogContent + 'static>;
+type BackgroundPainterFn = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone)]
 pub(crate) struct DialogProps {
@@ -264,6 +265,7 @@ pub struct Dialog {
     pub(crate) header: Option<AnyElement>,
     pub(crate) footer: Option<AnyElement>,
     pub(crate) content_builder: Option<ContentBuilderFn>,
+    background_painter: Option<BackgroundPainterFn>,
     pub(crate) props: DialogProps,
 
     pub(super) button_props: DialogButtonProps,
@@ -294,6 +296,7 @@ impl Dialog {
             header: None,
             footer: None,
             content_builder: None,
+            background_painter: None,
             props: DialogProps::default(),
             children: Vec::new(),
             layer_ix: 0,
@@ -316,6 +319,15 @@ impl Dialog {
         F: Fn(DialogContent, &mut Window, &mut App) -> DialogContent + 'static,
     {
         self.content_builder = Some(Rc::new(builder));
+        self
+    }
+
+    /// Pinta o fundo do diálogo após o layout e antes do conteúdo.
+    pub fn background_painter(
+        mut self,
+        painter: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.background_painter = Some(Rc::new(painter));
         self
     }
 
@@ -475,6 +487,7 @@ impl Dialog {
         let style = self.style.clone();
         let props = self.props.clone();
         let button_props = self.button_props.clone();
+        let background_painter = self.background_painter.clone();
 
         gpui_base::DialogTrigger::new(trigger)
             .on_open(move |window, cx| {
@@ -482,8 +495,9 @@ impl Dialog {
                 let style = style.clone();
                 let props = props.clone();
                 let button_props = button_props.clone();
+                let background_painter = background_painter.clone();
                 window.open_dialog(cx, move |dialog, _, _| {
-                    dialog
+                    let mut dialog = dialog
                         .refine_style(&style)
                         .button_props(button_props.clone())
                         .with_props(props.clone())
@@ -496,7 +510,9 @@ impl Dialog {
                                     content
                                 }
                             }
-                        })
+                        });
+                    dialog.background_painter = background_painter.clone();
+                    dialog
                 });
             })
             .into_any_element()
@@ -629,6 +645,18 @@ impl RenderOnce for Dialog {
                                     .w(width)
                                     .when_some(self.props.max_width, |this, w| this.max_w(w))
                                     .max_h(max_height)
+                                    .when_some(self.background_painter, |this, painter| {
+                                        this.child(
+                                            canvas(
+                                                |_, _, _| (),
+                                                move |bounds, _, window, cx| {
+                                                    painter(bounds, window, cx)
+                                                },
+                                            )
+                                            .absolute()
+                                            .inset_0(),
+                                        )
+                                    })
                                     .child(
                                         v_flex()
                                             .flex_1()
