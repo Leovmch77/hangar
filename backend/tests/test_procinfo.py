@@ -411,6 +411,7 @@ def test_saida_de_comando_acha_o_bash_pelo_eval(tmp_path, monkeypatch, ramo):
     if ramo == "psutil":
         monkeypatch.setattr(procinfo, "psutil", psutil, raising=False)
         monkeypatch.setattr(procinfo, "_TEM_PROC", False)
+        monkeypatch.setattr(procinfo, "_comandos_cache", None)
     comando = "echo \"it's vivo\"; sleep 3"
     proc = _bash_do_claude(tmp_path, comando)
     try:

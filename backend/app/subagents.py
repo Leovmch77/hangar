@@ -1,7 +1,10 @@
+import copy
 import json
 import logging
 import os
 import re
+import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,7 +57,41 @@ def _tool_target(name: str, inp) -> str:
     return ""
 
 
+# Subagente que terminou não muda mais, e a lista é pedida a cada 5 s por chat trabalhando: só o
+# arquivo que cresceu é relido. Devolve cópia porque `get_subagent` pendura `events` no dict.
+_AGENT_CACHE_MAX = 256
+_agent_cache: OrderedDict[tuple[str, int], tuple[tuple, dict]] = OrderedDict()
+_agent_cache_lock = threading.Lock()
+
+
 def _read_agent(f: Path, tail: int) -> dict | None:
+    try:
+        st = f.stat()
+    except OSError:
+        return _parse_agent(f, tail)
+    try:
+        meta_mtime = (f.parent / (f.stem + ".meta.json")).stat().st_mtime_ns
+    except OSError:
+        meta_mtime = None
+    key = (str(f), tail)
+    stamp = (st.st_mtime_ns, st.st_size, meta_mtime)
+    with _agent_cache_lock:
+        hit = _agent_cache.get(key)
+        if hit is not None and hit[0] == stamp:
+            _agent_cache.move_to_end(key)
+            return copy.deepcopy(hit[1])
+    a = _parse_agent(f, tail)
+    if a is None:
+        return None
+    with _agent_cache_lock:
+        _agent_cache[key] = (stamp, a)
+        _agent_cache.move_to_end(key)
+        while len(_agent_cache) > _AGENT_CACHE_MAX:
+            _agent_cache.popitem(last=False)
+    return copy.deepcopy(a)
+
+
+def _parse_agent(f: Path, tail: int) -> dict | None:
     """Uma passada no transcript do subagente: prompt, contagem de tools, últimas chamadas, texto."""
     try:
         lines = f.read_text(encoding="utf-8", errors="replace").splitlines()

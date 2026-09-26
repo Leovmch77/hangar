@@ -7,6 +7,7 @@
   import { formatarIntervalo } from '../lib/contaEstado';
   import MessageList from './MessageList.svelte';
   import Spinner from './Spinner.svelte';
+  import { pollSequential } from '../lib/pollSequential';
   import { onDestroy, tick } from 'svelte';
   import type { Activity, TaskStatus } from '@hangar/core';
   import type { WorkflowSummary, WorkflowDetail, WorkflowAgentDetail, SubagentRun, SessionInfo, PlanDetail, ShellVivo } from '@hangar/core';
@@ -142,7 +143,7 @@
   // ultimas ferramentas chamadas — que e o "o que ele esta fazendo agora" de verdade.
   let subs = $state<SubagentRun[]>([]);
   let subDetail = $state<SubagentRun | null>(null);
-  let subTimer: ReturnType<typeof setInterval> | null = null;
+  let pararSub: (() => void) | null = null;
   // Falha de rede NAO pode virar "nao ha nada": sem isto, a lista de subagentes ficava vazia e a
   // linha do agente simplesmente nao abria nada no clique — indistinguivel de bug de toque.
   let subError = $state('');
@@ -279,8 +280,7 @@
         }
       }
     };
-    void tick();
-    subTimer = setInterval(tick, 2500);
+    pararSub = pollSequential(tick, 2500);
   }
   let subTitle = $state('');
   // A MessageList so ancora no fim quando ela mesma controla o scroll da tela; aqui ela vive numa
@@ -292,7 +292,7 @@
   // mais estreita, e amarrava esta folha à classe interna do componente do chat.
   let subChatEl = $state<HTMLElement | null>(null);
   function stopSubPoll() {
-    if (subTimer) { clearInterval(subTimer); subTimer = null; }
+    if (pararSub) { pararSub(); pararSub = null; }
     subFails = 0;
   }
   // O componente e DESTRUIDO junto com o Chat a cada troca de sessao/par ({#key} no DesktopShell e

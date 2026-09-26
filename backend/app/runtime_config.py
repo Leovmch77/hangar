@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import tempfile
@@ -134,11 +135,24 @@ def _caminho() -> Path:
     return Path(_backend_config_base()) / _ARQUIVO
 
 
+# Lido de novo só quando o arquivo muda: `get()` roda por campo e por sessão, e no Windows cada
+# abertura passa pelo antivírus. Devolve cópia porque quem grava altera o dict recebido.
+_cache: tuple[tuple[str, int, int], dict[str, Any]] | None = None
+
+
 def _carregar() -> dict[str, Any]:
+    global _cache
     try:
-        with open(_caminho(), encoding="utf-8") as fh:
+        caminho = _caminho()
+        st = os.stat(caminho)
+        chave = (str(caminho), st.st_mtime_ns, st.st_size)
+        if _cache is not None and _cache[0] == chave:
+            return copy.deepcopy(_cache[1])
+        with open(caminho, encoding="utf-8") as fh:
             d = json.load(fh)
-        return d if isinstance(d, dict) else {}
+        d = d if isinstance(d, dict) else {}
+        _cache = (chave, d)
+        return copy.deepcopy(d)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         # Arquivo ausente/corrompido não pode derrubar o backend: sem override, vale o env.
         #
@@ -357,6 +371,7 @@ def aplicar(mudancas: dict[str, Any], *, remover: set[str] | None = None) -> dic
 
 
 def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, Any]:
+    global _cache
     atual = _carregar()
     for campo in remover:
         if campo in EDITAVEIS:
@@ -399,6 +414,9 @@ def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, A
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(atual, fh, ensure_ascii=False, indent=2)
         atomico.substituir(tmp, destino)
+        # Cache já com o que acabou de ser gravado: não depende de a data do arquivo ter mudado.
+        st = os.stat(destino)
+        _cache = ((str(destino), st.st_mtime_ns, st.st_size), copy.deepcopy(atual))
         # O arquivo guarda segredo (chave da Groq): 0600 como o .env, pra não ficar legível por
         # outro usuário da máquina. Falha de chmod não desfaz a gravação — o valor já está lá.
         try:
