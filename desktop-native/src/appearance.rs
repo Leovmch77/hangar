@@ -19,10 +19,16 @@ pub enum CodeFont { JetBrainsMono, System }
 #[serde(rename_all = "snake_case")]
 pub enum SidebarHeight { Full, Content }
 
-/// Onde ficam as sessões: na barra lateral ou numa faixa de abas no topo, que tira a barra lateral.
+/// Onde ficam as sessões e como as linhas da barra lateral são apresentadas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Navigation { Sidebar, Tabs }
+pub enum Navigation { Tabs, Conversations, #[serde(other)] Sidebar }
+
+impl Navigation {
+    pub fn sidebar_width(self) -> f32 {
+        match self { Self::Sidebar => 284., Self::Tabs => 0., Self::Conversations => 256. }
+    }
+}
 
 /// Como a barra lateral agrupa as sessões (`cp_group_by` do web; "Servidor" não se aplica a um servidor só).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +163,7 @@ pub struct Appearance {
     pub column: u16,
     pub sidebar_height: SidebarHeight,
     pub navigation: Navigation,
+    pub sidebar_compact: bool,
     /// Caixa do "Ver ao vivo": distância da borda direita e da de baixo da janela, em px lógicos.
     pub live_corner: [f32; 2],
     pub tool_look: ToolLook,
@@ -180,7 +187,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
-    navigation: Navigation::Sidebar, live_corner: [16., 16.],
+    navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
     language: Language::System, currency: Currency::Usd, accounts_compact: false, sidebar_group: SidebarGroup::None,
     code_font: CodeFont::JetBrainsMono, code_size: 25 };
@@ -195,7 +202,7 @@ impl Appearance {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
             surface_material: self.surface_material,
             background: self.background, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
-            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, live_corner: self.live_corner,
+            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
             code_font: self.code_font,
             ..Self::default() }
@@ -323,6 +330,20 @@ pub fn save() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_navigation_keeps_old_files_and_round_trips_both_densities() {
+        for (value, expected) in [("sidebar", Navigation::Sidebar), ("tabs", Navigation::Tabs), ("unknown", Navigation::Sidebar)] {
+            let old: Appearance = serde_json::from_value(serde_json::json!({"navigation": value})).unwrap();
+            assert_eq!((old.navigation, old.sidebar_compact), (expected, false));
+        }
+        for compact in [false, true] {
+            let saved = Appearance { navigation: Navigation::Conversations, sidebar_compact: compact, ..Appearance::default() };
+            let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(loaded, saved);
+            assert_eq!((loaded.reset_keeping_choices().navigation, loaded.reset_keeping_choices().sidebar_compact), (Navigation::Conversations, compact));
+        }
+    }
 
     #[test]
     fn missing_fields_take_defaults_and_values_stay_in_range() {

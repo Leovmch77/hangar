@@ -43,7 +43,7 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 32] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 33] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
@@ -55,7 +55,7 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 32] = [
     ("settings_font", None), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
     ("settings_code_size", None), ("settings_line_height", None), ("settings_column", None),
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
-    ("settings_collapsed_nav", None), ("settings_sidebar_height", Some("settings_only_floating")),
+    ("settings_collapsed_nav", None), ("settings_sidebar_density", Some("settings_sidebar_density_hint")), ("settings_sidebar_height", Some("settings_only_floating")),
 ];
 
 /// Linhas das outras páginas prontas, no mesmo formato.
@@ -853,10 +853,15 @@ impl Hangar {
         let height = segmented("sidebar-height", &[tr("settings_sidebar_full"), tr("settings_sidebar_content")],
             if a.sidebar_height == SidebarHeight::Content { 1 } else { 0 }, floating,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_height = if index == 1 { SidebarHeight::Content } else { SidebarHeight::Full }; this.apply_appearance(next, true, cx); }, cx);
+        const NAVIGATION: [Navigation; 3] = [Navigation::Sidebar, Navigation::Tabs, Navigation::Conversations];
         let sidebar_box = settings_box()
             .child(self.row(IconName::PanelLeft, "settings_collapsed_nav", None, true,
-                segmented("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs")], (a.navigation == Navigation::Tabs) as usize, true,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = if index == 1 { Navigation::Tabs } else { Navigation::Sidebar }; this.apply_appearance(next, true, cx); }, cx)))
+                segmented("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_nav_conversations")],
+                    NAVIGATION.iter().position(|n| *n == a.navigation).unwrap_or(0), true,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); }, cx)))
+            .child(self.row(IconName::PanelLeft, "settings_sidebar_density", Some(tr("settings_sidebar_density_hint")), a.navigation == Navigation::Conversations,
+                segmented("sidebar-density", &[tr("settings_sidebar_normal"), tr("settings_sidebar_compact")], a.sidebar_compact as usize, a.navigation == Navigation::Conversations,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_compact = index == 1; this.apply_appearance(next, true, cx); }, cx)))
             .child(self.row(IconName::PanelLeft, "settings_sidebar_height", Some(tr("settings_only_floating")), floating, height));
 
         // Os dois botões do topo com a borda forte do mock.

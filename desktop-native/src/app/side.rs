@@ -5,7 +5,6 @@ use crate::status::StatusFields;
 
 const MIN_WIDTH: f32 = 240.;
 const MAX_WIDTH: f32 = 480.;
-const SIDEBAR: f32 = 284.;
 // Caixa solta com o painel aberto: 10 de margem em cada lado da janela e os dois vãos de 10 entre as três caixas.
 const FLOATING_GAPS: f32 = 40.;
 // Largura que a conversa mantém; abaixo disso o painel sai de cena em vez de espremer o texto.
@@ -96,8 +95,8 @@ impl Side {
 
     // Largura efetiva: nunca tira da conversa menos que CHAT_MIN; sem espaço, o painel não aparece.
     // Com as abas no topo não há barra lateral ocupando a esquerda.
-    fn fitted(&self, viewport: f32, floating: bool, sidebar: bool) -> Option<f32> {
-        let room = viewport - if sidebar { SIDEBAR } else { 0. } - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. };
+    fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
+        let room = viewport - sidebar_width - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. };
         (room >= MIN_WIDTH).then(|| self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room))
     }
 }
@@ -573,7 +572,7 @@ impl Hangar {
 
     /// O painel está à vista: aberto, com sessão e com largura para ele.
     pub(super) fn side_shown(&self, window: &Window) -> bool {
-        let sidebar = appearance::get().navigation == appearance::Navigation::Sidebar;
+        let sidebar = appearance::get().navigation.sidebar_width();
         self.side.open && self.selected.is_some()
             && self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), sidebar).is_some()
     }
@@ -581,7 +580,7 @@ impl Hangar {
     /// Largura do painel aberto nesta janela; `None` quando está fechado ou não cabe.
     pub(super) fn side_width(&self, window: &Window) -> Option<f32> {
         let viewport = f32::from(window.viewport_size().width);
-        let sidebar = appearance::get().navigation == appearance::Navigation::Sidebar;
+        let sidebar = appearance::get().navigation.sidebar_width();
         self.side.fitted(viewport, theme::is_floating(), sidebar).filter(|_| self.side.open && self.selected.is_some())
     }
 
@@ -662,6 +661,7 @@ impl Hangar {
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
     use super::{Shortcut, Side, duration, parse_shortcuts, tokens};
+    use crate::appearance;
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
@@ -685,13 +685,19 @@ mod tests {
     #[test]
     fn panel_never_squeezes_the_chat() {
         let side = Side::default();
-        assert_eq!(side.fitted(1180., false, true), Some(300.));
-        assert_eq!(side.fitted(1000., false, true), None);
-        assert_eq!(side.fitted(1080., false, true), Some(256.));
+        let sidebar = appearance::Navigation::Sidebar.sidebar_width();
+        assert_eq!(side.fitted(1180., false, sidebar), Some(300.));
+        assert_eq!(side.fitted(1000., false, sidebar), None);
+        assert_eq!(side.fitted(1080., false, sidebar), Some(256.));
         // Na caixa solta as margens também saem da conversa.
-        assert_eq!(side.fitted(1080., true, true), None);
-        assert_eq!(side.fitted(1120., true, true), Some(256.));
+        assert_eq!(side.fitted(1080., true, sidebar), None);
+        assert_eq!(side.fitted(1120., true, sidebar), Some(256.));
         // Com as abas no topo a largura da barra lateral volta para a conversa e o painel.
-        assert_eq!(side.fitted(1000., false, false), Some(300.));
+        assert_eq!(side.fitted(1000., false, appearance::Navigation::Tabs.sidebar_width()), Some(300.));
+        let conversations = appearance::Navigation::Conversations.sidebar_width();
+        assert_eq!(side.fitted(1052., false, conversations), Some(256.));
+        assert_eq!(side.fitted(1036., false, conversations), Some(240.));
+        assert_eq!(side.fitted(1035., false, conversations), None);
+        assert_eq!(side.fitted(1092., true, conversations), Some(256.));
     }
 }
