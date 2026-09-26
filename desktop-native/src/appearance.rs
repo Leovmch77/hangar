@@ -48,6 +48,10 @@ pub enum DesktopText { Desktop, App }
 #[serde(rename_all = "snake_case")]
 pub enum Background { Plain, Texture, Light, Image, Desktop }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundScope { Chat, Everywhere }
+
 /// No fundo Desktop: a janela deixa ver a área de trabalho, ou desenha dentro dela a foto do papel de parede.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +137,7 @@ pub struct Appearance {
     /// Opacidade das caixas na caixa solta, 0–100.
     pub solidity: u16,
     pub background: Background,
+    pub background_scope: BackgroundScope,
     pub wallpaper: Wallpaper,
     pub reading: Reading,
     /// Opacidade da folha atrás da conversa, 0–100.
@@ -168,7 +173,7 @@ pub struct Appearance {
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, solidity: 70,
-    background: Background::Plain, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
+    background: Background::Plain, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
@@ -183,7 +188,7 @@ impl Appearance {
     /// "Voltar ao padrão" do web: não mexe em tema, fonte, fundo, painéis nem no jeito da conversa.
     pub fn reset_keeping_choices(self) -> Self {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
-            background: self.background, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
+            background: self.background, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
             code_font: self.code_font,
@@ -221,6 +226,7 @@ impl Appearance {
 }
 
 static CURRENT: RwLock<Appearance> = RwLock::new(DEFAULT);
+static IMAGE_NAME: RwLock<Option<String>> = RwLock::new(None);
 
 pub fn get() -> Appearance { *CURRENT.read().unwrap_or_else(|e| e.into_inner()) }
 
@@ -236,6 +242,26 @@ fn path() -> Option<PathBuf> { Some(dir()?.join("appearance.json")) }
 
 /// Cópia da imagem de fundo escolhida: o original pode sumir ou mudar depois.
 pub fn image_path() -> Option<PathBuf> { Some(dir()?.join("background-image")) }
+
+pub fn image_name() -> Option<String> {
+    IMAGE_NAME.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn read_image_name() -> Option<String> {
+    std::fs::read_to_string(dir()?.join("background-name")).ok().filter(|name| !name.is_empty())
+}
+
+/// Bloqueante; o nome fica separado porque Appearance é Copy.
+pub fn save_image_name(name: Option<&str>) -> std::io::Result<()> {
+    let dir = dir().ok_or_else(|| std::io::Error::other("sem pasta de configuração"))?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("background-name");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, name.unwrap_or_default())?;
+    std::fs::rename(tmp, path)?;
+    *IMAGE_NAME.write().unwrap_or_else(|e| e.into_inner()) = name.filter(|n| !n.is_empty()).map(str::to_owned);
+    Ok(())
+}
 
 /// A raiz escolhida por último em Nova sessão, como o `cp:last-root` do web; falha de disco só faz esquecer. Bloqueantes.
 pub fn last_root() -> Option<String> { std::fs::read_to_string(dir()?.join("last-root")).ok().map(|s| s.trim().to_owned()) }
@@ -265,6 +291,7 @@ pub fn remember_model(key: &str, model: &str, effort: &str) {
 
 /// Sem arquivo, ou arquivo ilegível, abre no padrão; o motivo da falha de leitura volta para ser mostrado.
 pub fn load() -> Result<Appearance, String> {
+    *IMAGE_NAME.write().unwrap_or_else(|e| e.into_inner()) = read_image_name();
     let Some(path) = path() else { return Ok(Appearance::default()) };
     match std::fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Appearance::default()),
@@ -312,6 +339,20 @@ mod tests {
             Appearance { code_size: 900, ..saved }.clamped().code_size), (16, 48));
         let reset = saved.reset_keeping_choices();
         assert_eq!((reset.code_font, reset.code_size), (CodeFont::System, 25));
+    }
+
+    #[test]
+    fn background_scope_defaults_and_persists_independently_of_panels() {
+        for panels in [Panels::Attached, Panels::Floating] {
+            let old: Appearance = serde_json::from_value(serde_json::json!({ "panels": panels })).unwrap();
+            assert_eq!(old.background_scope, BackgroundScope::Everywhere);
+            for scope in [BackgroundScope::Chat, BackgroundScope::Everywhere] {
+                let saved = Appearance { background_scope: scope, ..old };
+                let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+                assert_eq!((loaded.background_scope, loaded.panels), (scope, panels));
+                assert_eq!(loaded.reset_keeping_choices().background_scope, scope);
+            }
+        }
     }
 
     #[test]

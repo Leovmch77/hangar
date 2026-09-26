@@ -3,10 +3,10 @@
 //! As páginas de configuração usam a navegação lateral e mostram o conteúdo do servidor conectado.
 use super::*;
 use std::{cell::Cell, rc::Rc};
-use crate::appearance::{self, Appearance, Background, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
+use crate::appearance::{self, Appearance, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, Swatch,
     ThemeMode, ThinkingTools, ToolLook, Wallpaper};
 use gpui_kit::base::AccordionTrigger;
-use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}};
+use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
@@ -43,11 +43,12 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 29] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 31] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
     ("settings_text_color", Some("settings_text_color_desc")), ("settings_background", None),
+    ("settings_background_scope", None), ("settings_image", Some("settings_image_desc")),
     ("settings_transparency", Some("settings_transparency_desc")), ("settings_solidity", None),
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
@@ -747,8 +748,24 @@ impl Hangar {
         let image_actions = div().flex().gap_2()
             .child(Button::new("background-image-pick").outline().small().label(tr("settings_image_pick")).disabled(busy.is_some())
                 .on_click(cx.listener(|this, _, _, cx| this.pick_backdrop(cx))))
-            .child(Button::new("background-image-remove").outline().small().label(tr("settings_image_remove")).disabled(busy.is_some())
+            .child(Button::new("background-image-remove").outline().small().label(tr("settings_image_remove")).disabled(busy.is_some() || a.background != Background::Image)
                 .on_click(cx.listener(|this, _, _, cx| this.remove_backdrop(cx))));
+        let image_name = if a.background == Background::Image {
+            appearance::image_name().unwrap_or_else(|| tr("settings_image_unnamed"))
+        } else { tr("settings_image_none") };
+        let image_description = div().flex().items_center().gap_2().min_w_0()
+            .when(a.background == Background::Image, |el| el.when_some(self.backdrop.as_ref(), |el, (_, image)| el
+                .child(div().w(px(48.)).h(px(32.)).flex_shrink_0().rounded(px(4.)).overflow_hidden()
+                    .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover)))))
+            .child(div().id("background-image-name").flex_1().min_w_0().truncate().child(image_name.clone())
+                .tooltip(move |window, cx| Tooltip::new(image_name.clone()).build(window, cx)));
+        let background_scope = segmented("background-scope", &[tr("settings_background_chat"), tr("settings_background_everywhere")],
+            if a.background_scope == BackgroundScope::Chat { 0 } else { 1 }, busy.is_none(),
+            |this: &mut Hangar, index, _: &mut Window, cx| {
+                let mut next = appearance::get();
+                next.background_scope = if index == 0 { BackgroundScope::Chat } else { BackgroundScope::Everywhere };
+                this.apply_appearance(next, true, cx);
+            }, cx);
         let desktop_background = a.background == Background::Desktop;
         let wallpaper = segmented("wallpaper", &[tr("settings_wallpaper_window"), tr("settings_wallpaper_glass")],
             if a.wallpaper == Wallpaper::Glass { 1 } else { 0 }, desktop_background && busy.is_none(),
@@ -762,8 +779,8 @@ impl Hangar {
         let see_through = floating || a.busy_background();
         let background_box = settings_box()
             .child(self.row(IconName::Image, "settings_background", busy.map(|b| b.note()), true, background))
-            .when(a.background == Background::Image, |el| el.child(self.row(IconName::Image, "settings_image",
-                Some(tr("settings_image_desc")), true, image_actions.into_any_element())))
+            .child(self.row(IconName::Layers, "settings_background_scope", None, true, background_scope))
+            .child(self.row_with(IconName::Image, "settings_image", image_description, true, image_actions.into_any_element()))
             .child(self.slider_row(IconName::Layers, "settings_transparency",
                 Some(tr(if see_through { "settings_transparency_desc" } else { "settings_transparency_off" })), Knob::Transparency, see_through, &a, cx))
             .child(self.slider_row(IconName::Layers, "settings_solidity", Some(tr("settings_only_floating")), Knob::Solidity, floating, &a, cx))
