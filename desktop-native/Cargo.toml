@@ -5,7 +5,14 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gpui-kit = "=0.6.6"
+gpui-kit = { version = "=0.6.6", features = [
+    "tree-sitter-bash", "tree-sitter-cpp", "tree-sitter-csharp",
+    "tree-sitter-css", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java",
+    "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown",
+    "tree-sitter-php", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust",
+    "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
+    "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml",
+] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
 serde = { version = "=1.0.229", features = ["derive"] }
