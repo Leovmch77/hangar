@@ -383,6 +383,7 @@ pub struct Hangar {
     switch_draft: Option<String>,
     ready_sessions: Option<Vec<SessionInfo>>,
     dictation: dictation::Dictation,
+    connection_origin: Option<WeakFocusHandle>,
 }
 
 impl Drop for Hangar {
@@ -480,6 +481,7 @@ impl Hangar {
             new_chat: None,
             new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
+            connection_origin: None,
         }
     }
 
@@ -585,6 +587,7 @@ impl Hangar {
     }
 
     fn open_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.connection_dialog { self.connection_origin = window.focused(cx).map(|focus| focus.downgrade()); }
         self.connection_dialog = true;
         self.address.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -4071,20 +4074,38 @@ impl Render for Hangar {
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
             .when(self.activity_tab(), |el| el.child(self.activity_mark_float(cx)))
             .child(self.subagent_mark_float(cx)).into_any_element());
-        let dialog = div().w(px(480.)).p_6().bg(theme::surface()).border_1().border_color(theme::border()).rounded_xl().flex().flex_col().gap_4()
-            .child(div().text_xl().font_weight(FontWeight::BOLD).child(tr("connection")))
+        let dialog_top = window.viewport_size().height / 10.;
+        let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
+        let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
+            .p(px(20.)).bg(theme::raised()).border_1().border_color(theme::glass_border()).rounded(px(16.))
+            .shadow_xl().overflow_y_scroll().occlude().flex().flex_col().gap_4()
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.api.is_some() {
+                    this.connection_dialog = false;
+                    this.connection_origin.take().and_then(|origin| origin.upgrade()).unwrap_or_else(|| this.root_focus.clone()).focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("connection")))
             .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
-            .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address))
-            .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token))
+            .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
+            .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token")))
             .when_some(self.error.clone(), |el, error| el.child(div().text_sm().text_color(theme::warning()).child(error)))
             .child(div().flex().justify_end().gap_2()
                 .when(self.api.is_some(), |el| el.child(Button::new("cancel").label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
                     this.connection_dialog = false;
-                    // O campo do diálogo some da árvore; sem isto a janela fica sem foco e os atalhos não chegam.
-                    this.root_focus.focus(window, cx);
+                    this.connection_origin.take().and_then(|origin| origin.upgrade()).unwrap_or_else(|| this.root_focus.clone()).focus(window, cx);
                     cx.notify();
                 }))))
-                .child(Button::new("connect").primary().label(tr("connect")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx)))));
+                .child(Button::new("connect").primary().label(tr("connect")).on_click(cx.listener(|this, _, window, cx| {
+                    this.connect(window, cx);
+                    if !this.connection_dialog {
+                        window.close_all_dialogs(cx);
+                        this.root_focus.focus(window, cx);
+                    }
+                }))));
 
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
@@ -4169,10 +4190,20 @@ impl Render for Hangar {
             .children(live)
             .children(self.render_preview(window))
             .children(self.render_popup(window, cx))
-            .when(self.connection_dialog, |el| el.child(div().absolute().inset_0().bg(theme::scrim()).flex().items_center().justify_center()
-                .child(dialog.focus_trap("connection-dialog", &self.connection_focus))))
-            // Diálogos e avisos numa view própria: a animação deles redesenha só ela, não as áreas guardadas.
+            // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
+            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude()
+                .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                    if this.api.is_some() {
+                        this.connection_dialog = false;
+                        this.connection_origin.take().and_then(|origin| origin.upgrade()).unwrap_or_else(|| this.root_focus.clone()).focus(window, cx);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }))
+                .flex().items_start().justify_center().pt(dialog_top)
+                .child(dialog.focus_trap("connection-dialog", &self.connection_focus)))
+                .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
     }
 }
 

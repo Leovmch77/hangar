@@ -503,7 +503,7 @@ impl Hangar {
                 // enquanto o erro está à vista (o cursor segue mostrando o foco).
                 let field = Input::new(&input).aria_label(tr("sidebar_new_name"))
                     .when(error.is_some(), |el| el.focus_bordered(false).border_color(theme::danger()));
-                dialog.w(px(420.)).title(tr("sidebar_rename_title")).child(field)
+                popup::dialog(dialog).w(px(420.)).title(tr("sidebar_rename_title")).child(field)
                     .when_some(error, |dialog, error| dialog.child(div().id("rename-error").role(Role::Alert).mt(px(6.)).text_sm().text_color(theme::danger()).child(error)))
                     .footer(div().flex().justify_end().gap_2()
                         .child(Button::new("rename-cancel").label(tr("cancel")).on_click(move |_, window, cx| {
@@ -607,7 +607,7 @@ impl Hangar {
             };
             let line = |label: String, text: String| div().child(div().font_weight(FontWeight::SEMIBOLD).child(label))
                 .child(div().text_color(theme::muted()).child(text));
-            dialog.w(px(460.)).title(tr("sidebar_dirty_title"))
+            popup::dialog(dialog).w(px(460.)).title(tr("sidebar_dirty_title"))
                 .child(div().flex().flex_col().gap(px(10.)).text_sm()
                     .child(div().font_family(theme::MONO).child(format!("→ {branch}")))
                     .child(div().child(tr("sidebar_dirty_body")))
@@ -641,7 +641,7 @@ impl Hangar {
             let (save, close, owner) = (weak.clone(), weak.clone(), status.clone());
             let field = Input::new(&input).aria_label(tr("sidebar_chain_prompt_aria"))
                 .when(error.is_some(), |el| el.focus_bordered(false).border_color(theme::danger()));
-            dialog.w(px(460.)).title(tr("sidebar_chain_title").replace("{n}", &target)).child(field)
+            popup::dialog(dialog).w(px(460.)).title(tr("sidebar_chain_title").replace("{n}", &target)).child(field)
                 .when_some(error, |dialog, error| dialog.child(div().id("chain-error").role(Role::Alert).mt(px(6.)).text_sm().text_color(theme::danger()).child(error)))
                 .footer(div().flex().justify_end().gap_2()
                     .child(Button::new("chain-cancel").label(tr("cancel")).on_click(|_, window, cx| window.close_dialog(cx)))

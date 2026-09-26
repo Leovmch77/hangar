@@ -139,7 +139,7 @@ impl Hangar {
             });
         }
         let title = web("bastao_card_titulo", &[("nome", &origin)]);
-        window.open_dialog(cx, move |dialog, _, _| dialog.w(px(720.)).title(title.clone()).child(dossier.clone()));
+        window.open_dialog(cx, move |dialog, _, _| popup::dialog(dialog).w(px(720.)).title(title.clone()).child(dossier.clone()));
     }
 
     /// Só o pedido mais novo do resumo à vista entra: o de uma sessão anterior não acha mais o seu estado.
