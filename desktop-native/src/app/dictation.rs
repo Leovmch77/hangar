@@ -1,6 +1,5 @@
 use super::*;
 use std::{io::Read, process::{Child, Command, Stdio}, sync::Mutex, thread};
-use gpui_kit::component::notification::NotificationDelivery;
 
 const PCM_LIMIT: usize = 16_000 * 2 * 180;
 
@@ -8,6 +7,7 @@ struct Recorder {
     child: Option<Child>,
     reader: Option<thread::JoinHandle<std::io::Result<()>>>,
     pcm: Arc<Mutex<Vec<u8>>>,
+    playback: Option<Instant>,
 }
 
 impl Drop for Recorder {
@@ -22,12 +22,13 @@ impl Drop for Recorder {
 
 impl Recorder {
     fn start() -> Result<Self, Failure> {
-        let mut recorder = Self { child: None, reader: None, pcm: Default::default() };
+        let mut recorder = Self { child: None, reader: None, pcm: Default::default(), playback: None };
         if let Some(path) = std::env::var_os("HANGAR_NATIVE_DICTATION_WAV") {
             let mut bytes = Vec::new();
             std::fs::File::open(path).and_then(|file| file.take((PCM_LIMIT + 4097) as u64).read_to_end(&mut bytes))
                 .map_err(|_| Failure::local("dictation_wav_error"))?;
             *recorder.pcm.lock().unwrap() = wav_pcm(&bytes).ok_or_else(|| Failure::local("dictation_wav_error"))?.to_vec();
+            recorder.playback = Some(Instant::now());
             return Ok(recorder);
         }
         if !cfg!(target_os = "linux") { return Err(Failure::local("dictation_platform")); }
@@ -52,7 +53,8 @@ impl Recorder {
 
     fn level(&self) -> f32 {
         let bytes = self.pcm.lock().unwrap();
-        bytes[bytes.len().saturating_sub(3200) & !1..].chunks_exact(2)
+        let end = self.playback.map(|start| (start.elapsed().as_millis() as usize * 32) % bytes.len()).unwrap_or(bytes.len()) & !1;
+        bytes[end.saturating_sub(3200)..end].chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() as f32 / 32768.).fold(0., f32::max)
     }
 
@@ -105,7 +107,6 @@ pub(super) struct Dictation {
     started: Option<Instant>,
     level: f32,
     result: Option<Value>,
-    message: String,
 }
 
 impl Dictation {
@@ -119,56 +120,52 @@ impl Dictation {
         self.started = None;
         self.level = 0.;
         self.result = None;
-        self.message.clear();
     }
 }
 
 impl Drop for Dictation { fn drop(&mut self) { self.cancel(); } }
 
 impl Hangar {
-    pub(super) fn watch_dictation(window: &Window, cx: &mut Context<Self>) {
-        let window = window.window_handle();
+    pub(super) fn watch_dictation(_window: &Window, cx: &mut Context<Self>) {
         cx.observe_self(move |this, cx| {
             if this.dictation.owner.is_some_and(|owner| owner != (this.connection, this.selection)) {
-                let seq = this.dictation.seq;
                 this.dictation.cancel();
-                let _ = window.update(cx, |_, window, cx| window.remove_notification1::<Dictation>(("dictation", seq), cx));
+                this.redraw(panes::Area::Bottom, cx);
             }
         }).detach();
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.request.is_some() { return; }
-        if self.dictation.recorder.is_some() { self.stop_dictation(window, cx); return; }
+        if self.dictation.recorder.is_some() {
+            self.stop_dictation(window, cx);
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
+            return;
+        }
         if self.connection_dialog || self.settings.is_some() || self.new_chat.is_some() || window.has_active_dialog(cx) { return; }
-        if self.selected_key().is_none() { return; }
-        window.remove_notification1::<Dictation>(("dictation", self.dictation.seq), cx);
+        if self.selected_key().is_none() || !self.chat_online || !self.history_installed { return; }
         self.dictation.cancel();
         match Recorder::start() {
             Ok(recorder) => {
                 self.dictation.owner = Some((self.connection, self.selection));
                 self.dictation.recorder = Some(recorder);
                 self.dictation.started = Some(Instant::now());
-                self.dictation.message = tr("dictation_recording");
-                self.dictation_notice(window, cx);
                 let seq = self.dictation.seq;
                 cx.spawn_in(window, async move |this, cx| {
                     loop {
                         cx.background_executor().timer(Duration::from_millis(100)).await;
                         let keep = this.update_in(cx, |this, window, cx| {
-                            if this.dictation.seq != seq {
-                                window.remove_notification1::<Dictation>(("dictation", seq), cx);
-                                return false;
-                            }
+                            if this.dictation.seq != seq { return false; }
                             let Some(recorder) = &mut this.dictation.recorder else { return false; };
                             let failed = recorder.child.as_mut().is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
                             if failed {
                                 this.dictation.cancel();
-                                window.remove_notification1::<Dictation>(("dictation", seq), cx);
                                 window.push_notification(Notification::error(tr("dictation_recorder_error")), cx);
+                                this.redraw(panes::Area::Bottom, cx);
                                 return false;
                             }
                             this.dictation.level = recorder.level();
+                            this.redraw(panes::Area::Bottom, cx);
                             if this.dictation.started.is_some_and(|start| start.elapsed() >= Duration::from_secs(180)) {
                                 this.stop_dictation(window, cx);
                             }
@@ -183,29 +180,9 @@ impl Hangar {
         cx.notify();
     }
 
-    fn dictation_notice(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let (owner, seq) = (cx.entity(), self.dictation.seq);
-        let (this, content) = (owner.downgrade(), owner.downgrade());
-        let before: HashSet<_> = window.notifications(cx).iter().map(Entity::entity_id).collect();
-        window.push_notification(Notification::new().id1::<Dictation>(("dictation", seq)).autohide(false)
-            .content(move |_, _, cx| {
-                let text = content.upgrade().map(|view| view.read(cx).dictation.message.clone()).unwrap_or_default();
-                div().text_sm().text_color(theme::text()).child(text).into_any_element()
-            })
-            .delivery(NotificationDelivery::InApp).on_close(move |_, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if this.dictation.seq == seq { this.dictation.cancel(); cx.notify(); }
-                });
-            }), cx);
-        for note in window.notifications(cx).iter().filter(|note| !before.contains(&note.entity_id())) {
-            note.update(cx, |_, cx| cx.observe(&owner, |_, _, cx| cx.notify()).detach());
-        }
-    }
-
     fn stop_dictation(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { self.dictation.cancel(); return; };
-        self.dictation.message = tr("dictation_transcribing");
         let (tx, connection, selection, seq) = (self.tx.clone(), self.connection, self.selection, self.dictation.seq);
         self.dictation.request = Some(self.runtime.spawn(async move {
             let audio = tokio::task::spawn_blocking(move || recorder.finish()).await;
@@ -218,9 +195,11 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictation.seq != seq { return; }
+    pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dictation.seq != seq || self.dictation.owner != Some((self.connection, self.selection)) { return; }
         self.dictation.request = None;
+        self.dictation.started = None;
+        self.dictation.level = 0.;
         match result {
             Ok(value) => {
                 self.dictation.result = Some(value);
@@ -229,14 +208,58 @@ impl Hangar {
                 let warning = value.get("aviso").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
                 if text.is_empty() {
                     self.dictation.result = None;
-                    self.dictation.message = tr("dictation_empty_text");
+                    window.push_notification(Notification::error(tr("dictation_empty_text")), cx);
                 } else {
-                    self.dictation.message = match warning { Some(warning) => format!("{text}\n\n{warning}"), None => text };
+                    self.composer.update(cx, |input, cx| {
+                        let value = input.value().to_string();
+                        let range = input.selected_range();
+                        input.replace(dictation_insert(&value, range, &text), window, cx);
+                    });
+                    // Consome a mudança programática antes do observador de @menção.
+                    self.refresh_mention(cx);
+                    self.mention.close();
+                    if let Some(warning) = warning { window.push_notification(Notification::warning(warning), cx); }
                 }
             }
-            Err(error) => self.dictation.message = Self::dictation_failure(&error),
+            Err(error) => window.push_notification(Notification::error(Self::dictation_failure(&error)), cx),
         }
         cx.notify();
+    }
+
+    pub(super) fn render_dictation(&self, readable: bool, cx: &mut Context<Self>) -> (Button, Option<AnyElement>) {
+        let recording = self.dictation.recorder.is_some();
+        let transcribing = self.dictation.request.is_some();
+        let label = tr(if recording { "dictation_stop" } else if transcribing { "dictation_working" } else { "dictation_start" });
+        let mic = if recording {
+            Button::new("dictation-toggle").ghost().size_7().rounded_md()
+                .child(div().size_3().rounded_sm().bg(theme::danger()))
+        } else { chrome::icon_button("dictation-toggle", IconName::Mic, label.clone(), cx) };
+        let mic = mic.accessibility_label(label.clone())
+            .disabled(transcribing || (!recording && (!readable || !self.chat_online || !self.history_installed)))
+            .loading(transcribing)
+            .tooltip(format!("{label} · {}", tr("dictation_shortcut")))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
+        let strip = (recording || transcribing).then(|| {
+            let label = tr(if recording { "dictation_active" } else { "dictation_working" });
+            let seconds = self.dictation.started.map(|start| start.elapsed().as_secs()).unwrap_or(0);
+            div().flex().items_center().gap_2().text_sm().text_color(theme::muted())
+                .child(div().id("dictation-status").role(Role::Status).aria_label(label.clone()).child(label))
+                .when(recording, |el| el
+                    .child(div().font_family(theme::MONO).child(format!("{}:{:02}", seconds / 60, seconds % 60)))
+                    .child(div().id("dictation-level").role(Role::Meter).aria_label(tr("dictation_level"))
+                        .aria_min_numeric_value(0.).aria_max_numeric_value(100.).aria_numeric_value((self.dictation.level * 100.) as f64)
+                        .w_16().h_1().rounded_full().bg(theme::raised())
+                        .child(div().h_full().w(relative(self.dictation.level)).rounded_full().bg(theme::accent()))))
+                .child(div().flex_1())
+                .child(Button::new("dictation-cancel").ghost().small().label(tr("dictation_cancel"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.dictation.cancel();
+                        this.composer.update(cx, |input, cx| input.focus(window, cx));
+                        cx.notify();
+                    })))
+                .into_any_element()
+        });
+        (mic, strip)
     }
 
     fn dictation_failure(error: &Failure) -> String {
@@ -250,9 +273,38 @@ impl Hangar {
     }
 }
 
+fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> String {
+    let leading = value[..range.start].chars().next_back().is_some_and(|c| !c.is_whitespace());
+    let trailing = value[range.end..].chars().next().is_some_and(|c| !c.is_whitespace());
+    format!("{}{text}{}", if leading { " " } else { "" }, if trailing { " " } else { "" })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{wav, wav_pcm};
+    use super::{dictation_insert, wav, wav_pcm, Dictation, Recorder};
+    #[test]
+    fn dictation_preserves_draft_around_cursor_or_selection_and_cancels_old_result() {
+        for (value, range, expected) in [
+            ("depois", 0..0, "fala depois"), ("antes", 5..5, "antes fala"),
+            ("antes depois", 6..6, "antes fala depois"), ("trocar isto", 0..6, "fala isto"),
+            ("ação fim", 0..6, "fala fim"), ("tudo", 0..4, "fala"),
+            ("", 0..0, "fala"), ("antes\n", 6..6, "antes\nfala"),
+        ] {
+            let mut result = value.to_owned();
+            result.replace_range(range.clone(), &dictation_insert(value, range, "fala"));
+            assert_eq!(result, expected);
+        }
+        let mut state = Dictation::default();
+        state.owner = Some((1, 2));
+        let old = state.seq;
+        state.cancel();
+        assert_ne!(state.seq, old);
+        assert!(state.owner.is_none());
+        let mut pcm = vec![0; 3203];
+        pcm[3201] = 128;
+        let recorder = Recorder { child: None, reader: None, pcm: std::sync::Arc::new(std::sync::Mutex::new(pcm)), playback: None };
+        assert_eq!(recorder.level(), 1.);
+    }
     #[test]
     fn wav_roundtrip_rejects_truncation_and_wrong_format() {
         let pcm = [0, 0, 0xff, 0x7f, 0, 0x80];
