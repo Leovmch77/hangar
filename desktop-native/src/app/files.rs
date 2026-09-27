@@ -20,6 +20,10 @@ struct FileTab {
     path: String,
     line: Option<u32>,
     content: Option<Result<Document, String>>,
+    /// Imagem da raiz, lida direto do disco (servidor nesta máquina): mostrada, não editada.
+    image: Option<PathBuf>,
+    /// Markdown abre na prévia, como no Zeron; o botão alterna para o código.
+    preview: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -39,6 +43,7 @@ struct Document {
     dirty: bool,
     saved: Option<Instant>,
     error: Option<String>,
+    markdown: Option<Entity<TextViewState>>,
     _changed: Subscription,
 }
 
@@ -153,9 +158,14 @@ impl Hangar {
         }
         self.files.serial += 1;
         let id = self.files.serial;
-        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None });
+        let local = self.tree.local_root(&self.session_owner());
+        // Imagem só dá para mostrar do disco: a leitura pelo servidor recusa binário.
+        let image = local.as_ref().filter(|_| is_image(&path)).and_then(|root| super::tree::resolve(root, &path).ok());
+        let preview = file_language(&path) == "markdown";
+        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None, image: image.clone(), preview });
         self.files.active = self.files.tabs.len() - 1;
         self.focus_file(window, cx);
+        if image.is_some() { return; }
         let (connection, selection, tx) = (self.connection, None, self.tx.clone());
         let mut candidates = Vec::new();
         if !path.contains('/') {
@@ -171,7 +181,6 @@ impl Hangar {
             }
             for event in &self.chat.events { collect(&json!([event.text, event.tool_input, event.result]), &path, &mut candidates); }
         }
-        let local = self.tree.local_root(&self.session_owner());
         self.runtime.spawn(async move {
             let result = read_file(api, key.name, path, candidates, local).await;
             let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Read(id, result)) }).await;
@@ -198,7 +207,8 @@ impl Hangar {
                     cx.notify();
                 }
             });
-            let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, _changed: changed };
+            let markdown = (file_language(path) == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&content.text, cx)));
+            let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, markdown, _changed: changed };
             doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx));
             doc
         }).map_err(|error| match error.status {
@@ -267,6 +277,17 @@ impl Hangar {
         doc.editor.update(cx, |state, cx| state.set_value(doc.base.text.clone(), window, cx));
         doc.dirty = false;
         (doc.error, doc.saved) = (None, None);
+        cx.notify();
+    }
+
+    fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+        let tab = &mut self.files.tabs[self.files.active];
+        tab.preview = !tab.preview;
+        // A prévia mostra o texto do editor, com o que ainda não foi salvo.
+        if let (true, Some(Ok(doc))) = (tab.preview, &tab.content) {
+            let text = doc.editor.read(cx).value().to_string();
+            if let Some(view) = &doc.markdown { view.update(cx, |view, cx| view.set_text(&text, cx)); }
+        }
         cx.notify();
     }
 
@@ -369,6 +390,13 @@ impl Hangar {
                         .tooltip(tr("file_close")).on_click(cx.listener(move |this, _, window, cx| this.close_file(id, window, cx))))
             }));
         let content = match &tab.content {
+            _ if tab.image.is_some() => div().size_full().p_4().flex().items_center().justify_center()
+                .child(img(tab.image.clone().unwrap_or_default()).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
+                .into_any_element(),
+            Some(Ok(doc)) if tab.preview && doc.markdown.is_some() => div().id("file-markdown").size_full().overflow_y_scroll()
+                .flex().justify_center().px_6().py_4()
+                .child(div().w_full().max_w(px(760.)).children(doc.markdown.as_ref().map(|view| TextView::new(view).selectable(true).scrollable(false))))
+                .into_any_element(),
             None => div().p_4().text_color(theme::muted()).child(tr("file_loading")).into_any_element(),
             Some(Err(error)) => div().p_4().text_color(theme::danger()).child(error.clone()).into_any_element(),
             Some(Ok(doc)) => div().flex().flex_col().size_full().min_h_0()
@@ -393,6 +421,9 @@ impl Hangar {
             .child(div().flex().items_center().gap_4().px_4().py_2().flex_shrink_0().border_b_1().border_color(theme::border())
                 .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_xs().text_color(theme::muted()).child(tab.path.clone()))
                 .when_some(tab.content.as_ref().and_then(|result| result.as_ref().ok()), |el, doc| el
+                    .when(doc.markdown.is_some(), |el| el.child(Button::new("file-preview").ghost().small()
+                        .label(tr(if tab.preview { "file_source" } else { "file_preview" }))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx)))))
                     .when(doc.saved.is_some(), |el| el.child(div().text_sm().text_color(theme::success()).child(tr("file_saved"))))
                     .when(doc.editable() && doc.dirty(), |el| el
                         .child(Button::new("file-discard").ghost().small().label(tr("file_discard")).disabled(doc.saving)
@@ -404,6 +435,11 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, window, cx| { this.files_escape(window, cx); }))))
             .child(div().flex_1().min_h_0().overflow_hidden().child(content)).into_any_element())
     }
+}
+
+fn is_image(path: &str) -> bool {
+    let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
 }
 
 #[cfg(test)]

@@ -3984,6 +3984,8 @@
   "native_file_back": "Voltar à conversa",
   "native_file_loading": "Carregando arquivo…",
   "native_file_truncated": "Arquivo cortado em 512 KB.",
+  "native_file_preview": "Prévia",
+  "native_file_source": "Código",
   "native_empty_sessions": "Nenhuma sessão aberta neste servidor.",
   "native_empty_chat": "A conversa ainda não tem mensagens.",
   "native_composer": "Mensagem para {agent}…",

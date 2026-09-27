@@ -3984,6 +3984,8 @@
   "native_file_back": "Back to conversation",
   "native_file_loading": "Loading file…",
   "native_file_truncated": "File truncated at 512 KB.",
+  "native_file_preview": "Preview",
+  "native_file_source": "Source",
   "native_empty_sessions": "No sessions open on this server.",
   "native_empty_chat": "This conversation has no messages yet.",
   "native_composer": "Message {agent}…",
