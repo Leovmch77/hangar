@@ -562,9 +562,16 @@ impl ActivityPanel {
             meta
         };
         let empty = |text: String| div().px_4().py_4().text_center().text_sm().text_color(theme::faint()).child(text).into_any_element();
+        let running = !opened.done && !run.failed && !run.unreadable;
         let body = if !opened.loaded { empty(tr("subagent_loading")) }
             else if opened.has_events {
-                super::panes::cached_selectable(self.conversation.clone().into(), Vec::new(), StyleRefinement::default().size_full())
+                let conversation = super::panes::cached_selectable(self.conversation.clone().into(), Vec::new(), StyleRefinement::default().size_full());
+                // Como o `Spinner` que o web põe sob a conversa do subagente enquanto ele roda.
+                div().size_full().flex().flex_col().child(div().flex_1().min_h_0().child(conversation))
+                    .when(running, |el| el.child(div().flex_shrink_0().px_4().h(px(38.)).flex().items_center().gap(px(8.))
+                        .child(super::panes::mark_slot(&self.marks, super::panes::Area::Side, "act-sub-working", 14., theme::accent()))
+                        .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(web("pensamento_vivo")))))
+                    .into_any_element()
             }
             // Já chamou ferramentas (ou o registro não foi lido): é falha de leitura, não agente parado.
             else if run.unreadable || run.calls > 0 { empty(web("atividade_erro_transcript")) }
