@@ -790,6 +790,7 @@ impl Hangar {
     }
 
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
         if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
@@ -884,6 +885,7 @@ impl Hangar {
         if self.history_task.as_ref().is_some_and(|task| !task.is_finished()) { return; }
         self.history_started = true;
         self.loading = true;
+        api::open_trace(|| format!("history request limit={}", self.history_limit));
         let name = session.name.clone();
         let (connection, selection, revision, limit) = (self.connection, self.selection, self.revision, self.history_limit);
         let etag = self.etag.clone();
@@ -986,6 +988,7 @@ impl Hangar {
             }
             Payload::Stream(Update::Online) => {
                 if is_chat {
+                    api::open_trace(|| "sse online".into());
                     self.system_notifications.reset_stream();
                     self.pending_chat.retain(|update| !matches!(update, ChatUpdate::State(_)));
                     self.chat_online = true;
@@ -1020,12 +1023,14 @@ impl Hangar {
                 rows = true;
                 self.history_task = None;
                 self.loading = false;
+                api::open_trace(|| "history on ui thread".into());
                 match result {
                     Ok(history) => {
                         self.etag = history.etag;
                         if let Some(events) = history.events {
                             self.has_older = events.len() >= limit;
                             self.chat.merge_history(events);
+                            api::open_trace(|| "history merged".into());
                             if self.chat.preview.text.is_empty() {
                                 self.cancel_preview_drop();
                                 self.clear_visible_preview();
@@ -1034,6 +1039,7 @@ impl Hangar {
                         let first = !self.history_installed;
                         self.history_installed = true;
                         for update in std::mem::take(&mut self.pending_chat) { self.apply_chat_update(update, window, cx); }
+                        api::open_trace(|| "pending applied".into());
                         self.error = None;
                         self.ensure_commands(false);
                         self.discover_plan();
@@ -2053,11 +2059,14 @@ impl Hangar {
         self.activity = conversation::fold_activity(&self.chat.events);
         self.pinned = self.activity.running_agents().map(|agent| agent.call).collect();
         self.sync_activity(cx);
+        api::open_trace(|| format!("sync_rows activity {} events", self.chat.events.len()));
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
         self.sync_tables(a.table_chart);
+        api::open_trace(|| format!("sync_rows built {} items", self.items.len()));
         self.sync_row_ids(true, cx);
+        api::open_trace(|| format!("sync_rows prepared {} rows", self.row_ids.len()));
         let provider = self.provider().0.to_owned();
         if matches!(provider.as_str(), "pi" | "omp" | "kimi") {
             let derived = interaction::ask_from_events(&self.chat.events, &provider)
@@ -2092,6 +2101,7 @@ impl Hangar {
         let prefix = self.row_ids.iter().zip(&ids).take_while(|(a,b)| a == b).count();
         let suffix = self.row_ids[prefix..].iter().rev().zip(ids[prefix..].iter().rev()).take_while(|(a,b)| a == b).count();
         let spliced = prefix + suffix < self.row_ids.len() || prefix + suffix < ids.len();
+        api::open_trace(|| format!("rows splice prefix={prefix} suffix={suffix} old={} new={}", self.row_ids.len(), ids.len()));
         // Mesma linha com outro conteúdo (resultado que chegou, grupo que cresceu): altura muda.
         let previous: HashMap<&String, &String> = self.row_ids.iter().zip(&self.row_signatures).collect();
         let resized: Vec<usize> = ids.iter().zip(&signatures).enumerate()
@@ -2201,7 +2211,9 @@ impl Hangar {
         let owner = row.to_owned();
         // O parse que termina já redesenha quem mostra o texto (o estado é lido no desenho); aqui só a
         // altura da linha é refeita, sem um segundo quadro para a janela inteira.
+        api::open_trace(|| format!("markdown start {row} {} bytes", source.len()));
         let observer = cx.observe(&view, move |this, _, cx| {
+            api::open_trace(|| format!("markdown parsed {owner}"));
             if let Some(i) = this.row_ids.iter().position(|id| id == &owner) { this.follow_content_changed(cx); this.list_state.remeasure_items(i..i+1); }
         });
         self.rich.insert(key.to_owned(), RichText { source, view: view.clone(), _observer: observer, touched: self.render_tick, row: row.to_owned() });
@@ -4339,6 +4351,8 @@ impl Hangar {
     fn render_conversation_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // A miniatura só conta como vista quando a conversa é desenhada: guardada entre quadros, ela segue na tela.
         self.media.next_frame();
+        api::open_trace(|| format!("conversation render rows={} loading={}", self.row_ids.len(), self.loading));
+        if api::open_trace_on() { window.on_next_frame(|_, _| api::open_trace(|| "next frame".into())); }
         let mut content = div().size_full().flex().flex_col();
         let prethread = self.render_prethread(cx);
         if let Some(selected) = &self.selected {
