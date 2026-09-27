@@ -43,8 +43,9 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 34] = [
-    ("settings_live", None), ("settings_reset", Some("settings_reset_hint")), ("settings_theme", None),
+const APPEARANCE_ROWS: [(&str, Option<&str>); 35] = [
+    ("settings_live", None), ("settings_reset", Some("settings_reset_hint")),
+    ("settings_style", Some("settings_style_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
     ("settings_accent", None), ("settings_tint", Some("settings_tint_desc")), ("settings_tint_strength", None),
     ("settings_text_color", Some("settings_text_color_desc")), ("settings_background", None),
@@ -580,6 +581,15 @@ impl Hangar {
 
     fn render_appearance(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let a = appearance::get();
+        let compact = a == a.compact_style();
+        let style = settings_box().mt(px(18.)).child(self.row(IconName::Palette, "settings_style",
+            Some(tr(if compact { "settings_style_applied" } else { "settings_style_hint" })), true,
+            Button::new("appearance-style-compact").outline().small().label(tr("settings_style_compact"))
+                .selected(compact).when(compact, |el| el.icon(IconName::Check))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.apply_appearance(appearance::get().compact_style(), true, cx);
+                    this.sync_sliders(window, cx);
+                })).into_any_element()));
         let floating = a.panels == Panels::Floating;
         let live = self.settings_ui.live;
         let heading = |key: &'static str| self.mark(div().mt(px(if live { 20. } else { 28. })).mb(px(10.)).rounded(px(6.))
@@ -910,6 +920,7 @@ impl Hangar {
         div().flex().flex_col()
             .child(self.mark(top, top_key))
             .when_some(self.appearance_note.clone(), |el, note| el.child(div().mt_3().text_sm().text_color(theme::warning()).child(note)))
+            .child(style)
             // A caixa ao vivo não repete a prévia: a conversa de verdade está atrás dela.
             .when(!live, |el| el.child(preview))
             .child(heading("settings_theme")).child(theme_cards)
