@@ -44,8 +44,9 @@ mod sync;
 mod tree;
 mod costs;
 mod stats;
+mod search;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -377,6 +378,8 @@ pub struct Hangar {
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
     costs: costs::Costs,
     usage_stats: stats::UsageStats,
+    // Paleta "Buscar conversas" (Ctrl+K).
+    search: search::Search,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -450,7 +453,7 @@ impl Hangar {
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
             KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
-            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal"))]);
+            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -511,7 +514,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(),
-            costs: Default::default(), usage_stats: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            costs: Default::default(), usage_stats: Default::default(), search: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
@@ -673,6 +676,7 @@ impl Hangar {
         }));
         self.reset_device(cx);
         self.costs_reconnected(cx);
+        self.search_reconnected(cx);
         // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
         self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
         // Página do servidor aberta na troca: relê do servidor novo.
@@ -4490,6 +4494,7 @@ impl Render for Hangar {
                 if !this.connection_dialog { this.open_settings(settings::Page::Appearance, window, cx); }
             }))
             .on_action(cx.listener(|this, _: &OpenCosts, window, cx| this.toggle_costs(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.toggle_search(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
@@ -4504,6 +4509,7 @@ impl Render for Hangar {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Com a confirmação aberta, o Esc é dela: fecha só o diálogo.
                 if event.keystroke.key != "escape" || this.connection_dialog || this.search_focused(window, cx) || window.has_active_dialog(cx) { return; }
+                if this.search.open { this.close_search(window, cx); cx.stop_propagation(); return; }
                 if this.shortcuts_escape(window, cx) { cx.stop_propagation(); return; }
                 if this.costs_escape(window, cx) { cx.stop_propagation(); return; }
                 // O painel preso a um botão é a camada de cima: fecha antes de arquivos e terminal, e o foco volta ao campo.
@@ -4563,6 +4569,7 @@ impl Render for Hangar {
             .children(self.render_preview(window))
             .children(self.render_landing_ghost(cx))
             .children(self.render_popup(window, cx))
+            .children(self.render_search(window, cx))
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
             .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude()

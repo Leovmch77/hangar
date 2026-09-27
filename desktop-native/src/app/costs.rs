@@ -531,7 +531,7 @@ impl Hangar {
     pub(super) fn costs_page_key(&mut self, event: &KeyDownEvent, window: &mut Window) -> bool {
         let Some(view) = self.costs.view else { return false };
         let m = &event.keystroke.modifiers;
-        if m.control || m.alt || m.platform || m.shift { return false; }
+        if m.control || m.alt || m.platform || m.shift || self.search.open { return false; }
         let scroll = match view { View::Costs => &self.costs.scroll, View::Usage => &self.usage_stats.scroll };
         let (offset, max) = (scroll.offset(), scroll.max_offset());
         let page = (window.viewport_size().height - px(140.)).max(px(120.));
