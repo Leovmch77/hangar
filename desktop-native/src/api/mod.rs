@@ -8,6 +8,30 @@ use serde_json::{Value, json};
 use url::Url;
 use dto::{ChatEvent, CommandInfo, Delivery, SessionInfo, UploadFile, Uploaded};
 
+/// Só para medir a abertura de uma sessão: `HANGAR_NATIVE_OPEN_TRACE=1` escreve no stderr cada etapa, em ms desde o
+/// clique (`open_trace_start`). Sem a variável, nada é formatado nem escrito.
+pub fn open_trace(stage: impl FnOnce() -> String) {
+    if !open_trace_on() { return; }
+    let Some(start) = open_trace_clock().lock().ok().and_then(|clock| *clock) else { return };
+    eprintln!("open_trace {:>8.1} {}", start.elapsed().as_secs_f64() * 1000., stage());
+}
+
+pub fn open_trace_start(name: &str) {
+    if !open_trace_on() { return; }
+    if let Ok(mut clock) = open_trace_clock().lock() { *clock = Some(std::time::Instant::now()); }
+    open_trace(|| format!("select {name}"));
+}
+
+pub fn open_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HANGAR_NATIVE_OPEN_TRACE").is_some())
+}
+
+fn open_trace_clock() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    static CLOCK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    &CLOCK
+}
+
 pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const UPLOAD_SECONDS: u64 = 180;
 
@@ -102,9 +126,13 @@ impl Api {
         let mut req = self.client.get(url).timeout(Duration::from_secs(30));
         if let Some(tag) = etag { req = req.header(header::IF_NONE_MATCH, tag); }
         let r = Self::checked(req.send().await.map_err(|_| Failure::transport(false))?, false).await?;
+        open_trace(|| format!("history headers {}", r.status().as_u16()));
         if r.status() == StatusCode::NOT_MODIFIED { return Ok(History { events: None, etag: etag.map(str::to_owned) }); }
         let etag = r.headers().get(header::ETAG).and_then(|h| h.to_str().ok()).map(str::to_owned);
-        let events = r.json().await.map_err(|_| Failure::local("invalid_response"))?;
+        let body = r.bytes().await.map_err(|_| Failure::local("invalid_response"))?;
+        open_trace(|| format!("history body {} bytes", body.len()));
+        let events: Vec<ChatEvent> = serde_json::from_slice(&body).map_err(|_| Failure::local("invalid_response"))?;
+        open_trace(|| format!("history parsed {} events", events.len()));
         Ok(History { events: Some(events), etag })
     }
 

@@ -61,6 +61,10 @@ const SENT_BRIDGE: Duration = Duration::from_secs(5);
 /// Prefixo da linha do cartão fixo de um agente rodando, seguido do id do tool_use.
 const PINNED: &str = "pin:";
 const COLUMN: f32 = 780.;
+/// Abrir a sessão pede só a cauda que enche a tela: o backend lê o transcript de trás para a frente, e a janela
+/// inteira (`HISTORY_PAGE`) custa muito mais em transcript grande. Ela vem logo depois, por baixo.
+const FIRST_PAGE: usize = 60;
+const HISTORY_PAGE: usize = 400;
 
 /// Largura da coluna da conversa e do compositor: a do mock vezes o ajuste de Aparência.
 fn column_width() -> f32 { COLUMN * crate::appearance::get().column as f32 / 100. }
@@ -792,6 +796,7 @@ impl Hangar {
     }
 
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
         if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
@@ -819,7 +824,7 @@ impl Hangar {
         self.history_installed = false;
         self.pending_chat.clear();
         self.chat_online = false;
-        self.history_limit = 400;
+        self.history_limit = FIRST_PAGE;
         self.etag = None;
         self.has_older = false;
         self.rich.clear();
@@ -886,6 +891,7 @@ impl Hangar {
         if self.history_task.as_ref().is_some_and(|task| !task.is_finished()) { return; }
         self.history_started = true;
         self.loading = true;
+        api::open_trace(|| format!("history request limit={}", self.history_limit));
         let name = session.name.clone();
         let (connection, selection, revision, limit) = (self.connection, self.selection, self.revision, self.history_limit);
         let etag = self.etag.clone();
@@ -961,7 +967,7 @@ impl Hangar {
         // A conversa só é refeita quando o chat mudou, e a janela só redesenha quando algo visível mudou:
         // ping, lista e estatísticas chegam o tempo todo e não mexem nas linhas.
         let selection = self.selection;
-        let (mut rows, mut visible, mut tail) = (false, true, false);
+        let (mut rows, mut visible, mut tail, mut keep_end) = (false, true, false, false);
         match payload {
             Payload::Terminal(reply) => self.receive_terminal(reply, window, cx),
             Payload::Mentions(seq, result) => { self.receive_mentions(seq, result, cx); }
@@ -988,6 +994,7 @@ impl Hangar {
             }
             Payload::Stream(Update::Online) => {
                 if is_chat {
+                    api::open_trace(|| "sse online".into());
                     self.system_notifications.reset_stream();
                     self.pending_chat.retain(|update| !matches!(update, ChatUpdate::State(_)));
                     self.chat_online = true;
@@ -1022,25 +1029,38 @@ impl Hangar {
                 rows = true;
                 self.history_task = None;
                 self.loading = false;
+                api::open_trace(|| "history on ui thread".into());
                 match result {
                     Ok(history) => {
                         self.etag = history.etag;
                         if let Some(events) = history.events {
                             self.has_older = events.len() >= limit;
                             self.chat.merge_history(events);
+                            api::open_trace(|| "history merged".into());
                             if self.chat.preview.text.is_empty() {
                                 self.cancel_preview_drop();
                                 self.clear_visible_preview();
                             }
                         }
                         let first = !self.history_installed;
+                        // A janela inteira que veio por baixo da primeira página.
+                        keep_end = !first && limit == HISTORY_PAGE;
                         self.history_installed = true;
                         for update in std::mem::take(&mut self.pending_chat) { self.apply_chat_update(update, window, cx); }
+                        api::open_trace(|| "pending applied".into());
                         self.error = None;
                         self.ensure_commands(false);
                         self.discover_plan();
                         // A primeira conta de subagentes espera a conversa chegar, como o `aoAquecer` do web.
                         if first { self.restart_subagent_count(cx); }
+                        // Primeira página cheia: a janela inteira vem por baixo, sem aviso de carregando e sem o
+                        // "Carregar anteriores" de uma janela que já está crescendo.
+                        if first && limit < HISTORY_PAGE && self.has_older {
+                            self.history_limit = HISTORY_PAGE;
+                            self.etag = None;
+                            self.load_history(cx);
+                            (self.loading, self.has_older) = (false, false);
+                        }
                     }
                     Err(error) => {
                         if error.status == Some(404) {
@@ -1147,6 +1167,7 @@ impl Hangar {
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
+        if keep_end { self.follow_keep_end(); }
         else if tail {
             self.sync_tail_rows(cx);
             self.redraw(panes::Area::Conversation, cx);
@@ -2064,11 +2085,14 @@ impl Hangar {
         self.activity = conversation::fold_activity(&self.chat.events);
         self.pinned = self.activity.running_agents().map(|agent| agent.call).collect();
         self.sync_activity(cx);
+        api::open_trace(|| format!("sync_rows activity {} events", self.chat.events.len()));
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
         self.sync_tables(a.table_chart);
+        api::open_trace(|| format!("sync_rows built {} items", self.items.len()));
         self.sync_row_ids(true, cx);
+        api::open_trace(|| format!("sync_rows prepared {} rows", self.row_ids.len()));
         let provider = self.provider().0.to_owned();
         if matches!(provider.as_str(), "pi" | "omp" | "kimi") {
             let derived = interaction::ask_from_events(&self.chat.events, &provider)
@@ -2103,6 +2127,7 @@ impl Hangar {
         let prefix = self.row_ids.iter().zip(&ids).take_while(|(a,b)| a == b).count();
         let suffix = self.row_ids[prefix..].iter().rev().zip(ids[prefix..].iter().rev()).take_while(|(a,b)| a == b).count();
         let spliced = prefix + suffix < self.row_ids.len() || prefix + suffix < ids.len();
+        api::open_trace(|| format!("rows splice prefix={prefix} suffix={suffix} old={} new={}", self.row_ids.len(), ids.len()));
         // Mesma linha com outro conteúdo (resultado que chegou, grupo que cresceu): altura muda.
         let previous: HashMap<&String, &String> = self.row_ids.iter().zip(&self.row_signatures).collect();
         let resized: Vec<usize> = ids.iter().zip(&signatures).enumerate()
@@ -2212,7 +2237,9 @@ impl Hangar {
         let owner = row.to_owned();
         // O parse que termina já redesenha quem mostra o texto (o estado é lido no desenho); aqui só a
         // altura da linha é refeita, sem um segundo quadro para a janela inteira.
+        api::open_trace(|| format!("markdown start {row} {} bytes", source.len()));
         let observer = cx.observe(&view, move |this, _, cx| {
+            api::open_trace(|| format!("markdown parsed {owner}"));
             if let Some(i) = this.row_ids.iter().position(|id| id == &owner) { this.follow_content_changed(cx); this.list_state.remeasure_items(i..i+1); }
         });
         self.rich.insert(key.to_owned(), RichText { source, view: view.clone(), _observer: observer, touched: self.render_tick, row: row.to_owned() });
@@ -3505,6 +3532,26 @@ fn row_frame(inner: AnyElement, message: bool) -> Div {
         .child(div().w_full().max_w(px(column_width())).child(inner))
 }
 
+/// A conversa ainda sem histórico: turnos fantasmas no formato das linhas (pergunta em bolha à direita, resposta em
+/// linhas à esquerda), colados no fim como a lista. Cada peça só aparece depois da espera do `Skeleton`, então sessão
+/// rápida não pisca.
+fn render_history_skeleton() -> Div {
+    const TURNS: [(f32, [f32; 3]); 3] = [(180., [0.94, 0.88, 0.52]), (260., [0.9, 0.97, 0.7]), (140., [0.86, 0.62, 0.0])];
+    let mut row = 0;
+    let turns = TURNS.iter().enumerate().map(|(turn, (bubble, lines))| {
+        let user = chrome::Skeleton::new(("history-skeleton-user", turn)).row(row).w(px(*bubble)).h(px(38.)).rounded(px(18.));
+        row += 1;
+        let answer = lines.iter().enumerate().filter(|(_, width)| **width > 0.).map(|(line, width)| {
+            row += 1;
+            chrome::Skeleton::new(("history-skeleton-line", turn * 3 + line)).row(row).w(relative(*width)).h(px(12.)).rounded(px(4.))
+        }).collect::<Vec<_>>();
+        div().flex().flex_col().gap(px(14.)).child(div().flex().justify_end().child(user))
+            .child(div().flex().flex_col().gap(px(9.)).children(answer))
+    }).collect::<Vec<_>>();
+    div().flex_1().min_h_0().flex().flex_col().justify_end().pb(px(20.)).overflow_hidden()
+        .child(in_column(div().flex().flex_col().gap(px(28.)).children(turns)))
+}
+
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
@@ -4350,6 +4397,8 @@ impl Hangar {
     fn render_conversation_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // A miniatura só conta como vista quando a conversa é desenhada: guardada entre quadros, ela segue na tela.
         self.media.next_frame();
+        api::open_trace(|| format!("conversation render rows={} loading={}", self.row_ids.len(), self.loading));
+        if api::open_trace_on() { window.on_next_frame(|_, _| api::open_trace(|| "next frame".into())); }
         let mut content = div().size_full().flex().flex_col();
         let prethread = self.render_prethread(cx);
         if let Some(selected) = &self.selected {
@@ -4358,7 +4407,9 @@ impl Hangar {
             } else if !selected.readable() {
                 content = content.child(div().flex_1().p_6().text_color(theme::muted()).child(tr(if selected.tracked == Some(false) { "untracked" } else { "starting" })));
             } else {
-                if self.has_older || self.loading {
+                if self.row_ids.is_empty() && self.loading {
+                    content = content.child(render_history_skeleton());
+                } else if self.has_older || self.loading {
                     content = content.child(in_column(div().py_2().flex().gap_2().items_center()
                         .when(self.has_older, |el| el.child(Button::new("older").small().outline().label(tr("older")).disabled(self.loading)
                             .on_click(cx.listener(|this, _, _, cx| { this.history_limit = this.history_limit.saturating_add(400); this.etag = None; this.load_history(cx); }))))
@@ -4367,7 +4418,7 @@ impl Hangar {
                 }
                 if self.row_ids.is_empty() && !self.loading && self.error.is_none() {
                     content = content.child(self.render_empty_chat());
-                } else {
+                } else if !self.row_ids.is_empty() || !self.loading {
                     let view = cx.entity().downgrade();
                     // Leitura Folha: uma folha da largura da coluna atrás das mensagens, com o fundo nas margens.
                     let sheet = (appearance::get().effective_reading() == appearance::Reading::Sheet).then(|| div().absolute().inset_0()

@@ -122,6 +122,12 @@ impl Hangar {
     /// Conversa aberta ou recarregada: nasce no fim, sem deslizar.
     pub(super) fn follow_reset(&mut self) { self.follow = Follow::default(); }
 
+    /// Histórico antigo entrou em cima com a lista colada no fim: continua no fim. Sem isto, a troca que alcança a
+    /// âncora (as linhas fixas do fim mudam com mais eventos) a repunha contada do topo, no meio da conversa antiga.
+    pub(super) fn follow_keep_end(&mut self) {
+        if self.follow.pinned { self.list_state.scroll_to_end(); }
+    }
+
     /// Chamar antes de a altura das linhas mudar. Colada no fim, a lista saltaria para o fim novo
     /// no próximo layout; ancorada num pixel logo acima dele, ela fica parada e a mola desliza.
     pub(super) fn follow_content_changed(&mut self, cx: &App) {

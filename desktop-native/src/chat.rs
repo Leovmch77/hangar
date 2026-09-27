@@ -330,6 +330,17 @@ mod tests {
     }
 
     #[test]
+    fn full_window_after_the_first_page_prepends_older_without_duplicates() {
+        let mut chat = Chat::default();
+        // Primeira página (a cauda) e uma mensagem ao vivo que chegou antes da janela inteira.
+        chat.merge_history(vec![event("user_msg", "c", "3"), event("assistant_msg", "d", "4")]);
+        chat.apply(event("user_msg", "e", "5"));
+        chat.merge_history(["a", "b", "c", "d"].iter().enumerate()
+            .map(|(n, id)| event(if n % 2 == 0 { "user_msg" } else { "assistant_msg" }, id, &n.to_string())).collect());
+        assert_eq!(chat.events.iter().map(|event| event.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
     fn confirmed_queue_entry_stays_removed_after_replay() {
         let mut chat = Chat::default();
         chat.apply(event("user_msg", "queued-one", "one prompt"));

@@ -28,6 +28,8 @@ fn pulse_phase(period: Duration) -> f32 {
 fn pulse<V: 'static>(delay: Duration, awake: fn(&V) -> bool, cx: &mut Context<V>) {
     cx.spawn(async move |view, cx| {
         cx.background_executor().timer(delay).await;
+        // Um desenho no fim da espera mesmo com movimento reduzido: o esqueleto nasce vazio e, sem ele, ficava vazio.
+        if view.update(cx, |_, cx| cx.notify()).is_err() { return; }
         loop {
             let into = Duration::from_nanos((pulse_epoch().elapsed().as_nanos() % PULSE_TICK.as_nanos()) as u64);
             cx.background_executor().timer(PULSE_TICK - into).await;
