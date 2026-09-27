@@ -33,6 +33,7 @@ mod mention;
 mod server_config;
 mod shortcuts;
 mod side;
+mod terminal;
 mod sidebar;
 mod subagent;
 mod dictation;
@@ -121,6 +122,7 @@ enum Payload {
     HeadlessPlan(SessionKey, controls::PlanOutcome),
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
+    Terminal(terminal::Reply),
     Dictation(u64, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
@@ -367,6 +369,8 @@ pub struct Hangar {
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
     sidebar: sidebar::Sidebar,
+    terminal: Option<terminal::Panel>,
+    terminal_serial: u64,
     // Busca do seletor de modelo quando a lista é longa.
     ctl_search: Entity<InputState>,
     act: activity::ActivityState,
@@ -424,10 +428,15 @@ impl Hangar {
         });
         cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
         // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
-        cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, None), KeyBinding::new("ctrl-,", OpenSettings, None),
-            KeyBinding::new("ctrl-shift-c", CopyLastReply, None), KeyBinding::new("ctrl-f", FocusSettingsSearch, None),
-            KeyBinding::new("secondary-down", NextSession, None), KeyBinding::new("ctrl-space", ToggleDictation, None),
-            KeyBinding::new("secondary-up", PreviousSession, None)]);
+        cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, Some("!Terminal")), KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")),
+            KeyBinding::new("ctrl-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("ctrl-f", FocusSettingsSearch, Some("!Terminal")),
+            KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
+            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal"))]);
+        cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
+            KeyBinding::new("tab", NoAction, Some("Terminal")),
+            KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
+            KeyBinding::new("ctrl-c", NoAction, Some("Terminal"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
@@ -483,6 +492,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
@@ -688,6 +698,7 @@ impl Hangar {
 
     /// O que é da conexão atual sai da tela e os pedidos em voo passam a ser descartados. Serve à troca de servidor e ao Sair.
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_terminal(false, window, cx);
         self.mention.close();
         if self.switch_draft.is_none() { self.return_server = None; self.active_token.clear(); }
         self.connection += 1;
@@ -730,6 +741,9 @@ impl Hangar {
     }
 
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
+            self.close_terminal(false, window, cx);
+        }
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
         // Com as abas no topo, a aba da sessão aberta entra na vista da faixa.
         if let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
@@ -867,6 +881,7 @@ impl Hangar {
         let selection = self.selection;
         let (mut rows, mut visible, mut tail) = (false, true, false);
         match payload {
+            Payload::Terminal(reply) => self.receive_terminal(reply, window, cx),
             Payload::Mentions(seq, result) => { self.receive_mentions(seq, result, cx); }
             Payload::Sessions(Ok(sessions)) => {
                 self.list_error = None;
@@ -1123,6 +1138,7 @@ impl Hangar {
                 Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.select(new, window, cx),
                 Some(new) => self.selected = Some(new),
                 None => {
+                    self.close_terminal(false, window, cx);
                     self.selection += 1;
                     if let Some(task) = self.session_task.take() { task.abort(); }
                     if let Some(task) = self.history_task.take() { task.abort(); }
@@ -4186,12 +4202,16 @@ impl Render for Hangar {
                 .when_some(self.render_activity_button(window, cx), |el, button| el.child(button))
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
-                    .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))))))
+                    .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))))
+                .when(self.selected.is_some(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
+                        tr("term_toggle"), cx).selected(self.terminal.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
             .child(self.pane_element(panes::Area::Conversation, StyleRefinement::default().w_full().flex_1().min_h_0(), cx))
             // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca.
             .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
             .child(self.pane_element(panes::Area::Bottom, StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())), cx))
+            .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
         let nav = if page.is_some() { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
@@ -4284,6 +4304,11 @@ impl Render for Hangar {
                 if event.keystroke.key != "escape" || this.connection_dialog || this.search_focused(window, cx) || window.has_active_dialog(cx) { return; }
                 if this.shortcuts_escape(window, cx) { cx.stop_propagation(); return; }
                 if this.files_escape(window, cx) { cx.stop_propagation(); return; }
+                if this.terminal.is_some() && (this.settings.is_none() || this.settings_live()) {
+                    this.close_terminal(true, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.settings.is_some() {
                     this.close_settings(window, cx);
                     cx.stop_propagation();
@@ -4306,6 +4331,13 @@ impl Render for Hangar {
                     this.drag_side(f32::from(event.position.x), event.pressed_button == Some(MouseButton::Left), cx);
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx))))
+            .when(self.terminal_dragging(), |el| el.cursor_row_resize()
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    this.drag_terminal(f32::from(event.position.y), event.pressed_button == Some(MouseButton::Left), window, cx);
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                    this.drag_terminal(0., false, window, cx);
+                })))
             // Arrasto da caixa ao vivo pelo cabeçalho: mesmo esquema, gravando a posição ao soltar.
             .when(self.live_dragging(), |el| el.cursor_move()
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
