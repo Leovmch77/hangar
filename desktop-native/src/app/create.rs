@@ -1498,9 +1498,11 @@ impl Hangar {
         if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
         let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
         let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
+        // A tela chega como um objeto só, descendo 10 px até o lugar (o `settle-down` do kit, no tempo do `fade-in`).
+        let settle = motion::enter("new-chat-in", motion::FADE_IN, window, cx);
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
         div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
-            .child(div().my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
+            .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
                 .child(in_column(popup::anchor(top, super::landing::TOP)))
                 .child(composer)
                 .child(in_column(div().flex().flex_col().gap_1().child(popup::anchor(bottom, super::landing::BOTTOM))

@@ -83,12 +83,6 @@ impl Spec {
 /// A curva `--ease-out` do web para quem monta os próprios trechos (a marca "trabalhando").
 pub fn ease_out(x: f32) -> f32 { WORKING.ease(x) }
 
-/// Trecho `start..end` de uma linha do tempo 0–1, suavizado: os estágios da chegada da primeira mensagem.
-pub fn stage(value: f32, start: f32, end: f32) -> f32 {
-    let t = ((value - start) / (end - start)).clamp(0., 1.);
-    t * t * (3. - 2. * t)
-}
-
 /// Onda do pulso: 0 no começo do ciclo, 1 no meio, 0 no fim.
 pub fn pulse_wave(phase: f32) -> f32 { 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos() }
 
@@ -105,8 +99,6 @@ pub fn menu_in<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(0.3 + 0.7 
 
 /// Saída do popover; `t` vai de 0 (inteiro) a 1 (sumido).
 pub fn menu_out<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(1. - t).top(px(-2. * t)) }
-
-pub fn dialog_in<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(t).top(px(2. * (1. - t))) }
 
 /// Progresso com curva da entrada do elemento `key`, contado do primeiro desenho dele; pede quadros até terminar. O
 /// relógio vive enquanto o elemento é desenhado em quadros seguidos: sumiu e voltou, entra de novo. Com movimento
@@ -177,8 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_and_pulse_ends() {
-        assert_eq!((stage(0.1, 0.2, 0.65), stage(0.7, 0.2, 0.65)), (0., 1.));
+    fn pulse_ends() {
         assert!((pulse_wave(0.) - 0.).abs() < 1e-6 && (pulse_wave(0.5) - 1.).abs() < 1e-6);
     }
 }

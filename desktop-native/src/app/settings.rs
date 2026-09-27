@@ -608,7 +608,10 @@ impl Hangar {
             })))
     }
 
-    pub(super) fn render_settings(&mut self, page: Page, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_settings(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // `fade-quick` do kit: a tela ao abrir e o corpo a cada página.
+        let shown = motion::enter("settings-screen", motion::FADE_QUICK, window, cx);
+        let body_in = motion::enter(SharedString::from(format!("settings-page-{}", page.key())), motion::FADE_QUICK, window, cx);
         let floating = theme::is_floating();
         // Na caixa solta o destaque suave some sobre o vidro; o item da página aberta leva mais cor.
         let selected = if floating { theme::accent().alpha(0.26) } else { theme::selected_row() };
@@ -672,9 +675,9 @@ impl Hangar {
             Page::Windows => self.render_computer(cx),
         };
         let scroll = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
-            .child(div().w_full().flex().justify_center().child(div().w(px(720.)).max_w_full().px_4().pt(px(44.)).pb(px(40.)).child(body)));
+            .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(720.)).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
         let content = div().flex_1().min_w_0().h_full().flex().flex_col().child(scroll).children(self.server_config_footer(page, cx));
-        div().size_full().flex().when(floating, |el| el.p(px(10.)).gap(px(10.))).child(nav).child(content).into_any_element()
+        div().size_full().flex().opacity(shown).when(floating, |el| el.p(px(10.)).gap(px(10.))).child(nav).child(content).into_any_element()
     }
 
     /// Resultados da busca no lugar da navegação: "Página › Linha", o marcado pelas setas em destaque.

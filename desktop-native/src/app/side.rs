@@ -617,6 +617,7 @@ impl Hangar {
         // o detalhe do estado e o loop descem para a primeira seção.
         let _ = state;
         let on_activity = self.activity_tab();
+        let tab_in = self.side_tab_in(window, cx);
         let header = div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().justify_between()
             .child(self.render_side_title(cx))
             .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx)
@@ -661,9 +662,10 @@ impl Hangar {
                     else { el.border_l_1().border_color(theme::border()) })
                 .child(header)
                 .children(self.render_subagent_tabs(cx))
-                .child(if let Some(view) = self.subagent_tab_view(cx) { div().flex_1().min_h_0().child(view).into_any_element() }
+                .child(div().flex_1().min_h_0().flex().flex_col().opacity(tab_in)
+                    .child(if let Some(view) = self.subagent_tab_view(cx) { div().flex_1().min_h_0().child(view).into_any_element() }
                     else if on_activity { div().flex_1().min_h_0().child(self.activity_view(cx)).into_any_element() }
-                    else { div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element() })
+                    else { div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element() }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))
                     .child(div().min_w_0().truncate().text_color(theme::faint()).child(format!("{} · {server}", agent_label(&session.provider))))
                     .when(queued > 0, |el| el.child(div().flex_shrink_0().text_color(theme::muted()).child(tr("side_queued").replace("{n}", &queued.to_string()))))),

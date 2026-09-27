@@ -203,7 +203,7 @@ pub(super) fn row(id: impl Into<ElementId>, selected: bool) -> Button {
 /// Linhas vazias no lugar da lista enquanto ela carrega.
 pub(super) fn skeleton(id: &str, rows: usize) -> Div {
     div().flex().flex_col().gap(px(6.)).px(px(8.)).py(px(4.))
-        .children((0..rows).map(|n| chrome::Skeleton::new(SharedString::from(format!("{id}-{n}"))).h(px(22.)).rounded(px(7.))))
+        .children((0..rows).map(|n| chrome::Skeleton::new(SharedString::from(format!("{id}-{n}"))).row(n).h(px(22.)).rounded(px(7.))))
 }
 
 #[cfg(test)]

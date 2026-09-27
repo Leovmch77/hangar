@@ -4613,7 +4613,7 @@ impl Render for Hangar {
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
             .map(|el| match (page, nav) {
-                (Some(page), _) => el.child(self.render_settings(page, cx)),
+                (Some(page), _) => el.child(self.render_settings(page, window, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
                 (None, Some(bar)) if tabs => el.flex_col().child(bar)
                     .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),

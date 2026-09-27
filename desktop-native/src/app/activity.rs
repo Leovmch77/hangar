@@ -883,6 +883,19 @@ pub(super) fn agent_request(call: &ChatEvent) -> Option<(Option<String>, String)
 impl Hangar {
 
     /// A aba do painel: Atividade (a view própria) ou nada, e o Contexto segue como era.
+    /// Opacidade da aba do painel que acabou de aparecer (o `fade-quick` do kit). As views guardadas dentro dela redesenham
+    /// a cada quadro da troca: a cópia guardada ficaria na opacidade do primeiro quadro.
+    pub(super) fn side_tab_in(&self, window: &mut Window, cx: &App) -> f32 {
+        let key = match self.act.active_tab { Some(id) => SharedString::from(format!("side-tab-in-{id}")),
+            None if self.activity_tab() => "side-tab-in-activity".into(), None => "side-tab-in-context".into() };
+        let shown = crate::motion::enter(key, crate::motion::FADE_QUICK, window, cx);
+        if shown < 1. && (self.act.active_tab.is_some() || self.activity_tab()) {
+            let views = self.activity_views(cx);
+            window.on_next_frame(move |_, cx| for view in views { cx.notify(view); });
+        }
+        shown
+    }
+
     pub(super) fn activity_view(&self, cx: &App) -> AnyElement {
         let nested = self.act.view.read(cx).views();
         super::panes::cached_selectable(self.act.view.clone().into(), nested, StyleRefinement::default().size_full())
