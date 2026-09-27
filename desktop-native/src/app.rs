@@ -262,6 +262,9 @@ pub struct Hangar {
     selection: u64,
     revision: u64,
     sessions: Vec<SessionInfo>,
+    /// Pasta real (canonicalize) de cada `cwd` de sessão nesta máquina, resolvida fora da thread da tela: pasta de rede
+    /// travada não congela a janela. Ausente ou `None` = segue pelo backend.
+    local_dirs: HashMap<String, Option<std::path::PathBuf>>,
     selected: Option<SessionInfo>,
     chat: Chat,
     list_task: Option<JoinHandle<()>>,
@@ -510,7 +513,7 @@ impl Hangar {
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
         Self {
-            runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), selected: None,
+            runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), local_dirs: HashMap::new(), selected: None,
             chat: Chat::default(), list_task: None, session_task: None, history_task: None,
             address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription,
             connection_dialog: true, list_online: false, chat_online: false, loading: false, history_started: false,
@@ -1224,6 +1227,7 @@ impl Hangar {
         let focused_tab = self.sessions.iter().position(|s| self.tab_focus.get(&s.name).is_some_and(|f| f.is_focused(window)))
             .map(|ix| (ix, self.sessions[ix].name.clone()));
         self.sessions = sessions;
+        self.resolve_local_dirs(cx);
         // Cada aba guarda o próprio foco pela vida da sessão; aba de sessão que sumiu leva o dela junto.
         self.tab_focus.retain(|name, _| self.sessions.iter().any(|s| &s.name == name));
         for session in &self.sessions {

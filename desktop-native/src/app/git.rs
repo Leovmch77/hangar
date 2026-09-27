@@ -1050,7 +1050,7 @@ impl Hangar {
         let title = folder_name(&session).unwrap_or_else(|| session.name.clone());
         let runtime = self.runtime.clone();
         // Servidor nesta máquina e a pasta existe aqui: o git roda direto no disco, pela pasta real da sessão.
-        let here = session.cwd.as_deref().filter(|_| api.is_loopback()).and_then(|cwd| std::fs::canonicalize(cwd).ok()).filter(|p| p.is_dir());
+        let here = session.cwd.as_deref().filter(|_| api.is_loopback()).and_then(|cwd| self.local_dirs.get(cwd).cloned().flatten());
         let source = match here { Some(cwd) => Source::Local(Arc::new(cwd)), None => Source::Remote(api, session.name.clone()) };
         let panel = cx.new(|cx| GitPanel::new(source, runtime, session.name.clone(), title, expand, window, cx));
         panel.update(cx, |panel, cx| panel.load(window, cx));

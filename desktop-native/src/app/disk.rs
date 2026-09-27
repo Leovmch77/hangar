@@ -236,8 +236,24 @@ impl Hangar {
     fn local_cwd(&self, name: &str) -> Option<(String, PathBuf)> {
         if !cfg!(unix) || !self.api.as_ref()?.is_loopback() { return None; }
         let cwd = self.sessions.iter().chain(self.selected.as_ref()).find(|s| s.name == name)?.cwd.clone()?;
-        let real = std::fs::canonicalize(&cwd).ok().filter(|p| p.is_dir())?;
+        let real = self.local_dirs.get(&cwd).cloned().flatten()?;
         Some((cwd, real))
+    }
+
+    /// Resolve em segundo plano a pasta real das sessões ainda não vistas; até chegar, elas seguem pelo backend.
+    pub(super) fn resolve_local_dirs(&mut self, cx: &mut Context<Self>) {
+        if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
+        let pending: Vec<String> = self.sessions.iter().filter_map(|s| s.cwd.clone())
+            .filter(|cwd| !self.local_dirs.contains_key(cwd)).collect();
+        if pending.is_empty() { return; }
+        for cwd in &pending { self.local_dirs.insert(cwd.clone(), None); }
+        cx.spawn(async move |this, cx| {
+            let found = cx.background_executor().spawn(async move {
+                pending.into_iter().map(|cwd| { let real = std::fs::canonicalize(&cwd).ok().filter(|p| p.is_dir()); (cwd, real) })
+                    .collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| { this.local_dirs.extend(found); cx.notify(); });
+        }).detach();
     }
 
     /// Anexos da sessão aberta: da pasta desta máquina quando dá, senão pelo backend.
