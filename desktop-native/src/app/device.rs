@@ -512,7 +512,7 @@ impl Hangar {
         let with_local = |text: String, local: bool| div().flex().flex_col().gap(px(2.)).child(mono(text))
             .when(local, |el| el.child(div().child(tr("settings_about_local"))));
         let app_row = self.row_with(IconName::Monitor, "settings_about_app",
-            with_local(format!("{app_version} · {}", tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local),
+            with_local(format!("{} ({app_version}) · {}", env!("HANGAR_NATIVE_RELEASE"), tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local),
             true, div().into_any_element());
 
         let about = &self.device.about;
