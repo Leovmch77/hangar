@@ -20,6 +20,7 @@ mod controls;
 mod create;
 mod device;
 mod follow;
+mod landing;
 mod harness;
 mod viewer;
 mod machines;
@@ -48,8 +49,6 @@ const PREVIEW: &str = "__preview__";
 const WORKING: &str = "__working__";
 /// Entrada da linha "trabalhando"; a marca, desenhada fora da conversa, entra no mesmo tempo.
 const WORKING_FADE: Duration = Duration::from_millis(200);
-/// A chegada da primeira mensagem da tela sem sessão: o compositor desce ao lugar dele e a conversa aparece (a do Zeron).
-const LANDING: Duration = Duration::from_millis(420);
 /// Quanto "Enviando…" espera o turno começar depois da entrega; passou disso, a sessão não vai trabalhar.
 const SENT_BRIDGE: Duration = Duration::from_secs(5);
 /// Prefixo da linha do cartão fixo de um agente rodando, seguido do id do tool_use.
@@ -388,8 +387,8 @@ pub struct Hangar {
     new_chat: Option<Entity<create::NewSession>>,
     /// O menu aberto da tela sem sessão (máquina, pasta, modelo, conta, branch): a tela escreve; a camada da raiz lê.
     new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
-    /// A chegada em curso: quando começou e quantos pixels o compositor desce do meio da tela até o pé dela.
-    landing: Option<(Instant, f32)>,
+    /// A chegada da primeira mensagem da tela sem sessão (`landing.rs`).
+    landing: Option<landing::Landing>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -814,27 +813,6 @@ impl Hangar {
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
         cx.notify();
-    }
-
-    /// Quadro da chegada: quanto o compositor ainda está acima do lugar dele e a opacidade da conversa, que entra no meio
-    /// da descida, como no Zeron. Fora dela, `(0, 1)`. O fim é zerado depois das áreas desenhadas (`finish_landing`).
-    fn landing_frame(&mut self, window: &mut Window) -> (f32, f32) {
-        let Some((start, travel)) = self.landing.filter(|_| self.selected.is_some()) else { self.landing = None; return (0., 1.) };
-        let t = (start.elapsed().as_secs_f32() / LANDING.as_secs_f32()).min(1.);
-        window.request_animation_frame();
-        let fade = ((t - 0.2) / 0.45).clamp(0., 1.);
-        (travel * (1. - chrome::ease_out(t)), fade * fade * (3. - 2. * fade))
-    }
-
-    pub(super) fn landing_active(&self) -> bool { self.landing.is_some() }
-
-    /// A chegada terminou: as áreas voltam a ser guardadas, redesenhadas uma vez, porque a última cópia guardada delas é
-    /// de antes da tela sem sessão.
-    fn finish_landing(&mut self, window: &mut Window) {
-        if self.landing.is_none_or(|(start, _)| start.elapsed() < LANDING) { return; }
-        self.landing = None;
-        let panes = [self.panes.conversation.clone(), self.panes.bottom.clone(), self.panes.side.clone()];
-        window.on_next_frame(move |_, cx| for pane in &panes { pane.update(cx, |_, cx| cx.notify()); });
     }
 
     /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
@@ -4368,7 +4346,7 @@ impl Render for Hangar {
         let limited_now = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
-        let (drop, shown) = self.landing_frame(window);
+        let landing::Frame { drop, shown, rise } = self.landing_frame(window);
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
             .when(chat_background, |el| el.bg(theme::window_fill()))
             .when(cutout, |el| {
@@ -4377,7 +4355,7 @@ impl Render for Hangar {
             })
             .when(chat_background, |el| el.children(self.render_backdrop(window)))
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
-                .opacity(shown)
+                .relative().opacity(shown).top(px(rise))
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
                 .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(selected_name.clone().unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
@@ -4394,7 +4372,7 @@ impl Render for Hangar {
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
             // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
             .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation,
-                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown), cx)))
+                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown).top(px(rise)), cx)))
             // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca. Sem a
             // conversa na tela, os lugares dela são do último desenho, de outra sessão.
             .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
@@ -4409,7 +4387,7 @@ impl Render for Hangar {
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
-        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).left(px(12. * (1. - shown)))
+        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
@@ -4552,6 +4530,7 @@ impl Render for Hangar {
             })
             .children(live)
             .children(self.render_preview(window))
+            .children(self.render_landing_ghost(cx))
             .children(self.render_popup(window, cx))
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
