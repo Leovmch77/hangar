@@ -176,6 +176,7 @@ pub struct Appearance {
     /// Geral: também deste computador, no mesmo arquivo; o "Voltar ao padrão" da Aparência não mexe nelas.
     pub language: Language,
     pub currency: Currency,
+    pub hands_free: bool,
     /// Contas e modelos em uma linha por conta, sem barras: escolha deste aparelho, como no web.
     pub accounts_compact: bool,
     pub sidebar_group: SidebarGroup,
@@ -193,7 +194,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
-    language: Language::System, currency: Currency::Usd, accounts_compact: false, sidebar_group: SidebarGroup::None,
+    language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
 
 impl Default for Appearance {
@@ -214,7 +215,7 @@ impl Appearance {
             surface_material: self.surface_material,
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
-            language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
+            language: self.language, currency: self.currency, hands_free: self.hands_free, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
             code_font: self.code_font, terminal_font: self.terminal_font,
             ..Self::default() }
     }
