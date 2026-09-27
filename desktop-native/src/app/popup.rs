@@ -70,6 +70,8 @@ impl Hangar {
     fn floating(&self) -> Option<Floating> {
         // Sem o compositor na tela, o gatilho não foi desenhado e o painel não tem onde se prender.
         let page = self.settings.is_some() && !self.settings_ui.live;
+        // O cartão aberto pela pílula da barra do topo existe em qualquer tela, com ou sem sessão.
+        if self.accounts.card && self.accounts.card_top { return Some(Floating::Usage); }
         if let Some(menu) = self.new_chat_folders.get().filter(|_| !page && self.selected.is_none() && self.api.is_some()) {
             return Some(Floating::NewChat(menu));
         }
@@ -102,7 +104,8 @@ impl Hangar {
         let (anchor, align, narrow, content) = match shown {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
             Floating::Commands => ("composer".to_owned(), Align::Start, false, Some(self.render_command_panel(cx))),
-            Floating::Usage => ("composer-account".to_owned(), Align::End, true, Some(self.render_usage_card())),
+            Floating::Usage => ((if self.accounts.card_top { "topbar-account" } else { "composer-account" }).to_owned(), Align::End, true,
+                Some(self.render_usage_card())),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);

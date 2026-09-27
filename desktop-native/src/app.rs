@@ -45,6 +45,7 @@ mod tree;
 mod costs;
 mod stats;
 mod search;
+mod topbar;
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch]);
 
@@ -380,6 +381,7 @@ pub struct Hangar {
     usage_stats: stats::UsageStats,
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
+    topbar: topbar::TopBar,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -514,7 +516,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(),
-            costs: Default::default(), usage_stats: Default::default(), search: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
@@ -677,6 +679,8 @@ impl Hangar {
         self.reset_device(cx);
         self.costs_reconnected(cx);
         self.search_reconnected(cx);
+        self.load_today(cx);
+        self.refresh_default_account(cx);
         // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
         self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
         // Página do servidor aberta na troca: relê do servidor novo.
@@ -1323,6 +1327,8 @@ impl Hangar {
                 if turned { self.restart_subagent_count(cx); }
                 self.sync_activity(cx);
                 if finished { self.discover_plan(); }
+                // O turno gastou: a pílula de custo de hoje relê (a leitura em voo, se houver, já pega o novo).
+                if finished && !self.topbar_loading() { self.load_today(cx); }
                 if resumed { self.controls.clear_plan_preview(); }
                 if self.chat.ask.is_none() { self.ask_form = AskForm::default(); }
                 if self.chat.state.state == "working" { self.cancel_preview_drop(); }
@@ -3651,22 +3657,18 @@ impl Hangar {
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
             // O CTA do rodapé da barra do web.
             .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).child(self.new_session_button(false, cx)))
+            // A engrenagem mora na barra do app, acima de tudo; o rodapé fica com a conexão.
             .child(div().h(px(48.)).flex_shrink_0().px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(theme::border())
                 .child(Button::new("connection").ghost().flex_1().min_w_0().h(px(32.)).px(px(6.))
                     .tooltip(tr("connection_tip")).accessibility_label(tr("connection"))
                     .child(div().w_full().min_w_0().flex().items_center().gap_2()
                         .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                         .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx))))
-                .child(Button::new("open-settings").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
-                        .hover(theme::hover()).active(theme::hover()))
-                    .icon(chrome::small_icon(IconName::Settings, 16., theme::muted())).size(px(28.)).rounded(px(6.))
-                    .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx))))),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx))))),
             px(if floating { 18. } else { 0. }))
     }
 
-    /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor, a conexão e a engrenagem que moravam
+    /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
@@ -3746,12 +3748,7 @@ impl Hangar {
                 .child(div().min_w_0().flex().items_center().gap_2()
                     .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                     .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
-                .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx))))
-            .child(Button::new("open-settings").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
-                    .hover(theme::hover()).active(theme::hover()))
-                .icon(chrome::small_icon(IconName::Settings, 16., theme::muted())).size(px(28.)).rounded(px(6.))
-                .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
-                .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx)))),
+                .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))),
             px(if floating { 18. } else { 0. }))
     }
 
@@ -4554,7 +4551,12 @@ impl Render for Hangar {
                     this.drag_live(event.position, event.pressed_button == Some(MouseButton::Left), window, cx);
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
-            .map(|el| match (page, nav) {
+            // A barra do app fica acima de tudo, inclusive das páginas; na página solta ela ganha a mesma margem da página.
+            .flex_col()
+            .child(div().w_full().flex_shrink_0().when(floating && (page.is_some() || costs_page), |el| el.px(px(10.)).pt(px(10.)))
+                .child(self.render_topbar(cx)))
+            .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page, |el| el.gap(px(10.)))
+                .map(|el| match (page, nav) {
                 _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
@@ -4564,7 +4566,7 @@ impl Render for Hangar {
                     .when(page.is_none() && appearance::get().navigation == appearance::Navigation::Conversations,
                         |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
                     .child(content).when_some(side, |el, side| el.child(side)),
-            })
+            }))
             .children(live)
             .children(self.render_preview(window))
             .children(self.render_landing_ghost(cx))

@@ -179,6 +179,8 @@ pub(super) struct Accounts {
     reset_refresh: Option<(u64, bool)>,
     /// Cartão de contas aberto pelo anel de uso do compositor.
     pub(super) card: bool,
+    /// O cartão aberto veio da pílula da barra do topo: preso a ela, com a conta padrão do Claude em vez da da sessão.
+    pub(super) card_top: bool,
 }
 
 pub(super) enum AccountsReply {
