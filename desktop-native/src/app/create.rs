@@ -1494,9 +1494,9 @@ impl Hangar {
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
         div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
             .child(div().my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
-                .child(in_column(top))
+                .child(in_column(popup::anchor(top, super::landing::TOP)))
                 .child(composer)
-                .child(in_column(div().flex().flex_col().gap_1().child(bottom)
+                .child(in_column(div().flex().flex_col().gap_1().child(popup::anchor(bottom, super::landing::BOTTOM))
                     .children(note.map(|(text, warning)| div().id("new-chat-note").role(if warning { Role::Alert } else { Role::Status })
                         .px(px(14.)).text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(text))))))
             .into_any_element()
@@ -1541,19 +1541,16 @@ impl Hangar {
             self.delivery.begin(key.clone(), text.clone(), HashSet::new());
             self.receive_sent(key, text.clone(), text.clone(), result.clone(), window, cx);
         }
-        if compact { self.new_chat = None; } else {
+        let home = if compact { self.new_chat.take() } else {
             self.new_session = None;
             window.close_dialog(cx);
-        }
+            None
+        };
         let readable = session.readable();
         // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
         let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
         if current { self.select(session, window, cx); }
-        // Da tela sem sessão para a conversa: o compositor desce do meio da tela, onde estava, ao pé dela.
-        if compact && current && !cx.reduce_motion() {
-            let travel = popup::anchor_bounds("composer").map_or(0., |b| f32::from(window.viewport_size().height - b.bottom()) - 10.);
-            self.landing = Some((Instant::now(), travel.max(0.)));
-        }
+        if let Some(home) = home.filter(|_| current && !cx.reduce_motion()) { self.start_landing(home, window); }
         // O fechar devolveu o foco ao botão que abriu; a sessão nova é onde se escreve em seguida, como no clique na aba.
         if current && readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
         for note in notes { window.push_notification(Notification::info(note), cx); }
