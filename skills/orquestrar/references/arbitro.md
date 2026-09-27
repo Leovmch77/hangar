@@ -32,9 +32,8 @@ written: time and rounds per Task · account policy read and copied into the con
    "A rotating role"): open that role's session ("Opening a session"); the one at hand keeps
    its role, roles never stack. The session that executed never reviews its own commit, even
    after `/clear`; separate sessions on the same model are fine.
-3. `Prova: lote(N)`: the close notice says `Proof batch ready` → `orq batch take`, open one
-   proof session (executor row) with the printed roteiros on the integrated branch and one judge
-   (reviewer row); failures become one fix Task in the next wave.
+3. `Prova: lote(N)`: the close notice says `Proof batch ready` → `orq batch take`, then
+   `prova-lote.md` (proof session, judge, one fix Task in the next wave).
 4. Handoff checklist below, then the kick-off (`arbitro-lancamento.md`, "Kick-off"): it names
    the reviewer and carries one Task ("One Task per executor").
 
@@ -101,7 +100,7 @@ Done when the item is journaled and the ball is back with executor or reviewer.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.
    - An untouchable exception written in the contract → `orq init` again (same `--plan`, stamped
-     again after any edit) with the new `--untouchable` list; once that Task's `orq commit`
+     again after any edit; none on a run started without one) with the new `--untouchable` list; once that Task's `orq commit`
      passes, `orq init` again with the full original list.
    - No other commit in the checkout between a round's freeze and its `orq commit`; your plan
      edits stay uncommitted until the Task closes.

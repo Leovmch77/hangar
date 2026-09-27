@@ -101,9 +101,9 @@ obrigatorio SKILL.md 'never downgrades' 'A rota so escala (audit -> full); rebai
 obrigatorio references/planejamento.md 'no answer → `full`' 'Sem resposta do usuario a rota e `full`.'
 obrigatorio references/revisao-final.md 'audit' 'Na rota audit a revisao final e a UNICA revisao — a pagina tem de dizer o que muda.'
 
-# 0d. Motor por risco: a coluna `vez` aceita `low`/`high` e a Task carrega `Risk:`.
+# 0d. Motor por risco: a coluna `vez` aceita `low`/`high` e a Task carrega a coluna `Risk`.
 for f in references/planejamento.md references/arbitro-lancamento.md; do
-  obrigatorio "$f" 'Risk:' 'A linha `Risk:` por Task (seletor de linha por risco) tem de estar no plano e no lancamento.'
+  obrigatorio "$f" '`Risk` column' 'A coluna `Risk` por Task (seletor de linha por risco) tem de estar no plano e no lancamento.'
 done
 obrigatorio references/arbitro.md 'upward only' 'Escalada de risco e so pra cima; o arbitro nao rebaixa.'
 
@@ -193,7 +193,7 @@ done
 
 # 8. Pagina de papel que nao carrega a skill nao pode mandar ler o SKILL.md nem invoca-la.
 #    (a retrospectiva fica de fora: ela propoe patch pra skill inteira, SKILL.md incluso.)
-for f in references/executor*.md references/revisor*.md references/revisao-final.md; do
+for f in references/executor*.md references/revisor*.md references/revisao-final.md references/prova-lote.md; do
   if grep -q 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f"; then
     echo
     echo "✗ $f aponta para o SKILL.md ou manda invocar a skill: executor, revisor, revisao final e retrospectiva leem SO a pagina do papel."

@@ -100,7 +100,7 @@ Outside tool (skill, subagent, command): the three questions of `SKILL.md`'s loc
 
 - The `vez` column exists only when a role rotates between accounts.
 - Numeric `vez`: Task N uses that role's row of index `(N-1) % total`, in table order.
-- Risk `vez` (`low` | `high`): Task N uses the row named by its `Risk:` line in the orchestration plan. A line raised mid-work lands on `high` from the next session on.
+- Risk `vez` (`low` | `high`): Task N uses the row named by its `Risk` column in the orchestration plan. A value raised mid-work lands on `high` from the next session on.
 - One selector per role, never both. Rotation is not parallelism: one session of the role per Task.
 
 ## Opening a session — five steps, one unit

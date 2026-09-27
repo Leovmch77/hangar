@@ -101,7 +101,7 @@ chosen model has a card or a `## What they say` section.
      skill step without a Task citing it. Add the set-level verification the skill lacks.
    - An OWNER in every step that waits on something external: the executor, as an
      explicit prior step.
-   - `Risk: low | high` when the executor row is selected by risk. `low` = bounded, fully
+   - `Risk` column: `low | high` when the executor row is selected by risk. `low` = bounded, fully
      specified, small blast radius; `high` = judgment-heavy, wide blast radius, context-heavy, or
      touching a public contract, shared state, destination or credential. Proposed with the team,
      decided by the user; it only ever rises.
@@ -177,8 +177,8 @@ PRODUCE = write it in the orchestration plan.
    test counts from the run, never estimated. What cannot run → marked
    `<!-- NOT VERIFIED: … -->`; the executor reads that as description.
 10. AUDIT — domain skill declared and its two checks done.
-11. PRODUCE — `Route:` declared with its reason; `Risk:` on every Task when the executor row is
-    selected by risk.
+11. PRODUCE — `Route:` declared with its reason; `Risk` column filled on every Task when the
+    executor row is selected by risk.
 12. AUDIT — every function, attribute and fixture the plan cites found by `grep`: done by
     `preparar-plano`, its report pasted. A claim about an external lib's behavior carries the NOT
     VERIFIED mark or the installed source snippet. Every factual claim in plan, excerpt and

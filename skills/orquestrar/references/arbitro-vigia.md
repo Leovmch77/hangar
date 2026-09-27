@@ -15,9 +15,9 @@ replaced, and when unsure whether to decide alone or wake the user.
    ```
 
 2. The list follows `orq ball` every cycle: whoever owes work now, plus you. Nothing to rewrite at a handoff; a session waiting as it was told is never on it.
-3. Ball with the user: `systemctl --user stop vigia-<gid>` before asking; on the answer, run the arming command of step 1 again and wait for ARMED. `orq event execucao_fim --resultado <result>` logged → stop it for good.
+3. Ball with the user: `systemctl --user stop vigia-<gid>` before asking; on the answer, run the arming command of step 1 again; same arbiter → no new ARMED, the proof is `[vigia] re-armed …` in `journalctl --user -u vigia-<gid> -n 5`. `orq event execucao_fim --resultado <result>` logged → stop it for good.
 
-Done when the `[vigia] ARMED …` prompt arrives in your session within 2 min of arming — the proof it works. `active` is not proof; a hand-typed test is not proof.
+Done when the `[vigia] ARMED …` prompt arrives in your session within 2 min of arming — the proof it works; it arrives only for a new arbiter, a re-arm proves itself by the `re-armed` line above. `active` is not proof; a hand-typed test is not proof.
 
 ## What it does
 

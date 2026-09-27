@@ -41,6 +41,12 @@ A failure becomes a Task through the gate (`arbitro.md`, steps 2–5).
 
 Done when the user has the path.
 
+## The last proof batch (`Prova: lote(N)`)
+
+Every code Task approved, before the branch review: `orq batch take`; a batch printed → run it
+through `prova-lote.md`. Done when every batch taken has its `pareceres/lote-<n>.md` and its fix
+Task, if any, is approved.
+
 ## Phase 4 — the branch review
 
 1. Trigger: every code Task approved. Never "after Task N". A manual Task (asset upload, domain, third-party account) is not a code Task.

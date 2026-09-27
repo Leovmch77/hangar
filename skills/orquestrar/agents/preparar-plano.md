@@ -1,6 +1,6 @@
 ---
 name: preparar-plano
-description: Prepares a plan for the orquestrar skill in a clean context. Use ONLY when the orquestrar planner dispatches it with the user's three answers (parallel, max simultaneous Tasks, proof mode). Writes the orchestration plan and stamps it; never touches the user's plan.
+description: Prepares a plan for the orquestrar skill in a clean context. Use ONLY when the orquestrar planner dispatches it with the user's three answers (parallel, max simultaneous Tasks, proof mode). Rewrites the orchestration plan draft and stamps it; never touches the user's plan.
 tools: Read, Grep, Glob, Bash, Write, Edit
 model: inherit
 ---
