@@ -11,6 +11,7 @@ mod i18n;
 mod interaction;
 mod media;
 mod effects;
+mod electron;
 mod mend;
 mod term_view;
 mod status;
