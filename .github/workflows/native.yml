@@ -113,8 +113,8 @@ jobs:
             -R Hangar-*.sha256 > native-latest.json
           cat native-latest.json
       # O manifesto sobe por ÚLTIMO: até ele trocar, o app ainda vê o sha antigo e recusa o binário novo em vez de
-      # instalar um par trocado. Arquivo de sistema que não compilou desta vez sai da release, para ninguém baixar
-      # um binário de outro commit achando que é o atual.
+      # instalar um par trocado. Sistema que não compilou desta vez fica com o arquivo anterior na release (build
+      # instável não apaga o único binário dele) e fora do manifesto, então o app daquele sistema não oferece nada.
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -125,7 +125,4 @@ jobs:
           cd out
           gh release upload native-latest Hangar-* --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload native-latest native-latest.json --repo "$GITHUB_REPOSITORY" --clobber
-          for old in $(gh release view native-latest --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
-            [ -e "$old" ] || gh release delete-asset native-latest "$old" --repo "$GITHUB_REPOSITORY" --yes
-          done
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/native-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
