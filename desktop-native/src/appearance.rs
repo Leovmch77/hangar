@@ -7,13 +7,56 @@ use std::{collections::HashMap, path::PathBuf, sync::{Mutex, RwLock}};
 #[serde(rename_all = "snake_case")]
 pub enum Panels { Attached, Floating }
 
+/// `System` e `Mono` são as duas escolhas antigas, que o arquivo continua guardando assim; `Named` é uma fonte instalada.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Font { System, Mono }
+pub enum Font { System, Mono, Named(FontName) }
 
+impl Font {
+    pub fn family(self) -> &'static str {
+        match self { Self::System => crate::theme::SANS, Self::Mono => crate::theme::MONO, Self::Named(name) => name.0 }
+    }
+
+    /// A fonte de uma das escolhas antigas volta a ser ela: o "Estilo compacto" compara por igualdade.
+    pub fn from_family(family: &str) -> Self {
+        [Self::System, Self::Mono].into_iter().find(|f| f.family() == family).unwrap_or(Self::Named(FontName::intern(family)))
+    }
+}
+
+/// `System` é a monoespaçada que o kit ou o sistema resolvem; `Named` é uma fonte instalada.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeFont { JetBrainsMono, System }
+pub enum CodeFont { JetBrainsMono, System, Named(FontName) }
+
+impl CodeFont {
+    pub fn from_family(family: &str) -> Self {
+        if family == crate::theme::CODE_MONO { Self::JetBrainsMono } else { Self::Named(FontName::intern(family)) }
+    }
+}
+
+/// Nome de família de fonte. `&'static` para a Aparência continuar `Copy`: o tema a lê a cada desenho.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FontName(pub &'static str);
+
+impl FontName {
+    // ponytail: cada nome distinto vaza uma vez; o teto é a lista de fontes instaladas.
+    pub fn intern(name: &str) -> Self {
+        static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(known) = names.iter().find(|known| **known == name) { return Self(known); }
+        let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        names.push(leaked);
+        Self(leaked)
+    }
+}
+
+impl Serialize for FontName {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { s.serialize_str(self.0) }
+}
+
+impl<'de> Deserialize<'de> for FontName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { Ok(Self::intern(&String::deserialize(d)?)) }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -402,6 +445,18 @@ mod tests {
             Appearance { terminal_size: 900, ..saved }.clamped().terminal_size), (8, 24));
         let reset = saved.reset_keeping_choices();
         assert_eq!((reset.terminal_font, reset.terminal_size), (CodeFont::System, 12));
+    }
+
+    #[test]
+    fn installed_fonts_round_trip_and_old_choices_still_read() {
+        let old: Appearance = serde_json::from_str(r#"{"font":"mono","code_font":"system","terminal_font":"jet_brains_mono"}"#).unwrap();
+        assert_eq!((old.font, old.code_font, old.terminal_font), (Font::Mono, CodeFont::System, CodeFont::JetBrainsMono));
+        let saved = Appearance { font: Font::from_family("Fira Sans"), code_font: CodeFont::from_family("Fira Code"),
+            terminal_font: CodeFont::from_family(crate::theme::CODE_MONO), ..old };
+        let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(loaded, saved);
+        assert_eq!((loaded.font.family(), loaded.terminal_font), ("Fira Sans", CodeFont::JetBrainsMono));
+        assert_eq!(Font::from_family(crate::theme::SANS), Font::System);
     }
 
     #[test]

@@ -443,6 +443,7 @@ pub fn sync_kit(window: Option<&mut Window>, cx: &mut App) {
     theme.mono_font_family = match appearance.code_font {
         appearance::CodeFont::JetBrainsMono => CODE_MONO.into(),
         appearance::CodeFont::System => original_font,
+        appearance::CodeFont::Named(name) => name.0.into(),
     };
     theme.mono_font_size = px(appearance.code_size as f32 / 2.);
     Theme::sync_base(cx);
