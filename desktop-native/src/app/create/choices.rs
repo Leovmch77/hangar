@@ -140,7 +140,11 @@ impl NewSession {
     pub(super) fn receive_models(&mut self, seq: u64, result: Result<Value, Failure>, remembered: (String, String), window: &mut Window,
         cx: &mut Context<Self>) {
         let catalog = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| {
-            let models = serde_json::from_value(v.get("models").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;
+            let mut models: Vec<ModelOption> = serde_json::from_value(v.get("models").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;
+            // O picker do Claude dá o mesmo id (`opus`) às versões antigas: escolher "Opus 4.6" abriria o Opus atual.
+            // Linha que não dá para escolher de verdade não aparece.
+            let mut seen = std::collections::HashSet::new();
+            models.retain(|m| seen.insert(m.value().to_owned()));
             Ok(Catalog { models, reduced: v.get("reduced").and_then(Value::as_bool).unwrap_or(false) })
         });
         if !self.models.finish(seq, catalog) { return; }

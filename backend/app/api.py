@@ -7510,6 +7510,10 @@ async def model_options(name: str):
             # `opus` ("Opus" e "Opus (1M context)"), e id repetido derrubava a lista na tela.
             "models": [{"id": r["id"], "name": r["name"], "desc": r["desc"],
                         "active": r["active"]} for r in lido["models"]]}
+    # Versões antigas saem do picker com a keyword da família (`opus`): escolher "Opus 4.6" abriria o
+    # Opus atual. Só a primeira linha de cada id é escolhível de verdade.
+    vistos: set[str] = set()
+    resp["models"] = [m for m in resp["models"] if not (m["id"] in vistos or vistos.add(m["id"]))]
     _models_cache_put(chave, resp)
     return resp
 
