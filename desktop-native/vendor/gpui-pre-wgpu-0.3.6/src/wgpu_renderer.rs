@@ -245,10 +245,12 @@ fn plan_render_regions(
     RenderRegions::Partial(regions)
 }
 
-/// The pixels a backdrop blur samples: its visible bounds widened by the kernel reach, as `process_backdrop_blur`
-/// computes them.
+/// The pixels a backdrop blur samples: its visible bounds widened by the kernel reach, plus the bilinear taps of the
+/// downsampled passes, which reach a few source pixels past the padding `process_backdrop_blur` copies.
 fn blur_footprint(blur: &BackdropBlur, target_width: u32, target_height: u32) -> Option<ScissorRect> {
-    let padding = (blur.blur_radius.0.max(1.0) * 3.0).ceil() + 2.0;
+    let sigma = blur.blur_radius.0.max(1.0);
+    let downsample = ((sigma / 8.0) as u32).clamp(1, 4) as f32;
+    let padding = (sigma * 3.0).ceil() + 2.0 + 3.0 * downsample;
     let visible = blur.bounds.intersect(&blur.content_mask.bounds);
     ScissorRect::from_bounds(&visible.dilate(ScaledPixels(padding)), target_width, target_height)
 }
@@ -2168,6 +2170,9 @@ impl WgpuRenderer {
             if let Err(error) = self.record_frame(scene, &texture, &view, None, regions) {
                 log::error!("{error:#}");
                 self.resources().queue.submit(std::iter::empty());
+                // Nothing was submitted today, but the texture is only trusted after a whole frame lands in it.
+                self.invalidate_frame_texture();
+                self.needs_redraw = true;
                 return false;
             }
             if let Some(frame_texture) = &mut self.frame_texture {
