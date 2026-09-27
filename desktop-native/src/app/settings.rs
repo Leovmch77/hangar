@@ -9,6 +9,8 @@ use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip,
     IndexPath, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 
+mod appearance_page;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     General, Appearance, Diary, About,
@@ -269,6 +271,10 @@ pub(super) struct SettingsUi {
     scroll: ScrollHandle,
     /// A posição da linha só é conhecida no desenho: este sinal pede a rolagem até ela lá.
     reveal: Rc<Cell<bool>>,
+    /// Seção da Aparência levada pelo atalho: rola até ela como a busca, sem o destaque.
+    jump: Option<&'static str>,
+    /// Seção da Aparência que a prévia ao lado mostra: a do último atalho ou clique.
+    preview: Option<&'static str>,
     /// A Aparência numa caixa sobre a conversa, em vez da página.
     pub live: bool,
     /// Arrasto da caixa: ponto onde começou e o canto que ela tinha.
@@ -358,7 +364,7 @@ impl SettingsUi {
         }));
         Self { sliders, fonts, type_picks,
             accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
-            reveal: Rc::new(Cell::new(false)), live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
+            reveal: Rc::new(Cell::new(false)), jump: None, preview: None, live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
     }
 
     fn slider(&self, knob: Knob) -> &Entity<SliderState> {
@@ -666,8 +672,10 @@ impl Hangar {
                         .child(div().flex_1().text_sm().text_color(theme::muted()).child(tr("settings_back")))
                         .child(chrome::kbd("Esc")))
                     .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx)))));
+        // Com espaço para a coluna da prévia ao lado do conteúdo de 720px; a caixa ao vivo nunca tem.
+        let wide = page == Page::Appearance && !self.settings_ui.live && window.viewport_size().width >= px(1400.);
         let body = match page {
-            Page::Appearance => self.render_appearance(cx),
+            Page::Appearance => self.render_appearance(wide, cx),
             Page::General => self.render_general(cx),
             Page::Diary => self.render_diary(cx),
             Page::About => self.render_about(cx),
@@ -682,7 +690,15 @@ impl Hangar {
         };
         let scroll = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
             .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(720.)).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
-        let content = div().flex_1().min_w_0().h_full().flex().flex_col().child(scroll).children(self.server_config_footer(page, cx));
+        let tabs = (page == Page::Appearance).then(|| div().w_full().flex_shrink_0().flex().justify_center().px_4().pt(px(14.)).pb(px(6.))
+            .child(div().w(px(720.)).max_w_full().child(self.section_tabs(cx))));
+        let content = div().flex_1().min_w_0().h_full().flex().flex_col().children(tabs).child(scroll).children(self.server_config_footer(page, cx));
+        // A prévia fica fora da rolagem: continua à vista enquanto a página desce.
+        let content = if wide {
+            div().flex_1().min_w_0().h_full().flex().child(content)
+                .child(div().id("appearance-aside").w(px(360.)).flex_shrink_0().h_full().overflow_y_scroll().pt(px(44.)).pr(px(24.)).pb(px(40.))
+                    .child(self.render_appearance_aside(cx)))
+        } else { content };
         div().size_full().flex().opacity(shown).when(floating, |el| el.p(px(10.)).gap(px(10.))).child(nav).child(content).into_any_element()
     }
 
@@ -708,9 +724,12 @@ impl Hangar {
 
     /// Destaque da linha levada pela busca, e a rolagem até ela quando o desenho já sabe onde ela está.
     pub(super) fn mark(&self, el: Div, key: &str) -> Div {
-        if self.settings_ui.hit != Some(key) { return el; }
+        let hit = self.settings_ui.hit == Some(key);
+        // O atalho de seção só vale sem busca: os dois disputariam o mesmo pedido de rolagem.
+        let jump = self.settings_ui.hit.is_none() && self.settings_ui.jump == Some(key);
+        if !hit && !jump { return el; }
         let (scroll, reveal) = (self.settings_ui.scroll.clone(), self.settings_ui.reveal.clone());
-        el.relative().bg(theme::accent_dim()).child(canvas(move |bounds, window, _| {
+        el.relative().when(hit, |el| el.bg(theme::accent_dim())).child(canvas(move |bounds, window, _| {
             if !reveal.get() { return; }
             let area = scroll.bounds();
             // O contêiner ainda não foi medido neste desenho: tenta de novo no próximo.
@@ -746,7 +765,7 @@ impl Hangar {
                 })))
             .child(chrome::icon_button("live-close", IconName::Close, tr("close"), cx)
                 .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))));
-        let body = self.render_appearance(cx);
+        let body = self.render_appearance(false, cx);
         div().id("live-box").absolute().right(px(right)).bottom(px(bottom - 2. * (1. - shown))).opacity(shown).w(px(LIVE_WIDTH)).max_h(px(height))
             // Opaca mesmo na caixa solta: a conversa atrás não pode atravessar as linhas.
             .flex().flex_col().rounded(px(14.)).border_1().border_color(theme::border_strong()).bg(theme::raised())
@@ -757,372 +776,9 @@ impl Hangar {
             })))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx)))
             .child(header)
+            .child(div().flex_shrink_0().px(px(12.)).pt(px(10.)).child(self.section_tabs(cx)))
             .child(div().id("live-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
                 .px(px(12.)).pb(px(14.)).child(body))
-            .into_any_element()
-    }
-
-    fn render_appearance(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let a = appearance::get();
-        let compact = a == a.compact_style();
-        let style = settings_box().mt(px(18.)).child(self.row(IconName::Palette, "settings_style",
-            Some(tr(if compact { "settings_style_applied" } else { "settings_style_hint" })), true,
-            Button::new("appearance-style-compact").outline().small().label(tr("settings_style_compact"))
-                .selected(compact).when(compact, |el| el.icon(IconName::Check))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.apply_appearance(appearance::get().compact_style(), true, cx);
-                    this.sync_sliders(window, cx);
-                })).into_any_element()));
-        let floating = a.panels == Panels::Floating;
-        let live = self.settings_ui.live;
-        let heading = |key: &'static str| self.mark(div().mt(px(if live { 20. } else { 28. })).mb(px(10.)).rounded(px(6.))
-            .text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tr(key)), key);
-        // Na caixa ao vivo as miniaturas encolhem para caber quatro temas em 360px.
-        let thumb = px(if live { 60. } else { 92. });
-
-        let preview = div().mt(px(18.)).p(px(14.)).flex().flex_col().gap(px(10.)).rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::inset())
-            .child(div().flex().justify_end().child(conversation_text(div(), true).px(px(12.)).py(px(8.)).rounded(px(16.)).bg(theme::user_bubble()).child(tr("settings_preview_question"))))
-            .child(conversation_text(div(), false).child(tr("settings_preview_answer")))
-            .child(div().font_family(theme::MONO).text_size(px(12.5)).child("npm run check"));
-
-        // Miniatura: barra lateral à esquerda e conversa à direita, com duas linhas de texto em cada.
-        let mini_window = |(sidebar, main, line): (Hsla, Hsla, Hsla)| {
-            let bars = |color: Hsla| div().flex().flex_col().gap(px(5.)).pt(px(4.))
-                .child(div().h(px(4.)).w(relative(0.8)).rounded(px(2.)).bg(color)).child(div().h(px(4.)).w(relative(0.6)).rounded(px(2.)).bg(color));
-            // O GPUI recorta em retângulo: quem pinta o canto arredonda o próprio canto, senão cobre a moldura.
-            div().size_full().p(px(8.)).flex().gap(px(6.)).bg(sidebar).rounded(px(8.))
-                .child(div().w(relative(0.3)).child(bars(line)))
-                .child(div().flex_1().rounded(px(6.)).p(px(8.)).bg(main).child(bars(line)))
-        };
-        let themes = [ThemeMode::Auto, ThemeMode::Light, ThemeMode::Dark, ThemeMode::Desktop];
-        let theme_cards = div().flex().gap(px(12.)).children(themes.map(|mode| {
-            let key = match mode { ThemeMode::Auto => "auto", ThemeMode::Light => "light", ThemeMode::Dark => "dark", ThemeMode::Desktop => "desktop" };
-            let selected = a.theme == mode;
-            let art = match mode {
-                // Automático é metade claro, metade escuro: é o sistema que decide.
-                ThemeMode::Auto => div().size_full().flex()
-                    .child(div().w(relative(0.5)).h_full().child(mini_window(theme::thumbnail(a.palette, false)).rounded_tr(px(0.)).rounded_br(px(0.))))
-                    .child(div().flex_1().h_full().child(mini_window(theme::thumbnail(a.palette, true)).rounded_tl(px(0.)).rounded_bl(px(0.)))),
-                ThemeMode::Light => div().size_full().child(mini_window(theme::thumbnail(a.palette, false))),
-                ThemeMode::Dark => div().size_full().child(mini_window(theme::thumbnail(a.palette, true))),
-                ThemeMode::Desktop => div().size_full().child(mini_window(theme::desktop_thumbnail())),
-            };
-            div().flex_1().flex().flex_col().items_center().gap_2()
-                .child(div().w_full().rounded(px(10.)).border_2().border_color(if selected { theme::accent() } else { theme::border_strong() })
-                    .child(Button::new(SharedString::from(format!("theme-{key}")))
-                        .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
-                        .w_full().h(thumb).p(px(0.)).rounded(px(8.)).overflow_hidden()
-                        .accessibility_label(tr(&format!("settings_theme_{key}")))
-                        .child(art)
-                        .on_click(cx.listener(move |this, _, window, cx| this.set_theme(mode, window, cx)))))
-                .child(div().text_size(px(13.)).text_color(if selected { theme::text() } else { theme::muted() })
-                    .when(selected, |el| el.font_weight(FontWeight::MEDIUM)).child(tr(&format!("settings_theme_{key}"))))
-        }));
-        // Desktop escolhido e sem paleta: diz por quê e com o que está desenhando.
-        let desktop_fallback = (a.theme == ThemeMode::Desktop && !theme::desktop_painting())
-            .then(|| tr("settings_desktop_fallback").replace("{reason}", &self.desktop_note.clone()
-                .unwrap_or_else(|| tr(if self.api.is_none() { "settings_desktop_offline" } else { "settings_desktop_loading" }))));
-
-        let panel_card = |value: Panels, cx: &mut Context<Self>| {
-            let selected = a.panels == value;
-            let key = if value == Panels::Attached { "attached" } else { "floating" };
-            let loose = value == Panels::Floating;
-            let (backdrop, side_bg, side_line) = theme::panels_thumbnail(loose);
-            let side = || div().h_full().w(relative(if loose { 0.27 } else { 0.28 })).bg(side_bg)
-                .map(|el| if loose { el.rounded(px(7.)).border_1().border_color(side_line) } else { el })
-                .when(!loose, |el| el.border_color(side_line));
-            let mini = div().h(thumb).w_full().flex().justify_between().rounded(px(8.)).overflow_hidden().bg(backdrop)
-                .when(loose, |el| el.p(px(6.)))
-                .child(side().when(!loose, |el| el.border_r_1().rounded_l(px(8.)))).child(side().when(!loose, |el| el.border_l_1().rounded_r(px(8.))));
-            // A moldura mora fora do botão: o hover do botão redefine a cor da própria borda.
-            div().flex_1().rounded(px(10.)).border_2().border_color(if selected { theme::accent() } else { theme::border_strong() })
-                .child(Button::new(SharedString::from(format!("panels-{key}")))
-                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
-                .w_full().h_auto().p(px(10.)).rounded(px(8.))
-                .accessibility_label(tr(&format!("settings_panels_{key}")))
-                .child(div().w_full().flex().flex_col().gap_2()
-                    .child(mini)
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(tr(&format!("settings_panels_{key}"))))
-                    .when(!live, |el| el.child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal()
-                        .child(tr(&format!("settings_panels_{key}_desc"))))))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let mut next = appearance::get();
-                    next.panels = value;
-                    this.apply_appearance(next, true, cx);
-                })))
-        };
-        let panel_cards = div().flex().gap(px(12.)).child(panel_card(Panels::Attached, cx)).child(panel_card(Panels::Floating, cx));
-
-        // Destaque e tinta são do modo na tela; no Desktop as cores vêm do papel de parede.
-        let dark = theme::is_dark();
-        let from_wallpaper = theme::desktop_painting();
-        let colors = *a.colors(dark);
-        let swatch = |id: String, label: String, color: u32, selected: bool, empty: bool, pick: Swatch, tint: bool, cx: &mut Context<Self>| {
-            // No Desktop a cor vem do papel de parede: amostra esmaecida e sem anel de escolha.
-            div().rounded(px(8.)).border_2().border_color(swatch_ring(selected && !from_wallpaper)).when(from_wallpaper, |el| el.opacity(0.5))
-                .child(Button::new(SharedString::from(id))
-                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
-                .size(px(24.)).p(px(1.)).rounded(px(6.)).accessibility_label(label).disabled(from_wallpaper)
-                .child(div().size(px(20.)).rounded(px(6.)).bg(rgb(color)).when(empty, |el| el.border_1().border_color(theme::border_strong())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let mut next = appearance::get();
-                    let mode = next.colors_mut(theme::is_dark());
-                    if tint { mode.tint = pick } else { mode.accent = pick }
-                    this.apply_appearance(next, true, cx);
-                })))
-        };
-        // O kit não desliga o seletor: no Desktop ele sai e fica só o ícone, esmaecido como as amostras.
-        let picker = |state: &Entity<ColorPickerState>, selected: bool| {
-            div().rounded(px(8.)).border_2().border_color(swatch_ring(selected && !from_wallpaper)).p(px(1.))
-                .map(|el| if from_wallpaper {
-                    el.opacity(0.5).child(div().size(px(24.)).flex().items_center().justify_center()
-                        .child(chrome::small_icon(IconName::Palette, 16., theme::muted())))
-                } else {
-                    // Com cor livre escolhida o gatilho mostra a própria cor; sem ela, o ícone de paleta.
-                    el.child(ColorPicker::new(state).small().accessibility_label(tr("settings_custom_color"))
-                        .when(!selected, |picker| picker.icon(IconName::Palette)))
-                })
-        };
-        let accents = div().flex().items_center().gap(px(6.))
-            .children(theme::accent_swatches(dark).into_iter().enumerate().map(|(n, color)| swatch(format!("accent-{n}"),
-                tr("settings_accent_n").replace("{n}", &(n + 1).to_string()), color, colors.accent == Swatch::Preset(n), false, Swatch::Preset(n), false, cx)))
-            .child(picker(&self.settings_ui.accent_picker,matches!(colors.accent, Swatch::Custom(_))));
-        let tints = div().flex().items_center().gap(px(6.))
-            .children(theme::tint_swatches(dark).into_iter().enumerate().map(|(n, color)| swatch(format!("tint-{n}"),
-                tr(if n == 0 { "settings_tint_none" } else { "settings_tint_n" }).replace("{n}", &n.to_string()), color,
-                colors.tint == Swatch::Preset(n), n == 0, Swatch::Preset(n), true, cx)))
-            .child(picker(&self.settings_ui.tint_picker,matches!(colors.tint, Swatch::Custom(_))));
-        let no_tint = colors.tint == Swatch::Preset(0);
-        // "Vale para o modo escuro. Copiar do claro": copia destaque, tinta e força do outro modo.
-        let mode_note = div().flex().items_center().gap_1()
-            .child(tr(if dark { "settings_colors_for_dark" } else { "settings_colors_for_light" }))
-            .child(Button::new("copy-other-mode").ghost().xsmall().text_color(theme::text())
-                .label(tr(if dark { "settings_copy_from_light" } else { "settings_copy_from_dark" }))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    let mut next = appearance::get();
-                    let dark = theme::is_dark();
-                    *next.colors_mut(dark) = *next.colors(!dark);
-                    this.apply_appearance(next, true, cx);
-                    this.sync_sliders(window, cx);
-                })));
-
-        let palette = segmented("palette", &[tr("settings_palette_neutral"), tr("settings_palette_classic")],
-            if a.palette == Palette::Neutral { 0 } else { 1 }, !from_wallpaper,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.palette = if index == 0 { Palette::Neutral } else { Palette::Classic }; this.apply_appearance(next, true, cx); }, cx);
-        let text_color = segmented("text-color", &[tr("settings_text_color_desktop"), tr("settings_text_color_app")],
-            if a.desktop_text == DesktopText::App { 1 } else { 0 }, a.theme == ThemeMode::Desktop,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.desktop_text = if index == 1 { DesktopText::App } else { DesktopText::Desktop }; this.apply_appearance(next, true, cx); }, cx);
-        let wallpaper_note = || tr("settings_palette_desc");
-        let color_box = settings_box()
-            .child(self.row(IconName::Palette, "settings_palette", Some(wallpaper_note()), !from_wallpaper, palette))
-            .child(self.row_with(IconName::Droplet, "settings_accent",
-                if from_wallpaper { div().child(wallpaper_note()) } else { mode_note }, !from_wallpaper, accents.into_any_element()))
-            .child(self.row(IconName::Droplet, "settings_tint", Some(if from_wallpaper { wallpaper_note() } else { tr("settings_tint_desc") }),
-                !from_wallpaper, tints.into_any_element()))
-            // Sem tinta a força não muda nada; a linha fica visível e desligada.
-            .child(self.slider_row(IconName::Droplet, "settings_tint_strength", no_tint.then(|| tr("settings_tint_strength_off")),
-                Knob::TintStrength, !no_tint && !from_wallpaper, &a, cx))
-            .child(self.row(IconName::Type, "settings_text_color", Some(tr("settings_text_color_desc")), a.theme == ThemeMode::Desktop, text_color));
-
-        const BACKGROUNDS: [Background; 5] = [Background::Plain, Background::Texture, Background::Light, Background::Image, Background::Desktop];
-        // Escolha, cópia ou remoção da imagem em andamento: o grupo fica travado, mostrando o que está escolhido.
-        let busy = self.backdrop_busy;
-        let background = segments("background", &[tr("settings_bg_plain"), tr("settings_bg_texture"), tr("settings_bg_light"), tr("settings_bg_image"), tr("settings_bg_desktop")],
-            BACKGROUNDS.iter().position(|b| *b == a.background).unwrap_or(0), if busy.is_some() { 0 } else { BACKGROUNDS.len() }, busy.is_some(), tr("settings_next_version"),
-            |this: &mut Hangar, index, window: &mut Window, cx| {
-                if this.backdrop_busy.is_some() { return; }
-                let choice = BACKGROUNDS[index];
-                // Imagem sem cópia guardada começa pela escolha do arquivo; o fundo só muda quando ela der certo.
-                if choice == Background::Image && !appearance::image_path().is_some_and(|p| p.is_file()) { return this.pick_backdrop(cx); }
-                let mut next = appearance::get();
-                next.background = choice;
-                this.apply_appearance(next, true, cx);
-                this.refresh_backdrop(window, cx);
-            }, cx);
-        let image_actions = div().flex().gap_2()
-            .child(Button::new("background-image-pick").outline().small().label(tr("settings_image_pick")).disabled(busy.is_some())
-                .on_click(cx.listener(|this, _, _, cx| this.pick_backdrop(cx))))
-            .child(Button::new("background-image-remove").outline().small().label(tr("settings_image_remove")).disabled(busy.is_some() || a.background != Background::Image)
-                .on_click(cx.listener(|this, _, _, cx| this.remove_backdrop(cx))));
-        let image_name = if a.background == Background::Image {
-            appearance::image_name().unwrap_or_else(|| tr("settings_image_unnamed"))
-        } else { tr("settings_image_none") };
-        let image_description = div().flex().items_center().gap_2().min_w_0()
-            .when(a.background == Background::Image, |el| el.when_some(self.backdrop.as_ref(), |el, (_, image)| el
-                .child(div().w(px(48.)).h(px(32.)).flex_shrink_0().rounded(px(4.)).overflow_hidden()
-                    .child(img(image.clone()).size_full().object_fit(ObjectFit::Cover)))))
-            .child(div().id("background-image-name").flex_1().min_w_0().truncate().child(image_name.clone())
-                .tooltip(move |window, cx| Tooltip::new(image_name.clone()).build(window, cx)));
-        let background_scope = segmented("background-scope", &[tr("settings_background_chat"), tr("settings_background_everywhere")],
-            if a.background_scope == BackgroundScope::Chat { 0 } else { 1 }, busy.is_none(),
-            |this: &mut Hangar, index, _: &mut Window, cx| {
-                let mut next = appearance::get();
-                next.background_scope = if index == 0 { BackgroundScope::Chat } else { BackgroundScope::Everywhere };
-                this.apply_appearance(next, true, cx);
-            }, cx);
-        let desktop_background = a.background == Background::Desktop;
-        let wallpaper = segmented("wallpaper", &[tr("settings_wallpaper_window"), tr("settings_wallpaper_glass")],
-            if a.wallpaper == Wallpaper::Glass { 1 } else { 0 }, desktop_background && busy.is_none(),
-            |this: &mut Hangar, index, window: &mut Window, cx| {
-                let mut next = appearance::get();
-                next.wallpaper = if index == 1 { Wallpaper::Glass } else { Wallpaper::Window };
-                this.apply_appearance(next, true, cx);
-                this.refresh_backdrop(window, cx);
-            }, cx);
-        // Com imagem ou área de trabalho atrás, a Transparência é o véu e vale também nos painéis colados.
-        let see_through = floating || a.busy_background();
-        // Colados só ficam translúcidos com o fundo ocupado atrás da janela inteira; no Vidro a Solidez também dá a tinta dos menus.
-        let panels_see_through = floating || a.busy_background() && a.background_scope == BackgroundScope::Everywhere
-            || a.surface_material == SurfaceMaterial::Glass;
-        let surface_material = segmented("surface-material", &[tr("settings_surface_glass"), tr("settings_surface_opaque")],
-            if a.surface_material == SurfaceMaterial::Glass { 0 } else { 1 }, true,
-            |this: &mut Hangar, index, _: &mut Window, cx| {
-                let mut next = appearance::get();
-                next.surface_material = if index == 0 { SurfaceMaterial::Glass } else { SurfaceMaterial::Opaque };
-                this.apply_appearance(next, true, cx);
-            }, cx);
-        let effect_owner = cx.entity().downgrade();
-        let effect_label = crate::effects::CHOICES.iter().find(|(effect, _)| *effect == a.background_effect).unwrap().1;
-        let background_effect = Button::new("background-effect").outline().small()
-            .label(tr(effect_label)).icon(IconName::ChevronDown).disabled(busy.is_some())
-            .accessibility_label(format!("{}: {}", tr("settings_background_effect"), tr(effect_label)))
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                crate::effects::CHOICES.iter().fold(sidebar::menu_style(menu), |menu, &(effect, label)| {
-                    let owner = effect_owner.clone();
-                    menu.item(PopupMenuItem::new(tr(label)).checked(effect == a.background_effect).on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            if this.backdrop_busy.is_some() { return; }
-                            let mut next = appearance::get();
-                            if next.background != Background::Image || next.background_effect == effect { return; }
-                            next.background_effect = effect;
-                            this.apply_appearance(next, true, cx);
-                            this.refresh_backdrop(window, cx);
-                        });
-                    }))
-                })
-            });
-        let background_box = settings_box()
-            .child(self.row(IconName::Image, "settings_background", busy.map(|b| b.note()), true, background))
-            .child(self.row(IconName::Layers, "settings_background_scope", None, true, background_scope))
-            .child(self.row_with(IconName::Image, "settings_image", image_description, true, image_actions.into_any_element()))
-            .when(a.background == Background::Image, |el| el.child(self.row(IconName::Image, "settings_background_effect", None, busy.is_none(), background_effect.into_any_element())))
-            .child(self.slider_row(IconName::Layers, "settings_transparency",
-                Some(tr(if see_through { "settings_transparency_desc" } else { "settings_transparency_off" })), Knob::Transparency, see_through, &a, cx))
-            .child(self.row(IconName::Layers, "settings_surface_material", Some(tr("settings_surface_material_desc")), true, surface_material))
-            .child(self.slider_row(IconName::Layers, "settings_solidity",
-                Some(tr(if panels_see_through { "settings_solidity_desc" } else { "settings_solidity_off" })), Knob::Solidity, panels_see_through, &a, cx))
-            // Nada a escolher aqui: a linha diz de quem é o desfoque; o botão (mouse ou teclado) abre onde ligar.
-            .child(self.row(IconName::Layers, "settings_blur",
-                Some(if self.settings_ui.blur_hint { format!("{} {}", tr("settings_blur_desc"), tr("settings_blur_hint")) } else { tr("settings_blur_desc") }), true,
-                chrome::icon_button("blur-hint", IconName::Info, tr("settings_blur_hint_toggle"), cx).selected(self.settings_ui.blur_hint)
-                    .on_click(cx.listener(|this, _, _, cx| { this.settings_ui.blur_hint = !this.settings_ui.blur_hint; cx.notify(); }))
-                    .into_any_element()))
-            .child(self.row(IconName::Monitor, "settings_wallpaper",
-                Some(tr(if desktop_background { "settings_wallpaper_desc" } else { "settings_wallpaper_only_desktop" })), desktop_background, wallpaper));
-
-        const READINGS: [Reading; 4] = [Reading::Auto, Reading::None, Reading::Text, Reading::Sheet];
-        let reading = segmented("reading", &[tr("settings_reading_auto"), tr("settings_reading_none"), tr("settings_reading_text"), tr("settings_reading_sheet")],
-            READINGS.iter().position(|r| *r == a.reading).unwrap_or(0), true,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.reading = READINGS[index]; this.apply_appearance(next, true, cx); }, cx);
-        let sheet_on = a.reading == Reading::Sheet;
-        let text_on = a.effective_reading() == Reading::Text;
-        let reading_box = settings_box()
-            .child(self.row(IconName::FileText, "settings_reading", Some(tr("settings_reading_desc")), true, reading))
-            .child(self.slider_row(IconName::Layers, "settings_sheet_solidity", (!sheet_on).then(|| tr("settings_sheet_only")),
-                Knob::SheetSolidity, sheet_on, &a, cx))
-            .child(self.slider_row(IconName::Contrast, "settings_contrast", (!text_on).then(|| tr("settings_contrast_only")),
-                Knob::Contrast, text_on, &a, cx));
-
-        // Fonte e tamanho na mesma linha; a busca pelo tamanho ("Tamanho do código") destaca a linha da fonte.
-        let type_row = |area: Area, title: &'static str, description: &'static str, size_key: &'static str| {
-            let (_, font, size) = self.settings_ui.type_picks.iter().find(|(a, ..)| *a == area).expect("every area has pickers");
-            let control = div().flex().items_center().gap_2()
-                .child(Select::new(font).id(SharedString::from(format!("font-{area:?}"))).small().w(px(if live { 172. } else { 200. }))
-                    .menu_width(px(260.)).search_placeholder(tr("settings_font_search")).accessibility_label(tr(title)))
-                .child(Select::new(size).id(SharedString::from(format!("font-size-{area:?}"))).small().w(px(96.)).accessibility_label(tr(size_key)))
-                .into_any_element();
-            self.mark(self.row(IconName::Type, title, Some(tr(description)), true, control), size_key)
-        };
-        let text_box = settings_box()
-            .child(type_row(Area::Text, "settings_font", "settings_font_desc", "settings_text_size"))
-            .child(type_row(Area::Code, "settings_code_font", "settings_code_font_desc", "settings_code_size"))
-            .child(type_row(Area::Terminal, "settings_terminal_font", "settings_terminal_font_desc", "settings_terminal_size"))
-            .child(self.slider_row(IconName::SlidersHorizontal, "settings_line_height", None, Knob::Line, true, &a, cx))
-            .child(self.slider_row(IconName::PanelLeft, "settings_column", None, Knob::Column, true, &a, cx));
-
-        const THINKING: [ThinkingTools; 3] = [ThinkingTools::None, ThinkingTools::Search, ThinkingTools::All];
-        const LOOKS: [ToolLook; 3] = [ToolLook::Classic, ToolLook::Chips, ToolLook::Tree];
-        // Na Árvore o raciocínio já entra no grupo com todas as chamadas: a escolha do pensamento fica sem efeito.
-        let thinking_on = a.tool_look != ToolLook::Tree;
-        let conversation_box = settings_box()
-            .child(self.row(IconName::Wrench, "settings_tool_calls", None, true,
-                segmented("tool-calls", &[tr("settings_tool_calls_classic"), tr("settings_tool_calls_chips"), tr("settings_tool_calls_tree")],
-                    LOOKS.iter().position(|l| *l == a.tool_look).unwrap_or(0), true,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tool_look = LOOKS[index]; this.apply_appearance(next, true, cx); }, cx)))
-            .child(self.row(IconName::ListChecks, "settings_task_list", None, true,
-                segmented("task-list", &[tr("settings_task_list_hide"), tr("settings_task_list_progress")], a.task_list as usize, true,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.task_list = index == 1; this.apply_appearance(next, true, cx); }, cx)))
-            .child(self.row(IconName::Activity, "settings_thinking", (!thinking_on).then(|| tr("settings_thinking_tree")), thinking_on,
-                segmented("thinking", &[tr("settings_thinking_none"), tr("settings_thinking_search"), tr("settings_thinking_all")],
-                    THINKING.iter().position(|t| *t == a.thinking_tools).unwrap_or(1), thinking_on,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.thinking_tools = THINKING[index]; this.apply_appearance(next, true, cx); }, cx)))
-            .child(self.row(IconName::ChartColumn, "settings_table_chart", None, true,
-                segmented("table-chart", &[tr("settings_table_chart_hide"), tr("settings_table_chart_show")], a.table_chart as usize, true,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.table_chart = index == 1; this.apply_appearance(next, true, cx); }, cx)));
-
-        let height = segmented("sidebar-height", &[tr("settings_sidebar_full"), tr("settings_sidebar_content")],
-            if a.sidebar_height == SidebarHeight::Content { 1 } else { 0 }, floating,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_height = if index == 1 { SidebarHeight::Content } else { SidebarHeight::Full }; this.apply_appearance(next, true, cx); }, cx);
-        const NAVIGATION: [Navigation; 3] = [Navigation::Sidebar, Navigation::Tabs, Navigation::Conversations];
-        let sidebar_box = settings_box()
-            .child(self.row(IconName::PanelLeft, "settings_collapsed_nav", None, true,
-                segmented("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_nav_conversations")],
-                    NAVIGATION.iter().position(|n| *n == a.navigation).unwrap_or(0), true,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); }, cx)))
-            .child(self.row(IconName::PanelLeft, "settings_sidebar_density", Some(tr("settings_sidebar_density_hint")), a.navigation == Navigation::Conversations,
-                segmented("sidebar-density", &[tr("settings_sidebar_normal"), tr("settings_sidebar_compact")], a.sidebar_compact as usize, a.navigation == Navigation::Conversations,
-                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_compact = index == 1; this.apply_appearance(next, true, cx); }, cx)))
-            .child(self.row(IconName::PanelLeft, "settings_sidebar_height", Some(tr("settings_only_floating")), floating, height));
-
-        // Os dois botões do topo com a borda forte do mock.
-        let top_button = |id: &'static str, key: &'static str| Button::new(id).outline().small().border_color(theme::border_strong()).label(tr(key));
-        let reset = top_button("appearance-reset", "settings_reset").tooltip(tr("settings_reset_hint"))
-            .on_click(cx.listener(|this, _, window, cx| this.reset_appearance(window, cx)));
-        let import = top_button("appearance-electron", "electron_import").tooltip(tr("electron_import_hint"))
-            .on_click(cx.listener(|this, _, window, cx| this.import_electron(true, window, cx)));
-        // A âncora da rolagem até os botões do topo é a faixa deles.
-        let top_key = self.settings_ui.hit.filter(|k| matches!(*k, "settings_live" | "settings_reset")).unwrap_or("");
-        let top = if live { div().pt(px(12.)).flex().justify_end().child(reset) } else {
-            div().flex().items_end().gap_2()
-                .child(div().flex_1().flex().flex_col()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr("settings_page_appearance")))
-                    .child(div().mt(px(6.)).text_color(theme::muted()).child(tr("settings_appearance_lead"))))
-                .child(top_button("appearance-live", "settings_live").on_click(cx.listener(|this, _, window, cx| {
-                    this.settings_ui.live = true;
-                    this.settings_ui.hit = None;
-                    this.root_focus.focus(window, cx);
-                    cx.notify();
-                })))
-                .child(import)
-                .child(reset)
-        };
-        div().flex().flex_col()
-            .child(self.mark(top, top_key))
-            .when_some(self.appearance_note.clone(), |el, note| el.child(div().mt_3().text_sm().text_color(theme::warning()).child(note)))
-            .child(style)
-            // A caixa ao vivo não repete a prévia: a conversa de verdade está atrás dela.
-            .when(!live, |el| el.child(preview))
-            .child(heading("settings_theme")).child(theme_cards)
-            .when_some(desktop_fallback, |el, note| el.child(div().mt_3().text_sm().text_color(theme::warning()).child(note)))
-            .child(heading("settings_panels")).child(panel_cards)
-            .child(heading("settings_color")).child(color_box)
-            .child(heading("settings_background_group")).child(background_box)
-            .when_some(self.backdrop_note.clone(), |el, note| el.child(div().mt_3().text_sm().text_color(theme::warning()).child(note)))
-            .child(heading("settings_reading_group")).child(reading_box)
-            .child(heading("settings_text_group")).child(text_box)
-            .child(heading("settings_conversation_group")).child(conversation_box)
-            .child(heading("settings_sidebar_group")).child(sidebar_box)
-            .child(div().mt(px(14.)).text_size(px(12.5)).text_color(theme::faint()).child(tr("settings_web_only")))
             .into_any_element()
     }
 
@@ -1150,20 +806,6 @@ impl Hangar {
             // `flex` no invólucro: embaixo do título o controle fica do tamanho dele, sem esticar a borda.
             .child(div().flex_shrink_0().when(live, |el| el.flex().pl(px(38.))).child(control));
         self.mark(row, title)
-    }
-
-    fn slider_row(&self, icon: IconName, title: &'static str, description: Option<String>, knob: Knob, enabled: bool, a: &Appearance,
-        cx: &mut Context<Self>) -> Div {
-        let state = self.settings_ui.slider(knob);
-        // A coluna depende da janela e do painel, como no web: a escala é o que se escolhe.
-        let value = format!("{}%", knob.read(a));
-        let control = div().w(px(230.)).flex().items_center()
-            .child(self.slider_edge(knob, false, enabled, cx))
-            .child(Slider::new(state).flex_1().bg(theme::accent()).text_color(theme::text()).disabled(!enabled))
-            .child(self.slider_edge(knob, true, enabled, cx))
-            .child(div().w(px(60.)).flex_shrink_0().text_right().text_size(px(12.5))
-                .text_color(theme::muted()).child(value));
-        self.row(icon, title, description, enabled, control.into_any_element())
     }
 }
 

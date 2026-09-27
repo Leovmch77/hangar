@@ -94,6 +94,15 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Visualizador de imagem em tela cheia, vídeo e PDF embutidos | pendente | abrem no programa do sistema |
 | Perguntas, opções, planos, fila | conferido | Task 3; checagem de não regressão na fixture dela |
 
+## Configurações
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Aparência em cartões por seção, com atalhos fixos para cada seção | pendente no web | nasceu no nativo (`settings/appearance_page.rs`); o web segue com a lista de linhas |
+| Fundo, Leitura, Chamadas de ferramenta e Navegação recolhida escolhidos por miniatura | pendente no web | no web são botões de texto |
+| Ajuste dependente recuado sob o de cima (Força, Papel de parede, Solidez da folha, Contraste, O que entra no pensamento, Densidade) | pendente no web | no web cada um é uma linha solta |
+| Prévia ao lado que segue a seção mexida (chamadas no estilo escolhido, tarefas, tabela, leitura, navegação) | pendente no web | só com a janela larga (1400px); estreita ou ao vivo, a prévia de conversa fica no corpo como antes |
+
 ## Como rodar a prova
 
 ```bash
