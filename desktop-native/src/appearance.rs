@@ -198,6 +198,13 @@ impl Default for Appearance {
 }
 
 impl Appearance {
+    /// Atalho de valores: ajustes posteriores continuam independentes.
+    pub fn compact_style(self) -> Self {
+        Self { font: Font::System, text_size: 100, line_height: 108, column: 94,
+            code_font: CodeFont::JetBrainsMono, code_size: 25, tool_look: ToolLook::Tree,
+            navigation: Navigation::Conversations, sidebar_compact: true, ..self }
+    }
+
     /// "Voltar ao padrão" do web: não mexe em tema, fonte, fundo, painéis nem no jeito da conversa.
     pub fn reset_keeping_choices(self) -> Self {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
@@ -331,6 +338,23 @@ pub fn save() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_style_preserves_other_choices_and_keeps_adjustments_after_reload() {
+        let before = Appearance { theme: ThemeMode::Light, background: Background::Texture,
+            font: Font::Mono, text_size: 120, line_height: 120, column: 120,
+            code_font: CodeFont::System, code_size: 30, ..Appearance::default() };
+        let compact = before.compact_style();
+        assert_eq!((compact.font, compact.text_size, compact.line_height, compact.column), (Font::System, 100, 108, 94));
+        assert_eq!((compact.code_font, compact.code_size, compact.tool_look), (CodeFont::JetBrainsMono, 25, ToolLook::Tree));
+        assert_eq!((compact.navigation, compact.sidebar_compact), (Navigation::Conversations, true));
+        assert_eq!((compact.theme, compact.background), (before.theme, before.background));
+        let adjusted = Appearance { text_size: 105, ..compact };
+        let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&adjusted).unwrap()).unwrap();
+        assert_eq!(loaded, adjusted);
+        assert_ne!(loaded, loaded.compact_style());
+        assert_eq!(loaded.compact_style(), compact);
+    }
 
     #[test]
     fn sidebar_navigation_keeps_old_files_and_round_trips_both_densities() {
