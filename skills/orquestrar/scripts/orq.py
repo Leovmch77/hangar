@@ -465,6 +465,47 @@ def run_checks(repo: str, cmds: list[str], log: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def record_check(d: Path, task: int, commit: str, ok: bool, log: str) -> None:
+    with (d / "checks.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now(), "task": task, "commit": commit, "ok": ok, "log": log}) + "\n")
+
+
+def check_ok(d: Path, task: int, commit: str) -> bool:
+    p = d / "checks.jsonl"
+    if not p.exists():
+        return False
+    last = None
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            c = json.loads(line)
+        except ValueError:
+            continue
+        if c.get("task") == task and (c.get("commit", "").startswith(commit) or commit.startswith(c.get("commit", "-"))):
+            last = c
+    return bool(last and last.get("ok"))
+
+
+def cmd_check(a) -> int:
+    d = base_dir(a.dir)
+    cfg = config(d)
+    repo = a.repo or cfg["repo"]
+    full = git(repo, "rev-parse", "--verify", f"{a.commit}^{{commit}}").strip()
+    # The checks judge the frozen round: a tree that moved since would make the log lie.
+    if subprocess.run(["git", "-C", repo, "diff", "--quiet", full, "--"], capture_output=True).returncode != 0:
+        raise OrqError(f"worktree differs from {full[:12]}: freeze the round first, then check")
+    cmds = plan_of(d).get("checagens") or []
+    log = d / "checks" / f"task{a.task}-{full[:12]}.log"
+    if not cmds:
+        record_check(d, a.task, full, True, "")
+        print(f"check T{a.task}: nothing declared")
+        return 0
+    ok, why = run_checks(repo, cmds, log)
+    record_check(d, a.task, full, ok, str(log))
+    journal_append(d, f"check T{a.task} {full[:12]}: {'ok' if ok else why}")
+    print(f"check T{a.task} ok {len(cmds)}/{len(cmds)}, log {log}" if ok else why)
+    return 0 if ok else 1
+
+
 def cmd_init(a) -> int:
     d = base_dir(a.dir)
     contract = Path(a.contract).expanduser().resolve()
@@ -574,6 +615,10 @@ def cmd_event(a) -> int:
             ev[k] = v
     if a.reincide:
         ev["reincide"] = True
+    if (ev.get("tipo") == "entrega" and ev.get("fase") != "prova"
+            and plan_of(d).get("checagens") and not check_ok(d, ev.get("task"), ev.get("commit") or "")):
+        raise OrqError(f"run `orq check --task {ev.get('task')} --commit {ev.get('commit') or '<stash>'}` "
+                       "first: the plan declares checks and none passed on this object")
     if ev.get("tipo") == "entrega" and ev.get("fase") == "prova":
         ok = _code_approved_object(d, ev.get("task"))
         got = ev.get("commit") or ""
@@ -890,6 +935,10 @@ def build_parser() -> argparse.ArgumentParser:
     for k in EVENT_FIELDS_STR:
         s.add_argument(f"--{k}")
     s.add_argument("--reincide", action="store_true")
+    s = sub.add_parser("check", help="run the plan's checks on a frozen round")
+    s.add_argument("--task", type=int, required=True)
+    s.add_argument("--commit", required=True)
+    s.add_argument("--repo", help="the Task's worktree; default orq.json's")
     s = sub.add_parser("read", help="the contract's common part + one Task, or the journal's tail")
     s.add_argument("what", choices=["contract", "journal"])
     s.add_argument("--task", type=int)
@@ -915,8 +964,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "read": cmd_read, "ball": cmd_ball,
-        "done": cmd_done, "team": cmd_team,
+CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
+        "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log}
 
 

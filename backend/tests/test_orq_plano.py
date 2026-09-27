@@ -107,3 +107,78 @@ def test_init_exige_plano_carimbado_e_sem_mudanca(tmp_path):
     run("plan-check", str(p), "--repo", str(tmp_path), "--stamp")
     run(*base)
     assert json.loads((d / "orq.json").read_text())["plan"] == str(p.resolve())
+
+
+@pytest.fixture
+def repo(tmp_path):
+    r = tmp_path / "repo"; r.mkdir()
+    g = lambda *a: subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True,
+                                  text=True).stdout.strip()
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (r / "a.txt").write_text("1\n"); (r / "b.txt").write_text("1\n")
+    g("add", "a.txt", "b.txt"); g("commit", "-qm", "base")
+    return r, g
+
+
+def iniciar(tmp_path, r, projeto=PROJETO):
+    d = tmp_path / "orq"; d.mkdir()
+    (tmp_path / "roteiro-2.md").write_text("x\n")
+    p = tmp_path / "orq-plano.md"
+    p.write_text(f"# Orchestration plan — x\n\n{projeto}\n{TASKS}")
+    run("plan-check", str(p), "--repo", str(r), "--stamp")
+    c = tmp_path / "regras.md"; c.write_text("")
+    log = tmp_path / "sent.log"
+    fake = tmp_path / "fake-send"
+    fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n'); fake.chmod(0o755)
+    e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "ORQ_JEV": "off"}
+    run("init", "--arbiter", "arb", "--repo", str(r), "--contract", str(c), "--plan", str(p), env=e)
+    run("event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex", "--par", "rev", env=e)
+    return d, e, log
+
+
+def congelar(r, g, content="2\n"):
+    (r / "a.txt").write_text(content); g("add", "a.txt")
+    h = g("stash", "create"); g("stash", "store", "-m", "round", h)
+    return h
+
+
+def test_entrega_sem_check_e_recusada_e_com_check_passa(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    h = congelar(r, g)
+    res = run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e, check=False)
+    assert res.returncode == 2 and "orq check --task 1" in res.stderr
+    out = run("check", "--task", "1", "--commit", h, env=e).stdout
+    assert out.startswith("check T1 ok 1/1")
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+
+
+def test_check_recusa_arvore_diferente_do_objeto(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    h = congelar(r, g)
+    (r / "a.txt").write_text("mexido depois\n")
+    res = run("check", "--task", "1", "--commit", h, env=e, check=False)
+    assert res.returncode == 2 and "worktree differs from" in res.stderr
+
+
+def test_checagem_que_falha_nao_libera_entrega(tmp_path, repo):
+    r, g = repo
+    # A checagem passa no carimbo (a marca existe) e falha depois (a marca some).
+    (r / "marca").write_text("x")
+    d, e, _ = iniciar(tmp_path, r, projeto=PROJETO.replace("Checagens: `true`", "Checagens: `test -f marca`"))
+    (r / "marca").unlink()
+    h = congelar(r, g)
+    res = run("check", "--task", "1", "--commit", h, env=e, check=False)
+    assert res.returncode == 1 and "check failed" in res.stdout
+    res = run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e, check=False)
+    assert res.returncode == 2
+
+
+def test_execucao_sem_plano_entrega_sem_check(tmp_path, repo):
+    """orq.json de antes dos planos carimbados: nenhuma trava nova."""
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    cfg = json.loads((d / "orq.json").read_text()); cfg.pop("plan")
+    (d / "orq.json").write_text(json.dumps(cfg))
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", congelar(r, g), env=e)
