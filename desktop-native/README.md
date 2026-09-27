@@ -20,10 +20,10 @@ Execute o comando na raiz desta worktree. O seletor `+1.98.1` mantém a versão 
 No Linux, o fundo do chat usa transparência; a prova com dois fundos coloridos está em [verification.md](docs/verification.md). Windows e macOS mantêm fundo opaco até sua conferência visual. O estado exato das verificações e os limites desta entrega estão no mesmo documento.
 
 O ícone do aplicativo vem de `assets/brand/icon.png`; o executável Windows incorpora
-`assets/brand/icon.ico`. No Linux, o nome do lançador precisa ser
-`com.hangar.native.desktop` para combinar com o `app_id` da janela; seu campo `Icon` aponta
-para o PNG. O `icon.icns` está pronto para o macOS, mas a release atual publica um binário avulso:
-o Finder só exibe ícone próprio quando ele está num pacote `.app` que referencia esse arquivo.
+`assets/brand/icon.ico`. No Linux, rode `tools/install-linux.sh` após o build: ele instala
+o binário, o PNG e `com.hangar.native.desktop`, nome que combina com o `app_id` da janela.
+No macOS, `tools/package-macos.sh <binário> <Hangar.app>` monta o pacote com `icon.icns`.
+A release atual ainda publica só o binário avulso; seu ZIP não inclui esse pacote.
 
 ## Baixar pronto e atualização
 
