@@ -3441,10 +3441,12 @@ impl Hangar {
             .child(chrome::section_label(label))
             .when_some(count, |el, n| el.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(n.to_string())));
         let mut children: Vec<AnyElement> = Vec::new();
+        // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
+        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         let rows = |list: &[&SessionInfo], children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
             let selected = selected_name == Some(session.name.as_str());
-            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, &host, window, cx) }
-                else { self.render_session_row((*session).clone(), selected, &host, window, cx) });
+            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, window, cx) }
+                else { self.render_session_row((*session).clone(), selected, mixed, window, cx) });
         };
         if !layout.waiting.is_empty() {
             children.push(section(tr("sidebar_awaiting"), Some(layout.waiting.len())).into_any_element());
@@ -3596,7 +3598,8 @@ impl Hangar {
             .into_any_element()
     }
 
-    fn render_conversation_row(&self, session: SessionInfo, selected: bool, host: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
+    fn render_conversation_row(&self, session: SessionInfo, selected: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = appearance::get().sidebar_compact;
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
@@ -3610,19 +3613,14 @@ impl Hangar {
         let state = conversation_row_state(&session, outcome, queued);
         let color = theme::conversation_status(state);
         let status_label = tr(&format!("sidebar_state_{state}"));
-        let meta = place(&session, host);
-        let label = format!("{name} · {meta} · {status_label}");
-        let branch = session.branch.clone().filter(|b| !b.is_empty() && !compact);
-        let time = || div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
+        let label = match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") };
+        let branch = shown_branch(&session).filter(|_| !compact);
+        let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
-        let status = || {
-            let glyph = if state == "working" {
-                self.working_mark_slot(panes::Area::Nav, format!("conversation-mark-{name}"), 13., color)
-            } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
-            div().flex_shrink_0().flex().items_center().gap(px(4.)).text_size(px(10.)).line_height(px(14.)).text_color(color)
-                .child(div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph))
-                .when(!compact, |el| el.child(status_label.clone()))
-        };
+        let glyph = if state == "working" {
+            self.working_mark_slot(panes::Area::Nav, format!("conversation-mark-{name}"), 13., color)
+        } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
+        let status = div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph);
         let weak = cx.weak_entity();
         let menu = || {
             let (weak, target) = (weak.clone(), name.clone());
@@ -3639,19 +3637,18 @@ impl Hangar {
                 }); })
         };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
-            .when(compact, |el| el.child(status()))
+            .child(status)
             .child(chrome::provider_glyph(&session.provider, 13.))
-            .child(chrome::small_icon(IconName::Folder, 13., theme::muted()))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
-            .when(compact, |el| el.child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
-                .when(show_menu, |el| el.child(menu()))).child(time()));
+            .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
+                .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
         let hover_name = name.clone();
         div().id(SharedString::from(format!("conversation-row-{name}"))).relative().flex_shrink_0()
-            .h(px(if compact { 29. } else if branch.is_some() { 61. } else { 45. }))
+            .h(px(if branch.is_some() { 45. } else { 29. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
             .when_some(focus, |el, focus| el.track_focus(focus))
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -3664,13 +3661,9 @@ impl Hangar {
             }))
             .role(Role::Button).aria_selected(selected).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
-            .when(!compact, |el| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(8.))
-                .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
-                .child(div().flex_1().min_w_0().truncate().child(meta))
-                .child(div().h(px(14.)).flex_shrink_0().flex().items_center()
-                    .map(|el| if show_menu { el.child(menu()) } else if state == "idle" { el.child(time()) } else { el.child(status()) }))))
             .child(title)
-            .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).flex().items_center().gap(px(4.))
+            // Recuo do estado mais o vão: a branch começa embaixo do glifo.
+            .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
                 .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(branch))))
@@ -3694,26 +3687,36 @@ impl Hangar {
             .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element()
     }
 
-    /// Linha de 3 níveis do mock: pasta @ servidor e tempo; selo, nome e estado; pergunta pendente ou branch com o diff.
+    /// Linha do web (Sidebar.svelte): a marca tingida pelo estado no lugar do avatar; nome com a conta e a hora da última
+    /// resposta; embaixo, a resposta com ◆, a pergunta ou o que está fazendo; por fim a pasta (só worktree), a branch fora
+    /// de main/master e o diff. Servidor não aparece: a lista é de um servidor só.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, host: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
-        let chip_state = if limited { "limited" } else { state };
-        let chip = if chip_state == "working" {
-            chrome::working_chip(SharedString::from(format!("row-mark-{}", session.name)), tr("chip_working"))
-        } else { chrome::state_chip(chip_state, tr(&format!("chip_{chip_state}")), false) };
-        let sub = match state {
-            "awaiting_input" => session.question.clone().map(|q| (conversation::one_line(&q, 80), theme::warning(), false)),
-            "working" => session.label.clone().filter(|l| !l.trim().is_empty())
+        let mark_color = if limited { theme::limited() } else { theme::status(state) };
+        let mark = if state == "working" && !limited {
+            chrome::WorkingMark::new(SharedString::from(format!("row-mark-{}", session.name)), 18., mark_color).into_any_element()
+        } else { chrome::hangar_mark(18., mark_color).into_any_element() };
+        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
+            .when(mixed, |el| el.child(div().absolute().left(px(-4.)).top(px(-4.)).p(px(1.)).rounded_full()
+                .bg(theme::raised()).border_1().border_color(theme::border()).child(chrome::provider_glyph(&session.provider, 10.))));
+        let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
+        let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
+        let sub = match reply {
+            Some(r) => Some((conversation::one_line(r, 120), theme::muted(), false)),
+            None if state == "awaiting_input" || session.pending_questions > 0 =>
+                session.question.clone().map(|q| (conversation::one_line(&q, 80), theme::warning(), false)),
+            None if state == "working" => session.label.clone().filter(|l| !l.trim().is_empty())
                 .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), theme::muted(), true)),
-            _ => None,
+            None => None,
         };
-        let meta = place(&session, host);
-        let when = session.last_activity.map(side::since);
-        let branch = session.branch.clone().filter(|b| !b.is_empty());
+        let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
+        let account = account_chip(session.conta.as_deref());
+        let folder = folder_name(&session).filter(|_| session.worktree == Some(true));
+        let branch = shown_branch(&session);
         let (added, removed) = (session.git_added.filter(|n| *n > 0), session.git_removed.filter(|n| *n > 0));
         let name = session.name.clone();
         let questions = session.pending_questions;
@@ -3762,26 +3765,30 @@ impl Hangar {
                 this.select(key_open.clone(), window, cx);
                 cx.stop_propagation();
             }))
-            .child(div().flex().items_center().gap(px(8.)).text_size(px(11.5)).text_color(theme::faint())
-                .child(lane())
-                .child(div().flex_1().min_w_0().truncate().child(meta))
-                .when_some(when, |el, w| el.child(div().flex_shrink_0().child(w))))
-            .child(div().flex().items_center().gap(px(8.)).when(untracked, |el| el.opacity(0.45))
-                .child(lane().child(chrome::provider_glyph(&session.provider, 16.)))
-                .child(name_el)
-                .child(chip))
-            .map(|el| match sub {
-                Some((text, color, working)) => el.child(div().flex().gap(px(8.)).child(lane())
-                    .child(div().flex_1().min_w_0().truncate().text_xs().text_color(color).when(working, |el| el.italic()).child(text))),
-                None if branch.is_some() || added.is_some() || removed.is_some() => el.child(div().flex().items_center().gap(px(8.))
-                    .text_size(px(11.5)).text_color(theme::faint()).child(lane())
-                    .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
-                        .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
-                            .child(div().min_w_0().truncate().child(b)))
-                        .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
-                        .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))),
-                None => el,
-            })
+            .role(Role::Button).aria_selected(selected).aria_label(format!("{name} · {state_label}"))
+            // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
+            .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
+                .child(avatar)
+                .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.)).when(untracked, |el| el.opacity(0.45)).child(name_el))
+                .when_some(account, |el, (label, color)| el.child(div().flex_shrink_1().min_w_0().max_w(px(96.)).h(px(16.)).px(px(6.))
+                    .flex().items_center().gap(px(4.)).rounded_full().bg(theme::hover())
+                    .text_size(px(10.)).font_weight(FontWeight::MEDIUM).text_color(theme::muted())
+                    .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(color))
+                    .child(div().min_w_0().truncate().child(label))))
+                .when_some(when, |el, w| el.child(div().flex_shrink_0().text_size(px(10.)).text_color(theme::faint()).child(w))))
+            .when_some(sub, |el, (text, color, working)| el.child(div().flex().items_center().gap(px(8.)).child(lane())
+                .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
+                    .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
+                    .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
+            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+                .text_size(px(11.5)).text_color(theme::faint()).child(lane())
+                .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
+                    .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
+                        .child(div().min_w_0().truncate().child(f)))
+                    .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
+                        .child(div().min_w_0().truncate().child(b)))
+                    .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
+                    .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.hide_preview();
@@ -3814,6 +3821,25 @@ fn kind_of<'a>(items: &[Item], index: usize, events: &'a [ChatEvent]) -> Option<
 
 fn folder_name(session: &SessionInfo) -> Option<String> {
     session.cwd.as_deref().and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next()).filter(|f| !f.is_empty()).map(str::to_owned)
+}
+
+/// A branch que a linha mostra: main e master são o normal e ficam de fora, como no web.
+fn shown_branch(session: &SessionInfo) -> Option<String> {
+    session.branch.clone().filter(|b| !b.is_empty() && b != "main" && b != "master")
+}
+
+/// Selo da conta do `chipDaConta` do web (lib/conta.ts): o nome é o sufixo da pasta, a pasta sem sufixo é a padrão,
+/// e a cor sai do nome da pasta, com as mesmas seis tintas. Motor (`chave:`) não tem selo.
+fn account_chip(conta: Option<&str>) -> Option<(String, Hsla)> {
+    const TINTS: [u32; 6] = [0x80bbc3, 0xd3a781, 0x97c69d, 0xcd99b9, 0x9ba9d9, 0xccbf87];
+    let conta = conta?;
+    let harness = ["claude", "codex"].into_iter().find(|h| conta.starts_with(&format!("{h}:")))?;
+    let base = conta[harness.len() + 1..].trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
+    let own = if base == format!(".{harness}") { "" } else { base.strip_prefix(&format!(".{harness}-")).unwrap_or(base) };
+    let label = own.strip_prefix(&format!("{harness}-")).filter(|rest| !rest.is_empty()).unwrap_or(own);
+    let label = if label.is_empty() { crate::i18n::tr_web("conta_padrao", &HashMap::new()).unwrap_or_default() } else { label.to_owned() };
+    let hash = base.chars().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c.encode_utf16(&mut [0; 2])[0] as u32));
+    Some((label, rgb(TINTS[hash as usize % TINTS.len()]).into()))
 }
 
 /// "pasta @ servidor"; sem pasta legível, só o servidor.

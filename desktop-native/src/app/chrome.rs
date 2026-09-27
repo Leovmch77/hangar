@@ -454,14 +454,6 @@ pub fn state_chip(state: &str, label: String, large: bool) -> AnyElement {
         .child(label).into_any_element()
 }
 
-/// O chip "Trabalhando" da lista com a marca animada no lugar do ponto; o resto igual ao `state_chip`.
-pub fn working_chip(key: impl Into<ElementId>, label: String) -> AnyElement {
-    let (bg, fg) = theme::pill("working");
-    div().flex_shrink_0().h(px(22.)).px(px(9.)).flex().items_center().gap(px(6.)).rounded_full().bg(bg).text_color(fg)
-        .text_size(px(12.)).font_weight(FontWeight::MEDIUM)
-        .child(WorkingMark::new(key, 12., fg)).child(label).into_any_element()
-}
-
 pub fn meter(pct: f64) -> AnyElement {
     let color = meter_color(pct);
     div().h(px(4.)).w_full().rounded_full().bg(theme::raised())

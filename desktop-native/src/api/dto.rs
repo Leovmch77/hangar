@@ -29,6 +29,11 @@ pub struct SessionInfo {
     pub limit_reset: Option<String>,
     /// Sessão que recebe um prompt quando esta terminar (`PUT …/then`).
     pub then_target: Option<String>,
+    /// Conta que a sessão usa ("claude:<pasta>", "codex:<pasta>"); vira o selo da linha.
+    pub conta: Option<String>,
+    pub last_reply: Option<String>,
+    pub last_reply_at: Option<f64>,
+    pub worktree: Option<bool>,
 }
 
 impl SessionInfo {
