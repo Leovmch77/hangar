@@ -3325,11 +3325,11 @@ impl Hangar {
         let charted = (plain && id != PREVIEW && appearance::get().table_chart).then(|| self.tables.get(&id)).flatten()
             .filter(|(source, tables)| *source == markdown && !tables.is_empty()).map(|(_, tables)| tables.clone());
         let refs = match self.items.get(index) {
-            Some(Item::Event(i)) if id != PREVIEW => attachment_refs(&self.chat.events[*i]),
+            Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).map(attachment_refs).unwrap_or_default(),
             _ => Vec::new(),
         };
         // Na bolha do usuário as imagens saem em miniatura, lado a lado e acima do texto, como no web.
-        let peer = match self.items.get(index) { Some(Item::Event(i)) if user => peer_of(&self.chat.events[*i]), _ => None };
+        let peer = match self.items.get(index) { Some(Item::Event(i)) if user => self.chat.events.get(*i).and_then(peer_of), _ => None };
         let peer_scope = peer.as_ref().map(|peer| peer.scope);
         let peer_head = peer.map(|peer| self.peer_head(&id, peer, cx));
         let (images, refs): (Vec<_>, Vec<_>) = refs.into_iter().partition(|(_, _, image)| user && *image);
@@ -3352,7 +3352,7 @@ impl Hangar {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx))));
         // Hora e copiar sob a mensagem, só ao passar o mouse; a faixa é reservada para a lista não remedir.
         let actions = (id != PREVIEW && (user || plain)).then(|| {
-            let ts = match self.items.get(index) { Some(Item::Event(i)) => self.chat.events[*i].ts, _ => None };
+            let ts = match self.items.get(index) { Some(Item::Event(i)) => self.chat.events.get(*i).and_then(|e| e.ts), _ => None };
             let (view, copy_id) = (cx.weak_entity(), id.clone());
             div().h(px(24.)).flex().items_center().gap_1().opacity(0.).group_hover(ROW_GROUP, |s| s.opacity(1.))
                 .when_some(stamp(ts), |el, at| el.child(div().text_xs().text_color(theme::faint()).child(at)))
