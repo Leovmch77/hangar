@@ -3680,8 +3680,7 @@ impl Hangar {
             .when(conversations, |el| el.border_color(border))
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(16., theme::accent()))
-                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
-                .child(div().px_2().py(px(1.)).rounded_full().bg(theme::hover()).text_size(px(10.)).text_color(theme::faint()).child(tr("experimental"))))
+                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
