@@ -171,6 +171,14 @@ grep -q "/api/sessions/exec1/history" "$t/urls" || fail "o detector de laço nã
 if grep -q "MAY be looping" "$t/sent.log" "$t/out"; then fail "a fila da tela virou alarme de laço"; fi
 if grep -q "You repeat the SAME command" "$t/sent.log"; then fail "a fila da tela levou aviso de laço"; fi
 
+# `orq lock take <recurso>` repetido é a mesma fila, agora para qualquer recurso.
+novo fila-trava; orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
+printf '%s' '[{"kind":"tool_use","tool_input":{"command":"python3 ~/.claude/skills/orquestrar/scripts/orq.py --dir /x lock take db --owner ex --wait-min 9"}}]' > "$t/history.json"
+REP=1 vigia
+grep -q "/api/sessions/exec1/history" "$t/urls" || fail "o detector de laço não leu o histórico (trava)"
+if grep -q "MAY be looping" "$t/sent.log" "$t/out"; then fail "a fila da trava virou alarme de laço"; fi
+if grep -q "You repeat the SAME command" "$t/sent.log"; then fail "a fila da trava levou aviso de laço"; fi
+
 novo r-trilha; orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
 touch -d '2 hours ago' "$d/eventos.jsonl" "$d/registro.md"
 echo "1 The trail" > "$t/falha"
@@ -323,4 +331,24 @@ if PATH="$t/bin:$PATH" CP_ENV="$t/env" CP_VIGIA_INTERVALO=0 CP_VIGIA_CICLOS=1 CP
 fi
 [ ! -s "$t/sent.log" ] || fail "mandou recado sem orq init"
 grep -q "orq.json" "$t/err2" || fail "não disse por que não armou"
+
+# Rearmar o vigia na mesma execução, com o mesmo árbitro: sem segunda prova de canal.
+printf '%s' '[{"name":"exec1","state":"idle"},{"name":"rev1","state":"idle"},{"name":"arb","state":"idle"}]' > "$t/sessions.json"
+novo rearma
+orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
+vigia
+: > "$t/sent.log"
+vigia
+if grep -q "ARMED" "$t/sent.log"; then fail "rearmou mandando a prova de canal de novo"; fi
+grep -q "re-armed" "$t/out" || fail "rearmar sem prova não disse nada"
+
+# Contexto acima do teto com a vez trocando: um alarme só até subir 10 pontos. O árbitro segue
+# vigiado enquanto a lista em volta dele muda (exec1 → rev1).
+printf '%s' '[{"name":"exec1","state":"working","last_activity":9999999999},{"name":"rev1","state":"idle"},{"name":"arb","state":"idle","status_line":"💬 ctx 600k/1000k"}]' > "$t/sessions.json"
+novo ctx-vez
+orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
+printf 'python3 %q --dir %q event entrega --task 1 --rodada 1 --commit abc >/dev/null\n' "$ORQPY" "$d" > "$t/on-sessions"
+CICLOS=4 vigia
+n=$(grep -c "YOUR context is at 60%" "$t/sent.log" || true)
+[ "$n" -eq 1 ] || fail "alarme de contexto repetiu na troca de vez ($n)"
 echo ok

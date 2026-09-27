@@ -159,8 +159,16 @@ if [ -n "$ORQD" ]; then
   ARB=${bola##* }
   SESSOES=("$ARB")
 fi
-avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
-rc_arm=$?
+ARMADO="${ORQD:+$ORQD/.vigia-armado}"
+if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" = "$ARB" ]; then
+  # The channel to this arbiter was already proven in this run: one proof per arbiter, not per arming.
+  echo "[vigia] re-armed over: ${SESSOES[*]} (channel to $ARB already proven)"
+  rc_arm=0
+else
+  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
+  rc_arm=$?
+  [ "$rc_arm" -eq 0 ] && [ -n "$ARMADO" ] && printf '%s' "$ARB" > "$ARMADO"
+fi
 if [ "$rc_arm" -ne 0 ]; then
   echo "[vigia] FAILED to prove the channel with '$ARB' (rc=$rc_arm, stderr in $CP_VIGIA_LOG). I am NOT armed." >&2
   exit 1
@@ -227,8 +235,8 @@ try:
     else:
         ti = tool[-1].get("tool_input")
         cmd = str(ti.get("command") or "") if isinstance(ti, dict) else ""
-        # Re-running `orq screen take` is the screen queue (exit 1 → again), not a loop.
-        if "orq" in cmd and "screen take" in cmd:
+        # Re-running `orq lock take` (or its alias `screen take`) is the lock queue (exit 1 → again), not a loop.
+        if "orq" in cmd and ("screen take" in cmd or "lock take" in cmd):
             print("")
         else:
             payload = json.dumps(ti, sort_keys=True, ensure_ascii=False)
@@ -292,7 +300,7 @@ for nome in sys.argv[2:]:
     saida.append("%d/%s/%dk/%dk" % (round(100 * c[0] / c[1]), lim, c[0] // 1000, c[1] // 1000))
 print("|".join(saida))
 PY
-CAVISO=()        # context % at the last delivered ceiling alarm, per session (0 = below the ceiling)
+declare -A CAVISO=()   # context % at the last delivered ceiling alarm, per session NAME: survives a change of who has the ball
 
 # HEARTBEAT (-e): the panel reads <dir>/vigia.json to tell a live watchdog from a dead one
 # without asking the arbiter. tmp + mv: a reader never sees half a file.
@@ -516,7 +524,7 @@ for i in $(seq 1 "$CICLOS"); do
       export ARB=${nova[-1]}
       if [ "${nova[*]}" != "${SESSOES[*]}" ]; then
         SESSOES=("${nova[@]}")
-        PSEQ=(); NUDGE=(); RHASH=(); RSEQ=(); RAVISO=(); CAVISO=(); ALARM_FAILS=(); avisou_travado=; avisou_cota=
+        PSEQ=(); NUDGE=(); RHASH=(); RSEQ=(); RAVISO=(); ALARM_FAILS=(); avisou_travado=; avisou_cota=
         echo "[vigia] watching: ${SESSOES[*]}"
       fi
     else
@@ -639,16 +647,16 @@ for i in $(seq 1 "$CICLOS"); do
   fi
   IFS='|' read -r -a CTXS <<< "$ct"
   for k in "${!SESSOES[@]}"; do
+    nome=${SESSOES[$k]}
     c=${CTXS[$k]:--}
     [ "$c" = "-" ] && continue
     IFS='/' read -r pct lim usado total <<< "$c"
-    if [ "$pct" -lt "$lim" ]; then CAVISO[$k]=0; continue; fi
+    if [ "$pct" -lt "$lim" ]; then CAVISO[$nome]=0; continue; fi
     # Past the ceiling the session keeps working until the arbiter decides; with no decision the
     # alarm comes back every 10 more points instead of going quiet for good.
-    ult=${CAVISO[$k]:-0}
+    ult=${CAVISO[$nome]:-0}
     [ "$ult" -gt 0 ] && [ "$pct" -lt $(( ult + 10 )) ] && continue
     ainda=""; [ "$ult" -gt 0 ] && ainda=" STILL past it, no swap since the alarm at ${ult}%."
-    nome=${SESSOES[$k]}
     if [ "$k" -eq "$ULT" ]; then
       msg="[vigia] YOUR context is at ${pct}% of your window (${usado}/${total}); your row's ceiling is ${lim}%.${ainda} Decide by cost (arbitro-vigia.md, \"Rotation\"): finish the act past the ceiling, or run your succession at the nearest clean point (arbitro-encerramento.md, \"Arbiter succession\"). Record the decision with its numbers: orq log --task <N> \"…\"."
     else
@@ -656,7 +664,7 @@ for i in $(seq 1 "$CICLOS"); do
       msg="[vigia] ${nome} is at ${pct}% of its window (${usado}/${total}; its row's ceiling is ${lim}%).${ainda} I asked it to tell you what is left. Decide by cost (arbitro-vigia.md, \"Rotation\"): little left → it finishes past the ceiling; much left → swap at the nearest clean point. Record the decision with its numbers: orq log --task <N> \"…\"."
     fi
     echo "$msg"
-    deliver_alarm "context:$nome" "$msg" "context alarm for $nome" && CAVISO[$k]=$pct
+    deliver_alarm "context:$nome" "$msg" "context alarm for $nome" && CAVISO[$nome]=$pct
   done
 
   # Stalled JOURNAL: the arbiter's journal is the retrospective's net; >60min without a write
