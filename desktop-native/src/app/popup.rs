@@ -64,7 +64,7 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), Folders }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), Folders, Usage }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
@@ -74,15 +74,17 @@ impl Hangar {
         if page || !self.selected.as_ref().is_some_and(|s| s.readable()) { return None; }
         if let Some(open) = self.ctl_snapshot() { return Some(Floating::Controls(open)); }
         if self.command_panel { return Some(Floating::Commands); }
+        if self.accounts.card { return Some(Floating::Usage); }
         self.recent.clone().map(Floating::Recent)
     }
 
     /// Fecha o painel aberto sobre o compositor; diz se havia um.
     pub(super) fn close_popups(&mut self) -> bool {
         let folders = self.new_chat_folders.replace(false);
-        let open = folders || self.controls_open() || self.command_panel || self.recent.is_some();
+        let open = folders || self.controls_open() || self.command_panel || self.recent.is_some() || self.accounts.card;
         self.close_controls();
         self.command_panel = false;
+        self.accounts.card = false;
         self.recent = None;
         open
     }
@@ -97,6 +99,7 @@ impl Hangar {
         let (anchor, align, narrow, content) = match shown {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
             Floating::Commands => ("composer".to_owned(), Align::Start, false, Some(self.render_command_panel(cx))),
+            Floating::Usage => ("composer-account".to_owned(), Align::End, true, Some(self.render_usage_card())),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);
