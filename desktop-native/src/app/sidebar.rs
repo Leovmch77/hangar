@@ -53,7 +53,7 @@ pub(super) enum SidebarReply {
 /// Uma notificação por sessão: o "git pull…" dá lugar ao resultado, como o `flash` único do web.
 struct GitNote;
 
-fn git_note(name: &str, kind: NotificationType, text: String) -> Notification {
+pub(super) fn git_note(name: &str, kind: NotificationType, text: String) -> Notification {
     // O título diz de qual sessão é: o gesto pode ter sido numa linha que não é a aberta.
     Notification::new().title(name.to_owned()).message(text).with_type(kind).id1::<GitNote>(SharedString::from(name.to_owned()))
 }

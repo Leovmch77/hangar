@@ -115,10 +115,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--backend", type=Path, default=Path.home() / "hangar" / "backend")
+    # Fora do loopback o nativo trata o servidor como remoto e usa as rotas; em 127.0.0.1 ele roda o git no disco.
+    parser.add_argument("--bind", default="127.0.0.1")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer((args.bind, 0), Handler)
     port = server.server_port
     server.ops = load_git_ops(args.backend)
     server.repo = output / f"repo-{port}" / "demo-app"
@@ -158,7 +160,7 @@ if __name__ == "__main__":
                              {"id": "a1", "kind": "assistant_msg", "text": "Abra pela faixa embaixo do compositor.", "ts": 1790445601.0}]}
     threading.Thread(target=refresh, args=(server,), daemon=True).start()
     logging.basicConfig(filename=output / f"fixture-{port}.log", level=logging.INFO, format="%(asctime)s %(message)s")
-    address = f"http://127.0.0.1:{port}"
+    address = f"http://{args.bind}:{port}"
     xdg = output / f"xdg-{port}"
     (xdg / "hangar-native").mkdir(parents=True)
     (xdg / "hangar-native" / "connection.json").write_text(json.dumps({"address": address, "token": "git-fixture"}) + "\n")
