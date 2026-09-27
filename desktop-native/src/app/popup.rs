@@ -36,7 +36,7 @@ impl<T: Clone> Presence<T> {
     /// Quanto aparece agora, sem curva.
     fn visible(&self) -> f32 {
         let (spec, sign) = if self.leaving { (motion::MENU_OUT, -1.) } else { (motion::MENU_IN, 1.) };
-        (self.from + sign * self.since.elapsed().as_secs_f32() / spec.duration().as_secs_f32()).clamp(0., 1.)
+        (self.from + sign * self.since.elapsed().as_secs_f32() / spec.total().as_secs_f32()).clamp(0., 1.)
     }
 
     /// Vira a direção partindo de onde está: reaberto no meio da saída, não pisca.
@@ -216,9 +216,9 @@ mod tests {
     fn closing_keeps_the_last_copy_until_the_fade_ends() {
         let mut presence = Presence::default();
         assert_eq!(presence.frame(Some(1), false).map(|(v, _, leaving)| (v, leaving)), Some((1, false)));
-        presence.since -= motion::MENU_IN.duration();
+        presence.since -= motion::MENU_IN.total();
         assert_eq!(presence.frame(None, false).map(|(v, _, leaving)| (v, leaving)), Some((1, true)));
-        presence.since -= motion::MENU_OUT.duration();
+        presence.since -= motion::MENU_OUT.total();
         assert_eq!(presence.frame(None, false), None);
     }
 

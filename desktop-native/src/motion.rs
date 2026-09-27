@@ -66,7 +66,7 @@ impl Spec {
     pub const fn duration(self) -> Duration { Duration::from_millis(self.ms) }
 
     /// Espera mais duração: quando a linha do tempo inteira acaba.
-    pub const fn total(self) -> Duration { Duration::from_millis(self.delay + self.ms) }
+    pub fn total(self) -> Duration { Duration::from_millis(self.delay + self.ms).mul_f32(scale()) }
 
     /// Progresso com a curva para `raw` de 0 a 1 do tempo; fora disso, preso às pontas.
     pub fn ease(self, raw: f32) -> f32 {
@@ -76,8 +76,17 @@ impl Spec {
 
     /// Quanto do tempo passou desde `start`, de 0 a 1, sem curva; 0 durante a espera.
     pub fn raw(self, start: Instant) -> f32 {
-        ((start.elapsed().as_secs_f32() - self.delay as f32 / 1000.) / self.duration().as_secs_f32()).clamp(0., 1.)
+        let (delay, span) = (self.delay as f32 / 1000. * scale(), self.duration().as_secs_f32() * scale());
+        ((start.elapsed().as_secs_f32() - delay) / span).clamp(0., 1.)
     }
+}
+
+/// Só para medir e provar: `HANGAR_NATIVE_MOTION_SCALE=8` estica 8 vezes cada linha do tempo do catálogo, para uma
+/// sequência de capturas pegar os quadros do meio. Sem a variável, 1.
+fn scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| std::env::var("HANGAR_NATIVE_MOTION_SCALE").ok().and_then(|v| v.parse::<f32>().ok())
+        .filter(|s| s.is_finite()).map_or(1., |s| s.clamp(0.1, 50.)))
 }
 
 /// A curva `--ease-out` do web para quem monta os próprios trechos (a marca "trabalhando").
