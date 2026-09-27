@@ -717,6 +717,8 @@ impl Hangar {
     /// A Aparência numa caixa de 360px sobre a conversa, arrastável pelo cabeçalho; a posição fica gravada.
     pub(super) fn render_live(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let [right, bottom] = self.live_corner(window);
+        // O `dialog-in` do kit: aparece subindo 2 px até o canto gravado.
+        let shown = motion::enter("live-box-in", motion::DIALOG_IN, window, cx);
         // Para abaixo da barra do topo (abas ou cabeçalho), que continua alcançável com a caixa aberta.
         let height = (f32::from(window.viewport_size().height) - bottom - 56.).max(LIVE_VISIBLE[1]);
         let header = div().id("live-header").h(px(40.)).flex_shrink_0().pl(px(14.)).pr(px(6.)).flex().items_center().gap_1()
@@ -736,7 +738,7 @@ impl Hangar {
             .child(chrome::icon_button("live-close", IconName::Close, tr("close"), cx)
                 .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx))));
         let body = self.render_appearance(cx);
-        div().id("live-box").absolute().right(px(right)).bottom(px(bottom)).w(px(LIVE_WIDTH)).max_h(px(height))
+        div().id("live-box").absolute().right(px(right)).bottom(px(bottom - 2. * (1. - shown))).opacity(shown).w(px(LIVE_WIDTH)).max_h(px(height))
             // Opaca mesmo na caixa solta: a conversa atrás não pode atravessar as linhas.
             .flex().flex_col().rounded(px(14.)).border_1().border_color(theme::border_strong()).bg(theme::raised())
             .shadow(theme::popover_shadow()).overflow_hidden().occlude()

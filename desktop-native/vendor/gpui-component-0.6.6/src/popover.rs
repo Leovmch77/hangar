@@ -9,7 +9,7 @@ use std::{rc::Rc, time::Duration};
 use crate::ThemeStyled as _;
 use crate::{
     Selectable, StyledExt as _,
-    animation::ease_out_cubic,
+    animation::cubic_bezier,
     styled::{popover_ring, popover_shadow},
     v_flex,
 };
@@ -118,14 +118,15 @@ impl Element for PaintedSurface {
 ///
 /// This is shadcn/ui's figure: its popup surfaces carry `animate-in`, whose
 /// duration is 150ms.
-const DROPDOWN_ENTER_DURATION: Duration = Duration::from_millis(150);
+// Modified for Hangar: Zeron's `menu-in`, 140 ms `ease`, from 2px above and 30% opacity.
+const DROPDOWN_ENTER_DURATION: Duration = Duration::from_millis(140);
 
 /// Where a dropdown starts out, relative to where it comes to rest.
 ///
 /// Negative is above, so the surface slides *down* out of the trigger's edge —
 /// what shadcn/ui expresses as `data-[side=bottom]:slide-in-from-top-2`. Its
 /// `2` is `0.5rem`, which is 8px at the default root size.
-const DROPDOWN_ENTER_OFFSET: Pixels = px(-8.);
+const DROPDOWN_ENTER_OFFSET: Pixels = px(-2.);
 
 fn dropdown_positioner(bounds: Bounds<Pixels>) -> gpui_base::Positioner {
     gpui_base::Positioner::side(bounds)
@@ -189,9 +190,9 @@ pub(crate) fn dropdown_popup(
 
     let surface = surface.with_animation(
         id,
-        Animation::new(DROPDOWN_ENTER_DURATION).with_easing(ease_out_cubic),
+        Animation::new(DROPDOWN_ENTER_DURATION).with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.)),
         move |surface, delta| {
-            let surface = surface.top(px(travel * (1. - delta))).opacity(delta);
+            let surface = surface.top(px(travel * (1. - delta))).opacity(0.3 + 0.7 * delta);
             if painted {
                 surface.bg(transparent_black()).shadow(Vec::new())
             } else {

@@ -4477,6 +4477,7 @@ impl Render for Hangar {
         self.finish_landing(window);
 
         let ticker = motion::ticker(window, cx);
+        let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
             .bg(if !chat_background { theme::window_fill() }
@@ -4581,7 +4582,7 @@ impl Render for Hangar {
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
             .child(ticker)
-            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude()
+            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
                 .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if this.api.is_some() {
                         this.connection_dialog = false;
@@ -4591,9 +4592,9 @@ impl Render for Hangar {
                     cx.stop_propagation();
                 }))
                 .flex().items_start().justify_center().pt(dialog_top)
-                .child(if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
+                .child(div().relative().top(px(2. * (1. - dialog_in))).child(if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
                     chrome::Glass::new(dialog.focus_trap("connection-dialog", &self.connection_focus), px(16.)).into_any_element()
-                } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() }))
+                } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() })))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
     }
 }

@@ -21,4 +21,9 @@ Origem: crate `gpui-component` 0.6.6 do crates.io (repositório `longbridge/gpui
   sob o conteúdo, na camada da superfície. Sem o global, o desenho original permanece. Motivo: vidro desfocado e a
   superfície dos popovers do app nos menus e listas do kit, sem mexer em cada tela que os usa.
 
+- `src/popover.rs` (`dropdown_popup`), `src/menu/context_menu.rs` e `src/dialog/dialog.rs`: entradas com os tempos do
+  catálogo de movimento do Zeron que o app usa (`desktop-native/src/motion.rs`): listas suspensas e menus de contexto no
+  `menu-in` (140 ms `ease`, 2 px acima e opacidade de 30%), diálogos no `dialog-in` (180 ms `ease`, subindo 2 px enquanto
+  aparecem, no lugar da descida desde o topo). Motivo: um só movimento em todos os popovers e diálogos do app.
+
 Ao atualizar gpui-kit, reaplicar na nova versão ou remover esta cópia quando a API equivalente existir no kit.
