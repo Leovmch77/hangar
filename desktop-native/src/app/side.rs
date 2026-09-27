@@ -527,12 +527,17 @@ impl Hangar {
                     let current = self.side.diff.as_ref().map(|(_, path, _)| path.clone());
                     div().id("side-files-list").max_h(px(220.)).overflow_y_scroll().flex().flex_col()
                         .children(files.iter().enumerate().map(|(n, file)| {
-                            let path = file.path.clone();
+                            let (path, open) = (file.path.clone(), file.path.clone());
                             let counts = match (file.added, file.removed) { (Some(a), Some(r)) => format!("+{a} −{r}"), _ => file.code.clone() };
-                            Button::new(SharedString::from(format!("side-file-{n}"))).ghost().xsmall().w_full().flex_shrink_0().selected(current.as_deref() == Some(file.path.as_str()))
-                                .child(div().flex_1().min_w_0().truncate().font_family(crate::theme::MONO).child(file.path.clone()))
-                                .child(div().flex_shrink_0().text_color(theme::muted()).child(counts))
-                                .on_click(cx.listener(move |this, _, _, cx| this.open_diff(path.clone(), cx)))
+                            // O clique na linha mostra o diff; o botão ao lado abre o arquivo no visor.
+                            div().w_full().flex_shrink_0().flex().items_center()
+                                .child(Button::new(SharedString::from(format!("side-file-{n}"))).ghost().xsmall().flex_1().min_w_0().selected(current.as_deref() == Some(file.path.as_str()))
+                                    .child(div().flex_1().min_w_0().truncate().font_family(crate::theme::MONO).child(file.path.clone()))
+                                    .child(div().flex_shrink_0().text_color(theme::muted()).child(counts))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.open_diff(path.clone(), cx))))
+                                .child(Button::new(SharedString::from(format!("side-file-open-{n}"))).ghost().xsmall().icon(IconName::FileText)
+                                    .tooltip(tr("side_file_open")).accessibility_label(tr("side_file_open"))
+                                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(open.clone(), None, window, cx))))
                         })).into_any_element()
                 }
             };
