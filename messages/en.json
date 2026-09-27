@@ -4206,6 +4206,7 @@
   "native_side_files_reload": "Read again",
   "native_side_files_loading": "Reading changed files…",
   "native_side_files_empty": "No changed files.",
+  "native_rail_prompts": "{n} prompts",
   "native_side_diff_loading": "Reading diff…",
   "native_side_diff_empty": "Empty diff.",
   "native_side_diff_truncated": "Diff cut; the file changed more than fits here.",

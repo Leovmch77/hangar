@@ -4206,6 +4206,7 @@
   "native_side_files_reload": "Ler de novo",
   "native_side_files_loading": "Lendo arquivos alterados…",
   "native_side_files_empty": "Nenhum arquivo alterado.",
+  "native_rail_prompts": "{n} perguntas",
   "native_side_diff_loading": "Lendo diff…",
   "native_side_diff_empty": "Diff vazio.",
   "native_side_diff_truncated": "Diff cortado; o arquivo mudou mais do que cabe aqui.",
