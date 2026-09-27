@@ -5417,6 +5417,8 @@
   "native_new_chat_folder": "Folder",
   "native_new_chat_no_roots": "No folders configured on this server.",
   "native_new_chat_no_accounts": "No accounts available.",
+  "native_new_chat_machine": "Machine",
+  "native_new_chat_reasoning": "Reasoning",
   "native_create_search": "Search folder",
   "native_create_path": "Path",
   "native_create_use_folder": "Use this folder",

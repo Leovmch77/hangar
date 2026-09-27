@@ -384,8 +384,8 @@ pub struct Hangar {
     /// Envio entregue que o turno ainda não pegou: "Enviando…" segue até o estado virar trabalhando ou o prazo passar.
     sent_until: Option<(SessionKey, Instant)>,
     new_chat: Option<Entity<create::NewSession>>,
-    /// A tela escreve; a camada da raiz lê.
-    new_chat_folders: std::rc::Rc<std::cell::Cell<bool>>,
+    /// O menu aberto da tela sem sessão (máquina, pasta, modelo, conta, branch): a tela escreve; a camada da raiz lê.
+    new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -787,8 +787,8 @@ impl Hangar {
         self.terminal_suggestion.clear();
         self.recent = None;
         self.command_panel = false;
-        // O painel de pastas é da tela sem sessão: sem isto, o Esc seguinte seria gasto nele, já fora da tela.
-        self.new_chat_folders.set(false);
+        // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
+        self.new_chat_folders.set(None);
         self.suggest_dismissed = None;
         self.side.on_select();
         self.dossier = None;
@@ -2966,8 +2966,9 @@ impl Hangar {
         let tray = key.as_ref().and_then(|key| self.render_attachments(key, cx));
         let confirm = self.render_confirm(cx);
         let (pills, mode) = self.render_ctl_pills(readable, cx);
+        let pills = if new_chat { self.new_chat_pills(cx) } else { pills };
         let (provider, headless) = self.provider();
-        let provider = provider.to_owned();
+        let provider = if new_chat { self.new_chat_provider(cx) } else { provider }.to_owned();
         let provider = provider.as_str();
         // A dica do terminal e o destinatário moram no placeholder, como no web.
         let placeholder = if readable && !self.terminal_suggestion.is_empty() {
@@ -4228,6 +4229,7 @@ impl Hangar {
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.new_chat_screen() { return self.render_new_chat(window, cx); }
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));
         let stopping = selected_key.as_ref().is_some_and(|key| self.stopping.contains(key));
@@ -4244,12 +4246,6 @@ impl Hangar {
         let stop_note = selected_key.as_ref().and_then(|key| self.stop_feedback.get(key)).cloned();
         let prethread_open = self.prethread_key().is_some();
         let mut content = div().w_full().flex().flex_col();
-        if let Some(view) = self.new_chat.as_ref().filter(|_| self.selected.is_none()) {
-            let view = view.read(cx);
-            let note = if view.creating { Some(tr("new_chat_sending")) } else { view.error.clone() };
-            content = content.when_some(note, |el, note| el.child(in_column(div().py_2().text_sm()
-                .text_color(if view.creating { theme::muted() } else { theme::warning() }).child(note))));
-        }
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
@@ -4328,10 +4324,12 @@ impl Render for Hangar {
                         tr("term_toggle"), cx).selected(self.terminal.is_some())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
-            .child(self.pane_element(panes::Area::Conversation, StyleRefinement::default().w_full().flex_1().min_h_0(), cx))
+            // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
+            .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation, StyleRefinement::default().w_full().flex_1().min_h_0(), cx)))
             // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca.
             .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
-            .child(self.pane_element(panes::Area::Bottom, StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())), cx))
+            .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
+                else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())) }, cx))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
         let nav = if page.is_some() { None }

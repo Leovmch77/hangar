@@ -242,12 +242,29 @@ struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelop
 #[derive(Clone)]
 struct ServerChoice { id: String, label: String, address: String, token: Option<String> }
 
+/// Os menus da tela sem sessão, cada um preso à própria pílula.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::app) enum Menu { Machine, Folder, Model, Account, Branch }
+
+impl Menu {
+    pub(in crate::app) fn anchor(self) -> &'static str {
+        match self {
+            Menu::Machine => "new-chat-machine", Menu::Folder => "new-chat-folder", Menu::Model => "new-chat-model",
+            Menu::Account => "new-chat-account", Menu::Branch => "new-chat-branch",
+        }
+    }
+    /// Máquina e pasta ficam acima do compositor: o menu delas abre para cima, sem cobrir o campo.
+    pub(in crate::app) fn above(self) -> bool { matches!(self, Menu::Machine | Menu::Folder) }
+}
+
 /// O diálogo "Nova sessão". Entidade própria: o diálogo é desenhado durante o desenho da janela, quando o `Hangar` não pode ser
 /// escrito. Cada resposta volta com o número do pedido; a de um pedido velho (outra pasta, outro provider) cai.
 pub(in crate::app) struct NewSession {
     link: Link,
     compact: bool,
-    compact_folders: Rc<std::cell::Cell<bool>>,
+    menu: Rc<std::cell::Cell<Option<Menu>>>,
+    /// A busca dos menus de lista (máquina, modelo, conta, branch); a pasta usa a `query` da lista de pastas.
+    menu_query: Entity<InputState>,
     servers: Remote<Vec<ServerChoice>>,
     servers_error: Option<String>,
     switching: bool,
@@ -264,7 +281,6 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     checkout: Remote<Option<Checkout>>,
     branch: String,
-    branch_pick: Option<Picker>,
     sessions: Remote<Vec<SessionInfo>>,
     same_folder: bool,
     name: Entity<InputState>,
@@ -344,10 +360,12 @@ impl NewSession {
         let manual = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_path_placeholder")));
         let omp = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_omp_profile_hint")));
         let account_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_account_placeholder")));
+        let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
             cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe_in(&manual, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => cx.notify(),
                 InputEvent::PressEnter { .. } => this.use_typed(window, cx),
@@ -360,10 +378,10 @@ impl NewSession {
             }),
         ];
         Self {
-            link, compact: false, compact_folders: Default::default(), servers: Remote::default(), servers_error: None,
+            link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(), servers_error: None,
             switching: false, switch_error: None,
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(), branch_pick: None,
+            checkout: Remote::default(), branch: String::new(),
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -451,7 +469,7 @@ impl NewSession {
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact { self.load_servers(window, cx); }
         self.load_roots(cx);
-        if !self.compact { self.load_providers(cx); }
+        self.load_providers(cx);
         self.load_configs(cx);
         if self.compact { return; }
         self.load_extras(cx);
@@ -528,7 +546,7 @@ impl NewSession {
         if self.creating { return; }
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
         if self.compact {
-            self.compact_folders.set(false);
+            self.menu.set(None);
             self.load_branches(cx);
             cx.notify();
             return;
@@ -572,7 +590,8 @@ impl NewSession {
         self.permission = if provider == "codex" { "Full Access".into() } else { String::new() };
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
-        self.load_archive(window, cx);
+        // A tela sem sessão não retoma conversa antiga: o arquivo da pasta não serve a ela.
+        if !self.compact { self.load_archive(window, cx); }
         cx.notify();
     }
 
@@ -598,7 +617,7 @@ impl NewSession {
         let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
         let root = root.path.clone();
         let seq = self.checkout.start();
-        (self.checkout.value, self.branch_pick, self.branch) = (None, None, String::new());
+        (self.checkout.value, self.branch) = (None, String::new());
         self.request(cx, move |api, send| Box::pin(async move {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;
@@ -609,7 +628,7 @@ impl NewSession {
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.creating && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
-            && (!self.compact || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())
+            && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
                 && !self.checkout.loading))
     }
@@ -722,22 +741,7 @@ impl NewSession {
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
-            CreateReply::Branches(seq, result) => {
-                if !self.compact || !self.checkout.finish(seq, result) { return None; }
-                if let Some(Some(checkout)) = self.checkout.ok() {
-                    let current = checkout.current.as_ref().map(|branch| format!("{} · {branch}", tr("create_checkout_current")))
-                        .unwrap_or_else(|| tr("create_checkout_current"));
-                    let mut choices = vec![ModelChoice { id: String::new(), label: current, hint: String::new() }];
-                    choices.extend(checkout.branches.iter().chain(&checkout.remotes).map(|branch| ModelChoice {
-                        id: branch.clone(), label: branch.clone(), hint: if checkout.current.as_ref() == Some(branch) {
-                            tr("create_checkout_current")
-                        } else { tr("create_checkout_worktree") },
-                    }));
-                    self.branch_pick = Some(picker(choices, Some(0), |this, branch, _, _| {
-                        if !this.creating { this.branch = branch; }
-                    }, window, cx));
-                }
-            }
+            CreateReply::Branches(seq, result) => { if !self.compact || !self.checkout.finish(seq, result) { return None; } }
             CreateReply::Sessions(seq, result) => {
                 if seq != self.sessions.seq { return None; }
                 let Some(path) = self.picked.clone() else { return None };
@@ -1166,145 +1170,245 @@ impl NewSession {
     }
 }
 
+/// Linha dos menus da tela sem sessão: o nome, a dica à direita e o visto na escolhida.
+pub(super) fn menu_row(id: impl Into<ElementId>, on: bool, label: String, hint: String) -> Button {
+    popup::row(id, on).accessibility_label(label.clone()).child(div().w_full().flex().items_center().gap_2()
+        .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        .when(!hint.is_empty(), |el| el.child(div().flex_shrink_0().max_w(px(170.)).truncate().text_xs().text_color(theme::muted()).child(hint)))
+        .when(on, |el| el.child(chrome::small_icon(IconName::Check, 16., theme::accent()))))
+}
+
+/// A busca dos menus, sem caixa, sobre o nome e a dica; `query` já vem em minúsculas.
+pub(super) fn wanted(query: &str, label: &str, hint: &str) -> bool {
+    query.is_empty() || label.to_lowercase().contains(query) || hint.to_lowercase().contains(query)
+}
+
+/// Pílula quieta acima e abaixo do compositor: texto apagado com ícone, a seta do menu e o realce enquanto aberto.
+fn quiet_pill(menu: Menu, open: bool, icon: IconName, text: String, aria: String, disabled: bool, cx: &mut Context<NewSession>) -> Div {
+    popup::anchor(div(), menu.anchor()).child(Button::new(menu.anchor())
+        .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
+        .h(px(26.)).px(px(8.)).rounded(px(6.)).selected(open).disabled(disabled).accessibility_label(format!("{aria}: {text}"))
+        .child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
+            .child(chrome::small_icon(icon, 14., theme::faint()))
+            .child(div().max_w(px(220.)).truncate().child(text))
+            .child(chrome::small_icon(IconName::ChevronDown, 12., theme::faint())))
+        .on_click(cx.listener(move |this, _, window, cx| this.toggle_menu(menu, window, cx))))
+}
+
 impl NewSession {
-    fn render_servers(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.servers.loading || self.servers.value.is_none() {
-            return div().id("new-chat-servers-loading").role(Role::Status).aria_label(tr("loading"))
-                .child(Skeleton::new("new-chat-servers-loading").w_full().h_8().rounded_md()).into_any_element();
+    pub(super) fn toggle_menu(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.menu.get() != Some(menu) && !self.creating;
+        self.menu.set(open.then_some(menu));
+        if open && menu == Menu::Folder { self.query.update(cx, |input, cx| input.focus(window, cx)); }
+        else if open { self.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
+        cx.notify();
+    }
+
+    /// O texto da busca dos menus de lista, já em minúsculas.
+    pub(super) fn menu_filter(&self, cx: &App) -> String { self.menu_query.read(cx).value().trim().to_lowercase() }
+
+    pub(super) fn menu_search(&self) -> Div {
+        div().px(px(4.)).pb(px(4.)).child(Input::new(&self.menu_query).h(px(32.)).aria_label(tr("ctl_search"))
+            .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())))
+    }
+
+    pub(super) fn menu_list(id: &'static str, rows: Vec<AnyElement>) -> AnyElement {
+        if rows.is_empty() {
+            return div().px(px(8.)).py(px(16.)).text_size(px(12.)).text_color(theme::muted()).text_center().child(tr("ctl_no_results")).into_any_element();
         }
-        let Some(choices) = self.servers.ok() else {
-            let error = self.servers.value.as_ref().and_then(|value| value.as_ref().err()).cloned().unwrap_or_default();
-            return div().flex().items_center().gap_2()
-                .child(alert("new-chat-servers-error", error))
-                .child(Button::new("new-chat-servers-retry").ghost().label(tr("retry"))
-                    .on_click(cx.listener(|this, _, window, cx| this.load_servers(window, cx)))).into_any_element();
-        };
-        if choices.len() == 1 && self.servers_error.is_none() { return div().into_any_element(); }
-        let current = self.link.api.identity();
-        div().flex().flex_col().gap_2()
-            .children(self.servers_error.as_ref().map(|error| div().flex().items_center().gap_2()
-                .child(alert("new-chat-servers-error", error.clone()))
-                .child(Button::new("new-chat-servers-retry").ghost().label(tr("retry"))
-                    .on_click(cx.listener(|this, _, window, cx| this.load_servers(window, cx))))))
-            .when(choices.len() > 1, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("new_chat_server"))))
-            .child(div().flex().flex_wrap().gap_2().children(choices.iter().cloned().map(|choice| {
-                let selected = choice.address.trim_end_matches('/') == current.trim_end_matches('/');
-                let owner = self.link.owner.clone();
-                Button::new(SharedString::from(format!("new-chat-server-{}", choice.id))).outline().small()
-                    .label(choice.label.clone()).selected(selected).disabled(self.switching)
-                    .when(!selected, |button| button.on_click(cx.listener(move |_, _, window, cx| {
-                        let (id, address, token) = (choice.id.clone(), choice.address.clone(), choice.token.clone());
-                        let owner = owner.clone();
-                        chrome::confirm_alert(window, cx, tr("new_chat_switch_title").replace("{server}", &choice.label),
-                            tr("new_chat_switch_description"), tr("new_chat_switch_action"), ButtonVariant::Primary,
-                            move |_, cx| {
-                                let _ = owner.update(cx, |app, cx| app.switch_server(id.clone(), address.clone(), token.clone(), cx));
-                                true
-                            });
-                    })))
-            })))
-            .when(self.switching, |el| el.child(div().id("new-chat-switching").role(Role::Status).child(tr("loading"))))
-            .children(self.switch_error.as_ref().map(|error| alert("new-chat-switch-error", error.clone())))
+        div().id(id).max_h(px(260.)).overflow_y_scroll().flex().flex_col().children(rows).into_any_element()
+    }
+
+    pub(super) fn menu_failure(id: &'static str, error: String, retry: fn(&mut Self, &mut Window, &mut Context<Self>), cx: &mut Context<Self>) -> AnyElement {
+        div().p(px(8.)).flex().flex_col().items_start().gap(px(6.))
+            .child(alert(id, error))
+            .child(Button::new(SharedString::from(format!("{id}-retry"))).outline().xsmall().label(tr("retry"))
+                .on_click(cx.listener(move |this, _, window, cx| { retry(this, window, cx); cx.notify(); })))
             .into_any_element()
     }
 
-    fn render_checkout(&self, cx: &mut Context<Self>) -> Div {
-        let row = div().flex().flex_col().gap_2();
-        if self.checkout.loading {
-            return row.child(div().id("new-chat-branches-status").role(Role::Status).child(tr("create_checkout_loading")))
-                .child(Skeleton::new("new-chat-branches-loading").w_full().h_8().rounded_md());
-        }
-        if let Some(Err(error)) = &self.checkout.value {
-            return row.child(alert("new-chat-branches-error", tr("create_checkout_failed").replace("{reason}", error)))
-                .child(Button::new("new-chat-branches-retry").ghost().label(tr("retry"))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_branches(cx))));
-        }
-        let Some(Some(checkout)) = self.checkout.ok() else { return row };
-        let worktree = !self.branch.is_empty() && checkout.current.as_ref() != Some(&self.branch);
-        row.child(label(tr("create_checkout_branch")))
-            .children(self.branch_pick.as_ref().map(|(pick, _)| Select::new(pick).disabled(self.creating)
-                .accessibility_label(tr("create_checkout_branch"))))
-            .child(muted(tr(if worktree { "create_checkout_worktree_help" } else { "create_checkout_current_help" })))
-            .when(checkout.dirty, |row| row.child(muted(tr("create_checkout_dirty"))))
+    fn current_server(&self, choice: &ServerChoice) -> bool {
+        choice.address.trim_end_matches('/') == self.link.api.identity().trim_end_matches('/')
     }
 
-    fn render_compact(&self, cx: &mut Context<Self>) -> Div {
-        let field = |title: String, body: AnyElement| div().flex_1().min_w_0().flex().flex_col().gap_2()
-            .child(div().text_sm().text_color(theme::muted()).child(title)).child(body);
-        let loading = |id| div().id(id).role(Role::Status).aria_label(tr("loading"))
-            .child(Skeleton::new(id).w_full().h_8().rounded_md()).into_any_element();
-        let account = match (&self.configs.value, &self.config_pick) {
-            _ if self.configs.loading || self.configs.value.is_none() => loading("new-chat-accounts-loading"),
-            (Some(Err(error)), _) => alert("new-chat-accounts-error", error.clone()).into_any_element(),
-            (Some(Ok(list)), _) if list.is_empty() => muted(tr("new_chat_no_accounts")).into_any_element(),
-            (_, Some((pick, _))) => Select::new(pick).accessibility_label(tr("create_claude_account")).into_any_element(),
-            _ => div().into_any_element(),
-        };
-        let model = if self.configs.loading || self.models.loading || self.models.value.is_none() {
-            loading("new-chat-models-loading")
-        } else if let Some(Err(error)) = self.models.value.as_ref() {
-            alert("new-chat-models-error", format!("{}: {error}", tr("create_models_failed"))).into_any_element()
-        } else {
-            div().children(self.model_pick.as_ref().map(|(pick, _)| Select::new(pick).accessibility_label(tr("create_model"))))
-                .into_any_element()
-        };
+    fn server_label(&self) -> String {
+        self.servers.ok().and_then(|list| list.iter().find(|c| self.current_server(c))).map(|c| c.label.clone())
+            .unwrap_or_else(|| self.link.api.identity().trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/').to_owned())
+    }
+
+    /// Máquina e pasta, acima do compositor e à direita.
+    pub(super) fn render_top_pills(&self, cx: &mut Context<Self>) -> Div {
+        let open = self.menu.get();
+        let machine = if self.switching { tr("loading") } else { self.server_label() };
+        let folder = self.picked.as_deref().map(basename).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| tr("new_chat_folder"));
         let folders_ready = !self.roots.loading && self.roots.ok().is_some_and(|roots| !roots.is_empty());
-        let folder_button = Button::new("new-chat-folder").outline().w_full().min_w_0().icon(IconName::Folder)
-                .label(self.picked.as_deref().map(basename).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| tr("new_chat_folder")))
-                .tooltip(self.picked.clone().unwrap_or_else(|| tr("new_chat_folder"))).accessibility_label(tr("new_chat_folder"))
-                .disabled(!folders_ready);
-        let folder = folder_button.selected(self.compact_folders.get()).on_click(cx.listener(|this, _, window, cx| {
-            let open = !this.compact_folders.get();
-            this.compact_folders.set(open);
-            if open { this.query.update(cx, |input, cx| input.focus(window, cx)); }
-            cx.notify();
-        }));
-        let roots_note = match &self.roots.value {
-            Some(Err(error)) if !self.roots.loading => Some(alert("new-chat-roots-error", format!("{} {error}", tr("create_roots_failed"))).into_any_element()),
-            Some(Ok(list)) if list.is_empty() && !self.roots.loading => Some(muted(tr("new_chat_no_roots")).into_any_element()),
+        div().flex().justify_end().items_center().gap(px(2.)).pb(px(6.))
+            .child(quiet_pill(Menu::Machine, open == Some(Menu::Machine), IconName::Monitor, machine, tr("new_chat_machine"), self.switching, cx))
+            .child(quiet_pill(Menu::Folder, open == Some(Menu::Folder), IconName::Folder, folder, tr("new_chat_folder"), !folders_ready, cx))
+    }
+
+    /// Conta e branch, abaixo do compositor e à esquerda; cada uma só quando existe para o provider e a pasta.
+    pub(super) fn render_bottom_pills(&self, cx: &mut Context<Self>) -> Div {
+        let open = self.menu.get();
+        let account = match self.provider {
+            "claude" => self.configs.ok().filter(|list| !list.is_empty()).map(|list| {
+                let label = list.iter().find(|c| Some(&c.path) == self.config.as_ref()).map(|c| c.label.clone()).unwrap_or_else(|| tr("create_default"));
+                (label, tr("create_claude_account"))
+            }),
+            "codex" => self.codex.ok().filter(|list| !list.is_empty()).map(|list| {
+                let label = list.iter().find(|a| a.id == self.codex_account).map(|a| a.name.clone()).unwrap_or_else(|| tr("create_default"));
+                (label, tr("create_codex_account"))
+            }),
             _ => None,
         };
-        let failed = self.roots.value.as_ref().is_some_and(Result::is_err)
-            || self.configs.value.as_ref().is_some_and(Result::is_err) || self.models.value.as_ref().is_some_and(Result::is_err);
-        div().w_full().max_w(rems(42.)).flex().flex_col().gap_4()
-            .child(div().text_xl().font_weight(FontWeight::MEDIUM).child(tr("new_chat_title")))
-            .child(self.render_servers(cx))
-            .child(div().flex().gap_4().items_start()
-                .child(field(tr("create_claude_account"), account))
-                .child(popup::anchor(field(tr("new_chat_folder"), div().child(folder).children(roots_note).into_any_element()).relative(), "new-chat-folder")))
-            .when(self.checkout.loading || self.checkout.value.as_ref().is_some_and(|value| !matches!(value, Ok(None))),
-                |el| el.child(self.render_checkout(cx)))
-            .child(div().p_4().rounded_xl().border_1().border_color(theme::border()).bg(theme::boxed())
-                .child(field(tr("create_model"), model)))
-            .when(failed, |el| el.child(Button::new("new-chat-retry").ghost().label(tr("retry"))
-                .disabled(self.roots.loading || self.configs.loading || self.models.loading)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    // Repetir só a leitura que falhou preserva conta e subpasta já escolhidas.
-                    if this.roots.value.as_ref().is_some_and(Result::is_err) { this.load_roots(cx); }
-                    if this.configs.value.as_ref().is_some_and(Result::is_err) { this.load_configs(cx); }
-                    else if this.models.value.as_ref().is_some_and(Result::is_err) { this.load_models(window, cx); }
-                    cx.notify();
-                }))))
+        let branch = match (self.checkout.loading, self.checkout.ok()) {
+            (true, _) => Some(tr("create_checkout_loading")),
+            (false, Some(Some(checkout))) => Some(if self.branch.is_empty() {
+                checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"))
+            } else { format!("{} · {}", self.branch, tr("create_checkout_worktree")) }),
+            _ => None,
+        };
+        div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.))
+            .children(account.map(|(label, aria)| quiet_pill(Menu::Account, open == Some(Menu::Account), IconName::CircleUser, label, aria,
+                self.configs.loading || self.codex.loading, cx)))
+            .children(branch.map(|label| quiet_pill(Menu::Branch, open == Some(Menu::Branch), IconName::GitBranch, label,
+                tr("create_checkout_branch"), self.checkout.loading, cx)))
+    }
+
+    /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
+    pub(super) fn note(&self) -> Option<(String, bool)> {
+        if self.creating { return Some((tr("new_chat_sending"), false)); }
+        fn failed<T>(remote: &Remote<T>) -> Option<&String> { remote.value.as_ref().filter(|_| !remote.loading)?.as_ref().err() }
+        let claude = self.provider == "claude";
+        [
+            self.error.clone(),
+            self.switch_error.clone(),
+            failed(&self.roots).map(|e| format!("{} {e}", tr("create_roots_failed"))),
+            failed(&self.configs).filter(|_| claude).cloned(),
+            failed(&self.codex).filter(|_| self.provider == "codex").cloned(),
+            failed(&self.models).map(|e| format!("{}: {e}", tr("create_models_failed"))),
+            failed(&self.checkout).map(|e| tr("create_checkout_failed").replace("{reason}", e)),
+            (!self.roots.loading && self.roots.ok().is_some_and(Vec::is_empty)).then(|| tr("new_chat_no_roots")),
+            (claude && !self.configs.loading && self.configs.ok().is_some_and(Vec::is_empty)).then(|| tr("new_chat_no_accounts")),
+            (self.provider_ready() == Some(false)).then(|| tr("create_provider_missing").replace("{p}", self.provider)),
+        ].into_iter().flatten().next().map(|text| (text, true))
+    }
+
+    /// O menu aberto, preso à pílula dele; `room` é a altura livre para a lista de pastas.
+    pub(super) fn render_menu(&mut self, menu: Menu, room: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.menu_filter(cx);
+        let body = match menu {
+            Menu::Folder => return self.render_compact_folders(cx).p_3().max_h(room).into_any_element(),
+            Menu::Model => return self.render_model_menu(cx).into_any_element(),
+            Menu::Machine => match (&self.servers.value, self.servers.ok()) {
+                _ if self.servers.loading => popup::skeleton("new-chat-machines", 2).into_any_element(),
+                (Some(Err(error)), _) => Self::menu_failure("new-chat-machines-error", error.clone(), |this, window, cx| this.load_servers(window, cx), cx),
+                (_, Some(list)) => {
+                    let rows = list.iter().filter(|c| wanted(&query, &c.label, &c.address)).map(|choice| {
+                        let current = self.current_server(choice);
+                        let (choice, owner) = (choice.clone(), self.link.owner.clone());
+                        menu_row(SharedString::from(format!("new-chat-machine-{}", choice.id)), current, choice.label.clone(),
+                            if current { tr("create_current") } else { String::new() })
+                            .when(!current, |row| row.on_click(cx.listener(move |this, _, window, cx| {
+                                this.menu.set(None);
+                                let (id, address, token, owner) = (choice.id.clone(), choice.address.clone(), choice.token.clone(), owner.clone());
+                                chrome::confirm_alert(window, cx, tr("new_chat_switch_title").replace("{server}", &choice.label),
+                                    tr("new_chat_switch_description"), tr("new_chat_switch_action"), ButtonVariant::Primary,
+                                    move |_, cx| {
+                                        let _ = owner.update(cx, |app, cx| app.switch_server(id.clone(), address.clone(), token.clone(), cx));
+                                        true
+                                    });
+                                cx.notify();
+                            })))
+                            .into_any_element()
+                    }).collect();
+                    div().child(Self::menu_list("new-chat-machine-list", rows))
+                        .children(self.servers_error.clone().map(|error| Self::menu_failure("new-chat-peers-error", error,
+                            |this, window, cx| this.load_servers(window, cx), cx)))
+                        .into_any_element()
+                }
+                _ => div().into_any_element(),
+            },
+            Menu::Account if self.provider == "codex" => {
+                let rows = self.codex.ok().into_iter().flatten().filter(|a| wanted(&query, &a.name, &a.hint())).map(|account| {
+                    let id = account.id.clone();
+                    menu_row(SharedString::from(format!("new-chat-codex-{id}")), account.id == self.codex_account, account.name.clone(), account.hint())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.menu.set(None);
+                            if this.codex_account != id { this.codex_account = id.clone(); this.load_models(window, cx); }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }).collect();
+                Self::menu_list("new-chat-account-list", rows)
+            }
+            Menu::Account => {
+                let rows = self.configs.ok().into_iter().flatten().map(|c| (c, self.config_hint(c)))
+                    .filter(|(c, hint)| wanted(&query, &c.label, hint)).map(|(c, hint)| {
+                        let path = c.path.clone();
+                        menu_row(SharedString::from(format!("new-chat-account-{path}")), Some(&c.path) == self.config.as_ref(), c.label.clone(), hint)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.menu.set(None);
+                                if this.config.as_ref() != Some(&path) { this.config = Some(path.clone()); this.load_models(window, cx); }
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    }).collect();
+                Self::menu_list("new-chat-account-list", rows)
+            }
+            Menu::Branch => {
+                let Some(Some(checkout)) = self.checkout.ok() else { return div().into_any_element() };
+                let current = checkout.current.as_ref().map(|branch| format!("{} · {branch}", tr("create_checkout_current")))
+                    .unwrap_or_else(|| tr("create_checkout_current"));
+                let choices = std::iter::once((String::new(), current, String::new()))
+                    .chain(checkout.branches.iter().chain(&checkout.remotes).filter(|b| checkout.current.as_ref() != Some(*b))
+                        .map(|b| (b.clone(), b.clone(), tr("create_checkout_worktree"))));
+                let rows = choices.filter(|(_, label, hint)| wanted(&query, label, hint)).map(|(id, label, hint)| {
+                    let on = self.branch == id;
+                    menu_row(SharedString::from(format!("new-chat-branch-{id}")), on, label, hint)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.menu.set(None);
+                            if !this.creating { this.branch = id.clone(); }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }).collect();
+                let worktree = !self.branch.is_empty();
+                div().child(Self::menu_list("new-chat-branch-list", rows))
+                    .child(popup::separator())
+                    .child(div().px(px(8.)).py(px(4.)).flex().flex_col().gap(px(2.)).text_xs().text_color(theme::muted()).whitespace_normal()
+                        .child(tr(if worktree { "create_checkout_worktree_help" } else { "create_checkout_current_help" }))
+                        .when(checkout.dirty, |el| el.child(tr("create_checkout_dirty"))))
+                    .into_any_element()
+            }
+        };
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(self.menu_search()).child(body).into_any_element()
     }
 
     pub(super) fn render_compact_folders(&self, cx: &mut Context<Self>) -> Div {
         div().w(rems(28.)).max_w_full().flex().flex_col().gap_3()
             .child(self.render_roots(cx))
-            .child(Input::new(&self.query).small().cleanable(true).aria_label(tr("create_search")))
+            .child(Input::new(&self.query).small().cleanable(true).aria_label(tr("create_search"))
+                .prefix(chrome::small_icon(IconName::Search, 14., theme::faint())))
             .children(self.root.as_ref().map(|root| div().flex().flex_wrap().gap_1()
                 .children(crumbs(root, &self.dir).into_iter().map(|(text, path)|
                     Button::new(SharedString::from(format!("new-chat-crumb-{path}"))).ghost().small().label(text)
                         .on_click(cx.listener(move |this, _, window, cx| this.drill(path.clone(), window, cx)))))))
             // ponytail: lista mínima de 6rem; janela menor exige seletor em página própria.
             .child(div().flex_basis(rems(12.)).flex_shrink_1().min_h(rems(6.)).relative().flex().flex_col().child(self.render_rows(cx)))
-            .child(Button::new("new-chat-use-folder").outline().label(tr("create_use_folder"))
-                .on_click(cx.listener(|this, _, window, cx| this.pick(this.dir.clone(), window, cx))))
+            .child(div().flex().items_center().gap_2()
+                .child(Button::new("new-chat-use-folder").outline().small().label(tr("create_use_folder"))
+                    .on_click(cx.listener(|this, _, window, cx| this.pick(this.dir.clone(), window, cx))))
+                .child(Button::new("new-chat-computer-folder").ghost().small().icon(IconName::FolderOpen).label(tr("create_computer_folder"))
+                    .loading(self.choosing).on_click(cx.listener(|this, _, window, cx| this.choose_folder(window, cx)))))
+            .when_some(self.choose_error.clone(), |el, error| el.child(alert("new-chat-choose-error", error)))
     }
 }
 
 impl Render for NewSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.compact { return self.render_compact(cx); }
+        // A tela sem sessão é desenhada pelo `Hangar` (`render_new_chat`), em volta do compositor dele.
+        if self.compact { return div(); }
         // Topo, margem de baixo do kit e o preenchimento do diálogo: o resto da janela, até a altura do web.
         let height = (window.viewport_size().height - px(DIALOG_TOP + 16. + 32.)).min(px(760.)).max(px(320.));
         let right = match self.picked.clone() {
@@ -1320,6 +1424,21 @@ impl Render for NewSession {
 }
 
 impl Hangar {
+    /// Sem sessão escolhida e com servidor: a faixa de baixo vira a tela de nova conversa.
+    pub(super) fn new_chat_screen(&self) -> bool { self.selected.is_none() && self.api.is_some() }
+
+    /// O provider que a tela sem sessão vai criar (o texto do campo diz a quem se escreve).
+    pub(super) fn new_chat_provider(&self, cx: &App) -> &'static str {
+        self.new_chat.as_ref().map(|view| view.read(cx).provider).unwrap_or("claude")
+    }
+
+    /// A pílula de modelo e esforço, dentro do compositor da tela sem sessão.
+    pub(super) fn new_chat_pills(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.new_chat.clone().map(|view| view.update(cx, |view, cx| view.render_model_pill(cx).into_any_element())).into_iter().collect()
+    }
+
+    /// Nova conversa sem sessão, no desenho do Zeron: o fundo da janela, o compositor no meio, máquina e pasta acima dele,
+    /// conta e branch abaixo. Enviar cria a sessão com essas escolhas e manda a mensagem (`NewSession::create`).
     pub(super) fn render_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(api) = self.api.clone() else {
             return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
@@ -1327,19 +1446,28 @@ impl Hangar {
         if self.new_chat.as_ref().is_none_or(|view| view.read(cx).link.connection != self.connection) {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
                 owner: cx.entity().downgrade(), return_server: self.return_server.clone() };
-            self.new_chat_folders.set(false);
+            self.new_chat_folders.set(None);
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
                 view.compact = true;
-                view.compact_folders = self.new_chat_folders.clone();
+                view.menu = self.new_chat_folders.clone();
                 cx.defer_in(window, |view, window, cx| view.load(window, cx));
                 view
             }));
             cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         }
-        // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca.
-        div().id("new-chat-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().items_center().p_6()
-            .child(div().my_auto().flex_shrink_0().w_full().max_w(rems(42.)).child(self.new_chat.as_ref().unwrap().clone())).into_any_element()
+        let view = self.new_chat.clone().unwrap();
+        let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
+        let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
+        // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
+        div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
+            .child(div().my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
+                .child(in_column(top))
+                .child(composer)
+                .child(in_column(div().flex().flex_col().gap_1().child(bottom)
+                    .children(note.map(|(text, warning)| div().id("new-chat-note").role(if warning { Role::Alert } else { Role::Status })
+                        .px(px(14.)).text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(text))))))
+            .into_any_element()
     }
 
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
