@@ -7,6 +7,7 @@ isto, apagar o `.resolve()` do _chave_config deixava a suíte inteira verde e ma
 compartilhado calado — `reduced: true` é resposta legítima, e a tela de abertura responderia "lista
 reduzida" pra sempre na conta padrão sem ninguém perceber.
 """
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -128,6 +129,18 @@ def test_cache_de_outra_conta_nao_vaza(cli):
                 params={"provider": "claude", "config_dir": "~/.claude-outra"})
     assert r.status_code == 200
     assert r.json()["reduced"] is True
+
+
+def test_leitura_cortada_do_picker_nao_vira_cache(tmp_path):
+    cortada = {"kind": "claude", "engine": None, "effort": None,
+               "models": [{"id": "opus", "name": "Opus (1M con…", "desc": "Opus 5", "active": False}]}
+    chave = str(tmp_path)
+    api._models_cache_put(chave, cortada)
+    assert chave not in api._claude_models_cache
+    assert not (tmp_path / ".hangar-models.json").exists()
+    # A que já foi gravada antes da trava deixa de valer em vez de mandar por 30 dias.
+    (tmp_path / ".hangar-models.json").write_text(json.dumps({"ts": time.time(), "resp": cortada}), encoding="utf-8")
+    assert api._models_cache_get(chave) is None
 
 
 def test_pi_vem_do_catalogo(cli, monkeypatch):

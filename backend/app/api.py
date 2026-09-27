@@ -7392,9 +7392,15 @@ def _models_cache_path(chave: str) -> Path:
     return Path(chave) / ".hangar-models.json"
 
 
+def _leitura_cortada(resp: dict) -> bool:
+    """Picker lido com o pane estreito: o nome vem cortado ("Opus (1M con…") e a lista, pela metade.
+    Serve pra tela uma vez, mas guardada viraria a lista da conta por 30 dias."""
+    return any(str(m.get("name", "")).rstrip().endswith(("…", "...")) for m in resp.get("models") or [])
+
+
 def _models_cache_get(chave: str) -> dict | None:
     hit = _claude_models_cache.get(chave)
-    if hit and time.monotonic() - hit[0] < _CLAUDE_MODELS_TTL:
+    if hit and time.monotonic() - hit[0] < _CLAUDE_MODELS_TTL and not _leitura_cortada(hit[1]):
         return hit[1]
     try:
         # Sem a ponte do nome antigo, ao contrário dos outros sidecars: `.claude-pocket-models.json`
@@ -7404,7 +7410,7 @@ def _models_cache_get(chave: str) -> dict | None:
         # leitura; cache de outra conta mente sobre quais modelos aquele login tem.
         bruto = json.loads(_models_cache_path(chave).read_text(encoding="utf-8"))
         resp = bruto["resp"]
-        if not isinstance(resp, dict) or time.time() - float(bruto["ts"]) >= _CLAUDE_MODELS_TTL:
+        if not isinstance(resp, dict) or time.time() - float(bruto["ts"]) >= _CLAUDE_MODELS_TTL or _leitura_cortada(resp):
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -7416,6 +7422,8 @@ def _models_cache_get(chave: str) -> dict | None:
 
 
 def _models_cache_put(chave: str, resp: dict) -> None:
+    if _leitura_cortada(resp):
+        return
     _claude_models_cache[chave] = (time.monotonic(), resp)
     alvo = _models_cache_path(chave)
     tmp = alvo.with_name(f"{alvo.name}.{os.getpid()}.tmp")
