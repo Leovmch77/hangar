@@ -2765,6 +2765,30 @@ impl Hangar {
         Some(div().flex().flex_wrap().gap_1().children(tiles).into_any_element())
     }
 
+    /// Chip "de: X" do recado (`.peer-head` do `UserBubble` web): leva ao chat do remetente quando ele está na lista;
+    /// recado do painel não tem sessão para abrir.
+    fn peer_head(&self, row: &str, peer: cards::PeerMessage, cx: &mut Context<Self>) -> AnyElement {
+        let name = HashMap::from([("n".to_owned(), peer.from.clone())]);
+        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel" };
+        let label = crate::i18n::tr_web(key, &name).unwrap_or_else(|| peer.from.clone());
+        let target = self.sessions.iter().find(|s| s.name == peer.from).filter(|_| peer.scope != cards::PeerScope::Panel).cloned();
+        let chip = div().id(SharedString::from(format!("peer-{row}"))).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(peer_tint(peer.scope));
+        let chip = match target {
+            Some(session) => {
+                let open = crate::i18n::tr_web("user_abrir_chat_de", &name).unwrap_or_default();
+                chip.child(format!("{label} ›")).cursor_pointer().focusable().tab_stop(true).role(Role::Button).aria_label(open.clone())
+                    .hover(|el| el.underline()).focus_visible(|el| el.underline())
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(open.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| this.select(session.clone(), window, cx)))
+            }
+            None => chip.child(label),
+        };
+        div().flex().flex_wrap().items_center().gap(px(6.)).child(chip)
+            .when_some(peer.canal, |el, canal| el.child(div().px(px(7.)).py(px(1.)).rounded_full().bg(theme::raised())
+                .text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(theme::muted()).child(canal.to_uppercase())))
+            .into_any_element()
+    }
+
     fn render_attachments(&self, key: &SessionKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         let list = self.attachments.get(key).filter(|list| !list.is_empty())?;
         let busy = self.uploading.contains_key(key);
@@ -3246,6 +3270,9 @@ impl Hangar {
             _ => Vec::new(),
         };
         // Na bolha do usuário as imagens saem em miniatura, lado a lado e acima do texto, como no web.
+        let peer = match self.items.get(index) { Some(Item::Event(i)) if user => peer_of(&self.chat.events[*i]), _ => None };
+        let peer_scope = peer.as_ref().map(|peer| peer.scope);
+        let peer_head = peer.map(|peer| self.peer_head(&id, peer, cx));
         let (images, refs): (Vec<_>, Vec<_>) = refs.into_iter().partition(|(_, _, image)| user && *image);
         let thumbs = self.render_thumbs(&id, images.into_iter().map(|(source, _, _)| source).collect(), cx);
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
@@ -3277,12 +3304,13 @@ impl Hangar {
         });
         let content = conversation_text(div().flex().flex_col().gap_2())
             .when(!user && !plain, |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::muted() }).child(label)))
+            .when_some(peer_head, |el, head| el.child(head))
             .when_some(thumbs, |el, thumbs| el.child(thumbs))
             .children(text)
             .when_some(more, |el, more| el.child(more))
             .when_some(files, |el, files| el.child(files));
         let row = div().id(SharedString::from(format!("message-{id}"))).group(ROW_GROUP).w_full().flex().flex_col().gap_2()
-            .map(|el| if user { el.items_end().child(user_bubble(content)) } else { el.child(content) })
+            .map(|el| if user { el.items_end().child(match peer_scope { Some(scope) => peer_bubble(content, scope), None => user_bubble(content) }) } else { el.child(content) })
             .when_some(note, |el, note| el.child(div().flex().items_center().gap_2().when(user, |el| el.justify_end())
                 .child(div().min_w_0().text_sm().text_color(theme::warning()).child(note))
                 .when_some(discard, |el, button| el.child(button))))
@@ -3352,6 +3380,23 @@ const ROW_GROUP: &str = "message-row";
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
+}
+
+/// Recado de outra sessão com a cor de quem manda: accent (1:1), âmbar (grupo), neutro (app), como no web.
+fn peer_bubble(content: impl IntoElement, scope: cards::PeerScope) -> Div {
+    let tint = peer_tint(scope);
+    let fill = if scope == cards::PeerScope::Peer { theme::accent_dim() } else { tint.opacity(0.12) };
+    user_bubble(content).bg(fill).border_1().border_color(tint)
+}
+
+fn peer_tint(scope: cards::PeerScope) -> Hsla {
+    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted() }
+}
+
+/// Recado de outra sessão numa mensagem do usuário, lido da legenda (os anexos ficam de fora).
+fn peer_of(event: &ChatEvent) -> Option<cards::PeerMessage> {
+    let body = event.body();
+    cards::peer_message(&composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body))
 }
 
 /// Mensagem longa do usuário (mais de 5 linhas ou 400 caracteres) recolhe, para um log colado não virar bloco sem fim.
@@ -3929,7 +3974,9 @@ fn display_body(event: &ChatEvent) -> String {
         "user_msg" => {
             let body = event.body();
             if let Some(cards::Card::Codex(card)) = message_card(event) { return card.report; }
-            composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body)
+            let caption = composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body);
+            // Recado de outra sessão: remetente e etiqueta vão para o chip da bolha.
+            cards::peer_message(&caption).map(|peer| peer.body).unwrap_or(caption)
         }
         _ => event.body(),
     }

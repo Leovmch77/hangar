@@ -85,6 +85,40 @@ pub fn baton(text: &str) -> Option<Baton> {
     })
 }
 
+/// De onde vem o recado: outra sessão (`[de: X]`), aviso para o grupo (`[grupo: X]`) ou o próprio app (`[painel: X]`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PeerScope { Peer, Group, Panel }
+
+/// Recado de outra sessão (`parsePeerMessage` + `parseCanal` do `packages/core`). Só apresentação: o texto gravado
+/// continua inteiro.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerMessage {
+    pub from: String,
+    pub scope: PeerScope,
+    /// Etiqueta de uma palavra que abre o corpo ("[vigia] …"), mostrada ao lado do remetente.
+    pub canal: Option<String>,
+    pub body: String,
+}
+
+pub fn peer_message(text: &str) -> Option<PeerMessage> {
+    let rest = text.strip_prefix('[')?;
+    let (scope, rest) = [("de:", PeerScope::Peer), ("grupo:", PeerScope::Group), ("painel:", PeerScope::Panel)].into_iter()
+        .find_map(|(mark, scope)| rest.strip_prefix(mark).map(|rest| (scope, rest)))?;
+    let close = rest.find(']').filter(|&close| close > 0)?;
+    let body = rest[close + 1..].trim_start();
+    // `]` seguido de `(` é link markdown, não etiqueta.
+    let canal = body.strip_prefix('[').and_then(|inner| inner.split_once(']')).filter(|(label, after)| {
+        (1..=16).contains(&label.chars().count()) && !after.starts_with('(')
+            && label.chars().all(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_' || c == '-')
+    });
+    Some(PeerMessage {
+        from: rest[..close].trim().to_owned(),
+        scope,
+        canal: canal.map(|(label, _)| label.to_owned()),
+        body: canal.map_or(body, |(_, after)| after.trim_start()).to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +194,19 @@ mod tests {
             &wrap(r#"["status"]"#),
         ] {
             assert_eq!(codex_subagent(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn peer_messages_follow_the_web_parser() {
+        let peer = peer_message("[de:  orq-arbitro ] [vigia] **Oi**").unwrap();
+        assert_eq!((peer.from.as_str(), peer.scope, peer.canal.as_deref(), peer.body.as_str()), ("orq-arbitro", PeerScope::Peer, Some("vigia"), "**Oi**"));
+        assert_eq!(peer_message("[grupo: x] aviso").unwrap().scope, PeerScope::Group);
+        assert_eq!(peer_message("[painel: Orquestração] ok").unwrap().scope, PeerScope::Panel);
+        let link = peer_message("[de: x] [log](https://a) e mais").unwrap();
+        assert_eq!((link.canal, link.body.as_str()), (None, "[log](https://a) e mais"));
+        for text in ["oi [de: x] y", "[hangar: passagem de bastão] x", "[de:] x", "[de: x sem fechar"] {
+            assert_eq!(peer_message(text), None, "{text}");
         }
     }
 }
