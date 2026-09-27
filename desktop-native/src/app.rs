@@ -3059,11 +3059,15 @@ impl Hangar {
             let folder = repo.clone().or_else(|| session.as_ref().and_then(folder_name));
             let cost = status.as_ref().and_then(|s| s.cost_usd).map(|usd| self.money(usd));
             let stats = self.stats.as_ref().filter(|_| readable).map(side::stats_line);
-            // Anéis de contexto e de uso da conta (janela de 5h); sem dado dizem isso, nunca 0%.
+            // Anéis de contexto e de uso da conta; sem dado dizem isso, nunca 0%.
             let percent = |pct: Option<f64>| pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| tr("no_data"));
-            let limits = status.as_ref().filter(|_| readable).map(|s| [(tr("limit_5h"), s.five_hour_pct), (tr("limit_7d"), s.weekly_pct)]
-                .into_iter().map(|(label, pct)| format!("{label} {}", percent(pct))).collect::<Vec<_>>().join(" · "));
-            let account = status.as_ref().and_then(|s| s.five_hour_pct).filter(|_| readable);
+            let windows: Vec<(String, f64)> = status.as_ref().filter(|_| readable).map(|s| [(tr("limit_5h"), s.five_hour_pct),
+                (tr("limit_7d"), s.weekly_pct), (tr("limit_30d"), s.monthly_pct)].into_iter()
+                .filter_map(|(label, pct)| pct.map(|pct| (label, pct))).collect()).unwrap_or_default();
+            // O anel mostra a janela de 5 h; conta que só publica a semanal (Codex, alguns planos) mostra a semanal.
+            let account = windows.first().map(|(_, pct)| *pct);
+            let limits = (!windows.is_empty()).then(|| windows.iter().map(|(label, pct)| format!("{label} {}", percent(Some(*pct))))
+                .collect::<Vec<_>>().join(" · "));
             let ring = |id: &'static str, pct: Option<f64>, tip: String| div().id(id).flex_shrink_0().flex().items_center().gap(px(5.))
                 .child(chrome::ring(pct)).child(percent(pct))
                 .when(!tip.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)));
