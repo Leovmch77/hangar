@@ -502,6 +502,61 @@ impl Hangar {
         self.sync_sliders(window, cx);
     }
 
+    /// Traz do app Electron a aparência e o servidor ativo. Das Configurações pergunta antes: tudo o que tem par é trocado.
+    pub(super) fn import_electron(&mut self, ask: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if ask {
+            let weak = cx.entity().downgrade();
+            chrome::confirm_alert(window, cx, tr("electron_import_title"), tr("electron_import_desc"), tr("electron_import_ok"),
+                ButtonVariant::Primary, move |window, cx| { let _ = weak.update(cx, |this, cx| this.import_electron(false, window, cx)); true });
+            return;
+        }
+        let base = appearance::get();
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.runtime.spawn_blocking(move || { let _ = done.send(crate::electron::load(base).and_then(crate::electron::save_image)); });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result.await.unwrap_or_else(|_| Err(crate::electron::Failure::Read(tr("electron_import_stopped"))));
+            let _ = this.update_in(cx, |this, window, cx| this.receive_electron(result, window, cx));
+        }).detach();
+    }
+
+    fn receive_electron(&mut self, result: Result<crate::electron::Imported, crate::electron::Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let imported = match result {
+            Ok(imported) => imported,
+            Err(failure) => {
+                let note = match failure {
+                    crate::electron::Failure::Missing => tr("electron_import_missing"),
+                    crate::electron::Failure::Read(reason) => tr("electron_import_failed").replace("{reason}", &reason),
+                };
+                if self.connection_dialog { self.error = Some(note.clone()); }
+                window.push_notification(Notification::warning(note), cx);
+                cx.notify();
+                return;
+            }
+        };
+        let before = appearance::get();
+        let next = imported.appearance;
+        let mut what: Vec<String> = crate::electron::changed(&before, &next, imported.image.is_some()).into_iter().map(tr).collect();
+        self.apply_appearance(next, true, cx);
+        if next.language != before.language { self.set_language(next.language, window, cx); }
+        self.sync_sliders(window, cx);
+        self.refresh_backdrop(window, cx);
+        self.electron_offer = false;
+        if let Some((address, token)) = imported.server {
+            let same = self.active_token == token
+                && self.api.as_ref().is_some_and(|api| api.identity().trim_end_matches('/') == address.trim_end_matches('/'));
+            if !same {
+                what.push(tr("electron_import_server").replace("{address}", address.trim_start_matches("http://").trim_start_matches("https://")));
+                self.address.update(cx, |input, cx| input.set_value(address, window, cx));
+                self.token.update(cx, |input, cx| input.set_value(token, window, cx));
+                self.connect(window, cx);
+                if !self.connection_dialog { window.close_all_dialogs(cx); }
+            }
+        }
+        let note = if what.is_empty() { tr("electron_import_same") } else { tr("electron_import_done").replace("{what}", &what.join(", ")) };
+        window.push_notification(Notification::success(note), cx);
+        cx.notify();
+    }
+
     /// Recoloca os controles deslizantes no valor salvo: depois do reset ou quando o modo escuro/claro muda
     /// (a força da tinta é de cada modo).
     pub(super) fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1024,6 +1079,8 @@ impl Hangar {
         let top_button = |id: &'static str, key: &'static str| Button::new(id).outline().small().border_color(theme::border_strong()).label(tr(key));
         let reset = top_button("appearance-reset", "settings_reset").tooltip(tr("settings_reset_hint"))
             .on_click(cx.listener(|this, _, window, cx| this.reset_appearance(window, cx)));
+        let import = top_button("appearance-electron", "electron_import").tooltip(tr("electron_import_hint"))
+            .on_click(cx.listener(|this, _, window, cx| this.import_electron(true, window, cx)));
         // A âncora da rolagem até os botões do topo é a faixa deles.
         let top_key = self.settings_ui.hit.filter(|k| matches!(*k, "settings_live" | "settings_reset")).unwrap_or("");
         let top = if live { div().pt(px(12.)).flex().justify_end().child(reset) } else {
@@ -1037,6 +1094,7 @@ impl Hangar {
                     this.root_focus.focus(window, cx);
                     cx.notify();
                 })))
+                .child(import)
                 .child(reset)
         };
         div().flex().flex_col()

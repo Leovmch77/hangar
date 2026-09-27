@@ -393,6 +393,8 @@ pub struct Hangar {
     ready_sessions: Option<Vec<SessionInfo>>,
     dictation: dictation::Dictation,
     connection_origin: Option<WeakFocusHandle>,
+    /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
+    electron_offer: bool,
 }
 
 impl Drop for Hangar {
@@ -501,6 +503,7 @@ impl Hangar {
             new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
+            electron_offer: saved.is_none() && crate::electron::exists(),
         }
     }
 
@@ -4364,6 +4367,10 @@ impl Render for Hangar {
             .child(div().text_sm().text_color(theme::muted()).child(tr("connection_hint")))
             .child(div().text_sm().child(tr("server"))).child(Input::new(&self.address).aria_label(tr("server")))
             .child(div().text_sm().child(tr("token"))).child(Input::new(&self.token).aria_label(tr("token")))
+            .when(self.electron_offer, |el| el.child(div().flex().flex_col().gap_2().pt_3().border_t_1().border_color(theme::glass_border())
+                .child(div().text_sm().text_color(theme::muted()).child(tr("electron_import_offer_hint")))
+                .child(Button::new("electron-import").outline().label(tr("electron_import_offer"))
+                    .on_click(cx.listener(|this, _, window, cx| this.import_electron(false, window, cx))))))
             .when_some(self.error.clone(), |el, error| el.child(div().text_sm().text_color(theme::warning()).child(error)))
             .child(div().flex().justify_end().gap_2()
                 .when(self.api.is_some(), |el| el.child(Button::new("cancel").label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {

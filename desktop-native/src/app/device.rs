@@ -384,7 +384,7 @@ impl Hangar {
         cx.notify();
     }
 
-    fn set_language(&mut self, language: Language, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_language(&mut self, language: Language, window: &mut Window, cx: &mut Context<Self>) {
         let mut next = appearance::get();
         next.language = language;
         crate::i18n::set_language(language);
