@@ -125,7 +125,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create native-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            || gh release create native-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
                  --title 'Hangar desktop (topo da main)' \
                  --notes 'Reescrita a cada push na main. Binários não assinados; confira pelo .sha256 ao lado.'
           cd out
