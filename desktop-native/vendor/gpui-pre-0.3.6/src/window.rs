@@ -1,4 +1,5 @@
 // Modified for Hangar: backdrop blur paint entry point ported from zeronsh/zui 18a89af.
+// Modified for Hangar: element map (`set_element_map_sink`, `ElementRecord`) for test scripts.
 #[cfg(feature = "profiler")]
 use crate::DebugFrameOverlayMode;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1000,11 +1001,24 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    pub(crate) element_records: Vec<ElementRecord>,
+}
+
+/// An element with an id as laid out in the last frame; filled only while an element map sink is set.
+#[derive(Clone, Debug)]
+pub struct ElementRecord {
+    /// Ids from the window root down to this element.
+    pub path: Arc<[ElementId]>,
+    /// Bounds in logical pixels relative to the window.
+    pub bounds: Bounds<Pixels>,
+    /// Whether any part of the bounds survives the clip of its ancestors.
+    pub visible: bool,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
+    element_records_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
@@ -1059,6 +1073,7 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            element_records: Vec::new(),
         }
     }
 
@@ -1075,6 +1090,7 @@ impl Frame {
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
+        self.element_records.clear();
         self.focus = None;
 
         #[cfg(any(test, feature = "test-support"))]
@@ -1191,6 +1207,7 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    pub(crate) element_map: Option<Box<dyn FnMut(&[ElementRecord])>>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -2047,6 +2064,7 @@ impl Window {
             focused_text_input_active: false,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            element_map: None,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2606,6 +2624,13 @@ impl Window {
     /// await points in async code.
     pub fn to_async(&self, cx: &App) -> AsyncWindowContext {
         AsyncWindowContext::new_context(cx.to_async(), self.handle)
+    }
+
+    /// Calls `sink` after every drawn frame with the elements that have an id. While no sink is
+    /// set nothing is recorded.
+    pub fn set_element_map_sink(&mut self, sink: impl FnMut(&[ElementRecord]) + 'static) {
+        self.element_map = Some(Box::new(sink));
+        self.refresh();
     }
 
     /// Schedule the given closure to be run directly after the current frame is rendered.
@@ -3356,6 +3381,10 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        if let Some(mut sink) = self.element_map.take() {
+            sink(&self.rendered_frame.element_records);
+            self.element_map = Some(sink);
+        }
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
@@ -3813,6 +3842,7 @@ impl Window {
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
+            element_records_index: self.next_frame.element_records.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
@@ -3822,6 +3852,12 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        self.next_frame.element_records.extend(
+            self.rendered_frame.element_records
+                [range.start.element_records_index..range.end.element_records_index]
+                .iter()
+                .cloned(),
+        );
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -4066,6 +4102,9 @@ impl Window {
         let result = f(self);
         if result.is_err() {
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
+            self.next_frame
+                .element_records
+                .truncate(index.element_records_index);
             self.next_frame
                 .tooltip_requests
                 .truncate(index.tooltips_index);
