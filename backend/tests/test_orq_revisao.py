@@ -59,3 +59,51 @@ def test_veredito_de_subagente_recusado_se_a_arvore_mudou(tmp_path, repo):
     (r / "a.txt").write_text("2\n")
     run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova",
         "--sessao", "revisor-orq", env=e)
+
+
+def _pacote(e, task, rodada):
+    return open(run("review-package", "--task", str(task), "--rodada", str(rodada), env=e).stdout.strip()).read()
+
+
+def test_review_package_leva_a_fase_da_rodada_ao_comando_do_veredito(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    run("event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex",
+        "--par", "subagente", env=e)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, "--fase", "codigo", env=e)
+    txt = _pacote(e, 1, 1)
+    assert "Phase: codigo" in txt
+    cmd = txt.rstrip().splitlines()[-1]
+    assert "event veredito --task 1 --rodada 1" in cmd and cmd.endswith("--fase codigo")
+
+
+def test_review_package_lista_os_vereditos_anteriores(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    run("event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex",
+        "--par", "subagente", env=e)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+    assert "## Earlier verdicts\nnone" in _pacote(e, 1, 1)
+    run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "reprova",
+        "--sessao", "revisor-orq", "--motivo", "/x/parecer-r1.md", env=e)
+    h2 = congelar(r, g, "3\n")
+    run("check", "--task", "1", "--commit", h2, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "2", "--commit", h2, env=e)
+    txt = _pacote(e, 1, 2)
+    assert "Phase: none" in txt
+    assert "- round 1: reprova, report /x/parecer-r1.md" in txt
+
+
+def test_review_package_da_o_roteiro_como_caminho_absoluto(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    run("event", "task_inicio", "--task", "2", "--titulo", "t", "--executor", "ex",
+        "--par", "subagente", env=e)
+    h = congelar(r, g)
+    run("check", "--task", "2", "--commit", h, env=e)
+    run("event", "entrega", "--task", "2", "--rodada", "1", "--commit", h, env=e)
+    assert f"## Roteiro\n{(tmp_path / 'roteiro-2.md').resolve()}\n" in _pacote(e, 2, 1)

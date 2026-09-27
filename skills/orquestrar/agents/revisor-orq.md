@@ -11,7 +11,8 @@ You get one path: a review package. Everything you judge is in it or reachable f
 names. You never edit a file under the repo; you write only under the durable directory the
 package names. `orq` refuses your verdict if the worktree changed while you reviewed.
 
-1. Read the package whole.
+1. Read the package whole. The package lists earlier verdicts: read their reports; the same cause
+   rejected again → add `--reincide`.
 2. Judge the round the way `~/.claude/skills/orquestrar/references/revisor.md` says in "3. Judge"
    and "4. Write the report" (read those two sections; ignore the rest of the page: you are not a
    session, you do not wake up, prove protection or wait). A blocker gets its closed recipe

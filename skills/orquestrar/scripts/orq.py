@@ -931,23 +931,38 @@ def cmd_review_package(a) -> int:
     row = next((t for t in plan_tasks(plan_text(plan)) if t["n"] == a.task), None) if plan else None
     check = next((c for c in reversed(_jsonl(d / "checks.jsonl"))
                   if c.get("task") == a.task and c.get("commit", "-").startswith(obj[:12])), None)
-    patch_of = next((ev.get("motivo") for ev in reversed(events(d)) if ev.get("tipo") == "entrega"
-                     and ev.get("task") == a.task and ev.get("rodada") == a.rodada), "") or ""
+    evs = events(d)
+    ent = next((ev for ev in reversed(evs) if ev.get("tipo") == "entrega"
+                and ev.get("task") == a.task and ev.get("rodada") == a.rodada), {})
+    patch_of = ent.get("motivo") or ""
+    fase = ent.get("fase")
+    # A patch round's fresh reviewer checks these blockers; a repeated cause needs --reincide.
+    earlier = [f"- round {ev.get('rodada')}: {ev.get('resultado')}, report {ev.get('motivo') or 'none'}"
+               + (f", patch {ev['patch']}" if ev.get("patch") else "")
+               for ev in evs if ev.get("tipo") == "veredito" and ev.get("task") == a.task
+               and isinstance(ev.get("rodada"), int) and ev["rodada"] < a.rodada]
+    # Plan-relative in the plan; the reviewer runs elsewhere and needs a path it can open.
+    roteiro = (row or {}).get("roteiro")
+    if roteiro:
+        roteiro = str(Path(plan).expanduser().resolve().parent / roteiro)
     report = Path(a.report).read_text(encoding="utf-8") if a.report else "(no report given)"
     diff = git(repo, "diff", "--stat", f"{obj}^1", obj) + "\n" + git(repo, "diff", f"{obj}^1", obj)
     out = d / "review" / f"task{a.task}-r{a.rodada}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     verdict = (f"python3 {Path(__file__).resolve()} --dir {d} event veredito --task {a.task} "
                f"--rodada {a.rodada} --resultado <aprova|reprova|devolvido|corrige> --sessao revisor-orq "
-               f"--motivo {d}/pareceres/task{a.task}-r{a.rodada}.md --repo {repo}")
+               f"--motivo {d}/pareceres/task{a.task}-r{a.rodada}.md --repo {repo}"
+               + (f" --fase {fase}" if fase else ""))
     out.write_text("\n".join([
         f"# Review package — Task {a.task}, round {a.rodada}",
         f"Object: {obj}  Base: {obj}^1  Repo: {repo}  Durable dir: {d}",
+        f"Phase: {fase or 'none'}",
         f"This round is {patch_of}." if "reviewer patch" in patch_of else "",
         "## Contract", common.rstrip(), sections.get(a.task, f"(no '## Task {a.task}' section)").rstrip(),
         "## Plan row", json.dumps(row, ensure_ascii=False) if row else "(no plan row)",
-        "## Roteiro", (row or {}).get("roteiro") or "none",
+        "## Roteiro", roteiro or "none",
         "## Check log", (check or {}).get("log") or "none",
+        "## Earlier verdicts", "\n".join(earlier) or "none",
         "## Round report", report.rstrip(),
         "## Diff", "```diff", diff.rstrip(), "```",
         "## How to answer",
