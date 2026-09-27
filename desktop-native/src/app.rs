@@ -4592,7 +4592,6 @@ impl Render for Hangar {
             }).absolute().inset_0()))
             .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
-            .when(floating && page.is_none() && !costs_page, |el| el.p(px(10.)).gap(px(10.)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some();
                 if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(|s| s.readable())
@@ -4664,11 +4663,10 @@ impl Render for Hangar {
                     this.drag_live(event.position, event.pressed_button == Some(MouseButton::Left), window, cx);
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
-            // A barra do app fica acima de tudo, inclusive das páginas; na página solta ela ganha a mesma margem da página.
+            // A barra do app fica acima de tudo, inclusive das páginas, de ponta a ponta; soltos, a margem é só dos painéis.
             .flex_col()
-            .child(div().w_full().flex_shrink_0().when(floating && (page.is_some() || costs_page), |el| el.px(px(10.)).pt(px(10.)))
-                .child(self.render_topbar(cx)))
-            .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page, |el| el.gap(px(10.)))
+            .child(self.render_topbar(cx))
+            .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page, |el| el.p(px(10.)).gap(px(10.)))
                 .map(|el| match (page, nav) {
                 _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, window, cx)),
