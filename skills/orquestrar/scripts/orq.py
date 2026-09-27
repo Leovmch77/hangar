@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """orq — the orchestration's conductor: transport and bookkeeping without waking the arbiter.
 
-Events, the journal, the commit check, the shared-screen lock, who has the ball and the triage
+Events, the journal, the commit check, the shared-resource locks, who has the ball and the triage
 of messages to the arbiter live here, so the arbiter's session wakes only for decisions.
 
 Directory: `--dir D` (before the command) or ORQ_DIR — the durable dir ~/.hangar/orq/<date>-<gid>/.
@@ -31,8 +31,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 JOURNAL_CAP = 40_000
 COMMON_CAP = 8_000
-# A session that died holding the screen cannot freeze the team; a legit proof re-takes it.
-SCREEN_STALE_S = 60 * 60
+# A session that died holding a shared resource cannot freeze the team.
+LOCK_STALE_S = 60 * 60
 TASK_HEAD = re.compile(r"^## Task (\d+)\b")
 SECTION = re.compile(r"^## (.+?)\s*$")
 # The whole line, newline included: removing it must give back the text that was hashed.
@@ -59,15 +59,15 @@ JEV_QUESTIONS = {
                          "Routine bookkeeping is automatic; the coordinator is needed only to decide "
                          "or act. What does the coordinator have to do with this message?"),
         "criteria": {
-            "act": ("decide or act: answer a question; grant a permission or a go-ahead (screen time, "
-                    "more actions, 'may I', 'waiting for your OK'); choose between options; handle a "
-                    "failure, blocker or environment problem; open, name or replace a session (the "
-                    "sender is at its context limit or hands over, a session is gone, a reviewer must "
-                    "be named); settle a disagreement or a change of plan; record a decision from the "
-                    "user; or release the next Task after a commit"),
+            "act": ("decide or act: answer a question; grant a permission or a go-ahead (time on a "
+                    "shared resource, more actions, 'may I', 'waiting for your OK'); choose between "
+                    "options; handle a failure, blocker or environment problem; open, name or replace "
+                    "a session (the sender is at its context limit or hands over, a session is gone, a "
+                    "reviewer must be named); settle a disagreement or a change of plan; record a "
+                    "decision from the user; or release the next Task after a commit"),
             "nothing": ("nothing: the message only informs - progress, a status note, an "
-                        "acknowledgement, a wake-up or environment confirmation, a proof window "
-                        "opened or closed, a round delivered to the reviewer, a verdict already sent "
+                        "acknowledgement, a wake-up or environment confirmation, a shared resource "
+                        "taken or released, a round delivered to the reviewer, a verdict already sent "
                         "to the executor - and asks nothing of the coordinator"),
             "none": "none of these",
         },
@@ -667,12 +667,13 @@ def cmd_read(a) -> int:
             raise OrqError(f"contract not found: {path}") from None
         common, sections = _contract_parts(text)
         too_big = _over_cap(common)
-        if too_big:
-            raise OrqError(too_big)
         own = sections.get(a.task, "")
+        if too_big:
+            # Never empty: a session without its contract works blind and says nothing.
+            print(f"WARNING: {too_big}")
         print(common.rstrip())
         print("\n" + own.rstrip() if own else f"\n(no '## Task {a.task}' section in the contract)")
-        return 0
+        return 3 if too_big else 0
     j = d / "registro.md"
     lines = j.read_text(encoding="utf-8").splitlines() if j.exists() else []
     pat = re.compile(rf"\bT{a.task}\b|\bTask {a.task}\b") if a.task is not None else None
@@ -709,16 +710,22 @@ def _lock_owner(lock: Path) -> str | None:
         return None
 
 
-def cmd_screen(a) -> int:
+def _lock_path(d: Path, resource: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", resource):
+        raise OrqError(f"resource name must be letters, digits, '.', '_' or '-': {resource!r}")
+    return d / ("screen.lock" if resource == "screen" else f"lock-{resource}.lock")
+
+
+def cmd_lock(a) -> int:
     d = base_dir(a.dir)
-    lock = d / "screen.lock"
+    lock = _lock_path(d, a.resource)
     if a.action == "release":
         held = _lock_owner(lock)
         if held != a.owner:
             print(f"not yours: held by {held or 'nobody'}")
             return 1
         lock.unlink()
-        journal_append(d, f"screen released by {a.owner}")
+        journal_append(d, f"{a.resource} released by {a.owner}")
         print("released")
         return 0
     deadline = time.time() + a.wait_min * 60
@@ -735,9 +742,9 @@ def cmd_screen(a) -> int:
                 os.utime(lock)
                 print("already yours (renewed)")
                 return 0
-            if age > SCREEN_STALE_S:
+            if age > LOCK_STALE_S:
                 lock.unlink(missing_ok=True)
-                journal_append(d, f"screen lock of {held} stale ({int(age // 60)} min), taken by {a.owner}")
+                journal_append(d, f"{a.resource} lock of {held} stale ({int(age // 60)} min), taken by {a.owner}")
                 continue
             if time.time() >= deadline:
                 print(f"held by {held} for {int(age // 60)} min")
@@ -746,7 +753,7 @@ def cmd_screen(a) -> int:
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(a.owner)
-        journal_append(d, f"screen taken by {a.owner}")
+        journal_append(d, f"{a.resource} taken by {a.owner}")
         print("taken")
         return 0
 
@@ -1117,10 +1124,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--with-arbiter", action="store_true", help="append the current arbiter, last")
     sub.add_parser("done", help="sessions whose part is over (the watchdog closes them)")
     sub.add_parser("team", help="who must be in the arbiter's group (the watchdog joins them)")
-    s = sub.add_parser("screen", help="the shared-screen lock")
-    s.add_argument("action", choices=["take", "release"])
-    s.add_argument("--owner", required=True)
-    s.add_argument("--wait-min", type=float, default=20)
+    for name, extra in (("lock", True), ("screen", False)):
+        s = sub.add_parser(name, help="a lock on a shared resource" if extra else "alias of `lock … screen`")
+        s.add_argument("action", choices=["take", "release"])
+        if extra:
+            s.add_argument("resource")
+        else:
+            s.set_defaults(resource="screen")
+        s.add_argument("--owner", required=True)
+        s.add_argument("--wait-min", type=float, default=20)
     s = sub.add_parser("commit", help="check the Task's commit and close it")
     s.add_argument("--task", type=int, required=True)
     s.add_argument("--hash", required=True)
@@ -1138,7 +1150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
-        "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
+        "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
         "apply-patch": cmd_apply_patch, "batch": cmd_batch}
 
 

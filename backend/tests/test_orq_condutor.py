@@ -134,13 +134,27 @@ def test_read_contract_da_parte_comum_e_so_a_task_pedida(env, tmp_path):
     assert "só da um" not in out
 
 
-def test_read_contract_acima_do_teto_sai_2_e_manda_o_arbitro_cortar(env, tmp_path):
-    _, _, e = env
-    init(e, tmp_path, "## Task 1\nt\n")
-    (tmp_path / "regras.md").write_text("x" * 8100 + "\n## Task 1\nt\n")
-    r = run(e, "read", "contract", "--task", "1", check=False)
-    assert r.returncode == 2 and "8000" in r.stderr and "the arbiter must cut it" in r.stderr
-    assert r.stdout == ""
+def test_contrato_acima_do_teto_entrega_a_task_com_aviso_e_codigo_3(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path)
+    c = json.loads((d / "orq.json").read_text())["contract"]
+    Path(c).write_text("x" * 9000 + "\n## Task 2\nsó da Task 2\n")
+    r = run(e, "read", "contract", "--task", "2", check=False)
+    assert r.returncode == 3
+    assert r.stdout.splitlines()[0].startswith("WARNING: the contract's common part has 9001 characters")
+    assert "só da Task 2" in r.stdout
+
+
+def test_lock_generico_e_screen_como_apelido(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path)
+    assert run(e, "lock", "take", "porta-8080", "--owner", "a", "--wait-min", "0").stdout.strip() == "taken"
+    assert (d / "lock-porta-8080.lock").read_text() == "a"
+    r = run(e, "lock", "take", "porta-8080", "--owner", "b", "--wait-min", "0", check=False)
+    assert r.returncode == 1 and "held by a" in r.stdout
+    run(e, "screen", "take", "--owner", "c", "--wait-min", "0")
+    assert (d / "screen.lock").read_text() == "c"
+    assert "porta-8080 taken by a" in (d / "registro.md").read_text()
 
 
 def test_init_recusa_contrato_acima_do_teto_e_a_task_longa_nao_conta(env, tmp_path):
@@ -603,7 +617,7 @@ def test_veto_nan_fora_da_primeira_posicao_acorda(env, tmp_path, jev_server):
 
 
 # The calibrated question set and thresholds: a changed word or number means measuring again.
-QUESTIONS_SHA256 = "0c585afb5bf81ae72c4df6cb765bef86a82a1767989600a2e00a1f5e821dff6f"
+QUESTIONS_SHA256 = "ca05f591a55f640dd759536f4f33976a01a375f632c68ac345f39c62d1d4c22f"
 
 
 def test_perguntas_e_limites_calibrados_nao_mudam():
