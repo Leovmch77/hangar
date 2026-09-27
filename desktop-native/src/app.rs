@@ -3521,6 +3521,26 @@ fn row_frame(inner: AnyElement, message: bool) -> Div {
         .child(div().w_full().max_w(px(column_width())).child(inner))
 }
 
+/// A conversa ainda sem histórico: turnos fantasmas no formato das linhas (pergunta em bolha à direita, resposta em
+/// linhas à esquerda), colados no fim como a lista. Cada peça só aparece depois da espera do `Skeleton`, então sessão
+/// rápida não pisca.
+fn render_history_skeleton() -> Div {
+    const TURNS: [(f32, [f32; 3]); 3] = [(180., [0.94, 0.88, 0.52]), (260., [0.9, 0.97, 0.7]), (140., [0.86, 0.62, 0.0])];
+    let mut row = 0;
+    let turns = TURNS.iter().enumerate().map(|(turn, (bubble, lines))| {
+        let user = chrome::Skeleton::new(("history-skeleton-user", turn)).row(row).w(px(*bubble)).h(px(38.)).rounded(px(18.));
+        row += 1;
+        let answer = lines.iter().enumerate().filter(|(_, width)| **width > 0.).map(|(line, width)| {
+            row += 1;
+            chrome::Skeleton::new(("history-skeleton-line", turn * 3 + line)).row(row).w(relative(*width)).h(px(12.)).rounded(px(4.))
+        }).collect::<Vec<_>>();
+        div().flex().flex_col().gap(px(14.)).child(div().flex().justify_end().child(user))
+            .child(div().flex().flex_col().gap(px(9.)).children(answer))
+    }).collect::<Vec<_>>();
+    div().flex_1().min_h_0().flex().flex_col().justify_end().pb(px(20.)).overflow_hidden()
+        .child(in_column(div().flex().flex_col().gap(px(28.)).children(turns)))
+}
+
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
@@ -4376,7 +4396,9 @@ impl Hangar {
             } else if !selected.readable() {
                 content = content.child(div().flex_1().p_6().text_color(theme::muted()).child(tr(if selected.tracked == Some(false) { "untracked" } else { "starting" })));
             } else {
-                if self.has_older || self.loading {
+                if self.row_ids.is_empty() && self.loading {
+                    content = content.child(render_history_skeleton());
+                } else if self.has_older || self.loading {
                     content = content.child(in_column(div().py_2().flex().gap_2().items_center()
                         .when(self.has_older, |el| el.child(Button::new("older").small().outline().label(tr("older")).disabled(self.loading)
                             .on_click(cx.listener(|this, _, _, cx| { this.history_limit = this.history_limit.saturating_add(400); this.etag = None; this.load_history(cx); }))))
@@ -4385,7 +4407,7 @@ impl Hangar {
                 }
                 if self.row_ids.is_empty() && !self.loading && self.error.is_none() {
                     content = content.child(self.render_empty_chat());
-                } else {
+                } else if !self.row_ids.is_empty() || !self.loading {
                     let view = cx.entity().downgrade();
                     // Leitura Folha: uma folha da largura da coluna atrás das mensagens, com o fundo nas margens.
                     let sheet = (appearance::get().effective_reading() == appearance::Reading::Sheet).then(|| div().absolute().inset_0()
