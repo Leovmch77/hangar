@@ -903,21 +903,25 @@ def _queue_proof(d: Path, task: int, full: str) -> str:
         return ""
     tasks = plan_tasks(plan_text(config(d)["plan"]))
     me = next((t for t in tasks if t["n"] == task), None)
-    if not me or not me["roteiro"]:
-        return ""
     fila = d / "prova-fila.jsonl"
+    queued = {f.get("task") for f in _jsonl(fila)}
     # A repeated `orq commit` must not count the same Task twice toward N.
-    if task not in {f.get("task") for f in _jsonl(fila)}:
+    if me and me["roteiro"] and task not in queued:
         with fila.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": now(), "task": task, "roteiro": me["roteiro"], "hash": full}) + "\n")
     pend = pending_proofs(d)
+    if not pend:
+        return ""
     closed = _closed(d)
-    # By wave, not by open Tasks: a sequential run has none open at every commit.
-    wave_over = all(t["n"] in closed for t in tasks if t["wave"] == me["wave"])
+    # By wave, not by open Tasks: a sequential run has none open at every commit. A Task without
+    # roteiro may still be the one that ends the wave.
+    wave_over = not me or all(t["n"] in closed for t in tasks if t["wave"] == me["wave"])
     if len(pend) >= prova[1] or wave_over:
-        tasks = ", ".join(f"T{p['task']}" for p in pend)
-        return (f" Proof batch ready: {tasks}. Run `orq batch take` and open one proof session "
+        names = ", ".join(f"T{p['task']}" for p in pend)
+        return (f" Proof batch ready: {names}. Run `orq batch take` and open one proof session "
                 "for those roteiros on the integrated code.")
+    if not (me and me["roteiro"]):
+        return ""
     return f" Proof queued ({len(pend)}/{prova[1]})."
 
 

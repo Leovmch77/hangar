@@ -233,9 +233,24 @@ def test_lote_sai_quando_a_onda_da_task_acaba(tmp_path, repo):
     out = run("batch", "take", env=e).stdout
     assert out.startswith("lote 1: T1 roteiro-1.md ")
     assert run("batch", "take", env=e).stdout.strip() == "no pending proof"
+    # Commit repetido depois do take: fila vazia, nenhum lote vazio anunciado.
+    run("commit", "--task", "1", "--hash", g("rev-parse", "HEAD"), env=e)
+    assert log.read_text().splitlines()[-1].endswith("Release the next ready Task(s).")
     fechar(tmp_path, r, g, e, 2, "b.txt")
     assert "Proof batch ready: T2." in log.read_text().splitlines()[-1]
     assert run("batch", "take", env=e).stdout.startswith("lote 2: T2 ")
+
+
+def test_task_sem_roteiro_que_fecha_a_onda_anuncia_o_lote(tmp_path, repo):
+    r, g = repo
+    tasks = _tasks(1, 2) + "| 3 | c | §3 | `c.txt` | `true` | 1 | — |\n"
+    d, e, log = iniciar(tmp_path, r, projeto=PROJETO.replace("lote(2)", "lote(8)"), tasks=tasks)
+    fechar(tmp_path, r, g, e, 1, "a.txt")
+    assert log.read_text().splitlines()[-1].endswith("Proof queued (1/8).")
+    fechar(tmp_path, r, g, e, 3, "c.txt")
+    assert "Proof batch ready: T1." in log.read_text().splitlines()[-1]
+    fila = [json.loads(l) for l in (d / "prova-fila.jsonl").read_text().splitlines()]
+    assert [f["task"] for f in fila] == [1]
 
 
 def test_lote_so_enfileira_com_roteiro_e_commit_repetido_nao_duplica(tmp_path, repo):
