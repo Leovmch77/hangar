@@ -7,7 +7,6 @@ use super::*;
 use super::device::Remote;
 use super::sidebar::git_note;
 use gpui_kit::component::{WindowExt, notification::NotificationType, popover::Popover, tab::{Tab, TabBar}};
-use crate::appearance::SideTab;
 use std::rc::Rc;
 
 /// O diálogo no tamanho do painel expandido: `min(1100, 92% da janela)` por `min(720, 78%)`.
@@ -1058,17 +1057,10 @@ impl Hangar {
         Some(panel)
     }
 
-    /// A faixa do compositor e o "Git" do menu: a aba Git do painel direito; sem espaço para o painel, o diálogo grande.
+    /// A faixa do compositor e o "Git" do menu abrem o diálogo grande, com diff e histórico inteiros; a aba Git do
+    /// painel direito fica como a vista curta.
     pub(super) fn open_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let was_open = self.side.open;
-        self.side.open = true;
-        if !self.side_shown(window) {
-            self.side.open = was_open;
-            self.open_git_dialog(window, cx);
-            return;
-        }
-        if let Some((_, panel)) = self.side.git.clone() { panel.update(cx, |panel, cx| panel.load(window, cx)); }
-        self.choose_side_tab(SideTab::Git, window, cx);
+        self.open_git_dialog(window, cx);
     }
 
     /// Diff e histórico no tamanho do painel expandido; ao fechar, a aba relê o que o diálogo pode ter mudado.
