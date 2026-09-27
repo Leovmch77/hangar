@@ -4,6 +4,7 @@
 //! botão existem, é do `Hangar`, como no `Chat.svelte`.
 use super::*;
 use super::subagent::SubConversation;
+use crate::appearance::SideTab;
 use crate::conversation::{Activity, AgentRun, TaskStatus};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -605,7 +606,7 @@ impl ActivityPanel {
     }
 }
 
-/// Estado do `Hangar` para a aba: a view, a conta do disco e a aba escolhida por sessão.
+/// Estado do `Hangar` para a aba: a view, a conta do disco e as abas de subagente.
 pub(super) struct ActivityState {
     view: Entity<ActivityPanel>,
     /// Subagentes no disco da sessão aberta; falha mantém o número anterior.
@@ -615,8 +616,6 @@ pub(super) struct ActivityState {
     /// A lista da mesma leitura da conta: o cartão Agent do pai sabe da falha do seu subagente sem a aba aberta.
     subs: Vec<SubRun>,
     count_timer: Option<Task<()>>,
-    /// Sessões em que a aba escolhida é Atividade.
-    chosen: HashSet<SessionKey>,
     tabs: Vec<SubagentTab>,
     active_tab: Option<u64>,
     tab_seq: u64,
@@ -635,7 +634,7 @@ fn tab_after_close(active: Option<u64>, closed: u64, previous: Option<u64>, rema
 impl ActivityState {
     pub fn new(cx: &mut App) -> Self {
         Self { view: cx.new(ActivityPanel::new), count: 0, count_seq: 0, count_busy: false, subs: Vec::new(), count_timer: None,
-            chosen: HashSet::new(), tabs: Vec::new(), active_tab: None, tab_seq: 0, pending_tab: None, tab_error: None,
+            tabs: Vec::new(), active_tab: None, tab_seq: 0, pending_tab: None, tab_error: None,
             tab_scroll: ScrollHandle::new() }
     }
 }
@@ -648,39 +647,52 @@ impl Hangar {
     }
 
     pub(super) fn activity_tab(&self) -> bool {
-        self.act.active_tab.is_none() && self.selected_key().is_some_and(|key| self.act.chosen.contains(&key)) && self.has_activity()
+        self.act.active_tab.is_none() && self.side_tab() == SideTab::Activity
+    }
+
+    pub(super) fn subagent_tab_open(&self) -> bool { self.act.active_tab.is_some() }
+
+    /// A aba lembrada, se esta sessão tem o que mostrar nela; senão, Contexto (a escolha fica para a próxima sessão).
+    pub(super) fn side_tab(&self) -> SideTab {
+        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        match appearance::get().side_tab {
+            SideTab::Files if readable => SideTab::Files,
+            SideTab::Activity if self.has_activity() => SideTab::Activity,
+            SideTab::Git if readable && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
+            _ => SideTab::Context,
+        }
     }
 
     fn activity_link(&self) -> Option<Link> {
         Some(Link { api: self.api.clone()?, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection })
     }
 
-    /// Depois de mudar conversa, estado, conta ou aba: a aba sem atividade volta para Contexto (e fica lá), a view recebe
-    /// os dados e, se passou a aparecer, relê a lista. Antes de a conversa chegar não há como saber, e a escolha fica.
+    /// Depois de mudar conversa, estado, conta ou aba: a view recebe os dados e, se passou a aparecer, relê a lista.
     pub(super) fn sync_activity(&mut self, cx: &mut Context<Self>) {
         let key = self.selected_key();
         if !self.side.open { self.act.pending_tab = None; }
-        if let Some(key) = &key { if self.history_installed && !self.has_activity() { self.act.chosen.remove(key); } }
-        let target = key.filter(|key| self.side.open && self.act.chosen.contains(key) && self.has_activity()).zip(self.activity_link());
+        let target = key.filter(|_| self.side.open && self.side_tab() == SideTab::Activity).zip(self.activity_link());
         let (activity, processes) = (&self.activity, &self.chat.state.shells);
         self.act.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.show(target, cx); });
         for tab in &self.act.tabs { tab.view.update(cx, |view, cx| view.set_data(activity, processes, cx)); }
     }
 
-    pub(super) fn choose_side_tab(&mut self, activity: bool, cx: &mut Context<Self>) {
-        let Some(key) = self.selected_key() else { return };
+    /// Clique numa aba do painel: fecha a aba de subagente aberta e grava a escolha como as outras preferências de tela.
+    pub(super) fn choose_side_tab(&mut self, tab: SideTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() { return };
         self.act.active_tab = None;
         self.act.pending_tab = None;
         self.act.tab_error = None;
-        if activity { self.act.chosen.insert(key); } else { self.act.chosen.remove(&key); }
+        if appearance::get().side_tab != tab { self.apply_appearance(appearance::Appearance { side_tab: tab, ..appearance::get() }, true, cx); }
+        if self.side_tab() == SideTab::Files { self.show_tree(true, Some(window), cx); }
         self.sync_activity(cx);
         cx.notify();
     }
 
     /// O botão do cabeçalho: abre o painel já na aba Atividade.
-    fn open_activity(&mut self, cx: &mut Context<Self>) {
+    fn open_activity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.side.open { self.toggle_side(cx); }
-        self.choose_side_tab(true, cx);
+        self.choose_side_tab(SideTab::Activity, window, cx);
     }
 
     /// Sessão nova: a conta recomeça e o pedido em voo da anterior é descartado.
@@ -896,21 +908,27 @@ impl Hangar {
         views
     }
 
-    /// Abas "Contexto | Atividade" no cabeçalho do painel; sem atividade, só o título de antes.
+    /// Abas "Contexto | Arquivos | Atividade | Git" numa fileira, como o web: Atividade só com atividade e Git só com
+    /// repositório; Arquivos e Git pedem a sessão legível.
     pub(super) fn render_side_title(&self, cx: &mut Context<Self>) -> AnyElement {
-        if !self.has_activity() { return div().font_weight(FontWeight::SEMIBOLD).child(tr("side_context")).into_any_element(); }
-        let on_activity = self.activity_tab();
-        let tab = |id: &'static str, label: String, selected: bool, activity: bool, cx: &mut Context<Self>| {
-            div().h_full().flex().items_center().border_b_2().border_color(if selected { theme::accent() } else { transparent_black() })
+        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        let git = readable && self.selected.as_ref().is_some_and(super::sidebar::has_git);
+        let current = self.act.active_tab.is_none().then(|| self.side_tab());
+        let tab = |id: &'static str, label: String, which: SideTab, cx: &mut Context<Self>| {
+            let selected = current == Some(which);
+            // As quatro cabem a partir de ~300 px; mais estreito, cada uma encolhe com reticências em vez de sumir da fileira.
+            div().h_full().min_w_0().flex().items_center().border_b_2().border_color(if selected { theme::accent() } else { transparent_black() })
                 .child(Button::new(id).custom(ButtonCustomVariant::new(cx).color(transparent_black())
                         .foreground(if selected { theme::text() } else { theme::muted() }).hover(theme::hover()).active(theme::hover()))
-                    // Mesmo peso do título "Contexto" de antes: as abas chegam sem o texto mudar de lugar nem de peso.
-                    .h(px(28.)).px(px(10.)).rounded(px(6.)).when(selected, |b| b.font_weight(FontWeight::SEMIBOLD)).label(label)
-                    .on_click(cx.listener(move |this, _, _, cx| this.choose_side_tab(activity, cx))))
+                    .min_w_0().h(px(28.)).px(px(6.)).rounded(px(6.)).text_size(px(13.)).when(selected, |b| b.font_weight(FontWeight::SEMIBOLD))
+                    .accessibility_label(label.clone()).child(div().min_w_0().truncate().child(label))
+                    .on_click(cx.listener(move |this, _, window, cx| this.choose_side_tab(which, window, cx))))
         };
-        div().h_full().flex().items_center().gap(px(2.)).ml(px(-10.))
-            .child(tab("side-tab-context", tr("side_context"), !on_activity && self.act.active_tab.is_none(), false, cx))
-            .child(tab("side-tab-activity", web("ctx_atividade"), on_activity, true, cx))
+        div().id("side-tabs").h_full().min_w_0().flex().items_center().gap(px(2.)).ml(px(-6.)).overflow_hidden()
+            .child(tab("side-tab-context", tr("side_context"), SideTab::Context, cx))
+            .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, cx)))
+            .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, cx)))
+            .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, cx)))
             .into_any_element()
     }
 
@@ -929,7 +947,7 @@ impl Hangar {
             .child(Button::new("activity-open").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(color)
                     .hover(theme::hover()).active(theme::hover()))
                 .w(px(28.)).h(px(28.)).rounded(px(6.)).tooltip(label.clone()).accessibility_label(label).child(icon)
-                .on_click(cx.listener(|this, _, _, cx| this.open_activity(cx))))
+                .on_click(cx.listener(|this, _, window, cx| this.open_activity(window, cx))))
             // Selo no canto de fora do botão, sem cobrir as linhas do ícone.
             .when(badge > 0, |el| el.child(div().absolute().top(px(-6.)).right(px(-7.)).min_w(px(14.)).h(px(14.)).px(px(3.))
                 .rounded_full().bg(theme::accent()).text_color(gpui::white()).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD)

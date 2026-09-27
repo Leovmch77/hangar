@@ -6,6 +6,7 @@ use super::*;
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{WindowExt, dialog, menu::{DropdownMenu, PopupMenu}, notification::NotificationType};
 use super::machines::enter_to_focused;
+use super::activity::web;
 use std::{cell::RefCell, rc::Rc};
 
 /// O filtro aparece com mais de 6 sessões, contadas antes de filtrar (`FILTER_FROM` do web).
@@ -34,7 +35,7 @@ struct MenuRead { name: String, seq: u64, mute: Mute, branches: Option<Branches>
 
 #[derive(Clone, Debug)]
 /// O renomear leva o número do pedido: resposta de um diálogo cancelado não fecha a tentativa seguinte na mesma sessão.
-pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete }
+pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool) }
 
 /// Gravações de git e o remover vínculo: o resultado é a notificação da sessão, já em texto.
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
@@ -59,7 +60,7 @@ pub(super) fn git_note(name: &str, kind: NotificationType, text: String) -> Noti
 }
 
 /// Git no menu só com pasta num repositório: o backend manda `branch` nulo fora de um (como o web, SCM:162).
-fn has_git(s: &SessionInfo) -> bool { s.cwd.as_deref().is_some_and(|c| !c.is_empty()) && s.branch.is_some() }
+pub(super) fn has_git(s: &SessionInfo) -> bool { s.cwd.as_deref().is_some_and(|c| !c.is_empty()) && s.branch.is_some() }
 
 fn first_line(value: &Value) -> Option<String> {
     value.get("output").and_then(Value::as_str).and_then(|o| o.trim().lines().next()).filter(|l| !l.is_empty()).map(str::to_owned)
@@ -554,6 +555,7 @@ impl Hangar {
                 Write::Editor => api.act(&name, &["open-editor"], None, false, 15).await,
                 Write::Delete => api.act(&name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(&name, &["rename"], Some(json!({"new": new})), false, 30).await,
+                Write::Mode(terminal) => api.act(&name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
             };
             tell.send(SidebarReply::Wrote(name, what, result)).await;
         });
@@ -562,14 +564,25 @@ impl Hangar {
 
     // ── Git e encadear ──
 
-    /// "Git": a visão de git do nativo é a seção Projeto do painel da direita (decisão do árbitro), já com os arquivos alterados.
+    /// "Git": a aba Git do painel da direita (o diálogo quando o painel não cabe), o mesmo caminho da faixa do compositor.
     fn open_git(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.as_ref().is_none_or(|s| s.name != name) {
             let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() else { return };
             self.select(session, window, cx);
         }
-        self.side.open = true;
-        self.load_files(cx);
+        self.open_git_panel(window, cx);
+    }
+
+    /// Terminal ⇄ sem terminal na mesma conversa: reinicia o processo da sessão, então pergunta antes, como o web.
+    fn confirm_mode(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.iter().find(|s| s.name == name) else { return };
+        let terminal = session.headless;
+        let label = web(if terminal { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
+        let message = web(if terminal { "modo_confirmar_terminal_msg" } else { "modo_confirmar_sem_terminal_msg" });
+        self.focus_origin(&name, window, cx);
+        let this = cx.entity().downgrade();
+        chrome::confirm_alert(window, cx, label.clone(), message, label, ButtonVariant::Primary,
+            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(name.clone(), Write::Mode(terminal), cx)); true });
     }
 
     fn git_write(&mut self, name: String, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {
@@ -800,6 +813,8 @@ impl Hangar {
                     (Write::Mute(_), Err(error)) => Some(Notification::error(failed("sidebar_mute_failed", &error))),
                     (Write::Editor, Ok(_)) => None,
                     (Write::Editor, Err(error)) => Some(Notification::error(failed("sidebar_editor_failed", &error))),
+                    (Write::Mode(_), Ok(_)) => None,
+                    (Write::Mode(_), Err(error)) => Some(Notification::error(failed("sidebar_mode_failed", &error))),
                     (Write::Delete, Ok(value)) => {
                         // Fechou, mas um par do grupo não foi avisado: o motivo aparece em vez de fechar mudo.
                         value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(
@@ -948,6 +963,13 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
             });
         })
     };
+    // Só Claude e Codex trocam de modo, e só parados (o backend responde 409 fora disso); o rótulo é o destino.
+    let mode = matches!(session.provider.as_str(), "claude" | "codex").then(|| {
+        let label = web(if session.headless { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
+        let idle = session.state == "idle";
+        let label = if idle { label } else { format!("{label} · {}", web("modo_so_ociosa")) };
+        item(label, |this, name, window, cx| this.confirm_mode(name, window, cx)).disabled(!idle)
+    });
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
         .item(item(tr("sidebar_rename"), |this, name, window, cx| this.start_session_rename(name, window, cx)))
         .item(mute_item(hangar, &session.name, mute))
@@ -964,6 +986,7 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
         .separator()
         .submenu(chain_label, window, cx, move |menu, _, _| fill_chain(menu, &weak, &name, current.clone(), &others))
         .separator()
+        .when_some(mode, |menu, mode| menu.item(mode))
         .item(baton)
         .separator()
         .item(close)
