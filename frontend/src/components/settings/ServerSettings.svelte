@@ -67,13 +67,17 @@
       ajuda: m.config_server_marcar_travada_ajuda() },
     { chave: 'editor', rotulo: m.config_server_editor(), tipo: 'texto', secao: 'avancado',
       ajuda: m.config_server_editor_ajuda() },
-    // A ajuda diz ONDE a chave é usada, e é só um consumidor hoje. Havendo um segundo, a frase
-    // vira lista — não há registro de consumidores, e não precisa haver enquanto for um.
+    // A ajuda diz ONDE a chave é usada: `objetivo`, `confere` e a triagem da orquestração. Não há
+    // registro de consumidores; quem ganhar outro atualiza a lista da frase.
     { chave: 'jev_api_key', rotulo: m.config_server_jev_chave(), tipo: 'segredo', secao: 'avancado',
       ajuda: m.config_server_jev_chave_ajuda() },
     // Logo abaixo da chave de propósito: é o único campo cujo efeito depende dela estar preenchida.
     { chave: 'jev_padrao', rotulo: m.config_server_jev_padrao(), tipo: 'liga', secao: 'avancado',
       ajuda: m.config_server_jev_padrao_ajuda() },
+    { chave: 'jev_endpoint', rotulo: m.config_server_jev_endpoint(), tipo: 'texto', secao: 'avancado',
+      ajuda: m.config_server_jev_endpoint_ajuda() },
+    { chave: 'jev_model', rotulo: m.config_server_jev_modelo(), tipo: 'texto', secao: 'avancado',
+      ajuda: m.config_server_jev_modelo_ajuda() },
     { chave: 'jev_texto_base_url', rotulo: m.config_server_jev_texto_endpoint(), tipo: 'texto', secao: 'avancado',
       ajuda: m.config_server_jev_texto_endpoint_ajuda() },
     { chave: 'jev_texto_api_key', rotulo: m.config_server_jev_texto_chave(), tipo: 'segredo', secao: 'avancado',

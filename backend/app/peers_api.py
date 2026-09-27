@@ -69,6 +69,29 @@ def gravar_peer(body: dict) -> list:
     return _lista()
 
 
+@peers_router.put("/{server_id}/enabled", dependencies=[Depends(require_auth)])
+def set_peer_enabled(server_id: str, body: dict) -> list:
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(400, detail=erro("peers_registro_invalido", "enabled precisa ser true ou false"))
+    try:
+        peers.set_peer_enabled(server_id, enabled)
+    except ValueError as e:
+        raise HTTPException(404, detail=erro("peers_desconhecido", str(e))) from e
+    return _lista()
+
+
+@peers_router.get("/{server_id}/token", dependencies=[Depends(require_auth)])
+def token_do_peer(server_id: str) -> dict:
+    """Token inteiro de UM peer, pedido de propósito: a tela o usa para passar a mostrar as sessões
+    dessa máquina sem pedir o token de novo. Quem tem o token deste servidor já lê o peers.json
+    pelas sessões dele. A listagem continua mascarada."""
+    cfg = peers.peer_cfg(server_id)
+    if cfg is None:
+        raise HTTPException(404, detail=erro("peers_desconhecido", f"peer {server_id!r} desconhecido"))
+    return {"token": cfg[1]}
+
+
 @peers_router.delete("/{server_id}", dependencies=[Depends(require_auth)])
 def apagar_peer(server_id: str) -> list:
     try:

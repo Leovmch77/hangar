@@ -625,8 +625,61 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   return { feito, sucesso: false, parou: `estourou ${maxPassos} passos` };
 }
 
+/** `confere`: uma pergunta sobre o fato que a tela mostra, com o mesmo piso da conclusão do laço. */
+function perguntaDeConfere(estado) {
+  return {
+    chegou: {
+      type: 'noul',
+      instructions: `The page now shows this state: ${estado}. `
+        + 'Loading, a spinner, an error or a different screen mean this is false.',
+    },
+  };
+}
+
+function chegouNoEstado(respostas) {
+  const p = respostas?.chegou?.noul;
+  return typeof p === 'number' ? { p, ok: p >= LIMIARES.conclusao } : { p: 0, ok: false };
+}
+
+const JEV_URL_PADRAO = 'https://api.typesafe.ai/v1/systemone';
+
+/** Endereço e modelo do Jev: os da configuração do servidor (injetados na sessão) ou o padrão. */
+function destinoDoJev(env, modeloPadrao) {
+  const url = String(env.JEV_ENDPOINT ?? '').trim() || JEV_URL_PADRAO;
+  const modelo = String(env.JEV_MODEL ?? '').trim() || modeloPadrao;
+  return { url, modelo };
+}
+
+const JEV_DEADLINE_MS = 15_000;
+
+// Endpoint pendurado prendia o comando pra sempre, e um `until hangar-preview confere` parava calado.
+async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_DEADLINE_MS }) {
+  let r;
+  let corpo;
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: modelo, state: estado, questions: perguntas }),
+      signal: AbortSignal.timeout(deadlineMs),
+    });
+    corpo = await r.text();
+  } catch (err) {
+    throw new Error(err?.name === 'TimeoutError'
+      ? `o Jev não respondeu em ${deadlineMs / 1000} s`
+      : `o Jev falhou: ${String(err?.message).slice(0, 200)}`);
+  }
+  if (!r.ok) throw new Error(`o Jev recusou: ${r.status} ${corpo.slice(0, 200)}`);
+  try {
+    return JSON.parse(corpo).answers;
+  } catch (err) {
+    throw new Error(`o Jev falhou: ${String(err.message).slice(0, 200)}`);
+  }
+}
+
 module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
+  perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS,
 };

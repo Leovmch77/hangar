@@ -37,7 +37,7 @@ Done when every item above has an answer for this range.
 
 ### 3. Verify
 
-Run the plan's `Final verification:` (full suites: whole-repo type check, full test run, build)
+Run the plan's `Checagens:` and `Integração:` (plus its `Final verification:`, when it has one)
 once on the branch tip, cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or
 through the contract's optional `verificador` line (`revisor-verificador.md`). No such line →
 the project's documented full checks. A red test → run it on `<base>` in a detached worktree;
@@ -70,6 +70,9 @@ above.
 
 ## Locks
 
+- Nobody reads your chat: no text for the user — no narration, plan, status or summary between
+  tool calls or at the end of a turn. What matters goes in the report file or the message to
+  the arbiter.
 - Account and model are the contract's row for your role; subagents on the same account, model
   switch only where the contract allows, `model:` in any agent frontmatter checked. Need
   another → stop and ask.

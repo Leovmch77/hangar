@@ -1,14 +1,16 @@
 # Reviewer — the visual gate
 
-This page belongs to the Task that touches pixels. Diff draws nothing: go back to `revisor.md`
-and `revisor-catalogo.md`.
+This page belongs to the Task that touches pixels. Diff draws nothing: this page does not apply;
+follow your normal flow.
+
+`orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir from the kick-off>`.
 
 ## Proof of seeing, or a BLOCKER
 
 - The round carries the absolute paths of the per-state screenshots, the visual question asked
   of each, and the answer. DOM, CSS and the accessibility tree do not substitute.
 - A screenshot from before the fix does not count.
-- Task with a bar: the `Visual:` line points at the executor's visual report, which carries per
+- Task with a bar: the `Proof:` line points at the executor's visual report, which carries per
   round who won, which letter was their work, the biggest hole named and what they fixed.
   "I compared and it looks good" blocks.
 
@@ -17,8 +19,8 @@ and `revisor-catalogo.md`.
 Do not redo the executor's blind protocol. Make one pass at the end over the final screenshot
 and the bar, hunting:
 
-- the bar swapped midway: check the four invalidators of `executor-visual.md`, step 3
-  (viewport, language, edge-cut element, effect framed with the state);
+- the bar swapped midway: check the four capture invalidators (viewport, language,
+  edge-cut element, effect framed with the state);
 - they won and it is still wrong: an opaque rectangle over the wallpaper, cut-off text, a state
   nobody captured.
 
@@ -35,18 +37,26 @@ and the bar, hunting:
 
 ## No bar, or a waived bar
 
-- Pixels touched and no bar at all in the contract: `DEVOLVIDO` to the arbiter: "Task N draws a
-  screen and the contract carries neither a bar nor a waiver; the bar is the user's decision".
+- Pixels touched and no bar at all in the contract: `DEVOLVIDO` (the case this skill adds to
+  the reviewer's cannot-be-judged list), the report saying "Task N draws a screen and the
+  contract carries neither a bar nor a waiver; the bar is the user's decision".
   Do not propose one, pick one, or judge as if it existed.
 - Contract says `Bar: none — user's decision`: judge normally without the blind comparison
   (per-state screenshots, missing state is a finding) and enforce no bar.
 
 ## How to look without burning context
 
-- Do not follow screenshot by screenshot while the work moves. At the end, open ALL the
-  screenshots at once and check each shows what its caption says.
+- Do not follow screenshot by screenshot while the work moves. At the end, read the round's two
+  panels (yours and the reference's) and check each state shows what its caption says; open a
+  single screenshot only for a detail the panel cannot settle (color, sign, enabled).
 - A symbol or color claim is checked on the zoomed crop, never by eye on the whole image.
 - Hunt: a screenshot that does not prove its caption, a state captured at the wrong moment
   (before the fix, mid-transition), a state nobody captured.
 - The capturer's description is input; the conclusion is yours. You cannot see images and the
-  Task is visual: tell the arbiter.
+  Task is visual: `orq notify "[decisao] T<N>: visual Task, I cannot see images"`.
+
+## Report line
+
+```
+Screens: <2 panels + N single shots for detail> · invalidators: <ok | which failed> · bar: <result | "waived by <who>">
+```

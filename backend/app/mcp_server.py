@@ -88,7 +88,7 @@ async def who_am_i(ctx: Context) -> dict[str, str]:
 
 
 @mcp.tool(description="Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). "
-                      "`voce: true` marca esta sessão. "
+                      "`voce: true` marca esta sessão; mesmo `grupo` = mesmo grupo de trabalho. "
                       "Equivale a `hangar-send --list` sem os servidores remotos.")
 async def sessions(ctx: Context) -> list[dict[str, Any]]:
     from app import api
@@ -98,19 +98,24 @@ async def sessions(ctx: Context) -> list[dict[str, Any]]:
         eu = None
     infos = await api.list_sessions()
     return [{"name": s.name, "state": s.state, "cwd": s.cwd,
-             "provider": s.provider, "headless": s.headless, "voce": s.name == eu} for s in infos]
+             "provider": s.provider, "headless": s.headless, "voce": s.name == eu,
+             "grupo": s.pair_gid} for s in infos]
 
 
 @mcp.tool(description="Manda um recado 1:1 pra outra sessão, como `hangar-send <sessao> <msg>`: "
                       "chega lá como `[de: <você>] texto`. `alvo` aceita `servidor::sessao` "
-                      "pra outro servidor. Recusa alvo Claude local com caminho nativo "
-                      "(use SendMessage) a menos que `tmux=true`.")
+                      "pra outro servidor. O backend escolhe o transporte (socket nativo, plugin, "
+                      "tmux ou fila) e diz se entregou.")
 async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
     if alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}"):
         raise ToolError(f"recusado: '{alvo}' é esta sessão — o recado voltaria pra você. "
                         "Quem é quem: tool `sessoes` (campo `voce`).")
+    # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro — com ou sem o
+    # "<servidor>::" na frente, que é como o envio pra outro servidor qualifica o remetente.
+    servidor = rf"(?:{re.escape(settings.server_id)}::)?" if settings.server_id else ""
+    texto = re.sub(rf"^\s*\[de:\s*{servidor}{re.escape(eu)}\]\s*", "", texto)
     if peers.is_remote(alvo):
         srv, sess = peers.split_addr(alvo)
         if not settings.server_id:
@@ -123,8 +128,6 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
         return {"alvo": alvo, **(resp or {})}
     # `tmux` fica aceito por compatibilidade: o backend já escolhe o transporte (socket nativo,
     # plugin, tmux, fila) e nunca devolve o envio pro modelo fazer por outra ferramenta.
-    # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro.
-    texto = re.sub(rf"^\s*\[de:\s*{re.escape(eu)}\]\s*", "", texto)
     try:
         resp = await api.input_prompt(alvo, api.InputBody(text=f"[de: {eu}] {texto}", steer=True))
     except HTTPException as e:
@@ -146,7 +149,9 @@ async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
 
 @mcp.tool(description="Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> "
                       "<tarefa>`: registra no app e injeta o protocolo nos dois lados. `alvo` aceita "
-                      "`servidor::sessao`. Só quando o usuário pedir pareamento.")
+                      "`servidor::sessao`. `tarefa` é o título do grupo na lista: chave + assunto "
+                      "numa linha (ex: `ABC-1234 Tela de login`); o combinado vai por `send`. "
+                      "Só quando o usuário pedir pareamento.")
 async def pair(ctx: Context, alvo: str, tarefa: str = "", substituir_tarefa: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)

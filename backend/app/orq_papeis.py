@@ -5,7 +5,9 @@ O árbitro é dono do resto do arquivo; o app troca só a linha do papel (orq_md
 """
 from __future__ import annotations
 
+import itertools
 import logging
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,17 @@ _log = logging.getLogger(__name__)
 # continua byte a byte como estava, o que importa porque estes arquivos são de trabalhos em curso.
 CABECALHO = ("papel", "sessão", "provider", "conta", "modelo", "esforço")
 CABECALHO_VEZ = ("papel", "vez", "sessão", "provider", "conta", "modelo", "esforço")
+# `abertura` segue a mesma regra da `vez`: a coluna só entra no arquivo quando algum papel usa uma
+# opção de abertura, e vai por último. A célula é o trecho de flags do `hangar-send --new`.
+ABERTURA = "abertura"
+# `janela`: teto de contexto do papel, em % da janela da própria sessão. O vigia avisa o árbitro
+# nele; quem decide a troca é o árbitro.
+# Mesma regra das outras opcionais; fica antes de `abertura`. Vazio = 50%.
+JANELA = "janela"
+_CABECALHOS = tuple(sorted(
+    ((CABECALHO_VEZ if vez else CABECALHO) + ((JANELA,) if jan else ()) + ((ABERTURA,) if ab else ())
+     for vez, jan, ab in itertools.product((True, False), repeat=3)),
+    key=len, reverse=True))
 SECAO = "Quem é quem"
 ARBITRO = "arbitro"
 # `vez` só assume "1", "2", "3"…: a Task N cabe à conta de índice (N-1) % total, então a ordem é a
@@ -36,6 +49,16 @@ class Papel:
     modelo: str
     esforco: str
     vez: str = ""
+    headless: bool = False
+    permissao: str = ""
+    motor: str = ""
+    jev: bool = False
+    subagente: str = ""
+    perfil: str = ""        # perfil do omp (`--profile`)
+    # Trecho da célula que o painel não edita (ex.: `--read-only` escrito pelo árbitro): volta
+    # intacto no fim da célula, senão salvar pelo painel apagaria a proteção sem ninguém ver.
+    abertura_extra: str = ""
+    janela: str = ""        # "60" = teto de contexto em 60% da janela; "" = 50%
 
     def e_arbitro(self) -> bool:
         return orq_md.normalizar(self.papel) == ARBITRO
@@ -48,56 +71,113 @@ def regras_path(gid: str) -> Path:
     return pair._pair_dir() / f"regras-{gid}.md"
 
 
+def cabecalho_atual(texto: str) -> tuple[str, ...] | None:
+    """Formato da tabela no arquivo. A comparação do cabeçalho é exata, então o mais largo é
+    tentado primeiro: senão um arquivo com `vez` leria vazio, que na tela é 'grupo sem papel'."""
+    return next((cab for cab in _CABECALHOS if orq_md.ler_tabela(texto, cab)), None)
+
+
 def tem_coluna_vez(texto: str) -> bool:
-    """O arquivo já está no formato de 7 colunas? Decide entre reescrever no lugar e promover."""
-    return bool(orq_md.ler_tabela(texto, CABECALHO_VEZ))
+    cab = cabecalho_atual(texto)
+    return bool(cab and "vez" in cab)
+
+
+def chave_da_linha(cab: tuple[str, ...], papel: str, vez: str) -> str | tuple[str, str]:
+    # Chave composta (papel, vez): sem ela, gravar a 2ª conta de um papel sobrescreveria a 1ª.
+    return (papel, vez or "-") if "vez" in cab else papel
+
+
+def abertura_texto(p: Papel) -> str:
+    """As flags do `hangar-send --new` que o árbitro põe no comando, na ordem fixa."""
+    partes = ["--headless"] if p.headless else []
+    for flag, valor in (("--permissao", p.permissao), ("--engine", p.motor), ("--subagente", p.subagente),
+                        ("--profile", p.perfil)):
+        if valor:
+            partes += [flag, valor]
+    if p.jev:
+        partes.append("--jev")
+    # O árbitro cola a célula num comando de shell: valor com espaço ("Full Access") precisa de aspas.
+    texto = shlex.join(partes)
+    return f"{texto} {p.abertura_extra}".strip() if p.abertura_extra else texto
+
+
+_FLAGS_COM_VALOR = {"--permissao": "permissao", "--engine": "motor", "--subagente": "subagente",
+                    "--profile": "perfil"}
+
+
+def _ler_abertura(celula: str) -> dict:
+    campos: dict = {"headless": False, "permissao": "", "motor": "", "jev": False, "subagente": "",
+                    "perfil": ""}
+    try:
+        toks = [] if celula.strip() in ("", "-") else shlex.split(celula)
+    except ValueError:  # aspas sem par, de linha gravada antes das aspas existirem
+        _log.warning("abertura com aspas sem par, lida por espaço: %r", celula)
+        toks = celula.split()
+    extra: list[str] = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("--headless", "--jev"):
+            campos[t[2:]] = True
+        elif t in _FLAGS_COM_VALOR and i + 1 < len(toks):
+            campos[_FLAGS_COM_VALOR[t]] = toks[i + 1]
+            i += 1
+        else:
+            extra.append(t)
+        i += 1
+    campos["abertura_extra"] = shlex.join(extra)
+    return campos
 
 
 def ler(texto: str) -> list[Papel]:
-    """Lê a tabela nos dois formatos. Tenta o de 7 colunas primeiro: se o arquivo já tem `vez`, o
-    cabeçalho de 6 não casa (a comparação é exata) e a leitura devolveria vazio — que na tela é
-    'este grupo não tem papel nenhum', o pior erro possível aqui."""
-    for cab in (CABECALHO_VEZ, CABECALHO):
-        linhas = orq_md.ler_tabela(texto, cab)
-        if linhas:
-            return [Papel(r["papel"], r["sessão"], r["provider"].lower(), r["conta"],
-                          r["modelo"], r["esforço"], r.get("vez", ""))
-                    for r in linhas if r.get("papel")]
-    return []
+    cab = cabecalho_atual(texto)
+    if cab is None:
+        return []
+    return [Papel(r["papel"], r["sessão"], r["provider"].lower(), r["conta"],
+                  r["modelo"], r["esforço"], r.get("vez", ""), **_ler_abertura(r.get(ABERTURA, "")),
+                  janela=r.get(JANELA, "").rstrip("%").strip())
+            for r in orq_md.ler_tabela(texto, cab) if r.get("papel")]
+
+
+def validar_janela(valor: str) -> str:
+    if valor and not (valor.isdigit() and 10 <= int(valor) <= 95):
+        raise ValueError("janela: porcentagem inteira entre 10 e 95")
+    return valor
+
+
+def _com_coluna(texto: str, cab: tuple[str, ...], nome: str, em: int) -> tuple[str, tuple[str, ...]]:
+    """Acrescenta a coluna NO LUGAR, com `-` em quem já estava: nada além da tabela muda de
+    posição, e as seções escritas à mão (`## Gates`, `## Réguas`) ficam onde estavam."""
+    if nome in cab:
+        return texto, cab
+    return orq_md.inserir_coluna(texto, cab, nome, em), cab[:em] + (nome,) + cab[em:]
 
 
 def promover(texto: str) -> str:
-    """Acrescenta a coluna `vez` à tabela, no lugar, com `-` em quem já estava. Só é chamada quando
-    um papel passa a revezar: um contrato que nunca usou rodízio nunca é tocado.
-
-    A conversão é NO LUGAR de propósito — nada além da tabela muda de posição, e as outras seções
-    do contrato (`## Gates`, `## Réguas`, escritas à mão) ficam onde estavam."""
-    if tem_coluna_vez(texto):
-        return texto
-    return orq_md.inserir_coluna(texto, CABECALHO, "vez", 1)
-
-
-def _valores(p: Papel, com_vez: bool) -> dict[str, str]:
-    v = {"papel": p.papel, "sessão": p.sessao, "provider": p.provider,
-         "conta": p.conta, "modelo": p.modelo, "esforço": p.esforco}
-    if com_vez:
-        v["vez"] = p.vez
-    return v
-
-
-def _escrever_vez(texto: str, p: Papel) -> str:
-    # Chave composta (papel, vez): sem ela, gravar a 2ª conta de um papel sobrescreveria a 1ª.
-    return orq_md.trocar_linha(texto, CABECALHO_VEZ, (p.papel, p.vez or "-"),
-                               _valores(p, True), SECAO)
+    """Acrescenta a coluna `vez`. Só roda quando um papel passa a revezar: contrato que nunca usou
+    rodízio nunca é tocado."""
+    cab = cabecalho_atual(texto)
+    return _com_coluna(texto, cab, "vez", 1)[0] if cab else texto
 
 
 def escrever_papel(texto: str, p: Papel) -> str:
-    for v in (p.papel, p.sessao, p.provider, p.conta, p.modelo, p.esforco, p.vez):
+    abertura = abertura_texto(p)
+    for v in (p.papel, p.sessao, p.provider, p.conta, p.modelo, p.esforco, p.vez, abertura):
         orq_md.validar_celula(v)
-    # Papel sem `vez` num arquivo que ainda não tem a coluna: nada muda de formato.
-    if not p.vez and not tem_coluna_vez(texto):
-        return orq_md.trocar_linha(texto, CABECALHO, p.papel, _valores(p, False), SECAO)
-    return _escrever_vez(promover(texto), p)
+    validar_janela(p.janela)
+    # Contrato que não usa rodízio, janela nem abertura continua byte a byte no formato em que estava.
+    cab = cabecalho_atual(texto) or CABECALHO
+    if p.vez:
+        texto, cab = _com_coluna(texto, cab, "vez", 1)
+    if p.janela:
+        texto, cab = _com_coluna(texto, cab, JANELA, cab.index(ABERTURA) if ABERTURA in cab else len(cab))
+    if abertura:
+        texto, cab = _com_coluna(texto, cab, ABERTURA, len(cab))
+    valores = {"papel": p.papel, "vez": p.vez, "sessão": p.sessao, "provider": p.provider,
+               "conta": p.conta, "modelo": p.modelo, "esforço": p.esforco,
+               JANELA: f"{p.janela}%" if p.janela else "", ABERTURA: abertura}
+    return orq_md.trocar_linha(texto, cab, chave_da_linha(cab, p.papel, p.vez),
+                               {c: valores[c] for c in cab}, SECAO)
 
 
 def _casa_nome(padrao: str, nome: str) -> bool:

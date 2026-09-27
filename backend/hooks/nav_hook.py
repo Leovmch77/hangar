@@ -6,8 +6,11 @@
 # decide, mesmo teste do CLI). Sem Electron, sem saída. Falha em silêncio.
 import json
 import os
+import re
 import subprocess
 import sys
+import unicodedata
+import urllib.request
 
 
 def _nav_dir() -> str:
@@ -96,12 +99,63 @@ def _url_do_navegador(nav_dir: str, nome: str) -> str | None:
 
 def texto(url: str | None) -> str:
     if url:
-        return (f"[hangar] Esta sessão tem navegador embutido aberto em {url}. Pra ver, ler, clicar, "
-                "testar ou tirar print dessa página use `hangar-preview` (skill hangar-preview), "
-                "não agent-browser nem ver-front.")
-    return ("[hangar] O app desktop do Hangar está aberto: esta sessão pode abrir um navegador "
-            "embutido com `hangar-preview open <url>` (skill hangar-preview). Pra ver ou testar "
-            "página local prefira-o a agent-browser/ver-front — e avise o usuário, a janela dele muda.")
+        return (f"[hangar] Esta sessão tem o navegador embutido do Hangar aberto em {url}. Pra ver, "
+                "ler, clicar, testar ou tirar print dessa página, use as tools `browser`/`browser_batch` "
+                "do MCP hangar (sem elas: `hangar-preview` no shell), não agent-browser nem ver-front.")
+    return ("[hangar] Pra ver, testar ou tirar print de uma página, use o navegador embutido do Hangar: "
+            "tools `browser_open`/`browser`/`browser_batch` do MCP hangar (sem elas: `hangar-preview "
+            "open <url>` no shell, skill hangar-preview). Não use agent-browser nem ver-front. Abrir "
+            "muda a janela do usuário: avise-o.")
+
+
+# Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela.
+_TELA = re.compile(
+    r"\b(pagina|paginas|tela|telas|navegador|browser|print|prints|screenshot|captura|clica|clicar|"
+    r"clique|botao|botoes|layout|css|front|frontend|ui|interface|localhost|url|site|login|"
+    r"formulario|modal|preview|testa|testar|teste visual)\b|https?://")
+JEV_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_TIMEOUT_S = 2.0
+JEV_LIMIAR = 0.5
+
+
+def _sem_acento(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s.lower()) if unicodedata.category(c) != "Mn")
+
+
+def _jev_precisa(prompt: str) -> bool | None:
+    """True/False pelo Jev; None quando não há chave ou ele não responde — aí vale a regex."""
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        return None
+    pergunta = {"precisa": {"type": "noul", "instructions": (
+        "Will handling this message require opening, looking at, clicking or testing a web page or "
+        "an app screen in a browser?")}}
+    req = urllib.request.Request(
+        os.environ.get("JEV_ENDPOINT") or JEV_URL,
+        data=json.dumps({"model": os.environ.get("JEV_MODEL") or "jev-latest",
+                         "state": prompt[-4000:], "questions": pergunta}).encode(),
+        headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
+            return float(json.load(r)["answers"]["precisa"]["noul"]) >= JEV_LIMIAR
+    except Exception:
+        return None
+
+
+def precisa_de_navegador(prompt: str) -> bool:
+    if not prompt.strip():
+        return False
+    pelo_jev = _jev_precisa(prompt)
+    return pelo_jev if pelo_jev is not None else bool(_TELA.search(_sem_acento(prompt)))
+
+
+def _prompt() -> str:
+    try:
+        d = json.load(sys.stdin)
+    except Exception:
+        return ""
+    p = d.get("prompt") if isinstance(d, dict) else None
+    return p if isinstance(p, str) else ""
 
 
 def main() -> None:
@@ -115,6 +169,10 @@ def main() -> None:
         return
     nome = _nome_da_sessao()
     url = _url_do_navegador(nav_dir, nome) if nome else None
+    # Navegador aberto: sempre diz qual página. Fechado: a dica só vai quando a mensagem é de tela;
+    # em toda mensagem ela custava contexto a quem nunca abre página (o árbitro de uma orquestração).
+    if url is None and not precisa_de_navegador(_prompt()):
+        return
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                              "additionalContext": texto(url)}}))
 

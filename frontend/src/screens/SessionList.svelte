@@ -14,12 +14,11 @@ import * as m from '../paraglide/messages';
   import BottomSheet from '../components/BottomSheet.svelte';
   import ConfirmSheet from '../components/ConfirmSheet.svelte';
   import Git from '../components/Git.svelte';
-  import LoopSheet from '../components/LoopSheet.svelte';
   import AttentionFeed from '../components/AttentionFeed.svelte';
   import AccountMenu from '../components/AccountMenu.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import { createSession, canPair, type DropResult } from '@hangar/core';
-  import { listServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
+  import { listAllServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
   import type { AggSession, Provider } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
@@ -344,19 +343,6 @@ import * as m from '../paraglide/messages';
     model.openGit(s.name, s.serverId);
   }
 
-  // Loop runner (LoopSheet) aberto pelo botao 🔁 do card, mesma mecânica do gitSheet acima.
-  let loopSheet = $state<{ name: string } | null>(null);
-  let loopSheetPrevServer: string | null = null;
-  function handleLoop(s: AggSession) {
-    loopSheetPrevServer = getActiveId();
-    selectServer(s.serverId);
-    loopSheet = { name: s.name };
-  }
-  function closeLoopSheet() {
-    loopSheet = null;
-    if (loopSheetPrevServer) { selectServer(loopSheetPrevServer); loopSheetPrevServer = null; }
-  }
-
   // Retomar uma sessão "sem id": relança o pane com `claude --resume <uuid>` -> passa a rastrear. Caso
   // seguro (sessão sozinha no cwd) resolve direto; caso ambíguo (outras sessões no mesmo cwd) o backend
   // devolve candidatos e abrimos o sheet pra confirmar qual conversa retomar. O SSE de sessions atualiza
@@ -406,12 +392,12 @@ import * as m from '../paraglide/messages';
     if (!confirmSrv) return;
     const snap = confirmSrv;
     confirmSrv = null;
-    const motivo = removalStillMatches(snap, listServers(), serverVersion);
+    const motivo = removalStillMatches(snap, listAllServers(), serverVersion);
     if (motivo) { showActionMsg(motivo); return; }
     // removeServer() dispara onServersChanged -> o store reconcilia os streams sozinho (fecha o SSE
     // do removido). Só tratamos o caso "zerou" aqui; sem "ativo" pra restaurar.
     removeServer(snap.id);
-    if (listServers().length === 0) { handleLogout(); return; }
+    if (listAllServers().length === 0) { handleLogout(); return; }
   }
 
 </script>
@@ -552,7 +538,7 @@ import * as m from '../paraglide/messages';
                             class:drop-alvo={dropResultado?.ok === true}
                             class:drop-recusado={dropRecusa !== null}
                             data-session-key={rep ? dragChave(rep) : undefined}
-                            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
+                            title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: item.label })}>
                       <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
                       <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto"> {pairResto(item.label)}</span>{/if}</span></span>
                 {#if pairAwaiting(item.gid) > 0}
@@ -579,7 +565,6 @@ import * as m from '../paraglide/messages';
                         onResume={() => handleResume(session)}
                         onRename={(nv) => handleRename(session, nv)}
                         onGit={() => handleGit(session)}
-                        onLoop={() => handleLoop(session)}
                         onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
                         showProvider={model.showProviderTags}
                         selectMode={model.selectMode}
@@ -609,7 +594,7 @@ import * as m from '../paraglide/messages';
                       class:drop-alvo={dropResultado?.ok === true}
                       class:drop-recusado={dropRecusa !== null}
                       data-session-key={rep ? dragChave(rep) : undefined}
-                      title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
+                      title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : m.sessao_grupo_pareado({ label: item.label })}>
                 <span class="pair-chev" class:collapsed={model.collapsed.has(`pair:${item.gid}`)} aria-hidden="true">▾</span>
                 <span class="pair-label"><GroupGlyph size={13} /><span class="pair-text"><b class="pair-cod">{pairCodigo(item.label)}</b>{#if pairResto(item.label)}<span class="pair-resto"> {pairResto(item.label)}</span>{/if}</span></span>
                 {#if pairAwaiting(item.gid) > 0}
@@ -635,7 +620,6 @@ import * as m from '../paraglide/messages';
               onResume={() => handleResume(session)}
               onRename={(nv) => handleRename(session, nv)}
               onGit={() => handleGit(session)}
-              onLoop={() => handleLoop(session)}
               onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
               showProvider={model.showProviderTags}
               selectMode={model.selectMode}
@@ -856,11 +840,6 @@ import * as m from '../paraglide/messages';
   {#if model.gitSheet}
     <Git open={true} sessionName={model.gitSheet.name} desktop={false} filesInContext={false} onClose={model.closeGit} />
   {/if}
-
-  <!-- Loop runner aberto pelo botao 🔁 do card (repo da sessao, sem abrir o chat). -->
-  {#if loopSheet}
-    <LoopSheet open={true} sessionName={loopSheet.name} onClose={closeLoopSheet} />
-  {/if}
 </div>
 
 <style>
@@ -880,7 +859,11 @@ import * as m from '../paraglide/messages';
   .pair-chev { flex-shrink: 0; font-size: 10px; transition: transform 160ms var(--ease-out); }
   .pair-chev.collapsed { transform: rotate(-90deg); }
   .pair-label { flex: 1; display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; }
-  .pair-text { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+  /* A tarefa do grupo pode chegar com o combinado inteiro; o cabeçalho não passa de 2 linhas. */
+  .pair-text {
+    min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.4;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+  }
   .pair-cod { font-weight: 600; }
   .pair-resto {
     font-weight: 400; color: var(--text-muted); font-size: var(--text-xs);

@@ -2,7 +2,7 @@
 
 Read with the diff already in hand. The review is adversarial: try to break the final state,
 not to confirm the plan was followed. The procedure and the format are in `revisor.md`, the
-recipe in `revisor-receita.md`; the screen Task in `revisor-visual.md`.
+recipe in `revisor-receita.md`; a roteiro citing a skill, in that skill's reviewer side.
 
 ## What the report must cover
 
@@ -24,13 +24,13 @@ vanish.
 
 ## Declare the unit, one level above where you were sent
 
-Say in one line what your reading unit was:
+The `Unit:` report line says what your reading unit was:
 
 | You received | Your minimum unit |
 |---|---|
 | a diff | the whole function it landed in |
 | a fixed function | the file: what the same-kind siblings do (guard, in-flight flag, cleanup on switch) |
-| a module that talks to the network | the whole route: which destination each function talks to, and what the screen shows when each fails |
+| a module that talks to the network | the whole route: which destination each function talks to, and what the caller shows when each fails |
 | a fix that changes flight time | everyone who runs alongside that flight |
 | a ported pattern | the destination route: a number that came along (cap, timeout, threshold) must be justified again here |
 | the fix of a family defect | the branch: `git grep` of the symbol, with the count in the report |
@@ -55,7 +55,7 @@ Break the code on purpose and watch the test fall, on every new test a step or r
 - Asking the executor to run the mutation does not replace you running it.
 - A harness proves a deterministic race inside our code (order of effects, a poll, an
   out-of-order event). A defect that depends on something OUTSIDE our code emitting the event
-  (platform, browser, OS: native network error, permissions, keyboard, camera) is proven in the
+  (platform, runtime, OS: native network error, permissions, keyboard, camera) is proven in the
   real environment, never by a mock.
 - The fixture is never the world where the defect is invisible: "the dead one disappears" uses
   a different living one, never an empty world.
@@ -81,19 +81,26 @@ lock, run the verification with the change applied before writing the step count
 
 ## Live proof measures what is served
 
-- Match the identifier of the artifact you built with what the page loaded (bundle hash, file
-  date). Building is not proof.
-- Find out what the port serves (the command the service runs). A long-lived backend serves the
-  code from when it started: check its start against the commit, or bring up your own instance
-  on another port; never restart the user's service.
-- Check both mechanisms in every report: a port serving a precompiled build, a service worker
-  serving its cache. The concrete recipe is the repository's, in the group's rules file.
-- Before opening the browser, compare the expressions side by side, term against term.
+- Match the identifier of the artifact you produced with what the target loaded (hash, file
+  date). Producing it is not proof.
+- Find out what the target runs (the command the service runs). A long-lived service serves the
+  code from when it started: check its start against the commit, or bring up your own instance;
+  never restart the user's service.
+- Check every cache between you and the target (a precompiled artifact, a cache layer) in every
+  report. The concrete recipe is the repository's, in the group's rules file.
+- Before running it live, compare the expressions side by side, term against term.
 
-## Measure in both hosts and both states
+## Measure in every host and state
 
-- A screen that exists in two hosts (phone and desktop, panel and modal) is measured in both;
-  the report says at which width each number was taken.
-- Measure in the same state of the neighboring region where the original number was taken
-  (list scrolling, neighbor open or closed), and note the state next to the number.
+- Code that runs in two hosts (two clients, two entry points) is measured in both; the report
+  says where each number was taken.
+- Measure in the same state where the original number was taken, and note the state next to the
+  number.
 - Behavior proof goes to the outcome ("connected", "saved", "opened"), not the state before it.
+
+## Report line
+
+```
+Unit: <the minimum unit from the table, and what you read at it>
+Broken on purpose: <each new test: line removed → test that fell | "no new test" | "not run: waived by <who>">
+```

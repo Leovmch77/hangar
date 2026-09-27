@@ -1,4 +1,4 @@
-"""Rotas de orquestração: política (GET/PUT) e papéis do grupo (GET/POST) com recado ao árbitro."""
+"""Rotas de orquestração: política (GET/PUT) e papéis do grupo (GET/POST) e o kick-off do árbitro."""
 from types import SimpleNamespace
 
 import pytest
@@ -67,7 +67,7 @@ def test_politica_put_e_get(cli, tmp_path):
     assert cli.get("/api/orquestracao/politica", headers=H).json()["politica"] == []
 
 
-def test_papel_post_grava_e_avisa_arbitro(cli, tmp_path):
+def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
     # Sem grupo: a tela edita o time padrão (regras-padrao.md), sem árbitro pra avisar.
     r = cli.get("/api/sessions/solta/orq", headers=H)
     assert r.status_code == 200 and r.json()["gid"] == "padrao" and r.json()["papeis"] == []
@@ -86,15 +86,14 @@ def test_papel_post_grava_e_avisa_arbitro(cli, tmp_path):
     r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={
         "papel": "árbitro", "sessao": "arb", "provider": "claude", "conta": "200-01",
         "modelo": "opus[1m]", "esforco": "high", "mtime": 0.0})
-    assert r.status_code == 200 and r.json()["aviso"] == "enviado" and r.json()["arbitro"] == "arb"
+    assert r.status_code == 200 and r.json()["aviso"] == "proxima_sessao" and r.json()["arbitro"] is None
     mt = r.json()["mtime"]
     r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={
         "papel": "executor", "sessao": "exe*", "provider": "claude", "conta": "200-01",
         "modelo": "opus[1m]", "esforco": "medium", "mtime": mt})
     assert r.status_code == 200, r.text
-    assert r.json()["aviso"] == "enviado"
-    nome, texto = cli.enviados[-1]
-    assert nome == "arb" and "`executor`" in texto and "regras-g1.md" in texto and "TRABALHANDO" in texto
+    assert r.json()["aviso"] == "proxima_sessao"
+    assert not cli.enviados
     got = cli.get("/api/sessions/exec/orq", headers=H).json()
     ex = next(p for p in got["papeis"] if p["papel"] == "executor")
     assert ex["viva"] == "exec" and ex["id_cota"].startswith("claude:")
@@ -159,32 +158,67 @@ def test_remover_uma_conta_do_rodizio_nao_leva_as_outras(cli, tmp_path):
                        json={"papel": "revisor", "vez": "9", "mtime": r.json()["mtime"]}).status_code == 404
 
 
-def test_papeis_salvar_sem_avisar_grava_e_nao_acorda_o_arbitro(cli, tmp_path):
-    """`avisar: false` é o "salvar e continuar montando o time": o contrato tem de ficar gravado, e
-    o árbitro NÃO pode receber recado nenhum — antes, cada papel salvo o acordava com meia
-    configuração. Sem o campo, o comportamento antigo (avisar) continua valendo."""
+def test_papel_guarda_abertura_e_recusa_o_que_a_criacao_recusaria(cli, tmp_path, monkeypatch):
+    import app.api as api_mod
+    monkeypatch.setattr(api_mod.engines, "listar", lambda: ["m1"])
+    mt0 = cli.get("/api/orquestracao/politica", headers=H).json()["mtime"]
+    mt1 = cli.put("/api/orquestracao/politica/200-01", headers=H, json={"provider": "claude", "mtime": mt0}).json()["mtime"]
+    cli.put("/api/orquestracao/politica/apikey", headers=H, json={"provider": "kimi", "mtime": mt1})
+    r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={
+        "papel": "árbitro", "sessao": "arb", "provider": "claude", "conta": "200-01",
+        "modelo": "opus[1m]", "esforco": "high", "mtime": 0.0})
+    base = {"papel": "executor", "sessao": "exe*", "provider": "claude", "conta": "200-01",
+            "modelo": "opus[1m]", "esforco": "medium", "mtime": r.json()["mtime"]}
+    r = cli.post("/api/sessions/exec/orq/papel", headers=H,
+                 json={**base, "headless": True, "permissao": "bypassPermissions", "jev": True})
+    assert r.status_code == 200, r.text
+    ex = next(p for p in cli.get("/api/sessions/exec/orq", headers=H).json()["papeis"] if p["papel"] == "executor")
+    assert ex["headless"] is True and ex["permissao"] == "bypassPermissions" and ex["jev"] is True
+    mt = r.json()["mtime"]
+    recusas = [({"provider": "kimi", "conta": "apikey", "modelo": "apikey/k3", "headless": True}, "erro_orq_headless_provider"),
+               ({"motor": "nao-existe"}, "erro_motor_invalido"),
+               ({"motor": "m1", "subagente": "sonnet"}, "erro_subagente_so_claude"),
+               ({"permissao": "tudo"}, "erro_permissao_invalida")]
+    for extra, codigo in recusas:
+        r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={**base, "mtime": mt, **extra})
+        assert r.status_code == 400 and r.json()["detail"]["code"] == codigo, (extra, r.text)
+
+
+def test_salvar_papeis_nunca_acorda_o_arbitro(cli, tmp_path):
+    """A linha nova vale na próxima sessão de cada papel: o árbitro lê a tabela ao abrir. Recado
+    na hora mandava fechar sessão parada e fazer sucessão no meio de uma Task."""
     mt0 = cli.get("/api/orquestracao/politica", headers=H).json()["mtime"]
     cli.put("/api/orquestracao/politica/200-01", headers=H, json={"provider": "claude", "mtime": mt0})
     r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={
         "papel": "árbitro", "sessao": "arb", "provider": "claude", "conta": "200-01",
         "modelo": "opus[1m]", "esforco": "high", "mtime": 0.0})
-    mt = r.json()["mtime"]
-    antes = len(cli.enviados)
+    for avisar in (True, False):
+        mt = cli.get("/api/sessions/exec/orq", headers=H).json()["mtime"]
+        r = cli.post("/api/sessions/exec/orq/papeis", headers=H, json={
+            "avisar": avisar, "mtime": mt, "papeis": [
+                {"papel": "revisor", "sessao": "rev*", "provider": "claude", "conta": "200-01",
+                 "modelo": "opus[1m]", "esforco": "high"}]})
+        assert r.status_code == 200 and r.json()["aviso"] == "proxima_sessao", r.text
+    assert cli.enviados == []
 
-    r = cli.post("/api/sessions/exec/orq/papeis", headers=H, json={
-        "avisar": False, "mtime": mt, "papeis": [
-            {"papel": "revisor", "sessao": "rev*", "provider": "claude", "conta": "200-01",
-             "modelo": "opus[1m]", "esforco": "high"}]})
-    assert r.status_code == 200, r.text
-    assert r.json()["aviso"] == "nao_avisado"
-    assert len(cli.enviados) == antes, "salvar sem avisar mandou recado ao árbitro"
-    # Gravado de verdade: a linha tem de aparecer na leitura seguinte.
+
+def test_sem_terminal_com_read_only_na_abertura_e_recusado(cli, tmp_path):
+    mt0 = cli.get("/api/orquestracao/politica", headers=H).json()["mtime"]
+    cli.put("/api/orquestracao/politica/200-01", headers=H, json={"provider": "claude", "mtime": mt0})
+    cli.post("/api/sessions/exec/orq/papel", headers=H, json={
+        "papel": "revisor", "sessao": "rev", "provider": "claude", "conta": "200-01",
+        "modelo": "opus[1m]", "esforco": "high", "mtime": 0.0})
+    # O árbitro escreve `--read-only` na célula de abertura; o painel não edita esse trecho.
+    from dataclasses import replace
+    regras = tmp_path / "regras-g1.md"
+    texto = regras.read_text()
+    rev = next(x for x in orq_papeis.ler(texto) if x.papel == "revisor")
+    regras.write_text(orq_papeis.escrever_papel(texto, replace(rev, abertura_extra="--read-only")))
+    antes = regras.read_text()
     got = cli.get("/api/sessions/exec/orq", headers=H).json()
-    assert any(p["papel"] == "revisor" for p in got["papeis"])
-
     r = cli.post("/api/sessions/exec/orq/papeis", headers=H, json={
         "mtime": got["mtime"], "papeis": [
-            {"papel": "executor", "sessao": "exe*", "provider": "claude", "conta": "200-01",
-             "modelo": "opus[1m]", "esforco": "medium"}]})
-    assert r.status_code == 200 and r.json()["aviso"] == "enviado"
-    assert len(cli.enviados) == antes + 1
+            {"papel": "revisor", "sessao": "rev", "provider": "claude", "conta": "200-01",
+             "modelo": "opus[1m]", "esforco": "high", "headless": True}]})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_orq_headless_read_only"
+    assert regras.read_text() == antes

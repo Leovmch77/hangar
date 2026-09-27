@@ -71,6 +71,72 @@ def test_contrato_sem_rodizio_nao_ganha_a_coluna():
     assert "| vez |" not in t
 
 
+def test_abertura_vira_coluna_so_quando_usada_e_volta_igual():
+    """Opções de abertura viram a coluna `abertura`, por último, só quando algum papel as usa; a
+    célula é o trecho de flags do `hangar-send --new`, e ler devolve os mesmos campos."""
+    assert op.escrever_papel(REGRAS, op.Papel("executor", "pm1-t*", "claude", "200-01", "opus", "high")) \
+        .count("abertura") == 0
+    p = op.Papel("executor", "pm1-t*", "claude", "200-01", "opus", "high", "",
+                 headless=True, permissao="bypassPermissions", jev=True, subagente="sonnet")
+    t = op.escrever_papel(REGRAS, p)
+    assert "| papel | sessão | provider | conta | modelo | esforço | abertura |" in t
+    assert "--headless --permissao bypassPermissions --subagente sonnet --jev" in t
+    assert op.ler(t)[1] == p and op.ler(t)[0].headless is False
+    # Com rodízio por cima: as duas colunas convivem e a linha antiga mantém a abertura.
+    t2 = op.escrever_papel(t, op.Papel("revisor", "pm1-rev*", "codex", "openai-codex", "", "", "1", headless=True))
+    assert "| papel | vez | sessão | provider | conta | modelo | esforço | abertura |" in t2
+    assert op.ler(t2)[1] == p and op.ler(t2)[3].headless is True
+    assert t2.count("## Quem é quem") == 1 and t2.index("## Quem é quem") < t2.index("## Gates")
+
+
+def test_janela_vira_coluna_antes_da_abertura_e_recusa_fora_da_faixa():
+    """`janela` só entra quando algum papel a define, fica antes de `abertura` mesmo quando esta
+    já existe, e é gravada com `%`; valor fora de 10..95 não chega ao arquivo."""
+    assert op.escrever_papel(REGRAS, op.ler(REGRAS)[0]) == REGRAS
+    t = op.escrever_papel(REGRAS, op.Papel("executor", "pm1-t*", "claude", "200-01", "opus", "high", headless=True))
+    t = op.escrever_papel(t, op.Papel("árbitro", "pm1-arbitro", "claude", "claude-200-3", "opus[1m]", "high", janela="60"))
+    assert "| papel | sessão | provider | conta | modelo | esforço | janela | abertura |" in t
+    assert "| high | 60% | - |" in t
+    ps = op.ler(t)
+    assert ps[0].janela == "60" and ps[1].janela == "" and ps[1].headless is True
+    with pytest.raises(ValueError):
+        op.escrever_papel(REGRAS, op.Papel("executor", "pm1-t*", "claude", "200-01", "opus", "high", janela="5"))
+
+
+def test_perfil_do_omp_vira_profile_na_abertura_e_volta_igual():
+    p = op.Papel("executor", "pm1-t*", "omp", "omp-1", "", "", perfil="trabalho")
+    t = op.escrever_papel(REGRAS, p)
+    assert "| --profile trabalho |" in t
+    assert op.ler(t)[1] == p and op.ler(t)[1].abertura_extra == ""
+
+
+def test_permissao_com_espaco_vai_entre_aspas_e_volta_igual():
+    """"Full Access" do Codex: separar a célula por espaço cortava o valor e a sobra se acumulava
+    como flag desconhecida a cada salvamento."""
+    p = op.Papel("executor", "pm1-t*", "codex", "openai-codex", "gpt-6-astra", "high",
+                 headless=True, permissao="Full Access")
+    t = op.escrever_papel(REGRAS, p)
+    assert "| --headless --permissao 'Full Access' |" in t
+    lido = op.ler(t)[1]
+    assert lido == p and lido.abertura_extra == ""
+    assert op.escrever_papel(t, lido) == t
+
+
+def test_abertura_escrita_a_mao_sobrevive_ao_salvar_do_painel():
+    """Flag que o painel não conhece (o `--read-only` de um revisor, escrito pelo árbitro) volta
+    intacta na célula quando o painel salva só o que conhece."""
+    t = REGRAS.replace("| papel | sessão | provider | conta | modelo | esforço |",
+                       "| papel | sessão | provider | conta | modelo | esforço | abertura |") \
+              .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|") \
+              .replace("| pm1-t* | Claude | 200-01 | opus[1m] | medium |",
+                       "| pm1-t* | Claude | 200-01 | opus[1m] | medium | --read-only --headless |")
+    ex = op.ler(t)[1]
+    assert ex.headless is True and ex.abertura_extra == "--read-only"
+    salvo = op.escrever_papel(t, op.Papel("executor", "pm1-t*", "claude", "200-01", "opus", "high",
+                                           permissao="plan", abertura_extra=ex.abertura_extra))
+    assert "| --permissao plan --read-only |" in salvo
+
+
 def test_regras_path():
     assert op.regras_path("ab12").name == "regras-ab12.md"
     assert op.regras_path("ab12").parent == pair._pair_dir()

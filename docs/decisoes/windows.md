@@ -46,6 +46,40 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Recado repetido no Windows não é o par insistindo** — é o oráculo de entrega: o argv entre
   Python e psmux come uma contrabarra quando o argumento vai entre aspas, a comparação falha e o
   reconcile redigita. Olhe `REQUEUE` no log antes de responder.
+- **Conexão abortada no accept não pode fechar o listener**: no ProactorEventLoop o
+  `_start_serving` do asyncio fecha o listener em QUALQUER OSError do accept. `resilient_accept`
+  refaz o AcceptEx nos códigos da conexão (64, 1236, 10053, 10054), e o cancelamento dele é
+  síncrono, porque o `_stop_serving` fecha o socket na mesma pilha do `cancel()`.
+- **Timeout de subprocesso no Windows mata a ÁRVORE, não só o filho**: o `subprocess.run` mata o
+  processo e depois lê a saída sem prazo; o `git.exe` de `Git\cmd` é um lançador cujo filho segura
+  o pipe, e a thread fica presa até o git real terminar. `git_ops._run` usa `Popen`, mata os
+  filhos pelo `psutil` e drena com prazo.
+
+## Timeout do git não liberava a thread no Windows
+
+(26/09/2026, VM `delphi-02`, Git 2.55.0.windows.5 em `C:\Program Files\Git\cmd\git.exe`, Python
+3.14.7 do venv do Hangar.) As quedas do backend no Windows vinham precedidas de timeouts de git e
+do pool padrão lento (PR #15). Medição com `git -c "alias.dorme=!sleep 20" dorme` e limite de 2 s:
+`subprocess.run(timeout=2)` voltou em 20,1 s, o tempo inteiro do git, porque no Windows o `run()`
+chama `communicate()` sem prazo depois do `kill()` e o lançador morto deixa `git.exe` → `sh.exe`
+→ `sleep.exe` segurando o stdout. Com `Popen` + `psutil.Process(pid).children(recursive=True)`
+mortos antes do lançador + `communicate(timeout=1)`: 2,0 s, pipe drenado, nenhum órfão. Duas
+rodadas, mesmos números. No Linux o `run()` só espera o filho morto, então o problema não aparecia.
+Junto: a atualização em segundo plano do git da lista passou a um pool próprio de 4 threads, e o
+"Mais alterados" do painel manda um `/git/files` por vez em vez de um por mudança de contador.
+
+## Listener do backend morria com cliente abortando o accept
+
+(19/09/2026 14:19:22 e 23/09/2026 09:17:57, PR #13.) O app Electron abriu com o backend lento, os
+pedidos estouraram o timeout de 8–10 s e um cliente desistiu bem no meio do accept: o `f.result()`
+levantou `OSError [WinError 64] The specified network name is no longer available`, o asyncio
+logou "Accept failed on a socket" e fechou o socket da 8765. O processo seguiu vivo, sem ninguém
+escutando a porta, até a vigia reiniciar a tarefa. O embrulho em `IocpProactor.accept`
+(`backend/app/resilient_accept.py`) refaz o AcceptEx nos erros da conexão e deixa o resto seguir
+pro asyncio. A primeira versão cancelava o AcceptEx interno por callback: o CancelIoEx rodava no
+ciclo seguinte do loop, depois de o `_stop_serving` já ter fechado o socket. O teste ponta a ponta
+(`test_proactor_server_keeps_listening_after_winerror_64`) só roda no Windows, e o CI não tem
+pytest no Windows.
 
 ## PATH da máquina com `%SYSTEMROOT%` cru: o `Atualiza-Path` apagava o próprio `powershell.exe`
 

@@ -41,8 +41,8 @@ hangar-send --new <name> <repo> --provider <provider> --model <model> --effort <
 
 ## Tests that write
 
-Build, cache and mutation run in a disposable copy outside the protected tree, from the frozen
-round object (or the approved tip in the final review):
+Checks that write (cache, artifacts) and mutation run in a disposable copy outside the
+protected tree, from the frozen round object (or the approved tip in the final review):
 
 ```bash
 git clone --no-hardlinks --no-checkout -- <repo> <new-sandbox>

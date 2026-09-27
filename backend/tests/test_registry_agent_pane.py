@@ -25,7 +25,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # (achado do review de Task 8).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    monkeypatch.setattr(registry, "apos_saida_por_morte", None)
 
 
 @pytest.fixture

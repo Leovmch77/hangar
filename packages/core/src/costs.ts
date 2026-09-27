@@ -1,5 +1,5 @@
 import type {
-  ComboLocal, ComboRow, CostBucket, CostReport, DimBucket, KindBucket, RateInfo,
+  ComboLocal, ComboRow, CostBucket, CostReport, DimBucket, KindBucket, RateInfo, SessaoLocal,
 } from './types';
 
 // `Partial` de propósito: é o que chega DO FIO. Um servidor da malha em versão antiga responde
@@ -17,9 +17,13 @@ export interface ServerResult {
 // combos carimbados com a máquina e o corte por máquina, que só existem depois de juntar. E aqui
 // `combos` é obrigatório (lista vazia quando ninguém mandou), porque a tolerância a servidor
 // antigo mora na ENTRADA, não na saída — mesma razão do comentário em types.ts sobre CostReport.
-export interface RelatorioMesclado extends Omit<CostReport, 'combos'> {
+export interface RelatorioMesclado extends Omit<CostReport, 'combos' | 'sessoes'> {
   combos: ComboLocal[];
+  sessoes: SessaoLocal[];
   by_servidor: DimBucket[];
+  // Falso quando algum servidor somado não manda cache de 1 h nem cache perdido (versão antiga):
+  // a soma desses dois sairia baixa parecendo completa.
+  cache_detalhado: boolean;
 }
 
 export interface MergedReport {
@@ -38,6 +42,7 @@ export interface MergedReport {
 const zeroBucket = (key: string): DimBucket => ({
   key, label: null, sessions: 0, input: 0, output: 0, cache_write: 0, cache_read: 0,
   cost: 0, cost_input: 0, cost_output: 0, cost_cache_write: 0, cost_cache_read: 0,
+  cache_write_1h: 0, regravado: 0, custo_regravado: 0,
 });
 
 // `?? 0` em TODA entrada: servidor da malha em versão antiga não manda os campos novos, e
@@ -54,6 +59,9 @@ function somarBucket(alvo: DimBucket, b: Partial<DimBucket>): void {
   alvo.cost_output += b.cost_output ?? 0;
   alvo.cost_cache_write += b.cost_cache_write ?? 0;
   alvo.cost_cache_read += b.cost_cache_read ?? 0;
+  alvo.cache_write_1h = (alvo.cache_write_1h ?? 0) + (b.cache_write_1h ?? 0);
+  alvo.regravado = (alvo.regravado ?? 0) + (b.regravado ?? 0);
+  alvo.custo_regravado = (alvo.custo_regravado ?? 0) + (b.custo_regravado ?? 0);
 }
 
 function juntarDim(destino: Map<string, DimBucket>, lista: DimBucket[] | undefined): void {
@@ -86,6 +94,7 @@ export function mergeReports(results: ServerResult[], period: string): MergedRep
   // dimensões que somam entre servidores (dia, fonte, projeto, modelo) somam depois, no cliente,
   // quando o recorte pedir. Servidor recusado não contribui combo, como não contribui total.
   const combos: ComboLocal[] = [];
+  const sessoes: SessaoLocal[] = [];
   const servidores: DimBucket[] = [];
   const mismatched: string[] = [];
   const failed: string[] = [];
@@ -96,6 +105,7 @@ export function mergeReports(results: ServerResult[], period: string): MergedRep
   let semCache = 0;
   let equivalente = 0;
   let detalhamentoCompleto = true;
+  let cacheDetalhado = true;
   let usdBrl: number | null = null;
 
   results.forEach((res, i) => {
@@ -143,6 +153,8 @@ export function mergeReports(results: ServerResult[], period: string): MergedRep
     if (!r.combos?.length && [bs.sessions, bs.input, bs.output, bs.cache_write, bs.cache_read, bs.cost]
       .some((valor) => valor > 0)) detalhamentoCompleto = false;
     for (const cb of r.combos ?? []) combos.push({ ...cb, servidor: sid });
+    for (const se of r.sessoes ?? []) sessoes.push({ ...se, servidor: sid });
+    if (r.totals?.regravado === undefined && bs.cache_write > 0) cacheDetalhado = false;
     semCache += r.custo_sem_cache ?? 0;
     equivalente += r.equivalente_cobrado ?? 0;
     if (r.anterior) { somarBucket(anterior, r.anterior); comAnterior += 1; }
@@ -169,7 +181,10 @@ export function mergeReports(results: ServerResult[], period: string): MergedRep
       anterior: entraram > 0 && comAnterior === entraram ? anterior : null,
       // Um cruzamento parcial descartaria do foco o consumo das máquinas antigas.
       combos: detalhamentoCompleto ? combos : [],
+      // Cada servidor já manda as SUAS mais caras; juntas, a ordem volta a ser por custo.
+      sessoes: sessoes.sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0)),
       by_servidor: [...servidores].sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key)),
+      cache_detalhado: cacheDetalhado,
       applied: { period },
       usd_brl: usdBrl,
     },

@@ -87,15 +87,18 @@ class PairLink:
         harness = data.get("harness")
         return {"peers": peers, "task": data.get("task", ""),
                 "gid": data.get("gid") or _gid_legado(self.name, peers),
-                "harness": harness if isinstance(harness, dict) else {}}
+                "harness": harness if isinstance(harness, dict) else {},
+                "orq": data.get("orq") is True}
 
     def set(self, peers: list[str], task: str = "", gid: str = "",
-            harness: dict[str, str] | None = None) -> None:
+            harness: dict[str, str] | None = None, orq: bool = False) -> None:
         """`harness` = nome -> provider do grupo (o hook de SessionStart rotula a lista com ele);
         só ficam as chaves do próprio grupo."""
         dentro = {self.name, *peers}
         corpo = {"peers": peers, "task": task, "gid": gid,
                  "harness": {n: p for n, p in (harness or {}).items() if n in dentro}}
+        if orq:
+            corpo["orq"] = True
         # Escrita atômica (tmp + replace), mesmo padrão do PromptQueue._write_atomic.
         tmp = self.path.with_suffix(".json.tmp")
         tmp.write_text(dumps_safe(corpo), encoding="utf-8")
@@ -114,7 +117,8 @@ def _members_of(name: str) -> tuple[list[str], str, str]:
     return [name, *link["peers"]], link["task"], link["gid"]
 
 
-def _write_group(members: list[str], task: str, gid: str, harness: dict[str, str]) -> None:
+def _write_group(members: list[str], task: str, gid: str, harness: dict[str, str],
+                 orq: bool = False) -> None:
     """Grava o sidecar de CADA membro LOCAL com os demais como peers (chamada já sob _LOCK). Membro
     REMOTO (nome qualificado 'srv::sessao') não tem sidecar aqui — ele vive na máquina dele; entra só
     como string na lista de peers dos locais. O reverso (o sidecar de lá) é escrito pelo backend
@@ -122,7 +126,7 @@ def _write_group(members: list[str], task: str, gid: str, harness: dict[str, str
     for m in members:
         if "::" in m:
             continue
-        PairLink(m).set([p for p in members if p != m], task, gid, harness)
+        PairLink(m).set([p for p in members if p != m], task, gid, harness, orq)
 
 
 def snapshot(names: list[str]) -> dict[str, dict | None]:
@@ -141,7 +145,8 @@ def _restore_locked(snap: dict[str, dict | None]) -> None:
         if st is None:
             PairLink(m).clear()
         else:
-            PairLink(m).set(st["peers"], st.get("task", ""), st.get("gid", ""), st.get("harness"))
+            PairLink(m).set(st["peers"], st.get("task", ""), st.get("gid", ""), st.get("harness"),
+                            st.get("orq", False))
 
 
 def restore(snap: dict[str, dict | None]) -> None:
@@ -152,7 +157,8 @@ def restore(snap: dict[str, dict | None]) -> None:
 
 
 def join_group(name: str, others: list[str], task: str = "", substituir_task: bool = False,
-               harness: dict[str, str] | None = None) -> tuple[list[str], dict[str, dict | None]]:
+               harness: dict[str, str] | None = None,
+               orq: bool = False) -> tuple[list[str], dict[str, dict | None]]:
     """Une os grupos de `name` e de CADA sessão em `others` num só (N sessões soltas = grupo novo)
     e devolve (membros finais, snapshot pré-join pra rollback). snapshot+join na MESMA seção
     crítica: em seções separadas, um join concorrente na janela entre elas entrava no grupo sem
@@ -194,8 +200,10 @@ def join_group(name: str, others: list[str], task: str = "", substituir_task: bo
         for st in snap.values():
             todos.update((st or {}).get("harness") or {})
         todos.update(harness or {})
+        # Grupo de orquestração continua sendo, mesmo quando o join seguinte não repete a marca.
+        orq = orq or any((st or {}).get("orq") for st in snap.values())
         try:
-            _write_group(members, final_task, gid, todos)
+            _write_group(members, final_task, gid, todos, orq)
         except OSError:
             _restore_locked(snap)
             raise
@@ -286,7 +294,8 @@ def leave(name: str) -> list[str]:
                     st = PairLink(p).get()
                     if st:
                         PairLink(p).set([x for x in st["peers"] if x != name],
-                                        st.get("task", ""), st.get("gid", ""), st.get("harness"))
+                                        st.get("task", ""), st.get("gid", ""), st.get("harness"),
+                                        st.get("orq", False))
         except OSError:
             _restore_locked(snap)
             raise
@@ -308,12 +317,13 @@ def rename_pair(old: str, new: str) -> None:
         def renomeado(h: dict[str, str] | None) -> dict[str, str]:
             return {(new if n == old else n): p for n, p in (h or {}).items()}
         PairLink(new).set(link["peers"], link.get("task", ""), link.get("gid", ""),
-                          renomeado(link.get("harness")))
+                          renomeado(link.get("harness")), link.get("orq", False))
         for p in link["peers"]:
             st = PairLink(p).get()
             if st:
                 PairLink(p).set([new if x == old else x for x in st["peers"]],
-                                st.get("task", ""), st.get("gid", ""), renomeado(st.get("harness")))
+                                st.get("task", ""), st.get("gid", ""), renomeado(st.get("harness")),
+                                st.get("orq", False))
 
 
 def referenciados_locais() -> set[str]:

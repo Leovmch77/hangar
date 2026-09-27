@@ -29,6 +29,14 @@ def test_join_two_loose_sessions():
     assert PairLink("a").get()["gid"] == PairLink("b").get()["gid"] != ""
 
 
+def test_join_orq_marca_grupo_todo_e_nao_se_perde():
+    pair.join_group("a", ["b"], "t", orq=True)
+    pair.join_group("a", ["c"])  # join seguinte sem a marca não a apaga
+    assert all(PairLink(m).get()["orq"] for m in "abc")
+    pair.leave("c")
+    assert PairLink("a").get()["orq"] is True
+
+
 def test_join_merges_existing_groups():
     pair.join("a", "b")
     pair.join("c", "d")
@@ -118,11 +126,11 @@ def test_join_write_failure_restores_previous_state(monkeypatch):
     orig = PairLink.set
     armed = {"fail": True}
 
-    def flaky(self, peers, task="", gid="", harness=None):
+    def flaky(self, peers, task="", gid="", harness=None, orq=False):
         if armed["fail"]:
             armed["fail"] = False  # falha UMA vez (o restore usa set também)
             raise OSError("disco cheio")
-        orig(self, peers, task, gid, harness)
+        orig(self, peers, task, gid, harness, orq)
 
     monkeypatch.setattr(PairLink, "set", flaky)
     with pytest.raises(OSError):

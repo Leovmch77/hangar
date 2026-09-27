@@ -2,16 +2,21 @@
 
 This page belongs to the Task whose diff touches pixels: `.svelte`/`.tsx`/`.vue`, CSS,
 templates, anything that draws. Its gate is mandatory even when the plan does not ask. Diff
-draws nothing: go back to `executor.md`.
+draws nothing: this page does not apply; follow your normal flow.
+
+After `CODE OK`, any code fix below is a `--fase codigo` round first;
+recapture on the newly approved stash.
 
 A green test, a zeroed type gate, the DOM, CSS and the accessibility tree do not replace
 seeing the screen.
 
 ## 1. Open it
 
-Check, do not presume, in this order: a browser skill on your skill list (`agent-browser` and
-the like); a Chrome MCP among your tools (`chrome-devtools`, `claude-in-chrome`); an automation
-CLI (`command -v agent-browser`, `playwright`, `puppeteer`).
+Check, do not presume, in this order: the Hangar desktop app open (the `[hangar] … navegador
+embutido` notice in your prompt) → `hangar-preview open <your port's URL>`, your session's own
+browser; a browser skill on your skill list (`agent-browser` and the like); a Chrome MCP among
+your tools (`chrome-devtools`, `claude-in-chrome`); an automation CLI (`command -v
+agent-browser`, `playwright`, `puppeteer`).
 
 - "I have no browser" counts only after looking, and goes in the report with what you tried.
 - A kick-off, contract or recipe saying "there is no browser" is not a fact about your tools:
@@ -42,8 +47,11 @@ turn: use the flag that exits, `timeout N`, or background file logging.
 
 - Confirm the tab is yours before each capture round: `location.href` returns your port. It
   returned another: reopen your URL. Taken again: report the conflict to the arbiter.
-- How many screenshots is your call; the plan says which STATES must be proven.
-- Stopping point: 1h or 60 navigation commands per Task. Hit it: stop and report with what you
+- Capture only the STATES the plan names, plus at most 2. Chain the actions that reach a state
+  without capturing. Before capturing, `hangar-preview wait` for the state's text or element, or
+  `hangar-preview confere "<state>"` when it exists only in prose (exit 0 = reached, 1 = not
+  yet, 2 = failed → capture as before). The round's ceiling counts captures, never actions.
+- Stopping point: 1h per Task, or the capture ceiling above. Hit it: stop and report with what you
   have; if the sweep is big, propose to the arbiter a separate capture session with the state
   list in its kick-off. A new state discovered midway goes to the arbiter's list, not into your
   loop.
@@ -56,12 +64,17 @@ turn: use the flag that exits, `timeout N`, or background file logging.
 - Every claim about color, sign or state (`✓` / `✗` / `·`, enabled, disabled) is written from a
   300–400% crop of the detail, and the caption cites the color with the sign.
 - Write each caption looking at that file. "idem" is forbidden.
+- Per round, join the states into one panel (`folha <shots in state order>`, numbered, up to 6
+  per sheet) and the reference's same states into another. The panels go to your self-review
+  subagent and the reviewer; the single screenshots stay for a detail check. The arbiter gets
+  no screenshot.
 - The proof of a behavior Task ends at the outcome the user asked for ("connected", "saved",
   "opened"), not at the state right before it.
 
 ## 4. Look at the screenshot
 
-Read the image yourself first, by absolute path. Delegate only when the read fails (the tool
+Read the round's states yourself, by absolute path, through the panels of section 3 (`folha`),
+opening a single image only to check a detail. Delegate only when the read fails (the tool
 refuses the file, a hook blocks it, the model does not take images), in this order:
 
 1. a vision command on the machine (`command -v see`; `see <image> "<question>"`);
@@ -109,15 +122,22 @@ state and width as yours. Capture both and ask a fresh subagent, without saying 
 - Diff touches pixels and the contract has neither bar nor waiver: stop and report to the
   arbiter before sending the round.
 - The blind choice answers "which looks more finished", never "which does more". A Task that
-  replaces an existing surface still owes the inventory of what the old one did (the arbiter's
-  page); a blind win and an inventory rejection in the same round is normal.
+  replaces an existing surface still owes every item of the old surface's inventory listed in
+  the ready criterion (one line per thing a person can do or read, per mode); a blind win
+  and an inventory rejection in the same round is normal.
 
 ## What goes in the report
 
-Per state: the screenshot's path, what you clicked and what happened, the question asked of
+The two panels' paths. Per state: the screenshot's path, what you clicked and what happened, the question asked of
 whoever sees (if delegated) and the answer, what you changed because of it.
 
 With a bar: who won each blind round and which letter was yours, the biggest hole named, what
 you fixed, the final screenshot's path. Lost both rounds: say so, with the hole that remains.
 
 Without this the reviewer blocks the Task.
+
+## Report line
+
+```
+Invalidators: viewport <value> · language <value> · edge <recaptured | point not compared> · framing <ok | state that failed>
+```

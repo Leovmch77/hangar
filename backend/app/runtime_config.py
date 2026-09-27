@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import tempfile
@@ -78,15 +79,20 @@ EDITAVEIS: dict[str, type] = {
     # perimetro de quem PODE abrir o terminal, e um override por inteiro feito do celular tiraria
     # do ar a origem que o dono declarou no .env — inclusive a que ele esta usando pra editar.
     "term_origins": str,
-    # Jev (typesafe.ai), que decide a navegacao do `hangar-preview objetivo`. A chave fica aqui e
-    # nao no ambiente de quem sobe o servidor: a sessao so a recebe se tiver sido aberta com o
-    # recurso ligado, e trocar de chave nao pede reinicio.
+    # Chave do endpoint do Jev (typesafe.ai ou OpenRouter), lida pelo `objetivo` e pelo `confere`
+    # do `hangar-preview` e pela triagem da orquestracao. A chave fica aqui e nao no ambiente de
+    # quem sobe o servidor: a sessao so a recebe se tiver sido aberta com o recurso ligado, e
+    # trocar de chave nao pede reinicio.
     "jev_api_key": str,
     # Como a sessao NOVA nasce quando ninguem disse nada. Mora no servidor, e nao no localStorage
     # da folha, porque os outros dois caminhos de criacao (hangar-send, MCP new_session) nao leem
     # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
     # continua vencendo naquela sessao, sem mexer neste padrao.
     "jev_padrao": bool,
+    # Onde e com qual modelo o Jev decide. Vazio = a API da typesafe com o modelo padrão de cada
+    # consumidor; o OpenRouter serve o mesmo Jev com o mesmo corpo em outro endereço.
+    "jev_endpoint": str,
+    "jev_model": str,
     # LLM pequeno que escreve o valor de um campo que o chamador nao cobriu — OPCIONAL, e a mesma
     # ordem de precedencia que o CLI ja usa: base_url + api_key + modelo (endpoint compativel com
     # a OpenAI), senao cmd, senao o padrao do proprio CLI.
@@ -98,6 +104,10 @@ EDITAVEIS: dict[str, type] = {
     # Override vale por inteiro (nao soma com o env); vazio = volta ao env. Ver
     # config.resolve_scan_roots, que le daqui primeiro.
     "scan_roots": str,
+    # Fileira de atalhos do painel de sessao. JSON numa string porque _coagir so conhece escalar;
+    # vazio = conjunto nativo. Shape validado em _validate_shortcuts — config quebrada aqui viraria
+    # fileira sumida sem erro em lugar nenhum.
+    "shortcuts": str,
 }
 
 # Campos que NUNCA voltam inteiros pro cliente: o app devolve mascarado (gsk_••••1234) pra você
@@ -125,11 +135,24 @@ def _caminho() -> Path:
     return Path(_backend_config_base()) / _ARQUIVO
 
 
+# Lido de novo só quando o arquivo muda: `get()` roda por campo e por sessão, e no Windows cada
+# abertura passa pelo antivírus. Devolve cópia porque quem grava altera o dict recebido.
+_cache: tuple[tuple[str, int, int], dict[str, Any]] | None = None
+
+
 def _carregar() -> dict[str, Any]:
+    global _cache
     try:
-        with open(_caminho(), encoding="utf-8") as fh:
+        caminho = _caminho()
+        st = os.stat(caminho)
+        chave = (str(caminho), st.st_mtime_ns, st.st_size)
+        if _cache is not None and _cache[0] == chave:
+            return copy.deepcopy(_cache[1])
+        with open(caminho, encoding="utf-8") as fh:
             d = json.load(fh)
-        return d if isinstance(d, dict) else {}
+        d = d if isinstance(d, dict) else {}
+        _cache = (chave, d)
+        return copy.deepcopy(d)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         # Arquivo ausente/corrompido não pode derrubar o backend: sem override, vale o env.
         #
@@ -157,6 +180,11 @@ _JEV_TEXTO = (
     ("jev_texto_api_key", "JEV_TEXTO_API_KEY"),
     ("jev_texto_modelo", "JEV_TEXTO_MODELO"),
     ("jev_texto_cmd", "JEV_TEXTO_CMD"),
+)
+# Endereço e modelo do Jev -> variável lida pelo `objetivo`/`confere` do hangar-preview e pelo orq.
+_JEV_DESTINO = (
+    ("jev_endpoint", "JEV_ENDPOINT"),
+    ("jev_model", "JEV_MODEL"),
 )
 # Marcador do estado do recurso NA SESSÃO. Vai sempre, ligado ou desligado: sem ele o
 # `hangar-preview objetivo` não separa "desligado nesta sessão" de "nunca configurado", e as duas
@@ -186,7 +214,7 @@ def env_jev(ligado: bool) -> dict[str, str]:
     chave = str(get("jev_api_key") or "").strip()
     if chave:
         env["TYPESAFE_API_KEY"] = chave
-    for campo, var in _JEV_TEXTO:
+    for campo, var in _JEV_DESTINO + _JEV_TEXTO:
         valor = str(get(campo) or "").strip()
         if valor:
             env[var] = valor
@@ -206,6 +234,47 @@ def mascarar(valor: str) -> str:
     if len(valor) <= 8:
         return "•" * len(valor)
     return f"{valor[:4]}{'•' * 8}{valor[-4:]}"
+
+
+# As acoes internas que a fileira conhece (os botoes nativos de hoje). Item com action fora
+# daqui seria um botao morto na tela — recusa na gravacao, apontando o item.
+_SHORTCUT_INTERNAL_ACTIONS = {"terminal", "modo", "navegador", "anexos", "rodar"}
+
+
+def _validate_shortcuts(text: str) -> None:
+    """Recusa na gravacao o que o front nao conseguiria renderizar. O resolve do front e
+    tolerante (config invalida cai no conjunto nativo), entao sem esta trava um typo salvo
+    pela API viraria "minha fileira voltou ao padrao" sem nenhum erro visivel."""
+    try:
+        items = json.loads(text)
+    except ValueError:
+        raise ValueError("shortcuts: JSON invalido") from None
+    if not isinstance(items, list):
+        raise ValueError("shortcuts: esperado uma lista de atalhos")
+    for i, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"shortcuts: item {i} nao e um objeto")
+        if not isinstance(item.get("id"), str) or not item["id"].strip():
+            raise ValueError(f"shortcuts: item {i} sem id")
+        kind = item.get("type")
+        if kind == "internal":
+            if item.get("action") not in _SHORTCUT_INTERNAL_ACTIONS:
+                raise ValueError(
+                    f"shortcuts: item {i} tem action desconhecida "
+                    f"(use uma de: {', '.join(sorted(_SHORTCUT_INTERNAL_ACTIONS))})"
+                )
+        elif kind == "send_text":
+            if not isinstance(item.get("text"), str) or not item["text"].strip():
+                raise ValueError(f"shortcuts: item {i} (send_text) sem texto a enviar")
+        elif kind == "shell":
+            if not isinstance(item.get("command"), str) or not item["command"].strip():
+                raise ValueError(f"shortcuts: item {i} (shell) sem comando")
+        else:
+            raise ValueError(f"shortcuts: item {i} tem type desconhecido '{kind}'")
+        if kind in ("send_text", "shell") and (
+            not isinstance(item.get("label"), str) or not item["label"].strip()
+        ):
+            raise ValueError(f"shortcuts: item {i} sem rotulo")
 
 
 def _coagir(campo: str, valor: Any) -> Any:
@@ -282,7 +351,9 @@ def _coagir(campo: str, valor: Any) -> Any:
                 raise ValueError(f"term_origins: '{entrada}' precisa comecar com http:// ou https://")
             if not urlparse(entrada).netloc:
                 raise ValueError(f"term_origins: '{entrada}' nao tem endereco (ex: https://app.exemplo.com)")
-    if campo in ("transcription_base_url", "llm_base_url", "llm_briefing_base_url") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
+    if campo == "shortcuts" and texto:
+        _validate_shortcuts(texto)
+    if campo in ("transcription_base_url", "llm_base_url", "llm_briefing_base_url", "jev_endpoint") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
         # Mesmo argumento do editor: antes so o dono da maquina escolhia o endpoint (env), agora o
         # celular escreve. Aceita vazio (volta ao padrao) ou uma URL http(s) de verdade.
         raise ValueError(f"{campo}: use vazio ou uma URL http(s)://")
@@ -300,6 +371,7 @@ def aplicar(mudancas: dict[str, Any], *, remover: set[str] | None = None) -> dic
 
 
 def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, Any]:
+    global _cache
     atual = _carregar()
     for campo in remover:
         if campo in EDITAVEIS:
@@ -342,6 +414,9 @@ def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, A
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(atual, fh, ensure_ascii=False, indent=2)
         atomico.substituir(tmp, destino)
+        # Cache já com o que acabou de ser gravado: não depende de a data do arquivo ter mudado.
+        st = os.stat(destino)
+        _cache = ((str(destino), st.st_mtime_ns, st.st_size), copy.deepcopy(atual))
         # O arquivo guarda segredo (chave da Groq): 0600 como o .env, pra não ficar legível por
         # outro usuário da máquina. Falha de chmod não desfaz a gravação — o valor já está lá.
         try:

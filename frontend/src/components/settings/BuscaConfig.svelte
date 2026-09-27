@@ -14,10 +14,12 @@
     contas: m.contas_modelos_titulo,
     notificacoes: m.config_modal_notificacoes,
     anexos: m.config_modal_anexos_curto,
+    atalhos: m.lista_atalhos,
     avancado: m.config_modal_avancado,
     orquestracao: m.config_modal_orquestracao,
     harnesses: m.harness_titulo,
     sincronizacao: m.sync_config_titulo,
+    'shared-config': m.shared_config_title,
     computer: m.computer_control_title,
   };
 
@@ -71,6 +73,9 @@
     { tela: 'maquinas', rotulo: m.maquinas_reconectar },
     { tela: 'maquinas', rotulo: m.maquinas_buscar_tailscale, descricao: m.maquinas_buscar_ajuda },
 
+    { tela: 'atalhos', rotulo: m.atalhos_add, descricao: m.atalhos_sub },
+    { tela: 'atalhos', rotulo: m.atalhos_restaurar, descricao: m.atalhos_restaurar_ajuda },
+
     { tela: 'contas', rotulo: m.contas_atualizar, descricao: m.contas_legenda },
     { tela: 'contas', rotulo: m.contas_secao_claude, descricao: m.contas_secao_claude_leg },
     { tela: 'contas', rotulo: m.contas_secao_modelos, descricao: m.contas_secao_modelos_leg },
@@ -91,6 +96,8 @@
     { tela: 'sincronizacao', rotulo: m.sync_config_desativar, descricao: m.sync_config_desativada },
     { tela: 'sincronizacao', rotulo: m.sync_config_copiar, descricao: m.sync_config_como_entrar },
     { tela: 'sincronizacao', rotulo: m.sync_config_abrir, descricao: m.sync_config_como_entrar },
+
+    { tela: 'shared-config', rotulo: m.shared_config_title, descricao: m.shared_config_search_desc },
 
     { tela: 'voz', rotulo: m.voz_transcrever, descricao: m.voz_transcrever_ajuda },
     { tela: 'voz', rotulo: m.config_server_groq, descricao: m.config_server_groq_ajuda },

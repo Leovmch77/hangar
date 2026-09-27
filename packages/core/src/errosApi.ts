@@ -299,6 +299,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_orq_modelo_nao_liberado: () => m.erro_orq_modelo_nao_liberado(),
   erro_orq_conta_travada: () => m.erro_orq_conta_travada(),
   erro_orq_esforco_invalido: () => m.erro_orq_esforco_invalido(),
+  erro_orq_headless_provider: () => m.erro_orq_headless_provider(),
+  erro_orq_headless_read_only: () => m.erro_orq_headless_read_only(),
 
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),
@@ -332,6 +334,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_config_dir_invalido: () => m.erro_config_dir_invalido(),
   erro_rollout_sem_id: () => m.erro_rollout_sem_id(),
   erro_motor_sem_claude: () => m.erro_motor_sem_claude(),
+  erro_subagente_so_claude: () => m.erro_subagente_so_claude(),
   erro_conta_reconciliacao_falhou: (p) => m.erro_conta_reconciliacao_falhou({ nome_conta: String(p.nome_conta), erro: String(p.erro) }),
   erro_cwd_indisponivel: () => m.erro_cwd_indisponivel(),
   erro_cwd_inexistente: (p) => m.erro_cwd_inexistente({ cwd: String(p.cwd) }),
@@ -422,6 +425,14 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_bastao_sem_dossie: () => m.erro_bastao_sem_dossie(),
   erro_bastao_gravar: (p) => m.erro_bastao_gravar({ motivo: String(p.motivo ?? '') }),
   erro_bastao_fila: (p) => m.erro_bastao_fila({ nome: String(p.nome), dossie: String(p.dossie) }),
+
+  // Configuração compartilhada (/api/config-sync).
+  config_sync_unknown_item: (p) => m.config_sync_unknown_item({ items: String(p.items ?? '') }),
+  config_sync_bundle_too_big: (p) => m.config_sync_bundle_too_big({ largest: String(p.largest ?? '') }),
+  config_sync_busy: () => m.config_sync_busy(),
+  config_sync_invalid_keys: () => m.config_sync_invalid_keys(),
+  config_sync_invalid_bundle: () => m.config_sync_invalid_bundle(),
+  config_sync_version: () => m.config_sync_version(),
 };
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {

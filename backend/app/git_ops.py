@@ -58,25 +58,64 @@ class GitError(Exception):
         self.detail = detail
 
 
+_DRAIN_AFTER_KILL_S = 1.0
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """No Windows o `git.exe` do PATH costuma ser o lançador de `Git\\cmd`, que abre o git real
+    como filho. Matar só o lançador deixa o filho segurando os pipes, e a leitura da saída não
+    termina: a thread fica presa muito além do timeout."""
+    if os.name == "nt":
+        try:
+            import psutil
+            children = psutil.Process(proc.pid).children(recursive=True)
+        except Exception:
+            children = []
+        for child in children:
+            try:
+                child.kill()
+            except Exception:
+                pass
+    proc.kill()
+
+
 def _run(cwd: str, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(
+        proc = subprocess.Popen(
             ["git", "-C", cwd, *args],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout or _TIMEOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
             # LC_ALL=C: a saida do git aqui e LIDA POR CODIGO (ex: detectar "not a git
             # repository" pra esconder o menu de git em vez de reportar erro). Numa maquina com
             # catalogo NLS do git instalado, a mensagem sairia traduzida e a checagem quebraria
             # calada. Idioma da mensagem nao e superficie de usuario -- ela e dado.
-            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
+            # GIT_OPTIONAL_LOCKS=0: o `status` periodico nao pega o index.lock pra atualizar o
+            # indice; morto pelo timeout no meio, deixaria a trava orfa e o repo travado pra quem
+            # trabalha nele. Commit/add seguem com a trava obrigatoria.
+            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C", "GIT_OPTIONAL_LOCKS": "0"},
         )
     except FileNotFoundError:
         raise GitError(500, "git nao encontrado")
-    except subprocess.TimeoutExpired:
-        raise GitError(504, "git timeout")
     except OSError as e:
         # ex: sem permissao de executar git -> erro limpo em vez de 500 com traceback.
         raise GitError(500, f"git falhou: {e}")
+    try:
+        out, err = proc.communicate(timeout=timeout or _TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=_DRAIN_AFTER_KILL_S)
+        except subprocess.TimeoutExpired:
+            # Alguém fora da árvore herdou o pipe: abandona a leitura em vez de prender a thread.
+            _log.warning("git timeout em %s: pipe segue aberto depois do kill", cwd)
+        raise GitError(504, "git timeout")
+    except OSError as e:
+        _kill_tree(proc)
+        raise GitError(500, f"git falhou: {e}")
+    except BaseException:
+        _kill_tree(proc)
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
 _AHEAD_RE = re.compile(r"ahead (\d+)")

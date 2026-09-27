@@ -530,14 +530,35 @@ def _e_saida_de_tarefa(caminho: str) -> bool:
         parte.startswith("claude") for parte in p.parts)
 
 
+_COMANDOS_TTL = 2.0
+_comandos_cache: Optional[tuple[float, list[tuple["psutil.Process", str]]]] = None
+_comandos_lock = threading.Lock()
+
+
+def _comandos_vivos() -> list[tuple["psutil.Process", str]]:
+    """(processo, comando) de todos os processos, varridos uma vez por janela: cada card de Bash
+    aberto pergunta a cada 2 s, e sem isto cada pergunta varria a máquina inteira."""
+    global _comandos_cache
+    with _comandos_lock:
+        cache = _comandos_cache
+        if cache is not None and time.monotonic() - cache[0] < _COMANDOS_TTL:
+            return cache[1]
+        vivos = []
+        for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
+            argv = proc.info.get("cmdline")
+            if argv:
+                vivos.append((proc, _comando_pedido(" ".join(argv))))
+        _comandos_cache = (time.monotonic(), vivos)
+        return vivos
+
+
 def _arquivo_da_saida(alvo: str) -> Optional[str]:
     if not _TEM_PROC:
-        # A varredura por cmdline é barata; `open_files()` só roda no processo que casou (medido na
-        # VM Windows: 20-40 ms), nunca na lista inteira.
+        # `open_files()` só roda no processo que casou (medido na VM Windows: 20-40 ms), nunca na
+        # lista inteira.
         try:
-            for proc in psutil.process_iter(attrs=["pid", "cmdline"]):
-                argv = proc.info.get("cmdline")
-                if not argv or _comando_pedido(" ".join(argv)) != alvo:
+            for proc, comando in _comandos_vivos():
+                if comando != alvo:
                     continue
                 try:
                     for f in proc.open_files():

@@ -9,6 +9,7 @@ import { registrar as registrarDiag, novoReq } from './diag';
 import { retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import type { CotaContaResumo } from './cotaResumo';
 import type { UsoFiltros, UsoReport } from './uso';
+import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
   SessionInfo,
@@ -25,11 +26,13 @@ import type {
   WorkflowAgentDetail,
   AnswerItem,
   CostReport,
+  OrqConductor,
   OrqExecucao,
   OrqLista,
   ResumeResult,
   RunnersResponse,
   RunInfo,
+  Runner,
   SessionLimits,
   CodexModelsResponse,
   PiModelsResponse,
@@ -468,6 +471,10 @@ export function getOrqDetalheForServer(s: Server, id: string): Promise<OrqExecuc
   return apiFetchForServer<OrqExecucao>(s, `/api/orq/${encodeURIComponent(id)}`);
 }
 
+export function getOrqConductorForServer(s: Server, id: string): Promise<OrqConductor> {
+  return apiFetchForServer<OrqConductor>(s, `/api/orq/${encodeURIComponent(id)}/conductor`);
+}
+
 // Cauda do histórico de UMA sessão de um servidor específico — cards do quadro kanban.
 // limit dispara o tail-read no backend (parseia só o fim do jsonl). Timeout de 8s mantido: disco
 // frio + arquivo grande ainda pode passar dos 4s dos fan-outs acima.
@@ -761,11 +768,12 @@ export async function putOrqConta(
 export async function getOrqGrupo(name: string): Promise<import('./orquestracao').OrqGrupo> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/orq`);
 }
-// Vários papéis numa escrita só e um recado só pro árbitro.
+// Vários papéis numa escrita só.
 export async function postOrqPapeis(
   name: string,
-  // `avisar: false` grava sem acordar o árbitro — é o "salvar e continuar montando o time".
-  body: { papeis: { papel: string; sessao?: string; provider: string; conta: string; modelo?: string; esforco?: string }[]; mtime: number; avisar?: boolean },
+  // `avisar` é aceito e ignorado: salvar nunca acorda o árbitro.
+  body: { papeis: ({ papel: string; sessao?: string; provider: string; conta: string; modelo?: string; esforco?: string; vez?: string; janela?: string }
+    & Partial<import('./orquestracao').AberturaPapel>)[]; mtime: number; avisar?: boolean },
 ): Promise<import('./orquestracao').RespostaPapel> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/orq/papeis`, { method: 'POST', body: JSON.stringify(body) });
 }
@@ -1420,6 +1428,11 @@ export function iniciarAtualizacao(): Promise<{ ok: boolean; pid: number }> {
 /** Reinicia o servidor sem atualizar nada (disco já à frente do processo). 409 fora do systemd. */
 export function reiniciarServidor(): Promise<{ ok: boolean; pid: number }> {
   return apiFetch('/api/atualizacao/reiniciar', { method: 'POST' });
+}
+
+/** Estado da atualização/reinício no servidor que a tela está editando. */
+export function getAtualizacaoEm(s: Server | null): Promise<Atualizacao> {
+  return s ? apiFetchForServer(s, '/api/atualizacao') : getAtualizacao();
 }
 
 /** O mesmo reinício, no servidor que a tela está editando (que pode não ser o ativo). */
@@ -2412,8 +2425,28 @@ export function stopRun(name: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/stop`, { method: 'POST' });
 }
 
+/** Grava a lista INTEIRA de comandos personalizados do projeto (add/editar/remover são a mesma
+ * operação). Devolve a lista como o servidor a leu. */
+export function setCustomRunners(
+  name: string, commands: { label: string; command: string }[],
+): Promise<Runner[]> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/runners/custom`, {
+    method: 'POST',
+    body: JSON.stringify({ commands }),
+  });
+}
+
 export function getRunPane(name: string): Promise<{ pane: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/pane`);
+}
+
+/** Atalho "shell" da fileira: dispara-e-esquece no cwd da sessão. O 202 só diz que o processo
+ * nasceu — falha depois disso não volta por aqui (comando com saída que interessa vai no run). */
+export function runShortcutShell(name: string, command: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
+    method: 'POST',
+    body: JSON.stringify({ command }),
+  });
 }
 
 // Limites de uso da conta Codex (Task B) — so sessoes Codex; o back devolve 400 pra Claude.
@@ -2625,4 +2658,40 @@ export async function resolveLoopForServer(s: Server, name: string, accept: bool
   });
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
   return res.json() as Promise<{ loop: LoopState }>;
+}
+
+// Configuração compartilhada. O manifesto soma o disco inteiro de skills da máquina, e a
+// aplicação instala plugins no destino: os prazos são de minutos, não os 8s de uma leitura.
+export function getConfigSyncManifestForServer(s: Server, signal?: AbortSignal): Promise<ConfigSyncManifest> {
+  return apiFetchForServer(s, '/api/config-sync/manifest', { signal: comTeto(signal, 60_000) }, 60_000);
+}
+
+export async function getConfigSyncBundleForServer(s: Server, items: readonly ConfigSyncItem[], signal?: AbortSignal,
+  keys?: Partial<Record<ConfigSyncItem, string[]>>): Promise<Blob> {
+  const escolha = keys && Object.keys(keys).length ? `&keys=${encodeURIComponent(JSON.stringify(keys))}` : '';
+  const res = await apiFetchRes(`/api/config-sync/bundle?items=${encodeURIComponent(items.join(','))}${escolha}`,
+    { signal: comTeto(signal, 180_000) }, s);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.blob();
+}
+
+// Lote inteiro numa chamada ao provedor: o prazo é o de uma tradução longa, não o de uma leitura.
+export function translateConfigSyncTextsForServer(s: Server, texts: string[], lang: 'pt' | 'en', signal?: AbortSignal): Promise<{ texts: string[]; error: string }> {
+  return apiFetchForServer(s, '/api/config-sync/translate', {
+    method: 'POST',
+    body: JSON.stringify({ texts, lang }),
+    headers: { 'Content-Type': 'application/json' },
+    signal: comTeto(signal, 300_000),
+  }, 300_000);
+}
+
+export async function applyConfigSyncForServer(s: Server, items: readonly ConfigSyncItem[], bundle: Blob, signal?: AbortSignal): Promise<ConfigSyncReport> {
+  const res = await apiFetchRes(`/api/config-sync/apply?items=${encodeURIComponent(items.join(','))}`, {
+    method: 'POST',
+    body: bundle,
+    headers: { 'Content-Type': 'application/gzip' },
+    signal: comTeto(signal, 600_000),
+  }, s);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.json() as Promise<ConfigSyncReport>;
 }

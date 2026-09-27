@@ -24,7 +24,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
-                 pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
+                 loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
@@ -42,7 +42,7 @@ from app import filesearch, filetree, git_ops
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
-from app import orq, orq_md, orq_papeis, orq_politica
+from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica
 from app import pi_catalog
 from app import cli_probe
 from app import pi_models
@@ -52,7 +52,8 @@ from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
 from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
-                        RunInfo, ProjectStatus, session_key)
+                        RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody,
+                        session_key)
 from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
@@ -99,6 +100,7 @@ from app import pair
 from app import pair_texto
 from app import peers
 from app import alcance, conta_estado, cotas, credenciais, peers_api
+from app import config_sync_api
 from app import codex_contas as codex_accounts
 from app import codex_contas_api
 from app.codex_contas_login import CodexContasLogin, codex_session_alive
@@ -330,6 +332,8 @@ async def _lifespan(app: FastAPI):
 
     stall_task.add_done_callback(_stall_watch_done)
 
+    loop_monitor_task = asyncio.create_task(loop_monitor.watch(), name="loop-monitor")
+
     # Poda periodica dos sidecars de sessao morta (Task G3): varre na subida e depois a cada
     # 24h — ver app/prune.py para o criterio conservador (chave de sessao nao viva + idade
     # minima de 7 dias) e o porquê de periodica em vez de so no startup.
@@ -456,6 +460,7 @@ async def _lifespan(app: FastAPI):
             _log.exception("Falha ao encerrar a integração Codex")
         task.cancel()
         stall_task.cancel()
+        loop_monitor_task.cancel()
         prune_task.cancel()
         renova_task.cancel()
         await omp_sync.close()
@@ -467,6 +472,7 @@ async def _lifespan(app: FastAPI):
             await stall_task
         except asyncio.CancelledError:
             pass
+        await asyncio.gather(loop_monitor_task, return_exceptions=True)
         try:
             await prune_task
         except asyncio.CancelledError:
@@ -585,13 +591,10 @@ app.include_router(codex_contas_api.codex_contas_router)
 app.include_router(harness_api.harness_router)
 app.include_router(peers_api.peers_router)
 app.include_router(plugin_bridge.plugin_router)
+app.include_router(config_sync_api.config_sync_router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
-# Peer avisado pela varredura de morte já pode estar ocioso: sem este drain a fila só esvazia no
-# próximo hook dele, que pode nunca vir.
-registry_mod.apos_saida_por_morte = lambda p: threading.Thread(
-    target=_drain_session, args=(p,), daemon=True).start()
 terminal = TerminalInput()
 
 # Teto de mensagem: o _BodySizeLimitMiddleware ignora scope != http de propósito (api.py:83), então
@@ -1814,24 +1817,28 @@ async def logout_claude_config(nome: str):
         raise HTTPException(404, detail=erro("erro_conta_inexistente", f"conta {nome} não existe", nome=nome))
     alvo = Path(conta.path)
     pasta = alvo.name.removeprefix(".claude-")
-    if alvo.resolve() == _backend_config_base().resolve():
-        raise HTTPException(409, detail=erro("erro_conta_ativa_backend",
-                                 "esta conta é a configuração ativa do backend — não dá pra "
-                                 "mexer nela por aqui"))
+
+    def _sair():
+        try:
+            conta_estado._auth_logout(alvo)
+        except RuntimeError as e:
+            raise HTTPException(502, detail=erro("erro_logout_nao_confirmado", str(e))) from None
+        conta_estado.esquecer_conta(conta.path)
+        estado = conta_estado._estado_login(conta_estado._auth_status(alvo))
+        if estado.estado != "ok" or estado.loggedIn:
+            raise HTTPException(502, detail=erro("erro_logout_nao_confirmado",
+                                     "a conta não apareceu deslogada depois do logout"))
 
     def _checar_e_sair():
+        # A config ativa do backend (~/.claude) não é conta criada pelo hangar, então não tem
+        # trava de ciclo; sair dela só tira o login, é o caminho pra entrar com outra.
+        if alvo.resolve() == _backend_config_base().resolve():
+            _sair()
+            return
         with contas.ciclo_conta(pasta):
             if contas.caminho(pasta).resolve() != alvo.resolve():
                 raise contas.ContaError(404, f"{alvo} não é uma conta criada pelo hangar")
-            try:
-                conta_estado._auth_logout(alvo)
-            except RuntimeError as e:
-                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado", str(e))) from None
-            conta_estado.esquecer_conta(conta.path)
-            estado = conta_estado._estado_login(conta_estado._auth_status(alvo))
-            if estado.estado != "ok" or estado.loggedIn:
-                raise HTTPException(502, detail=erro("erro_logout_nao_confirmado",
-                                         "a conta não apareceu deslogada depois do logout"))
+            _sair()
 
     try:
         await asyncio.to_thread(_checar_e_sair)
@@ -2251,7 +2258,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
 
 
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth)])
-async def kill_session(name: str):
+async def kill_session(name: str, by: str | None = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
     # responde 404/500. Antes era {"ok": true} incondicional: o card sumia da UI e a sessao reaparecia
     # na varredura seguinte, sem fila e sem pareamento (ver SessionRegistry.kill).
@@ -2265,7 +2272,7 @@ async def kill_session(name: str):
     plugin_bridge.esquecer(name)
     warn = None
     if link:
-        errs = await _avisar_saida(name, link["peers"], "encerrou a sessão e saiu do grupo de trabalho")
+        errs = await _avisar_saida(name, link["peers"])
         if errs:
             warn = erro("erro_pareamento_saida_falhou",
                         "aviso de saída falhou: " + "; ".join(
@@ -3251,7 +3258,11 @@ def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
                      estado, mid, bool(info), _loop_servidor is not None, detalhe)
         return
     remetente, alvo, inicio = info
-    aviso = (f"[painel: hangar] Seu recado para {alvo} ({inicio!r}) foi {estado}"
+    if sanitize_session_name(remetente) != remetente:
+        # Aviso do próprio app ([painel: …]): não há sessão remetente a avisar, a recusa fica no log.
+        _log.warning("aviso do app %s por %s: %s (%r)", estado, alvo, detalhe, inicio)
+        return
+    aviso = (f"[painel: entrega de recado] Seu recado para {alvo} ({inicio!r}) foi {estado}"
              f"{': ' + detalhe if detalhe else ''}. Ele não chegou ao modelo de lá.")
     fut = asyncio.run_coroutine_threadsafe(_enviar(remetente, aviso), _loop_servidor)
 
@@ -3798,6 +3809,11 @@ class PairBody(_StrictBody):
     peers: list[str] = []
     task: str = ""
     replace_task: bool = False
+    # Sem efeito: veterano nunca é avisado. Fica porque o corpo é estrito e o vigia ainda o manda.
+    notify_members: bool = True
+    # Grupo de orquestração: o kick-off de cada papel já diz canal, contrato e branch, então o
+    # pareamento não entrega nada a ninguém (nem protocolo, nem entrada) e o hook reinjeta a versão curta.
+    orq: bool = False
 
 
 def _group_text(me: str, others: list[str], task: str, harness: dict[str, str]) -> str:
@@ -3849,7 +3865,7 @@ async def pair_session(name: str, body: PairBody):
     # na janela entre elas entrava no grupo fora do snapshot e um rollback posterior não o
     # reverteria). O snapshot volta pra cá pra desfazer se o aviso não chegar em ninguém.
     try:
-        members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task, harness=harness)
+        members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task, harness=harness, orq=body.orq)
     except pair.PairMixError as e:
         # Uma das sessões locais já está pareada cross-server (1:1) — não dá pra fundir em grupo local.
         raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
@@ -3859,20 +3875,10 @@ async def pair_session(name: str, body: PairBody):
                                              f"--substituir-tarefa pra trocar", existente=e.existente))
     link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
     task = link.get("task", body.task)
-    # Protocolo completo só pra quem estava SOLTO; veterano ganha uma linha com quem entrou. Quem
-    # não teve mudança de peers nem de tarefa não recebe nada — o protocolo pós-/clear é do hook.
-    avisos: list[tuple[str, str]] = []
-    for m in members:
-        antes = snap.get(m)
-        outros = [x for x in members if x != m]
-        if antes is None:
-            avisos.append((m, _group_text(m, outros, task, harness)))
-            continue
-        entraram = [x for x in outros if x not in antes["peers"]]
-        if entraram:
-            avisos.append((m, pair_texto.texto_entrada(entraram, members, task, harness)))
-        elif antes.get("task", "") != task:
-            avisos.append((m, pair_texto.texto_tarefa_atualizada(task)))
+    # Só quem estava SOLTO recebe o protocolo; veterano não é acordado (consulta o grupo quando
+    # precisar). O protocolo pós-/clear é do hook.
+    avisos = [(m, _group_text(m, [x for x in members if x != m], task, harness))
+              for m in ([] if link.get("orq") else members) if snap.get(m) is None]
     errs = []
     for m, texto in avisos:
         e = await _deliver(m, texto)
@@ -3993,7 +3999,7 @@ async def unpair_remote(name: str, body: UnpairRemoteBody):
     ex = await asyncio.to_thread(pair.leave, name)
     warn = None
     if ex:
-        e = await _deliver(name, f"[de: hangar] '{body.peer}' saiu do pareamento. "
+        e = await _deliver(name, f"{pair_texto.PREFIXO} '{body.peer}' saiu do pareamento. "
                                  "Volte a operar independente; use hangar-send só quando o usuário pedir.")
         if e:
             warn = erro("erro_pareamento_aviso_unpair", f"{name}: {_erro_texto(e)}",
@@ -4136,6 +4142,12 @@ class PapelBody(_StrictBody):
     conta: str
     modelo: str = ""
     esforco: str = ""
+    headless: bool = False
+    permissao: str = ""
+    motor: str = ""
+    jev: bool = False
+    subagente: str = ""
+    perfil: str = ""
     mtime: float
 
 
@@ -4168,27 +4180,6 @@ async def orq_get(name: str):
     }
 
 
-def _recado_arbitro(novos: list[orq_papeis.Papel], gid: str) -> str:
-    # Prefixo `[painel: orquestração]` = mesma família do `[de: <sessão>]` do hangar-send: o front
-    # desenha o chip "configuração · orquestração" e a sessão sabe que é recado automático.
-    linhas = "; ".join("`" + p.papel + "` agora é provider `" + p.provider + "`, conta `" + p.conta
-                       + "`, modelo `" + (p.modelo or "-") + "`, esforço `" + (p.esforco or "-") + "`"
-                       for p in novos)
-    return ("[painel: orquestração] A configuração de modelos do grupo mudou no painel: " + linhas
-            + ". Releia `" + str(orq_papeis.regras_path(gid))
-            + "`. Aplicação, papel a papel: sessão desse papel PARADA (idle) → feche-a e abra outra já na "
-            "configuração nova (o Claude não troca conta/modelo com a sessão aberta); sessão "
-            "TRABALHANDO → deixe terminar a tarefa atual e a próxima sessão desse papel nasce na nova. "
-            "A linha já está gravada: não reescreva a tabela. "
-            "Se o papel for o seu (árbitro): termine a tarefa em curso, escreva no seu registro "
-            "(o diário do grupo, seja grupo-<gid>.md ou o registro.md do diretório durável) a seção "
-            "'Passagem para o árbitro seguinte' (até 25 linhas: Task e portão, sessões vivas por "
-            "papel, HEAD e git status, pendências, decisões recentes, caminhos do plano/regras/"
-            "registro), abra o sucessor na configuração nova com kick-off apontando pra essa seção, "
-            "troque a linha `árbitro` da tabela pro nome dele, avise executor e revisor vivos quem é "
-            "o árbitro agora, e pare de despachar — rito 'Sucessão do árbitro' da skill.")
-
-
 class PapelItem(_StrictBody):
     papel: str
     sessao: str = ""
@@ -4199,22 +4190,73 @@ class PapelItem(_StrictBody):
     # Vazio = o papel roda numa conta só (formato original). "1", "2", "3"… = rodízio, e a Task N
     # cabe à conta de índice (N-1) % total. "par" = todas ao mesmo tempo.
     vez: str = ""
+    # Abertura da sessão do papel: as mesmas escolhas da criação de sessão, gravadas como flags.
+    headless: bool = False
+    permissao: str = ""
+    motor: str = ""
+    jev: bool = False
+    subagente: str = ""
+    perfil: str = ""
+    # Teto de contexto do papel, em % da janela da sessão ("" = 50%). O vigia lê daqui.
+    # None = cliente que não conhece o campo: mantém o valor gravado em vez de apagá-lo.
+    janela: str | None = None
+
+
+async def _validar_abertura(p: orq_papeis.Papel) -> None:
+    """Mesmas regras da criação de sessão: o árbitro não pode receber uma linha que o
+    `hangar-send --new` recusaria."""
+    def recusa(codigo: str, msg: str):
+        raise HTTPException(400, detail=erro(codigo, f"{msg}: {p.papel}"))
+    if p.headless and p.provider not in ("claude", "codex"):
+        recusa("erro_orq_headless_provider", "sem terminal só vale para claude ou codex")
+    if p.headless and "--read-only" in (p.abertura_extra or ""):
+        recusa("erro_orq_headless_read_only",
+               "sem terminal não aceita --read-only (o backend recusa a sessão): desligue o sem terminal")
+    if p.motor:
+        if p.provider != "claude":
+            recusa("erro_motor_sem_claude", "motor so vale para provider claude")
+        if p.motor not in await asyncio.to_thread(engines.listar):
+            recusa("erro_motor_invalido", "motor invalido")
+    if p.permissao:
+        if p.provider == "codex" and p.headless:
+            from app.adapters.codex import sem_terminal
+            if p.permissao not in {m[0] for m in sem_terminal.MODOS}:
+                recusa("erro_permissao_invalida", "modo de permissao invalido")
+        elif p.provider != "claude":
+            recusa("erro_permissao_so_claude", "modo de permissao so vale para claude")
+        else:
+            try:
+                model_args.validar("claude", None, None, p.permissao)
+            except ValueError:
+                recusa("erro_permissao_invalida", "modo de permissao invalido")
+    if p.subagente:
+        if p.provider != "claude" or p.motor:
+            recusa("erro_subagente_so_claude", "modelo dos subagentes so vale para claude sem motor")
+        try:
+            model_args.validar("claude", p.subagente, None)
+        except ValueError as e:
+            recusa("erro_orq_celula_invalida", str(e))
+    if p.perfil:
+        if p.provider != "omp":
+            recusa("erro_perfil_so_omp", "perfil so vale para provider omp")
+        # A mesma regra de nome do omp que a criação de sessão usa.
+        from app.omp_plugin_sync import InventoryError, resolve_omp_directories
+        try:
+            resolve_omp_directories(Path.home(), {"OMP_PROFILE": p.perfil}, Path.home())
+        except InventoryError as e:
+            recusa("erro_orq_celula_invalida", str(e))
 
 
 class PapeisBody(_StrictBody):
     papeis: list[PapelItem]
     mtime: float
-    # Falso = grava e NÃO acorda o árbitro. É o "salvar e continuar montando o time": quem monta
-    # o grupo mexe em vários papéis em sessões separadas da tela, e um recado por rodada de edição
-    # faz o árbitro parar o que está fazendo pra ler meia configuração. O aviso vai no fim, uma vez.
+    # Sem efeito: salvar nunca acorda o árbitro. Fica porque o corpo é estrito e clientes antigos o mandam.
     avisar: bool = True
 
 
-async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
-                          avisar: bool = True) -> dict:
-    """Grava TODAS as linhas numa escrita só e manda UM recado ao árbitro listando as mudanças —
-    o usuário edita vários papéis e salva no fim (medido em 26/08/2026: salvar um por vez
-    descartava o resto sem aviso). `avisar=False` grava sem acordar o árbitro."""
+async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) -> dict:
+    """Grava TODAS as linhas numa escrita só: o usuário edita vários papéis e salva no fim, e
+    salvar um por vez descartava o resto sem aviso."""
     if not itens:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", "nenhum papel"))
     gid = await asyncio.to_thread(_gid_de, name)
@@ -4235,12 +4277,18 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
                           and orq_md.normalizar(p.vez) == orq_md.normalizar(vez)), None)
             novo = orq_papeis.Papel(it.papel.strip(), (it.sessao or (atual.sessao if atual else "")).strip(),
                                     it.provider.strip().lower(), it.conta.strip(),
-                                    it.modelo.strip(), it.esforco.strip(), vez)
+                                    it.modelo.strip(), it.esforco.strip(), vez,
+                                    it.headless, it.permissao.strip(), it.motor.strip(), it.jev,
+                                    it.subagente.strip(), perfil=it.perfil.strip(),
+                                    abertura_extra=atual.abertura_extra if atual else "",
+                                    janela=(atual.janela if atual else "") if it.janela is None
+                                    else it.janela.strip().rstrip("%").strip())
             motivo = await asyncio.to_thread(orq_politica.permitido, novo.provider, novo.conta, novo.modelo, novo.esforco)
             if motivo:
                 raise HTTPException(400, detail=erro(motivo, "a política de contas não permite esta escolha: " + novo.papel))
+            await _validar_abertura(novo)
             # ponytail: validar_celula roda dentro de escrever_papel — texto do cliente nunca chega
-            # ao arquivo nem ao recado sem passar por ali.
+            # ao arquivo sem passar por ali.
             texto = orq_papeis.escrever_papel(texto, novo)
             novos.append(novo)
         mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, mtime_lido)
@@ -4249,24 +4297,10 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o contrato mudou desde a leitura — recarregue"))
-    # Gravado. Sem aviso, para aqui: o arquivo é a verdade do grupo, e o árbitro relê o contrato
-    # quando for usar — o recado é conveniência, não o canal de entrega da configuração.
-    if not avisar:
-        return {"papeis": [asdict(p) for p in novos], "papel": asdict(novos[0]), "mtime": mtime,
-                "arbitro": None, "aviso": "nao_avisado", "erro": None}
-    arb = next((p for p in orq_papeis.ler(texto) if p.e_arbitro()), None)
-    infos = await asyncio.to_thread(registry.list)
-    # Time padrão não tem árbitro vivo pra avisar: uma sessão que por acaso case o nome não é dele.
-    arbitro = orq_papeis.casar_viva(arb, infos) if arb and gid != orq_papeis.GID_PADRAO else None
-    aviso, err = "sem_arbitro", None
-    if arbitro:
-        res = await _enviar(arbitro, _recado_arbitro(novos, gid))
-        if res["ok"]:
-            aviso = "enviado" if res.get("delivered") else "enfileirado"
-        else:
-            aviso, err = "falhou", res["error"]
+    # A linha vale na próxima sessão de cada papel: o árbitro lê a tabela ao abrir. Nada que está
+    # rodando é fechado nem trocado por causa de um salvar.
     return {"papeis": [asdict(p) for p in novos], "papel": asdict(novos[0]), "mtime": mtime,
-            "arbitro": arbitro, "aviso": aviso, "erro": err}
+            "arbitro": None, "aviso": "proxima_sessao", "erro": None}
 
 
 @app.post("/api/sessions/{name}/orq/papel", dependencies=[Depends(require_auth)])
@@ -4276,7 +4310,7 @@ async def orq_papel_set(name: str, body: PapelBody):
 
 @app.post("/api/sessions/{name}/orq/papeis", dependencies=[Depends(require_auth)])
 async def orq_papeis_set(name: str, body: PapeisBody):
-    return await _aplicar_papeis(name, body.papeis, body.mtime, body.avisar)
+    return await _aplicar_papeis(name, body.papeis, body.mtime)
 
 
 class ComecarBody(_StrictBody):
@@ -4344,9 +4378,8 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
     if alvo is None:
         raise HTTPException(404, detail=erro("erro_orq_papel_inexistente",
                                              f"não há linha para {body.papel!r} nesta configuração"))
-    cab = orq_papeis.CABECALHO_VEZ if orq_papeis.tem_coluna_vez(texto) else orq_papeis.CABECALHO
-    chave = (alvo.papel, alvo.vez or "-") if cab is orq_papeis.CABECALHO_VEZ else alvo.papel
-    texto = orq_md.remover_linha(texto, cab, chave)
+    cab = orq_papeis.cabecalho_atual(texto) or orq_papeis.CABECALHO
+    texto = orq_md.remover_linha(texto, cab, orq_papeis.chave_da_linha(cab, alvo.papel, alvo.vez))
     try:
         mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, body.mtime)
     except orq_md.Conflito:
@@ -4370,11 +4403,9 @@ def pair_contract(name: str):
     return {"peers": link.get("peers", []), "path": str(p), "content": content}
 
 
-async def _avisar_saida(name: str, expeers: list[str], motivo: str) -> list[dict]:
-    """Avisa quem FICOU depois de `name` sair do grupo (o sidecar dele já foi limpo): remoto via
-    /unpair-remote do backend dele, local via _deliver. Uma esteira só pra unpair e kill — o kill
-    não avisava ninguém e os pares seguiam mandando recado pra um nome morto (ou pra sessão nova
-    que reusasse o nome)."""
+async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
+    """Depois de `name` sair do grupo (o sidecar dele já foi limpo), desfaz o vínculo nos pares
+    REMOTOS via /unpair-remote, senão o sidecar de lá fica órfão. Uma esteira só pra unpair e kill."""
     errs: list[dict] = []
     for p in expeers:
         if not peers.is_remote(p):
@@ -4394,11 +4425,7 @@ async def _avisar_saida(name: str, expeers: list[str], motivo: str) -> list[dict
             # Sidecar remoto fica órfão até alguém desparear lá. ponytail: sem fila de retry — single-user.
             _log.warning("saida do grupo: peer remoto '%s' não avisado (sidecar de lá fica órfão): %s", p, ex)
             errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
-    resto = [p for p in expeers if not peers.is_remote(p)]
-    for p in resto:
-        e = await _deliver(p, pair_texto.texto_saida(name, motivo, [x for x in resto if x != p]))
-        if e:
-            errs.append({"sessao": p, "erro": e})
+    # Locais não são avisados: recado para quem saiu volta "sessão não encontrada".
     return errs
 
 
@@ -4449,8 +4476,8 @@ async def unpair_session(name: str):
     expeers = await asyncio.to_thread(pair.leave, name)   # nome próprio: 'peers' é o módulo importado
     if not expeers:
         return {"ok": True, "warning": None}
-    errs = await _avisar_saida(name, expeers, "saiu do grupo de trabalho")
-    e = await _deliver(name, "[de: hangar] Você saiu do grupo de trabalho "
+    errs = await _avisar_saida(name, expeers)
+    e = await _deliver(name, f"{pair_texto.PREFIXO} Você saiu do grupo de trabalho "
                              f"({', '.join(expeers)}). Volte a operar independente; use hangar-send só "
                              "quando o usuário pedir.")
     if e:
@@ -5762,14 +5789,20 @@ async def session_plans(name: str):
 @app.get("/api/orq", dependencies=[Depends(require_auth)])
 async def orq_lista():
     """Execucoes de orquestracao (eventos.jsonl escrito pelo arbitro), mais recentes primeiro.
-    A lista vem SEM os eventos crus — quem quer a linha do tempo pede o detalhe."""
-    execs = await asyncio.to_thread(orq.listar_execucoes, orq.raiz_padrao())
+    A lista vem SEM os eventos crus — quem quer a linha do tempo pede o detalhe. Cada uma leva o
+    `watchdog` do chip do card: um systemctl por pedido, nunca um por execução."""
+    raiz = orq.raiz_padrao()
+    execs = await asyncio.to_thread(orq.listar_execucoes, raiz)
+    unidades = await asyncio.to_thread(orq_conductor.units)
+    vigias = await asyncio.to_thread(
+        lambda: {e.id: orq_conductor.watchdog(raiz / e.id, unidades) for e in execs})
 
     def _resumo(e):
         d = asdict(e)
         d.pop("eventos_execucao", None)
         for t in d["tasks"]:
             t.pop("eventos", None)
+        d["watchdog"] = vigias[e.id]
         return d
 
     return {"execucoes": [_resumo(e) for e in execs], "fichas": orq.fichas(execs)}
@@ -5781,6 +5814,16 @@ async def orq_detalhe(exec_id: str):
     if e is None:
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
     return asdict(e)
+
+
+@app.get("/api/orq/{exec_id}/conductor", dependencies=[Depends(require_auth)])
+async def orq_conductor_panel(exec_id: str):
+    """Painel do condutor: o vigia vivo ou parado e o feed do que passou pelo orq. Só leitura."""
+    d = orq.exec_dir(orq.raiz_padrao(), exec_id)
+    if d is None or not await asyncio.to_thread(d.is_dir):
+        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
+    unidades = await asyncio.to_thread(orq_conductor.units)
+    return await asyncio.to_thread(orq_conductor.conductor, d, unidades)
 
 
 class PlanPinBody(_StrictBody):
@@ -6169,9 +6212,26 @@ def list_runners(name: str):
     cwd = _session_cwd(name)
     return RunnersResponse(
         detected=runner.detect_runners(cwd),
+        custom=runner.custom_commands(cwd),
         remembered=runner.remembered(cwd),
         running=runner.run_status(cwd),
     )
+
+
+# POST, nao PUT/PATCH: mesmo motivo do /api/config — proxy na frente do backend ja barrou
+# metodo fora do par GET/POST.
+@app.post("/api/sessions/{name}/runners/custom", dependencies=[Depends(require_auth)],
+          response_model=list[Runner])
+def set_custom_runners(name: str, body: CustomRunnersBody):
+    # A lista vai INTEIRA (add/editar/remover sao a mesma gravacao). Item vazio e recusado aqui,
+    # apontando qual: gravado, ele viraria linha morta descartada calada no proximo GET.
+    cwd = _session_cwd(name)
+    for i, c in enumerate(body.commands, start=1):
+        if not c.label.strip() or not c.command.strip():
+            raise HTTPException(400, detail=erro(
+                "erro_runner_custom", f"comando personalizado {i}: rotulo e comando sao obrigatorios"))
+    runner.set_custom_commands(cwd, [c.model_dump() for c in body.commands])
+    return runner.custom_commands(cwd)
 
 
 @app.post("/api/sessions/{name}/run", dependencies=[Depends(require_auth)],
@@ -6198,6 +6258,31 @@ def stop_runner(name: str):
 @app.get("/api/sessions/{name}/run/pane", dependencies=[Depends(require_auth)])
 def runner_pane(name: str):
     return {"pane": runner.run_pane(_session_cwd(name))}
+
+
+@app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
+          status_code=202)
+def shortcut_shell(name: str, body: ShortcutShellBody):
+    # Atalho "abrir programa" da fileira: dispara-e-esquece no cwd da sessao. Sem pane, sem
+    # captura de saida — comando cuja saida interessa tem casa melhor (o run ou o terminal).
+    # Filho desprendido pra matar/reiniciar o backend nao levar o programa junto. start_new_session
+    # so existe no POSIX (no Windows e ignorado calado); la vale grupo proprio e sem console,
+    # em valor literal porque subprocess.CREATE_* so existe no Windows.
+    cwd = _session_cwd(name)
+    command = body.command.strip()
+    if not command:
+        raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
+    detach = ({"creationflags": 0x00000200 | 0x08000000} if os.name == "nt"
+              else {"start_new_session": True})
+    try:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **detach)
+    except OSError as e:
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
+    # Sem o texto do comando: ele pode carregar credencial.
+    _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
+    return {"ok": True}
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----

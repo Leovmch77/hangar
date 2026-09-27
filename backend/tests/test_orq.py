@@ -156,6 +156,18 @@ def test_ficha_conta_aceita_e_nao_aceita(tmp_path):
                   "aprovadas_primeira": 1, "rodadas_media": 1.0}]
 
 
+def test_codigo_aprovado_sem_prova_nao_conta_como_aceita(tmp_path):
+    linhas = _exec_basica()[:-1]
+    linhas[2]["fase"] = "codigo"
+    linhas[3]["fase"] = "codigo"
+    _grava(tmp_path, "2026-08-22-paridade", linhas)
+    execs = orq.listar_execucoes(tmp_path)
+    t = execs[0].tasks[0]
+    assert t.resultado is None and t.fim is None
+    assert execs[0].aprovadas_primeira == 0
+    assert orq.fichas(execs)[0]["aceitas"] == 0
+
+
 def test_execucao_sem_fim_e_viva(tmp_path):
     _grava(tmp_path, "2026-08-25-viva", _exec_basica()[:-1])
     e = orq.listar_execucoes(tmp_path)[0]
@@ -165,3 +177,27 @@ def test_execucao_sem_fim_e_viva(tmp_path):
 def test_raiz_padrao_e_o_cofre_nao_o_config_dir_de_uma_conta():
     # `~/.claude` é o config dir de UMA conta, e um trabalho põe papéis em contas diferentes.
     assert orq.raiz_padrao() == Path.home() / ".hangar" / "orq"
+
+
+def test_trabalho_depois_do_fim_reabre_a_execucao(tmp_path):
+    # A native-parity tem execucao_fim na linha 20 de 171 e seguiu trabalhando.
+    linhas = _exec_basica() + [
+        {"ts": "2026-08-22T13:00:00-03:00", "tipo": "task_inicio", "task": 2,
+         "titulo": "Nova", "executor": "x", "par": "p"},
+    ]
+    _grava(tmp_path, "2026-08-22-paridade", linhas)
+    e = orq.listar_execucoes(tmp_path)[0]
+    assert e.fim is None and e.resultado is None
+    assert orq.detalhe(tmp_path, "2026-08-22-paridade").fim is None
+
+
+def test_vale_o_ultimo_fim_sem_task_depois(tmp_path):
+    linhas = _exec_basica() + [
+        {"ts": "2026-08-22T13:00:00-03:00", "tipo": "task_inicio", "task": 2,
+         "titulo": "Nova", "executor": "x", "par": "p"},
+        {"ts": "2026-08-22T14:00:00-03:00", "tipo": "execucao_fim", "resultado": "abortada"},
+        {"ts": "2026-08-22T14:05:00-03:00", "tipo": "sessao_trocada", "de": "a", "para": "b"},
+    ]
+    _grava(tmp_path, "2026-08-22-paridade", linhas)
+    e = orq.listar_execucoes(tmp_path)[0]
+    assert e.fim == "2026-08-22T14:00:00-03:00" and e.resultado == "abortada"

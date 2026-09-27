@@ -51,6 +51,10 @@ def maquina(tmp_path, monkeypatch):
         {"provider": "opencode-go", "id": "deepseek-v4-flash", "context": "128k", "thinking": True},
         {"provider": "openrouter", "id": "x/y", "context": "8k", "thinking": False}])
     monkeypatch.setattr(pol.apelidos, "ler", lambda: {})
+    monkeypatch.setattr(pol.codex_contas, "list_visible_accounts",
+                        lambda: [pol.codex_contas.Account("default", home / ".codex", True)])
+    monkeypatch.setattr(pol.codex_models, "listar", lambda fresco=False, *, codex_home=None: [
+        {"id": "gpt-6-astra", "name": "GPT-6 Astra", "desc": "", "efforts": ["low", "high"], "default_effort": "high"}])
     return home
 
 
@@ -82,6 +86,24 @@ def test_inventario_junta_os_quatro_providers(maquina):
     assert kimi.modelos[0]["id"] == "apikey/k3" and kimi.modelos[0]["efforts"] == ["low", "high", "max"]
     # Claude sem cache do picker → lista reduzida
     assert [m["id"] for m in inv[0].modelos] == ["opus", "sonnet", "haiku"]
+
+
+def test_inventario_lista_cada_conta_codex(maquina, monkeypatch):
+    extra = maquina / ".codex-jefferson-felizardo"
+    monkeypatch.setattr(pol.codex_contas, "list_visible_accounts", lambda: [
+        pol.codex_contas.Account("default", maquina / ".codex", True),
+        pol.codex_contas.Account("jefferson-felizardo", extra, False)])
+    monkeypatch.setattr(pol.apelidos, "ler", lambda: {f"codex:{extra.resolve()}": "Pessoal"})
+    homes = []
+    def listar(fresco=False, *, codex_home=None):
+        homes.append(codex_home)
+        if codex_home == extra:
+            raise pol.codex_models.CodexIndisponivel("fora do ar")
+        return [{"id": "gpt-6-astra", "name": "GPT-6 Astra", "efforts": ["high"], "default_effort": "high"}]
+    monkeypatch.setattr(pol.codex_models, "listar", listar)
+    codex = [(i.conta, i.apelido, [m["id"] for m in i.modelos]) for i in pol.inventario() if i.provider == "codex"]
+    assert codex == [("openai-codex", "OpenAI Codex", ["gpt-6-astra"]), ("jefferson-felizardo", "Pessoal", [])]
+    assert homes == [None, extra]
 
 
 def test_inventario_sobrevive_a_pi_ausente(maquina, monkeypatch):

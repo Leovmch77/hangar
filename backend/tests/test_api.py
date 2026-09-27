@@ -29,7 +29,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # api.py registra este gancho no import (dispara thread real de _drain_session, que chama
     # registry.list() de novo) — sem neutraliza-lo aqui, um sweep achando ausente de verdade nesta
     # suite dispararia essa thread fora da janela isolada (achado do review de Task 8).
-    monkeypatch.setattr(registry_mod, "apos_saida_por_morte", None)
 
 
 @pytest.fixture
@@ -3157,8 +3156,8 @@ def test_pair_warning_none_quando_todos_avisados(api_client):
 # Task 2: protocolo completo só pro recém-chegado
 # ---------------------------------------------------------------------------
 
-def test_pair_protocolo_completo_so_pro_novato(api_client):
-    # 'd' entra num grupo (a,b): d recebe o protocolo; a e b recebem UMA linha "d entrou".
+def test_pair_protocolo_so_pro_novato_veterano_nao_e_acordado(api_client):
+    # 'd' entra num grupo (a,b): d recebe o protocolo; a e b nada (consultam o grupo quando precisarem).
     entregues = {}
     async def fake_deliver(name, text):
         entregues[name] = text
@@ -3173,10 +3172,29 @@ def test_pair_protocolo_completo_so_pro_novato(api_client):
          patch("app.api._deliver", side_effect=fake_deliver):
         r = api_client.post("/api/sessions/d/pair", headers=_h(), json={"peers": ["a"], "task": ""})
     assert r.status_code == 200
-    assert entregues["d"].startswith("[de: hangar] GRUPO DE TRABALHO ATIVO")
-    assert entregues["a"].startswith("[de: hangar] 'd' (Claude Code) entrou no seu grupo")
-    assert entregues["b"].startswith("[de: hangar] 'd' (Claude Code) entrou no seu grupo")
-    assert "Membros agora: 'a' (Claude Code), 'b' (Claude Code), 'd' (Claude Code)" in entregues["a"]
+    assert list(entregues) == ["d"]
+    assert entregues["d"].startswith("[painel: grupo de trabalho] Você, 'd', está num grupo de trabalho")
+
+
+def test_pair_sem_avisar_membros_so_o_novato_recebe(api_client):
+    # O vigia junta ao grupo quem ficou de fora: a linha "entrou no seu grupo" acordaria cada veterano.
+    entregues = {}
+    async def fake_deliver(name, text):
+        entregues[name] = text
+        return None
+    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1"},
+            "b": {"peers": ["a"], "task": "t", "gid": "g1"},
+            "d": None}
+    with patch("app.api.registry.list",
+               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b", "d")]), \
+         patch("app.api.pair.join_group", return_value=(["a", "b", "d"], snap)), \
+         patch("app.api.PairLink.get", return_value={"peers": ["b", "d"], "task": "t", "gid": "g1"}), \
+         patch("app.api._deliver", side_effect=fake_deliver):
+        r = api_client.post("/api/sessions/a/pair", headers=_h(),
+                            json={"peer": "d", "task": "t", "notify_members": False})
+    assert r.status_code == 200, r.text
+    assert list(entregues) == ["d"]
+    assert entregues["d"].startswith("[painel: grupo de trabalho] Você, 'd', está num grupo de trabalho")
 
 
 def test_pair_repetido_sem_mudanca_nao_avisa_ninguem(api_client):
@@ -3197,7 +3215,27 @@ def test_pair_repetido_sem_mudanca_nao_avisa_ninguem(api_client):
     assert r.json()["warning"] is None
 
 
-def test_pair_merge_de_dois_grupos_avisa_entrada_dos_dois_lados(api_client):
+def test_pair_de_orquestracao_nao_avisa_ninguem(api_client):
+    # Cada sessão de Task que entra acordava o grupo inteiro; o kick-off já traz o protocolo.
+    entregues = []
+    async def fake_deliver(name, text):
+        entregues.append(name)
+        return None
+    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1", "orq": True},
+            "b": {"peers": ["a"], "task": "t", "gid": "g1", "orq": True},
+            "d": None}
+    with patch("app.api.registry.list",
+               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b", "d")]), \
+         patch("app.api.pair.join_group", return_value=(["a", "b", "d"], snap)) as join, \
+         patch("app.api.PairLink.get", return_value={"peers": ["b", "d"], "task": "t", "gid": "g1", "orq": True}), \
+         patch("app.api._deliver", side_effect=fake_deliver):
+        r = api_client.post("/api/sessions/a/pair", headers=_h(), json={"peer": "d", "task": "t", "orq": True})
+    assert r.status_code == 200, r.text
+    assert entregues == []
+    assert join.call_args.kwargs["orq"] is True
+
+
+def test_pair_merge_de_dois_grupos_nao_avisa_ninguem(api_client):
     entregues = {}
     async def fake_deliver(name, text):
         entregues[name] = text
@@ -3213,9 +3251,7 @@ def test_pair_merge_de_dois_grupos_avisa_entrada_dos_dois_lados(api_client):
          patch("app.api._deliver", side_effect=fake_deliver):
         r = api_client.post("/api/sessions/a/pair", headers=_h(), json={"peers": ["c"], "task": ""})
     assert r.status_code == 200
-    cd, ab = "'c' (Claude Code), 'd' (Claude Code) entrou", "'a' (Claude Code), 'b' (Claude Code) entrou"
-    assert cd in entregues["a"] and cd in entregues["b"]
-    assert ab in entregues["c"] and ab in entregues["d"]
+    assert entregues == {}
 
 
 # ---------------------------------------------------------------------------
@@ -3328,7 +3364,8 @@ def test_group_message_remetente_sem_socket_nao_pula_ninguem(api_client):
     sp.assert_called_once()
 
 
-def test_kill_avisa_companheiros_que_ficaram(api_client):
+def test_kill_nao_avisa_companheiros_que_ficaram(api_client):
+    # Recado para quem saiu volta "sessão não encontrada"; o aviso custava um turno em cada membro.
     entregues = {}
     async def fake_deliver(name, text):
         entregues[name] = text
@@ -3339,9 +3376,7 @@ def test_kill_avisa_companheiros_que_ficaram(api_client):
         r = api_client.delete("/api/sessions/a", headers=_h())
     assert r.status_code == 200 and r.json() == {"ok": True, "warning": None}
     kill.assert_called_once_with("a")
-    assert entregues["b"] == "[de: hangar] 'a' encerrou a sessão e saiu do grupo de trabalho. O grupo continua entre você e 'c'."
-    assert entregues["c"].endswith("O grupo continua entre você e 'b'.")
-    assert "a" not in entregues
+    assert entregues == {}
 
 
 def test_kill_sem_grupo_nao_avisa(api_client):

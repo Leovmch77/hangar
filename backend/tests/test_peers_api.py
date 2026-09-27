@@ -135,6 +135,17 @@ def test_apagar_desconhecido_e_404(arquivo_peers, cli):
     assert r.status_code == 404
 
 
+def test_liga_e_desliga_peer_sem_perder_o_resto(arquivo_peers, cli):
+    cli.post("/api/peers", headers=AUTH, json={"id": "notebook", "base_url": "http://n:8765", "token": "t"})
+    r = cli.put("/api/peers/notebook/enabled", headers=AUTH, json={"enabled": False})
+    assert r.status_code == 200 and r.json()[0]["enabled"] is False
+    cfg = json.loads(arquivo_peers.read_text(encoding="utf-8"))["notebook"]
+    assert cfg == {"base_url": "http://n:8765", "token": "t", "enabled": False}
+    assert cli.put("/api/peers/notebook/enabled", headers=AUTH, json={"enabled": True}).json()[0]["enabled"] is True
+    assert cli.put("/api/peers/notebook/enabled", headers=AUTH, json={"enabled": "sim"}).status_code == 400
+    assert cli.put("/api/peers/nao-existe/enabled", headers=AUTH, json={"enabled": True}).status_code == 404
+
+
 def test_apagar_sem_credencial_e_401(cli):
     assert cli.delete("/api/peers/x").status_code == 401
 
@@ -330,3 +341,16 @@ def test_descobrir_sem_tailscale_e_503_nomeado(cli, monkeypatch):
     r = cli.get("/api/peers/descobrir", headers=AUTH)
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "descoberta_sem_tailscale"
+
+
+def test_token_do_peer_so_com_credencial_e_so_do_pedido(arquivo_peers, cli):
+    arquivo_peers.write_text(json.dumps({
+        "casa": {"base_url": "https://casa", "token": "tok-casa"},
+        "vps": {"base_url": "https://vps", "token": "tok-vps"}}))
+    assert cli.get("/api/peers/casa/token").status_code == 401
+    r = cli.get("/api/peers/casa/token", headers=AUTH)
+    assert r.status_code == 200
+    assert r.json() == {"token": "tok-casa"}
+    r = cli.get("/api/peers/nenhum/token", headers=AUTH)
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == "peers_desconhecido"

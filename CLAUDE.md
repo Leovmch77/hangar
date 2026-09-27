@@ -135,8 +135,8 @@ quando o usuário pedir o fluxo ou o kick-off mandar invocá-lo com `Role:`. A r
 fase 1 e só escala: `audit` (quem planejou escreve, uma revisão fresca do diff inteiro fecha) ou
 `full` (após o planejamento aprovado, executor e revisor independente trabalham com portão entre
 Tasks e revisão final da branch). A linha do executor na tabela do time pode ser escolhida pelo
-`Risk:` da Task (`vez` = `low`/`high`) em vez de rodízio. Push depende de autorização do usuário. Um escritor por árvore, execução serial por
-padrão. **Só planejador e árbitro invocam a skill**: executor, revisor, revisão final e
+`Risk:` da Task (`vez` = `low`/`high`) em vez de rodízio. Push depende de autorização do usuário. Um escritor por árvore; Tasks independentes rodam em paralelo por padrão, uma por
+worktree. **Só planejador e árbitro invocam a skill**: executor, revisor, revisão final e
 retrospectiva recebem no kick-off o caminho da página do papel
 (`~/.claude/skills/orquestrar/references/<papel>.md`) e leem só ela e as irmãs que ela nomeia
 no passo. Cada página é escrita como
@@ -296,7 +296,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   evento) leva ponte para o nome antigo enquanto houver sessão viva que o carregou no catálogo,
   e a ponte sai do catálogo para não cobrar contexto de quem abre depois.
 - **Grupo: protocolo reinjetado no `SessionStart`, saída por UMA esteira, anti-loop no backend.**
-  Varredura de sessão morta confirma ausência por TEMPO, nunca por número de polls.
+  Só quem estava sem grupo recebe o protocolo, sem lista de membros; entrada, saída e troca de
+  tarefa não acordam ninguém, e o grupo se consulta (`sessions`, `--list`). Grupo `orq` não recebe
+  nem o protocolo: o kick-off traz canal e contrato.
+  Varredura de sessão morta confirma ausência por TEMPO, nunca por número de polls. Aviso do app
+  sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`: o modelo responde a quem assina.
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper
@@ -340,6 +344,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   do realpath. Escrita nova fora da raiz entra por aqui, nunca afrouxando o `/files/write`.
 - **HTML servido como arquivo executa isolado e sem o token na URL do documento interno.**
   Arquivos citados e uploads usam `file_response`; SVG/XML mantêm o MIME com scripts bloqueados.
+- **Configuração compartilhada leva o conteúdo, e o destino resolve caminho e programa.** Caminho
+  vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;
+  hooks e skills do Hangar, MCP `hangar`, credenciais e o login do `.claude.json` são sempre do
+  destino. Regras e motivo em [plataforma.md](docs/decisoes/plataforma.md#configuração-compartilhada-leva-o-conteúdo-o-destino-resolve-caminho-e-programa).
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o

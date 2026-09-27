@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
 from app import atomico, diag, tmux
@@ -21,7 +22,7 @@ from app.models import SessionInfo, session_key
 from app.pqueue import PromptQueue, _sanitize, merged_history
 from app.archive import _texto_simples
 from app.chain import ThenLink
-from app import pair, pair_texto
+from app import pair
 from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
@@ -67,11 +68,14 @@ _MAX_PLAN_TASK_SEGMENTS = 9
 # anterior — erro nunca vira "repositorio limpo" no card.
 _git_ultimo: dict[str, tuple[dict | None, dict | None]] = {}
 _git_em_voo: set[str] = set()
+# Pool próprio: git lento não pode deixar na fila a captura do tmux e o resto do pool padrão.
+_git_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-git")
 
 
 async def _atualizar_git(cwd: str) -> None:
     try:
-        summary, diffstat = await asyncio.to_thread(lambda: (git_summary(cwd), git_diffstat(cwd)))
+        summary, diffstat = await asyncio.get_running_loop().run_in_executor(
+            _git_pool, lambda: (git_summary(cwd), git_diffstat(cwd)))
         antes = _git_ultimo.get(cwd, (None, None))
         _git_ultimo[cwd] = (summary if summary is not None else antes[0],
                             diffstat if diffstat is not None else antes[1])
@@ -782,9 +786,6 @@ def kimi_session_file(pane_id: str, pid: Optional[int] = None,
 _STATUS_TTL = 20.0
 _STATUS_BUDGET = 2
 
-# Gancho que o api.py registra: drena a fila do peer avisado (PromptQueue só drena em transição
-# de hook; peer já ocioso nunca receberia o aviso). Módulo, não instância — há 4 registries.
-apos_saida_por_morte: Optional[Callable[[str], None]] = None
 apos_saida_codex: Optional[Callable[[str], None]] = None
 apos_renomear_codex: Optional[Callable[[str, str], None]] = None
 
@@ -2379,19 +2380,8 @@ class SessionRegistry:
                 _log.warning("varredura de pares: '%s' morto fora do app, leave falhou: %r", n, e)
                 continue
             _log.info("varredura de pares: '%s' morreu fora do app; saiu do grupo (%s)", n, ex)
-            resto = [p for p in ex if "::" not in p]
-            if len(resto) != len(ex):
+            if any("::" in p for p in ex):
                 _log.warning("varredura de pares: '%s' tinha par remoto; sidecar de lá fica órfão", n)
-            for p in resto:
-                try:
-                    PromptQueue(p).append(
-                        pair_texto.texto_saida(n, "encerrou fora do app e saiu do grupo de trabalho",
-                                               [x for x in resto if x != p]),
-                        delivered=False)
-                    if apos_saida_por_morte:
-                        apos_saida_por_morte(p)
-                except Exception as e:
-                    _log.warning("varredura de pares: aviso a '%s' não enfileirado: %r", p, e)
 
     # ── Resume de sessao "sem id" ────────────────────────────────────────────────
     # Uma sessao aberta com `claude` cru (sem --session-id) JA tem um transcript <uuid>.jsonl; so nao da

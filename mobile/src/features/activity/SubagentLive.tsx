@@ -21,7 +21,8 @@ export function SubagentLive({ sessionName, agentId }: Props) {
 
   useEffect(() => {
     let alive = true;
-    let timer: ReturnType<typeof setInterval> | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
     let gen = 0;
     let failCount = 0;
 
@@ -40,21 +41,24 @@ export function SubagentLive({ sessionName, agentId }: Props) {
         failCount += 1;
         setFails(failCount);
         if (failCount >= 3) {
-          if (timer) {
-            clearInterval(timer);
-            timer = null;
-          }
+          stopped = true;
           setError(m.atividade_erro_vivo());
           setLoading(false);
         }
       }
     }
 
-    void tick();
-    timer = setInterval(tick, 3000);
+    // Próxima leitura só depois que a anterior voltar: com o backend lento, o intervalo fixo
+    // empilhava pedidos.
+    async function loop() {
+      await tick();
+      if (alive && !stopped) timer = setTimeout(loop, 3000);
+    }
+
+    void loop();
     return () => {
       alive = false;
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
   }, [sessionName, agentId]);
 

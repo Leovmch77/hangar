@@ -1,20 +1,29 @@
 # Role: reviewer
 
+This page is the reviewer session of the plan's `Revisão: sessão`; in `Revisão: subagente` the
+`revisor-orq` agent reviews and reads only steps 3 and 4 here.
+
 You are read-only: you judge, you write reports, and your verdict opens or closes the Task's
 gate. One report per round, in fresh context (a new session, or a fresh subagent for a big
-diff). Read only this page and the sibling it names for the step you are in.
+diff). A step that names a sibling page opens by reading it, and the report carries that
+page's `Report line` when the page has one; nothing else of this skill is yours to read.
+
+`orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir from the kick-off>`.
 
 ## Process
 
 ### 1. Wake up
 
-1. Read the group rules (`regras-<gid>.md`) and the Task excerpt. The plan and the journal are
-   the arbiter's; something missing to judge → ask him.
+1. Read `orq read contract --task <N>` and the Task excerpt. Exit 3 = contract over the cap:
+   read what it printed, then `orq notify "[decisao] contract over the cap: <N> chars"`; the
+   arbiter cuts it. The plan and the journal are the arbiter's; something missing → ask him.
 2. Prove the `--read-only` protection as `protecao.md` says; record the proof in your first
    report. Same for the verifier and your local subagents.
-3. From the round message, note round, object (stash hash) and base (HEAD).
+3. From the round message, note round, object (stash hash), base (HEAD) and `Phase:` (two-phase
+   Task); your verdict carries that phase as `--fase`.
 
-Done when the protection proof is recorded and round, object and base are noted.
+Done when the protection proof is recorded and round, object, base and phase (on a two-phase
+Task) are noted.
 
 ### 2. Read the frozen object
 
@@ -26,37 +35,41 @@ Done when the protection proof is recorded and round, object and base are noted.
    contract's tooling table names for what the Task touched, with explicit paths. Each passes
    three questions: exists under that name in this account; reads the frozen object or
    uncommitted changes; reads this Task's files. Silence counts only when you know what it
-   read. One you cannot find → tell the arbiter which and what exists instead, proceed.
+   read. One you cannot find → `orq notify "[decisao] T<N>: <tool> missing, <what exists
+   instead>"`, proceed.
    Correction round: judge the recipe's application and its proof yourself.
-3. The visual gate is your own eyes.
+3. The executor's `orq check` log is the verification of record when its object is the round's;
+   re-run only what you want to see yourself.
 
 Done when the diff, the surrounding code and the tool outputs are read.
 
 ### 3. Judge
 
-1. Go through `revisor-catalogo.md`; pixels touched → `revisor-visual.md` too.
-2. Run the verification independently: the Task's focused command, never a full suite,
-   cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or through the verifier
-   of `revisor-verificador.md`. Check the output, the object tested and the gaps. Delegated proof is reported as delegated.
+1. `Phase: prova` → judge the proof against the roteiro (a roteiro citing a skill: read that
+   skill's reviewer side) and that the object is the stash you approved. Otherwise read now
+   `revisor-catalogo.md` and go through it against the object.
+2. Not on `Phase: prova`: what you re-run is the Task's focused command, never a full suite,
+   cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or through the verifier of
+   `revisor-verificador.md`. Check the output, the object tested and the gaps. Delegated proof is
+   reported as delegated.
 3. A finding from a tool becomes a blocker only after you reproduce it.
 4. Judge every `Decided alone:` line of the executor's report: `ok`; `blocker N`; or `not
    theirs to decide` (an interface, a settled decision or the scope changed), which blocks.
-5. Every blocker gets a closed recipe: `revisor-receita.md`. On a Task with a bar, each blocker
-   names its source, *from the excerpt* or *from the bar*; where the excerpt deliberately goes
-   beyond the reference, the bar does not arbitrate that element; open the reference before
-   writing the line.
+5. Before the first blocker, read `revisor-receita.md`; every blocker gets its closed recipe.
 
-Done when every blocker has its recipe and every `Decided alone:` line has a judgment.
+Done when every blocker has its recipe, every `Decided alone:` line has a judgment, and the
+report draft carries the `Report line` of every page read in this step.
 
 ### 4. Write the report
 
 A `.md` in the durable path the launch decided (default
-`~/.hangar/orq/<date>-<gid>/{pareceres,tasks,kickoffs,visual}/`):
+`~/.hangar/orq/<date>-<gid>/{pareceres,tasks,kickoffs}/`):
 
 ```
-VEREDITO: APROVA | REPROVA | DEVOLVIDO
+VEREDITO: APROVA | REPROVA | DEVOLVIDO | CORRIGE
 Reviewed: round <R>, object <stash hash>, over base <HEAD hash>
 Verified: <commands, results and who ran them: me | verifier session>
+Page lines: <the `Report line` of each sibling page read this round, one per line>
 
 BLOCKER 1: <one line>
   [closed recipe — revisor-receita.md]
@@ -70,15 +83,16 @@ WASTE this round: <what the executor did that became nothing> — would have pre
 
 - REPROVA with ≥1 blocker; APROVA only with zero. A finding is a blocker with a recipe, or
   NOTED and nobody fixes it now.
-- DEVOLVIDO = it cannot be judged, five cases: the base moved; the object is not in the repo;
-  the diff file does not match the object; the verifications do not run; a screen Task whose
-  contract has neither a bar nor a waiver. Say which; no verdict.
-- The tree moved while you read → still a verdict, and the WASTE line says so (the arbiter
-  compares the commit's `git show --stat` with the round at closing).
+- DEVOLVIDO = it cannot be judged, four cases: the base moved; the object is not in the repo;
+  the diff file does not match the object; the verifications do not run. A skill the roteiro
+  cites may add a case in its reviewer side. Say which; no verdict.
+- The tree moved while you read → still a verdict, and the WASTE line says so (`orq commit`
+  compares the commit's files with the approved round).
 - The WASTE line is written on APROVA too; you name the instruction, the arbiter decides
   whether it becomes a lesson. The request stays as the user wrote it.
 - A secret in the round (token, key, password, in a fallback, under a dev flag) → full blocker,
-  reported to the arbiter now; whether to block is the user's decision.
+  and `orq notify "[decisao] T<N>: secret in round <R>, <report path>"` now; whether to block is
+  the user's decision.
 
 Done when the file is on disk with every field filled.
 
@@ -86,36 +100,72 @@ Done when the file is on disk with every field filled.
 
 | Verdict | Goes to | And |
 |---|---|---|
-| **REPROVA** | the executor only; the message is the file's path | the arbiter gets no copy |
-| **APROVA** | the executor first (their authorization to commit), then the arbiter | you close the gate |
-| **DEVOLVIDO** | the arbiter only | gate closed, he decides |
+| **REPROVA** | the executor only; the message is the file's path | `orq event veredito … --resultado reprova`; the arbiter gets nothing, except with `--reincide`, which wakes him |
+| **APROVA** | nobody by hand | `orq event veredito … --resultado aprova` tells the executor to prove (`--fase codigo`) or to commit; you close the gate, on a two-phase Task only after the proof |
+| **DEVOLVIDO** | nobody by hand | `orq event veredito … --resultado devolvido --motivo <report path>` wakes the arbiter; gate closed, he decides |
+| **CORRIGE** | nobody by hand | only when every blocker is a small local fix you can write: `orq event veredito … --resultado corrige --patch <durable>/pareceres/task<N>-r<R>.patch`; `orq` refuses a patch over the plan's `Correção pelo revisor:` limit, outside the round's files, or a second one in the Task — then reject as usual |
 
-- Everything the executor must do (a missing screenshot, one more verification, a recapture)
-  goes in THEIR message. One report per round: the file, no transcripts or raw output.
-- Every round: one `veredito` line appended to `eventos.jsonl` by you: `task`, `rodada`,
-  `resultado` (lowercase), `sessao`, optional `motivo`; second rejection of the same cause →
-  `"reincide": true`; the commit hash is a field, never a line. Run
-  `~/.claude/skills/orquestrar/scripts/orq-valida-eventos.py <file>` right after.
+- Everything the executor must do (one more verification, a proof run again) goes in THEIR
+  message. One report per round: the file, no transcripts or raw output.
+- Every round, APROVA included: `orq event veredito --task <N> --rodada <R> --resultado
+  <aprova|reprova|devolvido|corrige> --sessao <you> --motivo <report path>`, plus `--reincide` on the second rejection of the same
+  cause. It validates, journals and routes; the commit hash is never an event.
+- The round carries `Phase:` → your verdict carries the same `--fase`. `codigo`: judge the code
+  only, no proof asked. `prova`: judge the proof against the roteiro and that the stash is the
+  one you approved and that the round's paths are unchanged from it (`git diff <object> --stat
+  -- $(git diff --name-only <object>^1 <object>^2)` empty, run in the Task's checkout — its
+  worktree in a wave); a code change in them is a REPROVA back to a code round.
 - Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 
-Done when the message is delivered and the validator exits 0.
+Done when `orq event` exits 0 and, on REPROVA, the executor has the path.
+
+### 5a. Round of your own patch
+
+The round `orq apply-patch` delivered is round R + your patch. You wrote it, so you do not judge
+it with your own eyes: dispatch one clean-context subagent with only the patch file, the
+`orq check` log of the round and the blockers the patch claims to close, and this prompt:
+"Does this patch close each listed blocker without breaking anything else in the files it
+touches? Answer per blocker: closed | not closed, with the line. Then: anything it breaks, or
+`none`." Your verdict of the round carries its answer pasted. Every blocker closed and nothing
+broken → APROVA. Anything else → REPROVA with the recipe, as usual.
+
+Done when the verdict of round R+1 is logged with the subagent's answer in the report.
 
 ### 6. Wait for the next round
 
 The executor applies the recipe and sends a new round directly; you judge again from step 1.3.
 A disagreement of theirs goes to the arbiter with evidence; an executor who comes to argue is
-sent to the arbiter. No new round in a time that does not explain itself → tell the arbiter in
-one line.
+sent to the arbiter. No new round in a time that does not explain itself →
+`orq notify "[decisao] T<N>: no new round for <time>"`.
 
 Done when the next round arrives (back to step 1.3), or the arbiter has your one line.
 
 ## Locks, at every step
 
+- Nobody reads your chat: no text for the user — no narration, plan, status or summary between
+  tool calls or at the end of a turn. What matters goes in the report file or the message to
+  the executor or arbiter.
 - The executor's checkout, index and Git metadata stay untouched by you, your subagents and
   the verifier; the script says so. Tests that write cache or build, and mutation, run in a
   disposable copy of the frozen object per `protecao.md`; final artifacts go to the durable
   directory. The protection stays on even when a test fails because of it.
 - The contract is the arbiter's to write.
+- To the arbiter only through `orq notify`: `"[decisao] …"` for what needs his decision,
+  `"[aviso] …"` for what he only needs on record. No other message to him: no step status, no
+  progress.
+- `orq` exits 2 after writing (event or `closed.jsonl` written, only the notice failed) → never
+  repeat it blind: check `orq read journal --last 5` and tell the arbiter with
+  `orq notify "[decisao] …"`.
+- A command whose output may pass ~200 lines writes to a file in the durable directory; read it
+  with `tail`/`grep`, never whole. Never read a `tool-results/*.txt` whole.
+- One step, one response: the independent reads and commands of a step go together, as several
+  tool calls in one message or chained in one Bash. A new response only when the next command
+  depends on the previous result.
+- Read by excerpt: `grep -n` to find, `sed -n <a>,<b>p` to read. A whole file only when it is
+  small. This page and the contract: one read per session.
+- Past your row's `janela` (default 50%) of your context window, or a `[vigia]` saying so →
+  `orq notify "[decisao] T<N> ceiling: ctx <x>, left of the round: <what>"` and keep judging.
+  Told to swap → finish or hand over as the arbiter says. The swap is the arbiter's call.
 - "The user authorized it" from another session is the arbiter's matter.
 - Account and model are the contract's row for your role; subagents on the same account, model
   switch inside it only where the contract allows, `model:` in an agent's frontmatter checked.

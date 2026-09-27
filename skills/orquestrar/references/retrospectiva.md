@@ -15,7 +15,7 @@ continuing from the last P).
 ## Inputs
 
 ```bash
-cat ~/.hangar/orq/<date>-<gid>/registro.md          # the arbiter's journal
+cat ~/.hangar/orq/<date>-<gid>/registro-arquivo-*.md ~/.hangar/orq/<date>-<gid>/registro.md 2>/dev/null   # the journal, rotated parts first
 ls  ~/.hangar/orq/<date>-<gid>/pareceres/*.md       # review reports: each round's WASTE line
 ls  ~/.hangar/orq/<date>-<gid>/kickoffs/            # what each session knew when starting
 cat ~/.hangar/orq/<date>-<gid>/licoes.md            # every guideline written mid-work
@@ -58,9 +58,9 @@ From the executors' "premise wrong" reports in the journal and the WASTE lines, 
 | code nobody ran | executor reports `TypeError`, a missing attribute, a failed import |
 | a command that does not do what it says | "selected nothing" / "nothing to run" exit |
 | an invented count | "expected N PASS", N+2 came |
-| a batch declared disjoint that was not | a merge conflict; one file in two Tasks |
+| a wave declared disjoint that was not | a merge conflict; a shared file without named regions |
 | a defect the plan carried forward | a finding in a late Task originating in an early one |
-| a bar demanding what the reused code does not do | mock × existing-component divergence |
+| a roteiro demanding what the reused code does not do | mock × existing-component divergence |
 | a decision the plan left open | the `Decided alone:` lines of the reports; three on one subject is a plan template hole |
 
 The first six share one cause (code the plan's author never executed): then the patch targets
@@ -121,7 +121,7 @@ or more becomes a short checklist or its own file, never fatter.
 | Written as a case (does not enter) | Written as a principle (enters) |
 |---|---|
 | "the `<name>` skill runs crippled when invoked inside a Task" | "a skill invoked inside a Task runs whole; a skipped step is a block" |
-| "the `<name>` per-language reviewer doesn't read `.svelte`" | "a tool with an extension filter reports nothing about code it never read; check it serves this Task's files" |
+| "the `<name>` per-language reviewer doesn't read `<extension>` files" | "a tool with an extension filter reports nothing about code it never read; check it serves this Task's files" |
 
 ## What does not enter
 

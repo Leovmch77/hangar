@@ -73,7 +73,13 @@
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { listServers, getActiveId, getBaseUrl } from '../lib/auth';
+  import { runShortcutShell, sendsDirect } from '@hangar/core';
+  import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
+  import { abrirConfig } from '../lib/configNav';
+  import { listServers, getActiveId, getBaseUrl, selectServer } from '../lib/auth';
+  import { getIdentificador } from '../lib/peers';
+  import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
   import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
@@ -739,7 +745,8 @@
 
   // ── Atalhos de teclado (so desktop) ────────────────────────────────────────
   let composerRef = $state<{ focus: () => void; ditarArquivo: (f: File) => void;
-                            preencherComando: (n: string) => Promise<boolean> } | undefined>();
+                            preencherComando: (n: string) => Promise<boolean>;
+                            prefillText: (t: string) => Promise<boolean> } | undefined>();
 
   // Anexo de audio de volta pro ditado: busca o arquivo que ja esta no servidor e entrega ao
   // Composer, que transcreve de novo e abre a barra de versoes. O download acontece AQUI porque a
@@ -1468,13 +1475,22 @@
     if (!desktop || !publishWorkspaceActions || !publish) return;
     publish([
       action('git', m.sessao_git(), () => (gitOpen = true)),
-      action('loop', m.chat_loop(), () => (loopSheetOpen = true)),
       action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
       action('run', m.chat_executar_workflow(), () => (runOpen = true)),
       ...(sessionHeadless ? [] : [action('terminal', m.ctx_terminal(), abrirTerminalReal)]),
       ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
       ...(recarregavel ? [action('recarregar', m.recarregar_sessao(), recarregar)] : []),
       action('navegador', m.ctx_navegador(), alternarNavegador),
+      // Atalhos customizados da fileira: mesma ação do botão, acessível por teclado. O detail é
+      // o conteúdo — diz exatamente o que o Enter dispara.
+      ...customShortcuts.map((s): WorkspaceAction => ({
+        id: `atalho-${s.id}`,
+        title: s.label,
+        detail: s.type === 'shell' ? s.command : s.text,
+        keywords: ['atalho', 'shortcut', s.label],
+        group: m.lista_atalhos(),
+        run: () => triggerShortcut(s),
+      })),
     ]);
     // Ao trocar a key servidor-aware ou desmontar este Chat, nenhum callback pode sobreviver.
     return () => publish([]);
@@ -1970,10 +1986,13 @@
           // assistant_msg (replaces do replay não passam aqui -> não contam dobrado).
           if (ev.kind === 'thinking' && pensamentoVivo) limparPensamento();
           if (ev.kind === 'tool_use' && ferramentaViva) limparFerramenta();
-          if (ev.kind === 'tool_use' || ev.kind === 'tool_result') {
+          // Fala do pai e mensagem do usuário também entram: são elas que dão por terminado o
+          // subagente em primeiro plano cujo tool_result o harness não gravou.
+          if (ev.kind !== 'notice') {
             actFolder.push(ev);
             activity = actFolder.snapshot();
-          } else if (ev.kind === 'assistant_msg' && ev.text) {
+          }
+          if (ev.kind === 'assistant_msg' && ev.text) {
             asstCount += 1;
             // Swap preview->bolha ATOMICO: o bloco real entra SEM animacao (swapIds) e o preview
             // zera AQUI, sincrono, no mesmo flush do append -> UM paint so, sem frame vazio nem
@@ -2631,7 +2650,9 @@
     if (!problemaChave || problemaChave === problemaDispensado) return null;
     const texto = textoProblema(stateEvent?.problema ?? null);
     if (!texto) return null;
-    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0].slice(0, 80);
+    // Hook que barrou o prompt: o detalhe (qual hook e por quê) é a informação inteira, não cabe cortar.
+    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0]
+      .slice(0, stateEvent.problema === 'codex_prompt_bloqueado' ? 300 : 80);
     return detalhe ? `${texto} — ${detalhe}` : texto;
   });
 
@@ -2640,6 +2661,55 @@
     avisoErr = typeof err === 'string' ? err
       : err instanceof Error ? err.message : m.chat_nao_deu_enviar_resposta();
     avisoErrTimer = setTimeout(() => (avisoErr = ''), 8000);
+  }
+
+  // ── Atalhos configuráveis da fileira (lib/shortcuts.svelte.ts) ─────────────
+  const shortcuts = $derived(shortcutsFor());
+  // Só os customizados: no celular os internos já têm os botões/entradas de sempre — duplicar
+  // Terminal/Anexos dentro do "⋯" seria a mesma ação com dois nomes.
+  const customShortcuts = $derived(shortcuts.filter(
+    (s): s is ShortcutSendText | ShortcutShell => s.type !== 'internal'));
+  $effect(() => {
+    // A fileira segue no conjunto nativo; o erro de verdade aparece ao abrir a tela de Atalhos.
+    loadShortcuts().catch((err) => console.error('shortcuts load error:', err));
+  });
+  // Atalho com a flag "confirmar antes": segura aqui e o ConfirmSheet decide.
+  let pendingShortcut = $state<ShortcutSendText | ShortcutShell | null>(null);
+
+  function triggerShortcut(s: ShortcutSendText | ShortcutShell) {
+    if (s.confirm) { pendingShortcut = s; return; }
+    void runShortcut(s);
+  }
+
+  async function runShortcut(s: ShortcutSendText | ShortcutShell) {
+    // O 202 do shell é só "o processo nasceu", e o handleSend lança pro Composer mostrar — aqui
+    // não há Composer no meio, então sem este aviso o clique falho não faz NADA em silêncio.
+    try {
+      if (s.type === 'shell') await runShortcutShell(sessionName, s.command);
+      else if (sendsDirect(s)) await handleSend(s.text);
+      else await composerRef?.prefillText(s.text);
+    } catch (err) {
+      console.error('shortcut error:', err);
+      mostrarAviso(err);
+    }
+  }
+
+  // Chip "de: X" do recado. `X` pode ser `servidor::sessao`: abrir isso como nome no servidor ativo
+  // dava "sessão não encontrada".
+  async function abrirRemetente(from: string) {
+    const cache = sessionsStore.identities;
+    // Servidor fora do ar segura a resposta até o timeout: se a pessoa já saiu desta tela, o clique
+    // velho não pode trocar o servidor ativo nem navegar por cima do que ela abriu depois.
+    const hashDoClique = window.location.hash;
+    const destino = await destinoDoRemetente(from, listServers(), getActiveId(),
+      async (s) => cache.get(s.id) ?? (await getIdentificador(s)).identificador);
+    if (window.location.hash !== hashDoClique) return;
+    if (!destino) { mostrarAviso(m.user_remetente_fora_do_aparelho({ n: from })); return; }
+    if (destino.serverId && !selectServer(destino.serverId)) {
+      mostrarAviso(m.user_remetente_fora_do_aparelho({ n: from }));   // removido durante a busca
+      return;
+    }
+    onNavigateToChat(destino.name);
   }
 
   // Trava de um envio por vez (mesma do BoardCard): o /select agora le o cursor do picker, corrige
@@ -2812,6 +2882,9 @@
       onOpenRun={() => (runOpen = true)}
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
+      {shortcuts}
+      onShortcut={triggerShortcut}
+      onEditShortcuts={() => abrirConfig('atalhos', null)}
       onOpenActivity={hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined}
       {activity}
       processos={shellsVivos}
@@ -2998,7 +3071,7 @@
       onAnswer={handleAnswer}
       onAskClose={closeAsk}
       onForward={(t) => (forwardText = t)}
-      onOpenSession={onNavigateToChat}
+      onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
     />
@@ -3080,9 +3153,13 @@
         </div>
       {/if}
       {#if faixaProblema}
-        <div class="faixa-problema" role="status">
-          <span class="faixa-problema-texto" title={faixaProblema}>{faixaProblema}</span>
-          {#if stateEvent?.problema === 'codex_sem_conexao' && sessionHeadless}
+        {@const bloqueado = stateEvent?.problema === 'codex_prompt_bloqueado'}
+        <div class="faixa-problema" class:alerta={bloqueado} role={bloqueado ? 'alert' : 'status'}>
+          <span class="faixa-problema-texto" title={faixaProblema}>
+            {faixaProblema}
+            {#if bloqueado && sessionHeadless}<span class="faixa-problema-dica">{m.chat_problema_hook_dica()}</span>{/if}
+          </span>
+          {#if (stateEvent?.problema === 'codex_sem_conexao' || bloqueado) && sessionHeadless}
             <button type="button" class="sse-retry" disabled={recarregando} onclick={reiniciarCodex}>
               {recarregando ? m.chat_problema_reiniciando() : m.chat_problema_reiniciar()}
             </button>
@@ -3193,6 +3270,7 @@
 
   <RunSheet open={runOpen} {sessionName} onClose={() => (runOpen = false)} onRunningChange={(r) => (runRunning = r)} />
   <MoreSheet open={moreOpen} onClose={() => (moreOpen = false)}
+             shortcuts={customShortcuts} onShortcut={triggerShortcut}
              onRun={() => (runOpen = true)} {runRunning}
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
@@ -3208,6 +3286,11 @@
                 message={sessionHeadless ? m.modo_confirmar_terminal_msg() : m.modo_confirmar_sem_terminal_msg()}
                 confirmLabel={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
                 onConfirm={executarTrocaModo} onClose={() => (confirmaModo = false)} />
+  <ConfirmSheet open={pendingShortcut !== null}
+                title={pendingShortcut?.label ?? ''}
+                message={pendingShortcut?.type === 'shell' ? pendingShortcut.command : pendingShortcut?.text ?? null}
+                onConfirm={() => { const s = pendingShortcut; pendingShortcut = null; if (s) void runShortcut(s); }}
+                onClose={() => (pendingShortcut = null)} />
   <AttachmentsSheet open={anexosOpen} {sessionName} onClose={() => (anexosOpen = false)}
                     onUsarNoDitado={usarAnexoNoDitado} />
 
@@ -3813,6 +3896,15 @@
     border-radius: var(--radius-md);
   }
   .faixa-problema-texto { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .faixa-problema.alerta {
+    align-items: flex-start;
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+    border-left: 3px solid var(--warning);
+  }
+  .faixa-problema.alerta .faixa-problema-texto { white-space: normal; overflow-wrap: anywhere; }
+  .faixa-problema-dica { display: block; margin-top: var(--space-1); color: var(--text-muted); font-size: var(--text-xs); }
   .faixa-problema-fechar {
     background: transparent;
     border: 0;

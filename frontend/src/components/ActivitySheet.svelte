@@ -6,6 +6,8 @@
   import { renderMarkdown } from '../lib/markdown';
   import { formatarIntervalo } from '../lib/contaEstado';
   import MessageList from './MessageList.svelte';
+  import Spinner from './Spinner.svelte';
+  import { pollSequential } from '../lib/pollSequential';
   import { onDestroy, tick } from 'svelte';
   import type { Activity, TaskStatus } from '@hangar/core';
   import type { WorkflowSummary, WorkflowDetail, WorkflowAgentDetail, SubagentRun, SessionInfo, PlanDetail, ShellVivo } from '@hangar/core';
@@ -141,7 +143,7 @@
   // ultimas ferramentas chamadas — que e o "o que ele esta fazendo agora" de verdade.
   let subs = $state<SubagentRun[]>([]);
   let subDetail = $state<SubagentRun | null>(null);
-  let subTimer: ReturnType<typeof setInterval> | null = null;
+  let pararSub: (() => void) | null = null;
   // Falha de rede NAO pode virar "nao ha nada": sem isto, a lista de subagentes ficava vazia e a
   // linha do agente simplesmente nao abria nada no clique — indistinguivel de bug de toque.
   let subError = $state('');
@@ -206,6 +208,17 @@
     subs.filter((s2) => !activity.agents.some((a) => matchSub(a.prompt)?.agentId === s2.agentId)),
   );
 
+  // O subagente aberto ainda trabalha? Kimi e Pi dizem no arquivo do filho (`finished`); no Claude
+  // quem sabe é o transcript do pai, o mesmo dado do cartão "Executando…" da conversa.
+  // null = não dá pra saber (subagente que só o disco conhece).
+  const subRodando = $derived.by((): boolean | null => {
+    const d = subDetail;
+    if (!d || d.ilegivel) return null;
+    if (d.finished !== undefined) return !d.finished;
+    const pai = activity.agents.find((a) => matchSub(a.prompt)?.agentId === d.agentId);
+    return pai ? pai.running : null;
+  });
+
   async function openSubagent(prompt: string | undefined, title: string) {
     if (subs.length === 0) {
       try {
@@ -267,8 +280,7 @@
         }
       }
     };
-    void tick();
-    subTimer = setInterval(tick, 2500);
+    pararSub = pollSequential(tick, 2500);
   }
   let subTitle = $state('');
   // A MessageList so ancora no fim quando ela mesma controla o scroll da tela; aqui ela vive numa
@@ -280,7 +292,7 @@
   // mais estreita, e amarrava esta folha à classe interna do componente do chat.
   let subChatEl = $state<HTMLElement | null>(null);
   function stopSubPoll() {
-    if (subTimer) { clearInterval(subTimer); subTimer = null; }
+    if (pararSub) { pararSub(); pararSub = null; }
     subFails = 0;
   }
   // O componente e DESTRUIDO junto com o Chat a cada troca de sessao/par ({#key} no DesktopShell e
@@ -598,11 +610,9 @@
                 <div class="ag-meta"><span>{m.atividade_sub_ilegivel()}</span></div>
               {:else}
                 <div class="ag-meta">
-                  <!-- `finished` vem do próprio transcript do filho (Kimi e Pi sabem dizer). Antes
-                       isto era um "◐ Rodando" fixo no HTML, então um subagente que terminou há
-                       horas abria dizendo que ainda estava trabalhando — e a linha da lista, uma
-                       tela acima, já mostrava "concluído" pelo mesmo dado. -->
-                  {#if subDetail.finished}
+                  <!-- Antes isto era um "◐ Rodando" fixo no HTML, então um subagente que terminou
+                       há horas abria dizendo que ainda estava trabalhando. -->
+                  {#if subRodando === false}
                     <span class="ok">✓ {m.atividade_sub_concluido()}</span>
                   {:else}
                     <span class="rodando">◐ {m.atividade_rodando()}</span>
@@ -630,6 +640,7 @@
                     onSelectOption={() => {}}
                     onCancel={() => {}}
                   />
+                  {#if subRodando}<Spinner label={m.pensamento_vivo()} />{/if}
                 </div>
               {:else if subDetail.ilegivel || subDetail.toolCalls > 0}
                 <!-- Ele JA chamou ferramentas (ou o proprio registro nao deu pra ler): e falha de

@@ -9,9 +9,10 @@
 #
 # Two fixes, and both matter:
 #   1. It watches the ARBITER too. A stalled judge is the failure mode nobody was watching.
-#   2. It WAKES via `hangar-send --tmux`, which enters as a prompt and revives a dead turn. The
-#      `--tmux` is MANDATORY: plain `hangar-send` REFUSES to talk to a Claude session on the same
-#      machine (rc=3, "use SendMessage") — and a shell script has no SendMessage.
+#   2. It WAKES via `hangar-send`, which enters as a prompt and revives a dead turn, with or
+#      without a terminal: the backend picks the path. `--tmux` stays for older hangar-send
+#      builds, which refused a same-machine Claude session without it (rc=3); current ones
+#      ignore it.
 #
 # It fires in TWO independent ways, and the second is the one that produces false alarms:
 #   - collectively, when NOBODY on the list has the ball (a deadlocked pipeline);
@@ -35,6 +36,10 @@
 #      the alarms go to a session called "5" while the group stalls. E.g.:
 #      vigia.sh t1 t2 t3 review review2 arbitro -m 10 -d ~/.hangar/orq/<date>-<gid>/registro.md
 #      The old form `vigia.sh exec rev arb 5` still works.
+# Usage: vigia.sh <arbiter> -e <durable dir> [-m N] [--no-housekeeping]
+#      the list follows `orq ball` every cycle. Each cycle it also writes <dir>/vigia.json (the
+#      panel's heartbeat), closes the sessions `orq done` lists after 10 idle minutes and joins
+#      `orq team` to the arbiter's group; --no-housekeeping turns the closing and the joining off.
 #
 # Confirming it LIVES (is-active right after the systemd-run answers `active` because it was just
 # born, not because it reads the API — a watchdog once sat `active` for hours with no log line):
@@ -71,11 +76,15 @@ set -u
 # `sanitize_session_name` accepts them.
 LIMITE=5
 DIARIO=
+ORQD=
+HOUSEKEEPING=1   # under -e: close finished sessions, keep the team in the arbiter's group
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -m|--minutos) LIMITE=${2:?"-m needs the number of minutes"}; shift 2 ;;
     -d|--diario)  DIARIO=${2:?"-d needs the journal's path"}; shift 2 ;;
+    -e|--eventos) ORQD=${2:?"-e needs the durable directory (orq)"}; shift 2 ;;
+    --no-housekeeping) HOUSEKEEPING=0; shift ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
@@ -86,9 +95,20 @@ if [ "$n" -eq 4 ] && printf '%s' "${ARGS[3]}" | grep -qE '^[0-9]+$'; then
   ARGS=("${ARGS[0]}" "${ARGS[1]}" "${ARGS[2]}")
 fi
 SESSOES=("${ARGS[@]}")
-[ "${#SESSOES[@]}" -ge 2 ] || { echo "usage: vigia.sh <session> [session...] <arbiter> [minutes]" >&2; exit 2; }
+[ "${#SESSOES[@]}" -ge 2 ] || [ -n "$ORQD" ] || { echo "usage: vigia.sh <session> [session...] <arbiter> [-m minutes] | vigia.sh <arbiter> -e <dir>" >&2; exit 2; }
 ARB=${SESSOES[$((${#SESSOES[@]}-1))]}      # the last one is the arbiter
 export ARB
+# With -e the list is `orq ball` + the arbiter, re-read every cycle: nobody re-arms at a handoff,
+# and a session waiting as it was told is never on the list.
+ORQ="$(dirname "$(realpath "$0")")/orq.py"
+[ -n "$ORQD" ] && DIARIO=${DIARIO:-$ORQD/registro.md}
+avisar_arb() {
+  if [ -n "$ORQD" ]; then
+    ORQ_DIR="$ORQD" python3 "$ORQ" notify --alarm "$1" >/dev/null 2>>"${CP_VIGIA_LOG:-/dev/stderr}"
+  else
+    hangar-send --tmux "$ARB" "$1" >/dev/null 2>>"${CP_VIGIA_LOG:-/dev/stderr}"
+  fi
+}
 
 BASE=${CP_BASE:-http://127.0.0.1:8765}
 ENVFILE=${CP_ENV:-$(dirname "$(realpath "$(command -v hangar-send)")")/../backend/.env}
@@ -129,10 +149,28 @@ diario_avisado=0
 # PROVEN ARMING: the synthetic alarm goes out through the SAME path as the real ones. If it does
 # not deliver, the watchdog does NOT stand pretending to be a net — it exits loudly, which is the
 # opposite of shouting into the void.
-hangar-send --tmux "$ARB" "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
-rc_arm=$?
+# Under -e every alarm goes through orq: without `orq init` each one would fail into the log only.
+# The arbiter comes from orq as well, so a succession before launch arms the one in charge now.
+if [ -n "$ORQD" ]; then
+  bola=$(ORQ_DIR="$ORQD" python3 "$ORQ" ball --with-arbiter 2>&1) || {
+    echo "[vigia] orq ball failed in $ORQD: $bola. I am NOT armed." >&2
+    exit 1
+  }
+  ARB=${bola##* }
+  SESSOES=("$ARB")
+fi
+ARMADO="${ORQD:+$ORQD/.vigia-armado}"
+if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" = "$ARB" ]; then
+  # The channel to this arbiter was already proven in this run: one proof per arbiter, not per arming.
+  echo "[vigia] re-armed over: ${SESSOES[*]} (channel to $ARB already proven)"
+  rc_arm=0
+else
+  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
+  rc_arm=$?
+  [ "$rc_arm" -eq 0 ] && [ -n "$ARMADO" ] && printf '%s' "$ARB" > "$ARMADO"
+fi
 if [ "$rc_arm" -ne 0 ]; then
-  echo "[vigia] FAILED to prove the channel with '$ARB' (hangar-send --tmux rc=$rc_arm). I am NOT armed." >&2
+  echo "[vigia] FAILED to prove the channel with '$ARB' (rc=$rc_arm, stderr in $CP_VIGIA_LOG). I am NOT armed." >&2
   exit 1
 fi
 
@@ -195,31 +233,321 @@ try:
     if not tool:
         print("")
     else:
-        payload = json.dumps(tool[-1].get("tool_input"), sort_keys=True, ensure_ascii=False)
-        print(hashlib.md5(payload.encode()).hexdigest())
+        ti = tool[-1].get("tool_input")
+        cmd = str(ti.get("command") or "") if isinstance(ti, dict) else ""
+        # Re-running `orq lock take` (or its alias `screen take`) is the lock queue (exit 1 → again), not a loop.
+        if "orq" in cmd and ("screen take" in cmd or "lock take" in cmd):
+            print("")
+        else:
+            payload = json.dumps(ti, sort_keys=True, ensure_ascii=False)
+            print(hashlib.md5(payload.encode()).hexdigest())
 except Exception:
     print("")
 PY
 REP_LIMITE=${CP_VIGIA_REP:-10}
 
+# CONTEXT: each session's own window, read from the status line the app already serves
+# (`💬 <turn in/out> <used>/<window>`, or Pi's `ctx <used>/<window>`), against the `janela` of
+# its row in the arbiter's contract (GET /api/sessions/<arbiter>/orq; empty = 50). Prints
+# `pct/limit/used/window` per session, `-` when the line carries no context.
+CTXDET=$(mktemp /tmp/vigia-ctx-XXXXXX.py)
+ORQF=$(mktemp /tmp/vigia-orq-XXXXXX.json)
+trap 'rm -f "$LEITOR" "$CURLRC" "$LOOPDET" "$CTXDET" "$ORQF"' EXIT
+cat > "$CTXDET" <<'PY'
+import json, os, re, sys
+
+MULT = {"k": 1e3, "m": 1e6}
+PADRAO = os.environ.get("CP_VIGIA_JANELA", "50")   # the smoke test lowers it; nobody else passes it
+PAR = r"([\d.,]+)\s*([kKmM])?\s*/\s*([\d.,]+)\s*([kKmM])?"
+
+def num(v, u):
+    return float(v.replace(",", "")) * MULT.get((u or "").lower(), 1)
+
+def ctx(linha):
+    seg = re.search(r"💬([^│]*)", linha or "")
+    if not seg:
+        return None
+    m = re.search(r"\bctx\s*" + PAR, seg.group(1))
+    if not m:
+        pares = re.findall(PAR, seg.group(1))
+        if len(pares) < 2:    # a lone pair is the turn's in/out, not the context
+            return None
+        m = pares[-1]
+    else:
+        m = m.groups()
+    used, total = num(m[0], m[1]), num(m[2], m[3])
+    return (used, total) if total > 0 else None
+
+sessoes = {s.get("name"): s for s in json.load(sys.stdin)}
+try:
+    papeis = json.load(open(sys.argv[1])).get("papeis") or []
+except Exception as e:
+    print(f"[vigia] contract unreadable ({e!r}); every limit falls back to {PADRAO}%", file=sys.stderr)
+    papeis = []
+janela = {p.get("viva"): str(p.get("janela") or "") for p in papeis if p.get("viva")}
+saida = []
+for nome in sys.argv[2:]:
+    try:
+        c = ctx((sessoes.get(nome) or {}).get("status_line"))
+    except ValueError as e:
+        print(f"[vigia] {nome}: status line unreadable ({e!r})", file=sys.stderr)
+        c = None
+    if c is None:
+        saida.append("-")
+        continue
+    lim = janela.get(nome, "")
+    lim = lim if lim.isdigit() else PADRAO
+    saida.append("%d/%s/%dk/%dk" % (round(100 * c[0] / c[1]), lim, c[0] // 1000, c[1] // 1000))
+print("|".join(saida))
+PY
+declare -A CAVISO=()   # context % at the last delivered ceiling alarm, per session NAME: survives a change of who has the ball
+
+# HEARTBEAT (-e): the panel reads <dir>/vigia.json to tell a live watchdog from a dead one
+# without asking the arbiter. tmp + mv: a reader never sees half a file.
+UNIT=$(sed -n 's#^.*/\(vigia-[^/]*\)\.service$#\1#p' /proc/self/cgroup 2>/dev/null | head -n 1)
+BEAT=$(mktemp /tmp/vigia-beat-XXXXXX.py)
+trap 'rm -f "$LEITOR" "$CURLRC" "$LOOPDET" "$CTXDET" "$ORQF" "$BEAT"' EXIT
+cat > "$BEAT" <<'PY'
+import json, sys
+from datetime import datetime
+pid, unit, arb, iv, st, *names = sys.argv[1:]
+print(json.dumps({"ts": datetime.now().astimezone().isoformat(timespec="seconds"), "pid": int(pid),
+                  "unit": unit or None, "arbiter": arb, "watching": names,
+                  "states": dict(zip(names, st.split("|"))) if st else {}, "interval_s": int(iv)},
+                 ensure_ascii=False))
+PY
+heartbeat() {  # $1 = this cycle's states in SESSOES order, "" when the API did not answer
+  [ -n "$ORQD" ] || return 0
+  local tmp="$ORQD/.vigia.json.$$"
+  if python3 "$BEAT" "$$" "${UNIT:-}" "$ARB" "$INTERVALO" "$1" "${SESSOES[@]}" > "$tmp" 2>>"$CP_VIGIA_LOG"; then
+    mv -f "$tmp" "$ORQD/vigia.json"
+  else
+    rm -f "$tmp"
+    echo "[vigia] heartbeat not written to $ORQD/vigia.json" >&2
+  fi
+}
+
+# An alarm counts as given only once it reached the arbiter: a failed delivery retries next
+# cycle, at most 3 attempts, then it is dropped with one [aviso] so the trail shows the loss.
+declare -A ALARM_FAILS=()
+deliver_alarm() {  # $1 = key (one per alarm), $2 = message, $3 = label for the log; rc 0 = done with it
+  if avisar_arb "$2"; then
+    unset 'ALARM_FAILS[$1]'
+    return 0
+  fi
+  local n=$(( ${ALARM_FAILS[$1]:-0} + 1 ))
+  if [ "$n" -lt 3 ]; then
+    ALARM_FAILS[$1]=$n
+    echo "[vigia] $3 NOT delivered to $ARB; retrying next cycle" >&2
+    return 1
+  fi
+  unset 'ALARM_FAILS[$1]'
+  local drop="[aviso] [vigia] alarm dropped after 3 failed deliveries: $2"
+  if [ -n "$ORQD" ]; then
+    # notify with a leading [aviso] only journals it (as `aviso:`, the prefix the panel feed reads).
+    ORQ_DIR="$ORQD" python3 "$ORQ" notify "$drop" >/dev/null 2>>"$CP_VIGIA_LOG" || echo "$drop" >&2
+  else
+    echo "$drop" >>"$CP_VIGIA_LOG"
+  fi
+  return 0
+}
+
+# HOUSEKEEPING (-e, off with --no-housekeeping): closes the sessions whose part is over
+# (`orq done`) once idle for CLOSE_IDLE_S, measured by cycles, and keeps the arbiter and the open
+# Tasks' owners (`orq team`) in the arbiter's group. Every act is journaled, so the panel's feed
+# shows it; three failures on one session → an [aviso] and the watchdog stops trying it.
+CLOSE_IDLE_S=${CP_VIGIA_CLOSE_IDLE_S:-600}   # the smoke test lowers it; nobody else passes it
+declare -A IDLE_CYCLES=() FAILS=() GAVE_UP=()
+warned_no_group=
+GROUP=$(mktemp /tmp/vigia-group-XXXXXX.py)
+LIVESUB=$(mktemp /tmp/vigia-livesub-XXXXXX.py)
+trap 'rm -f "$LEITOR" "$CURLRC" "$LOOPDET" "$CTXDET" "$ORQF" "$BEAT" "$GROUP" "$LIVESUB"' EXIT
+cat > "$LIVESUB" <<'PY'
+import json, re, sys, time
+from datetime import datetime
+from pathlib import Path
+# stdin = /api/sessions, argv[1] = session. Prints "live" when its transcript has a background
+# Agent launched and not yet notified (same pairing as packages/core/src/activity.ts), else "none";
+# no transcript or a read error → exit 1. Bash background launches are ignored on purpose: a
+# forgotten dev server would block the close forever.
+# ponytail: a launch from another process (resumed session) is never notified, so it only counts
+# while agent-<id>.jsonl (or, before that file exists, the launch itself) is younger than FRESH_S.
+# ponytail: only the current transcript is read, so a launch made before a /clear is not seen.
+FRESH_S = 1800
+name = sys.argv[1]
+s = next((s for s in json.load(sys.stdin) if s.get("name") == name), {})
+jsonl = s.get("jsonl")
+if not jsonl and s.get("provider", "claude") != "claude":
+    print("none")   # Pi/Kimi/omp: no Agent tool, and no jsonl in the listing
+    sys.exit()
+if not jsonl:
+    sys.exit(f"no transcript for {name}")
+launched, notified = {}, set()
+def texts(content):
+    if isinstance(content, str):
+        return [content]
+    return [b.get("text") or "" for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
+with open(jsonl, encoding="utf-8") as f:
+    for line in f:
+        o = json.loads(line)
+        if o.get("type") == "queue-operation" and isinstance(o.get("content"), str):
+            if o["content"].lstrip().startswith("<task-notification>"):
+                notified.update(t.strip() for t in re.findall(r"<task-id>([^<]+)</task-id>", o["content"]))
+            continue
+        if o.get("type") != "user":
+            continue
+        content = (o.get("message") or {}).get("content")
+        for t in texts(content):
+            if "<task-notification>" in t:
+                notified.update(x.strip() for x in re.findall(r"<task-id>([^<]+)</task-id>", t))
+        for b in content if isinstance(content, list) else []:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                r = "\n".join(texts(b.get("content")))
+                m = re.search(r"agentId:\s*([A-Za-z0-9_-]+)", r) if "Async agent launched" in r else None
+                if m:
+                    launched[m.group(1)] = o.get("timestamp")
+now = time.time()
+def fresh(agent_id, ts):
+    p = Path(jsonl).with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl"
+    try:
+        t = p.stat().st_mtime
+    except FileNotFoundError:
+        t = datetime.fromisoformat(ts).timestamp() if ts else 0
+    return now - t < FRESH_S
+print("live" if any(fresh(a, ts) for a, ts in launched.items() if a not in notified) else "none")
+PY
+cat > "$GROUP" <<'PY'
+import json, sys
+# Joining merges WHOLE groups (pair.join_group): a session already in another group is reported,
+# never pulled in.
+arb, *team = sys.argv[1:]
+by_name = {s.get("name"): s for s in json.load(sys.stdin)}
+a = by_name.get(arb) or {}
+gid = a.get("pair_gid")
+if not gid:
+    print("noarb")
+    sys.exit()
+for n in team:
+    s = by_name.get(n)
+    if n == arb or s is None or "::" in n or s.get("pair_gid") == gid:
+        continue
+    if s.get("pair_gid"):
+        print(f"other\t{n}\t{s['pair_gid']}")
+    else:
+        body = {"peer": n, "task": a.get("pair_task") or "", "orq": True}
+        print(f"join\t{n}\t{json.dumps(body, ensure_ascii=False)}")
+PY
+orq_log() { ORQ_DIR="$ORQD" python3 "$ORQ" log "$1" >/dev/null 2>>"$CP_VIGIA_LOG"; }
+# A leading [aviso] makes notify only journal it, as `aviso:` (the panel feed's prefix).
+orq_warn() { ORQ_DIR="$ORQD" python3 "$ORQ" notify "[aviso] $1" >/dev/null 2>>"$CP_VIGIA_LOG" || echo "[aviso] $1" >&2; }
+attempt_failed() {  # $1 = close:<name> | join:<name>, $2 = what failed (starts with the journal prefix)
+  FAILS[$1]=$(( ${FAILS[$1]:-0} + 1 ))
+  echo "[vigia] $2 (${FAILS[$1]}/3)" >&2
+  orq_log "$2 (${FAILS[$1]}/3)"
+  if [ "${FAILS[$1]}" -ge 3 ]; then
+    GAVE_UP[$1]=1
+    orq_warn "vigia gave up after 3 attempts: $2"
+  fi
+}
+close_finished() {
+  local out name reason k err live names=() reasons=() states=()
+  out=$(ORQ_DIR="$ORQD" python3 "$ORQ" done 2>>"$CP_VIGIA_LOG") || { echo "[vigia] orq done failed" >&2; return 0; }
+  [ -n "$out" ] || return 0
+  while read -r name reason; do names+=("$name"); reasons+=("$reason"); done <<< "$out"
+  IFS='|' read -r -a states <<< "$(printf '%s' "$lista" | python3 "$LEITOR" "${names[@]}" 2>>"$CP_VIGIA_LOG")"
+  for k in "${!names[@]}"; do
+    name=${names[$k]}
+    [ -n "${GAVE_UP[close:$name]:-}" ] && continue
+    [[ $name == *::* ]] && continue   # another server's session: not ours to close
+    # Only `idle` counts: working, awaiting_input and stuck are someone still in the middle.
+    if [ "${states[$k]:-?}" != idle ]; then IDLE_CYCLES[$name]=0; continue; fi
+    IDLE_CYCLES[$name]=$(( ${IDLE_CYCLES[$name]:-0} + 1 ))
+    [ $(( ${IDLE_CYCLES[$name]} * INTERVALO )) -ge "$CLOSE_IDLE_S" ] || continue
+    IDLE_CYCLES[$name]=0
+    # A background subagent leaves its parent `idle`; closing would kill it.
+    if ! live=$(printf '%s' "$lista" | python3 "$LIVESUB" "$name" 2>&1); then
+      attempt_failed "close:$name" "close failed: $name: subagents check: $(tail -n1 <<< "$live" | cut -c1-200)"; continue
+    fi
+    [ "$live" = none ] || continue
+    # ?by=<arbiter>: the backend spares the arbiter the exit notice of a close it did not ask for.
+    if err=$(curl -sS -f --config "$CURLRC" -X DELETE "$BASE/api/sessions/$name?by=$ARB" 2>&1 >/dev/null); then
+      unset 'FAILS[close:$name]'
+      orq_log "closed session: $name (${reasons[$k]})"
+      echo "[vigia] closed $name (${reasons[$k]})"
+    elif [[ $err == *"error: 404"* ]]; then
+      GAVE_UP[close:$name]=1   # already gone: nothing to do
+    else
+      attempt_failed "close:$name" "close failed: $name: ${err:0:200}"
+    fi
+  done
+}
+join_team() {
+  local out kind name rest err members=()
+  out=$(ORQ_DIR="$ORQD" python3 "$ORQ" team 2>>"$CP_VIGIA_LOG") || { echo "[vigia] orq team failed" >&2; return 0; }
+  read -r -a members <<< "$out"
+  out=$(printf '%s' "$lista" | python3 "$GROUP" "$ARB" "${members[@]}" 2>>"$CP_VIGIA_LOG")
+  while IFS=$'\t' read -r kind name rest; do
+    case "$kind" in
+      noarb)
+        [ -n "$warned_no_group" ] || echo "[vigia] $ARB is in no group: nobody to join to it" >&2
+        warned_no_group=1 ;;
+      other)
+        [ -n "${GAVE_UP[join:$name]:-}" ] && continue
+        GAVE_UP[join:$name]=1   # warned once; never merged
+        orq_warn "$name is in another group ($rest); the watchdog does not merge groups — pair it by hand if it belongs to this work" ;;
+      join)
+        [ -n "${GAVE_UP[join:$name]:-}" ] && continue
+        if err=$(curl -sS -f --config "$CURLRC" -X POST -H 'content-type: application/json' \
+                    --data "$rest" "$BASE/api/sessions/$ARB/pair" 2>&1 >/dev/null); then
+          unset 'FAILS[join:$name]'
+          orq_log "joined group: $name"
+          echo "[vigia] joined $name to $ARB's group"
+        else
+          attempt_failed "join:$name" "join failed: $name: ${err:0:200}"
+        fi ;;
+    esac
+  done <<< "$out"
+}
+
 # Interval between readings. It exists as a variable only so the smoke test can run the whole
 # loop in seconds; in normal use nobody passes it.
 INTERVALO=${CP_VIGIA_INTERVALO:-60}
 
-for i in $(seq 1 1440); do
+CICLOS=${CP_VIGIA_CICLOS:-1440}
+heartbeat ""   # alive from the arming on, not only after the first sleep
+for i in $(seq 1 "$CICLOS"); do
   sleep "$INTERVALO"
-  st=$(curl -s --config "$CURLRC" "$BASE/api/sessions" \
-       | python3 "$LEITOR" "${SESSOES[@]}" 2>>"${CP_VIGIA_LOG:-/dev/stderr}")
+  if [ -n "$ORQD" ]; then
+    # The arbiter is the last name: a succession moves every alarm and the /orq lookup with it.
+    if bola=$(ORQ_DIR="$ORQD" python3 "$ORQ" ball --with-arbiter 2>>"${CP_VIGIA_LOG:-/dev/stderr}") && [ -n "$bola" ]; then
+      read -r -a nova <<< "$bola"
+      export ARB=${nova[-1]}
+      if [ "${nova[*]}" != "${SESSOES[*]}" ]; then
+        SESSOES=("${nova[@]}")
+        PSEQ=(); NUDGE=(); RHASH=(); RSEQ=(); RAVISO=(); ALARM_FAILS=(); avisou_travado=; avisou_cota=
+        echo "[vigia] watching: ${SESSOES[*]}"
+      fi
+    else
+      echo "[vigia] orq ball failed; keeping: ${SESSOES[*]}" >&2
+    fi
+  fi
+  lista=$(curl -s --config "$CURLRC" "$BASE/api/sessions")
+  st=$(printf '%s' "$lista" | python3 "$LEITOR" "${SESSOES[@]}" 2>>"${CP_VIGIA_LOG:-/dev/stderr}")
+  heartbeat "$st"
   if [ -z "$st" ]; then
     # The API's silence cannot be the watchdog's silence: that is how the hole above hid.
     mudos=$((mudos+1))
     if [ "$mudos" -eq 5 ]; then
       echo "[vigia] 5 straight readings with no answer from $BASE/api/sessions — I am watching nothing"
-      hangar-send --tmux "$ARB" "[vigia] I cannot read /api/sessions for 5 minutes. Meanwhile I am watching NOBODY — check the backend and re-arm me." >/dev/null 2>&1
+      avisar_arb "[vigia] I cannot read /api/sessions for 5 minutes. Meanwhile I am watching NOBODY — check the backend and re-arm me."
     fi
     continue
   fi
   mudos=0
+  if [ -n "$ORQD" ] && [ "$HOUSEKEEPING" -eq 1 ]; then
+    close_finished
+    join_team
+  fi
 
   # One state per session, in the SAME order as SESSOES. `resumo` is what goes in the messages.
   IFS='|' read -r -a ESTADOS <<< "$st"
@@ -228,7 +556,7 @@ for i in $(seq 1 1440); do
     resumo="$resumo${resumo:+ · }${SESSOES[$k]}=${ESTADOS[$k]:-?}"
   done
   # Only the PAIR (everyone but the arbiter) counts for stuck/noquota: an idle arbiter is normal.
-  par_estados="${st%|*}"
+  if [ "${#SESSOES[@]}" -gt 1 ]; then par_estados="${st%|*}"; else par_estados=""; fi
 
   # "Stopped" is everything that is not work in progress:
   #   idle          — finished the turn and is waiting
@@ -264,16 +592,15 @@ for i in $(seq 1 1440); do
       # arbiter didn't solve it: he may be down too, and then it was the user who came looking.
       # Nudge ONCE per stall (nudge=1) and keep warning every LIMITE min while it lasts.
       if [ "${NUDGE[$k]:-0}" -eq 0 ] && [ "${ESTADOS[$k]:-?}" != "gone" ] && [ "${ESTADOS[$k]:-?}" != "noquota" ]; then
-        hangar-send --tmux "${SESSOES[$k]}" "[vigia] You have been stopped for ${LIMITE} min without reporting. If your last turn died (provider timeout, retries blown, connection cut), CONTINUE from where you stopped, without restarting and without redoing what was done. If you already delivered and are waiting for a verdict, ignore this message. If you are blocked waiting for something from the arbiter, say in one line what it is." >/dev/null 2>&1
+        hangar-send --tmux "${SESSOES[$k]}" "[vigia] You have been stopped for ${LIMITE} min without reporting. If your last turn died (provider timeout, retries blown, connection cut), CONTINUE from where you stopped, without restarting and without redoing what was done. If you already delivered and are waiting for a verdict, ignore this message. If you are blocked waiting for something from the arbiter, tell him in one line: orq notify '[decisao] waiting for <what>'." >/dev/null 2>&1
         NUDGE[$k]=1
         cutucada=" — I NUDGED it just now (1st time); if it doesn't come back, the turn didn't die, it is truly stuck"
       else
         cutucada=" — already nudged in this stall; it did NOT come back on its own"
       fi
-      msg="[vigia] ${SESSOES[$k]} is stopped (${ESTADOS[$k]:-?}) for ${LIMITE} min${cutucada}. Team: $resumo. Look at its PANE: a provider timeout with retries blown, a dead turn and a report stuck in the queue do not undo themselves."
+      msg="[vigia] ${SESSOES[$k]} is stopped (${ESTADOS[$k]:-?}) for ${LIMITE} min${cutucada}. Team: $resumo. Look at its screen (the pane, or its transcript without a terminal): a provider timeout with retries blown, a dead turn and a report stuck in the queue do not undo themselves."
       echo "$msg"
-      hangar-send --tmux "$ARB" "$msg" >/dev/null 2>&1
-      PSEQ[$k]=0
+      deliver_alarm "stopped:${SESSOES[$k]}" "$msg" "stopped alarm for ${SESSOES[$k]}" && PSEQ[$k]=0
     fi
   done
 
@@ -293,18 +620,51 @@ for i in $(seq 1 1440); do
       fi
       RHASH[$k]=$h
       if [ "${RSEQ[$k]:-0}" -ge "$REP_LIMITE" ] && [ "${RAVISO[$k]:-0}" -eq 0 ]; then
-        msg="[vigia] ${SESSOES[$k]} MAY be looping: it says working but the last command is the SAME for ${RSEQ[$k]} readings (~${RSEQ[$k]} min). Look at the pane before deciding — wait-polling is not work, but long work also repeats commands. You give the stop order, after looking. Team: $resumo"
+        msg="[vigia] ${SESSOES[$k]} MAY be looping: it says working but the last command is the SAME for ${RSEQ[$k]} readings (~${RSEQ[$k]} min). Look at its screen (pane or transcript) before deciding — wait-polling is not work, but long work also repeats commands. You give the stop order, after looking. Team: $resumo"
         echo "$msg"
         # A question, never an order: the watchdog reads two numbers and does not know whether
         # the session is stuck or working — an imperative false alarm has ordered a STOP in the
         # middle of legitimate work. Stop orders come from the arbiter, after looking.
-        hangar-send --tmux "${SESSOES[$k]}" "[vigia] You repeat the SAME command for ~${RSEQ[$k]} min. Is this a wait on an external condition? If so, the cap has blown: report to the arbiter what you wait for and the last return (executor.md rule). If you are working, ignore this notice." >/dev/null 2>&1
-        hangar-send --tmux "$ARB" "$msg" >/dev/null 2>&1
-        RAVISO[$k]=1
+        hangar-send --tmux "${SESSOES[$k]}" "[vigia] You repeat the SAME command for ~${RSEQ[$k]} min. Is this a wait on an external condition? If so, the cap has blown: orq notify '[decisao] waiting for <what>; last return: <line>' (executor.md rule). If you are working, ignore this notice." >/dev/null 2>&1
+        deliver_alarm "loop:${SESSOES[$k]}" "$msg" "loop alarm for ${SESSOES[$k]}" && RAVISO[$k]=1
       fi
     else
       RSEQ[$k]=0; RHASH[$k]=""; RAVISO[$k]=0
     fi
+  done
+
+  # CONTEXT past the row's `janela`: the arbiter is told and decides the swap by cost; the session
+  # is only asked to report what is left, never to stop. Once per crossing, again every 10 more
+  # points while it stays above; dropping back below (a compaction) re-arms it.
+  curl -sf --config "$CURLRC" "$BASE/api/sessions/$ARB/orq" -o "$ORQF" 2>>"${CP_VIGIA_LOG:-/dev/stderr}" || : > "$ORQF"
+  ct=$(printf '%s' "$lista" | python3 "$CTXDET" "$ORQF" "${SESSOES[@]}" 2>>"${CP_VIGIA_LOG:-/dev/stderr}")
+  # The context reader dying cannot turn into "nobody crossed": same rule as the state reader.
+  if [ -z "$ct" ]; then
+    ctx_mudos=$(( ${ctx_mudos:-0} + 1 ))
+    [ "$ctx_mudos" -eq 5 ] && avisar_arb "[vigia] I cannot read the sessions' context for 5 minutes: the context handover alarms are OFF. The reason is in ${CP_VIGIA_LOG}."
+  else
+    ctx_mudos=0
+  fi
+  IFS='|' read -r -a CTXS <<< "$ct"
+  for k in "${!SESSOES[@]}"; do
+    nome=${SESSOES[$k]}
+    c=${CTXS[$k]:--}
+    [ "$c" = "-" ] && continue
+    IFS='/' read -r pct lim usado total <<< "$c"
+    if [ "$pct" -lt "$lim" ]; then CAVISO[$nome]=0; continue; fi
+    # Past the ceiling the session keeps working until the arbiter decides; with no decision the
+    # alarm comes back every 10 more points instead of going quiet for good.
+    ult=${CAVISO[$nome]:-0}
+    [ "$ult" -gt 0 ] && [ "$pct" -lt $(( ult + 10 )) ] && continue
+    ainda=""; [ "$ult" -gt 0 ] && ainda=" STILL past it, no swap since the alarm at ${ult}%."
+    if [ "$k" -eq "$ULT" ]; then
+      msg="[vigia] YOUR context is at ${pct}% of your window (${usado}/${total}); your row's ceiling is ${lim}%.${ainda} Decide by cost (arbitro-vigia.md, \"Rotation\"): finish the act past the ceiling, or run your succession at the nearest clean point (arbitro-encerramento.md, \"Arbiter succession\"). Record the decision with its numbers: orq log --task <N> \"…\"."
+    else
+      hangar-send --tmux "$nome" "[vigia] Your context is at ${pct}% of your window (${usado}/${total}); your role's ceiling is ${lim}%.${ainda} Tell the arbiter what is left and keep working until the arbiter decides: orq notify '[decisao] ceiling: ctx ${pct}%, left: <actions, screenshots, report>'." >/dev/null 2>&1
+      msg="[vigia] ${nome} is at ${pct}% of its window (${usado}/${total}; its row's ceiling is ${lim}%).${ainda} I asked it to tell you what is left. Decide by cost (arbitro-vigia.md, \"Rotation\"): little left → it finishes past the ceiling; much left → swap at the nearest clean point. Record the decision with its numbers: orq log --task <N> \"…\"."
+    fi
+    echo "$msg"
+    deliver_alarm "context:$nome" "$msg" "context alarm for $nome" && CAVISO[$nome]=$pct
   done
 
   # Stalled JOURNAL: the arbiter's journal is the retrospective's net; >60min without a write
@@ -321,9 +681,10 @@ for i in $(seq 1 1440); do
     fi
     idade=$(( $(date +%s) - mtime ))
     if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ]; then
-      diario_avisado=$(( idade / 3600 ))
-      hangar-send --tmux "$ARB" "[vigia] The trail ($parado) has gone $(( idade / 60 ))min without a write, with the group active. The journal and eventos.jsonl are written AT the event — if reports/merges happened in this window, they are outside the trail." >/dev/null 2>&1
-      echo "[vigia] trail stalled for $(( idade / 60 ))min ($parado)"
+      if deliver_alarm trail "[vigia] The trail ($parado) has gone $(( idade / 60 ))min without a write, with the group active. The journal and eventos.jsonl are written AT the event — if reports/merges happened in this window, they are outside the trail." "trail alarm"; then
+        diario_avisado=$(( idade / 3600 ))
+        echo "[vigia] trail stalled for $(( idade / 60 ))min ($parado)"
+      fi
     fi
     [ "$idade" -lt 3600 ] && diario_avisado=0
   fi
@@ -334,10 +695,9 @@ for i in $(seq 1 1440); do
   case "$par_estados" in
     *stuck*)
       if [ "$avisou_travado" != "$par_estados" ]; then
-        msg="[vigia] STUCK session: $resumo. It says 'working' but has produced no event for over 10 minutes — the classic case is a picker/AskUserQuestion blocking the firing turn. Look at the pane and unblock it (POST /api/sessions/<name>/select with {\"option\": N})."
+        msg="[vigia] STUCK session: $resumo. It says 'working' but has produced no event for over 10 minutes — the classic case is a picker/AskUserQuestion blocking the firing turn. Look at its screen (pane or transcript) and unblock it (POST /api/sessions/<name>/select with {\"option\": N})."
         echo "$msg"
-        hangar-send --tmux "$ARB" "$msg" >/dev/null 2>&1
-        avisou_travado="$par_estados"
+        deliver_alarm stuck "$msg" "stuck alarm" && avisou_travado="$par_estados"
       fi
       ;;
   esac
@@ -350,8 +710,7 @@ for i in $(seq 1 1440); do
       if [ "$avisou_cota" != "$par_estados" ]; then
         msg="[vigia] Account out of quota: $resumo. The session will not come back on its own — open the substitute on an account ALLOWED by the contract and send the same kick-off, with the open Task."
         echo "$msg"
-        hangar-send --tmux "$ARB" "$msg" >/dev/null 2>&1
-        avisou_cota="$par_estados"
+        deliver_alarm quota "$msg" "quota alarm" && avisou_cota="$par_estados"
       fi
       ;;
   esac
@@ -361,13 +720,14 @@ for i in $(seq 1 1440); do
   if [ "$parados" -ge "$LIMITE" ]; then
     msg="[vigia] Nobody has had the ball for ${LIMITE} min: $resumo (minute $i). If you fell (an API error), this is what brings you back. Check whether someone delivered while you were out — a report stuck in the queue and a stalled verdict are the two ways the pipeline locks up with nobody noticing."
     echo "$msg"
-    hangar-send --tmux "$ARB" "$msg" >/dev/null 2>&1
-    avisos=$((avisos+1))
-    parados=0
-    if [ "$avisos" -ge 20 ]; then
-      echo "20 warnings without unblocking; shutting the watchdog down"
-      exit 0
+    if deliver_alarm nobody "$msg" "nobody-has-the-ball alarm"; then
+      avisos=$((avisos+1))
+      parados=0
+      if [ "$avisos" -ge 20 ]; then
+        echo "20 warnings without unblocking; shutting the watchdog down"
+        exit 0
+      fi
     fi
   fi
 done
-echo "1440min over; last state: $resumo"
+echo "1440min over; last state: ${resumo:-}"

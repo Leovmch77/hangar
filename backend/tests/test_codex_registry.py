@@ -28,7 +28,6 @@ def _isolate(tmp_path, monkeypatch):
     SessionRegistry._fd_locked.clear()
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    monkeypatch.setattr(registry, "apos_saida_por_morte", None)
     sdir = tmp_path / "codex-sessions"
     with patch.object(codex_sessions, "_dir", lambda: sdir), \
          patch.object(registry.tmux, "new_session", return_value=True), \

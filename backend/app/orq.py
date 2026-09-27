@@ -84,9 +84,21 @@ def _le_eventos(path: Path) -> list[dict]:
     return out
 
 
+def _current_end(eventos: list[dict]) -> dict | None:
+    """O último execucao_fim, se nenhum evento de Task veio depois dele: a mesma regra do
+    orq.state() da skill. Trabalho retomado no mesmo arquivo reabre a execução."""
+    fim = None
+    for e in eventos:
+        if e["tipo"] == "execucao_fim":
+            fim = e
+        elif _int_ou_none(e.get("task")) is not None:
+            fim = None
+    return fim
+
+
 def _monta(exec_id: str, eventos: list[dict]) -> ExecucaoResumo:
     inicio = next((e for e in eventos if e["tipo"] == "execucao_inicio"), {})
-    fim = next((e for e in eventos if e["tipo"] == "execucao_fim"), None)
+    fim = _current_end(eventos)
     por_task: dict[int, list[dict]] = {}
     soltos: list[dict] = []
     for e in eventos:
@@ -102,10 +114,13 @@ def _monta(exec_id: str, eventos: list[dict]) -> ExecucaoResumo:
         evs = por_task[n]
         ini = next((e for e in evs if e["tipo"] == "task_inicio"), {})
         vereditos = [e for e in evs if e["tipo"] == "veredito"]
-        final = vereditos[-1] if vereditos else None
-        rodadas = max((r for e in evs if e["tipo"] in ("entrega", "veredito")
+        # Aprovação da fase de código ainda deve a prova de tela: não fecha a Task nem conta rodada.
+        final_verdicts = [e for e in vereditos if e.get("fase") != "codigo"]
+        final = final_verdicts[-1] if final_verdicts else None
+        rodadas = max((r for e in evs if e["tipo"] == "entrega"
+                       or (e["tipo"] == "veredito" and e.get("fase") != "codigo")
                        if (r := _int_ou_none(e.get("rodada"))) is not None), default=0)
-        voltas += sum(1 for e in vereditos if e.get("resultado") in ("devolvido", "reprova"))
+        voltas += sum(1 for e in vereditos if e.get("resultado") in ("devolvido", "reprova", "corrige"))
         if final and final.get("resultado") == "aprova" and rodadas == 1:
             aprovadas_primeira += 1
         tasks.append(TaskResumo(
@@ -163,14 +178,21 @@ def listar_execucoes(raiz: Path) -> list[ExecucaoResumo]:
     return out
 
 
-def detalhe(raiz: Path, exec_id: str) -> ExecucaoResumo | None:
+def exec_dir(raiz: Path, exec_id: str) -> Path | None:
     # exec_id vem de URL e vira NOME DE PASTA. A lista de proibidos leva `:` por causa do Windows,
     # onde `D:foo` não tem separador nenhum e mesmo assim escapa da raiz — `Path("C:/base") /
     # "D:foo"` resolve pra `D:foo`, relativo ao diretório corrente do OUTRO drive. Este repo roda
     # em Windows (ConPTY/psmux), então não é hipótese.
     if not exec_id or any(c in exec_id for c in "/\\:\x00") or exec_id in (".", ".."):
         return None
-    eventos = _le_eventos(raiz / exec_id / "eventos.jsonl")
+    return raiz / exec_id
+
+
+def detalhe(raiz: Path, exec_id: str) -> ExecucaoResumo | None:
+    d = exec_dir(raiz, exec_id)
+    if d is None:
+        return None
+    eventos = _le_eventos(d / "eventos.jsonl")
     return _monta(exec_id, eventos) if eventos else None
 
 

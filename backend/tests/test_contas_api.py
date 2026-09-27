@@ -150,11 +150,11 @@ def test_sair_de_conta_renomeada_usa_a_pasta_do_apelido(casa, cli_sair, monkeypa
     assert cli_sair == [pasta]
 
 
-def test_sair_da_config_ativa_do_backend_devolve_409(casa, cli_sair, monkeypatch):
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(casa / ".claude-conta2"))
-    r = TestClient(app).post("/api/claude-configs/conta2/logout", headers=AUTH)
-    assert r.status_code == 409
-    assert cli_sair == []
+def test_sair_da_config_ativa_do_backend_desloga(casa, cli_sair):
+    r = TestClient(app).post("/api/claude-configs/default/logout", headers=AUTH)
+    assert r.status_code == 200
+    assert cli_sair == [casa / ".claude"]
+    assert (casa / ".claude").is_dir()
 
 
 def test_sair_com_sessao_aberta_na_conta_desloga_mesmo_assim(casa, cli_sair, monkeypatch):

@@ -58,6 +58,15 @@ export function gravarPeer(alvo: Server | null, dado: { id: string; base_url: st
   return em<PeerView[]>(alvo, '/api/peers', { method: 'POST', body: JSON.stringify(dado) });
 }
 
+export function setPeerEnabled(alvo: Server | null, id: string, enabled: boolean): Promise<PeerView[]> {
+  return em<PeerView[]>(alvo, `/api/peers/${encodeURIComponent(id)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) });
+}
+
+/** Token INTEIRO de um peer: só para este aparelho passar a mostrar as sessões dele. */
+export function tokenDoPeer(alvo: Server | null, id: string): Promise<{ token: string }> {
+  return em<{ token: string }>(alvo, `/api/peers/${encodeURIComponent(id)}/token`);
+}
+
 export function removerPeer(alvo: Server | null, id: string): Promise<PeerView[]> {
   return em<PeerView[]>(alvo, `/api/peers/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

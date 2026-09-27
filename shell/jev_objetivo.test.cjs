@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, NENHUM, SEM_SELECT } = require('./jev_objetivo.cjs');
+const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT } = require('./jev_objetivo.cjs');
 
 const SNAPSHOT = `- RootWebArea "Cadastro"
   - link "Ver ajuda" [ref=@e1]
@@ -608,4 +608,77 @@ test('o estado nao repete os rotulos que ja estao nos criterios dos heads', () =
   const e = montarEstado('objetivo', 'http://local', [], 'texto');
   assert.ok(!('elementos' in e));
   assert.equal(e.objetivo, 'objetivo');
+});
+
+test('confere: noul no piso da conclusao passa; abaixo, torto ou ausente nao', () => {
+  const q = perguntaDeConfere('a lista mostra o item novo');
+  assert.equal(q.chegou.type, 'noul');
+  assert.match(q.chegou.instructions, /a lista mostra o item novo/);
+  assert.deepEqual(chegouNoEstado({ chegou: { noul: 0.8 } }), { p: 0.8, ok: true });
+  assert.deepEqual(chegouNoEstado({ chegou: { noul: 0.4 } }), { p: 0.4, ok: false });
+  assert.deepEqual(chegouNoEstado({ chegou: { noul: 'x' } }), { p: 0, ok: false });
+  assert.deepEqual(chegouNoEstado(undefined), { p: 0, ok: false });
+});
+
+test('destino do Jev: endpoint e modelo do ambiente vencem o padrao', () => {
+  assert.deepEqual(destinoDoJev({}, 'jev-latest'),
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: 'https://openrouter.ai/api/alpha/decisions', JEV_MODEL: 'typesafe/jev-1.13-20260917' }, 'jev-latest'),
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917' });
+  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: '  ', JEV_MODEL: '' }, 'jev-1.13.0'),
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-1.13.0' });
+});
+
+const http = require('node:http');
+const { askJev } = require('./jev_objetivo.cjs');
+
+async function jevServer(respond) {
+  const srv = http.createServer(respond);
+  await new Promise((ok) => srv.listen(0, '127.0.0.1', ok));
+  return { srv, url: `http://127.0.0.1:${srv.address().port}/v1/systemone` };
+}
+
+test('askJev: endpoint pendurado vira erro no prazo, sem prender o comando', async () => {
+  const { srv, url } = await jevServer(() => {});
+  try {
+    await assert.rejects(
+      askJev({ url, modelo: 'm', chave: 'k', estado: 's', perguntas: {}, deadlineMs: 100 }),
+      { message: 'o Jev não respondeu em 0.1 s' },
+    );
+  } finally {
+    srv.closeAllConnections();
+    srv.close();
+  }
+});
+
+test('askJev: devolve answers e manda modelo, estado e chave', async () => {
+  let pedido;
+  const { srv, url } = await jevServer((req, res) => {
+    let corpo = '';
+    req.on('data', (c) => { corpo += c; });
+    req.on('end', () => {
+      pedido = { corpo: JSON.parse(corpo), auth: req.headers.authorization };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ answers: { ok: { noul: 0.9 } } }));
+    });
+  });
+  try {
+    const r = await askJev({ url, modelo: 'jev-x', chave: 'k', estado: 'tela', perguntas: { ok: { type: 'noul' } } });
+    assert.deepEqual(r, { ok: { noul: 0.9 } });
+    assert.deepEqual(pedido, { corpo: { model: 'jev-x', state: 'tela', questions: { ok: { type: 'noul' } } }, auth: 'Bearer k' });
+  } finally {
+    srv.close();
+  }
+});
+
+test('askJev: status de erro vira "o Jev recusou"', async () => {
+  const { srv, url } = await jevServer((req, res) => { res.statusCode = 529; res.end('lotado'); });
+  try {
+    await assert.rejects(
+      askJev({ url, modelo: 'm', chave: 'k', estado: 's', perguntas: {} }),
+      { message: 'o Jev recusou: 529 lotado' },
+    );
+  } finally {
+    srv.close();
+  }
 });

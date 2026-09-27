@@ -55,9 +55,9 @@ permitido() {  # $1 = linha inteira do grep
   return 1
 }
 
-# proibido <padrao-grep> <explicacao>
+# proibido <padrao-grep> <explicacao> [flags extras do grep]
 proibido() {
-  local pat="$1" msg="$2" achou=0 linha
+  local pat="$1" msg="$2" flags="${3:-}" achou=0 linha
   while IFS= read -r linha; do
     [ -z "$linha" ] && continue
     permitido "$linha" && continue
@@ -68,7 +68,7 @@ proibido() {
       falhou=1
     fi
     echo "    $linha"
-  done < <(grep -rn -- "$pat" "${arquivos[@]}" 2>/dev/null)
+  done < <(grep -rn ${flags:+"$flags"} -- "$pat" "${arquivos[@]}" 2>/dev/null)
 }
 
 # obrigatorio <arquivo> <padrao-grep-F> <explicacao> — regra que nao pode sumir da pagina.
@@ -101,9 +101,9 @@ obrigatorio SKILL.md 'never downgrades' 'A rota so escala (audit -> full); rebai
 obrigatorio references/planejamento.md 'no answer → `full`' 'Sem resposta do usuario a rota e `full`.'
 obrigatorio references/revisao-final.md 'audit' 'Na rota audit a revisao final e a UNICA revisao — a pagina tem de dizer o que muda.'
 
-# 0d. Motor por risco: a coluna `vez` aceita `low`/`high` e a Task carrega `Risk:`.
+# 0d. Motor por risco: a coluna `vez` aceita `low`/`high` e a Task carrega a coluna `Risk`.
 for f in references/planejamento.md references/arbitro-lancamento.md; do
-  obrigatorio "$f" 'Risk:' 'A linha `Risk:` por Task (seletor de linha por risco) tem de estar no plano e no lancamento.'
+  obrigatorio "$f" '`Risk` column' 'A coluna `Risk` por Task (seletor de linha por risco) tem de estar no plano e no lancamento.'
 done
 obrigatorio references/arbitro.md 'upward only' 'Escalada de risco e so pra cima; o arbitro nao rebaixa.'
 
@@ -115,6 +115,11 @@ done
 # 0f. Data literal nao entra no texto da skill: a medicao mora no commit e no registro do trabalho.
 proibido '20[0-9][0-9]-[01][0-9]-[0-3][0-9]\|[0-3][0-9]/[01][0-9]/20[0-9][0-9]' \
   'Skill nao carrega data literal — a evidencia datada vai pra mensagem de commit ou pro registro.'
+
+# 0g. A skill e generica: extensao de arquivo, pixel e ferramenta de navegador sao do projeto.
+#     `build` fica fora do padrao: aparece de forma legitima como exemplo de checagem.
+proibido '\.svelte|\.tsx|\.vue|pixel|screenshot|agent-browser|hangar-preview' \
+  'A skill e generica: isso e do plano (`## Projeto`, roteiro) ou da skill provar-tela.' -iE
 
 # 3. "Step" (maiusculo) nao enuncia mecanica em lugar nenhum — a camada de baixo se chama "step".
 proibido 'Step' \
@@ -188,7 +193,7 @@ done
 
 # 8. Pagina de papel que nao carrega a skill nao pode mandar ler o SKILL.md nem invoca-la.
 #    (a retrospectiva fica de fora: ela propoe patch pra skill inteira, SKILL.md incluso.)
-for f in references/executor*.md references/revisor*.md references/revisao-final.md; do
+for f in references/executor*.md references/revisor*.md references/revisao-final.md references/prova-lote.md; do
   if grep -q 'SKILL\.md\|invoke the `orquestrar` skill\|Invoke the orquestrar skill' "$f"; then
     echo
     echo "✗ $f aponta para o SKILL.md ou manda invocar a skill: executor, revisor, revisao final e retrospectiva leem SO a pagina do papel."

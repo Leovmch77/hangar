@@ -268,20 +268,25 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     ficava e o modelo esquecia os pares. O `pair_dir` vai por argv porque é o do BACKEND — sessão em
     `--conta` tem `CLAUDE_CONFIG_DIR` próprio, e o sidecar não mora lá. Por isso os textos moram em
     `pair_texto.py`, stdlib-only (mesma regra do `engines.py`).
-  - **Protocolo completo só pro recém-chegado** (`snap[m] is None`); veterano recebe "fulano entrou";
-    peers e tarefa iguais = nada. Adicionar o 5º membro disparava 5 prompts de 1,5KB, 4 redundantes.
+  - **Protocolo só pro recém-chegado** (`snap[m] is None`), sem lista de membros; veterano não
+    recebe nada. Adicionar o 5º membro disparava 5 prompts de 1,5KB, 4 redundantes. Em 26/09/2026
+    o "fulano entrou" também saiu: na native-parity os árbitros receberam 269 avisos do painel
+    (175 entradas, 67 saídas), que viraram 64 turnos próprios, 54 sem efeito, e a lista de membros
+    envelhecia a cada troca de sessão. O grupo passou a ser consultado (`sessions` com `grupo`,
+    rodapé `# seu grupo:` do `--list`). Grupo com `orq: true` no sidecar (`--pair --orq`, e o
+    vigia) não recebe nem o protocolo: o comum mandava falar 1:1 livre, criar `grupo-<gid>.md` e
+    trocar de branch, contra o kick-off; o hook reinjeta uma frase que aponta pro kick-off.
   - **Tarefa diferente da existente é 409** sem `--substituir-tarefa` — cada `--pair` de um árbitro
     sobrescrevia a de todos, calado.
-  - **Toda saída avisa quem ficou pela mesma esteira**: unpair, kill (não avisava ninguém — os pares
-    mandavam recado pra nome morto ou pra sessão nova que o reusasse) e morte fora do app. Remoto vai
-    por `/unpair-remote` no unpair e no kill; na varredura só loga (rede dentro do `list()` não).
+  - **Saída não avisa os locais que ficaram** (26/09/2026, mesma medição acima): recado pra quem
+    saiu volta "sessão não encontrada". Ficou o risco de uma sessão nova com o nome reusado receber
+    recado dirigido à antiga. Remoto continua por `/unpair-remote` no unpair e no kill, senão o
+    sidecar de lá fica órfão; na varredura só loga (rede dentro do `list()` não).
   - **Varredura de morto fora do app roda no fim de `list()`, e três coisas a seguram:** contador
     DE CLASSE (há 4 instâncias de `SessionRegistry` — api, sse×2, prune — e todas chamam `list()`);
     ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número de polls, porque
     `kill()` e `rename()` chamam `list()` numa janela em que o nome está ausente de propósito; e lista
-    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. Aviso pela fila durável
-    (nunca send-keys ali) + drain por callback (`apos_saida_por_morte`), porque a fila só drena em
-    transição de hook e o peer já ocioso nunca receberia. O dict de classe (`_pair_ausencias`) é
+    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. O dict de classe (`_pair_ausencias`) é
     limpo com `pop(n, None)`, nunca `del` — as 4 instâncias varrem concorrentemente e outra thread
     pode já ter tirado a mesma chave.
   - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429). Todo membro
@@ -300,8 +305,18 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     (`<config>/sessions/<pid>.json`, campo `messagingSocketPath`), que cobre a sessão sem terminal —
     `inbox_socket_of` pelo pane devolvia `null` nela. `from` é endereço de RESPOSTA: o backend liga
     `cc-socks/<pid>.sock` próprio pra receber `peer_message_status` (retido/recusado) e avisa a
-    remetente com `[painel: hangar]`. O recado vai com o prefixo `[de: X]` no corpo e o parser não
-    o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
+    remetente com `[painel: entrega de recado]`. O recado vai com o prefixo `[de: X]` no corpo e o
+    parser não o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
+  - **Aviso do app sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`** (`pair_texto.PREFIXO`,
+    24/09/2026). Os avisos de grupo saíam `[de: hangar]` e terminavam em "Confirme em uma linha": o
+    uma sessão solta num grupo pelo arrasto confirmou com `hangar-send hangar …` e o
+    recado caiu na sessão `hangar` (nome padrão de quem abre o repo), que não era do grupo. O socket
+    nativo também tira o remetente do prefixo (`separar_prefixo`), então o envelope dizia
+    `from-name="hangar"`. Nome de sessão só tem `[A-Za-z0-9_-]` (`names.py`): rótulo com espaço
+    nunca coincide com um. Teste real com três sessões Haiku: todas confirmaram no próprio terminal.
+  - **Soltar uma sessão avulsa num grupo existente só entra**: o diálogo mostra a tarefa do grupo,
+    sem campo nem "Sugerir", e manda tarefa vazia (o `join_group` herda). Campo e sugestão ficam
+    para grupo novo ou fusão de dois grupos.
   - Contrato do grupo dissolvido vai pra `~/.hangar/pair-arquivo/`, não pro `unlink`.
   - **Teste que chega em `SessionRegistry.list()` ou num `pair.leave()` de último membro isola
     `pair.settings.projects_dir`, zera `SessionRegistry._pair_ausencias`, anula
@@ -336,8 +351,7 @@ Anthropic responder 429 pras 5 contas Claude, e a aba Contas mostrou "não infor
 conectado. Duas regras: o cache vai pra `~/.hangar/cotas-cache.json` (pasta do Hangar, não da
 conta) e o que está dentro do TTL volta do disco na subida; e fonte que levou 429 só vence de novo
 depois de `_ESPERA_429_S` (10 min) — insistir no próximo poll só renova o 429. Sob pytest o disco
-fica fora, pelo mesmo motivo do `_avisar_sessoes`: a suíte gravaria fontes de mentira no arquivo
-real da máquina.
+fica fora: a suíte gravaria fontes de mentira no arquivo real da máquina.
 
 ## Redefinições guardadas do Codex respeitam a janela semanal
 
@@ -627,3 +641,19 @@ em blocos; SVG/XML continuam como arquivos, com scripts bloqueados por CSP. O ET
 citados mudou para invalidar respostas antigas na revalidação; cache fresco anterior dura até 60s.
 No navegador embutido, o HTML executou JavaScript, mas não leu token pela URL, baseURI ou referrer,
 nem acessou a página pai ou o armazenamento. Sem mudanças na autorização de caminhos.
+
+## Configuração compartilhada: leva o conteúdo, o destino resolve caminho e programa
+
+(25/09/2026, pedido do usuário.) Levar a configuração de uma máquina para outras, só manual.
+Decisões dele, que o desenho não pode amolecer: quem envia vence; segredos vão (variáveis `env`,
+cabeçalhos de MCP, motores, chaves de voz), porque as máquinas são internas e o pacote viaja pelo
+Tailscale; link de skill é do layout de uma pessoa, então vai o conteúdo; arquivo que um hook usa
+e não existe no destino vai junto; caminho absoluto é resolvido pelo Hangar do destino, e não por
+troca de texto, porque o destino pode ser Windows.
+
+Os marcadores são `⟦HOME⟧`, `⟦CLAUDE⟧`, `⟦CODEX⟧` e `⟦HANGAR⟧`: `{HOME}` colidiria com `${HOME}`
+de script de shell e com f-string de Python, e o destino trocaria o que não é caminho. O destino
+só resolve marcador em arquivo que a origem marcou. Criptografia extra do pacote foi descartada:
+o bearer que vai na mesma requisição abre a máquina inteira, e o Tailscale já cifra o caminho.
+Quem leva o pacote é o navegador (ele tem o token de todas as máquinas), então nenhuma máquina
+precisa conhecer a outra pelo `peers.json`.
