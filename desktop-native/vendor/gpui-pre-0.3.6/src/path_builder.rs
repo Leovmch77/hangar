@@ -9,7 +9,8 @@ use lyon::tessellation::{
 };
 
 pub use lyon::math::Transform;
-pub use lyon::tessellation::{FillOptions, FillRule, StrokeOptions};
+// Modified for Hangar: `LineCap` re-exported so strokes can end rounded.
+pub use lyon::tessellation::{FillOptions, FillRule, LineCap, StrokeOptions};
 
 use crate::{Path, Pixels, Point, point, px};
 

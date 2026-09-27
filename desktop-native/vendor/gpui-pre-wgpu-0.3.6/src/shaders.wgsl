@@ -1503,3 +1503,18 @@ fn fs_backdrop_blur(input: BackdropBlurVarying) -> @location(0) vec4<f32> {
     let uv = (input.device_position - params.source_rect.xy) / params.source_rect.zw;
     return textureSampleLevel(t_backdrop_blurred, s_backdrop_blurred, uv, 0.0);
 }
+
+// Clears the scissored region to transparent before a partial re-render. `LoadOp::Clear` can't be scoped to a
+// sub-rectangle, and re-rendering translucent content over stale pixels would double-blend, so partial passes start
+// by overwriting each region with this blend-disabled fullscreen triangle.
+@vertex
+fn vs_clear_region(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32(i32(vertex_index & 1u) * 4 - 1);
+    let y = f32(i32(vertex_index >> 1u) * 4 - 1);
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_clear_region() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}

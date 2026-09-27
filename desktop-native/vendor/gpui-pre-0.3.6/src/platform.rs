@@ -1,3 +1,4 @@
+// Modified for Hangar: `PlatformWindow::draw_with_damage` ported from zed-industries/zed PR #62455 (d9c29a3).
 mod app_menu;
 mod keyboard;
 mod keystroke;
@@ -957,6 +958,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
     fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
     fn draw(&self, scene: &Scene);
+    /// Like [`Self::draw`], with the region of the scene that changed since the scene most recently drawn. Backends
+    /// may re-render only that region; the default ignores it. The damage over-approximates and never under-reports.
+    fn draw_with_damage(&self, scene: &Scene, _damage: &crate::SceneDamage) {
+        self.draw(scene);
+    }
     fn schedule_frame(&self) {}
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas>;
     fn is_subpixel_rendering_supported(&self) -> bool;

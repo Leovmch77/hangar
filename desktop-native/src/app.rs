@@ -3850,7 +3850,7 @@ impl Hangar {
             if session.pending_questions > 0 { label.push_str(&format!(" · ? {}", session.pending_questions)); }
             // Trabalhando é a marca animada da lista (parada com movimento reduzido); os outros estados são um ponto na cor dele.
             let mark = if session.state == "working" {
-                chrome::WorkingMark::new(SharedString::from(format!("tab-mark-{}", session.name)), 14., theme::accent()).into_any_element()
+                self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", session.name), 14., theme::accent())
             } else {
                 div().size(px(8.)).mx(px(2.)).flex_shrink_0().rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }).into_any_element()
             };
@@ -4027,12 +4027,16 @@ impl Hangar {
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
         let mark_color = if limited { theme::limited() } else { theme::status(state) };
-        let mark = if state == "working" && !limited {
-            chrome::WorkingMark::new(SharedString::from(format!("row-mark-{}", session.name)), 18., mark_color).into_any_element()
-        } else { chrome::hangar_mark(18., mark_color).into_any_element() };
+        // Trabalhando, a marca (e o selo, que fica por cima dela) é pintada fora da lista guardada: a batida não redesenha a lista.
+        let working = state == "working" && !limited;
+        let mark = match (working, mixed) {
+            (true, true) => self.badged_mark_slot(panes::Area::Nav, format!("row-mark-{}", session.name), 18., mark_color,
+                session.provider.clone().into()),
+            (true, false) => self.working_mark_slot(panes::Area::Nav, format!("row-mark-{}", session.name), 18., mark_color),
+            (false, _) => chrome::hangar_mark(18., mark_color).into_any_element(),
+        };
         let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
-            .when(mixed, |el| el.child(div().absolute().left(px(-4.)).top(px(-4.)).p(px(1.)).rounded_full()
-                .bg(theme::raised()).border_1().border_color(theme::border()).child(chrome::provider_glyph(&session.provider, 10.))));
+            .when(mixed && !working, |el| el.child(chrome::provider_badge(&session.provider)));
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
         let sub = match reply {
@@ -4816,10 +4820,10 @@ impl Render for Hangar {
                 (Some(page), _) => el.child(self.render_settings(page, window, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
                 (None, Some(bar)) if tabs => el.flex_col().child(bar)
+                    .child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion()))
                     .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),
                 (None, sidebar) => el.children(sidebar)
-                    .when(page.is_none() && appearance::get().navigation == appearance::Navigation::Conversations,
-                        |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
+                    .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
                     .map(|el| match topbar_beside {
                         Some(column) => el.child(column
                             .child(div().w_full().flex_1().min_h_0().flex().child(content).when_some(side, |el, side| el.child(side)))),

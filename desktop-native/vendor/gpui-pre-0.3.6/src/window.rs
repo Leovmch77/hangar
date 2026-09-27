@@ -1,5 +1,7 @@
 // Modified for Hangar: backdrop blur paint entry point ported from zeronsh/zui 18a89af.
 // Modified for Hangar: element map (`set_element_map_sink`, `ElementRecord`) for test scripts.
+// Modified for Hangar: scene damage, present skip and partial render ported from zed-industries/zed PR #62455
+// (d9c29a3); on unless GPUI_EXPERIMENTAL_PRESENT_SKIP=0 / GPUI_EXPERIMENTAL_PARTIAL_RENDER=0.
 #[cfg(feature = "profiler")]
 use crate::DebugFrameOverlayMode;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -359,6 +361,20 @@ fn draw_in_progress() -> bool {
 /// Allocates an element in the current arena. Uses the app-specific arena if one
 /// is active (during draw), otherwise falls back to the thread-local ELEMENT_ARENA.
 #[inline(always)]
+/// Whether frames whose scene is identical to the one on screen skip presentation. On unless
+/// `GPUI_EXPERIMENTAL_PRESENT_SKIP=0`.
+pub(crate) fn present_skip_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("GPUI_EXPERIMENTAL_PRESENT_SKIP").map_or(true, |value| value != "0"))
+}
+
+/// Whether presentation hands the scene damage to the renderer so it re-renders only the changed region. On unless
+/// `GPUI_EXPERIMENTAL_PARTIAL_RENDER=0`.
+pub(crate) fn partial_render_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("GPUI_EXPERIMENTAL_PARTIAL_RENDER").map_or(true, |value| value != "0"))
+}
+
 pub(crate) fn with_element_arena<R>(callback: impl FnOnce(&mut Arena) -> R) -> R {
     let mut callback = Some(callback);
     let mut result = None;
@@ -1243,6 +1259,11 @@ pub struct Window {
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
+    /// Whether this window has presented a frame yet: on Wayland a window isn't mapped until a buffer is attached,
+    /// so presentation is never skipped before the first one.
+    presented: bool,
+    /// The damage of `rendered_frame` against the scene most recently presented, handed to the renderer at present.
+    pending_damage: crate::SceneDamage,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -1809,10 +1830,11 @@ impl Window {
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                 // Once high-rate input is detected, we sustain presentation for 1 second
-                // to prevent display underclocking during active input.
+                // to prevent display underclocking during active input. Each sustained
+                // present re-renders an unchanged scene, so present skip drops it.
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
-                    || input_rate_tracker.borrow_mut().is_high_rate();
+                    || (!present_skip_enabled() && input_rate_tracker.borrow_mut().is_high_rate());
 
                 if invalidator.is_dirty() || force_render {
                     measure("frame duration", || {
@@ -1824,7 +1846,11 @@ impl Window {
                                     window.refresh();
                                 }
                                 let arena_clear_needed = window.draw(cx);
-                                window.present();
+                                // `draw` clears `needs_present` when the new scene equals the one on screen; the
+                                // platform may still need it presented (an X11 expose).
+                                if window.needs_present.get() || request_frame_options.require_presentation {
+                                    window.present();
+                                }
                                 arena_clear_needed.clear(cx);
                             })
                             .log_err();
@@ -2101,6 +2127,8 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
+            presented: false,
+            pending_damage: crate::SceneDamage::Full,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -3379,6 +3407,15 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
+        // Diffed before the swap, while the previous scene is still intact: it is cleared right after.
+        let scene_damage = (present_skip_enabled() || partial_render_enabled()).then(|| {
+            if self.refreshing {
+                // Resizes, appearance changes and GPU recovery invalidate the presented buffer.
+                crate::SceneDamage::Full
+            } else {
+                crate::SceneDamage::between(&self.rendered_frame.scene, &self.next_frame.scene)
+            }
+        });
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
         if let Some(mut sink) = self.element_map.take() {
@@ -3434,7 +3471,14 @@ impl Window {
         if self.focus != focus_before_listeners {
             self.refresh();
         }
-        self.needs_present.set(true);
+        // A scene identical to the one on screen would only make the GPU re-render the same pixels.
+        let skip_present = present_skip_enabled()
+            && self.presented
+            && matches!(&scene_damage, Some(crate::SceneDamage::Unchanged));
+        self.needs_present.set(!skip_present);
+        // Accumulated, not replaced: a drawn frame that wasn't presented still changed the screen's pending content.
+        let pending = mem::replace(&mut self.pending_damage, crate::SceneDamage::Unchanged);
+        self.pending_damage = pending.union(scene_damage.unwrap_or(crate::SceneDamage::Full));
 
         #[cfg(feature = "profiler")]
         {
@@ -3477,7 +3521,15 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        // After a present the renderer is caught up with `rendered_frame`, so a re-present of the same scene (an
+        // expose event) carries no damage; the renderer keeps what its own failed frames missed.
+        let damage = mem::replace(&mut self.pending_damage, crate::SceneDamage::Unchanged);
+        if partial_render_enabled() {
+            self.platform_window.draw_with_damage(&self.rendered_frame.scene, &damage);
+        } else {
+            self.platform_window.draw(&self.rendered_frame.scene);
+        }
+        self.presented = true;
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,

@@ -195,6 +195,11 @@ fn paint_mark(bounds: Bounds<Pixels>, frame: MarkFrame, color: Hsla, window: &mu
     let unit = f32::from(bounds.size.width) / 24.;
     let center = bounds.center();
     let width = MARK_STROKE * unit * frame.scale;
+    // Os três arcos num path só, com as pontas redondas do próprio traço (o `stroke-linecap="round"` do web): um lote de
+    // path por quadro. Cada lote rasteriza numa textura do tamanho da janela.
+    let options = StrokeOptions::default().with_line_width(width).with_line_cap(LineCap::Round);
+    let mut path = PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(options));
+    let mut any = false;
     for (&(radius, gap, _, _), &(drawn, turn)) in MARK_ARCS.iter().zip(&frame.arcs) {
         if drawn <= 0. { continue; }
         let radius = radius * unit * frame.scale;
@@ -205,15 +210,11 @@ fn paint_mark(bounds: Bounds<Pixels>, frame: MarkFrame, color: Hsla, window: &mu
             point(center.x + px(radius * rad.cos()), center.y + px(radius * rad.sin()))
         };
         let steps = (sweep / 6.).ceil().max(2.) as usize;
-        let mut path = PathBuilder::stroke(px(width));
         path.move_to(at(start));
         for step in 1..=steps { path.line_to(at(start + sweep * step as f32 / steps as f32)); }
-        if let Ok(path) = path.build() { window.paint_path(path, color); }
-        // Pontas redondas, como o `stroke-linecap="round"` do web.
-        for end in [at(start), at(start + sweep)] {
-            window.paint_quad(fill(Bounds::centered_at(end, size(px(width), px(width))), color).corner_radii(px(width / 2.)));
-        }
+        any = true;
     }
+    if any && let Ok(path) = path.build() { window.paint_path(path, color); }
 }
 
 /// A marca animada "trabalhando" (três arcos: entrada que se desenha, onda de giro e respiro), no relógio comum de 30
@@ -339,6 +340,12 @@ pub fn provider_glyph(provider: &str, size: f32) -> Div {
         Some(logo) => seal.child(logo),
         None => seal.text_size(px(10.)).font_weight(FontWeight::BOLD).child(glyph),
     }
+}
+
+/// O selo do provider no canto de cima da marca da linha, quando a lista mistura providers.
+pub fn provider_badge(provider: &str) -> Div {
+    div().absolute().left(px(-4.)).top(px(-4.)).p(px(1.)).rounded_full()
+        .bg(theme::raised()).border_1().border_color(theme::border()).child(provider_glyph(provider, 10.))
 }
 
 /// Logo vetorial do provider (Claude, Codex/OpenAI, Kimi); `None` para quem não tem marca.

@@ -21,9 +21,10 @@ pub(super) struct Panes {
     pub marks: MarkPlaces,
 }
 
-/// O que se pinta num lugar: a marca animada ou os segundos da linha "trabalhando".
-#[derive(Clone, Copy)]
-pub(super) enum Floating { Mark(Hsla), Elapsed(Instant) }
+/// O que se pinta num lugar: a marca animada (com o selo do provider por cima, quando a linha tem um) ou os segundos da
+/// linha "trabalhando".
+#[derive(Clone)]
+pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant) }
 
 /// Um lugar vazio deixado por uma área guardada: posição, recorte dela e quando o lugar nasceu. A área que não repinta
 /// deixa os lugares do último desenho, que continuam certos; a que redesenha apaga os seus e grava os que aparecerem.
@@ -172,6 +173,13 @@ impl Hangar {
         mark_slot(&self.panes.marks, area, key, size, color)
     }
 
+    /// O `working_mark_slot` com o selo do provider pintado por cima da marca, fora da área também: pintado dentro dela,
+    /// ficaria por baixo da marca.
+    pub(super) fn badged_mark_slot(&self, area: Area, key: impl Into<SharedString>, size: f32, color: Hsla, provider: SharedString) -> AnyElement {
+        div().size(px(size)).flex_shrink_0()
+            .child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Mark(color, Some(provider)))).into_any_element()
+    }
+
     /// O lugar dos segundos contados desde `since`, pintados fora da view guardada: o tique de 1 s não redesenha a área.
     pub(super) fn elapsed_slot(&self, area: Area, key: impl Into<SharedString>, since: Instant) -> AnyElement {
         div().w(px(ELAPSED_WIDTH)).h_full().flex_shrink_0().child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Elapsed(since)))
@@ -193,7 +201,7 @@ pub(super) fn float_marks(places: MarkPlaces, area: Area, fade: Duration, reduce
 
 /// O mesmo lugar de `working_mark_slot`, na lista de lugares de quem chama.
 pub(super) fn mark_slot(places: &MarkPlaces, area: Area, key: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
-    div().size(px(size)).flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Mark(color))).into_any_element()
+    div().size(px(size)).flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Mark(color, None))).into_any_element()
 }
 
 fn mark_place(places: MarkPlaces, area: Area, key: SharedString, draw: Floating) -> impl IntoElement {
@@ -241,12 +249,16 @@ impl Element for FloatingMark {
         places.into_iter().map(|place| {
             let t = if self.reduce_motion { 1. }
                 else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
-            let inner = match place.draw {
-                Floating::Mark(color) => super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color)
-                    .into_any_element(),
-                Floating::Elapsed(since) => super::chrome::Elapsed::new(place.key.clone(), since).into_any_element(),
+            // Só a marca entra com o fade: o selo já estava na linha antes de ela começar a trabalhar.
+            let (inner, badge) = match place.draw {
+                Floating::Mark(color, badge) => (
+                    super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color).into_any_element(),
+                    badge.map(|provider| super::chrome::provider_badge(&provider)),
+                ),
+                Floating::Elapsed(since) => (super::chrome::Elapsed::new(place.key.clone(), since).into_any_element(), None),
             };
-            let mut child = div().size_full().opacity(t).child(inner).into_any_element();
+            let mut child = div().size_full().relative().child(div().size_full().opacity(t).child(inner)).children(badge)
+                .into_any_element();
             window.with_content_mask(Some(ContentMask { bounds: place.clip }), |window| {
                 child.layout_as_root(place.at.size.map(AvailableSpace::Definite), window, cx);
                 child.prepaint_at(place.at.origin, window, cx);
