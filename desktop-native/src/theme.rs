@@ -1,9 +1,10 @@
 use gpui_kit::{component::{Theme, ThemeMode as KitMode}, *};
 use std::sync::{OnceLock, RwLock, atomic::{AtomicBool, Ordering}};
-use crate::appearance::{self, Background as Backdrop, DesktopText, Palette, Panels, Reading, SurfaceMaterial, Swatch, ThemeMode};
+use crate::appearance::{self, Background as Backdrop, BackgroundScope, DesktopText, Palette, Panels, Reading, SurfaceMaterial, Swatch, ThemeMode};
 
-// Cores dos mocks aprovados (Task 12): o padrão é "Colados", opaco; "Caixa solta" deixa passar o que está
-// atrás da janela nas medidas de Transparência e Solidez. O nome de cada função diz o papel, não a cor.
+// Cores dos mocks aprovados (Task 12): o padrão é "Colados", opaco; "Caixa solta", ou colados sobre imagem ou área de
+// trabalho "em tudo", deixa passar o que está atrás nas medidas de Transparência e Solidez. O nome de cada função diz o
+// papel, não a cor.
 /// `--font-mono` do web; sem a fonte instalada, o GPUI cai na padrão.
 pub const MONO: &str = "JetBrainsMono Nerd Font";
 /// Sans embutida no binário (`assets/fonts`), a "Sistema" das configurações.
@@ -103,8 +104,14 @@ pub fn is_dark() -> bool {
 
 /// Superfície, seleção, hover e divisória exclusivos da barra de conversas.
 pub fn conversation_sidebar() -> (Hsla, Hsla, Hsla, Hsla) {
-    let colors = if is_dark() { [0x181818, 0x2f2f2f, 0x313131, 0x242424] }
+    let dark = is_dark();
+    let colors = if dark { [0x181818, 0x2f2f2f, 0x313131, 0x242424] }
         else { [0xf7f7f7, 0xe3e3e3, 0xeaeaea, 0xd9d9d9] };
+    if see_through() {
+        // Seleção e realce cheios virariam retângulos chapados sobre o painel translúcido.
+        let ink = if dark { 1. } else { 0. };
+        return (hex(colors[0], panel_alpha()), hsla(0., 0., ink, 0.10), hsla(0., 0., ink, 0.06), rgb(colors[3]).into());
+    }
     (rgb(colors[0]).into(), rgb(colors[1]).into(), rgb(colors[2]).into(), rgb(colors[3]).into())
 }
 
@@ -150,6 +157,15 @@ pub fn panels_thumbnail(floating: bool) -> (Hsla, Hsla, Hsla) {
 fn floating() -> bool { appearance::get().panels == Panels::Floating }
 pub fn is_floating() -> bool { floating() }
 
+/// Imagem ou área de trabalho atrás da janela inteira: aí os painéis colados também deixam o fundo aparecer, como no web.
+fn backdrop_everywhere() -> bool {
+    let a = appearance::get();
+    a.busy_background() && a.background_scope == BackgroundScope::Everywhere
+}
+
+/// Os painéis deixam passar o que está atrás: soltos sempre, colados só com fundo ocupado "em tudo".
+fn see_through() -> bool { floating() || backdrop_everywhere() }
+
 fn hex(value: u32, alpha: f32) -> Hsla { Hsla::from(rgb(value)).alpha(alpha) }
 
 /// Tinta do modo atual já resolvida; o Desktop não tem tinta, a cor vem do papel de parede.
@@ -188,6 +204,9 @@ fn luminance(c: u32) -> f32 {
 }
 
 fn solidity() -> f32 { appearance::get().solidity as f32 / 100. }
+
+/// Quanto os painéis translúcidos tapam o fundo: a Solidez.
+fn panel_alpha() -> f32 { solidity() }
 
 /// Fundo da janela. Colados é opaco; na caixa solta a Transparência diz quanto do fundo do sistema aparece.
 pub fn background() -> Hsla {
@@ -244,16 +263,23 @@ fn reading(color: u32, weight: f32) -> Hsla {
     rgb(mix(color, if dark { 0xffffff } else { 0x000000 }, a.text_contrast as f32 / 100. * weight)).into()
 }
 /// Barra lateral, painel de contexto e navegação das configurações.
-pub fn chrome() -> Hsla { let c = colors(); if floating() { tinted(c.float_chrome, solidity()) } else { tinted(c.chrome, 1.) } }
-pub fn surface() -> Hsla { chrome() }
+pub fn chrome() -> Hsla {
+    let c = colors();
+    tinted(if floating() { c.float_chrome } else { c.chrome }, if see_through() { panel_alpha() } else { 1. })
+}
+/// Visor de arquivo e cartões que cobrem a conversa: colados ficam cheios, o texto de baixo não atravessa.
+pub fn surface() -> Hsla { if floating() { chrome() } else { tinted(colors().chrome, 1.) } }
 /// Caixas de conteúdo: compositor e grupos de configuração.
-pub fn boxed() -> Hsla { let c = colors(); if floating() { hex(c.float_boxed, solidity() * 0.9) } else { hex(c.boxed, 1.) } }
-pub fn inset() -> Hsla { let c = colors(); hex(c.inset, if floating() { 0.55 } else { 1. }) }
+pub fn boxed() -> Hsla {
+    let c = colors();
+    hex(if floating() { c.float_boxed } else { c.boxed }, if see_through() { panel_alpha() * 0.9 } else { 1. })
+}
+pub fn inset() -> Hsla { let c = colors(); hex(c.inset, if see_through() { 0.55 } else { 1. }) }
 /// Popovers e fundos de realce: sempre opacos, ficam sobre qualquer material.
 pub fn elevated() -> Hsla { rgb(colors().elevated).into() }
 pub fn raised() -> Hsla { rgb(colors().raised).into() }
 /// Realce de passagem do ponteiro sobre linhas e botões quietos.
-pub fn hover() -> Hsla { let c = colors(); if floating() { hex(c.line, 0.06) } else { hex(c.hover, 1.) } }
+pub fn hover() -> Hsla { let c = colors(); if see_through() { hex(c.line, 0.06) } else { hex(c.hover, 1.) } }
 pub fn user_bubble() -> Hsla { let c = colors(); if floating() { hex(c.float_bubble, 0.78) } else { hex(c.bubble, 1.) } }
 /// Véu atrás de diálogos: a cor da janela quase opaca.
 pub fn scrim() -> Hsla { hex(colors().bg, 0.87) }
@@ -319,8 +345,8 @@ pub fn on_accent() -> Hsla {
     rgb(if luminance(accent_hex()) > 0.45 { 0x1a1718 } else { c.on_accent }).into()
 }
 pub fn limited() -> Hsla { rgb(if colors().dark { 0xc98cff } else { 0x8a45c7 }).into() }
-/// Linha selecionada: cinza elevado no colado, destaque suave na caixa solta.
-pub fn selected_row() -> Hsla { if floating() { accent_dim() } else { rgb(colors().selected).into() } }
+/// Linha selecionada: cinza elevado no colado opaco, destaque suave quando o painel é translúcido.
+pub fn selected_row() -> Hsla { if see_through() { accent_dim() } else { rgb(colors().selected).into() } }
 pub fn status(state: &str) -> Hsla {
     match state { "working" => accent(), "awaiting_input" => warning(), "idle" => success(), "dead" => danger(), _ => muted() }
 }

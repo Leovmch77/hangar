@@ -4455,6 +4455,8 @@
   "native_settings_transparency_off": "With Plain, Texture or Light, floating only.",
   "native_settings_solidity": "Box solidity",
   "native_settings_only_floating": "Floating boxes only.",
+  "native_settings_solidity_desc": "How much the panels cover the background.",
+  "native_settings_solidity_off": "Only with floating panels, or with an image or the desktop everywhere.",
   "native_settings_blur": "Background blur",
   "native_settings_blur_desc": "Handled by the system compositor.",
   "native_settings_blur_hint": "On Hyprland: decoration:blur plus a windowrule for Hangar.",

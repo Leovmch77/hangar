@@ -4455,6 +4455,8 @@
   "native_settings_transparency_off": "Com Liso, Textura ou Luz, só na caixa solta.",
   "native_settings_solidity": "Solidez das caixas",
   "native_settings_only_floating": "Só na caixa solta.",
+  "native_settings_solidity_desc": "Quanto os painéis tapam o fundo.",
+  "native_settings_solidity_off": "Só com painéis soltos, ou com imagem ou área de trabalho em tudo.",
   "native_settings_blur": "Desfoque do fundo",
   "native_settings_blur_desc": "Fica com o compositor do sistema.",
   "native_settings_blur_hint": "No Hyprland: decoration:blur e uma windowrule para o Hangar.",

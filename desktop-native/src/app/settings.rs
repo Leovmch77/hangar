@@ -794,6 +794,8 @@ impl Hangar {
             }, cx);
         // Com imagem ou área de trabalho atrás, a Transparência é o véu e vale também nos painéis colados.
         let see_through = floating || a.busy_background();
+        // Colados só ficam translúcidos com o fundo ocupado atrás da janela inteira.
+        let panels_see_through = floating || a.busy_background() && a.background_scope == BackgroundScope::Everywhere;
         let surface_material = segmented("surface-material", &[tr("settings_surface_glass"), tr("settings_surface_opaque")],
             if a.surface_material == SurfaceMaterial::Glass { 0 } else { 1 }, true,
             |this: &mut Hangar, index, _: &mut Window, cx| {
@@ -829,7 +831,8 @@ impl Hangar {
             .child(self.slider_row(IconName::Layers, "settings_transparency",
                 Some(tr(if see_through { "settings_transparency_desc" } else { "settings_transparency_off" })), Knob::Transparency, see_through, &a, cx))
             .child(self.row(IconName::Layers, "settings_surface_material", Some(tr("settings_surface_material_desc")), true, surface_material))
-            .child(self.slider_row(IconName::Layers, "settings_solidity", Some(tr("settings_only_floating")), Knob::Solidity, floating, &a, cx))
+            .child(self.slider_row(IconName::Layers, "settings_solidity",
+                Some(tr(if panels_see_through { "settings_solidity_desc" } else { "settings_solidity_off" })), Knob::Solidity, panels_see_through, &a, cx))
             // Nada a escolher aqui: a linha diz de quem é o desfoque; o botão (mouse ou teclado) abre onde ligar.
             .child(self.row(IconName::Layers, "settings_blur",
                 Some(if self.settings_ui.blur_hint { format!("{} {}", tr("settings_blur_desc"), tr("settings_blur_hint")) } else { tr("settings_blur_desc") }), true,
