@@ -4461,6 +4461,16 @@ impl Render for Hangar {
         let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
         let cutout = chat_background && page.is_none() && !costs_page && (desktop_window || floating);
         let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
+        // Colados com barra lateral, ela sobe até o topo e a barra do app começa na borda dela, como no Zeron. O fundo
+        // do chat passa a ser da coluna que junta a barra e o chat, para a barra ter a cor dele.
+        let beside_sidebar = !floating && !tabs && page.is_none() && !costs_page;
+        let chat_fill = |el: Div, this: &Self, window: &Window| el
+            .when(chat_background, |el| el.bg(theme::window_fill()))
+            .when(cutout, |el| {
+                let bounds = chat_bounds.clone();
+                el.child(canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {}).absolute().inset_0())
+            })
+            .when(chat_background, |el| el.children(this.render_backdrop(window)));
 
         // Sessão sem conversa não tem stream próprio: o estado é o da lista.
         let header_state = if self.chat_online && self.chat.state.state.is_empty() { "loading".to_owned() }
@@ -4475,12 +4485,7 @@ impl Render for Hangar {
         let landing::Frame { drop, shown, rise } = self.landing_frame(window, cx);
         let opening = self.opening.clone().filter(|_| self.selected.is_none());
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
-            .when(chat_background, |el| el.bg(theme::window_fill()))
-            .when(cutout, |el| {
-                let bounds = chat_bounds.clone();
-                el.child(canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {}).absolute().inset_0())
-            })
-            .when(chat_background, |el| el.children(self.render_backdrop(window)))
+            .when(!beside_sidebar, |el| chat_fill(el, self, window))
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
                 .relative().opacity(shown).top(px(rise))
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
@@ -4517,6 +4522,11 @@ impl Render for Hangar {
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
         let slide = self.side_slide_frame(window, cx);
+        let beside = beside_sidebar.then(|| self.side_width(window)
+            .or(slide.map(|(width, _)| width)).or_else(|| self.opening_side_width(window)).unwrap_or(0.));
+        let topbar = self.render_topbar(beside, cx);
+        let (topbar, topbar_beside) = if beside_sidebar { (None, Some(chat_fill(div(), self, window).relative().flex_1().min_w_0().h_full().flex().flex_col().child(topbar))) }
+            else { (Some(topbar), None) };
         let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
@@ -4664,7 +4674,7 @@ impl Render for Hangar {
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
             // A barra do app fica acima de tudo, inclusive das páginas, de ponta a ponta; soltos, a margem é só dos painéis.
             .flex_col()
-            .child(self.render_topbar(cx))
+            .children(topbar)
             .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page, |el| el.p(px(10.)).gap(px(10.)))
                 .map(|el| match (page, nav) {
                 _ if costs_page => el.child(self.render_costs(window, cx)),
@@ -4675,7 +4685,11 @@ impl Render for Hangar {
                 (None, sidebar) => el.children(sidebar)
                     .when(page.is_none() && appearance::get().navigation == appearance::Navigation::Conversations,
                         |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
-                    .child(content).when_some(side, |el, side| el.child(side)),
+                    .map(|el| match topbar_beside {
+                        Some(column) => el.child(column
+                            .child(div().w_full().flex_1().min_h_0().flex().child(content).when_some(side, |el, side| el.child(side)))),
+                        None => el.child(content).when_some(side, |el, side| el.child(side)),
+                    }),
             }))
             .children(live)
             .children(self.render_preview(window))

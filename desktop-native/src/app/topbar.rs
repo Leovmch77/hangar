@@ -3,9 +3,10 @@
 //! duplo clique maximiza, como a barra de título do Zeron e do Zed: a janela não tem decoração no Linux. No Windows e no
 //! macOS a janela tem a barra do sistema, com os botões dela; aqui não se desenha nenhum.
 //!
-//! Colados, ela é a barra de título do Zeron: o mesmo material da barra lateral, sem linha embaixo, e o conteúdo um
-//! pouco abaixo do meio. Soltos, é a faixa do web: sem fundo, o papel de parede passa por trás, só uma linha fina
-//! embaixo, e os painéis flutuam abaixo dela com a margem deles.
+//! Colados, ela é a barra de título do Zeron: sem linha embaixo e o conteúdo um pouco abaixo do meio. Com a barra
+//! lateral à esquerda, a lateral sobe até o topo e esta começa na borda dela, com a cor do chat; nas abas e nas páginas
+//! vai de ponta a ponta com o material da lateral. Soltos, é a faixa do web: sem fundo, o papel de parede passa por
+//! trás, só uma linha fina embaixo, e os painéis flutuam abaixo dela com a margem deles.
 use super::*;
 use super::device::Remote;
 use super::costs::web;
@@ -58,7 +59,8 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn render_topbar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// `beside`: ao lado da barra lateral, com a largura do painel direito aberto (0 fechado); a busca fica no meio do chat.
+    pub(super) fn render_topbar(&mut self, beside: Option<f32>, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
         let online = self.api.is_some();
         let settings_open = self.settings.is_some() && !self.settings_live();
@@ -113,7 +115,9 @@ impl Hangar {
             else { theme::chrome() };
         let bar = div().id("topbar").w_full().flex_shrink_0().flex().items_center().gap(px(8.))
             .map(|el| if floating { el.h(px(TOPBAR_FLOATING_HEIGHT)).px(px(8.)).border_b_1().border_color(theme::border_strong()) }
-                else { el.h(px(TOPBAR_HEIGHT)).pt(px(TOPBAR_TOP_PAD)).pl(px(10.)).pr(px(6.)).bg(wall) })
+                else { el.h(px(TOPBAR_HEIGHT)).pt(px(TOPBAR_TOP_PAD)).pl(px(10.)).pr(px(6.)) })
+            // Ao lado da lateral, sem fundo próprio: o que está atrás é o do chat.
+            .when(!floating && beside.is_none(), |el| el.bg(wall))
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = true))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = false))
@@ -128,11 +132,18 @@ impl Hangar {
             .on_click(|event, window, _| if event.click_count() == 2 {
                 if cfg!(target_os = "macos") { window.titlebar_double_click() } else { window.zoom_window() }
             })
-            .child(div().flex_1())
-            .child(control(search))
-            .child(div().flex_1().min_w_0().flex().justify_end().gap(px(6.))
-                .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
-                .child(control(pill)).child(control(gear)));
-        if floating { bar.into_any_element() } else { chrome::glass_panel(bar, px(0.)) }
+            .map(|el| {
+                let controls = div().flex().justify_end().gap(px(6.))
+                    .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
+                    .child(control(pill)).child(control(gear));
+                match beside {
+                    // Com o painel direito aberto, a busca centra no chat e os controles ficam sobre o painel; mais largos que
+                    // ele, invadem o vazio do chat sem empurrar a busca.
+                    Some(side) if side > 0. => el.child(div().flex_1().min_w_0().flex().child(div().flex_1()).child(control(search)).child(div().flex_1()))
+                        .child(controls.flex_shrink_0().w(px(side))),
+                    _ => el.child(div().flex_1()).child(control(search)).child(controls.flex_1().min_w_0()),
+                }
+            });
+        if floating || beside.is_some() { bar.into_any_element() } else { chrome::glass_panel(bar, px(0.)) }
     }
 }
