@@ -394,6 +394,10 @@ pub struct Hangar {
     landing: Option<landing::Landing>,
     /// A mensagem mandada da tela sem sessão, mostrada como enviada até o transcript trazer a real (`landing.rs`).
     opening: Option<landing::Opening>,
+    /// O painel direito do último quadro (conversa e largura), para ver quando ele abre ou fecha.
+    side_seen: Option<(Option<SessionKey>, Option<f32>)>,
+    /// O painel entrando ou saindo: quando começou, se está abrindo e a largura dele.
+    side_slide: Option<(Instant, bool, f32)>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -508,7 +512,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
-            new_chat_folders: Default::default(), landing: None, opening: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -4363,6 +4367,24 @@ impl Hangar {
             .when(self.selected.is_some() || self.api.is_some(), |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx)));
         self.measured_bottom(content.into_any_element())
     }
+
+    /// O painel direito abrindo ou fechando na mesma conversa: a largura dele e quanto está à vista (0 a 1), pedindo
+    /// quadros até acabar. Trocar de conversa, a chegada da primeira mensagem e o movimento reduzido não deslizam.
+    fn side_slide_frame(&mut self, window: &mut Window, cx: &App) -> Option<(f32, f32)> {
+        let now = (self.selected_key(), self.side_width(window));
+        if let Some((key, width)) = self.side_seen.replace(now.clone())
+            && key == now.0 && width.is_some() != now.1.is_some() && !cx.reduce_motion() && !self.landing_active() {
+            self.side_slide = now.1.or(width).map(|w| (Instant::now(), now.1.is_some(), w));
+        }
+        let (start, opening, width) = self.side_slide?;
+        if start.elapsed() >= motion::RESIZE.total() { self.side_slide = None; return None; }
+        motion::request_frame(window, cx);
+        let t = motion::RESIZE.ease(motion::RESIZE.raw(start));
+        Some((width, if opening { t } else { 1. - t }))
+    }
+
+    /// Saindo, o painel ainda desenha o que mostrava enquanto desliza para fora.
+    pub(super) fn side_closing(&self) -> bool { self.side_slide.is_some_and(|(_, opening, _)| !opening) }
 }
 
 impl Render for Hangar {
@@ -4432,12 +4454,19 @@ impl Render for Hangar {
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
-        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
+        let slide = self.side_slide_frame(window, cx);
+        let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
             .when(self.activity_tab(), |el| el.child(self.activity_mark_float(cx)))
-            .child(self.subagent_mark_float(cx)).into_any_element());
+            .child(self.subagent_mark_float(cx)).into_any_element())
+            // Entrando ou saindo, o painel desliza da borda com a largura final: a conversa muda de largura uma vez só.
+            .map(|side| match slide {
+                Some((width, shown)) => div().w(px(width)).h_full().flex_shrink_0().overflow_hidden()
+                    .child(div().relative().left(px(width * (1. - shown))).h_full().child(side)).into_any_element(),
+                None => side,
+            });
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))

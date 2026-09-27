@@ -55,13 +55,15 @@ pub(super) struct Panel {
     shell_pending: bool,
     shell_request: u64,
     shell_error: Option<String>,
+    /// Quando abriu: o painel sobe do pé da janela nos primeiros 200 ms.
+    opened: Instant,
 }
 
 impl Panel {
     fn new(id: u64, session: String, cx: &mut Context<Hangar>) -> Self {
         Self { id, tabs: [Slot::new(session.clone(), true), Slot::new(String::new(), false)], session,
             active: 0, focus: cx.focus_handle().tab_stop(true), height: 260., drag: None, maximized: false,
-            shell_pending: false, shell_request: 0, shell_error: None }
+            shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now() }
     }
 }
 
@@ -257,8 +259,12 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn render_terminal(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panel = self.terminal.as_ref()?;
+        // Abrindo, sobe do pé com a altura final: a conversa encolhe uma vez só, não a cada quadro.
+        let rising = !panel.maximized && !cx.reduce_motion() && panel.opened.elapsed() < motion::RESIZE.total();
+        if rising { motion::request_frame(window, cx); }
+        let below = if rising { panel.height * (1. - motion::RESIZE.ease(motion::RESIZE.raw(panel.opened))) } else { 0. };
         let tab = panel.active;
         let slot = &panel.tabs[tab];
         let fixture_loaded = slot.fixture_loaded;
@@ -349,7 +355,7 @@ impl Hangar {
                 })))
             .child(Button::new("term-close").ghost().small().label("✕").accessibility_label(tr("term_close"))
                 .on_click(cx.listener(|this, _, window, cx| this.close_terminal(true, window, cx))));
-        Some(div().id("terminal-panel")
+        let terminal = div().id("terminal-panel")
             .when(panel.maximized, |el| el.absolute().inset_0().occlude())
             .when(!panel.maximized, |el| el.h(px(panel.height)).flex_shrink_0())
             .flex().flex_col().min_h_0().border_t_1().border_color(theme::border()).bg(theme::background())
@@ -357,6 +363,9 @@ impl Hangar {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     if let Some(panel) = this.terminal.as_mut() { panel.drag = Some((f32::from(event.position.y), panel.height)); cx.notify(); }
                 }))))
-            .child(header).child(body).into_any_element())
+            .child(header).child(body);
+        Some(if rising {
+            div().h(px(panel.height)).flex_shrink_0().overflow_hidden().child(terminal.relative().top(px(below))).into_any_element()
+        } else { terminal.into_any_element() })
     }
 }

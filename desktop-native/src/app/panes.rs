@@ -73,7 +73,14 @@ impl Hangar {
             Area::Nav => self.render_nav(window, cx),
             Area::Conversation => self.render_conversation_area(window, cx),
             Area::Bottom => self.render_bottom_area(window, cx),
-            Area::Side => self.render_side(window, cx).unwrap_or_else(|| div().into_any_element()),
+            Area::Side => {
+                // Fechando, o painel ainda desliza para fora com o conteúdo de antes.
+                let open = self.side.open;
+                self.side.open |= self.side_closing();
+                let side = self.render_side(window, cx);
+                self.side.open = open;
+                side.unwrap_or_else(|| div().into_any_element())
+            }
             Area::Overlay => div().absolute().inset_0()
                 .children(Root::render_dialog_layer(window, cx))
                 .children(Root::render_notification_layer(window, cx))
