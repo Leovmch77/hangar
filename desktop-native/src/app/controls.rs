@@ -77,6 +77,20 @@ fn capitalized(label: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
+/// A linha de status do Claude escreve o modelo colado ("Opus5.5·1M"); na pílula ele sai com espaços ("Opus 5.5 · 1M").
+/// Só palavra de três letras ou mais se solta do número: ids curtos como `k3` ficam como estão.
+fn spaced(label: &str) -> String {
+    let mut out = String::new();
+    let mut letters = 0;
+    for c in label.chars() {
+        if c == '·' { out.push_str(" · "); letters = 0; continue; }
+        if c.is_ascii_digit() && letters >= 3 { out.push(' '); }
+        letters = if c.is_alphabetic() { letters + 1 } else { 0 };
+        out.push(c);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }
 
 // A única linha com o nome exato; nome repetido entre providers não diz qual é a atual.
@@ -431,16 +445,41 @@ impl Hangar {
         }
     }
 
-    /// Seletores da sessão como no compositor do web: modelo, esforço e permissão em pílulas; o modo com seta.
+    /// Com modelo e esforço, os dois vão numa pílula só, e o esforço mora no rodapé do menu do modelo (o `pickers` do Zeron).
+    fn ctl_paired(&self) -> bool {
+        let list = self.ctl_list();
+        list.contains(&Ctl::Model) && list.contains(&Ctl::Effort)
+    }
+
+    /// Seletores da sessão: modelo com esforço, e permissão, em pílulas; o modo com seta.
     pub(super) fn render_ctl_pills(&self, readable: bool, cx: &mut Context<Self>) -> (Vec<AnyElement>, Option<AnyElement>) {
         let Some(key) = self.selected_key().filter(|_| readable) else { return (Vec::new(), None); };
         let busy = self.controls.busy.get(&key).copied();
         let open = self.controls.open.as_ref().filter(|o| o.key == key).map(|o| o.ctl);
         let claude = self.provider().0 == "claude";
+        let paired = self.ctl_paired();
         let (mut pills, mut mode) = (Vec::new(), None);
         for ctl in self.ctl_list() {
+            if paired && ctl == Ctl::Effort { continue; }
             let name = tr(&format!("ctl_{}", ctl.key()));
-            let value = self.ctl_label(ctl).map(|v| shown(ctl, v));
+            let value = self.ctl_label(ctl).map(|v| shown(ctl, v)).map(|v| if claude && ctl == Ctl::Model { spaced(&v) } else { v });
+            if paired && ctl == Ctl::Model {
+                let effort = self.ctl_label(Ctl::Effort).map(|e| capitalized(&e));
+                let applying = match busy { Some(Ctl::Model) => Some(name.clone()), Some(Ctl::Effort) => Some(tr("ctl_effort")), _ => None };
+                let text = applying.map(|what| tr("ctl_applying").replace("{what}", &what)).or(value.clone()).unwrap_or_else(|| name.clone());
+                let aria = [Some(format!("{name}: {text}")), effort.clone().map(|e| format!("{}: {e}", tr("ctl_effort")))]
+                    .into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                let id = SharedString::from(format!("ctl-{}", ctl.key()));
+                pills.push(popup::anchor(div(), id.clone()).child(chrome::pill_button(id, cx).gap(px(6.)).selected(open == Some(ctl)).disabled(!self.chat_online)
+                    .tooltip(format!("{name} · {}", tr("ctl_effort"))).accessibility_label(aria)
+                    .child(div().max_w(px(150.)).truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(text))
+                    .when_some(effort.filter(|_| busy.is_none()), |el, effort| el.child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(effort)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_ctl(ctl, false, cx);
+                        this.focus_ctl_panel(window, cx);
+                    }))).into_any_element());
+                continue;
+            }
             let text = if busy == Some(ctl) { tr("ctl_applying").replace("{what}", &name) } else { value.clone().unwrap_or_else(|| name.clone()) };
             let id = SharedString::from(format!("ctl-{}", ctl.key()));
             let listener = cx.listener(move |this, _, window, cx| {
@@ -549,6 +588,30 @@ impl Hangar {
             .into_any_element()
     }
 
+    /// Rodapé do menu do modelo: os níveis de esforço do modelo atual, como o "Raciocínio" da tela sem sessão. Trocar o
+    /// esforço deixa o menu aberto; o catálogo lido na abertura envelhece, então o nível da linha de status vence.
+    fn render_effort_footer(&self, catalog: &Value, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let levels = self.choices(Ctl::Effort, catalog);
+        if levels.is_empty() { return None; }
+        let now = self.ctl_label(Ctl::Effort).unwrap_or_default();
+        let live = levels.iter().any(|c| c.label.eq_ignore_ascii_case(now.trim()));
+        Some(div().flex().flex_col().gap(px(2.))
+            .child(popup::separator())
+            .child(popup::title(tr("new_chat_reasoning"), None))
+            .child(div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().flex_wrap().gap(px(4.))
+                .children(levels.into_iter().map(|c| {
+                    let on = if live { c.label.eq_ignore_ascii_case(now.trim()) } else { c.current };
+                    let label = capitalized(&c.label);
+                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).ghost().xsmall().selected(on).label(label)
+                        .disabled(busy || !c.enabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if on { return; }
+                            this.apply_ctl(Ctl::Effort, c.path.clone(), c.body.clone(), c.label.clone(), cx);
+                        }))
+                })))
+            .into_any_element())
+    }
+
     pub(super) fn render_ctl_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.selected_key()?;
         let open = self.controls.open.as_ref().filter(|o| o.key == key)?;
@@ -616,9 +679,11 @@ impl Hangar {
                     .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_ctl(1, false, cx)))
                     .child(Input::new(&self.ctl_search).h(px(32.)).aria_label(tr("ctl_search"))
                         .prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))));
+                let effort = (ctl == Ctl::Model && self.ctl_paired()).then(|| self.render_effort_footer(catalog, busy, cx)).flatten();
                 div().flex().flex_col().gap(px(2.))
                     .children(search)
                     .child(list)
+                    .children(effort)
                     .when(ctl == Ctl::Effort, |el| el.child(popup::separator())
                         .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_xs().text_color(theme::muted()).child(tr("effort_hint"))))
                     .when_some(probe_note.filter(|_| needs_probe), |el, note| el.child(div().px(px(8.)).flex().items_center().gap_2()
@@ -853,7 +918,15 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, claude_effort_current, claude_model_current, keep, only_match, step_free};
+    use super::{Choice, claude_effort_current, claude_model_current, keep, only_match, spaced, step_free};
+
+    #[test]
+    fn claude_model_label_gets_its_spaces_back() {
+        assert_eq!(spaced("Opus5.5·1M"), "Opus 5.5 · 1M");
+        assert_eq!(spaced("Sonnet4.6"), "Sonnet 4.6");
+        assert_eq!(spaced("Opus 5.5 · 1M"), "Opus 5.5 · 1M");
+        assert_eq!(spaced("k3"), "k3");
+    }
 
     #[test]
     fn search_matches_name_origin_or_id_ignoring_case() {
