@@ -4395,8 +4395,9 @@ impl Render for Hangar {
             // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
             .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation,
                 StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown), cx)))
-            // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca.
-            .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
+            // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca. Sem a
+            // conversa na tela, os lugares dela são do último desenho, de outra sessão.
+            .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
             .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
                 else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }, cx))
             .children(self.render_terminal(window, cx))
