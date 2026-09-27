@@ -8,9 +8,10 @@ Os seis tipos e seus campos obrigatórios estão em TIPOS abaixo. Regras que o c
 completam o contrato:
   - `ts` sempre presente, ISO-8601 com offset (saída de `date -Iseconds`).
   - `task` e `rodada` são números; `rodada` começa em 1 — rodada desconhecida é OMITIDA, nunca 0.
-  - `veredito.resultado` ∈ aprova|reprova|devolvido (o MESMO vocabulário do parecer); leva `sessao`
-    e, opcionais, `motivo` (str, a razão curta) e `reincide` (bool: segunda reprovação da mesma
-    causa — a porta do árbitro no laço). `entrega` leva o hash da rodada (stash) no campo `commit`.
+  - `veredito.resultado` ∈ aprova|reprova|devolvido|corrige (o MESMO vocabulário do parecer); leva
+    `sessao` e, opcionais, `motivo` (str, a razão curta) e `reincide` (bool: segunda reprovação da
+    mesma causa — a porta do árbitro no laço). `corrige` leva `patch` (caminho do patch do revisor;
+    o executor o aplica com `orq apply-patch`). `entrega` leva o hash da rodada (stash) no campo `commit`.
   - `fase` (opcional, em `entrega` e `veredito`) ∈ codigo|prova: rodada em duas fases de Task com
     prova de tela. Sem `fase`, a rodada é única.
   - Campo extra pode; tipo novo NÃO — o app agrega por esses seis.
@@ -30,7 +31,7 @@ TIPOS = {
     "sessao_trocada": {"de", "para"},
     "execucao_fim": {"resultado"},
 }
-RESULTADOS = {"aprova", "reprova", "devolvido"}
+RESULTADOS = {"aprova", "reprova", "devolvido", "corrige"}
 FASES = {"codigo", "prova"}
 
 

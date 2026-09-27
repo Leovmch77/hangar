@@ -42,7 +42,7 @@ PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova":
 CHECK_TIMEOUT_S = 900
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
-                    "de", "para", "plano", "branch", "gid", "fase")
+                    "de", "para", "plano", "branch", "gid", "fase", "patch")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
 JEV_TIMEOUT_S = 5
@@ -337,6 +337,13 @@ def _after_event(d: Path, ev: dict) -> None:
         _send_after_event(ex, f"APROVA Task {task} round {rnd}: commit only the Task's paths, by "
                               f"explicit path, then run `orq commit --task {task} --hash <hash>`.",
                           st["arbiter"])
+    elif res == "corrige":
+        ex = st["roles"].get(task, {}).get("executor")
+        _send_after_event(ex, f"CORRIGE Task {task} round {rnd}: the reviewer's patch {ev['patch']} "
+                              f"fixes the blockers. Run `orq apply-patch --task {task}` in your worktree "
+                              "(plus `--repo <your worktree>` in a wave); nothing else to decide. If it "
+                              f"fails, the patch is your recipe: fix it yourself and deliver round {rnd + 1} "
+                              "as usual.", st["arbiter"])
     elif res == "devolvido" or ev.get("reincide"):
         extra = " (reincide)" if ev.get("reincide") else ""
         _send_after_event(st["arbiter"], f"[decisao] Task {task} round {rnd}: {res}{extra}. "
@@ -638,6 +645,9 @@ def cmd_event(a) -> int:
         if ent and ent.get("fase") and ent["fase"] != ev.get("fase"):
             raise OrqError("verdict phase must match the delivered round: "
                            f"round {ev.get('rodada')} was delivered with --fase {ent['fase']}")
+    if ev.get("tipo") == "veredito" and ev.get("resultado") == "corrige":
+        ev["patch"] = str(Path(ev.get("patch") or "").expanduser().resolve()) if ev.get("patch") else ""
+        _check_patch(d, ev)
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
     _after_event(d, ev)
@@ -776,6 +786,83 @@ def _code_approved_object(d: Path, task: int) -> str | None:
         return None
     return next((ev.get("commit") for ev in reversed(evs) if ev.get("tipo") == "entrega"
                  and ev.get("task") == task and ev.get("rodada") == rnd), None)
+
+
+def round_object(d: Path, task: int, rnd: int) -> str | None:
+    return next((ev.get("commit") for ev in reversed(events(d)) if ev.get("tipo") == "entrega"
+                 and ev.get("task") == task and ev.get("rodada") == rnd), None)
+
+
+def _check_patch(d: Path, ev: dict) -> None:
+    """A reviewer's patch is small and stays inside the round, or it is an ordinary rejection."""
+    limit = plan_of(d).get("correcao") or 0
+    if not limit:
+        raise OrqError("corrige is off in the plan (Correção pelo revisor: até 0 linhas): "
+                       "reject the round as usual")
+    task, rnd = ev.get("task"), ev.get("rodada")
+    if any(x.get("tipo") == "veredito" and x.get("task") == task and x.get("resultado") == "corrige"
+           for x in events(d)):
+        raise OrqError("one corrige per Task: reject the round as usual")
+    patch = ev.get("patch") or ""
+    if not patch or not Path(patch).is_file():
+        raise OrqError(f"corrige needs --patch <existing file>, got {patch or 'none'}")
+    obj = round_object(d, task, rnd)
+    if not obj:
+        raise OrqError(f"round {rnd} of Task {task} was never delivered")
+    repo = config(d)["repo"]
+    stat = subprocess.run(["git", "-C", repo, "apply", "--numstat", str(Path(patch).resolve())],
+                          capture_output=True, text=True)
+    if stat.returncode != 0:
+        raise OrqError(f"patch unreadable: {stat.stderr.strip()[:200]}")
+    rows = [l.split("\t") for l in stat.stdout.splitlines() if l.count("\t") >= 2]
+    inside = set(git(repo, "diff", "--name-only", "--no-renames", f"{obj}^1", f"{obj}^2").splitlines())
+    outside = sorted({p for _, _, p in rows} - inside)
+    if outside:
+        raise OrqError(f"patch touches files outside the round: {outside}")
+    total = sum(int(a) + int(b) for a, b, _ in rows if a.isdigit() and b.isdigit())
+    if total > limit:
+        raise OrqError(f"patch changes {total} lines, the plan's limit is {limit}: reject the round as usual")
+
+
+def cmd_apply_patch(a) -> int:
+    """Round R + the reviewer's patch becomes round R+1, frozen and checked, back to the reviewer."""
+    d = base_dir(a.dir)
+    cfg = config(d)
+    repo = a.repo or cfg["repo"]
+    ver = next((ev for ev in reversed(events(d)) if ev.get("tipo") == "veredito"
+                and ev.get("task") == a.task and ev.get("resultado") == "corrige"), None)
+    if not ver:
+        raise OrqError(f"no corrige for Task {a.task}")
+    rnd, patch = ver["rodada"], ver["patch"]
+    if round_object(d, a.task, rnd + 1):
+        raise OrqError(f"round {rnd + 1} of Task {a.task} already delivered")
+    obj = round_object(d, a.task, rnd)
+    if subprocess.run(["git", "-C", repo, "diff", "--quiet", obj, "--"], capture_output=True).returncode != 0:
+        raise OrqError(f"worktree differs from round {rnd} ({obj[:12]}): the patch was made for that round")
+    ap = subprocess.run(["git", "-C", repo, "apply", "--index", patch], capture_output=True, text=True)
+    if ap.returncode != 0:
+        print(f"patch does not apply: {ap.stderr.strip()[:300]}; the patch is your recipe now: "
+              f"fix it yourself and deliver round {rnd + 1} as usual.")
+        return 1
+    ok, why = run_checks(repo, plan_of(d).get("checagens") or [],
+                         d / "checks" / f"task{a.task}-r{rnd + 1}-patch.log")
+    if not ok:
+        subprocess.run(["git", "-C", repo, "apply", "-R", "--index", patch], capture_output=True)
+        print(f"{why}. Worktree back to round {rnd}; the patch is your recipe now: fix it yourself "
+              f"and deliver round {rnd + 1} as usual.")
+        return 1
+    h = git(repo, "stash", "create").strip()
+    git(repo, "stash", "store", "-m", f"task-{a.task} round {rnd + 1} (reviewer patch)", h)
+    record_check(d, a.task, h, True, str(d / "checks" / f"task{a.task}-r{rnd + 1}-patch.log"))
+    ev = event_append(d, {"tipo": "entrega", "task": a.task, "rodada": rnd + 1, "commit": h,
+                          "motivo": f"round {rnd} + reviewer patch {patch}"})
+    journal_append(d, _event_line(ev))
+    par = state(d)["roles"].get(a.task, {}).get("par")
+    send(par, f"Task {a.task} round {rnd + 1} = round {rnd} + your patch {patch}, checks ok, object "
+              f"{h}. Review the patch with a clean-context subagent (revisor.md, \"Round of your own "
+              f"patch\") and give the verdict of round {rnd + 1}.")
+    print(f"round {rnd + 1} frozen: {h}")
+    return 0
 
 
 def cmd_commit(a) -> int:
@@ -944,6 +1031,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--task", type=int, required=True)
     s.add_argument("--commit", required=True)
     s.add_argument("--repo", help="the Task's worktree; default orq.json's")
+    s = sub.add_parser("apply-patch", help="apply the reviewer's patch as the next round")
+    s.add_argument("--task", type=int, required=True)
+    s.add_argument("--repo", help="the Task's worktree; default orq.json's")
     s = sub.add_parser("read", help="the contract's common part + one Task, or the journal's tail")
     s.add_argument("what", choices=["contract", "journal"])
     s.add_argument("--task", type=int)
@@ -971,7 +1061,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
-        "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log}
+        "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
+        "apply-patch": cmd_apply_patch}
 
 
 def main(argv: list[str] | None = None) -> int:
