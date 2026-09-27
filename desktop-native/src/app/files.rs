@@ -106,7 +106,13 @@ impl Files {
     }
 }
 
-async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<String>) -> Result<Content, Failure> {
+async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<String>, local: Option<PathBuf>) -> Result<Content, Failure> {
+    // Servidor nesta máquina (a árvore já provou): caminho da raiz sai do disco, com as mesmas travas.
+    if let Some(root) = local.filter(|root| !path.starts_with('/') && root.join(&path).exists()) {
+        return tokio::task::spawn_blocking(move || super::tree::read_local(&root, &path).map(|read|
+            Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: false }))
+            .await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+    }
     let mut resolved = api.act(&name, &["files", "resolver"], Some(json!({"caminhos": [&path]})), false, 30).await?;
     if resolved.get("ok").and_then(|v| v.get(&path)).is_none() && !candidates.is_empty() {
         resolved = api.act(&name, &["files", "resolver"], Some(json!({"caminhos": candidates})), false, 30).await?;
@@ -165,8 +171,9 @@ impl Hangar {
             }
             for event in &self.chat.events { collect(&json!([event.text, event.tool_input, event.result]), &path, &mut candidates); }
         }
+        let local = self.tree.local_root(&self.session_owner());
         self.runtime.spawn(async move {
-            let result = read_file(api, key.name, path, candidates).await;
+            let result = read_file(api, key.name, path, candidates, local).await;
             let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Read(id, result)) }).await;
         });
     }

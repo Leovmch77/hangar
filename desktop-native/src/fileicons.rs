@@ -92,6 +92,11 @@ pub fn citation_icon(name: &str) -> Img {
         .size_3p5().flex_shrink_0()
 }
 
+/// Ícone de uma linha da árvore de arquivos: pasta aberta ou fechada, ou o tipo do arquivo.
+pub fn tree_icon(name: &str, is_dir: bool, open: bool) -> Img {
+    img(SharedString::from(format!("file-icons/{}.svg", icon_name(name, is_dir, open)))).size_3p5().flex_shrink_0()
+}
+
 macro_rules! file_assets {
     ($($name:literal),* $(,)?) => {
         const ASSETS: &[(&str, &[u8])] = &[$(

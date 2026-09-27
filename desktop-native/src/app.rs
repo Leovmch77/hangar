@@ -39,6 +39,7 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod tree;
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation]);
 
@@ -380,6 +381,7 @@ pub struct Hangar {
     act: activity::ActivityState,
     panes: panes::Panes,
     files: files::Files,
+    tree: tree::Tree,
     dossier: Option<Entity<baton::Dossier>>,
     /// Quando vimos o turno começar ao vivo; a sessão aberta já trabalhando conta do último envio.
     turn_seen: Option<Instant>,
@@ -500,7 +502,7 @@ impl Hangar {
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
-            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
             new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
