@@ -66,7 +66,7 @@ impl Hangar {
             // Cartão do Zeron: título de uma linha, o começo da resposta em até três e, num trecho, quantas perguntas junta.
             let card = hovered.then(|| {
                 let reply = reply_after(events, event).map(|reply| preview(&reply, PREVIEW_REPLY_CHARS));
-                let body = div().w(px(280.)).p(px(12.)).flex().flex_col().gap(px(6.))
+                let body = div().id("hover-card-rail").w(px(280.)).p(px(12.)).flex().flex_col().gap(px(6.))
                     .child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme::text()).truncate().child(prompt.clone()))
                     .when_some(reply, |el, reply| el.child(div().text_size(px(11.)).line_height(px(17.)).text_color(theme::muted())
                         .line_clamp(3).text_ellipsis().child(reply)))

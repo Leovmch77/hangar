@@ -7,7 +7,7 @@ use super::*;
 use super::panes::Area;
 use std::path::Path;
 use source::{FileSource, Listing};
-pub(super) use source::read_local;
+pub(super) use source::{read_local, resolve};
 
 const ROW_H: f32 = 26.;
 const INDENT: f32 = 14.;
@@ -381,7 +381,7 @@ impl Hangar {
         self.tree_sync(cx);
         let searching = !self.tree.query.is_empty();
         let search = div().flex().items_center().gap_1().px_3().pb_2()
-            .child(div().flex_1().min_w_0()
+            .child(div().id("tree-search").flex_1().min_w_0()
                 .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.tree_step_result(-1, cx)))
                 .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.tree_step_result(1, cx)))
                 .capture_action(cx.listener(|this, _: &Escape, window, cx| {
