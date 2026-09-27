@@ -310,6 +310,32 @@ def _sub_id(uid: str, k: int) -> str:
     return uid if k == 0 else f"{uid}:{k}"
 
 
+# Anexos que o parse_obj transforma em evento. Os outros (resposta de hook assíncrono, hook_success,
+# lembrete de tokens...) nunca viram bolha e, numa sessão longa, são quase todos os bytes do jsonl:
+# ler só o relógio deles, sem json.loads, é o que deixa barato o /history de transcript grande.
+_ATTACHMENT_EVENT_TYPES = frozenset({"queued_command", "hook_additional_context"})
+_ATTACHMENT_HEAD_RE = re.compile(
+    r'\{"parentUuid":(?:null|"[^"\\]*"),"isSidechain":(?:true|false),"attachment":\{"type":"([^"\\]*)"')
+_ATTACHMENT_TAIL = '},"type":"attachment","uuid":"'
+_ATTACHMENT_TAIL_RE = re.compile(r'\},"type":"attachment","uuid":"[^"\\]*","timestamp":"([^"\\]*)"')
+
+
+def silent_attachment_timestamp(line: str) -> str | None:
+    """`timestamp` de uma linha de anexo do Claude que o parse_obj descartaria, lido sem json.loads.
+    None = não é esse caso (ou o formato não é o esperado): a linha segue pelo parse completo.
+    Exige a linha terminada: a última, ainda sendo gravada, não pode dar relógio que o json recusaria."""
+    if not line.endswith("}\n"):
+        return None
+    head = _ATTACHMENT_HEAD_RE.match(line)
+    if not head or head.group(1) in _ATTACHMENT_EVENT_TYPES:
+        return None
+    # rfind: o fechamento do anexo no topo vem depois de todo o conteúdo dele, e aspas dentro de
+    # string JSON são sempre escapadas, então o último casamento é o do topo.
+    i = line.rfind(_ATTACHMENT_TAIL)
+    tail = _ATTACHMENT_TAIL_RE.match(line, i) if i >= 0 else None
+    return tail.group(1) if tail else None
+
+
 def parse_obj(obj: dict) -> list[ChatEvent]:
     """Eventos de chat de UMA entrada (ja parseada) do transcript. Lista pq uma entrada pode
     carregar VARIOS blocos (tool calls paralelas = varios tool_result numa msg user so; assistant

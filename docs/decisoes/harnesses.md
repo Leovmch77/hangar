@@ -164,6 +164,22 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `GET /api/sessions/{name}/tool-progress/{id}` a cada 2 s enquanto roda. A saída parcial do Bash
   vem do `tasks/<id>.output` do Claude Code, achado pelo processo (`procinfo.saida_de_comando`). Ver
   [Progresso de MCP](#progresso-de-mcp-no-claude-sem-terminal).
+- **Anexo do Claude que não vira bolha não passa por `json.loads` no `/history`.** O
+  `merged_history` lê só o relógio dele (`transcript.silent_attachment_timestamp`). Ramo novo de
+  anexo no `parse_obj` entra também em `_ATTACHMENT_EVENT_TYPES`, senão some calado. Ver
+  [anexos no /history](#history-de-transcript-grande-anexos-sem-bolha).
+
+## /history de transcript grande: anexos sem bolha
+
+Em 27/09/2026 a sessão `native-correcoes` tinha um jsonl de 223 MB: 193 MB eram 11 mil linhas
+`attachment` (170 MB só de `async_hook_response`, ~22 KB cada) que o `parse_obj` descarta, e o
+transcript inteiro rendia 981 eventos. Com `limit=400` a janela do tail-read crescia até o início
+e parseava 312 MB (cada janela reparseia do zero). Medido pela rota real (TestClient, sem subir
+backend), 3 rodadas, mediana, arquivo em cache: `limit=400` 0,71 s → 0,36 s; `limit=120`
+0,19 → 0,11 s; `limit=60` 0,066 → 0,032 s; sem limite 0,50 → 0,26 s. Corpo e ETag idênticos; 251
+transcripts reais × 3 limites comparados com o atalho desligado, zero diferenças. O relógio do
+anexo pulado continua contando porque decide o `ts` herdado por linha sem timestamp e por entrada
+de fila sem `ts`.
 
 ## Codex: compactação e ida ao terminal
 

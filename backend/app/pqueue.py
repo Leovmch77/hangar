@@ -16,7 +16,7 @@ from watchfiles import awatch
 from app import atomico
 from app.config import settings
 from app.models import ChatEvent, dumps_safe, scrub_surrogates
-from app.transcript import RewriteFilter, parse_obj
+from app.transcript import RewriteFilter, parse_obj, silent_attachment_timestamp
 
 _log = logging.getLogger("hangar.pqueue")
 
@@ -1084,13 +1084,17 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
             if offset:
                 fh.seek(offset)
             for i, line in enumerate(fh):
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if reescrita is not None and not reescrita.keep(obj):
-                    continue
-                evs = parse(obj)
+                # Anexo que nao vira bolha: so o relogio dele conta. RewriteFilter.keep ignora anexo.
+                if reescrita is not None and (att_ts := silent_attachment_timestamp(line)) is not None:
+                    obj, evs = {"timestamp": att_ts}, []
+                else:
+                    try:
+                        obj = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if reescrita is not None and not reescrita.keep(obj):
+                        continue
+                    evs = parse(obj)
                 # ts ANTES do `continue`: com o parser do Pi a 1a linha util e um user_msg que fica
                 # RETIDO (devolve [] nela), e pular o relogio aqui empurrava o start_ts pra linha
                 # seguinte que solta algo — a resposta do assistente, minutos depois. Efeito: toda

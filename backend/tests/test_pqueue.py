@@ -476,6 +476,71 @@ def test_merged_history_limit_tail_read_e_sufixo_do_parse_completo(tmp_path, mon
         assert len(tail) >= lim
         assert tail == full[-len(tail):]
 
+def _linha_claude(obj):
+    # Formato do Claude Code: JSON compacto, acento sem escape, uma entrada por linha.
+    import json
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _anexo(tipo, ts, **campos):
+    return _linha_claude({"parentUuid": None, "isSidechain": False,
+                          "attachment": {"type": tipo, **campos}, "type": "attachment",
+                          "uuid": f"a-{ts}", "timestamp": ts, "sessionId": "s", "cwd": "/p"})
+
+
+def test_silent_attachment_timestamp_so_le_anexo_sem_bolha():
+    from app.transcript import silent_attachment_timestamp as sat
+    # Conteudo que imita o fechamento do topo: dentro da string as aspas vem escapadas, nao casa.
+    armadilha = '},"type":"attachment","uuid":"x","timestamp":"1999-01-01T00:00:00Z"'
+    linha = _anexo("async_hook_response", "2026-01-01T00:00:05Z", stdout=armadilha * 3)
+    assert sat(linha) == "2026-01-01T00:00:05Z"
+    assert sat(_anexo("queued_command", "2026-01-01T00:00:05Z", prompt=[])) is None
+    assert sat(_anexo("hook_additional_context", "2026-01-01T00:00:05Z", content=["x"])) is None
+    assert sat(linha.rstrip("\n")) is None          # linha ainda sendo gravada
+    assert sat(_linha_claude({"type": "user", "timestamp": "2026-01-01T00:00:05Z",
+                              "message": {"role": "user", "content": "oi"}})) is None
+
+
+def test_merged_history_pular_anexo_sem_bolha_nao_muda_a_resposta(tmp_path, monkeypatch):
+    # O atalho do anexo so pode mudar o custo: mesmos eventos, mesma ordem, mesmo relogio herdado
+    # (assistant sem timestamp e entrada de fila sem ts herdam o do anexo anterior).
+    j = tmp_path / "t.jsonl"
+    linhas = []
+    for i in range(40):
+        s = f"2026-01-01T00:{i:02d}:00Z"
+        linhas.append(_linha_claude({"type": "user", "uuid": f"u{i}", "timestamp": s,
+                                     "message": {"role": "user", "content": f"msg {i}"}}))
+        linhas.append(_anexo("async_hook_response", f"2026-01-01T00:{i:02d}:10Z", stdout="y" * 3000))
+        linhas.append(_linha_claude({"type": "assistant", "uuid": f"r{i}",
+                                     "message": {"role": "assistant",
+                                                 "content": [{"type": "text", "text": f"resp {i}"}]}}))
+    linhas.append(_anexo("queued_command", "2026-01-01T00:50:00Z",
+                         prompt=[{"type": "text", "text": "no meio do turno"}]))
+    linhas.append(_anexo("hook_additional_context", "2026-01-01T00:50:01Z", hookEvent="Stop", content=["reabre"]))
+    # O relogio do anexo pulado decide a ordem: "fim" (sem timestamp) herda 00:59 e cai DEPOIS de
+    # "depois", gravado em seguida com 00:55.
+    linhas.append(_anexo("hook_success", "2026-01-01T00:59:00Z", stdout="z"))
+    linhas.append(_linha_claude({"type": "assistant", "uuid": "r-fim", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "fim"}]}}))
+    linhas.append(_linha_claude({"type": "user", "uuid": "u-depois", "timestamp": "2026-01-01T00:55:00Z",
+                                 "message": {"role": "user", "content": "depois"}}))
+    j.write_text("".join(linhas), encoding="utf-8")
+    PromptQueue("s").path.parent.mkdir(parents=True, exist_ok=True)
+    PromptQueue("s").path.write_text('{"id": "e1", "text": "sem relogio"}\n', encoding="utf-8")
+    monkeypatch.setattr(pqueue, "_TAIL_WINDOW", 4096)
+
+    def rodar():
+        return {lim: [e.model_dump() for e in pqueue.merged_history("s", str(j), limit=lim)]
+                for lim in (None, 5, 30)}
+
+    com_atalho = rodar()
+    monkeypatch.setattr(pqueue, "silent_attachment_timestamp", lambda linha: None)
+    assert com_atalho == rodar()
+    ids = [e["id"] for e in com_atalho[None]]
+    assert ids[-5:] == ["a-2026-01-01T00:50:00Z", "a-2026-01-01T00:50:01Z",
+                        "u-depois", "queued-e1", "r-fim"]
+
+
 def test_reconcile_confirma_msg_com_imagem_prefixo_image_n(tmp_path):
     # Claude Code grava prompt com anexo como "[Image #N]<texto> — 📎 imagem:" (prefixo prependado,
     # path removido). Sem normalizar o prefixo, a entrada delivered nunca confirmava contra o
