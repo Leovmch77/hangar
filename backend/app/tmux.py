@@ -651,7 +651,9 @@ def claude_json_de(config_dir: str | None) -> Path:
     Nao e derivavel do config dir sozinho: com `CLAUDE_CONFIG_DIR` ausente o CLI le o da HOME, e
     com ela setada le o de DENTRO do config dir — dois arquivos diferentes (ver
     `_config_dir_padrao`). Quem decide se a variavel chega ao pane e o `_e_config_dir`, entao a
-    resposta vem dele, nunca de uma segunda copia da regra. Sem isso o pre-trust da pasta escrevia
+    resposta vem dele, nunca de uma segunda copia da regra. Excecao: a janela escondida de login
+    (`new_hidden_shell`) manda a pasta padrao por `-e` no tmux; ela morre logo depois do login e
+    ninguem le o `.claude.json` de dentro dela. Sem isso o pre-trust da pasta escrevia
     no `~/.claude.json` enquanto o pane lia `~/.claude/.claude.json`, e a sessao nova nascia presa
     no "trust this folder?".
     """
