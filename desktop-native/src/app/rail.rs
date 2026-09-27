@@ -1,7 +1,8 @@
 //! Marcador de mensagens (`MessageRail` do Zeron): uma risca por pergunta do usuário na borda esquerda da conversa.
-//! A da pergunta que está no topo da tela acende, o mouse em cima mostra o começo dela e o clique leva até ela, mesmo
-//! fora do trecho desenhado da lista.
+//! A da pergunta que está no topo da tela acende, o mouse em cima abre um cartão com o começo dela e da resposta, e o
+//! clique leva até ela, mesmo fora do trecho desenhado da lista.
 use super::*;
+use super::panes::Area;
 
 /// Abaixo desta largura da conversa o marcador some: encostaria no texto.
 const MIN_WIDTH: f32 = 768.;
@@ -12,7 +13,8 @@ const GAP: f32 = 3.;
 const MARGIN: f32 = 24.;
 /// Pilha compacta em qualquer altura de janela: passando disso, cada risca vale um trecho da conversa.
 const MAX_TICKS: usize = 12;
-const PREVIEW_CHARS: usize = 160;
+const PREVIEW_PROMPT_CHARS: usize = 160;
+const PREVIEW_REPLY_CHARS: usize = 200;
 
 /// Trechos `[início, fim)` das perguntas que cada risca representa: uma por risca enquanto couberem.
 fn buckets(count: usize, capacity: usize) -> Vec<(usize, usize)> {
@@ -21,10 +23,16 @@ fn buckets(count: usize, capacity: usize) -> Vec<(usize, usize)> {
     (0..slots).map(|k| (k * count / slots, (k + 1) * count / slots)).collect()
 }
 
-fn preview(text: &str) -> String {
+fn preview(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= PREVIEW_CHARS { return flat; }
-    format!("{}…", flat.chars().take(PREVIEW_CHARS - 1).collect::<String>().trim_end())
+    if flat.chars().count() <= max { return flat; }
+    format!("{}…", flat.chars().take(max - 1).collect::<String>().trim_end())
+}
+
+/// Primeira resposta com texto depois da pergunta `event`, antes da pergunta seguinte.
+fn reply_after(events: &[ChatEvent], event: usize) -> Option<String> {
+    events[event + 1..].iter().take_while(|e| e.kind != "user_msg" || peer_of(e).is_some())
+        .filter(|e| e.kind == "assistant_msg").map(display_body).find(|text| !text.trim().is_empty())
 }
 
 impl Hangar {
@@ -47,19 +55,38 @@ impl Hangar {
         let active = rows.iter().rposition(|&(row, _)| row <= top).unwrap_or(0);
         let usable = (if height > 0. { height } else { 600. } - 2. * MARGIN).max(SLOT);
         let capacity = (((usable + GAP) / (SLOT + GAP)).floor() as usize).min(MAX_TICKS);
-        let ticks = buckets(rows.len(), capacity).into_iter().map(|(start, end)| {
+        let hover = self.rail_hover;
+        let ticks = buckets(rows.len(), capacity).into_iter().enumerate().map(|(ix, (start, end))| {
             let lit = (start..end).contains(&active);
+            let hovered = hover == Some(ix);
             let (row, event) = rows[if lit { active } else { start }];
             let text = display_body(&events[event]);
-            let text = if text.trim().is_empty() { activity::web("anexos_imagem_enviada") } else { preview(&text) };
-            let label = text.clone();
-            div().id(SharedString::from(format!("rail-{}", events[rows[start].1].id))).group("rail-tick")
-                .h(px(SLOT)).w_full().flex().items_center().cursor_pointer()
-                .role(Role::Button).aria_label(text.clone())
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+            let text = if text.trim().is_empty() { activity::web("anexos_imagem_enviada") } else { text };
+            let prompt = preview(&text, PREVIEW_PROMPT_CHARS);
+            // Cartão do Zeron: título de uma linha, o começo da resposta em até três e, num trecho, quantas perguntas junta.
+            let card = hovered.then(|| {
+                let reply = reply_after(events, event).map(|reply| preview(&reply, PREVIEW_REPLY_CHARS));
+                let body = div().id("hover-card-rail").w(px(280.)).p(px(12.)).flex().flex_col().gap(px(6.))
+                    .child(div().text_size(px(12.)).line_height(px(18.)).text_color(theme::text()).truncate().child(prompt.clone()))
+                    .when_some(reply, |el, reply| el.child(div().text_size(px(11.)).line_height(px(17.)).text_color(theme::muted())
+                        .line_clamp(3).text_ellipsis().child(reply)))
+                    .when(end - start > 1, |el| el.child(div().text_size(px(10.)).text_color(theme::faint())
+                        .child(tr("rail_prompts").replace("{n}", &(end - start).to_string()))));
+                deferred(anchored().anchor(gpui_kit::Anchor::LeftCenter).snap_to_window_with_margin(px(8.))
+                    .child(div().pl(px(26.)).child(chrome::popover(body.into_any_element(), false))))
+            });
+            div().id(SharedString::from(format!("rail-{}", events[rows[start].1].id)))
+                .relative().h(px(SLOT)).w_full().flex().items_center().cursor_pointer()
+                .role(Role::Button).aria_label(prompt)
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    // Sair de uma risca e entrar na vizinha chegam em qualquer ordem: a saída só apaga a própria.
+                    let next = if *hovered { Some(ix) } else { this.rail_hover.filter(|&h| h != ix) };
+                    if next != this.rail_hover { this.rail_hover = next; this.redraw(Area::Conversation, cx); }
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| this.jump_to_row(row, cx)))
-                .child(div().h(px(2.)).w(px(12.)).rounded(px(1.)).bg(if lit { theme::text().opacity(0.8) } else { theme::faint().opacity(0.5) })
-                    .group_hover("rail-tick", |el| el.w(px(20.)).bg(theme::text().opacity(0.8))))
+                .child(div().h(px(2.)).w(px(if hovered { 20. } else { 12. })).rounded(px(1.))
+                    .bg(if lit || hovered { theme::text().opacity(0.8) } else { theme::faint().opacity(0.5) }))
+                .children(card)
         });
         Some(div().absolute().left(px(16.)).top_0().bottom_0().w(px(26.)).flex().flex_col().items_start().justify_center()
             .gap(px(GAP)).children(ticks).into_any_element())

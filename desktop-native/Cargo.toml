@@ -27,6 +27,7 @@ ring = "=0.17.14"
 base64 = "=0.22.1"
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 rusty-leveldb = "=4.0.1"
+notify = "=7.0.0"
 
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component-0.6.6" }

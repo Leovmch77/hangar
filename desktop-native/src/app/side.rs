@@ -617,10 +617,15 @@ impl Hangar {
         // o detalhe do estado e o loop descem para a primeira seção.
         let _ = state;
         let on_activity = self.activity_tab();
+        // O botão de árvore do cabeçalho do Zeron: troca o corpo do painel pelos arquivos da sessão.
+        let files = self.tree.open && readable;
         let header = div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().justify_between()
-            .child(self.render_side_title(cx))
-            .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx)
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))));
+            .child(if files { div().font_weight(FontWeight::SEMIBOLD).child(activity::web("arq_aba")).into_any_element() } else { self.render_side_title(cx) })
+            .child(div().flex().items_center().gap_1()
+                .when(readable, |el| el.child(chrome::icon_button("side-files-tree", IconName::FolderTree, activity::web("arq_aba"), cx).selected(files)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_tree(window, cx)))))
+                .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))));
         let section = |body: AnyElement| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).child(body);
         let mut content = div().flex().flex_col();
         if detail.is_some() || self.loop_text().is_some() {
@@ -660,8 +665,9 @@ impl Hangar {
                 .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                     else { el.border_l_1().border_color(theme::border()) })
                 .child(header)
-                .children(self.render_subagent_tabs(cx))
-                .child(if let Some(view) = self.subagent_tab_view(cx) { div().flex_1().min_h_0().child(view).into_any_element() }
+                .when(!files, |el| el.children(self.render_subagent_tabs(cx)))
+                .child(if files { div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element() }
+                    else if let Some(view) = self.subagent_tab_view(cx) { div().flex_1().min_h_0().child(view).into_any_element() }
                     else if on_activity { div().flex_1().min_h_0().child(self.activity_view(cx)).into_any_element() }
                     else { div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element() })
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))

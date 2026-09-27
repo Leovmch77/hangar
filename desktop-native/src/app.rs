@@ -41,6 +41,7 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod tree;
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat]);
 
@@ -295,6 +296,8 @@ pub struct Hangar {
     plan_scroll: (String, ScrollHandle),
     plan_view: Option<(String, Entity<TextViewState>)>,
     list_state: ListState,
+    /// Risca do marcador de mensagens sob o mouse: abre o cartão com a pergunta e o começo da resposta.
+    rail_hover: Option<usize>,
     follow: follow::Follow,
     row_ids: Vec<String>,
     row_signatures: Vec<String>,
@@ -380,6 +383,7 @@ pub struct Hangar {
     act: activity::ActivityState,
     panes: panes::Panes,
     files: files::Files,
+    tree: tree::Tree,
     dossier: Option<Entity<baton::Dossier>>,
     /// Quando vimos o turno começar ao vivo; a sessão aberta já trabalhando conta do último envio.
     turn_seen: Option<Instant>,
@@ -484,7 +488,7 @@ impl Hangar {
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
-            list_state, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
+            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
@@ -502,7 +506,7 @@ impl Hangar {
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
-            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
             new_chat_folders: Default::default(), landing: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),

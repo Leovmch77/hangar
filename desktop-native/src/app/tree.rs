@@ -1,0 +1,438 @@
+//! Árvore de arquivos da sessão no painel direito, no molde do `files/` do Zeron (MIT, ver `LICENSE-ZERON`):
+//! busca por nome no topo, pastas com seta, ícone por tipo, o nome na cor do estado no git e o clique abrindo o arquivo
+//! no visor. Servidor nesta máquina lê o disco e acompanha as mudanças com um vigia; servidor de fora, pelas rotas.
+mod source;
+
+use super::*;
+use super::panes::Area;
+use std::path::Path;
+use source::{FileSource, Listing};
+pub(super) use source::{read_local, resolve};
+
+const ROW_H: f32 = 26.;
+const INDENT: f32 = 14.;
+/// Espera o disco sossegar antes de reler: um `git checkout` ou um build disparam centenas de avisos seguidos.
+const SETTLE: Duration = Duration::from_millis(300);
+
+enum Dir { Loading, Ready(Listing), Failed(String) }
+
+#[derive(Clone)]
+enum RowKind { Entry { dir: bool, mark: Option<char> }, Loading, Empty, Failed(String), Truncated }
+
+#[derive(Clone)]
+struct Row { path: String, name: String, depth: usize, kind: RowKind }
+
+pub(super) struct Tree {
+    pub open: bool,
+    owner: Option<(u64, String)>,
+    generation: u64,
+    source: Option<FileSource>,
+    picking: Option<Failure>,
+    dirs: HashMap<String, Dir>,
+    expanded: HashSet<String>,
+    selected: Option<String>,
+    rows: Vec<Row>,
+    scroll: UniformListScrollHandle,
+    focus: FocusHandle,
+    search: Entity<InputState>,
+    query: String,
+    /// `None` enquanto a busca roda.
+    results: Option<Result<(Vec<String>, bool), String>>,
+    active: usize,
+    search_task: Option<Task<()>>,
+    reloading: bool,
+    reload_again: bool,
+    watcher: Option<notify::RecommendedWatcher>,
+    watched: HashSet<PathBuf>,
+    watch_error: bool,
+    _watch_task: Option<Task<()>>,
+}
+
+impl Tree {
+    pub fn new(window: &mut Window, cx: &mut Context<Hangar>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(activity::web("arq_buscar")));
+        cx.subscribe(&search, |this: &mut Hangar, _, event: &InputEvent, cx| match event {
+            InputEvent::Change => this.tree_search_changed(cx),
+            _ => {}
+        }).detach();
+        Self { open: false, owner: None, generation: 0, source: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
+            selected: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
+            query: String::new(), results: None, active: 0, search_task: None, reloading: false, reload_again: false,
+            watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None }
+    }
+
+    /// Linhas à vista: a raiz e, dentro de cada pasta aberta, o que ela tem, com a linha de estado quando falta conteúdo.
+    fn rebuild(&mut self) {
+        fn walk(tree: &Tree, dir: &str, depth: usize, out: &mut Vec<Row>) {
+            let status = |kind: RowKind| Row { path: format!("{dir}\u{0}"), name: String::new(), depth, kind };
+            match tree.dirs.get(dir) {
+                None | Some(Dir::Loading) => out.push(status(RowKind::Loading)),
+                Some(Dir::Failed(reason)) => out.push(status(RowKind::Failed(reason.clone()))),
+                Some(Dir::Ready(listing)) if listing.entries.is_empty() => out.push(status(RowKind::Empty)),
+                Some(Dir::Ready(listing)) => {
+                    for entry in &listing.entries {
+                        out.push(Row { path: entry.path.clone(), name: entry.name.clone(), depth,
+                            kind: RowKind::Entry { dir: entry.dir, mark: entry.mark } });
+                        if entry.dir && tree.expanded.contains(&entry.path) { walk(tree, &entry.path, depth + 1, out); }
+                    }
+                    if listing.truncated { out.push(status(RowKind::Truncated)); }
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        walk(self, "", 0, &mut rows);
+        self.rows = rows;
+    }
+
+    fn entry(&self, path: &str) -> Option<(bool, bool)> {
+        self.rows.iter().find_map(|row| match row.kind {
+            RowKind::Entry { dir, .. } if row.path == path => Some((dir, self.expanded.contains(path))),
+            _ => None,
+        })
+    }
+
+    /// Pastas lidas agora: a raiz e as abertas.
+    fn loaded_dirs(&self) -> Vec<String> {
+        let mut dirs = vec![String::new()];
+        dirs.extend(self.expanded.iter().filter(|dir| self.dirs.contains_key(*dir)).cloned());
+        dirs
+    }
+
+    pub fn local_root(&self, owner: &Option<(u64, String)>) -> Option<PathBuf> {
+        self.source.as_ref().filter(|_| &self.owner == owner).and_then(FileSource::root).map(Path::to_path_buf)
+    }
+}
+
+fn mark_color(mark: char) -> Hsla {
+    match mark { '?' | 'A' => theme::success(), 'R' => theme::accent(), 'D' | 'U' => theme::danger(), _ => theme::warning() }
+}
+
+impl Hangar {
+    pub(super) fn toggle_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.open = !self.tree.open;
+        if self.tree.open { self.tree.focus.focus(window, cx); } else { self.tree_stop(); }
+        cx.notify();
+    }
+
+    /// Solta o vigia e as leituras em voo; a próxima abertura relê do zero.
+    fn tree_stop(&mut self) {
+        let tree = &mut self.tree;
+        tree.owner = None;
+        tree.generation += 1;
+        (tree.watcher, tree._watch_task, tree.search_task) = (None, None, None);
+        tree.watched.clear();
+        (tree.source, tree.picking, tree.reloading, tree.reload_again, tree.watch_error) = (None, None, false, false, false);
+        tree.dirs.clear();
+        tree.expanded.clear();
+        tree.rows.clear();
+        tree.selected = None;
+    }
+
+    /// Chamado no desenho do painel: sessão trocada recomeça a árvore e escolhe de novo de onde ler.
+    fn tree_sync(&mut self, cx: &mut Context<Self>) {
+        let owner = self.session_owner();
+        if !self.tree.open || self.tree.owner == owner { return; }
+        self.tree_stop();
+        self.tree.owner = owner;
+        let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return };
+        let (name, cwd, generation) = (session.name.clone(), session.cwd.clone(), self.tree.generation);
+        let pick = self.runtime.spawn(FileSource::pick(api, name, cwd));
+        cx.spawn(async move |this, cx| {
+            let Ok(source) = pick.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.tree.generation != generation { return; }
+                this.tree.source = Some(source);
+                this.tree_reload(cx);
+            });
+        }).detach();
+    }
+
+    /// Relê a raiz e as pastas abertas (e, no disco, as marcas do git e o que o vigia acompanha).
+    fn tree_reload(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.tree.source.clone() else { return };
+        if self.tree.reloading { self.tree.reload_again = true; return; }
+        self.tree.reloading = true;
+        let dirs = self.tree.loaded_dirs();
+        self.tree_fetch(source, dirs, true, cx);
+    }
+
+    fn tree_fetch(&mut self, source: FileSource, dirs: Vec<String>, reload: bool, cx: &mut Context<Self>) {
+        for dir in &dirs { self.tree.dirs.entry(dir.clone()).or_insert(Dir::Loading); }
+        self.tree.rebuild();
+        let generation = self.tree.generation;
+        let job = self.runtime.spawn(async move {
+            let listings = source.list(dirs).await;
+            let watch = match source.root().map(Path::to_path_buf) {
+                Some(root) => tokio::task::spawn_blocking(move || FileSource::watch_dirs(&root)).await.ok(),
+                None => None,
+            };
+            (listings, watch)
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((listings, watch)) = job.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.tree.generation != generation { return; }
+                for (dir, listing) in listings {
+                    // Pasta que sumiu do disco fecha em vez de ficar aberta com erro.
+                    if dir.is_empty() || this.tree.expanded.contains(&dir) {
+                        this.tree.dirs.insert(dir, match listing { Ok(listing) => Dir::Ready(listing), Err(error) => Dir::Failed(Self::fetch_failure(&error)) });
+                    }
+                }
+                if let Some(dirs) = watch { this.tree_watch(dirs, cx); }
+                this.tree.rebuild();
+                this.redraw(Area::Side, cx);
+                if reload {
+                    this.tree.reloading = false;
+                    if std::mem::take(&mut this.tree.reload_again) { this.tree_reload(cx); }
+                }
+            });
+        }).detach();
+    }
+
+    /// Acompanha exatamente estas pastas; o primeiro pedido também liga o vigia e a fila que relê a árvore.
+    fn tree_watch(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        use notify::Watcher as _;
+        if self.tree.watcher.is_none() {
+            let (tx, rx) = async_channel::bounded::<()>(1);
+            let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) { let _ = tx.try_send(()); }
+            });
+            let Ok(watcher) = watcher else { self.tree.watch_error = true; return };
+            self.tree.watcher = Some(watcher);
+            let generation = self.tree.generation;
+            self.tree._watch_task = Some(cx.spawn(async move |this, cx| {
+                while rx.recv().await.is_ok() {
+                    cx.background_executor().timer(SETTLE).await;
+                    while rx.try_recv().is_ok() {}
+                    let alive = this.update(cx, |this, cx| {
+                        if this.tree.generation == generation { this.tree_reload(cx); }
+                    });
+                    if alive.is_err() { return; }
+                }
+            }));
+        }
+        let wanted: HashSet<PathBuf> = dirs.into_iter().collect();
+        let Some(watcher) = self.tree.watcher.as_mut() else { return };
+        for gone in self.tree.watched.difference(&wanted) { let _ = watcher.unwatch(gone); }
+        let mut failed = false;
+        for new in wanted.difference(&self.tree.watched) {
+            failed |= watcher.watch(new, notify::RecursiveMode::NonRecursive).is_err();
+        }
+        self.tree.watched = wanted;
+        self.tree.watch_error = failed;
+    }
+
+    fn tree_toggle_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.tree.expanded.remove(&path) {
+            self.tree.expanded.insert(path.clone());
+            if !matches!(self.tree.dirs.get(&path), Some(Dir::Ready(_))) {
+                self.tree.dirs.remove(&path);
+                if let Some(source) = self.tree.source.clone() { self.tree_fetch(source, vec![path], false, cx); }
+            }
+        }
+        self.tree.rebuild();
+    }
+
+    fn tree_activate(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.selected = Some(path.clone());
+        match self.tree.entry(&path) {
+            Some((true, _)) => self.tree_toggle_dir(path, cx),
+            Some((false, _)) => self.open_file(path, None, window, cx),
+            None => {}
+        }
+        self.redraw(Area::Side, cx);
+    }
+
+    fn tree_reveal(&self) {
+        if let Some(ix) = self.tree.selected.as_ref().and_then(|path| self.tree.rows.iter().position(|row| &row.path == path)) {
+            self.tree.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// Setas andam, Enter abre, → entra na pasta e ← volta à pasta de cima, como o Zeron.
+    fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let entries: Vec<&Row> = self.tree.rows.iter().filter(|row| matches!(row.kind, RowKind::Entry { .. })).collect();
+        let at = self.tree.selected.as_ref().and_then(|path| entries.iter().position(|row| &row.path == path));
+        let selected = self.tree.selected.clone();
+        match event.keystroke.key.as_str() {
+            "up" | "down" => {
+                let next = match (at, event.keystroke.key.as_str()) {
+                    (None, _) => 0,
+                    (Some(ix), "up") => ix.saturating_sub(1),
+                    (Some(ix), _) => (ix + 1).min(entries.len().saturating_sub(1)),
+                };
+                self.tree.selected = entries.get(next).map(|row| row.path.clone());
+            }
+            "left" => if let Some(path) = selected {
+                if self.tree.entry(&path) == Some((true, true)) { self.tree_toggle_dir(path, cx); }
+                else if let Some((parent, _)) = path.rsplit_once('/') { self.tree.selected = Some(parent.to_owned()); }
+            },
+            "right" => if let Some(path) = selected.filter(|path| self.tree.entry(path) == Some((true, false))) { self.tree_toggle_dir(path, cx); },
+            "enter" | "space" => if let Some(path) = selected { self.tree_activate(path, window, cx); },
+            _ => return,
+        }
+        cx.stop_propagation();
+        self.tree_reveal();
+        self.redraw(Area::Side, cx);
+    }
+
+    fn tree_collapse_all(&mut self, cx: &mut Context<Self>) {
+        self.tree.expanded.clear();
+        self.tree.dirs.retain(|dir, _| dir.is_empty());
+        self.tree.rebuild();
+        self.redraw(Area::Side, cx);
+    }
+
+    fn tree_search_changed(&mut self, cx: &mut Context<Self>) {
+        let query = self.tree.search.read(cx).value().trim().to_owned();
+        if query == self.tree.query { return; }
+        self.tree.query = query.clone();
+        self.tree.active = 0;
+        self.tree.results = None;
+        self.tree.search_task = None;
+        let Some(source) = self.tree.source.clone().filter(|_| !query.is_empty()) else { self.redraw(Area::Side, cx); return };
+        let runtime = self.runtime.clone();
+        self.tree.search_task = Some(cx.spawn(async move |this, cx| {
+            // Espera a digitação parar: cada tecla não vira uma busca.
+            cx.background_executor().timer(Duration::from_millis(180)).await;
+            let Ok(result) = runtime.spawn(async move { source.search(query.clone()).await.map(|hits| (query, hits)) }).await else { return };
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok((query, hits)) if query == this.tree.query => this.tree.results = Some(Ok(hits)),
+                    Ok(_) => return,
+                    Err(error) => this.tree.results = Some(Err(Self::fetch_failure(&error))),
+                }
+                this.redraw(Area::Side, cx);
+            });
+        }));
+        self.redraw(Area::Side, cx);
+    }
+
+    fn tree_step_result(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.tree.results.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, |(hits, _)| hits.len());
+        if count == 0 { return; }
+        self.tree.active = (self.tree.active as isize + delta).clamp(0, count as isize - 1) as usize;
+        self.tree.scroll.scroll_to_item(self.tree.active, ScrollStrategy::Nearest);
+        self.redraw(Area::Side, cx);
+    }
+
+    fn tree_open_result(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.tree.results.as_ref().and_then(|r| r.as_ref().ok()).and_then(|(hits, _)| hits.get(ix)).cloned() else { return };
+        self.tree.active = ix;
+        self.open_file(path, None, window, cx);
+    }
+
+    fn tree_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row = self.tree.rows.get(ix)?.clone();
+        let pad = 8. + row.depth as f32 * INDENT;
+        let status = |text: String, color: Hsla| div().pl(px(pad + INDENT + 4.)).pr_2().h_full().flex().items_center()
+            .text_size(px(11.)).text_color(color).child(div().truncate().child(text));
+        let content = match row.kind {
+            RowKind::Loading => status(activity::web("arq_carregando"), theme::faint()).into_any_element(),
+            RowKind::Empty => status(tr("tree_empty_folder"), theme::faint()).into_any_element(),
+            RowKind::Truncated => status(activity::web("arq_pasta_grande"), theme::faint()).into_any_element(),
+            RowKind::Failed(reason) => status(reason, theme::danger()).into_any_element(),
+            RowKind::Entry { dir, mark } => {
+                let selected = self.tree.selected.as_deref() == Some(row.path.as_str());
+                let open = dir && self.tree.expanded.contains(&row.path);
+                let path = row.path.clone();
+                let color = mark.map(mark_color).unwrap_or(if selected { theme::text() } else { theme::muted() });
+                div().id(SharedString::from(format!("tree-{}", row.path))).role(Role::TreeItem).aria_label(row.name.clone())
+                    .aria_selected(selected).when(dir, |el| el.aria_expanded(open))
+                    .h_full().pl(px(pad)).pr_2().flex().items_center().gap(px(4.)).rounded(px(6.)).cursor_pointer()
+                    .map(|el| if selected { el.bg(theme::accent_dim()) } else { el.hover(|el| el.bg(theme::hover())) })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.tree.focus.focus(window, cx);
+                        this.tree_activate(path.clone(), window, cx);
+                    }))
+                    .child(div().size(px(14.)).flex_none().flex().items_center().justify_center()
+                        .when(dir, |el| el.child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 11., theme::faint()))))
+                    .child(crate::fileicons::tree_icon(&row.name, dir, open))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(color).child(row.name.clone()))
+                    // A letra repete a cor: o estado não depende só dela.
+                    .when_some(mark, |el, mark| el.child(div().flex_none().font_family(theme::MONO).text_size(px(10.)).text_color(mark_color(mark))
+                        .child(if mark == '?' { 'U' } else if mark == 'U' { 'C' } else { mark }.to_string())))
+                    .into_any_element()
+            }
+        };
+        // Guias de recuo desenhadas na própria linha, para a lista virtual emendar mesmo com o pai fora da tela.
+        Some(div().relative().h(px(ROW_H)).w_full().px_1()
+            .children((0..row.depth).map(|level| div().absolute().top_0().bottom_0().left(px(4. + 8. + 7. + level as f32 * INDENT)).w(px(1.)).bg(theme::border())))
+            .child(content).into_any_element())
+    }
+
+    fn tree_result_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (hits, _) = self.tree.results.as_ref()?.as_ref().ok()?;
+        let path = hits.get(ix)?.clone();
+        let (folder, name) = path.rsplit_once('/').map_or(("", path.as_str()), |(folder, name)| (folder, name));
+        let active = ix == self.tree.active;
+        Some(div().id(SharedString::from(format!("tree-hit-{path}"))).role(Role::ListBoxOption).aria_selected(active).aria_label(path.clone())
+            .h(px(ROW_H)).mx_1().px_2().flex().items_center().gap(px(6.)).rounded(px(6.)).cursor_pointer()
+            .map(|el| if active { el.bg(theme::accent_dim()) } else { el.hover(|el| el.bg(theme::hover())) })
+            .on_click(cx.listener(move |this, _, window, cx| this.tree_open_result(ix, window, cx)))
+            .child(crate::fileicons::tree_icon(name, false, false))
+            .child(div().flex_none().max_w(relative(0.6)).truncate().text_size(px(12.)).text_color(theme::text()).child(name.to_owned()))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme::faint()).child(folder.to_owned()))
+            .into_any_element())
+    }
+
+    /// O corpo do painel no modo Arquivos: busca, e embaixo a árvore ou os resultados.
+    pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.tree_sync(cx);
+        let searching = !self.tree.query.is_empty();
+        let search = div().flex().items_center().gap_1().px_3().pb_2()
+            .child(div().id("tree-search").flex_1().min_w_0()
+                .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.tree_step_result(-1, cx)))
+                .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.tree_step_result(1, cx)))
+                .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                    if this.tree.query.is_empty() { cx.propagate(); return; }
+                    this.tree.search.update(cx, |input, cx| input.set_value("", window, cx));
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "enter" && !this.tree.query.is_empty() { this.tree_open_result(this.tree.active, window, cx); }
+                }))
+                .child(Input::new(&self.tree.search).small().cleanable(true).aria_label(activity::web("arq_buscar"))
+                    .prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))))
+            .child(chrome::icon_button("tree-collapse", IconName::ChevronsDownUp, activity::web("arq_recolher_tudo"), cx)
+                .disabled(self.tree.expanded.is_empty())
+                .on_click(cx.listener(|this, _, _, cx| this.tree_collapse_all(cx))))
+            .child(chrome::icon_button("tree-reload", IconName::RefreshCw, activity::web("arq_recarregar"), cx)
+                .disabled(self.tree.source.is_none())
+                .on_click(cx.listener(|this, _, _, cx| this.tree_reload(cx))));
+        let note = |text: String, color: Hsla| div().px_4().py_2().text_xs().text_color(color).child(text).into_any_element();
+        let body = if searching {
+            match &self.tree.results {
+                None => note(activity::web("arq_carregando"), theme::muted()),
+                Some(Err(reason)) => note(reason.clone(), theme::warning()),
+                Some(Ok((hits, _))) if hits.is_empty() => note(activity::web("arq_sem_nome"), theme::muted()),
+                Some(Ok((hits, truncated))) => div().flex_1().min_h_0().flex().flex_col()
+                    .child(uniform_list("tree-results", hits.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        range.filter_map(|ix| this.tree_result_row(ix, cx)).collect::<Vec<_>>()
+                    })).track_scroll(&self.tree.scroll).flex_1())
+                    .when(*truncated, |el| el.child(note(activity::web("arq_primeiros_200"), theme::faint())))
+                    .into_any_element(),
+            }
+        } else if self.tree.source.is_none() {
+            note(activity::web("arq_carregando"), theme::muted())
+        } else {
+            div().id("tree").flex_1().min_h_0().track_focus(&self.tree.focus).role(Role::Tree).aria_label(activity::web("arq_aba"))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.tree_key(event, window, cx)))
+                .child(uniform_list("tree-rows", self.tree.rows.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range.filter_map(|ix| this.tree_row(ix, cx)).collect::<Vec<_>>()
+                })).track_scroll(&self.tree.scroll).size_full())
+                .into_any_element()
+        };
+        let live = match self.tree.source.as_ref() {
+            Some(source) if source.is_local() && self.tree.watch_error => Some((tr("tree_watch_failed"), theme::warning())),
+            Some(source) if source.is_local() => Some((tr("tree_local"), theme::faint())),
+            Some(_) => Some((tr("tree_remote"), theme::faint())),
+            None => None,
+        };
+        div().size_full().flex().flex_col().pt_1()
+            .child(search)
+            .child(body)
+            .when_some(live, |el, (text, color)| el.child(div().flex_shrink_0().px_4().py(px(6.)).border_t_1().border_color(theme::border())
+                .text_size(px(11.)).text_color(color).child(text)))
+            .into_any_element()
+    }
+}
