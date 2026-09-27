@@ -128,20 +128,12 @@ def comando_bash(cmd: str) -> str:
     return "?"
 
 
+# `&&`/`||` antes do `|` sozinho: a alternância tenta na ordem, como a varredura da esquerda.
+_SEPARADORES = re.compile(r"&&|\|\||[;|\n]")
+
+
 def _segmentos(cmd: str) -> list[str]:
-    out, atual = [], []
-    i = 0
-    while i < len(cmd):
-        dois = cmd[i:i + 2]
-        if dois in ("&&", "||") or cmd[i] in ";|\n":
-            out.append("".join(atual))
-            atual = []
-            i += 2 if dois in ("&&", "||") else 1
-            continue
-        atual.append(cmd[i])
-        i += 1
-    out.append("".join(atual))
-    return [s for s in out if s.strip()]
+    return [s for s in _SEPARADORES.split(cmd) if s.strip()]
 
 
 # Palavras no prompt do usuário que indicam que ELE pediu subagente. É heurística: quem pede

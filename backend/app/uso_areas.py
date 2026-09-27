@@ -22,11 +22,14 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
 OUTROS = "outros"
 CONVERSA = "conversa"
+# Suba ao mudar como `repartir` divide: o resultado fica gravado no cache das leituras.
+_DIVISAO = 2
 
 PADRAO: list[tuple[str, list[str]]] = [
     ("banco", ["*.sql", "migrations/*", "prisma/*", "skill:*database*"]),
@@ -45,7 +48,8 @@ def repartir(valor: int, pesos: dict[str, int]) -> dict[str, int]:
     total = sum(pesos.values())
     exatos = {a: valor * n / total for a, n in pesos.items()}
     inteiros = {a: int(x) for a, x in exatos.items()}
-    for a in sorted(exatos, key=lambda a: inteiros[a] - exatos[a])[:valor - sum(inteiros.values())]:
+    # Empate de resto decide pelo nome: a ordem dos pesos vem de um set e muda a cada processo.
+    for a in sorted(exatos, key=lambda a: (inteiros[a] - exatos[a], a))[:valor - sum(inteiros.values())]:
         inteiros[a] += 1
     return inteiros
 
@@ -65,13 +69,13 @@ def _regras(bruto) -> list[tuple[str, list[str]]]:
 
 @lru_cache(maxsize=1)
 def _mapa() -> tuple[str, list, dict[str, list]]:
-    # O PADRAO do código entra na assinatura: mudar a regra embutida também relê o cache.
+    # O PADRAO do código e a regra de divisão entram na assinatura: mudar qualquer um relê o cache.
     try:
         texto = _arquivo().read_text(encoding="utf-8")
         bruto = json.loads(texto)
     except (OSError, ValueError):
         texto, bruto = "", None
-    assinatura = hashlib.sha256((repr(PADRAO) + texto).encode()).hexdigest()[:12]
+    assinatura = hashlib.sha256((f"divisao:{_DIVISAO}" + repr(PADRAO) + texto).encode()).hexdigest()[:12]
     if not isinstance(bruto, dict):
         return assinatura, PADRAO, {}
     padrao = _regras(bruto["padrao"]) if "padrao" in bruto else PADRAO
@@ -111,13 +115,17 @@ def regras_de(cwd: str) -> list[tuple[str, list[str]]]:
     return do_projeto + padrao
 
 
-def _casa(alvo: str, padrao: str) -> bool:
-    return fnmatch.fnmatchcase(alvo, padrao) or fnmatch.fnmatchcase("/" + alvo, "*/" + padrao)
+@lru_cache(maxsize=1024)
+def _casador(padroes: tuple[str, ...]) -> re.Pattern:
+    """Os padrões de uma área numa regex só, aplicada a `/` + alvo: casa o alvo inteiro (o `/`
+    vira literal na frente) ou qualquer sufixo dele depois de uma barra (`*/padrao`)."""
+    partes = [f"/{fnmatch.translate(p)}|{fnmatch.translate('*/' + p)}" for p in padroes]
+    return re.compile("|".join(partes) or r"(?!)")
 
 
 def area_do_alvo(alvo: str, regras: list[tuple[str, list[str]]]) -> str | None:
     for area, padroes in regras:
-        if any(_casa(alvo, p) for p in padroes):
+        if _casador(tuple(padroes)).match("/" + alvo):
             return area
     return None
 
