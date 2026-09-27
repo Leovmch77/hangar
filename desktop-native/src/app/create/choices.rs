@@ -515,11 +515,11 @@ impl NewSession {
     pub(super) fn render_claude_account(&self, cx: &mut Context<Self>) -> Div {
         let busy = self.creating || self.account_busy;
         let deletable = self.deletable().filter(|_| !self.asking && !self.confirming);
-        let small = |id: &'static str, text: String| Button::new(id).outline().small().flex_shrink_0().label(text);
+        let small = |id: &'static str, text: String| Button::new(id).outline().flex_shrink_0().label(text);
         let picker = match (&self.config_pick, self.configs.value.as_ref()) {
             // A falha vem antes do seletor: a leitura que falhou também deixa um seletor vazio.
             (_, Some(Err(error))) if !self.configs.loading => alert("create-configs-error", error.clone()).into_any_element(),
-            (Some((pick, _)), _) if !self.configs.loading => Select::new(pick).small().disabled(busy).accessibility_label(tr("create_claude_account")).into_any_element(),
+            (Some((pick, _)), _) if !self.configs.loading => Select::new(pick).disabled(busy).accessibility_label(tr("create_claude_account")).into_any_element(),
             _ => muted(tr("loading")).into_any_element(),
         };
         let selected_quota = self.config.as_ref().and_then(|p| self.quota_of(&format!("claude:{p}")));
@@ -543,7 +543,7 @@ impl NewSession {
                 .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal()
                     .child(format!("{} ", tr("create_delete_start"))).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(name))
                     .child(format!(" {}", tr("create_delete_end"))).flex().flex_wrap().gap_x(px(0.)))
-                .child(Button::new("create-account-delete-yes").outline().small().text_color(theme::danger()).border_color(theme::danger())
+                .child(Button::new("create-account-delete-yes").outline().text_color(theme::danger()).border_color(theme::danger())
                     .label(if self.account_busy { "…".into() } else { tr("create_delete") }).disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.delete_account(cx))))
                 .child(small("create-account-delete-no", tr("create_cancel")).disabled(busy)
@@ -551,7 +551,7 @@ impl NewSession {
             .when(self.asking, |el| {
                 let ready = !self.account_name.read(cx).value().trim().is_empty();
                 el.child(div().id("create-account-line").flex().items_center().gap(px(8.)).on_action(esc)
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.account_name).small().disabled(busy).aria_label(tr("create_account_new_aria"))))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.account_name).disabled(busy).aria_label(tr("create_account_new_aria"))))
                     .child(small("create-account-new-ok", tr("create_account_create")).disabled(busy || !ready)
                         .on_click(cx.listener(|this, _, _, cx| this.add_account(cx))))
                     .child(small("create-account-new-no", tr("create_cancel")).disabled(busy)
@@ -564,15 +564,15 @@ impl NewSession {
     /// Modelo, esforço e permissão lado a lado; cada um some quando não se aplica.
     pub(super) fn render_trio(&self) -> Option<Div> {
         let busy = self.creating;
-        let field = |title: String, pick: &Option<Picker>| pick.as_ref().map(|(p, _)| div().flex_1().min_w(px(150.)).flex().flex_col().gap(px(4.))
-            .child(label(title.clone())).child(Select::new(p).small().disabled(busy).accessibility_label(title)));
-        let model = field(tr("create_model"), &self.model_pick).map(|el| el
+        let field = |id: &'static str, title: String, pick: &Option<Picker>| pick.as_ref().map(|(p, _)| div().flex_1().min_w(px(150.)).flex().flex_col().gap(px(6.))
+            .child(label(title.clone())).child(Select::new(p).id(id).disabled(busy).accessibility_label(title)));
+        let model = field("create-pick-model", tr("create_model"), &self.model_pick).map(|el| el
             .when(self.models.ok().is_some_and(|c| c.reduced), |el| el.child(div().id("create-models-reduced").role(Role::Status).child(muted(tr("create_models_reduced")))))
             .when_some(self.models.value.as_ref().and_then(|v| v.as_ref().err()), |el, error| el.child(alert("create-models-error",
                 tr("create_models_default").replace("{erro}", &format!("{}: {error}", tr("create_models_failed")))))));
         let effort_title = tr(if matches!(self.provider, "pi" | "omp") { "create_reasoning" } else { "create_effort" });
-        let effort = (!self.levels().is_empty()).then(|| field(effort_title, &self.effort_pick)).flatten();
-        let permission = self.permissions().and(field(tr("create_permission"), &self.permission_pick));
+        let effort = (!self.levels().is_empty()).then(|| field("create-pick-effort", effort_title, &self.effort_pick)).flatten();
+        let permission = self.permissions().and(field("create-pick-permission", tr("create_permission"), &self.permission_pick));
         let fields: Vec<Div> = [model, effort, permission].into_iter().flatten().collect();
         (!fields.is_empty()).then(|| div().flex().flex_wrap().items_start().gap(px(12.)).children(fields))
     }
@@ -607,7 +607,7 @@ impl NewSession {
         let pill = |text: String| div().px(px(8.)).py(px(1.)).rounded_full().border_1().border_color(theme::border()).text_size(px(11.5)).text_color(theme::muted()).child(text);
         let this = cx.entity().downgrade();
         let busy = self.creating;
-        Some(div().flex().flex_col().gap(px(10.)).p(px(10.)).rounded(px(8.)).border_1().border_color(theme::border())
+        Some(div().flex().flex_col().gap(px(12.)).px(px(12.)).py(px(10.)).rounded(px(10.)).border_1().border_color(theme::border())
             .child(div().flex().items_center().gap(px(8.)).flex_wrap()
                 .child(Disclosure::new("create-more", self.more, tr("create_more"), false)
                     .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.more = open; cx.notify(); }); }))
@@ -617,18 +617,18 @@ impl NewSession {
                     .when(jev && self.jev_on, |el| el.child(pill(tr("create_jev"))))))
             .when(self.more, |el| el
                 .when_some(engine, |el, (p, _)| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_engine")))
-                    .child(Select::new(p).small().disabled(busy).accessibility_label(tr("create_engine")))))
+                    .child(Select::new(p).disabled(busy).accessibility_label(tr("create_engine")))))
                 .when_some(subagent, |el, (p, _)| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_subagent")))
-                    .child(Select::new(p).small().disabled(busy).accessibility_label(tr("create_subagent"))).child(muted(tr("create_subagent_help")))))
+                    .child(Select::new(p).disabled(busy).accessibility_label(tr("create_subagent"))).child(muted(tr("create_subagent_help")))))
                 .when(jev, |el| el.child(div().flex().flex_col().gap(px(4.))
-                    .child(Checkbox::new("create-jev").label(tr("create_jev")).checked(self.jev_on).disabled(busy)
+                    .child(Checkbox::new("create-jev").small().label(tr("create_jev")).checked(self.jev_on).disabled(busy)
                         .on_click(cx.listener(|this, checked: &bool, _, cx| { this.jev_on = *checked; cx.notify(); })))
                     .child(muted(tr("create_jev_help")))))))
     }
 
     pub(super) fn render_omp(&self) -> Div {
         div().flex().flex_col().gap(px(4.)).child(label(tr("create_omp_profile")))
-            .child(Input::new(&self.omp).small().font_family(theme::MONO).disabled(self.creating).aria_label(tr("create_omp_profile")))
+            .child(Input::new(&self.omp).font_family(theme::MONO).disabled(self.creating).aria_label(tr("create_omp_profile")))
     }
 }
 

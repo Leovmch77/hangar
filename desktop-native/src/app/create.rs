@@ -876,7 +876,15 @@ async fn found(api: &Api, name: &str, cwd: &str, branch: Option<&str>, failure: 
         .map(|session| Opened { session, notes: vec![tr("create_found_in_list")], warning: None }).ok_or(failure)
 }
 
-fn label(text: String) -> Div { div().text_size(px(13.)).text_color(theme::muted()).child(text) }
+/// Três níveis no formulário: o título do grupo (`group`), o rótulo do campo (`label`) e a ajuda (`muted`).
+fn label(text: String) -> Div { div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(text) }
+
+/// Grupo de campos com o título em caixa alta miúda, como os títulos dos menus; sem campo, o grupo não aparece.
+fn group(title: &str, fields: Vec<AnyElement>) -> Option<Div> {
+    (!fields.is_empty()).then(|| div().flex().flex_col().gap(px(16.))
+        .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::faint()).child(tr(title).to_uppercase()))
+        .children(fields))
+}
 
 fn muted(text: String) -> Div { div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text) }
 
@@ -902,7 +910,7 @@ fn soft_choice(id: impl Into<ElementId>, on: bool, idle: Hsla, cx: &App) -> Butt
 
 /// Cartão de uma escolha entre duas (onde roda, quem escreve o resumo): o ponto de rádio, o título e o resumo da escolha.
 fn option_card(id: &'static str, on: bool, title: String, beta: bool, summary: String, busy: bool, cx: &App) -> Button {
-    choice(id, on, cx).flex_1().min_w_0().h_auto().py(px(8.)).px(px(12.)).rounded(px(8.)).selected(on).disabled(busy)
+    choice(id, on, cx).flex_1().min_w_0().h_auto().py(px(10.)).px(px(12.)).rounded(px(10.)).selected(on).disabled(busy)
         .accessibility_label(format!("{title}. {summary}"))
         // No topo, não no centro que o botão dá: com resumos de alturas diferentes, os títulos dos dois cartões ficam na mesma linha.
         .child(div().self_start().w_full().flex().items_start().gap(px(10.))
@@ -1095,12 +1103,16 @@ impl NewSession {
         let probe_error = self.providers.value.as_ref().and_then(|v| v.as_ref().err()).cloned();
         let missing = ready == Some(false);
         let busy = self.creating;
-        let providers = div().id("create-providers").role(Role::Group).aria_label(tr("create_provider_aria")).flex().gap(px(8.))
+        // Controle segmentado na trilha das raízes do lado esquerdo: raio 11 por fora, 8 nos segmentos a 3 de distância.
+        let providers = div().id("create-providers").role(Role::Group).aria_label(tr("create_provider_aria")).flex().gap(px(2.))
+            .p(px(3.)).rounded(px(11.)).bg(theme::inset())
             .children(PROVIDERS.iter().map(|&p| {
                 let available = self.providers.ok().and_then(|m| m.get(p)).is_none_or(|probe| probe.disponivel);
-                choice(SharedString::from(format!("create-provider-{p}")), self.provider == p, cx).flex_1().min_w_0().h(px(36.)).rounded(px(8.))
-                    .selected(self.provider == p).disabled(!available || busy).accessibility_label(provider_name(p))
-                    .child(div().flex().items_center().gap(px(6.)).child(chrome::provider_glyph(p, 16.)).child(provider_name(p)))
+                let on = self.provider == p;
+                soft_choice(SharedString::from(format!("create-provider-{p}")), on, theme::muted(), cx).flex_1().min_w_0().h(px(32.)).rounded(px(8.))
+                    .disabled(!available || busy).accessibility_label(provider_name(p))
+                    .child(div().flex().items_center().gap(px(6.)).text_sm().when(on, |el| el.font_weight(FontWeight::MEDIUM))
+                        .child(chrome::provider_glyph(p, 16.)).child(provider_name(p)))
                     .on_click(cx.listener(move |this, _, window, cx| this.set_provider(p, window, cx)))
             }));
         let target = self.target().cloned();
@@ -1108,12 +1120,12 @@ impl NewSession {
         let claude = (self.provider == "claude").then(|| self.render_claude_account(cx));
         let codex = (self.provider == "codex").then(|| {
             let account = self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).cloned();
-            div().flex().flex_col().gap(px(4.))
+            div().flex().flex_col().gap(px(6.))
                 .child(label(tr("create_codex_account")))
                 .map(|el| match (&self.codex_pick, self.codex.value.as_ref()) {
                     (_, _) if self.codex.loading => el.child(div().id("create-codex-loading").role(Role::Status).child(muted(tr("loading")))),
                     (_, Some(Err(error))) => el.child(alert("create-codex-error", error.clone())),
-                    (Some((pick, _)), _) => el.child(Select::new(pick).small().disabled(busy).accessibility_label(tr("create_codex_account"))),
+                    (Some((pick, _)), _) => el.child(Select::new(pick).disabled(busy).accessibility_label(tr("create_codex_account"))),
                     _ => el,
                 })
                 .when_some(account, |el, a| el.child(muted(a.hint())).children(self.render_codex_quota(a.credential_id.as_deref()))
@@ -1136,7 +1148,7 @@ impl NewSession {
                 (true, false) => "create_mode_tmux_help_codex", (true, true) => "create_mode_headless_help_codex",
             };
             let this = cx.entity().downgrade();
-            div().flex().flex_col().gap(px(6.))
+            div().flex().flex_col().gap(px(8.))
                 .child(label(tr("create_mode")))
                 .child(div().id("create-modes").role(Role::Group).aria_label(tr("create_mode")).flex().gap(px(12.))
                     .child(mode("create-mode-tmux", !self.headless, tr("create_mode_tmux"), false,
@@ -1147,36 +1159,52 @@ impl NewSession {
                     .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.difference = open; cx.notify(); }); })))
                 .when(self.difference, |el| el.child(muted(tr(help))))
         });
-        let fields = div().flex().flex_col().gap(px(16.))
-            .child(div().flex().flex_col().gap(px(4.)).pr(px(28.))
-                .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(path.to_owned()))
-                .when(checking, |el| el.child(div().id("create-checking").role(Role::Status).child(muted(tr("create_checking")))))
-                .when(!checking && self.same_folder, |el| el.child(div().id("create-same-folder").role(Role::Status).child(muted(tr("create_same_folder"))))))
-            // Nome, modo, modelo, esforço e permissão não chegam ao retomar: com uma conversa escolhida, somem.
-            .when(!checking, |el| el
-                .when(fresh, |el| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_name")))
-                    .child(Input::new(&self.name).disabled(busy).aria_label(tr("create_name")))))
-                .child(div().flex().flex_col().gap(px(6.)).child(label(tr("create_provider"))).child(providers)
-                    .when_some(probe_error, |el, error| el.child(muted(tr("create_probe_failed").replace("{erro}", &error))
-                        .id("create-probe-error").role(Role::Alert)))
-                    .when(missing, |el| el.child(alert("create-provider-missing", tr("create_provider_missing").replace("{p}", self.provider)))))
-                .children(codex)
-                .children(claude)
-                .children(modes)
-                .children(self.render_resume(cx))
-                .when(fresh && self.provider == "omp", |el| el.child(self.render_omp()))
-                .when(fresh, |el| el.children(self.render_trio()))
-                .when(fresh && self.provider == "codex", |el| el.child(self.render_context(cx)))
-                .children(self.render_more(cx))
-                .children(self.render_baton(cx)));
+        // O destino no topo, com a mesma pasta em destaque das linhas da lista ao lado.
+        let destination = div().flex().items_center().gap(px(12.)).pr(px(28.))
+            .child(div().size(px(36.)).flex_shrink_0().rounded(px(10.)).bg(theme::accent_dim()).flex().items_center().justify_center()
+                .child(chrome::small_icon(IconName::FolderOpen, 18., theme::accent())))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                .child(div().truncate().text_base().font_weight(FontWeight::SEMIBOLD).child(basename(path).to_owned()))
+                .child(div().font_family(theme::MONO).text_size(px(11.5)).text_color(theme::muted()).whitespace_normal().child(path.to_owned())));
+        let head = div().flex().flex_col().gap(px(8.)).child(destination)
+            .when(checking, |el| el.child(div().id("create-checking").role(Role::Status).child(muted(tr("create_checking")))))
+            .when(!checking && self.same_folder, |el| el.child(div().id("create-same-folder").role(Role::Status).child(muted(tr("create_same_folder")))));
+        let field = |title: String, control: AnyElement| div().flex().flex_col().gap(px(6.)).child(label(title)).child(control).into_any_element();
+        // Nome, modo, modelo, esforço e permissão não chegam ao retomar: com uma conversa escolhida, somem.
+        let session = [
+            fresh.then(|| field(tr("create_name"), Input::new(&self.name).disabled(busy).aria_label(tr("create_name")).into_any_element())),
+            Some(div().flex().flex_col().gap(px(6.)).child(label(tr("create_provider"))).child(providers)
+                .when_some(probe_error, |el, error| el.child(muted(tr("create_probe_failed").replace("{erro}", &error))
+                    .id("create-probe-error").role(Role::Alert)))
+                .when(missing, |el| el.child(alert("create-provider-missing", tr("create_provider_missing").replace("{p}", self.provider))))
+                .into_any_element()),
+            codex.map(IntoElement::into_any_element),
+            claude.map(IntoElement::into_any_element),
+        ];
+        let run = [
+            modes.map(IntoElement::into_any_element),
+            self.render_resume(cx).map(IntoElement::into_any_element),
+            (fresh && self.provider == "omp").then(|| self.render_omp().into_any_element()),
+            self.render_baton(cx).map(IntoElement::into_any_element),
+        ];
+        let agent = [
+            fresh.then(|| self.render_trio()).flatten().map(IntoElement::into_any_element),
+            (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
+            self.render_more(cx).map(IntoElement::into_any_element),
+        ];
+        let groups = [("create_group_session", session.into_iter().flatten().collect()), ("create_group_run", run.into_iter().flatten().collect()),
+            ("create_group_agent", agent.into_iter().flatten().collect())].into_iter().filter_map(|(title, fields)| group(title, fields));
+        let fields = div().flex().flex_col().gap(px(20.)).pb(px(8.))
+            .child(head)
+            .when(!checking, |el| el.children(groups.map(|g| g.pt(px(20.)).border_t_1().border_color(theme::border()))));
         let can = self.can_create(cx);
         let seconds = self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         let step = if self.step.is_empty() { tr("create_creating") } else { self.step.clone() };
         // Uma ação primária só: com uma conversa escolhida, o botão continua aquela conversa em vez de criar.
         let submit = match &target {
-            Some(c) => Button::new("create-resume-submit").primary().w_full().label(self.resume_label(c)).loading(busy).disabled(busy)
+            Some(c) => Button::new("create-resume-submit").primary().large().w_full().label(self.resume_label(c)).loading(busy).disabled(busy)
                 .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
-            None => Button::new("create-submit").primary().w_full()
+            None => Button::new("create-submit").primary().large().w_full()
                 .label(tr(if busy { "create_creating" } else if self.baton.is_some() { "create_baton_submit" } else { "create_submit" }))
                 .loading(busy).disabled(!can && !busy).on_click(cx.listener(|this, _, _, cx| this.create(None, cx))),
         };

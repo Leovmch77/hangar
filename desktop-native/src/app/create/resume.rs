@@ -162,7 +162,7 @@ impl NewSession {
     pub(super) fn render_resume(&self, cx: &mut Context<Self>) -> Option<Div> {
         let list = self.archive.ok().filter(|l| !l.is_empty())?;
         Some(div().flex().flex_col().gap(px(8.))
-            .child(Checkbox::new("create-resume").label(tr("create_resume")).checked(self.want_resume).disabled(self.creating)
+            .child(Checkbox::new("create-resume").small().label(tr("create_resume")).checked(self.want_resume).disabled(self.creating)
                 .on_click(cx.listener(|this, checked: &bool, window, cx| this.set_want(*checked, window, cx))))
             .when(self.want_resume, |el| el.child(div().id("create-conversations").role(Role::Group).aria_label(tr("create_resume_choose"))
                 .max_h(px(208.)).overflow_y_scroll().rounded(px(8.)).border_1().border_color(theme::border())
