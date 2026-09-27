@@ -5,7 +5,8 @@
 #   1. symlink ~/.local/bin/hangar-send -> scripts/hangar-send deste clone;
 #   2. insere/atualiza a seção "Sessões-irmãs" no ~/.claude/CLAUDE.md global (entre marcadores),
 #      pra toda sessão Claude da máquina saber listar/mandar recado/parear/criar sessões;
-#   3. symlink das skills do repo (skills/*) em ~/.claude/skills/ (ex: orquestrar).
+#   3. symlink das skills do repo (skills/*) em ~/.claude/skills/ (ex: orquestrar), e os agentes delas
+#      (skills/*/agents/*.md) no Claude e em cada home do Codex.
 #
 # Rode uma vez por máquina, do clone local:  ./scripts/install-hangar-send.sh
 set -euo pipefail
@@ -69,6 +70,9 @@ for skill in "$REPO"/skills/*/; do
         echo "ok: ~/.claude/skills/$name (COPIA — symlink indisponivel; re-rode apos git pull)"
     fi
 done
+
+# Agentes das skills (ex.: preparar-plano da orquestrar): link no Claude, .toml em cada home do Codex.
+python3 "$REPO/scripts/instalar-agentes.py"
 
 MD="$HOME/.claude/CLAUDE.md"
 START="<!-- claude-pocket:sessoes-irmas:start -->"
