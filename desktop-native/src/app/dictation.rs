@@ -3,12 +3,39 @@ use std::{io::Read, process::{Child, Command, Stdio}, sync::Mutex, thread};
 
 const STYLES: [&str; 3] = ["limpar", "prosa", "briefing"];
 const PCM_LIMIT: usize = 16_000 * 2 * 180;
+const SILENCE: Duration = Duration::from_secs(2);
+const COUNTDOWN: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct Vad {
+    peak: f32,
+    last: Option<Instant>,
+    quiet_since: Option<Instant>,
+}
+
+impl Vad {
+    fn step(&mut self, rms: f32, now: Instant) -> bool {
+        let elapsed = self.last.map(|last| now.duration_since(last).as_secs_f32() * 1000.).unwrap_or(0.);
+        self.last = Some(now);
+        let decayed = self.peak * 0.98_f32.powf(elapsed / 55.);
+        self.peak = if rms > decayed { decayed + (rms - decayed) * 0.08 } else { decayed };
+        if self.peak <= 0.01 || rms >= self.peak * 0.25 {
+            self.quiet_since = None;
+            return false;
+        }
+        let since = *self.quiet_since.get_or_insert(now);
+        now.duration_since(since) >= SILENCE
+    }
+}
 
 struct Recorder {
     child: Option<Child>,
     reader: Option<thread::JoinHandle<std::io::Result<()>>>,
     pcm: Arc<Mutex<Vec<u8>>>,
     playback: Option<Instant>,
+    sampled: usize,
+    last_signal: (f32, f32),
+    last_pcm_at: Option<Instant>,
 }
 
 impl Drop for Recorder {
@@ -23,7 +50,8 @@ impl Drop for Recorder {
 
 impl Recorder {
     fn start() -> Result<Self, Failure> {
-        let mut recorder = Self { child: None, reader: None, pcm: Default::default(), playback: None };
+        let mut recorder = Self { child: None, reader: None, pcm: Default::default(), playback: None,
+            sampled: 0, last_signal: (0., 0.), last_pcm_at: None };
         if let Some(path) = std::env::var_os("HANGAR_NATIVE_DICTATION_WAV") {
             let mut bytes = Vec::new();
             std::fs::File::open(path).and_then(|file| file.take((PCM_LIMIT + 4097) as u64).read_to_end(&mut bytes))
@@ -52,11 +80,29 @@ impl Recorder {
         Ok(recorder)
     }
 
-    fn level(&self) -> f32 {
+    fn signal(&mut self) -> (f32, f32) {
         let bytes = self.pcm.lock().unwrap();
-        let end = self.playback.map(|start| (start.elapsed().as_millis() as usize * 32) % bytes.len()).unwrap_or(bytes.len()) & !1;
-        bytes[end.saturating_sub(3200)..end].chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() as f32 / 32768.).fold(0., f32::max)
+        let end = self.playback.map(|start| (start.elapsed().as_millis() as usize * 32).min(bytes.len())).unwrap_or(bytes.len()) & !1;
+        let start = self.sampled.min(end);
+        self.sampled = end;
+        // `pw-record` entrega blocos; um intervalo sem bloco ainda é áudio recente, mas uma captura travada não é fala eterna.
+        if start == end {
+            return if self.last_pcm_at.is_some_and(|at| at.elapsed() < Duration::from_millis(4096 / 32 + 55)) {
+                self.last_signal
+            } else { (0., 0.) };
+        }
+        let mut peak: f32 = 0.;
+        let mut sum = 0.;
+        let mut count = 0;
+        for sample in bytes[start..end].chunks_exact(2) {
+            let value = i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.;
+            peak = peak.max(value.abs());
+            sum += value * value;
+            count += 1;
+        }
+        self.last_signal = (peak, if count == 0 { 0. } else { (sum / count as f32).sqrt() });
+        self.last_pcm_at = Some(Instant::now());
+        self.last_signal
     }
 
     fn finish(mut self) -> Result<Vec<u8>, Failure> {
@@ -116,6 +162,11 @@ pub(super) struct Dictation {
     inserted: Option<(String, std::ops::Range<usize>)>,
     cleaning: bool,
     error: Option<String>,
+    hands_free: bool,
+    auto_send: bool,
+    timed_out: bool,
+    vad: Vad,
+    countdown: Option<Instant>,
 }
 
 impl Dictation {
@@ -144,6 +195,11 @@ impl Dictation {
         self.inserted = None;
         self.cleaning = false;
         self.error = None;
+        self.hands_free = false;
+        self.auto_send = false;
+        self.timed_out = false;
+        self.vad = Vad::default();
+        self.countdown = None;
     }
 }
 
@@ -165,6 +221,17 @@ impl Hangar {
                 this.load_dictation_style(cx);
             }
         }).detach();
+        let owner = cx.entity().downgrade();
+        cx.intercept_keystrokes(move |_, _, cx| {
+            let _ = owner.update(cx, |this, cx| this.cancel_dictation_countdown(cx));
+        }).detach();
+    }
+
+    fn cancel_dictation_countdown(&mut self, cx: &mut Context<Self>) {
+        if self.dictation.countdown.take().is_some() {
+            self.redraw(panes::Area::Bottom, cx);
+            cx.notify();
+        }
     }
 
     fn load_dictation_style(&mut self, cx: &mut Context<Self>) {
@@ -211,9 +278,10 @@ impl Hangar {
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_dictation_countdown(cx);
         if self.dictation.request.is_some() { return; }
         if self.dictation.recorder.is_some() {
-            self.stop_dictation(window, cx);
+            self.stop_dictation(false, false, cx);
             self.composer.update(cx, |input, cx| input.focus(window, cx));
             return;
         }
@@ -223,12 +291,13 @@ impl Hangar {
         match Recorder::start() {
             Ok(recorder) => {
                 self.dictation.owner = Some((self.connection, self.selection));
+                self.dictation.hands_free = appearance::get().hands_free;
                 self.dictation.recorder = Some(recorder);
                 self.dictation.started = Some(Instant::now());
                 let seq = self.dictation.seq;
                 cx.spawn_in(window, async move |this, cx| {
                     loop {
-                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                        cx.background_executor().timer(Duration::from_millis(55)).await;
                         let keep = this.update_in(cx, |this, window, cx| {
                             if this.dictation.seq != seq { return false; }
                             let Some(recorder) = &mut this.dictation.recorder else { return false; };
@@ -239,10 +308,16 @@ impl Hangar {
                                 this.redraw(panes::Area::Bottom, cx);
                                 return false;
                             }
-                            this.dictation.level = recorder.level();
+                            let (level, rms) = recorder.signal();
+                            this.dictation.level = level;
+                            if this.dictation.hands_free && this.dictation.vad.step(rms, Instant::now()) {
+                                this.stop_dictation(true, false, cx);
+                                this.redraw(panes::Area::Bottom, cx);
+                                return false;
+                            }
                             this.redraw(panes::Area::Bottom, cx);
                             if this.dictation.started.is_some_and(|start| start.elapsed() >= Duration::from_secs(180)) {
-                                this.stop_dictation(window, cx);
+                                this.stop_dictation(false, this.dictation.hands_free, cx);
                             }
                             true
                         });
@@ -255,9 +330,11 @@ impl Hangar {
         cx.notify();
     }
 
-    fn stop_dictation(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn stop_dictation(&mut self, silence: bool, timed_out: bool, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { self.dictation.cancel(); return; };
+        self.dictation.auto_send = silence && self.dictation.hands_free;
+        self.dictation.timed_out = timed_out;
         let audio_cache = self.dictation.audio.clone();
         let style = self.dictation.style(self.connection);
         let (tx, connection, selection, seq) = (self.tx.clone(), self.connection, self.selection, self.dictation.seq);
@@ -272,6 +349,43 @@ impl Hangar {
             };
             let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Dictation(seq, result) }).await;
         }));
+        cx.notify();
+    }
+
+    fn start_dictation_countdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let deadline = Instant::now() + COUNTDOWN;
+        let seq = self.dictation.seq;
+        self.dictation.countdown = Some(deadline);
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
+                let keep = this.update_in(cx, |this, window, cx| {
+                    if this.dictation.seq != seq || this.dictation.countdown != Some(deadline)
+                        || this.dictation.owner != Some((this.connection, this.selection)) { return false; }
+                    if Instant::now() < deadline {
+                        this.redraw(panes::Area::Bottom, cx);
+                        cx.notify();
+                        return true;
+                    }
+                    this.dictation.countdown = None;
+                    let key = this.selected_key();
+                    if !this.can_send() || key.as_ref().is_none_or(|key| this.delivery.pending(key)
+                        || this.uploading.contains_key(key) || this.attachments.get(key).is_some_and(|files| !files.is_empty())) {
+                        this.dictation.error = Some(tr("dictation_auto_send_failed"));
+                    } else {
+                        this.submit(false, false, window, cx);
+                        if key.as_ref().is_some_and(|key| !this.delivery.pending(key)) {
+                            this.dictation.error = Some(tr("dictation_auto_send_failed"));
+                        }
+                    }
+                    this.redraw(panes::Area::Bottom, cx);
+                    cx.notify();
+                    false
+                });
+                if !matches!(keep, Ok(true)) { break; }
+            }
+        }).detach();
+        self.redraw(panes::Area::Bottom, cx);
         cx.notify();
     }
 
@@ -312,6 +426,8 @@ impl Hangar {
 
     pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.seq != seq || self.dictation.owner != Some((self.connection, self.selection)) { return; }
+        let auto_send = std::mem::take(&mut self.dictation.auto_send);
+        let timed_out = std::mem::take(&mut self.dictation.timed_out);
         self.dictation.request = None;
         self.dictation.started = None;
         self.dictation.level = 0.;
@@ -327,6 +443,8 @@ impl Hangar {
                 } else if !self.dictation.draft_matches(&self.composer.read(cx).value()) {
                     self.dictation.error = Some(tr("dictation_draft_changed"));
                 } else {
+                    let draft_still_empty = self.composer.read(cx).value().trim().is_empty()
+                        && self.selected_key().is_some_and(|key| self.attachments.get(&key).is_none_or(Vec::is_empty));
                     let previous = self.dictation.inserted.as_ref().map(|(_, range)| range.clone());
                     let inserted = self.composer.update(cx, |input, cx| {
                         let draft = input.value().to_string();
@@ -349,7 +467,10 @@ impl Hangar {
                     if let Some(warning) = value.get("aviso").and_then(Value::as_str).filter(|s| !s.is_empty()) {
                         window.push_notification(Notification::warning(warning.to_owned()), cx);
                     }
+                    let warning = value.get("aviso").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
                     self.dictation.result = Some(value);
+                    if timed_out && !warning { self.dictation.error = Some(tr("dictation_silence_timeout")); }
+                    if auto_send && draft_still_empty && !warning { self.start_dictation_countdown(window, cx); }
                 }
             }
             Err(error) => self.dictation.error = Some(Self::dictation_failure(&error)),
@@ -421,7 +542,25 @@ impl Hangar {
                     })))
                 .into_any_element()
         });
-        let strip = readable.then(|| div().flex().flex_col().gap_2().child(controls).children(status)
+        let countdown = self.dictation.countdown.map(|deadline| {
+            let seconds = ((deadline.saturating_duration_since(Instant::now()).as_millis() + 999) / 1000).clamp(1, 3);
+            let label = tr("dictation_countdown").replace("{seconds}", &seconds.to_string());
+            let owner = cx.entity().downgrade();
+            div().flex().items_center().gap_2()
+                .child(div().id("dictation-countdown").role(Role::Status).aria_label(label.clone())
+                    .text_sm().text_color(theme::accent_text()).child(label))
+                .child(Button::new("dictation-countdown-cancel").ghost().small().label(tr("dictation_countdown_cancel"))
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_dictation_countdown(cx))))
+                .child(canvas(|_, _, _| (), move |_, _, window, _| {
+                    window.on_mouse_event::<MouseDownEvent>(move |_, phase, _, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let _ = owner.update(cx, |this, cx| this.cancel_dictation_countdown(cx));
+                        }
+                    });
+                }).w_0().h_0())
+                .into_any_element()
+        });
+        let strip = readable.then(|| div().flex().flex_col().gap_2().child(controls).children(status).children(countdown)
             .children(self.dictation.error.clone().map(|error| div().id("dictation-error").role(Role::Alert)
                 .text_sm().text_color(theme::danger()).child(error))).into_any_element());
         (mic, strip)
@@ -450,7 +589,17 @@ fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{dictation_insert, wav, wav_pcm, Dictation, Recorder};
+    use super::{dictation_insert, wav, wav_pcm, Dictation, Recorder, Vad};
+    use std::time::{Duration, Instant};
+    #[test]
+    fn hands_free_waits_for_speech_and_two_seconds_of_silence() {
+        let base = Instant::now();
+        let mut vad = Vad::default();
+        for tick in 0..40 { assert!(!vad.step(0., base + Duration::from_millis(tick * 55))); }
+        for tick in 40..70 { assert!(!vad.step(0.3, base + Duration::from_millis(tick * 55))); }
+        for tick in 70..107 { assert!(!vad.step(0., base + Duration::from_millis(tick * 55))); }
+        assert!(vad.step(0., base + Duration::from_millis(107 * 55)));
+    }
     #[test]
     fn versions_preserve_surroundings_and_cancel_releases_audio_without_changing_style() {
         let mut state = Dictation::default();
@@ -501,8 +650,11 @@ mod tests {
         assert!(state.owner.is_none());
         let mut pcm = vec![0; 3203];
         pcm[3201] = 128;
-        let recorder = Recorder { child: None, reader: None, pcm: std::sync::Arc::new(std::sync::Mutex::new(pcm)), playback: None };
-        assert_eq!(recorder.level(), 1.);
+        let mut recorder = Recorder { child: None, reader: None, pcm: std::sync::Arc::new(std::sync::Mutex::new(pcm)),
+            playback: None, sampled: 0, last_signal: (0., 0.), last_pcm_at: None };
+        assert_eq!(recorder.signal().0, 1.);
+        recorder.last_pcm_at = Some(Instant::now() - Duration::from_millis(200));
+        assert_eq!(recorder.signal(), (0., 0.));
     }
     #[test]
     fn wav_roundtrip_rejects_truncation_and_wrong_format() {

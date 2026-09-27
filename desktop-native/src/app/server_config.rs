@@ -1019,7 +1019,9 @@ impl Hangar {
                 .child(self.section_toggle(0, "voice_transcribe_other", cx)))
             .when(s.open[0], |el| el.child(div().mt(px(8.)).child(rows(SECTIONS[0], cx))))
             .child(div().mt(px(28.)).mb(px(10.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(tr("voice_after")))
-            .child(settings_box().child(self.hands_free_row()).child(self.style_row(cx)).child(self.config_row(field("ditado_vocabulario"), cx)))
+            .child(settings_box().child(self.hands_free_row(cx)).child(self.style_row(cx)).child(self.config_row(field("ditado_vocabulario"), cx)))
+            .when_some(self.appearance_note.clone(), |el, note| el.child(div().id("voice-hands-free-save-error").role(Role::Alert)
+                .mt_2().text_sm().text_color(theme::danger()).whitespace_normal().child(note)))
             .child(self.voice_head("voice_cleanup", "voice_cleanup_help", s.cleanup_status()))
             .child(div().flex().child(self.section_toggle(1, "voice_cleanup_other", cx)))
             .when(s.open[1], |el| el.child(div().mt(px(8.)).child(rows(SECTIONS[1], cx)))
@@ -1163,19 +1165,21 @@ impl Hangar {
             .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.server_config.open[n] = open; cx.notify(); }); })
     }
 
-    /// Mãos-livres é do aparelho (localStorage no web), e o app ainda não dita: aparece desligado, dizendo por quê.
-    fn hands_free_row(&self) -> Div {
-        let switch = div().id("voice-hands-free").child(Switch::new("voice-hands-free-switch").checked(false).disabled(true)
-            .accessibility_label(tr("voice_hands_free")))
-            .tooltip(|window, cx| Tooltip::new(tr("settings_next_version")).build(window, cx));
-        // As etiquetas no lugar do "Este servidor" das vizinhas: onde vale e por que está desligado.
+    /// A preferência é deste aparelho e já é gravada no clique.
+    fn hands_free_row(&self, cx: &mut Context<Self>) -> Div {
+        let switch = div().id("voice-hands-free").child(Switch::new("voice-hands-free-switch").checked(appearance::get().hands_free)
+            .accessibility_label(tr("voice_hands_free"))
+            .on_change(cx.listener(|this, on: &bool, _, cx| {
+                let mut next = appearance::get();
+                next.hands_free = *on;
+                this.apply_appearance(next, true, cx);
+            })));
         let head = div().flex_1().min_w_0().flex().items_center().gap(px(14.))
             .child(icon_box(IconName::Mic))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                 .child(div().flex().flex_wrap().items_center().gap(px(8.))
-                    .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_hands_free")))
-                    .child(chip(tr("settings_group_device"), theme::muted(), theme::raised()))
-                    .child(chip(tr("settings_next_version").trim_end_matches('.').to_owned(), theme::muted(), theme::raised())))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(tr("voice_hands_free")))
+                    .child(chip(tr("settings_group_device"), theme::muted(), theme::raised())))
                 .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("voice_hands_free_help"))));
         let row = div().mt(px(-1.)).border_t_1().border_color(theme::border()).flex().items_center().gap(px(14.)).px_4().py(px(14.))
             .child(head).child(div().flex_shrink_0().child(switch));
