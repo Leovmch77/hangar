@@ -1,12 +1,20 @@
-//! Barra do app (36 px) acima de tudo, igual em qualquer tela: no meio o campo "Buscar conversas" que abre a paleta (Ctrl+K),
+//! Barra do app acima de tudo, igual em qualquer tela: no meio o campo "Buscar conversas" que abre a paleta (Ctrl+K),
 //! à direita a pílula do custo de hoje (abre Custos) e a engrenagem das Configurações. A barra vazia arrasta a janela e o
 //! duplo clique maximiza, como a barra de título do Zeron e do Zed: a janela não tem decoração no Linux. No Windows e no
 //! macOS a janela tem a barra do sistema, com os botões dela; aqui não se desenha nenhum.
+//!
+//! Colados, ela é a barra de título do Zeron: o mesmo material da barra lateral, sem linha embaixo, e o conteúdo um
+//! pouco abaixo do meio. Soltos, é a faixa do web: sem fundo, o papel de parede passa por trás, só uma linha fina
+//! embaixo, e os painéis flutuam abaixo dela com a margem deles.
 use super::*;
 use super::device::Remote;
 use super::costs::web;
 
-pub(super) const TOPBAR_HEIGHT: f32 = 36.;
+/// Colada, a altura e o respiro de cima da barra de título do Zeron.
+const TOPBAR_HEIGHT: f32 = 38.;
+const TOPBAR_TOP_PAD: f32 = 4.;
+/// Solta, a altura da faixa de abas do web.
+const TOPBAR_FLOATING_HEIGHT: f32 = 44.;
 /// O custo de hoje é relido de tempos em tempos, além de ao conectar e ao fim de um turno longo.
 const TODAY_EVERY: Duration = Duration::from_secs(300);
 
@@ -99,9 +107,13 @@ impl Hangar {
                 if this.settings.is_some() && !this.settings_live() { this.close_settings(window, cx) }
                 else { this.open_settings(settings::Page::Appearance, window, cx) }
             }));
-        let bar = div().id("topbar").h(px(TOPBAR_HEIGHT)).w_full().flex_shrink_0().px(px(10.)).flex().items_center().gap(px(8.))
-            .map(|el| if floating { el.rounded(px(12.)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
-                else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
+        // Colada, a barra continua a lateral que está embaixo dela: a de conversas tem superfície própria.
+        let page_open = settings_open || self.costs.view.is_some();
+        let wall = if !page_open && appearance::get().navigation == appearance::Navigation::Conversations { theme::conversation_sidebar().0 }
+            else { theme::chrome() };
+        let bar = div().id("topbar").w_full().flex_shrink_0().flex().items_center().gap(px(8.))
+            .map(|el| if floating { el.h(px(TOPBAR_FLOATING_HEIGHT)).px(px(8.)).border_b_1().border_color(theme::border_strong()) }
+                else { el.h(px(TOPBAR_HEIGHT)).pt(px(TOPBAR_TOP_PAD)).pl(px(10.)).pr(px(6.)).bg(wall) })
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = true))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = false))
@@ -121,6 +133,6 @@ impl Hangar {
             .child(div().flex_1().min_w_0().flex().justify_end().gap(px(6.))
                 .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
                 .child(control(pill)).child(control(gear)));
-        chrome::glass_panel(bar, px(if floating { 12. } else { 0. }))
+        if floating { bar.into_any_element() } else { chrome::glass_panel(bar, px(0.)) }
     }
 }
