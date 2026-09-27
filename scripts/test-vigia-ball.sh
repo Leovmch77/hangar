@@ -280,8 +280,8 @@ group() {
 }
 group grupo
 vigia
-grep -q -- '--data {"peer": "rev1", "task": "Plano X", "notify_members": false} http://127.0.0.1:8765/api/sessions/arb/pair' "$t/urls" \
-  || fail "rev1 não entrou no grupo do árbitro com notify_members false"
+grep -q -- '--data {"peer": "rev1", "task": "Plano X", "orq": true} http://127.0.0.1:8765/api/sessions/arb/pair' "$t/urls" \
+  || fail "rev1 não entrou no grupo do árbitro como grupo de orquestração"
 if grep -q '"peer": "exec1"\|"peer": "outro"' "$t/urls"; then fail "pareou quem já tinha grupo"; fi
 grep -q "joined group: rev1" "$d/registro.md" || fail "entrada no grupo sem linha no registro"
 [ "$(grep -c 'aviso: \[aviso\] outro is in another group (g2)' "$d/registro.md")" -eq 1 ] || fail "aviso de outro grupo não saiu uma vez só"

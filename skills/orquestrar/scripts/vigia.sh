@@ -426,7 +426,7 @@ for n in team:
     if s.get("pair_gid"):
         print(f"other\t{n}\t{s['pair_gid']}")
     else:
-        body = {"peer": n, "task": a.get("pair_task") or "", "notify_members": False}
+        body = {"peer": n, "task": a.get("pair_task") or "", "orq": True}
         print(f"join\t{n}\t{json.dumps(body, ensure_ascii=False)}")
 PY
 orq_log() { ORQ_DIR="$ORQD" python3 "$ORQ" log "$1" >/dev/null 2>>"$CP_VIGIA_LOG"; }

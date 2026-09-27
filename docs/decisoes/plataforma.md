@@ -268,20 +268,25 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     ficava e o modelo esquecia os pares. O `pair_dir` vai por argv porque é o do BACKEND — sessão em
     `--conta` tem `CLAUDE_CONFIG_DIR` próprio, e o sidecar não mora lá. Por isso os textos moram em
     `pair_texto.py`, stdlib-only (mesma regra do `engines.py`).
-  - **Protocolo completo só pro recém-chegado** (`snap[m] is None`); veterano recebe "fulano entrou";
-    peers e tarefa iguais = nada. Adicionar o 5º membro disparava 5 prompts de 1,5KB, 4 redundantes.
+  - **Protocolo só pro recém-chegado** (`snap[m] is None`), sem lista de membros; veterano não
+    recebe nada. Adicionar o 5º membro disparava 5 prompts de 1,5KB, 4 redundantes. Em 26/09/2026
+    o "fulano entrou" também saiu: na native-parity os árbitros receberam 269 avisos do painel
+    (175 entradas, 67 saídas), que viraram 64 turnos próprios, 54 sem efeito, e a lista de membros
+    envelhecia a cada troca de sessão. O grupo passou a ser consultado (`sessions` com `grupo`,
+    rodapé `# seu grupo:` do `--list`). Grupo com `orq: true` no sidecar (`--pair --orq`, e o
+    vigia) não recebe nem o protocolo: o comum mandava falar 1:1 livre, criar `grupo-<gid>.md` e
+    trocar de branch, contra o kick-off; o hook reinjeta uma frase que aponta pro kick-off.
   - **Tarefa diferente da existente é 409** sem `--substituir-tarefa` — cada `--pair` de um árbitro
     sobrescrevia a de todos, calado.
-  - **Toda saída avisa quem ficou pela mesma esteira**: unpair, kill (não avisava ninguém — os pares
-    mandavam recado pra nome morto ou pra sessão nova que o reusasse) e morte fora do app. Remoto vai
-    por `/unpair-remote` no unpair e no kill; na varredura só loga (rede dentro do `list()` não).
+  - **Saída não avisa os locais que ficaram** (26/09/2026, mesma medição acima): recado pra quem
+    saiu volta "sessão não encontrada". Ficou o risco de uma sessão nova com o nome reusado receber
+    recado dirigido à antiga. Remoto continua por `/unpair-remote` no unpair e no kill, senão o
+    sidecar de lá fica órfão; na varredura só loga (rede dentro do `list()` não).
   - **Varredura de morto fora do app roda no fim de `list()`, e três coisas a seguram:** contador
     DE CLASSE (há 4 instâncias de `SessionRegistry` — api, sse×2, prune — e todas chamam `list()`);
     ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número de polls, porque
     `kill()` e `rename()` chamam `list()` numa janela em que o nome está ausente de propósito; e lista
-    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. Aviso pela fila durável
-    (nunca send-keys ali) + drain por callback (`apos_saida_por_morte`), porque a fila só drena em
-    transição de hook e o peer já ocioso nunca receberia. O dict de classe (`_pair_ausencias`) é
+    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. O dict de classe (`_pair_ausencias`) é
     limpo com `pop(n, None)`, nunca `del` — as 4 instâncias varrem concorrentemente e outra thread
     pode já ter tirado a mesma chave.
   - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429). Todo membro

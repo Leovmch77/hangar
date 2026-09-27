@@ -6,16 +6,19 @@
 #                                  (como o recado chega: ver "TRANSPORTE" abaixo).
 #   hangar-send <servidor>::<sessao> <mensagem...>  idem, pra sessão em OUTRO servidor (peers.json)
 #   hangar-send --pair <sessao> [tarefa...] [--substituir-tarefa]  pareia ESTA sessão com outra
-#                                        (registra no app: badge 🤝 na UI + protocolo injetado nos
-#                                        dois lados). tarefa = título do grupo na lista, chave +
+#                                        (registra no app: badge 🤝 na UI + protocolo só pra quem
+#                                        estava sem grupo; ninguém é avisado de entrada ou saída,
+#                                        o grupo se consulta no --list). tarefa = título do grupo na lista, chave +
 #                                        assunto numa linha ("ABC-1234 Tela de login"); o
 #                                        combinado vai num recado à parte. tarefa diferente da
 #                                        que o grupo já tem é recusada (409) sem o flag;
 #                                        --substituir-tarefa vale em
-#                                        QUALQUER posição entre os tokens de tarefa
-#   hangar-send --unpair               desfaz o pareamento desta sessão (avisa os dois lados)
-#   hangar-send --close <sessao>       fecha OUTRA sessão desta máquina, com ou sem terminal (o
-#                                  grupo dela é avisado). Nunca a própria.
+#                                        QUALQUER posição entre os tokens de tarefa.
+#                                        --orq: grupo de orquestração (skill orquestrar); o
+#                                        pareamento não manda aviso a ninguém, o kick-off traz tudo
+#   hangar-send --unpair               tira esta sessão do grupo (só ela é avisada)
+#   hangar-send --close <sessao>       fecha OUTRA sessão desta máquina, com ou sem terminal
+#                                  (sai do grupo dela sem aviso). Nunca a própria.
 #   hangar-send --group <mensagem...>  AVISO pro grupo TODO de uma vez (marco: "terminei",
 #                                  "contrato atualizado"). Chega como [grupo: X]. UNIDIRECIONAL —
 #                                  nunca responda um [grupo:] com --group (evita loop); responda 1:1.
@@ -154,9 +157,14 @@ listar() {
     # (frontend/src/lib/hangarCmd.ts) lê essas colunas; mudou aqui, muda lá.
     api GET /api/sessions | python3 -c '
 import json, sys
-for s in json.load(sys.stdin):
+sessions = json.load(sys.stdin)
+for s in sessions:
     h = "%s%s/%s" % (s.get("provider") or "?", ":" + s["engine"] if s.get("engine") else "", "headless" if s.get("headless") else "tmux")
-    print("%-23s  %-14s  %-17s  %s%s" % (s["name"], s["state"], h, s["cwd"], "  (você)" if s["name"] == sys.argv[1] else ""))' "$(me 2>/dev/null)"
+    print("%-23s  %-14s  %-17s  %s%s" % (s["name"], s["state"], h, s["cwd"], "  (você)" if s["name"] == sys.argv[1] else ""))
+# Entrada e saída não são avisadas: é aqui que a sessão vê com quem está.
+eu = next((s for s in sessions if s["name"] == sys.argv[1]), {})
+if eu.get("pair_peers"):
+    print("# seu grupo: " + ", ".join(eu["pair_peers"]))' "$(me 2>/dev/null)"
     # Servidores do peers.json: mesmas colunas, nome prefixado servidor::sessao (é o endereço
     # que o hangar-send de envio aceita). Peer fora do ar não derruba a lista local — vira aviso.
     if [[ -f "$PEERS_FILE" ]]; then
@@ -279,19 +287,26 @@ if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
 fi
 
 if [[ "$1" == "--pair" ]]; then
-    peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa]}"; shift 2
+    peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa] [--orq]}"; shift 2
     substituir=false
+    orq=false
     tarefa=""
     # --substituir-tarefa em QUALQUER posição entre os tokens restantes, não só logo após o peer —
     # senão "hangar-send --pair X 'PM-2' --substituir-tarefa" dobrava a flag pro texto da tarefa.
     for arg in "$@"; do
-        if [[ "$arg" == "--substituir-tarefa" ]]; then substituir=true; else tarefa="$tarefa${tarefa:+ }$arg"; fi
+        if [[ "$arg" == "--substituir-tarefa" ]]; then substituir=true
+        elif [[ "$arg" == "--orq" ]]; then orq=true
+        else tarefa="$tarefa${tarefa:+ }$arg"; fi
     done
     # peer local (nome cru) OU remoto (servidor::sessao) — o backend local resolve o remoto via
     # peers.json + CP_SERVER_ID e registra o vínculo dos dois lados (/pair-remote). Cross-server é 1:1.
-    body=$(python3 -c 'import json,sys; print(json.dumps({"peer": sys.argv[1], "task": sys.argv[2], "replace_task": sys.argv[3] == "true"}))' "$peer" "$tarefa" "$substituir")
+    body=$(python3 -c 'import json,sys; print(json.dumps({"peer": sys.argv[1], "task": sys.argv[2], "replace_task": sys.argv[3] == "true", "orq": sys.argv[4] == "true"}))' "$peer" "$tarefa" "$substituir" "$orq")
     api POST "/api/sessions/$(me)/pair" "$body" >/dev/null
-    echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
+    if $orq; then
+        echo "pareado: $(me) <-> $peer (grupo de orquestração: ninguém recebe aviso; o kick-off traz o protocolo)"
+    else
+        echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
+    fi
     exit 0
 fi
 
@@ -509,10 +524,9 @@ if [[ "$1" == "--close" ]]; then
     vivas=$(api GET /api/sessions) || exit 1
     printf '%s' "$vivas" | python3 -c 'import json,sys; sys.exit(0 if any(s.get("name") == sys.argv[1] for s in json.load(sys.stdin)) else 1)' "$alvo" \
         || { echo "erro: sessão '$alvo' não existe (hangar-send --list)" >&2; exit 1; }
-    # by= poupa quem fechou do aviso de saída do grupo; sem identidade, vai sem ele.
-    resp=$(api DELETE "/api/sessions/$alvo${eu:+?by=$eu}") || exit 1
+    resp=$(api DELETE "/api/sessions/$alvo") || exit 1
     echo "fechada: $alvo"
-    # Fechou, mas o aviso ao grupo dela pode ter falhado: isso não some calado.
+    # Fechou, mas desfazer o par remoto dela pode ter falhado: isso não some calado.
     printf '%s' "$resp" | python3 -c 'import json,sys; w=(json.load(sys.stdin) or {}).get("warning"); w and print("aviso: " + (w.get("msg") or json.dumps(w, ensure_ascii=False)), file=sys.stderr)' || true
     exit 0
 fi

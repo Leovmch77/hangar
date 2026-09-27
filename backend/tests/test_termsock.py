@@ -28,7 +28,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # direto (sem isolar projects_dir) — sem isto varria o .hangar-pair REAL (achado do review).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    monkeypatch.setattr(registry_mod, "apos_saida_por_morte", None)
 
 
 # Diretorio de trabalho dos shells escondidos deste arquivo. Era "/tmp" cru: no Windows esse caminho

@@ -88,7 +88,7 @@ async def who_am_i(ctx: Context) -> dict[str, str]:
 
 
 @mcp.tool(description="Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). "
-                      "`voce: true` marca esta sessão. "
+                      "`voce: true` marca esta sessão; mesmo `grupo` = mesmo grupo de trabalho. "
                       "Equivale a `hangar-send --list` sem os servidores remotos.")
 async def sessions(ctx: Context) -> list[dict[str, Any]]:
     from app import api
@@ -98,7 +98,8 @@ async def sessions(ctx: Context) -> list[dict[str, Any]]:
         eu = None
     infos = await api.list_sessions()
     return [{"name": s.name, "state": s.state, "cwd": s.cwd,
-             "provider": s.provider, "headless": s.headless, "voce": s.name == eu} for s in infos]
+             "provider": s.provider, "headless": s.headless, "voce": s.name == eu,
+             "grupo": s.pair_gid} for s in infos]
 
 
 @mcp.tool(description="Manda um recado 1:1 pra outra sessão, como `hangar-send <sessao> <msg>`: "

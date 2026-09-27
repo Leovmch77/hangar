@@ -37,11 +37,13 @@ session is opened or a Task released. Back to `arbitro.md` once the team stands.
    kick-offs ("Kick-off", below).
 
    ```bash
-   hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract"   # one call per session
+   hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract" --orq   # one call per session
    ```
 
-   The `--pair` string names the work and the contract, nothing more; roles live in the
-   kick-off and in the table, and the contract says the table wins over any group notice. Wrong
+   `--orq` marks the group as an orchestration: pairing delivers nothing to anyone, and the
+   watchdog's later joins stay silent too. The `--pair` string names the work and the contract,
+   nothing more; roles live in the kick-off and in the table, and the contract says the table
+   wins over any group notice. Wrong
    string already sent → rewrite `task` in `<config>/.hangar-pair/<session>.json` (tmp+rename).
 
 Done when the five items of `arbitro.md`, step 1, stand.

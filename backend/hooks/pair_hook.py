@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from app.pair_texto import texto_grupo  # noqa: E402  (stdlib-only; app/__init__.py é vazio)
+from app.pair_texto import texto_grupo, texto_grupo_orq  # noqa: E402  (stdlib-only; app/__init__.py é vazio)
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -78,6 +78,11 @@ def main() -> None:
         d = json.load(fh)
     peers = [p for p in (d.get("peers") or []) if p] if isinstance(d, dict) else []
     if not peers:
+        return
+    if d.get("orq") is True:
+        texto = texto_grupo_orq(d.get("task", ""))
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                 "additionalContext": texto}}))
         return
     gid = d.get("gid") or ""
     cross = any("::" in p for p in peers)

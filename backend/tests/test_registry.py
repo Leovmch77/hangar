@@ -38,7 +38,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
     # sem isto, um sweep que ache um ausente de verdade dispara uma thread real (_drain_session)
     # que chama registry.list() de novo, fora da janela desta fixture (achado do review de Task 8).
-    monkeypatch.setattr(registry, "apos_saida_por_morte", None)
 
 
 def test_sanitize_cwd_matches_claude_scheme():

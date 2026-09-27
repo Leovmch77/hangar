@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app import pair, registry as registry_mod
+from app import pair
 from app.registry import SessionRegistry
 
 
@@ -13,19 +13,16 @@ from app.registry import SessionRegistry
 def _pair_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    monkeypatch.setattr(registry_mod, "apos_saida_por_morte", None)
 
 
 def _reg():
     return SessionRegistry.__new__(SessionRegistry)  # só o método; sem __init__ (tmux)
 
 
-def test_ausente_por_tempo_e_dois_polls_sai_do_grupo_e_avisa_pela_fila():
+def test_ausente_por_tempo_e_dois_polls_sai_do_grupo_sem_avisar_ninguem():
     pair.join("a", "b")
     pair.join("c", "a")
     r = _reg()
-    drenados = []
-    registry_mod.apos_saida_por_morte = drenados.append
     with patch("app.registry.PromptQueue") as pq:
         r._varrer_pares_mortos({"b", "c"}, agora=100.0)     # 1ª ausência: só marca
         r._varrer_pares_mortos({"b", "c"}, agora=100.1)     # 2ª, mas cedo demais
@@ -34,11 +31,7 @@ def test_ausente_por_tempo_e_dois_polls_sai_do_grupo_e_avisa_pela_fila():
         r._varrer_pares_mortos({"b", "c"}, agora=100.0 + SessionRegistry._PAIR_AUSENCIA_MIN_S)
     assert pair.PairLink("a").get() is None
     assert pair.PairLink("b").get()["peers"] == ["c"]
-    assert sorted(c.args[0] for c in pq.call_args_list) == ["b", "c"]
-    for c in pq.return_value.append.call_args_list:
-        assert c.args[0].startswith("[painel: grupo de trabalho] 'a' encerrou fora do app e saiu do grupo de trabalho.")
-        assert c.kwargs.get("delivered") is False
-    assert sorted(drenados) == ["b", "c"]
+    pq.return_value.append.assert_not_called()   # quem ficou consulta o grupo; aviso custava um turno
     # 2a varredura do mesmo nome ja limpo (ex: outra instancia do registry rodando o mesmo tick):
     # 'a' nao tem mais sidecar, entao nao volta a ser candidato -- mas isto so nao estoura porque a
     # remocao do dict usa pop(n, None), nunca del (achado do review de Task 8).

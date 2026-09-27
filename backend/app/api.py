@@ -594,10 +594,6 @@ app.include_router(config_sync_api.config_sync_router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
-# Peer avisado pela varredura de morte já pode estar ocioso: sem este drain a fila só esvazia no
-# próximo hook dele, que pode nunca vir.
-registry_mod.apos_saida_por_morte = lambda p: threading.Thread(
-    target=_drain_session, args=(p,), daemon=True).start()
 terminal = TerminalInput()
 
 # Teto de mensagem: o _BodySizeLimitMiddleware ignora scope != http de propósito (api.py:83), então
@@ -2223,8 +2219,7 @@ async def kill_session(name: str, by: str | None = None):
     plugin_bridge.esquecer(name)
     warn = None
     if link:
-        errs = await _avisar_saida(name, link["peers"], "encerrou a sessão e saiu do grupo de trabalho",
-                                   pular=by)
+        errs = await _avisar_saida(name, link["peers"])
         if errs:
             warn = erro("erro_pareamento_saida_falhou",
                         "aviso de saída falhou: " + "; ".join(
@@ -3761,8 +3756,11 @@ class PairBody(_StrictBody):
     peers: list[str] = []
     task: str = ""
     replace_task: bool = False
-    # False: só quem entra recebe o protocolo; veterano não é acordado pela linha de entrada.
+    # Sem efeito: veterano nunca é avisado. Fica porque o corpo é estrito e o vigia ainda o manda.
     notify_members: bool = True
+    # Grupo de orquestração: o kick-off de cada papel já diz canal, contrato e branch, então o
+    # pareamento não entrega nada a ninguém (nem protocolo, nem entrada) e o hook reinjeta a versão curta.
+    orq: bool = False
 
 
 def _group_text(me: str, others: list[str], task: str, harness: dict[str, str]) -> str:
@@ -3814,7 +3812,7 @@ async def pair_session(name: str, body: PairBody):
     # na janela entre elas entrava no grupo fora do snapshot e um rollback posterior não o
     # reverteria). O snapshot volta pra cá pra desfazer se o aviso não chegar em ninguém.
     try:
-        members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task, harness=harness)
+        members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task, harness=harness, orq=body.orq)
     except pair.PairMixError as e:
         # Uma das sessões locais já está pareada cross-server (1:1) — não dá pra fundir em grupo local.
         raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
@@ -3824,22 +3822,10 @@ async def pair_session(name: str, body: PairBody):
                                              f"--substituir-tarefa pra trocar", existente=e.existente))
     link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
     task = link.get("task", body.task)
-    # Protocolo completo só pra quem estava SOLTO; veterano ganha uma linha com quem entrou. Quem
-    # não teve mudança de peers nem de tarefa não recebe nada — o protocolo pós-/clear é do hook.
-    avisos: list[tuple[str, str]] = []
-    for m in members:
-        antes = snap.get(m)
-        outros = [x for x in members if x != m]
-        if antes is None:
-            avisos.append((m, _group_text(m, outros, task, harness)))
-            continue
-        if not body.notify_members:
-            continue
-        entraram = [x for x in outros if x not in antes["peers"]]
-        if entraram:
-            avisos.append((m, pair_texto.texto_entrada(entraram, members, task, harness)))
-        elif antes.get("task", "") != task:
-            avisos.append((m, pair_texto.texto_tarefa_atualizada(task)))
+    # Só quem estava SOLTO recebe o protocolo; veterano não é acordado (consulta o grupo quando
+    # precisar). O protocolo pós-/clear é do hook.
+    avisos = [(m, _group_text(m, [x for x in members if x != m], task, harness))
+              for m in ([] if link.get("orq") else members) if snap.get(m) is None]
     errs = []
     for m, texto in avisos:
         e = await _deliver(m, texto)
@@ -4399,11 +4385,9 @@ def pair_contract(name: str):
     return {"peers": link.get("peers", []), "path": str(p), "content": content}
 
 
-async def _avisar_saida(name: str, expeers: list[str], motivo: str, pular: str | None = None) -> list[dict]:
-    """Avisa quem FICOU depois de `name` sair do grupo (o sidecar dele já foi limpo): remoto via
-    /unpair-remote do backend dele, local via _deliver. Uma esteira só pra unpair e kill — o kill
-    não avisava ninguém e os pares seguiam mandando recado pra um nome morto (ou pra sessão nova
-    que reusasse o nome)."""
+async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
+    """Depois de `name` sair do grupo (o sidecar dele já foi limpo), desfaz o vínculo nos pares
+    REMOTOS via /unpair-remote, senão o sidecar de lá fica órfão. Uma esteira só pra unpair e kill."""
     errs: list[dict] = []
     for p in expeers:
         if not peers.is_remote(p):
@@ -4423,14 +4407,7 @@ async def _avisar_saida(name: str, expeers: list[str], motivo: str, pular: str |
             # Sidecar remoto fica órfão até alguém desparear lá. ponytail: sem fila de retry — single-user.
             _log.warning("saida do grupo: peer remoto '%s' não avisado (sidecar de lá fica órfão): %s", p, ex)
             errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
-    resto = [p for p in expeers if not peers.is_remote(p)]
-    for p in resto:
-        if p == pular:
-            # Quem fechou já sabe; o aviso só acordaria um turno à toa.
-            continue
-        e = await _deliver(p, pair_texto.texto_saida(name, motivo, [x for x in resto if x != p]))
-        if e:
-            errs.append({"sessao": p, "erro": e})
+    # Locais não são avisados: recado para quem saiu volta "sessão não encontrada".
     return errs
 
 
@@ -4481,7 +4458,7 @@ async def unpair_session(name: str):
     expeers = await asyncio.to_thread(pair.leave, name)   # nome próprio: 'peers' é o módulo importado
     if not expeers:
         return {"ok": True, "warning": None}
-    errs = await _avisar_saida(name, expeers, "saiu do grupo de trabalho")
+    errs = await _avisar_saida(name, expeers)
     e = await _deliver(name, f"{pair_texto.PREFIXO} Você saiu do grupo de trabalho "
                              f"({', '.join(expeers)}). Volte a operar independente; use hangar-send só "
                              "quando o usuário pedir.")
