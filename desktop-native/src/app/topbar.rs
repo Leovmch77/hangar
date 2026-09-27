@@ -132,7 +132,9 @@ impl Hangar {
             .child(control(search))
             .child(div().flex_1().min_w_0().flex().justify_end().gap(px(6.))
                 .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
-                .child(control(pill)).child(control(gear)));
+                .child(control(pill))
+                .children(cx.try_global::<crate::update::Handle>().map(|updater| control(updater.0.clone())))
+                .child(control(gear)));
         if floating { bar.into_any_element() } else { chrome::glass_panel(bar, px(0.)) }
     }
 }
