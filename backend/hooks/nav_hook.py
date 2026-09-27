@@ -108,11 +108,15 @@ def texto(url: str | None) -> str:
             "muda a janela do usuário: avise-o.")
 
 
-# Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela.
+# Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela. Palavra que aparece
+# em qualquer conversa de código (testa, ui, url, login, interface) fica de fora: sozinha, ela
+# mandava a dica em "roda os testes" e "a interface do adapter".
 _TELA = re.compile(
-    r"\b(pagina|paginas|tela|telas|navegador|browser|print|prints|screenshot|captura|clica|clicar|"
-    r"clique|botao|botoes|layout|css|front|frontend|ui|interface|localhost|url|site|login|"
-    r"formulario|modal|preview|testa|testar|teste visual)\b|https?://")
+    r"\b(pagina|paginas|tela|telas|navegador|browser|prints?|screenshot|captura de tela|clica|clicar|"
+    r"clique|botao|botoes|layout|css|front|frontend|localhost|site|formulario|modal|preview|"
+    r"teste visual)\b|\btestar? (o |a )?(login|cadastro|fluxo)\b|https?://")
+# Notificação de subagente chega como prompt, mas ninguém a escreveu pedindo tela.
+_NAO_E_PEDIDO = ("<task-notification", "[SYSTEM NOTIFICATION")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
@@ -143,7 +147,7 @@ def _jev_precisa(prompt: str) -> bool | None:
 
 
 def precisa_de_navegador(prompt: str) -> bool:
-    if not prompt.strip():
+    if not prompt.strip() or any(m in prompt.lstrip()[:400] for m in _NAO_E_PEDIDO):
         return False
     pelo_jev = _jev_precisa(prompt)
     return pelo_jev if pelo_jev is not None else bool(_TELA.search(_sem_acento(prompt)))
@@ -167,11 +171,14 @@ def main() -> None:
         return   # sem arquivo = sem Electron, o caso normal de quem usa só o celular
     if not isinstance(srv, dict) or not _pid_vivo(srv.get("pid")):
         return
+    prompt = _prompt()
+    if any(m in prompt.lstrip()[:400] for m in _NAO_E_PEDIDO):
+        return
     nome = _nome_da_sessao()
     url = _url_do_navegador(nav_dir, nome) if nome else None
     # Navegador aberto: sempre diz qual página. Fechado: a dica só vai quando a mensagem é de tela;
     # em toda mensagem ela custava contexto a quem nunca abre página (o árbitro de uma orquestração).
-    if url is None and not precisa_de_navegador(_prompt()):
+    if url is None and not precisa_de_navegador(prompt):
         return
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                              "additionalContext": texto(url)}}))
