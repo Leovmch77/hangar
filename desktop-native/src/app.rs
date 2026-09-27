@@ -21,6 +21,7 @@ mod create;
 mod device;
 mod follow;
 mod landing;
+mod git;
 mod harness;
 mod viewer;
 mod machines;
@@ -3065,14 +3066,24 @@ impl Hangar {
             let ctx_tip = [Some(format!("{} {}", tr("ring_context"), percent(ctx_pct))), stats].into_iter().flatten().collect::<Vec<_>>().join("\n");
             // Com o cartão aberto a dica sairia por cima dele.
             let account_tip = if self.accounts.card { String::new() } else { format!("{}: {}", tr("ring_account"), limits.unwrap_or_else(|| tr("no_data"))) };
-            div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+            let has_git = !branch.is_empty();
+            let place = div().min_w_0().flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
                 .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 14., theme::faint())).child(div().max_w(px(200.)).truncate().child(f)))
-                .when(!branch.is_empty(), |el| el.child(div().ml(px(4.)).flex().items_center().gap(px(4.)).min_w_0()
+                .when(has_git, |el| el.child(div().ml(px(4.)).flex().items_center().gap(px(4.)).min_w_0()
                     .child(chrome::small_icon(IconName::GitBranch, 14., theme::faint()))
                     .child(div().max_w(px(160.)).truncate().child(branch))
                     .when(dirty, |el| el.child(div().text_color(theme::warning()).child("*")))))
                 .when_some(added, |el, a| el.child(div().text_color(theme::success()).child(format!("+{a}"))))
-                .when_some(removed, |el, r| el.child(div().text_color(theme::removed()).child(format!("−{r}"))))
+                .when_some(removed, |el, r| el.child(div().text_color(theme::removed()).child(format!("−{r}"))));
+            // Com repositório, a faixa abre o git da sessão (o `repo-chip` do web); o recuo negativo mantém o texto no lugar.
+            let place = if has_git {
+                Button::new("composer-git").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::faint())
+                    .hover(theme::hover()).active(theme::hover())).h(px(22.)).ml(px(-4.)).px(px(4.)).rounded(px(6.))
+                    .tooltip(tr("git_open")).accessibility_label(tr("git_open")).child(place)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_git_panel(window, cx))).into_any_element()
+            } else { place.into_any_element() };
+            div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+                .child(place)
                 .child(div().flex_1())
                 // A linha de estatísticas do turno fica na dica do anel de contexto.
                 .child(ring("composer-ctx", ctx_pct, ctx_tip))
