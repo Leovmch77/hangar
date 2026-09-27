@@ -75,9 +75,50 @@ fn resolve(dir: &Path, filename: &str) -> Result<PathBuf, Failure> {
 }
 
 fn read(dir: &Path, filename: &str) -> Result<Vec<u8>, Failure> {
-    let path = resolve(dir, filename)?;
-    if std::fs::metadata(&path).map_err(|_| Failure::local("invalid_response"))?.len() > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
-    std::fs::read(&path).map_err(|_| Failure::local("invalid_response"))
+    read_file(&resolve(dir, filename)?)
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, Failure> {
+    if std::fs::metadata(path).map_err(|_| Failure::local("invalid_response"))?.len() > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
+    std::fs::read(path).map_err(|_| Failure::local("invalid_response"))
+}
+
+/// `_resolver_citado` sem a varredura do transcript: o caminho saiu dos eventos da própria conversa, que são o transcript
+/// (varrê-lo custa segundos numa conversa longa). `cwd` é o caminho real da pasta da sessão. Relativo resolve dentro dela
+/// e não sai; `.git` fica de fora pelo caminho real. `None` manda ao backend, que tenta também as pastas das linhas que
+/// citaram e dá o erro certo.
+fn cited(cwd: &Path, path: &str) -> Option<PathBuf> {
+    let expanded = match path.strip_prefix('~') {
+        Some("") => std::env::home_dir()?,
+        Some(rest) => std::env::home_dir()?.join(rest.strip_prefix('/')?),
+        None => PathBuf::from(path),
+    };
+    let real = if expanded.is_absolute() { std::fs::canonicalize(&expanded).ok()? } else {
+        if path.split(['/', '\\']).any(|part| part == "..") { return None; }
+        let real = std::fs::canonicalize(cwd.join(&expanded)).ok()?;
+        if real == cwd || !real.starts_with(cwd) { return None; }
+        real
+    };
+    (real.is_file() && !real.components().any(|part| part.as_os_str() == ".git")).then_some(real)
+}
+
+/// `get_transcript_image`: a `index`-ésima imagem base64 da linha do evento `id`. Só a linha que contém o id vira JSON.
+fn transcript_image(jsonl: &Path, id: &str, index: usize) -> Option<Vec<u8>> {
+    use std::io::BufRead;
+    use base64::Engine as _;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(jsonl).ok()?);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line).ok()? > 0 {
+        if std::str::from_utf8(&line).is_ok_and(|text| text.contains(id))
+            && let Ok(event) = serde_json::from_slice::<Value>(&line)
+            && event.get("uuid").and_then(Value::as_str) == Some(id) {
+            let image = event.pointer("/message/content")?.as_array()?.iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("image")).nth(index)?;
+            return base64::engine::general_purpose::STANDARD.decode(image.pointer("/source/data")?.as_str()?).ok();
+        }
+        line.clear();
+    }
+    None
 }
 
 /// `_safe_ext` sobre o nome como ele iria no `X-Filename` (percent-encoded): [a-z0-9] até 8, ou `bin`.
@@ -143,29 +184,35 @@ async fn blocking<T: Send + 'static>(job: impl FnOnce() -> Result<T, Failure> + 
     tokio::task::spawn_blocking(job).await.map_err(|_| Failure::local("invalid_response"))?
 }
 
-/// Onde os anexos de uma sessão são lidos e gravados.
+/// Onde os anexos de uma sessão são lidos e gravados. Local, também as imagens citadas e as do transcript vêm do disco.
 #[derive(Clone)]
-pub(super) enum Uploads { Local(PathBuf), Remote }
+pub(super) enum Uploads { Local { dir: PathBuf, cwd: PathBuf, jsonl: PathBuf }, Remote }
 
 impl Uploads {
     pub(super) async fn list(&self, api: &Api, name: &str) -> Result<Vec<UploadFile>, Failure> {
         match self {
-            Uploads::Local(dir) => { let dir = dir.clone(); blocking(move || Ok(list(&dir))).await }
+            Uploads::Local { dir, .. } => { let dir = dir.clone(); blocking(move || Ok(list(&dir))).await }
             Uploads::Remote => api.uploads(name).await,
         }
     }
 
     pub(super) async fn fetch(&self, api: &Api, name: &str, source: &Source) -> Result<Vec<u8>, Failure> {
-        match (self, source) {
-            (Uploads::Local(dir), Source::Upload(file)) => { let (dir, file) = (dir.clone(), file.clone()); blocking(move || read(&dir, &file)).await }
-            _ => api.fetch(name, source).await,
-        }
+        let Uploads::Local { dir, cwd, jsonl } = self else { return api.fetch(name, source).await };
+        let (dir, cwd, jsonl, local) = (dir.clone(), cwd.clone(), jsonl.clone(), source.clone());
+        // `None`: não deu para ler daqui; o backend responde, com o erro dele se for o caso.
+        let read = blocking(move || Ok(match local {
+            Source::Upload(file) => Some(read(&dir, &file)),
+            Source::Cited(path) => cited(&cwd, &path).map(|path| read_file(&path)),
+            Source::Transcript(id, index) => transcript_image(&jsonl, &id, index).map(Ok),
+            Source::Remote(_) => None,
+        })).await?;
+        match read { Some(result) => result, None => api.fetch(name, source).await }
     }
 
     /// Vídeo sobe pelo backend, que extrai quadros e transcreve a fala; o resto grava aqui e varre os vencidos do projeto.
     pub(super) async fn upload(&self, api: &Api, name: &str, filename: &str, bytes: Vec<u8>, retention: Option<i64>) -> Result<Uploaded, Failure> {
         match self {
-            Uploads::Local(dir) if !VIDEO_EXTS.contains(&safe_ext(filename).as_str()) => {
+            Uploads::Local { dir, .. } if !VIDEO_EXTS.contains(&safe_ext(filename).as_str()) => {
                 let (dir, filename) = (dir.clone(), filename.to_owned());
                 blocking(move || {
                     let saved = save(&dir, &filename, &bytes)?;
@@ -197,9 +244,10 @@ impl Hangar {
     pub(super) fn uploads_for(&self, key: &SessionKey) -> Uploads {
         let local = self.local_cwd(&key.name).and_then(|(_, real)| {
             let id = if key.jsonl.is_empty() { Some(key.name.clone()) } else { session_id(&key.jsonl) }?;
-            uploads_dir(&std::env::home_dir()?, &real, &id)
+            let dir = uploads_dir(&std::env::home_dir()?, &real, &id)?;
+            Some(Uploads::Local { dir, cwd: real, jsonl: PathBuf::from(&key.jsonl) })
         });
-        local.map_or(Uploads::Remote, Uploads::Local)
+        local.unwrap_or(Uploads::Remote)
     }
 
     /// `shortcut-shell` local quando a sessão é desta máquina; `None` manda ao backend.
@@ -223,8 +271,50 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve, safe_ext, session_id, slug, uploads_dir};
+    use super::{cited, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
     use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn cited_path_stays_in_the_session_folder_and_out_of_git() {
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("hangar-cited-{}", std::process::id()));
+        let cwd = root.join("repo");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("sub")).unwrap();
+        for file in ["sub/a.png", ".git/config"] { std::fs::write(cwd.join(file), b"x").unwrap(); }
+        std::fs::write(root.join("fora.png"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("fora.png"), cwd.join("link.png")).unwrap();
+        std::os::unix::fs::symlink(cwd.join(".git"), cwd.join("atalho")).unwrap();
+        assert_eq!(cited(&cwd, "sub/a.png"), Some(cwd.join("sub/a.png")));
+        let absolute = root.join("fora.png");
+        assert_eq!(cited(&cwd, absolute.to_str().unwrap()), Some(absolute));
+        // Relativo que sai da pasta (por `..` ou symlink), área do git, pasta e o que não existe vão ao backend.
+        for path in ["../fora.png", "link.png", ".git/config", "atalho/config", "sub", "sumiu.png", "~outro/a.png"] {
+            assert_eq!(cited(&cwd, path), None, "{path}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn transcript_image_is_read_from_the_event_line() {
+        use base64::Engine as _;
+        let jsonl = std::env::temp_dir().join(format!("hangar-transcript-{}.jsonl", std::process::id()));
+        let data = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let lines = [
+            serde_json::json!({"uuid": "b", "parentUuid": "a", "message": {"content": [{"type": "image", "source": {"data": data(b"filho")}}]}}),
+            serde_json::json!({"uuid": "a", "message": {"content": [
+                {"type": "text", "text": "oi"},
+                {"type": "image", "source": {"data": data(b"um")}},
+                {"type": "image", "source": {"data": data(b"dois")}}]}}),
+        ];
+        std::fs::write(&jsonl, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        // A linha que só cita o id como pai não conta; o índice conta só imagens.
+        assert_eq!(transcript_image(&jsonl, "a", 1).as_deref(), Some(&b"dois"[..]));
+        assert_eq!(transcript_image(&jsonl, "a", 0).as_deref(), Some(&b"um"[..]));
+        assert_eq!(transcript_image(&jsonl, "a", 2), None);
+        assert_eq!(transcript_image(&jsonl, "c", 0), None);
+        let _ = std::fs::remove_file(&jsonl);
+    }
 
     #[test]
     fn upload_folder_follows_the_backend_rule() {

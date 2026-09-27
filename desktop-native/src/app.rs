@@ -1625,7 +1625,7 @@ impl Hangar {
         self.uploading.insert(key.clone(), list.iter().map(|a| a.id).collect());
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
-            let retention = match uploads { disk::Uploads::Local(_) => disk::retention(&api).await, disk::Uploads::Remote => None };
+            let retention = match uploads { disk::Uploads::Local { .. } => disk::retention(&api).await, disk::Uploads::Remote => None };
             for (id, name, bytes) in jobs {
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, None) }).await;
                 let result = uploads.upload(&api, &key.name, &name, bytes.to_vec(), retention).await;
