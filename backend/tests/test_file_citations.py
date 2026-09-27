@@ -19,6 +19,15 @@ def test_citation_uses_cwd_from_the_line_that_mentions_it(tmp_path):
     assert citation_cwds(transcript, ["src/a.ts", "ausente.ts"]) == {"src/a.ts": ["/project"]}
 
 
+def test_longer_citation_does_not_cite_its_prefix(tmp_path):
+    # `config.json.bak` citado sozinho não cita `config.json`: o mais longo vence na mesma posição.
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({"cwd": "/repo", "message": {"content": "/home/x/config.json.bak"}}) + "\n",
+                          encoding="utf-8")
+    got = citation_cwds(transcript, ["/home/x/config.json", "/home/x/config.json.bak"])
+    assert got == {"/home/x/config.json.bak": ["/repo"]}
+
+
 def test_relative_citation_uses_transcript_cwd_and_opens_in_file_endpoint(tmp_path, monkeypatch):
     born = tmp_path / "born"
     current = tmp_path / "project"

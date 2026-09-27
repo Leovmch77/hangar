@@ -606,20 +606,24 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
     wanted = {needle for needle in needles if needle}
     if not wanted:
         return {}
-    # Busca de bytes em vez de texto + regex por linha: o transcript passa de centenas de MB e cada
-    # imagem citada na tela faz a rota refazer esta varredura.
-    encoded = [(needle, needle.encode()) for needle in wanted]
+    pattern = re.compile("(?=(" + "|".join(re.escape(x) for x in sorted(wanted, key=len, reverse=True)) + "))")
+    # Bytes só como filtro: o transcript passa de centenas de MB e cada imagem citada na tela refaz
+    # esta varredura. A regex (o mais longo vence na mesma posição) decide nas poucas linhas que passam.
+    encoded = [needle.encode() for needle in wanted]
     seen: set[str] = set()
     cwds: dict[str, list[str]] = {}
     try:
         with open(jsonl, "rb") as fh:
-            for line in fh:
-                matched = {needle for needle, raw in encoded if raw in line}
+            for raw_line in fh:
+                if not any(raw in raw_line for raw in encoded):
+                    continue
+                line = raw_line.decode("utf-8", errors="replace")
+                matched = {m.group(1) for m in pattern.finditer(line)}
                 if not matched:
                     continue
                 seen.update(matched)
                 try:
-                    cwd = json.loads(line.decode("utf-8", errors="replace")).get("cwd")
+                    cwd = json.loads(line).get("cwd")
                 except (json.JSONDecodeError, AttributeError):
                     continue
                 if isinstance(cwd, str) and cwd:
