@@ -69,6 +69,8 @@ struct QuotaWindow {
     #[serde(rename = "rotulo")] label: String,
     pct: f64,
     #[serde(rename = "reset_ts")] reset_at: Option<f64>,
+    /// Janela de um modelo só (o rótulo é o nome do modelo).
+    #[serde(default)] por_modelo: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -109,7 +111,7 @@ enum Group { Subscriptions, Models, Others }
 #[derive(Clone, Copy, PartialEq)]
 enum Tone { Muted, Warn, Danger }
 
-struct Bar { label: String, reset: String, pct: f64 }
+struct Bar { label: String, reset: String, pct: f64, reset_at: Option<f64>, per_model: bool }
 
 enum QuotaView { Bars { bars: Vec<Bar>, stale: Option<String> }, Note(String), Nothing }
 
@@ -353,7 +355,9 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
 
     let quota = match (c.read_windows(), c.quota.as_ref()) {
         (Some(windows), Some(q)) => {
-            let mut bars: Vec<Bar> = windows.iter().map(|w| Bar { label: w.label.clone(), reset: reset_text(w.reset_at, now), pct: w.pct }).collect();
+            let mut bars: Vec<Bar> = windows.iter().map(|w| Bar {
+                label: w.label.clone(), reset: reset_text(w.reset_at, now), pct: w.pct, reset_at: w.reset_at, per_model: w.por_modelo,
+            }).collect();
             bars.sort_by_key(|b| window_order(&b.label));
             let stale = q.age.filter(|a| *a > STALE_AFTER).map(|a| tr("accounts_last_read").replace("{n}", &age(a)));
             QuotaView::Bars { bars, stale }

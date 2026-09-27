@@ -70,9 +70,9 @@ impl Hangar {
         if !self.accounts.list.loading { self.load_accounts(false, cx); }
     }
 
-    /// A conta da sessão em foco para a pílula da barra do topo: provider, nome e a janela mostrada — a de 5 h ou, sem
-    /// ela, a que houver (a semanal), com o rótulo dela. Sem sessão, o Claude; conta ausente (servidor sem o campo) é a
-    /// padrão do provider. `None` antes da lista chegar ou sem conta daquele provider.
+    /// A conta da sessão em foco para a pílula da barra do topo: provider, nome e a janela mais cheia, com o rótulo dela
+    /// (o `piorJanela` do web). Sem sessão, o Claude; conta ausente (servidor sem o campo) é a padrão do provider.
+    /// `None` antes da lista chegar ou sem conta daquele provider.
     pub(in crate::app) fn focused_account(&self) -> Option<(String, String, Option<(String, f64)>)> {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
@@ -80,8 +80,9 @@ impl Hangar {
         let c = self.accounts.list.ok()?.iter().find(|c| c.kind == kind && conta.map_or(c.active, |id| id == c.id))?;
         let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
         let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
+        let model = self.status().and_then(|s| s.model).map(|m| m.to_lowercase());
         let window = match build_row(c, &HashMap::new(), false, now()).quota {
-            QuotaView::Bars { bars, .. } => bars.iter().find(|b| b.label == "5h").or_else(|| bars.first()).map(|b| (b.label.clone(), b.pct)),
+            QuotaView::Bars { bars, .. } => fullest(&bars, model.as_deref()).map(|b| (b.label.clone(), b.pct)),
             _ => None,
         };
         Some((kind.to_owned(), title, window))
@@ -145,13 +146,29 @@ fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
         .child(div().w(px(176.)).flex_shrink_0().child(meters))
 }
 
-/// Uma janela numa linha: rótulo, barra e %, como o medidor do Zeron.
+/// A janela mais cheia; janela de um modelo só conta quando é o modelo da sessão, e no empate vence a que renova antes.
+fn fullest<'a>(bars: &'a [Bar], model: Option<&str>) -> Option<&'a Bar> {
+    bars.iter()
+        .filter(|b| !(b.per_model && model.is_some_and(|m| !m.contains(&b.label.to_lowercase()))))
+        .fold(None, |best: Option<&Bar>, b| match best {
+            None => Some(b),
+            Some(best) if b.pct > best.pct => Some(b),
+            Some(best) if b.pct == best.pct && b.reset_at.is_some_and(|at| best.reset_at.is_none_or(|was| at < was)) => Some(b),
+            best => best,
+        })
+}
+
+/// Uma janela numa linha: rótulo, barra, % e, embaixo, quando ela renova ("↺ 1h20" na curta, "↺ sáb 27/09 15h" na
+/// longa), como o cartão da pílula do web.
 fn meter(bar: &Bar) -> Div {
     let label = if bar.label == "5h" { tr("usage_card_session") } else { window_label(&bar.label) };
-    div().flex().items_center().gap(px(8.)).text_size(px(12.))
-        .child(div().w(px(52.)).flex_shrink_0().truncate().text_color(theme::muted()).child(label))
-        .child(div().flex_1().h(px(4.)).rounded_full().bg(theme::border_strong())
-            .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative((bar.pct.clamp(0., 100.) / 100.) as f32))))
-        .child(div().w(px(34.)).flex_shrink_0().flex().justify_end().text_color(if bar.pct > 80. { level(bar.pct) } else { theme::muted() })
-            .child(format!("{}%", bar.pct.round())))
+    div().flex().flex_col().gap(px(1.))
+        .child(div().flex().items_center().gap(px(8.)).text_size(px(12.))
+            .child(div().w(px(52.)).flex_shrink_0().truncate().text_color(theme::muted()).child(label))
+            .child(div().flex_1().h(px(4.)).rounded_full().bg(theme::border_strong())
+                .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative((bar.pct.clamp(0., 100.) / 100.) as f32))))
+            .child(div().w(px(34.)).flex_shrink_0().flex().justify_end().text_color(if bar.pct > 80. { level(bar.pct) } else { theme::muted() })
+                .child(format!("{}%", bar.pct.round()))))
+        .when(!bar.reset.is_empty(), |el| el.child(div().pl(px(60.)).truncate().text_size(px(11.)).text_color(theme::faint())
+            .child(format!("↺ {}", bar.reset))))
 }
