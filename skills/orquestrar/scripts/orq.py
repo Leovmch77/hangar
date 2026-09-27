@@ -508,6 +508,13 @@ def cmd_plan_check(a) -> int:
         problems.append("## Projeto: Prova must be nenhuma | por-task | lote(N)")
     if pj["paralelo"] == 0:
         problems.append("## Projeto: Paralelo must be sequencial | até N")
+    # A command typed without backticks parses to no command: it would disable the check silently.
+    for line in _section(text, "Projeto"):
+        k, sep, v = line.partition(":")
+        label = k.strip()
+        if (sep and label.lower() in ("checagens", "integração") and v.strip() not in ("—", "-")
+                and not re.search(r"`[^`]+`", v)):
+            problems.append(f"## Projeto: {label} has no `command`")
     tasks = plan_tasks(text)
     if not tasks:
         problems.append("missing table: ## Tasks with columns #, Files, Verification, Wave, Roteiro")
@@ -534,10 +541,10 @@ def cmd_plan_check(a) -> int:
         for w, count in sorted(waves.items()):
             if count > pj["paralelo"]:
                 problems.append(f"wave {w} has {count} Tasks, Paralelo allows {pj['paralelo']}")
-    for c in pj["checagens"] or []:
-        ok, why = run_checks(str(repo), [c], path.parent / "plan-check.log")
+    for i, c in enumerate(pj["checagens"] or [], 1):
+        ok, why = run_checks(str(repo), [c], path.parent / f"plan-check-{i}.log")
         if not ok:
-            problems.append(why.split(", log ")[0])
+            problems.append(why)
     if problems:
         print("\n".join(problems))
         return 1

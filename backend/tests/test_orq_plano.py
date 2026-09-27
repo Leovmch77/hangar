@@ -74,6 +74,24 @@ def test_plan_check_roda_as_checagens_e_conta_a_onda(tmp_path):
     assert "wave 1 has 2 Tasks, Paralelo allows 1" in r.stdout
 
 
+def test_plan_check_recusa_comando_sem_crase(tmp_path):
+    p = escrever(tmp_path, projeto=PROJETO.replace("`true`", "npm test")
+                 .replace("Integração: —", "Integração: make e2e"))
+    r = run("plan-check", str(p), "--repo", str(tmp_path), check=False)
+    assert r.returncode == 1
+    assert "## Projeto: Checagens has no `command`" in r.stdout
+    assert "## Projeto: Integração has no `command`" in r.stdout
+
+
+def test_plan_check_um_log_por_checagem_e_o_caminho_na_falta(tmp_path):
+    p = escrever(tmp_path, projeto=PROJETO.replace(
+        "`true`", "`echo primeira; exit 3` `echo segunda; exit 4`"))
+    r = run("plan-check", str(p), "--repo", str(tmp_path), check=False)
+    log1, log2 = tmp_path / "plan-check-1.log", tmp_path / "plan-check-2.log"
+    assert f"(rc=3), log {log1}" in r.stdout and f"(rc=4), log {log2}" in r.stdout
+    assert "primeira" in log1.read_text() and "segunda" in log2.read_text()
+
+
 def test_init_exige_plano_carimbado_e_sem_mudanca(tmp_path):
     d = tmp_path / "orq"; d.mkdir()
     p = escrever(tmp_path)
