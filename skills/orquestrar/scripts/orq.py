@@ -876,6 +876,44 @@ def cmd_apply_patch(a) -> int:
     return 0
 
 
+def _jsonl(p: Path) -> list[dict]:
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            v = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            out.append(v)
+    return out
+
+
+def pending_proofs(d: Path) -> list[dict]:
+    taken = {t for b in _jsonl(d / "prova-lotes.jsonl") for t in b.get("tasks", [])}
+    return [f for f in _jsonl(d / "prova-fila.jsonl") if f.get("task") not in taken]
+
+
+def _queue_proof(d: Path, task: int, full: str) -> str:
+    """Batch mode: the committed Task's proof waits in line; the text to add to the close notice."""
+    pj = plan_of(d)
+    prova = pj.get("prova")
+    if not prova or prova[0] != "lote":
+        return ""
+    rot = next((t["roteiro"] for t in plan_tasks(plan_text(config(d)["plan"])) if t["n"] == task), "")
+    if not rot:
+        return ""
+    with (d / "prova-fila.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now(), "task": task, "roteiro": rot, "hash": full}) + "\n")
+    pend = pending_proofs(d)
+    if len(pend) >= prova[1] or not state(d)["open"]:
+        tasks = ", ".join(f"T{p['task']}" for p in pend)
+        return (f" Proof batch ready: {tasks}. Run `orq batch take` and open one proof session "
+                "for those roteiros on the integrated code.")
+    return f" Proof queued ({len(pend)}/{prova[1]})."
+
+
 def cmd_commit(a) -> int:
     """The arbiter's step-5.1 metadata check, done here so the arbiter wakes once per Task."""
     d = base_dir(a.dir)
@@ -923,10 +961,25 @@ def cmd_commit(a) -> int:
     with (d / "closed.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": now(), "task": a.task, "hash": full}) + "\n")
     journal_append(d, f"commit T{a.task} {full[:12]} checked ({len(files)} file(s))")
+    extra = _queue_proof(d, a.task, full)
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
                               f"{len(files)} file(s), tip = hash, matches the approved round. "
-                              "Release the next ready Task(s).")
+                              "Release the next ready Task(s)." + extra)
     print("ok")
+    return 0
+
+
+def cmd_batch(a) -> int:
+    d = base_dir(a.dir)
+    pend = pending_proofs(d)
+    if not pend:
+        print("no pending proof")
+        return 0
+    n = len(_jsonl(d / "prova-lotes.jsonl")) + 1
+    with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
+    journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
+    print(f"lote {n}: " + " ".join(f"T{p['task']} {p['roteiro']} {p['hash'][:12]}" for p in pend))
     return 0
 
 
@@ -1061,6 +1114,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--task", type=int, required=True)
     s.add_argument("--hash", required=True)
     s.add_argument("--repo", help="the checkout holding the commit (a batch worktree); default orq.json's")
+    s = sub.add_parser("batch", help="take the pending proofs as one batch")
+    s.add_argument("action", choices=["take"])
     s = sub.add_parser("notify", help="the only path of a message to the arbiter")
     s.add_argument("--alarm", action="store_true")
     s.add_argument("text")
@@ -1073,7 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
 CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
-        "apply-patch": cmd_apply_patch}
+        "apply-patch": cmd_apply_patch, "batch": cmd_batch}
 
 
 def main(argv: list[str] | None = None) -> int:

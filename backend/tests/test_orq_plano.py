@@ -192,3 +192,38 @@ def test_execucao_sem_plano_entrega_sem_check(tmp_path, repo):
     cfg = json.loads((d / "orq.json").read_text()); cfg.pop("plan")
     (d / "orq.json").write_text(json.dumps(cfg))
     run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", congelar(r, g), env=e)
+
+
+def fechar(tmp_path, r, g, e, task, arquivo):
+    run("event", "task_inicio", "--task", str(task), "--titulo", "t", "--executor", f"ex{task}",
+        "--par", f"rev{task}", env=e)
+    (r / arquivo).write_text(f"{task}0\n"); g("add", arquivo)
+    h = g("stash", "create"); g("stash", "store", "-m", "round", h)
+    run("check", "--task", str(task), "--commit", h, env=e)
+    run("event", "entrega", "--task", str(task), "--rodada", "1", "--commit", h, env=e)
+    run("event", "veredito", "--task", str(task), "--rodada", "1", "--resultado", "aprova",
+        "--sessao", f"rev{task}", env=e)
+    g("commit", "-qm", f"t{task}", "--", arquivo)
+    run("commit", "--task", str(task), "--hash", g("rev-parse", "HEAD"), env=e)
+
+
+def test_lote_enfileira_so_task_com_roteiro_e_avisa_quando_nao_ha_task_aberta(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r)          # TASKS: T1 sem roteiro, T2 com roteiro; lote(2)
+    fechar(tmp_path, r, g, e, 1, "a.txt")
+    assert not (d / "prova-fila.jsonl").exists()
+    fechar(tmp_path, r, g, e, 2, "b.txt")
+    fila = [json.loads(l) for l in (d / "prova-fila.jsonl").read_text().splitlines()]
+    assert [f["task"] for f in fila] == [2]
+    # Fila com 1 < 2, mas nenhuma Task aberta: o lote sai assim mesmo.
+    assert "Proof batch ready: T2" in log.read_text().splitlines()[-1]
+    out = run("batch", "take", env=e).stdout
+    assert out.startswith("lote 1: T2 ")
+    assert run("batch", "take", env=e).stdout.strip() == "no pending proof"
+
+
+def test_por_task_nao_enfileira(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r, projeto=PROJETO.replace("lote(2)", "por-task"))
+    fechar(tmp_path, r, g, e, 2, "b.txt")
+    assert not (d / "prova-fila.jsonl").exists()
