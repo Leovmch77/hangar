@@ -26,6 +26,7 @@ mod machines;
 mod orchestration;
 mod panes;
 mod popup;
+mod rail;
 mod rows;
 mod files;
 mod settings;
@@ -2733,6 +2734,62 @@ impl Hangar {
         list.into_any_element()
     }
 
+    /// Miniaturas da bolha do usuário (`.thumb-row` do `UserBubble` web): 96 px, 80 quando há várias. Abrir e salvar
+    /// ficam no visor, que o clique abre.
+    fn render_thumbs(&mut self, row: &str, images: Vec<Source>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if images.is_empty() { return None; }
+        let key = self.selected_key();
+        let side = px(if images.len() > 1 { 80. } else { 96. });
+        let label = activity::web("anexos_ver_original");
+        let mut tiles = Vec::new();
+        for (n, source) in images.iter().enumerate() {
+            self.ensure_media(source);
+            let state = key.as_ref().and_then(|key| self.media.get(&(key.clone(), source.clone())));
+            let inner = match state {
+                // O id guarda o quadro corrente: sem ele a GPUI não anima o GIF.
+                Some(MediaState::Image(picture)) => img(picture.clone()).size_full().object_fit(ObjectFit::Cover)
+                    .id(SharedString::from(format!("thumb-image-{row}-{n}"))).into_any_element(),
+                Some(MediaState::Failed(reason)) => div().size_full().p_1().overflow_hidden().text_size(px(10.)).text_color(theme::warning())
+                    .child(reason.clone()).into_any_element(),
+                _ => div().into_any_element(),
+            };
+            let (open_key, sources) = (key.clone(), images.clone());
+            tiles.push(div().id(SharedString::from(format!("thumb-{row}-{n}"))).focusable().tab_stop(true).cursor_pointer()
+                .role(Role::Button).aria_label(label.clone())
+                .size(side).flex_shrink_0().rounded_md().overflow_hidden().bg(theme::raised()).border_1().border_color(theme::border())
+                .focus_visible(|el| el.border_color(theme::accent_focus()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(key) = open_key.clone() { this.open_image(key, sources.clone(), n, window, cx); }
+                }))
+                .child(inner));
+        }
+        Some(div().flex().flex_wrap().gap_1().children(tiles).into_any_element())
+    }
+
+    /// Chip "de: X" do recado (`.peer-head` do `UserBubble` web): leva ao chat do remetente quando ele está na lista;
+    /// recado do painel não tem sessão para abrir.
+    fn peer_head(&self, row: &str, peer: cards::PeerMessage, cx: &mut Context<Self>) -> AnyElement {
+        let name = HashMap::from([("n".to_owned(), peer.from.clone())]);
+        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel" };
+        let label = crate::i18n::tr_web(key, &name).unwrap_or_else(|| peer.from.clone());
+        let target = self.sessions.iter().find(|s| s.name == peer.from).filter(|_| peer.scope != cards::PeerScope::Panel).cloned();
+        let chip = div().id(SharedString::from(format!("peer-{row}"))).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(peer_tint(peer.scope));
+        let chip = match target {
+            Some(session) => {
+                let open = crate::i18n::tr_web("user_abrir_chat_de", &name).unwrap_or_default();
+                chip.child(format!("{label} ›")).cursor_pointer().focusable().tab_stop(true).role(Role::Button).aria_label(open.clone())
+                    .hover(|el| el.underline()).focus_visible(|el| el.underline())
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(open.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| this.select(session.clone(), window, cx)))
+            }
+            None => chip.child(label),
+        };
+        div().flex().flex_wrap().items_center().gap(px(6.)).child(chip)
+            .when_some(peer.canal, |el, canal| el.child(div().px(px(7.)).py(px(1.)).rounded_full().bg(theme::raised())
+                .text_size(px(9.5)).font_weight(FontWeight::BOLD).text_color(theme::muted()).child(canal.to_uppercase())))
+            .into_any_element()
+    }
+
     fn render_attachments(&self, key: &SessionKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         let list = self.attachments.get(key).filter(|list| !list.is_empty())?;
         let busy = self.uploading.contains_key(key);
@@ -3215,13 +3272,19 @@ impl Hangar {
             Some(Item::Event(i)) if id != PREVIEW => attachment_refs(&self.chat.events[*i]),
             _ => Vec::new(),
         };
+        // Na bolha do usuário as imagens saem em miniatura, lado a lado e acima do texto, como no web.
+        let peer = match self.items.get(index) { Some(Item::Event(i)) if user => peer_of(&self.chat.events[*i]), _ => None };
+        let peer_scope = peer.as_ref().map(|peer| peer.scope);
+        let peer_head = peer.map(|peer| self.peer_head(&id, peer, cx));
+        let (images, refs): (Vec<_>, Vec<_>) = refs.into_iter().partition(|(_, _, image)| user && *image);
+        let thumbs = self.render_thumbs(&id, images.into_iter().map(|(source, _, _)| source).collect(), cx);
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
         let more_key = format!("{id}#more");
         let long = user && long_message(&markdown);
         let open = self.expanded.contains(&more_key);
         let text: Vec<AnyElement> = match charted {
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
-            None if !blank || files.is_none() => {
+            None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
                 let text = chat_text(&view, cx).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
                     .markdown_extensions(citation_extensions(&id, cx.weak_entity()));
@@ -3244,11 +3307,13 @@ impl Hangar {
         });
         let content = conversation_text(div().flex().flex_col().gap_2())
             .when(!user && !plain, |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::muted() }).child(label)))
+            .when_some(peer_head, |el, head| el.child(head))
+            .when_some(thumbs, |el, thumbs| el.child(thumbs))
             .children(text)
             .when_some(more, |el, more| el.child(more))
             .when_some(files, |el, files| el.child(files));
         let row = div().id(SharedString::from(format!("message-{id}"))).group(ROW_GROUP).w_full().flex().flex_col().gap_2()
-            .map(|el| if user { el.items_end().child(user_bubble(content)) } else { el.child(content) })
+            .map(|el| if user { el.items_end().child(match peer_scope { Some(scope) => peer_bubble(content, scope), None => user_bubble(content) }) } else { el.child(content) })
             .when_some(note, |el, note| el.child(div().flex().items_center().gap_2().when(user, |el| el.justify_end())
                 .child(div().min_w_0().text_sm().text_color(theme::warning()).child(note))
                 .when_some(discard, |el, button| el.child(button))))
@@ -3318,6 +3383,23 @@ const ROW_GROUP: &str = "message-row";
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
+}
+
+/// Recado de outra sessão com a cor de quem manda: accent (1:1), âmbar (grupo), neutro (app), como no web.
+fn peer_bubble(content: impl IntoElement, scope: cards::PeerScope) -> Div {
+    let tint = peer_tint(scope);
+    let fill = if scope == cards::PeerScope::Peer { theme::accent_dim() } else { tint.opacity(0.12) };
+    user_bubble(content).bg(fill).border_1().border_color(tint)
+}
+
+fn peer_tint(scope: cards::PeerScope) -> Hsla {
+    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted() }
+}
+
+/// Recado de outra sessão numa mensagem do usuário, lido da legenda (os anexos ficam de fora).
+fn peer_of(event: &ChatEvent) -> Option<cards::PeerMessage> {
+    let body = event.body();
+    cards::peer_message(&composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body))
 }
 
 /// Mensagem longa do usuário (mais de 5 linhas ou 400 caracteres) recolhe, para um log colado não virar bloco sem fim.
@@ -3921,7 +4003,9 @@ fn display_body(event: &ChatEvent) -> String {
         "user_msg" => {
             let body = event.body();
             if let Some(cards::Card::Codex(card)) = message_card(event) { return card.report; }
-            composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body)
+            let caption = composer::parse_marked(&body).map(|m| m.caption).unwrap_or(body);
+            // Recado de outra sessão: remetente e etiqueta vão para o chip da bolha.
+            cards::peer_message(&caption).map(|peer| peer.body).unwrap_or(caption)
         }
         _ => event.body(),
     }
@@ -4133,6 +4217,7 @@ impl Hangar {
                             view.update(cx, |this, cx| this.render_row(i, window, cx)).unwrap_or_else(|_| div().into_any_element())
                         }).flex_1().min_h_0())
                         .child(self.wheel_layer(cx))
+                        .children(self.render_rail(cx))
                         .when(self.follow_detached(), |el| el.child(self.render_jump_pill(cx))));
                     self.schedule_scroll(window, cx);
                 }

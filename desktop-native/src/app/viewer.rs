@@ -155,10 +155,11 @@ impl Viewer {
         cx.stop_propagation();
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    /// `open` entrega uma cópia ao programa do sistema; sem ele, pergunta onde salvar.
+    fn keep(&mut self, open: bool, cx: &mut Context<Self>) {
         let source = self.sources[self.index].clone();
         let name = source_name(&source);
-        let _ = self.hangar.update(cx, |hangar, cx| hangar.keep_file(source, name, false, cx));
+        let _ = self.hangar.update(cx, |hangar, cx| hangar.keep_file(source, name, open, cx));
     }
 }
 
@@ -172,6 +173,7 @@ impl Render for Viewer {
         };
         let percent = self.view.map(|view| format!("{}%", (view.scale * 100.).round() as i32));
         let has_image = matches!(self.shown, Shown::Image(_));
+        let openable = composer::openable(&composer::safe_name(&source_name(&self.sources[self.index])));
 
         let header = div().flex().items_center().gap_2().pr(px(36.)).h(px(28.))
             .child(div().flex_1().min_w_0().truncate().text_sm().text_color(theme::text()).child(source_name(&self.sources[self.index])))
@@ -184,8 +186,10 @@ impl Render for Viewer {
                     .tooltip(tr("viewer_fit")).on_click(cx.listener(|this, _, _, cx| this.fit(cx)))))
                 .child(Button::new("viewer-zoom-in").ghost().small().icon(IconName::Plus).tooltip(tr("viewer_zoom_in")).disabled(!has_image)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_at(None, STEP, cx)))))
+            .when(openable, |el| el.child(Button::new("viewer-open").ghost().small().icon(IconName::ExternalLink).label(tr("open"))
+                .on_click(cx.listener(|this, _, _, cx| this.keep(true, cx)))))
             .child(Button::new("viewer-save").ghost().small().icon(IconName::Download).label(tr("save"))
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx))));
+                .on_click(cx.listener(|this, _, _, cx| this.keep(false, cx))));
 
         let entity = cx.entity();
         let body = match (&self.shown, self.view) {

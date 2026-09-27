@@ -157,6 +157,14 @@ impl Hangar {
         self.redraw(Area::Conversation, cx);
     }
 
+    /// Marcador lateral: solta do fim e põe a linha no topo. O `scroll_to` da lista vale para linha ainda não medida.
+    pub(super) fn jump_to_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.release();
+        self.follow.wheel = 0.;
+        self.list_state.scroll_to(ListOffset { item_ix: row, offset_in_item: px(0.) });
+        self.redraw(Area::Conversation, cx);
+    }
+
     fn release(&mut self) {
         self.follow.pinned = false;
         self.follow.spring = StickSpring::default();
