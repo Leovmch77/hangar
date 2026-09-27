@@ -61,6 +61,10 @@ const SENT_BRIDGE: Duration = Duration::from_secs(5);
 /// Prefixo da linha do cartão fixo de um agente rodando, seguido do id do tool_use.
 const PINNED: &str = "pin:";
 const COLUMN: f32 = 780.;
+/// Abrir a sessão pede só a cauda que enche a tela: o backend lê o transcript de trás para a frente, e a janela
+/// inteira (`HISTORY_PAGE`) custa muito mais em transcript grande. Ela vem logo depois, por baixo.
+const FIRST_PAGE: usize = 60;
+const HISTORY_PAGE: usize = 400;
 
 /// Largura da coluna da conversa e do compositor: a do mock vezes o ajuste de Aparência.
 fn column_width() -> f32 { COLUMN * crate::appearance::get().column as f32 / 100. }
@@ -818,7 +822,7 @@ impl Hangar {
         self.history_installed = false;
         self.pending_chat.clear();
         self.chat_online = false;
-        self.history_limit = 400;
+        self.history_limit = FIRST_PAGE;
         self.etag = None;
         self.has_older = false;
         self.rich.clear();
@@ -961,7 +965,7 @@ impl Hangar {
         // A conversa só é refeita quando o chat mudou, e a janela só redesenha quando algo visível mudou:
         // ping, lista e estatísticas chegam o tempo todo e não mexem nas linhas.
         let selection = self.selection;
-        let (mut rows, mut visible, mut tail) = (false, true, false);
+        let (mut rows, mut visible, mut tail, mut keep_end) = (false, true, false, false);
         match payload {
             Payload::Terminal(reply) => self.receive_terminal(reply, window, cx),
             Payload::Mentions(seq, result) => { self.receive_mentions(seq, result, cx); }
@@ -1037,6 +1041,8 @@ impl Hangar {
                             }
                         }
                         let first = !self.history_installed;
+                        // A janela inteira que veio por baixo da primeira página.
+                        keep_end = !first && limit == HISTORY_PAGE;
                         self.history_installed = true;
                         for update in std::mem::take(&mut self.pending_chat) { self.apply_chat_update(update, window, cx); }
                         api::open_trace(|| "pending applied".into());
@@ -1045,6 +1051,14 @@ impl Hangar {
                         self.discover_plan();
                         // A primeira conta de subagentes espera a conversa chegar, como o `aoAquecer` do web.
                         if first { self.restart_subagent_count(cx); }
+                        // Primeira página cheia: a janela inteira vem por baixo, sem aviso de carregando e sem o
+                        // "Carregar anteriores" de uma janela que já está crescendo.
+                        if first && limit < HISTORY_PAGE && self.has_older {
+                            self.history_limit = HISTORY_PAGE;
+                            self.etag = None;
+                            self.load_history(cx);
+                            (self.loading, self.has_older) = (false, false);
+                        }
                     }
                     Err(error) => {
                         if error.status == Some(404) {
@@ -1148,6 +1162,7 @@ impl Hangar {
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
+        if keep_end { self.follow_keep_end(); }
         else if tail {
             self.sync_tail_rows(cx);
             self.redraw(panes::Area::Conversation, cx);
