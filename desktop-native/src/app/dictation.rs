@@ -502,7 +502,8 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn render_dictation(&self, readable: bool, cx: &mut Context<Self>) -> (Button, Option<AnyElement>) {
+    /// O microfone, a pílula do estilo (ao lado dele, como no web) e a faixa de estado do ditado, só quando há o que mostrar.
+    pub(super) fn render_dictation(&self, readable: bool, cx: &mut Context<Self>) -> (Button, Option<AnyElement>, Option<AnyElement>) {
         let recording = self.dictation.recorder.is_some();
         let transcribing = self.dictation.request.is_some();
         let label = tr(if recording { "dictation_stop" } else if transcribing { "dictation_working" } else { "dictation_start" });
@@ -518,8 +519,12 @@ impl Hangar {
         let owner = self.dictation.owner.is_some() && self.dictation.owner == self.session_owner();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
         let entity = cx.entity().downgrade();
-        let pill = chrome::pill_button("dictation-style", cx).label(style_label(style)).icon(IconName::ChevronDown)
-            .accessibility_label(tr("dictation_style")).disabled(recording || transcribing || !readable)
+        // Gravando, some: trocar no meio não muda nada (o backend lê o estilo no fim) e o espaço é do botão de parar.
+        let pill = (!recording).then(|| chrome::pill_button("dictation-style", cx).pl(px(10.)).gap(px(6.))
+            .tooltip(tr("dictation_style")).accessibility_label(format!("{}: {}", tr("dictation_style"), style_label(style)))
+            .disabled(transcribing || !readable)
+            .child(div().text_xs().text_color(theme::muted()).child(style_label(style)))
+            .child(chrome::small_icon(IconName::ChevronDown, 12., theme::faint()))
             .dropdown_menu(move |menu, _, cx| {
                 let _ = entity.update(cx, |this, cx| this.load_dictation_style(cx));
                 STYLES.into_iter().fold(menu, |menu, next| {
@@ -531,9 +536,11 @@ impl Hangar {
                         let _ = entity.update(cx, |this, cx| this.set_dictation_style(next, cx));
                     }))
                 })
-            });
-        let controls = div().flex().flex_wrap().items_center().gap_2().child(pill)
-            .when(owner && self.dictation.result.is_some() && (transcribing || self.dictation.text_in_field(&self.composer.read(cx).value())), |el| {
+            }).into_any_element());
+        let versions = owner && self.dictation.result.is_some() && (transcribing || self.dictation.text_in_field(&self.composer.read(cx).value()));
+        let again = owner && self.dictation.result.is_none() && !self.dictation.audio.lock().unwrap().is_empty();
+        let controls = (versions || again).then(|| div().flex().flex_wrap().items_center().gap_2()
+            .when(versions, |el| {
                 let applied = self.dictation.result.as_ref().and_then(|v| v.get("estilo_aplicado")).and_then(Value::as_str).unwrap_or("cru");
                 el.child(div().text_xs().text_color(theme::muted()).child(tr("dictation_versions")))
                     .children(["cru", "limpar", "prosa", "briefing"].into_iter().map(|version| {
@@ -542,10 +549,10 @@ impl Hangar {
                             .on_click(cx.listener(move |this, _, window, cx| this.revise_dictation(Some(version), window, cx)))
                     }))
             })
-            .when(owner && self.dictation.result.is_none() && !self.dictation.audio.lock().unwrap().is_empty(), |el| el.child(
+            .when(again, |el| el.child(
                 Button::new("dictation-retranscribe").ghost().small().label(tr("dictation_again"))
                     .disabled(recording || transcribing)
-                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx)))));
+                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx))))));
         let status = (recording || transcribing).then(|| {
             let label = tr(if recording { "dictation_active" } else if self.dictation.cleaning { "dictation_cleaning" } else { "dictation_working" });
             let seconds = self.dictation.started.map(|start| start.elapsed().as_secs()).unwrap_or(0);
@@ -584,10 +591,12 @@ impl Hangar {
                 }).w_0().h_0())
                 .into_any_element()
         });
-        let strip = readable.then(|| div().flex().flex_col().gap_2().child(controls).children(status).children(countdown)
-            .children(self.dictation.error.clone().map(|error| div().id("dictation-error").role(Role::Alert)
-                .text_sm().text_color(theme::danger()).child(error))).into_any_element());
-        (mic, strip)
+        let error = self.dictation.error.clone().map(|error| div().id("dictation-error").role(Role::Alert)
+            .text_sm().text_color(theme::danger()).child(error));
+        let busy = controls.is_some() || status.is_some() || countdown.is_some() || error.is_some();
+        let strip = (readable && busy).then(|| div().flex().flex_col().gap_2().children(controls).children(status).children(countdown)
+            .children(error).into_any_element());
+        (mic, pill.filter(|_| readable), strip)
     }
 
     fn dictation_failure(error: &Failure) -> String {

@@ -3143,9 +3143,9 @@ impl Hangar {
             .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx)));
         let recent_btn = popup::anchor(div(), "attach-recent").child(chrome::icon_button("attach-recent", IconName::RotateCcwClock, tr("attach_recent"), cx)
             .disabled(!readable || uploading.is_some()).selected(self.recent.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_recent(cx))));
-        let (microphone, dictation_strip) = self.render_dictation(readable, cx);
+        let (microphone, dictation_style, dictation_strip) = self.render_dictation(readable, cx);
         let control_row = div().flex().items_center().gap_1()
-            .child(commands).child(attach).child(recent_btn).child(microphone)
+            .child(commands).child(attach).child(recent_btn).child(microphone).children(dictation_style)
             .child(div().flex_1())
             .when(steer_text, |el| el.child(chrome::pill_button("steer-text", cx).label(tr("steer_text")).disabled(blocked)
                 .on_click(cx.listener(|this, _, window, cx| this.submit(true, false, window, cx)))))
