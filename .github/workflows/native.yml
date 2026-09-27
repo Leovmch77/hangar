@@ -71,17 +71,17 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
       # Binário cru com nome limpo (o que o app baixa para se atualizar) + arquivo compactado para quem baixa à mão.
-      # Dentro do arquivo o executável continua `hangar-native`, o nome que os lançadores já usam.
+      # Dentro do arquivo o executável se chama só `hangar` (`Hangar.exe` no Windows); a pasta de configuração continua
+      # `hangar-native`, que vem do código e não do nome do arquivo.
       - name: Empacotar
         run: |
           name=Hangar-${{ matrix.platform }}
           mkdir -p out stage
           cp "target/release/hangar-native${{ matrix.exe }}" "out/$name${{ matrix.exe }}"
-          cp "target/release/hangar-native${{ matrix.exe }}" stage/
           case "$RUNNER_OS" in
-            Linux) tar -czf "out/$name.tar.gz" -C stage "hangar-native" ;;
-            Windows) (cd stage && 7z a -tzip "../out/$name.zip" "hangar-native.exe") ;;
-            macOS) (cd stage && zip "../out/$name.zip" "hangar-native") ;;
+            Linux) cp target/release/hangar-native stage/hangar && tar -czf "out/$name.tar.gz" -C stage hangar ;;
+            Windows) cp target/release/hangar-native.exe stage/Hangar.exe && (cd stage && 7z a -tzip "../out/$name.zip" Hangar.exe) ;;
+            macOS) cp target/release/hangar-native stage/hangar && (cd stage && zip "../out/$name.zip" hangar) ;;
           esac
           ls -l out
       - uses: actions/upload-artifact@v4
