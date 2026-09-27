@@ -844,18 +844,29 @@ def cmd_apply_patch(a) -> int:
         print(f"patch does not apply: {ap.stderr.strip()[:300]}; the patch is your recipe now: "
               f"fix it yourself and deliver round {rnd + 1} as usual.")
         return 1
-    ok, why = run_checks(repo, plan_of(d).get("checagens") or [],
-                         d / "checks" / f"task{a.task}-r{rnd + 1}-patch.log")
+    # Frozen before the checks: a check that writes files cannot leak into round R+1.
+    h = git(repo, "stash", "create").strip()
+    git(repo, "stash", "store", "-m", f"task-{a.task} round {rnd + 1} (reviewer patch)", h)
+    log = d / "checks" / f"task{a.task}-r{rnd + 1}-patch.log"
+    ok, why = run_checks(repo, plan_of(d).get("checagens") or [], log)
     if not ok:
-        subprocess.run(["git", "-C", repo, "apply", "-R", "--index", patch], capture_output=True)
+        undo = subprocess.run(["git", "-C", repo, "apply", "-R", "--index", patch],
+                              capture_output=True, text=True)
+        if undo.returncode != 0:
+            print(f"{why}. Worktree NOT restored to round {rnd}: {undo.stderr.strip()[:300]}")
+            return 1
         print(f"{why}. Worktree back to round {rnd}; the patch is your recipe now: fix it yourself "
               f"and deliver round {rnd + 1} as usual.")
         return 1
-    h = git(repo, "stash", "create").strip()
-    git(repo, "stash", "store", "-m", f"task-{a.task} round {rnd + 1} (reviewer patch)", h)
-    record_check(d, a.task, h, True, str(d / "checks" / f"task{a.task}-r{rnd + 1}-patch.log"))
-    ev = event_append(d, {"tipo": "entrega", "task": a.task, "rodada": rnd + 1, "commit": h,
-                          "motivo": f"round {rnd} + reviewer patch {patch}"})
+    record_check(d, a.task, h, True, str(log))
+    ev = {"tipo": "entrega", "task": a.task, "rodada": rnd + 1, "commit": h,
+          "motivo": f"round {rnd} + reviewer patch {patch}"}
+    # The patch changed code: a proof round goes back to code review and the proof runs again.
+    ent = next((x for x in reversed(events(d)) if x.get("tipo") == "entrega"
+                and x.get("task") == a.task and x.get("rodada") == rnd), {})
+    if ent.get("fase"):
+        ev["fase"] = "codigo"
+    ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
     par = state(d)["roles"].get(a.task, {}).get("par")
     send(par, f"Task {a.task} round {rnd + 1} = round {rnd} + your patch {patch}, checks ok, object "

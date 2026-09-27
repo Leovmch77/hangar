@@ -84,3 +84,35 @@ def test_patch_que_nao_aplica_ou_quebra_a_checagem_devolve_a_arvore_intacta(tmp_
     assert (r / "a.txt").read_text() == "2\n"
     assert subprocess.run(["git", "-C", str(r), "diff", "--cached", "--name-only"],
                           capture_output=True, text=True).stdout.strip() == "a.txt"
+
+
+def test_corrige_numa_rodada_de_codigo_mantem_a_fase_de_codigo(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--fase", "codigo", "--commit", h, env=e)
+    run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "corrige", "--fase", "codigo",
+        "--sessao", "rev", "--patch", patch_de(r, g, tmp_path), env=e)
+    run("apply-patch", "--task", "1", "--repo", str(r), env=e)
+    ent = [json.loads(l) for l in (d / "eventos.jsonl").read_text().splitlines()][-1]
+    assert ent["rodada"] == 2 and ent["fase"] == "codigo"
+    # Sem a fase, o APROVA da rodada do patch mandaria direto ao commit, sem prova.
+    res = run("event", "veredito", "--task", "1", "--rodada", "2", "--resultado", "aprova",
+              "--sessao", "rev", env=e, check=False)
+    assert res.returncode == 2 and "verdict phase must match" in res.stderr
+
+
+def test_checagem_que_suja_a_arvore_nao_entra_na_rodada_e_o_desfazer_falho_e_dito(tmp_path, repo):
+    r, g = repo
+    # Passa sem 3 em a.txt; com o patch, escreve em a.txt e falha.
+    d, e, _ = iniciar(tmp_path, r, projeto=PROJETO.replace(
+        "Checagens: `true`", "Checagens: `! grep -q 3 a.txt || { echo x >> a.txt; false; }`"))
+    entregar_r1(tmp_path, r, g, e)
+    run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "corrige",
+        "--sessao", "rev", "--patch", patch_de(r, g, tmp_path), env=e)
+    res = run("apply-patch", "--task", "1", "--repo", str(r), env=e, check=False)
+    assert res.returncode == 1 and "Worktree NOT restored to round 1" in res.stdout
+    congelado = g("stash", "list").splitlines()[0]
+    assert "round 2 (reviewer patch)" in congelado
+    assert g("show", "stash@{0}:a.txt") == "3"
