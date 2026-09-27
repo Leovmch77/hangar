@@ -1,8 +1,14 @@
-//! Arquivos sobre a conversa; cada aba conserva seu rascunho e seu pedido.
+//! Arquivos sobre a conversa, no molde do visor do Zeron (`files/preview.rs`, MIT, ver `LICENSE-ZERON`): abas com o
+//! ícone do tipo, trilha do caminho, Markdown com o estilo da conversa, código com cores e imagem. Cada aba conserva
+//! seu rascunho e seu pedido.
 use super::*;
 use gpui_kit::component::input::{Editor, EditorState, Position, RopeExt};
 
 actions!(file_view, [CloseFile, NextFile, PreviousFile, SaveFile]);
+
+/// Lado maior da imagem decodificada: cabe numa tela grande sem guardar o original inteiro na memória.
+const PICTURE_SIDE: u32 = 4096;
+const UNREADABLE_PICTURE: &str = "file_image_unreadable";
 
 pub(super) struct Files {
     owner: Option<(u64, String)>,
@@ -10,6 +16,8 @@ pub(super) struct Files {
     tabs: Vec<FileTab>,
     active: usize,
     serial: u64,
+    /// O visor toma a janela: a lista de sessões e o painel direito saem enquanto ele está à vista.
+    expanded: bool,
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     _focus_lost: Subscription,
@@ -20,8 +28,8 @@ struct FileTab {
     path: String,
     line: Option<u32>,
     content: Option<Result<Document, String>>,
-    /// Imagem da raiz, lida direto do disco (servidor nesta máquina): mostrada, não editada.
-    image: Option<PathBuf>,
+    /// Imagem: mostrada, não editada.
+    picture: Option<Picture>,
     /// Markdown abre na prévia, como no Zeron; o botão alterna para o código.
     preview: bool,
 }
@@ -34,7 +42,14 @@ impl Content {
 pub(super) enum FileReply {
     Read(u64, Result<Content, Failure>),
     Saved(u64, String, Result<Value, Failure>),
+    Picture(u64, Result<Arc<RenderImage>, Failure>),
+    /// Link relativo clicado na prévia de Markdown, já resolvido contra a pasta do documento.
+    Open(String),
 }
+
+/// Da raiz, direto do disco (servidor nesta máquina); fora dela, pela rota de arquivo citado, que só serve o que a
+/// conversa mencionou.
+enum Picture { Disk(PathBuf), Loading, Ready(Arc<RenderImage>), Failed(String) }
 
 struct Document {
     editor: Entity<EditorState>,
@@ -106,7 +121,7 @@ impl Files {
         ]);
         let focus = cx.focus_handle();
         let lost = cx.on_focus_lost(window, |this, window, cx| this.files_focus_lost(window, cx));
-        Self { owner: None, hidden: false, tabs: Vec::new(), active: 0, serial: 0,
+        Self { owner: None, hidden: false, tabs: Vec::new(), active: 0, serial: 0, expanded: false,
             focus, return_focus: None, _focus_lost: lost }
     }
 }
@@ -145,7 +160,7 @@ impl Hangar {
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
         if !self.files_visible() {
             let owner = self.session_owner();
-            if self.files.owner != owner { self.files.tabs.clear(); }
+            if self.files.owner != owner { for tab in std::mem::take(&mut self.files.tabs) { release(tab, window, cx); } }
             self.files.owner = owner;
             self.files.hidden = false;
             self.files.return_focus = window.focused(cx);
@@ -159,14 +174,25 @@ impl Hangar {
         self.files.serial += 1;
         let id = self.files.serial;
         let local = self.tree.local_root(&self.session_owner());
-        // Imagem só dá para mostrar do disco: a leitura pelo servidor recusa binário.
-        let image = local.as_ref().filter(|_| is_image(&path)).and_then(|root| super::tree::resolve(root, &path).ok());
+        // A leitura de texto recusa binário: imagem vem do disco ou da rota de arquivo citado.
+        let picture = is_image(&path).then(|| local.as_ref().and_then(|root| super::tree::resolve(root, &path).ok())
+            .map_or(Picture::Loading, Picture::Disk));
+        let fetch_picture = matches!(picture, Some(Picture::Loading));
+        let is_picture = picture.is_some();
         let preview = file_language(&path) == "markdown";
-        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None, image: image.clone(), preview });
+        self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None, picture, preview });
         self.files.active = self.files.tabs.len() - 1;
         self.focus_file(window, cx);
-        if image.is_some() { return; }
         let (connection, selection, tx) = (self.connection, None, self.tx.clone());
+        if fetch_picture {
+            let (api, name, path, tx) = (api.clone(), key.name.clone(), path.clone(), tx.clone());
+            self.runtime.spawn(async move {
+                let result = api.fetch(&name, &Source::Cited(path)).await.and_then(|bytes|
+                    crate::media::decode(&bytes, PICTURE_SIDE, PICTURE_SIDE, None).ok_or_else(|| Failure::local(UNREADABLE_PICTURE)));
+                let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Picture(id, result)) }).await;
+            });
+        }
+        if is_picture { return; }
         let mut candidates = Vec::new();
         if !path.contains('/') {
             fn collect(value: &Value, name: &str, out: &mut Vec<String>) {
@@ -191,6 +217,19 @@ impl Hangar {
         let (id, result) = match reply {
             FileReply::Read(id, result) => (id, result),
             FileReply::Saved(id, text, result) => { self.file_saved(id, text, result, cx); return; }
+            FileReply::Open(path) => { self.open_file(path, None, window, cx); return; }
+            FileReply::Picture(id, result) => {
+                let slot = self.files.tabs.iter_mut().find(|tab| tab.id == id).and_then(|tab| tab.picture.as_mut());
+                match (slot, result) {
+                    (Some(slot), Ok(image)) => *slot = Picture::Ready(image),
+                    (Some(slot), Err(error)) => *slot = Picture::Failed(if error.detail == UNREADABLE_PICTURE { tr(UNREADABLE_PICTURE) } else { file_failure(&error) }),
+                    // A aba fechou enquanto a imagem chegava.
+                    (None, Ok(image)) => cx.drop_image(image, Some(window)),
+                    (None, Err(_)) => {}
+                }
+                cx.notify();
+                return;
+            }
         };
         let Some(ix) = self.files.tabs.iter().position(|tab| tab.id == id) else { return };
         let path = &self.files.tabs[ix].path;
@@ -341,7 +380,7 @@ impl Hangar {
 
     fn close_file(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.files.tabs.iter().position(|tab| tab.id == id) else { return };
-        self.files.tabs.remove(ix);
+        release(self.files.tabs.remove(ix), window, cx);
         if self.files.tabs.is_empty() { self.restore_file_focus(window, cx); }
         else {
             if ix < self.files.active { self.files.active -= 1; }
@@ -364,42 +403,116 @@ impl Hangar {
         true
     }
 
+    pub(super) fn files_expanded(&self) -> bool { self.files.expanded && self.files_visible() }
+
+    /// O "+" do Zeron abre outro arquivo: aqui, a busca da aba Arquivos do painel.
+    fn file_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.files.expanded = false;
+        if !self.side.open { self.toggle_side(cx); }
+        self.choose_side_tab(crate::appearance::SideTab::Files, window, cx);
+        self.tree_focus_search(window, cx);
+    }
+
+    /// Abrir pasta: a árvore do painel abre as pastas até o arquivo e o deixa marcado.
+    fn file_reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.files.tabs[self.files.active].path.clone();
+        self.files.expanded = false;
+        if !self.side.open { self.toggle_side(cx); }
+        self.choose_side_tab(crate::appearance::SideTab::Files, window, cx);
+        self.tree_reveal_path(path, cx);
+    }
+
     pub(super) fn render_file_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.files_visible() { return None; }
         let tab = &self.files.tabs[self.files.active];
-        let tabs = div().id("file-tabs").flex().gap_1().px_2().pt_1().flex_shrink_0().overflow_x_scroll()
+        let name = composer::basename(&tab.path).to_owned();
+        let tabs = div().id("file-tabs").role(Role::TabList).aria_label(tr("file_tabs")).min_w_0().flex().items_center().gap_1().overflow_x_scroll()
             .children(self.files.tabs.iter().enumerate().map(|(ix, tab)| {
-                let id = tab.id;
+                let (id, active) = (tab.id, ix == self.files.active);
                 let mark = match &tab.content {
                     Some(Ok(doc)) if doc.error.is_some() => Some(true),
                     Some(Ok(doc)) if doc.dirty() => Some(false),
                     _ => None,
                 };
-                div().id(("file-tab", id)).flex().items_center().flex_shrink_0().rounded_t_lg()
-                    .when(ix == self.files.active, |el| el.bg(theme::elevated()))
-                    .child(Button::new(("file-activate", id)).ghost().small().max_w(rems(12.5)).selected(ix == self.files.active)
-                        .label(composer::basename(&tab.path).to_owned())
-                        .tooltip(mark.map_or(tab.path.clone(), |failed| format!("{} · {}", tab.path,
-                            activity::web(if failed { "arq_falhou_salvar" } else { "arq_nao_salvo" }))))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Some(ix) = this.files.tabs.iter().position(|t| t.id == id) { this.files.active = ix; this.focus_file(window, cx); }
-                        })))
+                let tip = mark.map_or(tab.path.clone(), |failed| format!("{} · {}", tab.path,
+                    activity::web(if failed { "arq_falhou_salvar" } else { "arq_nao_salvo" })));
+                let group = SharedString::from(format!("file-tab-{id}"));
+                let name = composer::basename(&tab.path).to_owned();
+                div().id(("file-tab", id)).group(group.clone()).role(Role::Tab).aria_selected(active).aria_label(tab.path.clone())
+                    .h(px(28.)).pl(px(8.)).pr(px(2.)).flex().items_center().gap(px(6.)).flex_shrink_0().rounded(px(6.)).cursor_pointer()
+                    .map(|el| if active { el.bg(theme::elevated()) } else { el.hover(|el| el.bg(theme::hover())) })
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(ix) = this.files.tabs.iter().position(|t| t.id == id) { this.files.active = ix; this.focus_file(window, cx); }
+                    }))
+                    .child(crate::fileicons::tree_icon(&name, false, false))
+                    .child(div().max_w(px(120.)).truncate().text_size(px(12.)).text_color(if active { theme::text() } else { theme::muted() }).child(name))
                     .when_some(mark, |el, failed| el.child(div().size(px(6.)).flex_shrink_0().rounded_full()
                         .bg(if failed { theme::danger() } else { theme::accent() })))
-                    .child(Button::new(("file-close", id)).ghost().small().icon(IconName::Close).accessibility_label(tr("file_close"))
-                        .tooltip(tr("file_close")).on_click(cx.listener(move |this, _, window, cx| this.close_file(id, window, cx))))
+                    // Como no Zeron, o X aparece na aba ativa e na que está sob o ponteiro.
+                    .child(div().opacity(if active { 1. } else { 0. }).group_hover(group, |s| s.opacity(1.))
+                        .child(Button::new(("file-close", id)).ghost().xsmall().icon(IconName::Close).accessibility_label(tr("file_close"))
+                            .tooltip(tr("file_close")).on_click(cx.listener(move |this, _, window, cx| this.close_file(id, window, cx)))))
             }));
-        let content = match &tab.content {
-            _ if tab.image.is_some() => div().size_full().p_4().flex().items_center().justify_center()
-                .child(img(tab.image.clone().unwrap_or_default()).max_w_full().max_h_full().object_fit(ObjectFit::Contain))
-                .into_any_element(),
-            Some(Ok(doc)) if tab.preview && doc.markdown.is_some() => div().id("file-markdown").size_full().overflow_y_scroll()
-                .flex().justify_center().px_6().py_4()
-                .child(div().w_full().max_w(px(760.)).children(doc.markdown.as_ref().map(|view| TextView::new(view).selectable(true).scrollable(false))))
-                .into_any_element(),
-            None => div().p_4().text_color(theme::muted()).child(tr("file_loading")).into_any_element(),
-            Some(Err(error)) => div().p_4().text_color(theme::danger()).child(error.clone()).into_any_element(),
-            Some(Ok(doc)) => div().flex().flex_col().size_full().min_h_0()
+        let expanded = self.files.expanded;
+        let strip = div().h(px(40.)).flex_shrink_0().flex().items_center().gap_1().px_2()
+            .child(tabs)
+            .child(chrome::icon_button("file-add", IconName::Plus, tr("file_add"), cx)
+                .on_click(cx.listener(|this, _, window, cx| this.file_add(window, cx))))
+            .child(div().flex_1())
+            .child(chrome::icon_button("file-expand", if expanded { IconName::Minimize } else { IconName::Maximize },
+                    tr(if expanded { "file_restore" } else { "file_expand" }), cx).selected(expanded)
+                .on_click(cx.listener(|this, _, _, cx| { this.files.expanded = !this.files.expanded; cx.notify(); })))
+            .child(Button::new("file-back").ghost().small().label(tr("file_back"))
+                .on_click(cx.listener(|this, _, window, cx| { this.files_escape(window, cx); })));
+        let parts = trail(self.selected.as_ref().and_then(|s| s.cwd.as_deref()), &tab.path);
+        let last = parts.len().saturating_sub(1);
+        let full = tab.path.clone();
+        let crumbs = div().id("file-trail").min_w_0().flex_1().flex().items_center().overflow_hidden()
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
+            .children(parts.into_iter().enumerate().flat_map(|(ix, part)| [
+                (ix > 0).then(|| div().mx(px(4.)).flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child("›").into_any_element()),
+                Some(div().min_w_0().truncate().text_size(px(11.))
+                    .text_color(if ix == last { theme::muted() } else { theme::faint() }).child(part).into_any_element()),
+            ]).flatten());
+        let doc = tab.content.as_ref().and_then(|result| result.as_ref().ok());
+        let toolbar = div().h(px(34.)).flex_shrink_0().flex().items_center().gap_1().px_2().border_t_1().border_b_1().border_color(theme::border())
+            .child(div().pl_1().flex_shrink_0().child(crate::fileicons::tree_icon(&name, false, false)))
+            .child(crumbs)
+            .when_some(doc, |el, doc| el
+                .when(doc.saved.is_some(), |el| el.child(div().px_1().text_xs().text_color(theme::success()).child(tr("file_saved"))))
+                .when(doc.editable() && doc.dirty(), |el| el
+                    .child(Button::new("file-discard").ghost().xsmall().label(tr("file_discard")).disabled(doc.saving)
+                        .on_click(cx.listener(|this, _, window, cx| this.discard_file(window, cx))))
+                    .child(Button::new("file-save").primary().xsmall().label(tr(if doc.saving { "file_saving" } else { "file_save" }))
+                        .tooltip(tr("file_save_shortcut")).disabled(doc.saving)
+                        .on_click(cx.listener(|this, _, _, cx| this.save_file(cx)))))
+                .when(doc.markdown.is_some(), |el| el.child(chrome::icon_button("file-preview",
+                        if tab.preview { IconName::FileCode } else { IconName::Eye }, tr(if tab.preview { "file_source" } else { "file_preview" }), cx)
+                    .selected(tab.preview).on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx))))))
+            // Arquivo citado fora da raiz não está na árvore da sessão.
+            .child(chrome::icon_button("file-reveal", IconName::FolderOpen, tr("file_reveal"), cx).disabled(tab.path.starts_with(['/', '~']))
+                .on_click(cx.listener(|this, _, window, cx| this.file_reveal(window, cx))));
+        let state = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4().text_sm().text_color(color)
+            .child(text).into_any_element();
+        let content = match (&tab.picture, &tab.content) {
+            (Some(Picture::Disk(path)), _) => div().size_full().p_4().flex().items_center().justify_center()
+                .child(img(path.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
+            (Some(Picture::Ready(image)), _) => div().size_full().p_4().flex().items_center().justify_center()
+                .child(img(image.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
+            (Some(Picture::Loading), _) | (None, None) => state(tr("file_loading"), theme::faint()),
+            (Some(Picture::Failed(error)), _) | (None, Some(Err(error))) => state(error.clone(), theme::danger()),
+            (None, Some(Ok(doc))) if tab.preview && doc.markdown.is_some() => {
+                let (tx, connection, document) = (self.tx.clone(), self.connection, tab.path.clone());
+                div().id("file-markdown").size_full().overflow_y_scroll().flex().justify_center().px_6().py_4()
+                    .child(conversation_text(div().w_full().max_w(px(900.))).children(doc.markdown.as_ref().map(|view| chat_text(view, cx)
+                        .on_link_click(move |url, event, window, cx| match link_target(&document, url) {
+                            Some(path) => { let _ = tx.try_send(Envelope { connection, selection: None, payload: Payload::FileView(FileReply::Open(path)) }); }
+                            None => open_web_link(url, event, window, cx),
+                        }))))
+                    .into_any_element()
+            }
+            (None, Some(Ok(doc))) => div().flex().flex_col().size_full().min_h_0()
                 .when(doc.base.truncated, |el| el.child(div().px_4().py_2().text_xs().text_color(theme::warning()).child(tr("file_truncated"))))
                 .when_some(doc.error.as_ref(), |el, error| el.child(div().id("file-save-error").role(Role::Alert)
                     .flex_shrink_0().px_4().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
@@ -417,24 +530,52 @@ impl Hangar {
             .on_action(cx.listener(|this, _: &NextFile, window, cx| this.step_file(true, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousFile, window, cx| this.step_file(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
-            .child(tabs)
-            .child(div().flex().items_center().gap_4().px_4().py_2().flex_shrink_0().border_b_1().border_color(theme::border())
-                .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_xs().text_color(theme::muted()).child(tab.path.clone()))
-                .when_some(tab.content.as_ref().and_then(|result| result.as_ref().ok()), |el, doc| el
-                    .when(doc.markdown.is_some(), |el| el.child(Button::new("file-preview").ghost().small()
-                        .label(tr(if tab.preview { "file_source" } else { "file_preview" }))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx)))))
-                    .when(doc.saved.is_some(), |el| el.child(div().text_sm().text_color(theme::success()).child(tr("file_saved"))))
-                    .when(doc.editable() && doc.dirty(), |el| el
-                        .child(Button::new("file-discard").ghost().small().label(tr("file_discard")).disabled(doc.saving)
-                            .on_click(cx.listener(|this, _, window, cx| this.discard_file(window, cx))))
-                        .child(Button::new("file-save").primary().small().label(tr(if doc.saving { "file_saving" } else { "file_save" }))
-                            .tooltip(tr("file_save_shortcut")).disabled(doc.saving)
-                            .on_click(cx.listener(|this, _, _, cx| this.save_file(cx))))))
-                .child(Button::new("file-back").ghost().small().label(tr("file_back"))
-                    .on_click(cx.listener(|this, _, window, cx| { this.files_escape(window, cx); }))))
+            .child(strip)
+            .child(toolbar)
             .child(div().flex_1().min_h_0().overflow_hidden().child(content)).into_any_element())
     }
+}
+
+/// Imagem decodificada aqui sai da memória de vídeo junto com a aba.
+fn release(tab: FileTab, window: &mut Window, cx: &mut App) {
+    if let Some(Picture::Ready(image)) = tab.picture { cx.drop_image(image, Some(window)); }
+}
+
+/// A trilha do Zeron: a pasta da sessão e as partes do caminho. Caminho absoluto (arquivo citado fora da raiz) já diz
+/// de onde vem e não leva a pasta da sessão.
+fn trail(root: Option<&str>, path: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    if !path.starts_with('/') && !path.starts_with('~') {
+        parts.extend(root.and_then(|root| std::path::Path::new(root).file_name()).map(|name| name.to_string_lossy().into_owned()));
+    }
+    parts.extend(path.split('/').filter(|part| !part.is_empty() && *part != ".").map(str::to_owned));
+    parts
+}
+
+/// Destino de um link da prévia de Markdown dentro da sessão: relativo à pasta do documento, sem sair da raiz. Web,
+/// âncora e caminho absoluto ficam de fora.
+fn link_target(document: &str, url: &str) -> Option<String> {
+    if url.starts_with(['#', '/']) || url.contains([':', '\\']) { return None; }
+    let target = url.split(['#', '?']).next().filter(|target| !target.is_empty())?;
+    let mut decoded = Vec::new();
+    let mut bytes = target.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'%' { decoded.push(byte); continue; }
+        let hex = [bytes.next()?, bytes.next()?];
+        decoded.push(u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?);
+    }
+    let target = String::from_utf8(decoded).ok()?;
+    let mut parts: Vec<&str> = document.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            // O primeiro pedaço vazio é a raiz de um caminho absoluto: dali não se sobe.
+            ".." => { if parts.last().is_none_or(|last| last.is_empty()) { return None; } parts.pop(); }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 fn is_image(path: &str) -> bool {
@@ -464,6 +605,26 @@ mod tests {
         ] {
             assert_eq!(super::file_language(path), expected, "{path}");
         }
+    }
+
+    #[test]
+    fn trail_starts_at_the_session_folder_unless_the_path_is_absolute() {
+        assert_eq!(super::trail(Some("/home/j/hangar"), "docs/a.md"), ["hangar", "docs", "a.md"]);
+        assert_eq!(super::trail(Some("/home/j/hangar/"), "./mobile/app.json"), ["hangar", "mobile", "app.json"]);
+        assert_eq!(super::trail(Some("/home/j/hangar"), "/etc/hosts"), ["etc", "hosts"]);
+        assert_eq!(super::trail(None, "a.md"), ["a.md"]);
+    }
+
+    #[test]
+    fn markdown_links_resolve_inside_the_session_only() {
+        let target = |url| super::link_target("docs/guide/intro.md", url);
+        assert_eq!(target("setup.md").as_deref(), Some("docs/guide/setup.md"));
+        assert_eq!(target("../../README.md#topo").as_deref(), Some("README.md"));
+        assert_eq!(target("./img/a%20b.png").as_deref(), Some("docs/guide/img/a b.png"));
+        assert_eq!(target("../../../etc/passwd"), None);
+        for outside in ["https://x.dev/a.md", "#topo", "/etc/hosts", "mailto:a@b.c", "a%2"] { assert_eq!(target(outside), None, "{outside}"); }
+        assert_eq!(super::link_target("/tmp/notes/a.md", "../b.md").as_deref(), Some("/tmp/b.md"));
+        assert_eq!(super::link_target("/a.md", "../b.md"), None);
     }
 
     #[test]

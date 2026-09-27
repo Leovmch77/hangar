@@ -2,6 +2,8 @@ Parts of the native app are adapted from Zeron (https://github.com/zeronsh/zeron
 - src/app/rail.rs: the message rail and its hover preview card (crates/ui/src/rail.rs).
 - src/app/tree.rs and src/app/tree/source.rs: the session file tree, search, git decorations and disk watch
   (crates/ui/src/files/tree.rs, search.rs, git_status.rs, watch.rs; crates/engine/src/workspace_files.rs).
+- src/app/files.rs: the file viewer tabs, path breadcrumb, preview/source and reveal-in-tree toolbar, and relative
+  Markdown link resolution (crates/ui/src/files/preview.rs, markdown_preview.rs; crates/ui/src/shell/tabs.rs).
 
 MIT License
 

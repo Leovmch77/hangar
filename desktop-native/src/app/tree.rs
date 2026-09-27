@@ -31,6 +31,8 @@ pub(super) struct Tree {
     dirs: HashMap<String, Dir>,
     expanded: HashSet<String>,
     selected: Option<String>,
+    /// Arquivo que o visor pediu para mostrar na árvore; espera a origem e as pastas de cima serem lidas.
+    reveal: Option<String>,
     rows: Vec<Row>,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -56,7 +58,7 @@ impl Tree {
             _ => {}
         }).detach();
         Self { open: false, owner: None, generation: 0, source: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
-            selected: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
+            selected: None, reveal: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
             query: String::new(), results: None, active: 0, search_task: None, reloading: false, reload_again: false,
             watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None }
     }
@@ -103,6 +105,11 @@ impl Tree {
     }
 }
 
+/// As pastas acima de um caminho relativo, da raiz para dentro: `a/b/c.md` dá `a` e `a/b`.
+fn parent_dirs(path: &str) -> Vec<String> {
+    path.match_indices('/').map(|(ix, _)| path[..ix].to_owned()).filter(|dir| !dir.is_empty()).collect()
+}
+
 fn mark_color(mark: char) -> Hsla {
     match mark { '?' | 'A' => theme::success(), 'R' => theme::accent(), 'D' | 'U' => theme::danger(), _ => theme::warning() }
 }
@@ -113,7 +120,7 @@ impl Hangar {
         if let (true, Some(window)) = (open, window) { self.tree.focus.focus(window, cx); }
         if self.tree.open == open { return; }
         self.tree.open = open;
-        if !open { self.tree_stop(); }
+        if !open { self.tree_stop(); self.tree.reveal = None; }
         cx.notify();
     }
 
@@ -183,6 +190,7 @@ impl Hangar {
                 }
                 if let Some(dirs) = watch { this.tree_watch(dirs, cx); }
                 this.tree.rebuild();
+                this.tree_apply_reveal(cx);
                 this.redraw(Area::Side, cx);
                 if reload {
                     this.tree.reloading = false;
@@ -243,6 +251,31 @@ impl Hangar {
             Some((false, _)) => self.open_file(path, None, window, cx),
             None => {}
         }
+        self.redraw(Area::Side, cx);
+    }
+
+    /// "Abrir pasta" do visor: abre as pastas até o arquivo e o marca, assim que a árvore tiver de onde ler.
+    pub(super) fn tree_reveal_path(&mut self, path: String, cx: &mut Context<Self>) {
+        self.tree.reveal = Some(path);
+        self.tree_apply_reveal(cx);
+    }
+
+    pub(super) fn tree_focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.search.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn tree_apply_reveal(&mut self, cx: &mut Context<Self>) {
+        let (Some(path), Some(source)) = (self.tree.reveal.clone(), self.tree.source.clone()) else { return };
+        let parents = parent_dirs(&path);
+        self.tree.expanded.extend(parents.iter().cloned());
+        let unread: Vec<String> = parents.iter().filter(|dir| !self.tree.dirs.contains_key(*dir)).cloned().collect();
+        if !unread.is_empty() { self.tree_fetch(source, unread, false, cx); return; }
+        // Pasta que falhou também encerra: a linha de erro fica à vista no lugar do arquivo.
+        if std::iter::once("").chain(parents.iter().map(String::as_str)).any(|dir| matches!(self.tree.dirs.get(dir), None | Some(Dir::Loading))) { return; }
+        self.tree.reveal = None;
+        self.tree.selected = Some(path);
+        self.tree.rebuild();
+        self.tree_reveal();
         self.redraw(Area::Side, cx);
     }
 
@@ -437,5 +470,14 @@ impl Hangar {
             .when_some(live, |el, (text, color)| el.child(div().flex_shrink_0().px_4().py(px(6.)).border_t_1().border_color(theme::border())
                 .text_size(px(11.)).text_color(color).child(text)))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parent_dirs_walk_from_the_root_inward() {
+        assert_eq!(super::parent_dirs("docs/decisoes/a.md"), ["docs", "docs/decisoes"]);
+        assert!(super::parent_dirs("README.md").is_empty());
     }
 }
