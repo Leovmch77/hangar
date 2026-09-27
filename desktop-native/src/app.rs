@@ -3653,9 +3653,9 @@ impl Hangar {
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
-        chrome::glass_panel(div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
-            // A linha da janela estica os filhos; "Só o conteúdo" solta a barra e a centra na altura, como o web.
-            .map(|el| if fit_content { el.max_h_full().self_center() } else { el.h_full() })
+        let panel = chrome::glass_panel(div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
+            // A linha da janela estica os filhos; "Só o conteúdo" solta a barra do fundo.
+            .map(|el| if fit_content { el.max_h_full() } else { el.h_full() })
             .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .when(conversations, |el| el.border_color(border))
@@ -3712,7 +3712,9 @@ impl Hangar {
                     .icon(chrome::small_icon(IconName::Settings, 16., theme::muted())).size(px(28.)).rounded(px(6.))
                     .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx))))),
-            px(if floating { 18. } else { 0. }))
+            px(if floating { 18. } else { 0. }));
+        // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
+        if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
     }
 
     /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor, a conexão e a engrenagem que moravam
@@ -4501,8 +4503,6 @@ impl Render for Hangar {
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(appearance::get().navigation.sidebar_width())).h_full().flex_shrink_0()
-                // Coluna que centra na altura: a barra solta "só o conteúdo" fica no meio, como o `align-self: center` do web.
-                .flex().flex_col().justify_center()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.

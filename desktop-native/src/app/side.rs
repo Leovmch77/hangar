@@ -561,12 +561,13 @@ impl Hangar {
     }
 
     fn render_shortcuts(&self, readable: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // "Anexar" já é o clipe do compositor: sozinho na grade, o bloco não oferece nada novo.
         let list = match self.side.shortcuts.as_ref()? {
-            Ok(list) if list.is_empty() => return None,
-            Ok(list) => list.clone(),
+            Ok(list) => list.iter().filter(|s| **s != Shortcut::Attach).cloned().collect::<Vec<_>>(),
             Err(reason) => return Some(div().text_xs().text_color(theme::warning())
                 .child(tr("side_shortcuts_failed").replace("{reason}", reason)).into_any_element()),
         };
+        if list.is_empty() { return None; }
         let busy = self.selected_key().is_some_and(|key| self.uploading.contains_key(&key));
         // "Ações" do mock: grade de quatro por linha, cada atalho com borda, ícone em cima e rótulo embaixo.
         let buttons: Vec<Button> = list.into_iter().enumerate().map(|(n, shortcut)| {
@@ -592,7 +593,12 @@ impl Hangar {
             let pad = 4 - row.len();
             grid = grid.child(div().flex().gap(px(6.)).children(row).children((0..pad).map(|_| div().flex_1())));
         }
-        Some(div().flex().flex_col().gap(px(10.)).child(chrome::section_label(tr("side_actions"))).child(grid).into_any_element())
+        let add = Button::new("side-shortcut-add").ghost().xsmall().icon(IconName::Plus).tooltip(tr("shortcuts_add"))
+            .accessibility_label(tr("shortcuts_add"))
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings(super::settings::Page::Shortcuts, window, cx)));
+        Some(div().flex().flex_col().gap(px(10.))
+            .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions"))).child(add))
+            .child(grid).into_any_element())
     }
 
     /// O painel está à vista: aberto, com sessão e com largura para ele.
