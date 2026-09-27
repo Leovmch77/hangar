@@ -26,6 +26,7 @@ mod machines;
 mod orchestration;
 mod panes;
 mod popup;
+mod rail;
 mod rows;
 mod files;
 mod settings;
@@ -4188,6 +4189,7 @@ impl Hangar {
                             view.update(cx, |this, cx| this.render_row(i, window, cx)).unwrap_or_else(|_| div().into_any_element())
                         }).flex_1().min_h_0())
                         .child(self.wheel_layer(cx))
+                        .children(self.render_rail(cx))
                         .when(self.follow_detached(), |el| el.child(self.render_jump_pill(cx))));
                     self.schedule_scroll(window, cx);
                 }
