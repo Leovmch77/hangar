@@ -1,9 +1,9 @@
-//! Servidor nesta máquina: anexos vão direto ao disco, com as regras de `backend/app/uploads.py` e da rota `upload` de
-//! `backend/app/api.py`. Servidor remoto, pasta que não existe aqui ou vídeo (quadros e fala saem do backend) seguem pelo
-//! backend.
+//! Servidor nesta máquina: anexos, atalhos de programa e o editor vão direto ao disco e ao processo, com as regras de
+//! `backend/app/uploads.py` e das rotas `upload`, `shortcut-shell` e `open-editor` de `backend/app/api.py`. Servidor
+//! remoto, pasta que não existe aqui ou vídeo (quadros e fala saem do backend) seguem pelo backend.
 use super::*;
 use crate::api::MAX_BYTES;
-use std::path::Path;
+use std::{path::Path, process::{Command, Stdio}};
 
 /// Os `VIDEO_EXTS` de `backend/app/video.py`.
 const VIDEO_EXTS: [&str; 6] = ["mp4", "mov", "webm", "mkv", "m4v", "avi"];
@@ -117,6 +117,28 @@ fn prune(project: &Path, days: i64) {
     }
 }
 
+/// `shortcut-shell`: o comando pelo shell, no cwd da sessão, desprendido e sem saída.
+fn shell(cwd: &Path, command: &str) -> Result<Value, Failure> {
+    let command = command.trim();
+    if command.is_empty() { return Err(refusal(400, "comando vazio")); }
+    launch(Command::new("/bin/sh").arg("-c").arg(command).current_dir(cwd)).map_err(|error| refusal(500, error.to_string()))
+}
+
+/// `open-editor`: o binário da configuração do servidor com a pasta como único argumento, sem shell.
+fn editor(binary: &str, cwd: &str) -> Result<Value, Failure> {
+    launch(Command::new(binary).arg(cwd)).map_err(|error| refusal(500, format!("editor '{binary}' falhou: {error}")))
+}
+
+fn launch(command: &mut Command) -> std::io::Result<Value> {
+    // Grupo próprio: fechar o app ou um Ctrl-C no terminal que o abriu não leva o programa junto.
+    // ponytail: o backend usa setsid; grupo próprio basta sem terminal de controle. setsid via libc se precisar.
+    #[cfg(unix)] { use std::os::unix::process::CommandExt; command.process_group(0); }
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    // Quem espera é uma thread, senão o filho que termina fica zumbi até o app fechar.
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Ok(json!({"ok": true}))
+}
+
 async fn blocking<T: Send + 'static>(job: impl FnOnce() -> Result<T, Failure> + Send + 'static) -> Result<T, Failure> {
     tokio::task::spawn_blocking(job).await.map_err(|_| Failure::local("invalid_response"))?
 }
@@ -180,6 +202,23 @@ impl Hangar {
         local.map_or(Uploads::Remote, Uploads::Local)
     }
 
+    /// `shortcut-shell` local quando a sessão é desta máquina; `None` manda ao backend.
+    pub(super) fn local_shell(&self, name: &str, command: String) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
+        let (_, real) = self.local_cwd(name)?;
+        Some(blocking(move || shell(&real, &command)))
+    }
+
+    /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor.
+    pub(super) fn local_editor(&self, name: &str) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
+        let (cwd, _) = self.local_cwd(name)?;
+        let api = self.api.clone()?;
+        Some(async move {
+            let config = api.config().await?;
+            let binary = config.pointer("/campos/editor/valor").and_then(Value::as_str).filter(|b| !b.is_empty()).map(str::to_owned)
+                .ok_or_else(|| Failure::local("invalid_response"))?;
+            blocking(move || editor(&binary, &cwd)).await
+        })
+    }
 }
 
 #[cfg(test)]

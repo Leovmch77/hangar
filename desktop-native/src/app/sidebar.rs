@@ -548,10 +548,11 @@ impl Hangar {
     fn write(&mut self, name: String, what: Write, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let tell = self.sidebar_tell();
+        let editor = matches!(what, Write::Editor).then(|| self.local_editor(&name)).flatten();
         self.runtime.spawn(async move {
             let result = match &what {
                 Write::Mute(muted) => api.server_send(reqwest::Method::POST, &["push", "mute"], Some(json!({"session": name, "muted": muted})), 15).await,
-                Write::Editor => api.act(&name, &["open-editor"], None, false, 15).await,
+                Write::Editor => match editor { Some(open) => open.await, None => api.act(&name, &["open-editor"], None, false, 15).await },
                 Write::Delete => api.act(&name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(&name, &["rename"], Some(json!({"new": new})), false, 30).await,
             };
