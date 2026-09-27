@@ -1,6 +1,6 @@
 use gpui_kit::{component::{Theme, ThemeMode as KitMode}, *};
 use std::sync::{OnceLock, RwLock, atomic::{AtomicBool, Ordering}};
-use crate::appearance::{self, Background as Backdrop, BackgroundScope, DesktopText, Palette, Panels, Reading, SurfaceMaterial, Swatch, ThemeMode};
+use crate::appearance::{self, Background as Backdrop, BackgroundScope, DesktopText, Palette, Panels, Reading, SurfaceMaterial, Swatch, ThemeMode, Wallpaper};
 
 // Cores dos mocks aprovados (Task 12): o padrão é "Colados", opaco; "Caixa solta", ou colados sobre imagem ou área de
 // trabalho "em tudo", deixa passar o que está atrás nas medidas de Transparência e Solidez. O nome de cada função diz o
@@ -205,8 +205,20 @@ fn luminance(c: u32) -> f32 {
 
 fn solidity() -> f32 { appearance::get().solidity as f32 / 100. }
 
-/// Quanto os painéis translúcidos tapam o fundo: a Solidez.
-fn panel_alpha() -> f32 { solidity() }
+/// Vidro nos painéis: Vidro escolhido e uma imagem desenhada pela própria janela atrás deles "em tudo". A área de
+/// trabalho crua (fundo Janela) fica fora da janela e não tem o que borrar.
+pub fn panel_glass() -> bool {
+    let a = appearance::get();
+    a.surface_material == SurfaceMaterial::Glass && backdrop_everywhere() && BACKDROP_READY.load(Ordering::Relaxed)
+        && !(a.background == Backdrop::Desktop && a.wallpaper == Wallpaper::Window)
+}
+
+/// Tinta sobre o desfoque: com ele segurando a leitura, desce até a do Zeron (0,15). O quadrado dá passos finos na
+/// ponta leve da Solidez, e 100 continua opaco.
+fn glass_tint() -> f32 { let s = solidity(); 0.15 + 0.85 * s * s }
+
+/// Quanto os painéis translúcidos tapam o fundo: a Solidez, ou a tinta do vidro quando há desfoque atrás.
+fn panel_alpha() -> f32 { if panel_glass() { glass_tint() } else { solidity() } }
 
 /// Fundo da janela. Colados é opaco; na caixa solta a Transparência diz quanto do fundo do sistema aparece.
 pub fn background() -> Hsla {
@@ -319,10 +331,11 @@ pub fn popover_shadow() -> Vec<BoxShadow> {
     let alpha = if colors().dark { 0.4 } else { 0.16 };
     vec![BoxShadow { color: hsla(0., 0., 0., alpha), offset: point(px(0.), px(8.)), blur_radius: px(28.), spread_radius: px(0.), inset: false }]
 }
-/// A tinta mantém o texto legível sobre o conteúdo desfocado; Opaco conserva o fundo anterior.
+/// A tinta dos menus segue a dos painéis, com pelo menos metade, como no Zeron: o texto do menu disputa com o que
+/// passa desfocado atrás. Opaco conserva o fundo anterior.
 pub fn popup_fill(color: Hsla) -> Hsla {
     if appearance::get().surface_material == SurfaceMaterial::Glass {
-        color.alpha(0.78)
+        color.alpha(glass_tint().max(0.5))
     } else { color }
 }
 pub fn popup_content_fill() -> Hsla {

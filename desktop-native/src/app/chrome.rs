@@ -382,6 +382,11 @@ impl Element for Glass {
     }
 }
 
+/// Painel grande (barra lateral, painel direito, abas, compositor) com o vidro atrás quando há imagem para borrar.
+pub fn glass_panel(panel: impl IntoElement, radius: Pixels) -> AnyElement {
+    if theme::panel_glass() { Glass::new(panel, radius).into_any_element() } else { panel.into_any_element() }
+}
+
 /// Superfície dos popovers do compositor: mesma borda de vidro e sombra `--elev-2` do web.
 pub fn popover(content: AnyElement, narrow: bool) -> AnyElement {
     let surface = div().when(narrow, |el| el.w(px(380.))).rounded(px(12.)).border_1().border_color(theme::glass_border())

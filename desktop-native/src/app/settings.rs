@@ -794,8 +794,9 @@ impl Hangar {
             }, cx);
         // Com imagem ou área de trabalho atrás, a Transparência é o véu e vale também nos painéis colados.
         let see_through = floating || a.busy_background();
-        // Colados só ficam translúcidos com o fundo ocupado atrás da janela inteira.
-        let panels_see_through = floating || a.busy_background() && a.background_scope == BackgroundScope::Everywhere;
+        // Colados só ficam translúcidos com o fundo ocupado atrás da janela inteira; no Vidro a Solidez também dá a tinta dos menus.
+        let panels_see_through = floating || a.busy_background() && a.background_scope == BackgroundScope::Everywhere
+            || a.surface_material == SurfaceMaterial::Glass;
         let surface_material = segmented("surface-material", &[tr("settings_surface_glass"), tr("settings_surface_opaque")],
             if a.surface_material == SurfaceMaterial::Glass { 0 } else { 1 }, true,
             |this: &mut Hangar, index, _: &mut Window, cx| {
