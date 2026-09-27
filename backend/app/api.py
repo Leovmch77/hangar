@@ -7398,10 +7398,17 @@ def _leitura_cortada(resp: dict) -> bool:
     return any(str(m.get("name", "")).rstrip().endswith(("…", "...")) for m in resp.get("models") or [])
 
 
+def _sem_repetidos(models: list[dict]) -> list[dict]:
+    """Versões antigas saem do picker com a keyword da família (`opus`): escolher "Opus 4.6" abriria o
+    Opus atual. Só a primeira linha de cada id é escolhível de verdade."""
+    vistos: set = set()
+    return [m for m in models if not (m.get("id") in vistos or vistos.add(m.get("id")))]
+
+
 def _models_cache_get(chave: str) -> dict | None:
     hit = _claude_models_cache.get(chave)
     if hit and time.monotonic() - hit[0] < _CLAUDE_MODELS_TTL and not _leitura_cortada(hit[1]):
-        return hit[1]
+        return {**hit[1], "models": _sem_repetidos(hit[1].get("models") or [])}
     try:
         # Sem a ponte do nome antigo, ao contrário dos outros sidecars: `.claude-pocket-models.json`
         # ficou SYMLINKADO pro ~/.claude dentro de toda conta (o `_NAO_LIGAR` do contas.py só
@@ -7418,7 +7425,8 @@ def _models_cache_get(chave: str) -> dict | None:
     # monotonic de agora zerava o relogio e um dado de 6d23h passava a valer mais 7 dias.
     idade = time.time() - float(bruto["ts"])
     _claude_models_cache[chave] = (time.monotonic() - idade, resp)
-    return resp
+    # Cache gravado antes da trava de repetidos ainda vale pelos 30 dias: a limpeza vale na leitura também.
+    return {**resp, "models": _sem_repetidos(resp.get("models") or [])}
 
 
 def _models_cache_put(chave: str, resp: dict) -> None:
@@ -7510,10 +7518,7 @@ async def model_options(name: str):
             # `opus` ("Opus" e "Opus (1M context)"), e id repetido derrubava a lista na tela.
             "models": [{"id": r["id"], "name": r["name"], "desc": r["desc"],
                         "active": r["active"]} for r in lido["models"]]}
-    # Versões antigas saem do picker com a keyword da família (`opus`): escolher "Opus 4.6" abriria o
-    # Opus atual. Só a primeira linha de cada id é escolhível de verdade.
-    vistos: set[str] = set()
-    resp["models"] = [m for m in resp["models"] if not (m["id"] in vistos or vistos.add(m["id"]))]
+    resp["models"] = _sem_repetidos(resp["models"])
     _models_cache_put(chave, resp)
     return resp
 
