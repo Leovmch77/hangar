@@ -16,4 +16,9 @@ Origem: crate `gpui-component` 0.6.6 do crates.io (repositório `longbridge/gpui
   do conteúdo, cobrindo todo o cartão. Sem opt-in, o fundo original permanece. Motivo:
   permitir vidro desfocado no diálogo do app sem alterar o comportamento do kit.
 
+- `src/popover.rs` e `src/menu/popup_menu.rs`: global opcional `PopupSurface` com um pintor do app. Com ele,
+  `dropdown_popup` (Select, Combobox, DatePicker) e o `PopupMenu` tiram o próprio fundo e a sombra, e o pintor roda
+  sob o conteúdo, na camada da superfície. Sem o global, o desenho original permanece. Motivo: vidro desfocado e a
+  superfície dos popovers do app nos menus e listas do kit, sem mexer em cada tela que os usa.
+
 Ao atualizar gpui-kit, reaplicar na nova versão ou remover esta cópia quando a API equivalente existir no kit.

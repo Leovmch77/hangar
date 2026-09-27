@@ -508,6 +508,7 @@ impl Hangar {
     fn watch_system(window: &mut Window, cx: &mut Context<Self>) {
         theme::set_system_dark(matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
         theme::sync_kit(Some(window), cx);
+        popup::install_kit_surface(cx);
         cx.observe_window_appearance(window, |this, window, cx| {
             theme::set_system_dark(matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
             theme::sync_kit(Some(window), cx);
@@ -3106,7 +3107,7 @@ impl Hangar {
                 .when(!floating.is_empty(), |el| el.child(div().absolute().left_0().right_0().bottom(relative(1.)).pb_2().flex().flex_col().gap_2()
                     .occlude().children(floating)))
                 .children(queue_row)
-                .child(card)
+                .child(chrome::glass_panel(card, px(18.)))
                 .children(footer))
             .into_any_element()
     }
@@ -3559,7 +3560,7 @@ impl Hangar {
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
-        div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
+        chrome::glass_panel(div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
             // A linha da janela estica os filhos; "Só o conteúdo" precisa soltar a barra do fundo.
             .map(|el| if fit_content { el.max_h_full().self_start() } else { el.h_full() })
             .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
@@ -3592,8 +3593,8 @@ impl Hangar {
                         .hover(theme::hover()).active(theme::hover()))
                     .icon(chrome::small_icon(IconName::Settings, 16., theme::muted())).size(px(28.)).rounded(px(6.))
                     .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx)))))
-            .into_any_element()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx))))),
+            px(if floating { 18. } else { 0. }))
     }
 
     /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor, a conexão e a engrenagem que moravam
@@ -3660,7 +3661,7 @@ impl Hangar {
             .children(tabs)
             .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
-        div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
+        chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
@@ -3679,8 +3680,8 @@ impl Hangar {
                     .hover(theme::hover()).active(theme::hover()))
                 .icon(chrome::small_icon(IconName::Settings, 16., theme::muted())).size(px(28.)).rounded(px(6.))
                 .accessibility_label(tr("settings")).tooltip_with_action(tr("settings_open"), &OpenSettings, None)
-                .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx))))
-            .into_any_element()
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Appearance, window, cx)))),
+            px(if floating { 18. } else { 0. }))
     }
 
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.

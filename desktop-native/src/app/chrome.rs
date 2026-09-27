@@ -352,7 +352,7 @@ pub fn provider_logo(provider: &str, size: f32, color: Hsla) -> Option<Svg> {
     Some(svg().path(path).size(px(size)).flex_shrink_0().text_color(color))
 }
 
-const GLASS_BLUR: Pixels = px(16.);
+pub(super) const GLASS_BLUR: Pixels = px(16.);
 
 /// O cartão pinta o desfoque antes do seu conteúdo, sobre o que já foi desenhado atrás dele.
 pub fn paint_glass(bounds: Bounds<Pixels>, radius: Pixels, window: &mut Window) {
@@ -391,6 +391,11 @@ impl Element for Glass {
             self.child.paint(window, cx);
         });
     }
+}
+
+/// Painel grande (barra lateral, painel direito, abas, compositor) com o vidro atrás quando há imagem para borrar.
+pub fn glass_panel(panel: impl IntoElement, radius: Pixels) -> AnyElement {
+    if theme::panel_glass() { Glass::new(panel, radius).into_any_element() } else { panel.into_any_element() }
 }
 
 /// Superfície dos popovers do compositor: mesma borda de vidro e sombra `--elev-2` do web.

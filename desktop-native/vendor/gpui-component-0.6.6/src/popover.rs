@@ -1,7 +1,8 @@
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, ElementId,
-    FocusHandle, InteractiveElement as _, IntoElement, MouseButton, ParentElement, Pixels,
-    RenderOnce, Stateful, StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px,
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, Element, ElementId,
+    FocusHandle, Global, GlobalElementId, InspectorElementId, InteractiveElement as _, IntoElement,
+    LayoutId, MouseButton, ParentElement, Pixels, RenderOnce, Stateful, StyleRefinement, Styled,
+    Window, prelude::FluentBuilder as _, px, transparent_black,
 };
 use std::{rc::Rc, time::Duration};
 
@@ -16,6 +17,102 @@ use gpui_base::Popover as BasePopover;
 pub use gpui_base::PopoverState;
 
 pub(crate) fn init(_: &mut App) {}
+
+// Modified for Hangar: the application may paint the dropdown and menu surfaces itself.
+/// Painter for the surface of every dropdown (Select, Combobox, DatePicker) and PopupMenu. While it
+/// is set, those surfaces drop their own fill and shadow and it paints under their content, inside
+/// the surface bounds, in a layer of its own so a backdrop blur there only sees what is behind.
+#[derive(Clone)]
+pub struct PopupSurface(Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>);
+
+impl PopupSurface {
+    pub fn new(painter: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static) -> Self {
+        Self(Rc::new(painter))
+    }
+
+    pub(crate) fn active(cx: &App) -> bool {
+        cx.has_global::<Self>()
+    }
+}
+
+impl Global for PopupSurface {}
+
+/// Runs the application's [`PopupSurface`] painter, when there is one, under `child`.
+pub(crate) struct PaintedSurface {
+    child: AnyElement,
+    painter: Option<PopupSurface>,
+}
+
+impl PaintedSurface {
+    pub(crate) fn new(child: impl IntoElement, cx: &App) -> Self {
+        Self {
+            child: child.into_any_element(),
+            painter: cx.try_global::<PopupSurface>().cloned(),
+        }
+    }
+}
+
+impl IntoElement for PaintedSurface {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for PaintedSurface {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(painter) = self.painter.clone() else {
+            return self.child.paint(window, cx);
+        };
+        window.paint_layer(bounds, |window| {
+            (painter.0)(bounds, window, cx);
+            self.child.paint(window, cx);
+        });
+    }
+}
 
 /// How long a dropdown takes to settle into place after it opens.
 ///
@@ -88,17 +185,21 @@ pub(crate) fn dropdown_popup(
     let travel: f32 = DROPDOWN_ENTER_OFFSET.into();
     // Read out here: the animation runs long after `cx` is gone.
     let ring = popover_ring(cx);
+    let painted = PopupSurface::active(cx);
 
-    dropdown_positioner(bounds).child(surface.with_animation(
+    let surface = surface.with_animation(
         id,
         Animation::new(DROPDOWN_ENTER_DURATION).with_easing(ease_out_cubic),
         move |surface, delta| {
-            surface
-                .top(px(travel * (1. - delta)))
-                .opacity(delta)
-                .shadow(popover_shadow(ring, delta * delta * delta))
+            let surface = surface.top(px(travel * (1. - delta))).opacity(delta);
+            if painted {
+                surface.bg(transparent_black()).shadow(Vec::new())
+            } else {
+                surface.shadow(popover_shadow(ring, delta * delta * delta))
+            }
         },
-    ))
+    );
+    dropdown_positioner(bounds).child(PaintedSurface::new(surface, cx))
 }
 
 /// A popover element that can be triggered by a button or any other element.
