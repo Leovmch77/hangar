@@ -2733,6 +2733,38 @@ impl Hangar {
         list.into_any_element()
     }
 
+    /// Miniaturas da bolha do usuário (`.thumb-row` do `UserBubble` web): 96 px, 80 quando há várias. Abrir e salvar
+    /// ficam no visor, que o clique abre.
+    fn render_thumbs(&mut self, row: &str, images: Vec<Source>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if images.is_empty() { return None; }
+        let key = self.selected_key();
+        let side = px(if images.len() > 1 { 80. } else { 96. });
+        let label = activity::web("anexos_ver_original");
+        let mut tiles = Vec::new();
+        for (n, source) in images.iter().enumerate() {
+            self.ensure_media(source);
+            let state = key.as_ref().and_then(|key| self.media.get(&(key.clone(), source.clone())));
+            let inner = match state {
+                // O id guarda o quadro corrente: sem ele a GPUI não anima o GIF.
+                Some(MediaState::Image(picture)) => img(picture.clone()).size_full().object_fit(ObjectFit::Cover)
+                    .id(SharedString::from(format!("thumb-image-{row}-{n}"))).into_any_element(),
+                Some(MediaState::Failed(reason)) => div().size_full().p_1().overflow_hidden().text_size(px(10.)).text_color(theme::warning())
+                    .child(reason.clone()).into_any_element(),
+                _ => div().into_any_element(),
+            };
+            let (open_key, sources) = (key.clone(), images.clone());
+            tiles.push(div().id(SharedString::from(format!("thumb-{row}-{n}"))).focusable().tab_stop(true).cursor_pointer()
+                .role(Role::Button).aria_label(label.clone())
+                .size(side).flex_shrink_0().rounded_md().overflow_hidden().bg(theme::raised()).border_1().border_color(theme::border())
+                .focus_visible(|el| el.border_color(theme::accent_focus()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(key) = open_key.clone() { this.open_image(key, sources.clone(), n, window, cx); }
+                }))
+                .child(inner));
+        }
+        Some(div().flex().flex_wrap().gap_1().children(tiles).into_any_element())
+    }
+
     fn render_attachments(&self, key: &SessionKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         let list = self.attachments.get(key).filter(|list| !list.is_empty())?;
         let busy = self.uploading.contains_key(key);
@@ -3213,13 +3245,16 @@ impl Hangar {
             Some(Item::Event(i)) if id != PREVIEW => attachment_refs(&self.chat.events[*i]),
             _ => Vec::new(),
         };
+        // Na bolha do usuário as imagens saem em miniatura, lado a lado e acima do texto, como no web.
+        let (images, refs): (Vec<_>, Vec<_>) = refs.into_iter().partition(|(_, _, image)| user && *image);
+        let thumbs = self.render_thumbs(&id, images.into_iter().map(|(source, _, _)| source).collect(), cx);
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
         let more_key = format!("{id}#more");
         let long = user && long_message(&markdown);
         let open = self.expanded.contains(&more_key);
         let text: Vec<AnyElement> = match charted {
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
-            None if !blank || files.is_none() => {
+            None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
                 let text = chat_text(&view, cx).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
                     .markdown_extensions(citation_extensions(&id, cx.weak_entity()));
@@ -3242,6 +3277,7 @@ impl Hangar {
         });
         let content = conversation_text(div().flex().flex_col().gap_2())
             .when(!user && !plain, |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::muted() }).child(label)))
+            .when_some(thumbs, |el, thumbs| el.child(thumbs))
             .children(text)
             .when_some(more, |el, more| el.child(more))
             .when_some(files, |el, files| el.child(files));
