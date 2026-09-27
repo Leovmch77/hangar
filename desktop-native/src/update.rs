@@ -4,7 +4,7 @@
 //! `<exe>.old`. O processo velho continua de pé até o novo gravar o próprio pid em `<exe>.alive`: se ele morrer ou
 //! não der sinal a tempo, o anterior volta para o lugar e este processo segue aberto. Nunca fica sem app.
 use crate::{i18n::tr, theme};
-use gpui_kit::{assets::IconName, component::{button::*, *}, *};
+use gpui_kit::{assets::IconName, component::{button::*, notification::Notification, *}, *};
 use serde::Deserialize;
 use std::{collections::HashMap, ffi::OsString, path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio::runtime::Runtime;
@@ -164,16 +164,22 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
 }
 
 impl Updater {
-    fn run(&mut self, cx: &mut Context<Self>) {
+    fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let offer = match &self.state { State::Available(o) | State::Failed(o, _) => o.clone(), _ => return };
         self.state = State::Updating;
         cx.notify();
         let task = self.runtime.spawn(install(self.client.clone(), self.exe.clone(), offer.clone()));
+        let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
                 Ok(()) => cx.quit(),
-                Err(reason) => { this.state = State::Failed(offer, reason); cx.notify(); }
+                Err(reason) => {
+                    // O motivo não cabe na barra: vai no aviso e fica no tooltip do "Tentar de novo".
+                    let _ = handle.update(cx, |_, window, cx| window.push_notification(Notification::error(reason.clone()).id::<Updater>(), cx));
+                    this.state = State::Failed(offer, reason);
+                    cx.notify();
+                }
             });
         }).detach();
     }
@@ -181,23 +187,20 @@ impl Updater {
 
 impl Render for Updater {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, tip, failed) = match &self.state {
+        let (id, label, tip, color) = match &self.state {
             State::Idle => return div().into_any_element(),
-            State::Available(o) => (tr("app_update_now"), tr("app_update_available").replace("{version}", &o.version), None),
-            State::Updating => (tr("app_update_running"), tr("app_update_running"), None),
-            State::Failed(_, reason) => (tr("app_update_retry"), reason.clone(), Some(reason.clone())),
+            State::Available(o) => ("topbar-update", tr("app_update_now"), tr("app_update_available").replace("{version}", &o.version), theme::accent()),
+            State::Updating => ("topbar-update", tr("app_update_running"), tr("app_update_running"), theme::accent()),
+            State::Failed(_, reason) => ("topbar-update-retry", tr("app_update_retry"), reason.clone(), theme::danger()),
         };
-        let button = Button::new("topbar-update").ghost().small().h(px(26.)).px(px(10.)).rounded_full().border_1()
-            .border_color(if failed.is_some() { theme::danger() } else { theme::accent() })
+        Button::new(id).ghost().small().h(px(26.)).px(px(10.)).rounded_full().border_1().border_color(color)
             .disabled(matches!(self.state, State::Updating))
             .child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
-                .child(Icon::new(IconName::Download).size(px(14.)).text_color(if failed.is_some() { theme::danger() } else { theme::accent() }))
+                .child(Icon::new(IconName::Download).size(px(14.)).text_color(color))
                 .child(label))
             .accessibility_label(tip.clone()).tooltip(tip)
-            .on_click(cx.listener(|this, _, _, cx| this.run(cx)));
-        div().flex().items_center().gap(px(8.))
-            .children(failed.map(|reason| div().id("topbar-update-error").max_w(px(280.)).truncate().text_size(px(12.)).text_color(theme::danger()).child(reason)))
-            .child(button).into_any_element()
+            .on_click(cx.listener(|this, _, window, cx| this.run(window, cx)))
+            .into_any_element()
     }
 }
 
