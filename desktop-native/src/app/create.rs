@@ -467,7 +467,7 @@ impl NewSession {
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact { self.load_servers(window, cx); }
+        if self.compact { self.load_servers(window, cx); self.load_quotas(cx); }
         self.load_roots(cx);
         self.load_providers(cx);
         self.load_configs(cx);
@@ -1192,9 +1192,14 @@ impl NewSession {
 }
 
 /// Linha dos menus da tela sem sessão: o nome, a dica à direita e o visto na escolhida.
-pub(super) fn menu_row(id: impl Into<ElementId>, on: bool, label: String, hint: String) -> Button {
+pub(super) fn menu_row(id: impl Into<ElementId>, on: bool, label: String, hint: String) -> Button { menu_row_with(id, on, label, hint, None) }
+
+/// A mesma linha com uma segunda linha sob o nome: a cota da conta.
+fn menu_row_with(id: impl Into<ElementId>, on: bool, label: String, hint: String, below: Option<AnyElement>) -> Button {
     popup::row(id, on).accessibility_label(label.clone()).child(div().w_full().flex().items_center().gap_2()
-        .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+            .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+            .children(below))
         .when(!hint.is_empty(), |el| el.child(div().flex_shrink_0().max_w(px(170.)).truncate().text_xs().text_color(theme::muted()).child(hint)))
         .when(on, |el| el.child(chrome::small_icon(IconName::Check, 16., theme::accent()))))
 }
@@ -1353,7 +1358,9 @@ impl NewSession {
             Menu::Account if self.provider == "codex" => {
                 let rows = self.codex.ok().into_iter().flatten().filter(|a| wanted(&query, &a.name, &a.hint())).map(|account| {
                     let id = account.id.clone();
-                    menu_row(SharedString::from(format!("new-chat-codex-{id}")), account.id == self.codex_account, account.name.clone(), account.hint())
+                    let quota = account.credential_id.as_deref().and_then(|c| self.quota_line(format!("new-chat-codex-quota-{id}"), c));
+                    menu_row_with(SharedString::from(format!("new-chat-codex-{id}")), account.id == self.codex_account, account.name.clone(),
+                        account.hint(), quota)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.menu.set(None);
                             if this.codex_account != id { this.codex_account = id.clone(); this.load_models(window, cx); }
@@ -1364,10 +1371,13 @@ impl NewSession {
                 Self::menu_list("new-chat-account-list", rows)
             }
             Menu::Account => {
-                let rows = self.configs.ok().into_iter().flatten().map(|c| (c, self.config_hint(c)))
-                    .filter(|(c, hint)| wanted(&query, &c.label, hint)).map(|(c, hint)| {
+                let rows = self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
                         let path = c.path.clone();
-                        menu_row(SharedString::from(format!("new-chat-account-{path}")), Some(&c.path) == self.config.as_ref(), c.label.clone(), hint)
+                        let quota = self.quota_line(format!("new-chat-account-quota-{path}"), &format!("claude:{path}"));
+                        menu_row_with(SharedString::from(format!("new-chat-account-{path}")), Some(&c.path) == self.config.as_ref(), c.label.clone(),
+                            if c.active { tr("create_current") } else { String::new() }, quota)
+                            .accessibility_label(Some(self.config_hint(c)).filter(|h| !h.is_empty())
+                                .map_or_else(|| c.label.clone(), |hint| format!("{}, {hint}", c.label)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.menu.set(None);
                                 if this.config.as_ref() != Some(&path) { this.config = Some(path.clone()); this.load_models(window, cx); }

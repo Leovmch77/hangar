@@ -96,6 +96,20 @@ impl NewSession {
         }));
     }
 
+    /// Só a cota: a tela sem sessão não mostra motor nem Jev.
+    pub(super) fn load_quotas(&mut self, cx: &mut Context<Self>) {
+        let seq = self.quotas.start();
+        self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Quotas(seq, api.server_read(&["cotas"], &[], 15).await)).await }));
+    }
+
+    /// As contas Claude oferecidas. O `/api/cotas` só traz conta de verdade (carimbada pelo app) e a ativa, o mesmo corte do
+    /// `/api/credenciais` da página Contas: pasta de backup (`~/.claude-x.bak-…`) fica fora. Sem a cota lida, vão todas.
+    pub(super) fn accounts(&self) -> impl Iterator<Item = &ConfigDir> {
+        let quotas = self.quotas.ok();
+        self.configs.ok().into_iter().flatten()
+            .filter(move |c| c.active || quotas.is_none_or(|list| list.iter().any(|q| q.id.strip_prefix("claude:") == Some(c.path.as_str()))))
+    }
+
     /// A chave da memória do último modelo: servidor, provider e a conta do Codex ou o motor (`chaveMemoria` do web).
     pub(super) fn memory_key(&self) -> String {
         let who = if self.provider == "codex" { self.codex_account.clone() } else { Some(self.engine.clone()).filter(|e| !e.is_empty()).unwrap_or("-".into()) };
@@ -261,8 +275,8 @@ impl NewSession {
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(list) = self.configs.ok() else { self.config_pick = None; return };
-        let choices: Vec<ModelChoice> = list.iter().map(|c| ModelChoice { id: c.path.clone(), label: c.label.clone(), hint: self.config_hint(c) }).collect();
+        if self.configs.ok().is_none() { self.config_pick = None; return; }
+        let choices: Vec<ModelChoice> = self.accounts().map(|c| ModelChoice { id: c.path.clone(), label: c.label.clone(), hint: self.config_hint(c) }).collect();
         let at = choices.iter().position(|c| Some(&c.id) == self.config.as_ref());
         self.config_pick = Some(picker(choices, at, |this, path, window, cx| {
             this.config = Some(path);
@@ -304,7 +318,13 @@ impl NewSession {
             }
             CreateReply::Quotas(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
-                if self.quotas.finish(seq, list) { self.build_config_pick(window, cx); }
+                if !self.quotas.finish(seq, list) { return; }
+                // A escolhida antes da cota chegar pode ser uma pasta que não é conta.
+                if self.config.as_ref().is_some_and(|path| !self.accounts().any(|c| &c.path == path)) {
+                    self.config = self.fallback_config();
+                    self.load_models(window, cx);
+                }
+                self.build_config_pick(window, cx);
             }
             CreateReply::Models(seq, result, remembered) => self.receive_models(seq, result, remembered, window, cx),
             CreateReply::Context(seq, result) => {
@@ -408,8 +428,7 @@ impl NewSession {
     }
 
     pub(super) fn fallback_config(&self) -> Option<String> {
-        let list = self.configs.ok()?;
-        list.iter().find(|c| c.active).or(list.first()).map(|c| c.path.clone())
+        self.accounts().find(|c| c.active).or_else(|| self.accounts().next()).map(|c| c.path.clone())
     }
 
     fn account_done(&mut self, seq: u64, done: AccountDone, window: &mut Window, cx: &mut Context<Self>) {
@@ -474,6 +493,11 @@ impl NewSession {
             _ => row.child(format!("{} {}", tr("create_quota_none"),
                 if quota.reason.as_deref() == Some("renovacao-falhou") { tr("create_quota_stopped") } else { String::new() }).trim().to_owned()),
         }
+    }
+
+    /// A linha da cota de `credential` nos menus da tela sem sessão; nada enquanto não há leitura.
+    pub(super) fn quota_line(&self, id: String, credential: &str) -> Option<AnyElement> {
+        Some(self.render_quota(id, self.quota_of(credential)?).into_any_element())
     }
 
     pub(super) fn render_codex_quota(&self, credential: Option<&str>) -> Option<Stateful<Div>> {
