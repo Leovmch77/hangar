@@ -110,6 +110,27 @@ impl Hangar {
         !arrived
     }
 
+    /// Antes de a sessão nascer, o painel direito aberto já ocupa o lugar dele: a conversa não muda de largura quando a
+    /// sessão abre.
+    pub(super) fn opening_side_width(&self, window: &Window) -> Option<f32> {
+        if self.opening.is_none() || self.selected.is_some() || !self.side.open { return None; }
+        self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), appearance::get().navigation.sidebar_width())
+    }
+
+    /// O painel ainda sem a sessão: o cabeçalho dele e linhas carregando.
+    pub(super) fn render_opening_side(&self, width: f32) -> AnyElement {
+        let floating = theme::is_floating();
+        div().w(px(width)).h_full().flex_shrink_0().child(chrome::glass_panel(div().size_full().flex().flex_col().bg(theme::chrome())
+            .overflow_hidden()
+            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+                else { el.border_l_1().border_color(theme::border()) })
+            .child(div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().font_weight(FontWeight::SEMIBOLD)
+                .child(tr("side_context")))
+            .child(div().px_4().py(px(14.)).flex().flex_col().gap(px(10.))
+                .children((0..3usize).map(|n| chrome::Skeleton::new(("opening-side", n)).row(n).h(px(12.)).rounded(px(4.))))),
+            px(if floating { 18. } else { 0. }))).into_any_element()
+    }
+
     /// A mensagem enviada, na bolha do usuário e com o mesmo recuo da linha real, para a troca não mexer nada.
     pub(super) fn render_opening_bubble(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let text = self.opening.as_ref().map(|o| o.text.clone()).unwrap_or_default();

@@ -95,7 +95,7 @@ impl Side {
 
     // Largura efetiva: nunca tira da conversa menos que CHAT_MIN; sem espaço, o painel não aparece.
     // Com as abas no topo não há barra lateral ocupando a esquerda.
-    fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
+    pub(super) fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
         let room = viewport - sidebar_width - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. };
         (room >= MIN_WIDTH).then(|| self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room))
     }

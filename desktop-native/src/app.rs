@@ -4484,7 +4484,9 @@ impl Render for Hangar {
                 Some((width, shown)) => div().w(px(width)).h_full().flex_shrink_0().overflow_hidden()
                     .child(div().relative().left(px(width * (1. - shown))).h_full().child(side)).into_any_element(),
                 None => side,
-            });
+            })
+            .or_else(|| self.opening_side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
+                .when(chat_background, |el| el.bg(theme::background().alpha(1.))).child(self.render_opening_side(width)).into_any_element()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
