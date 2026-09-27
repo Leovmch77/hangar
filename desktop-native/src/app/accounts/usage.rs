@@ -56,7 +56,7 @@ impl Hangar {
             .into_any_element()
     }
 
-    /// A pílula da barra do topo abre o mesmo cartão, preso a ela e com a conta padrão do Claude.
+    /// A pílula da barra do topo abre o mesmo cartão, só que preso a ela.
     pub(in crate::app) fn toggle_top_usage_card(&mut self, cx: &mut Context<Self>) {
         let open = !(self.accounts.card && self.accounts.card_top);
         self.close_popups();
