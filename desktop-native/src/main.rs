@@ -13,6 +13,7 @@ mod media;
 mod effects;
 mod electron;
 mod mend;
+mod motion;
 mod term_view;
 mod status;
 mod tables;

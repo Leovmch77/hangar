@@ -3,6 +3,7 @@ use gpui_kit::{component::{ActiveTheme, Icon, Sizable, StyledExt, button::*}, pr
 use gpui_kit::assets::IconName;
 use crate::theme;
 use crate::appearance::{self, SurfaceMaterial};
+pub use crate::motion::ease_out;
 use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
 /// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. O `Spinner`/`Skeleton` do
@@ -149,17 +150,6 @@ impl RenderOnce for Breathing {
         // Sem encolher: dentro do botão a caixa guardada perdia largura e o ícone saía cortado à direita.
         view.cached(StyleRefinement::default().size(size).flex_shrink_0())
     }
-}
-
-/// `--ease-out` do web: `cubic-bezier(0.23, 1, 0.32, 1)`.
-pub fn ease_out(x: f32) -> f32 {
-    let curve = |s: f32, a: f32, b: f32| 3. * (1. - s) * (1. - s) * s * a + 3. * (1. - s) * s * s * b + s * s * s;
-    let (mut lo, mut hi) = (0f32, 1f32);
-    for _ in 0..20 {
-        let mid = (lo + hi) / 2.;
-        if curve(mid, 0.23, 0.32) < x { lo = mid } else { hi = mid }
-    }
-    curve((lo + hi) / 2., 1., 1.)
 }
 
 // A marca "trabalhando" do web (HangarWorking.svelte), no quadro de 24: raio, abertura e atraso de entrada e de giro de cada arco.

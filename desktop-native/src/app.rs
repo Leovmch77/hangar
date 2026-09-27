@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
     conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::tr, theme,
-    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance};
+    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
 
@@ -47,7 +47,7 @@ const LIVE_TOOL: &str = "__tool__";
 const PREVIEW: &str = "__preview__";
 const WORKING: &str = "__working__";
 /// Entrada da linha "trabalhando"; a marca, desenhada fora da conversa, entra no mesmo tempo.
-const WORKING_FADE: Duration = Duration::from_millis(200);
+const WORKING_FADE: Duration = motion::WORKING.duration();
 /// A chegada da primeira mensagem da tela sem sessão: o compositor desce ao lugar dele e a conversa aparece (a do Zeron).
 const LANDING: Duration = Duration::from_millis(420);
 /// Quanto "Enviando…" espera o turno começar depois da entrega; passou disso, a sessão não vai trabalhar.
@@ -2302,7 +2302,7 @@ impl Hangar {
             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(verb))
             .when_some(since, |el, since| el.child(self.elapsed_slot(panes::Area::Conversation, "working-elapsed", since)));
         if cx.reduce_motion() { return row.into_any_element(); }
-        row.with_animation("working-line-in", Animation::new(WORKING_FADE).with_easing(chrome::ease_out),
+        row.with_animation("working-line-in", Animation::new(WORKING_FADE).with_easing(motion::ease_out),
             |el, t| el.opacity(t).top(px(6. * (1. - t)))).into_any_element()
     }
 
@@ -2322,7 +2322,7 @@ impl Hangar {
         let pill = if glass { chrome::Glass::new(pill, px(15.)).into_any_element() } else { pill.into_any_element() };
         let wrap = div().absolute().left_0().right_0().bottom(px(16.)).flex().justify_center().child(pill);
         if cx.reduce_motion() { return wrap.into_any_element(); }
-        wrap.with_animation("jump-latest-in", Animation::new(WORKING_FADE).with_easing(chrome::ease_out),
+        wrap.with_animation("jump-latest-in", Animation::new(WORKING_FADE).with_easing(motion::ease_out),
             |el, t| el.opacity(t).bottom(px(10. + 6. * t))).into_any_element()
     }
 
@@ -4453,6 +4453,7 @@ impl Render for Hangar {
                 }))));
         self.finish_landing(window);
 
+        let ticker = motion::ticker(window, cx);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
             .bg(if !chat_background { theme::window_fill() }
@@ -4555,6 +4556,7 @@ impl Render for Hangar {
             .children(self.render_popup(window, cx))
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
+            .child(ticker)
             .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude()
                 .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if this.api.is_some() {

@@ -226,7 +226,7 @@ impl Element for FloatingMark {
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
             let t = if self.reduce_motion { 1. }
-                else { super::chrome::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
+                else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
             let inner = match place.draw {
                 Floating::Mark(color) => super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color)
                     .into_any_element(),
