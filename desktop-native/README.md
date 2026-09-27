@@ -23,11 +23,10 @@ O ícone do aplicativo vem de `assets/brand/icon.png`; o executável Windows inc
 `assets/brand/icon.ico`. No Linux, rode `tools/install-linux.sh` após o build: ele instala
 o binário, o PNG e `com.hangar.native.desktop`, nome que combina com o `app_id` da janela.
 No macOS, `tools/package-macos.sh <binário> <Hangar.app>` monta o pacote com `icon.icns`.
-A release atual ainda publica só o binário avulso; seu ZIP não inclui esse pacote.
 
 ## Baixar pronto e atualização
 
-Cada push na `main` que mexe no app recompila e publica na release fixa [`native-latest`](https://github.com/jeffer1312/hangar/releases/tag/native-latest) (workflow `.github/workflows/native.yml`): `Hangar-linux-x86_64.tar.gz`, `Hangar-windows-x86_64.zip` e `Hangar-macos-aarch64.zip`, cada um com o `.sha256` ao lado (`sha256sum -c`). Dentro do arquivo o executável é `hangar` (`Hangar.exe` no Windows). Não são assinados: no macOS, abra pelo botão direito na primeira vez. Windows e macOS compilam sem conferência de uso; se o build deles falhar, a release sai só com o Linux.
+Cada push na `main` que mexe no app recompila e publica na release fixa [`native-latest`](https://github.com/jeffer1312/hangar/releases/tag/native-latest) (workflow `.github/workflows/native.yml`): `Hangar-linux-x86_64.tar.gz`, `Hangar-windows-x86_64.zip` e `Hangar-macos-aarch64.zip`, cada um com o `.sha256` ao lado (`sha256sum -c`). O arquivo Linux contém `hangar`, `icon.png` e `install-linux.sh` (rode este último para instalar o atalho). O ZIP Windows contém `Hangar.exe`; o ZIP macOS contém `Hangar.app` com o ícone. Os binários crus continuam publicados à parte para o atualizador. Não são assinados: no macOS, abra pelo botão direito na primeira vez. Windows e macOS compilam sem conferência de uso; se o build deles falhar, a release sai só com o Linux.
 
 A versão é a do backend: `VERSION` da raiz + número de commits (`0.1.0.2533`), embutida pelo `build.rs` e mostrada em Configurações → Sobre. Ao abrir e a cada 6 h o app lê o `native-latest.json` da release; havendo versão maior, aparece **Atualizar** na barra do topo, ao lado da engrenagem. O clique baixa o binário da plataforma (`Hangar-<sistema>-<arquitetura>`), confere o sha256 do manifesto (diferente: recusa sem trocar nada), guarda o atual em `<executável>.old`, põe o novo no lugar e o abre. O novo prova que subiu gravando o próprio pid; se não fizer isso em 30 s ou morrer antes, o anterior volta para o lugar e a janela antiga continua aberta com o aviso. Build local de uma branch com mais commits que a `main` não recebe oferta.
 
