@@ -43,7 +43,7 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 35] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 37] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")),
     ("settings_style", Some("settings_style_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
@@ -55,7 +55,8 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 35] = [
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
     ("settings_font", None), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
-    ("settings_code_size", None), ("settings_line_height", None), ("settings_column", None),
+    ("settings_code_size", None), ("settings_terminal_font", Some("settings_terminal_font_desc")),
+    ("settings_terminal_size", None), ("settings_line_height", None), ("settings_column", None),
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
     ("settings_collapsed_nav", None), ("settings_sidebar_density", Some("settings_sidebar_density_hint")), ("settings_sidebar_height", Some("settings_only_floating")),
 ];
@@ -142,22 +143,22 @@ const LIVE_WIDTH: f32 = 360.;
 const LIVE_VISIBLE: [f32; 2] = [120., 40.];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Size, CodeSize, Line, Column }
+enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Size, CodeSize, TerminalSize, Line, Column }
 
 impl Knob {
-    const ALL: [Knob; 9] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Size, Knob::CodeSize, Knob::Line, Knob::Column];
+    const ALL: [Knob; 10] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Size, Knob::CodeSize, Knob::TerminalSize, Knob::Line, Knob::Column];
 
     // A força da tinta é do modo que está na tela (escuro ou claro), como a cor.
     fn read(self, a: &Appearance) -> u16 {
         match self { Knob::TintStrength => a.colors(theme::is_dark()).tint_strength, Knob::Transparency => a.transparency, Knob::Solidity => a.solidity,
             Knob::SheetSolidity => a.sheet_solidity, Knob::Contrast => a.text_contrast,
-            Knob::Size => a.text_size, Knob::CodeSize => a.code_size, Knob::Line => a.line_height, Knob::Column => a.column }
+            Knob::Size => a.text_size, Knob::CodeSize => a.code_size, Knob::TerminalSize => a.terminal_size, Knob::Line => a.line_height, Knob::Column => a.column }
     }
 
     fn write(self, a: &mut Appearance, value: u16) {
         match self { Knob::TintStrength => a.colors_mut(theme::is_dark()).tint_strength = value, Knob::Transparency => a.transparency = value,
             Knob::Solidity => a.solidity = value, Knob::SheetSolidity => a.sheet_solidity = value, Knob::Contrast => a.text_contrast = value,
-            Knob::Size => a.text_size = value, Knob::CodeSize => a.code_size = value, Knob::Line => a.line_height = value, Knob::Column => a.column = value }
+            Knob::Size => a.text_size = value, Knob::CodeSize => a.code_size = value, Knob::TerminalSize => a.terminal_size = value, Knob::Line => a.line_height = value, Knob::Column => a.column = value }
     }
 
     fn range(self) -> (f32, f32) {
@@ -166,6 +167,7 @@ impl Knob {
             Knob::Transparency | Knob::Solidity | Knob::SheetSolidity | Knob::Contrast => (0., 100.),
             Knob::Size | Knob::Line | Knob::Column => (50., 150.),
             Knob::CodeSize => (16., 48.),
+            Knob::TerminalSize => (8., 24.),
         }
     }
 }
@@ -173,6 +175,7 @@ impl Knob {
 /// Estado vivo da página: os controles deslizantes guardam posição e arrasto entre desenhos.
 pub(super) struct SettingsUi {
     sliders: Vec<(Knob, Entity<SliderState>)>,
+    terminal_size_focus: FocusHandle,
     /// Cor livre de Destaque e de Tinta.
     accent_picker: Entity<ColorPickerState>,
     tint_picker: Entity<ColorPickerState>,
@@ -252,7 +255,8 @@ impl SettingsUi {
             InputEvent::PressEnter { .. } => this.search_go(None, cx),
             _ => {}
         }));
-        Self { sliders, accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
+        Self { sliders, terminal_size_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
             reveal: Rc::new(Cell::new(false)), live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
     }
 
@@ -856,11 +860,19 @@ impl Hangar {
                 let mut next = appearance::get(); next.code_font = if index == 1 { CodeFont::System } else { CodeFont::JetBrainsMono };
                 this.apply_appearance(next, true, cx);
             }, cx);
+        let terminal_font = segmented("terminal-font", &[tr("settings_code_font_jetbrains"), tr("settings_code_font_system")],
+            if a.terminal_font == CodeFont::System { 1 } else { 0 }, true,
+            |this: &mut Hangar, index, _: &mut Window, cx| {
+                let mut next = appearance::get(); next.terminal_font = if index == 1 { CodeFont::System } else { CodeFont::JetBrainsMono };
+                this.apply_appearance(next, true, cx);
+            }, cx);
         let text_box = settings_box()
             .child(self.row(IconName::Type, "settings_font", None, true, font))
             .child(self.slider_row(IconName::Type, "settings_text_size", None, Knob::Size, true, &a, cx))
             .child(self.row(IconName::Type, "settings_code_font", Some(tr("settings_code_font_desc")), true, code_font))
             .child(self.slider_row(IconName::Type, "settings_code_size", None, Knob::CodeSize, true, &a, cx))
+            .child(self.row(IconName::Type, "settings_terminal_font", Some(tr("settings_terminal_font_desc")), true, terminal_font))
+            .child(self.slider_row(IconName::Type, "settings_terminal_size", None, Knob::TerminalSize, true, &a, cx))
             .child(self.slider_row(IconName::SlidersHorizontal, "settings_line_height", None, Knob::Line, true, &a, cx))
             .child(self.slider_row(IconName::PanelLeft, "settings_column", None, Knob::Column, true, &a, cx));
 
@@ -967,6 +979,7 @@ impl Hangar {
         cx: &mut Context<Self>) -> Div {
         let state = self.settings_ui.slider(knob);
         let value = match knob {
+            Knob::TerminalSize => format!("{} px", a.terminal_size),
             Knob::Column => format!("{:.0} px", column_width()),
             Knob::CodeSize => format!("{} px", (a.code_size as f32 / 2.).to_string().replace('.', &tr("decimal"))),
             _ => knob.read(a).to_string(),
@@ -977,7 +990,27 @@ impl Hangar {
             .child(self.slider_edge(knob, true, enabled, cx))
             .child(div().w(px(60.)).flex_shrink_0().text_right().text_size(px(12.5))
                 .text_color(theme::muted()).child(value));
-        self.row(icon, title, description, enabled, control.into_any_element())
+        let control = if knob == Knob::TerminalSize {
+            control.id("terminal-size-control").track_focus(&self.settings_ui.terminal_size_focus)
+                .role(Role::Group).aria_label(tr(title)).rounded(px(6.)).border_1().border_color(transparent_black())
+                .focus_visible(|el| el.border_color(theme::accent_focus()))
+                .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Left { this.settings_ui.terminal_size_focus.focus(window, cx); }
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let mut next = appearance::get();
+                    let value = match event.keystroke.key.as_str() {
+                        "left" | "down" => next.terminal_size.saturating_sub(1),
+                        "right" | "up" => next.terminal_size + 1,
+                        "home" => 8, "end" => 24, _ => return,
+                    };
+                    cx.stop_propagation();
+                    next.terminal_size = value.clamp(8, 24);
+                    this.apply_appearance(next, true, cx);
+                    this.sync_sliders(window, cx);
+                })).into_any_element()
+        } else { control.into_any_element() };
+        self.row(icon, title, description, enabled, control)
     }
 }
 

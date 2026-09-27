@@ -179,6 +179,9 @@ pub struct Appearance {
     /// Contas e modelos em uma linha por conta, sem barras: escolha deste aparelho, como no web.
     pub accounts_compact: bool,
     pub sidebar_group: SidebarGroup,
+    pub terminal_font: CodeFont,
+    /// Tamanho em pixels, independente do texto e do código da conversa.
+    pub terminal_size: u16,
     pub code_font: CodeFont,
     /// Meio pixel por unidade, para permitir 12,5 px sem arredondar o controle.
     pub code_size: u16,
@@ -191,7 +194,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
     language: Language::System, currency: Currency::Usd, accounts_compact: false, sidebar_group: SidebarGroup::None,
-    code_font: CodeFont::JetBrainsMono, code_size: 25 };
+    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -212,7 +215,7 @@ impl Appearance {
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             language: self.language, currency: self.currency, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
-            code_font: self.code_font,
+            code_font: self.code_font, terminal_font: self.terminal_font,
             ..Self::default() }
     }
 
@@ -240,6 +243,7 @@ impl Appearance {
         for colors in [&mut self.dark, &mut self.light] { colors.tint_strength = colors.tint_strength.clamp(5, 100); }
         for v in [&mut self.text_size, &mut self.line_height, &mut self.column] { *v = (*v).clamp(50, 150); }
         self.code_size = self.code_size.clamp(16, 48);
+        self.terminal_size = self.terminal_size.clamp(8, 24);
         // O limite de cima depende da janela e é aplicado ao desenhar; aqui só o que nunca vale.
         for v in &mut self.live_corner { *v = if v.is_finite() { v.max(0.) } else { 16. }; }
         self
@@ -381,6 +385,22 @@ mod tests {
         assert_eq!(parsed.dark.tint_strength, 40);
         assert_eq!((parsed.theme, parsed.palette), (ThemeMode::Dark, Palette::Classic));
         assert_eq!((parsed.code_font, parsed.code_size), (CodeFont::JetBrainsMono, 25));
+    }
+
+    #[test]
+    fn terminal_typography_is_independent_and_survives_reload() {
+        let old: Appearance = serde_json::from_str("{}").unwrap();
+        assert_eq!((old.terminal_font, old.terminal_size), (CodeFont::JetBrainsMono, 12));
+        let saved = Appearance { terminal_font: CodeFont::System, terminal_size: 18, ..old };
+        let loaded: Appearance = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(loaded, saved);
+        assert_eq!((loaded.font, loaded.text_size, loaded.code_font, loaded.code_size),
+            (old.font, old.text_size, old.code_font, old.code_size));
+        assert_eq!((loaded.compact_style().terminal_font, loaded.compact_style().terminal_size), (CodeFont::System, 18));
+        assert_eq!((Appearance { terminal_size: 0, ..saved }.clamped().terminal_size,
+            Appearance { terminal_size: 900, ..saved }.clamped().terminal_size), (8, 24));
+        let reset = saved.reset_keeping_choices();
+        assert_eq!((reset.terminal_font, reset.terminal_size), (CodeFont::System, 12));
     }
 
     #[test]

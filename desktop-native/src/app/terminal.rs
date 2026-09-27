@@ -238,7 +238,7 @@ impl Hangar {
     fn resize_terminal(&mut self, tab: usize, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = self.terminal.as_mut() else { return; };
         let slot = &mut panel.tabs[tab];
-        if slot.bounds.get() == bounds { return; }
+        if slot.bounds.get() == bounds && !slot.view.typography_changed() { return; }
         slot.bounds.set(bounds);
         if slot.view.resize_to_bounds(bounds, window) {
             let (cols, rows) = slot.view.dimensions();
@@ -263,6 +263,7 @@ impl Hangar {
         let slot = &panel.tabs[tab];
         let fixture_loaded = slot.fixture_loaded;
         let bounds = slot.bounds.clone();
+        let typography_changed = slot.view.typography_changed();
         let entity = cx.entity();
         let message = if tab == 1 && slot.name.is_empty() {
             panel.shell_error.clone().or_else(|| Some(tr("term_opening_shell")))
@@ -273,7 +274,7 @@ impl Hangar {
             .track_focus(&panel.focus).key_context("Terminal").relative().flex_1().min_h_0().overflow_hidden()
             .bg(theme::background()).child(slot.view.element())
             .child(canvas(move |area, window, cx| {
-                if bounds.get() != area {
+                if bounds.get() != area || typography_changed {
                     let entity = entity.clone();
                     window.defer(cx, move |window, cx| entity.update(cx, |this, cx| this.resize_terminal(tab, area, window, cx)));
                 }

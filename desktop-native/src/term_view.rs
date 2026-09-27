@@ -12,9 +12,23 @@ use gpui_kit::{App, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hs
     IntoElement, KeyDownEvent, LayoutId, Pixels, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle,
     Window, fill, font, point, px, relative, rgb, size};
 
-const TERM_FONT: &str = "JetBrains Mono";
-const FONT_SIZE: f32 = 13.;
-const LINE_HEIGHT: f32 = 19.;
+fn terminal_font(window: &Window) -> gpui_kit::Font {
+    if crate::appearance::get().terminal_font == crate::appearance::CodeFont::JetBrainsMono {
+        return font(crate::theme::CODE_MONO);
+    }
+    // A fonte do kit já pode ter sido trocada pela preferência de código da conversa.
+    static SYSTEM_MONO: std::sync::OnceLock<gpui_kit::SharedString> = std::sync::OnceLock::new();
+    font(SYSTEM_MONO.get_or_init(|| {
+        let default = gpui_kit::base::TypographyTokens::default().mono;
+        let installed = window.text_system().all_font_names();
+        [default.as_ref(), "Menlo", "Consolas", "DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", crate::theme::CODE_MONO]
+            .into_iter().find(|name| installed.iter().any(|installed| installed == name))
+            .unwrap_or(crate::theme::CODE_MONO).to_owned().into()
+    }).clone())
+}
+
+fn terminal_size() -> f32 { crate::appearance::get().terminal_size as f32 }
+fn terminal_line_height(font_size: f32) -> f32 { font_size * 19. / 13. }
 // Cores ANSI são dados do protocolo; texto e fundo padrão vêm do tema ativo.
 const ANSI16: [u32; 16] = [
     0x2e3436, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf,
@@ -59,6 +73,8 @@ pub struct TermView {
     parser: Processor,
     output: Output,
     cell_width: f32,
+    line_height: f32,
+    typography: (crate::appearance::CodeFont, u16),
     selection_anchor: Option<TermPoint>,
     wheel_remainder: f32,
     fixture_loopback: bool,
@@ -68,10 +84,13 @@ pub struct KeyResult { pub handled: bool, pub redraw: bool }
 
 impl TermView {
     pub fn new(cols: usize, rows: usize) -> Self {
+        let appearance = crate::appearance::get();
         let size = GridSize { cols: cols.max(2), rows: rows.max(1) };
         let output = Output::default();
         Self { term: Term::new(Config::default(), &size, output.clone()), parser: Processor::new(),
-            output, cell_width: FONT_SIZE * 0.6, selection_anchor: None, wheel_remainder: 0., fixture_loopback: false }
+            output, cell_width: terminal_size() * 0.6, line_height: terminal_line_height(terminal_size()),
+            typography: (appearance.terminal_font, appearance.terminal_size),
+            selection_anchor: None, wheel_remainder: 0., fixture_loopback: false }
     }
 
     /// A fixture é opt-in; nenhum dado da sessão real entra nesta vista de prova.
@@ -146,12 +165,21 @@ impl TermView {
         } else { self.output.push(bytes); false }
     }
 
+    pub fn typography_changed(&self) -> bool {
+        let appearance = crate::appearance::get();
+        self.typography != (appearance.terminal_font, appearance.terminal_size)
+    }
+
     pub fn resize_to_bounds(&mut self, bounds: Bounds<Pixels>, window: &mut Window) -> bool {
-        let cell_width = window.text_system().shape_line("M".into(), px(FONT_SIZE),
-            &[TextRun { len: 1, font: font(TERM_FONT), color: crate::theme::text(), ..Default::default() }], None).width;
+        let appearance = crate::appearance::get();
+        self.typography = (appearance.terminal_font, appearance.terminal_size);
+        let font_size = terminal_size();
+        let cell_width = window.text_system().shape_line("M".into(), px(font_size),
+            &[TextRun { len: 1, font: terminal_font(window), color: crate::theme::text(), ..Default::default() }], None).width;
         self.cell_width = f32::from(cell_width).max(1.);
+        self.line_height = terminal_line_height(font_size);
         let cols = (f32::from(bounds.size.width) / self.cell_width).floor().max(2.) as usize;
-        let rows = (f32::from(bounds.size.height) / LINE_HEIGHT).floor().max(1.) as usize;
+        let rows = (f32::from(bounds.size.height) / self.line_height).floor().max(1.) as usize;
         self.resize_grid(cols, rows)
     }
 
@@ -199,7 +227,7 @@ impl TermView {
     pub fn scroll_lines(&mut self, lines: i32) -> bool { self.scroll(Scroll::Delta(lines)) }
 
     pub fn scroll_wheel(&mut self, event: &ScrollWheelEvent) -> bool {
-        self.wheel_remainder += f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
+        self.wheel_remainder += f32::from(event.delta.pixel_delta(px(self.line_height)).y) / self.line_height;
         let lines = self.wheel_remainder.trunc() as i32;
         self.wheel_remainder -= lines as f32;
         self.scroll_lines(lines)
@@ -213,7 +241,7 @@ impl TermView {
 
     fn point_at(&self, x: f32, y: f32) -> TermPoint {
         let col = (x / self.cell_width).floor().max(0.) as usize;
-        let row = (y / LINE_HEIGHT).floor().max(0.) as i32;
+        let row = (y / self.line_height).floor().max(0.) as i32;
         TermPoint::new(Line(row.min(self.term.grid().screen_lines() as i32 - 1)
             - self.term.grid().display_offset() as i32), Column(col.min(self.term.grid().columns() - 1)))
     }
@@ -357,7 +385,7 @@ impl IntoElement for TerminalGrid {
 
 impl Element for TerminalGrid {
     type RequestLayoutState = ();
-    type PrepaintState = (Pixels, Vec<Vec<(usize, ShapedLine)>>);
+    type PrepaintState = (Pixels, Pixels, Vec<Vec<(usize, ShapedLine)>>);
 
     fn id(&self) -> Option<ElementId> { None }
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
@@ -372,8 +400,9 @@ impl Element for TerminalGrid {
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (),
         window: &mut Window, _: &mut App) -> Self::PrepaintState {
-        let font = font(TERM_FONT);
-        let cell_width = window.text_system().shape_line("M".into(), px(FONT_SIZE),
+        let font = terminal_font(window);
+        let font_size = terminal_size();
+        let cell_width = window.text_system().shape_line("M".into(), px(font_size),
             &[TextRun { len: 1, font: font.clone(), color: self.foreground, ..Default::default() }], None).width;
         let cursor_row = self.snapshot.cursor.point.line.0 + self.snapshot.offset as i32;
         let cursor_col = self.snapshot.cursor.point.column.0;
@@ -385,7 +414,7 @@ impl Element for TerminalGrid {
             for (col, cell) in cells.iter().enumerate() {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) { continue; }
                 if cell.flags.contains(Flags::WIDE_CHAR) && !text.is_empty() {
-                    segments.push((start_col, window.text_system().shape_line(text.into(), px(FONT_SIZE), &runs, None)));
+                    segments.push((start_col, window.text_system().shape_line(text.into(), px(font_size), &runs, None)));
                     text = String::new();
                     runs.clear();
                 }
@@ -411,23 +440,23 @@ impl Element for TerminalGrid {
                     && run.underline == underline && run.strikethrough == strikethrough) { last.len += len; }
                 else { runs.push(TextRun { len, font: glyph_font, color: ink, underline, strikethrough, ..Default::default() }); }
                 if cell.flags.contains(Flags::WIDE_CHAR) {
-                    segments.push((start_col, window.text_system().shape_line(text.into(), px(FONT_SIZE), &runs, None)));
+                    segments.push((start_col, window.text_system().shape_line(text.into(), px(font_size), &runs, None)));
                     text = String::new();
                     runs.clear();
                 }
             }
             if !text.is_empty() {
-                segments.push((start_col, window.text_system().shape_line(text.into(), px(FONT_SIZE), &runs, None)));
+                segments.push((start_col, window.text_system().shape_line(text.into(), px(font_size), &runs, None)));
             }
             segments
         }).collect();
-        (cell_width, lines)
+        (cell_width, px(terminal_line_height(font_size)), lines)
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (),
         state: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
-        let (cell_width, lines) = state;
-        let line_height = px(LINE_HEIGHT);
+        let (cell_width, line_height, lines) = state;
+        let line_height = *line_height;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for (row, cells) in self.snapshot.cells.chunks(self.snapshot.cols).enumerate() {
                 for (col, cell) in cells.iter().enumerate() {
@@ -550,6 +579,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_selection_uses_resized_cell_metrics() {
+        let mut view = TermView::new(20, 4);
+        view.feed(b"first\r\nsecond\r\nthird");
+        for font_size in [8., 12., 18., 24.] {
+            view.cell_width = font_size * 0.6;
+            view.line_height = terminal_line_height(font_size);
+            assert_eq!(view.point_at(view.cell_width * 2.5, view.line_height * 1.5),
+                TermPoint::new(Line(1), Column(2)));
+        }
+    }
+
+    #[test]
     fn resize_selection_and_history_keep_visible_content() {
         let mut view = TermView::new(10, 2);
         view.feed(b"alpha beta\r\nsecond\r\nthird");
@@ -570,10 +611,10 @@ mod tests {
         assert_eq!(view.selected_text().as_deref(), Some("alpha"));
         view.mouse_up();
         assert!(view.mouse_down(0., 0., 1));
-        assert!(view.mouse_drag(36., 0.));
+        assert!(view.mouse_drag(view.cell_width * 4.5, 0.));
         assert_eq!(view.selected_text().as_deref(), Some("alpha"));
         view.mouse_up();
-        view.mouse_down(36., 0., 1);
+        view.mouse_down(view.cell_width * 4.5, 0., 1);
         assert!(view.mouse_drag(0., 0.));
         assert_eq!(view.selected_text().as_deref(), Some("alpha"));
     }
