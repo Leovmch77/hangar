@@ -13,6 +13,8 @@ pub struct Imported {
     pub image: Option<Vec<u8>>,
     /// Endereço e token do servidor ativo do web.
     pub server: Option<(String, String)>,
+    /// Todas as máquinas da lista do web (`cp_servers`), a ativa inclusive.
+    pub servers: Vec<crate::app::ServerEntry>,
 }
 
 /// `Electron` é o shell aberto com `electron main.cjs` (sem package.json, fica o nome padrão); `hangar-shell`, com
@@ -173,7 +175,7 @@ fn map(local: &HashMap<String, String>, origin: &str, base: Appearance) -> Impor
         hands_free: on("cp_ditado_maos_livres", "1"),
         ..base
     };
-    Imported { appearance, image, server: server(get("cp_servers"), get("cp_active"), origin) }
+    Imported { appearance, image, server: server(get("cp_servers"), get("cp_active"), origin), servers: servers(get("cp_servers"), origin) }
 }
 
 /// `cp_cor_*` guarda só o desvio: `{destaque, tinta, forca}`, com a força em 0–100 de um teto de 45% de mistura.
@@ -193,6 +195,18 @@ fn server(list: Option<&str>, active: Option<&str>, origin: &str) -> Option<(Str
         .or_else(|| list.iter().filter(usable).find(|s| s.get("disabled").and_then(Value::as_bool) != Some(true)))?;
     let address = pick.get("baseUrl").and_then(Value::as_str).filter(|a| !a.is_empty()).unwrap_or(origin);
     Some((address.trim_end_matches('/').to_owned(), pick.get("token")?.as_str()?.to_owned()))
+}
+
+/// A lista inteira, com o endereço vazio resolvido para a origem. Sem token não dá para entrar: fica de fora.
+fn servers(list: Option<&str>, origin: &str) -> Vec<crate::app::ServerEntry> {
+    let list: Vec<Value> = list.and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default();
+    list.iter().filter_map(|s| {
+        let token = s.get("token")?.as_str().filter(|t| !t.is_empty())?.to_owned();
+        let address = s.get("baseUrl").and_then(Value::as_str).filter(|a| !a.is_empty()).unwrap_or(origin).trim_end_matches('/').to_owned();
+        let text = |key: &str| s.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
+        Some(crate::app::ServerEntry { id: text("id").unwrap_or_else(crate::app::new_server_id), label: text("label").unwrap_or_default(),
+            address, token, disabled: s.get("disabled").and_then(Value::as_bool) == Some(true) })
+    }).collect()
 }
 
 /// Grupos da Aparência que mudaram, pelas chaves de tradução dos títulos, para o resumo depois de importar.
@@ -240,6 +254,8 @@ mod tests {
         assert_eq!((a.text_size, a.line_height, a.font), (120, 100, Font::System));
         assert_eq!((a.reading, a.sheet_solidity, a.thinking_tools, a.language), (Reading::Sheet, 92, ThinkingTools::All, Language::En));
         assert_eq!(got.server, Some(("http://127.0.0.1:8765".into(), "t2".into())));
+        let addresses: Vec<&str> = got.servers.iter().map(|s| s.address.as_str()).collect();
+        assert_eq!(addresses, ["http://x:1", "http://127.0.0.1:8765"]);
         assert!(got.image.is_none());
         assert!(changed(&base, &a, false).contains(&"settings_theme"));
     }

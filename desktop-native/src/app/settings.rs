@@ -542,6 +542,11 @@ impl Hangar {
         self.sync_sliders(window, cx);
         self.refresh_backdrop(window, cx);
         self.electron_offer = false;
+        let before_servers = self.servers.len();
+        self.merge_servers(imported.servers);
+        if self.servers.len() > before_servers {
+            what.push(tr("electron_import_servers").replace("{n}", &(self.servers.len() - before_servers).to_string()));
+        }
         if let Some((address, token)) = imported.server {
             let same = self.active_token == token
                 && self.api.as_ref().is_some_and(|api| api.identity().trim_end_matches('/') == address.trim_end_matches('/'));

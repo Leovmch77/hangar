@@ -4463,6 +4463,7 @@
   "native_electron_import_done": "Imported from the Electron app: {what}.",
   "native_electron_import_same": "The Electron app settings already matched these.",
   "native_electron_import_server": "server {address}",
+  "native_electron_import_servers": "{n} servers",
   "native_settings_preview_question": "how does the text look?",
   "native_settings_preview_answer": "Like this. This is your conversation with the current settings: size, line height, font and column width.",
   "native_settings_theme": "Theme",

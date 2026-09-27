@@ -35,6 +35,8 @@ mod files;
 mod settings;
 mod mention;
 mod server_config;
+mod servers;
+pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
 mod side;
 mod terminal;
@@ -131,7 +133,8 @@ enum Payload {
     Computer(computer::ComputerReply),
     // Diálogo Nova sessão: a resposta vai ao diálogo que a pediu, se ele ainda for o aberto.
     Create(EntityId, create::CreateReply),
-    ServerSwitch(u64, String, String, Result<Vec<SessionInfo>, Failure>),
+    // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
+    Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
     // Barra lateral: prévia, leitura do silenciar e as gravações do menu da sessão.
     Sidebar(sidebar::SidebarReply),
@@ -425,11 +428,17 @@ pub struct Hangar {
     side_slide: Option<(Instant, bool, f32)>,
     /// Linhas que chegaram com a conversa aberta, e quando: entram com o `fade-in` do kit, uma vez.
     arrived: HashMap<String, Instant>,
-    return_server: Option<(String, String)>,
     active_token: String,
-    switch_seq: u64,
-    switch_draft: Option<String>,
     ready_sessions: Option<Vec<SessionInfo>>,
+    /// Todas as máquinas conhecidas, a ativa inclusive, e a lista ao vivo de cada outra.
+    servers: Vec<servers::ServerEntry>,
+    remote: HashMap<String, servers::RemoteList>,
+    remote_tasks: Vec<JoinHandle<()>>,
+    remote_gen: u64,
+    /// Sobe quando a lista de máquinas muda: a tela sem sessão refaz o seletor dela.
+    servers_rev: u64,
+    /// Sessão de outra máquina clicada na barra: abre quando a lista da máquina, agora ativa, chegar.
+    pending_open: Option<String>,
     dictation: dictation::Dictation,
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
@@ -438,7 +447,7 @@ pub struct Hangar {
 
 impl Drop for Hangar {
     fn drop(&mut self) {
-        for task in [&self.list_task, &self.session_task, &self.history_task].into_iter().flatten() { task.abort(); }
+        for task in [&self.list_task, &self.session_task, &self.history_task].into_iter().flatten().chain(&self.remote_tasks) { task.abort(); }
     }
 }
 
@@ -447,6 +456,14 @@ impl Hangar {
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
         let saved = load_connection();
+        // Primeira abertura com a lista: as máquinas do app Electron entram sozinhas, como a conexão dele já entrava.
+        let (mut known_servers, adopt) = match load_servers() { Some(list) => (list, false), None => (Vec::new(), true) };
+        if adopt { cx.defer_in(window, |this: &mut Self, window, cx| this.adopt_electron_servers(window, cx)); }
+        if let Some((address, token)) = &saved
+            && !known_servers.iter().any(|s| servers::norm(&s.address) == servers::norm(address)) {
+            known_servers.insert(0, servers::ServerEntry { id: servers::new_id(), label: servers::default_label(address),
+                address: address.clone(), token: token.clone(), disabled: false });
+        }
         let (saved_address, saved_token) = saved.clone().unwrap_or_else(|| ("http://127.0.0.1:8765".into(), String::new()));
         let address = cx.new(|cx| InputState::new(window, cx).default_value(saved_address).placeholder(tr("server")));
         let token = cx.new(|cx| InputState::new(window, cx).masked(true).default_value(saved_token).placeholder(tr("token")));
@@ -542,7 +559,8 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
-            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), active_token: String::new(), ready_sessions: None,
+            servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, pending_open: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -572,7 +590,7 @@ impl Hangar {
     /// Pede a paleta do papel de parede quando o tema é Desktop. Sem conexão, diz isso e desenha como Automático.
     pub(super) fn refresh_desktop_palette(&mut self, cx: &mut Context<Self>) {
         if appearance::get().theme != appearance::ThemeMode::Desktop { self.desktop_note = None; return; }
-        let Some(api) = self.api.clone() else {
+        let Some(api) = self.desktop_api() else {
             self.desktop_note = Some(tr("settings_desktop_offline"));
             cx.notify();
             return;
@@ -674,18 +692,20 @@ impl Hangar {
                 return;
             }
         };
-        let reconnect = self.switch_draft.is_none() && self.return_server.is_some()
-            && self.api.as_ref().is_some_and(|current| current.identity() == api.identity());
-        let kept = if reconnect { self.return_server.clone() } else { None };
-        // A escolha temporária da Nova conversa não muda o servidor salvo para a próxima abertura.
-        self.unsaved_connection = (self.switch_draft.is_none() && !reconnect).then(|| (address, token.clone()));
+        // Como o `cp_active` do web: a máquina que abriu vira a da próxima abertura.
+        self.unsaved_connection = Some((address, token.clone()));
         if let Some(key) = self.selected_key() { self.drafts.insert(key, self.composer.read(cx).value().to_string()); }
+        // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
+        let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
+            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online));
         self.drop_connection(window, cx);
-        if kept.is_some() { self.return_server = kept; }
         self.active_token = token;
-        if let Some(draft) = self.switch_draft.take() { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
         self.api = Some(api.clone());
         self.server = Some(api.identity());
+        if let Some((key, sessions, online)) = previous {
+            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error: None });
+        }
+        self.start_remote_lists();
         self.connection_dialog = false;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
@@ -713,32 +733,6 @@ impl Hangar {
         cx.notify();
     }
 
-    fn switch_server(&mut self, id: String, address: String, known_token: Option<String>, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
-        if api.identity().trim_end_matches('/') == address.trim_end_matches('/') { return; }
-        self.switch_seq += 1;
-        let seq = self.switch_seq;
-        if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_started(cx)); }
-        let (connection, tx) = (self.connection, self.tx.clone());
-        self.runtime.spawn(async move {
-            let result = async {
-                let token = match known_token {
-                    Some(token) => token,
-                    None => api.server_read(&["peers", &id, "token"], &[], 15).await?
-                        .get("token").and_then(Value::as_str).filter(|s| !s.is_empty())
-                        .ok_or_else(|| Failure::local("invalid_response"))?.to_owned(),
-                };
-                let target = Api::new(&address, &token)?;
-                let sessions = target.sessions().await?;
-                Ok((token, sessions))
-            }.await;
-            let (token, sessions) = match result { Ok((token, sessions)) => (token, Ok(sessions)), Err(error) => (String::new(), Err(error)) };
-            let _ = tx.send(Envelope { connection, selection: None,
-                payload: Payload::ServerSwitch(seq, address, token, sessions) }).await;
-        });
-        cx.notify();
-    }
-
     fn load_notification_preferences(&mut self) {
         let Some(api) = self.api.clone() else { return };
         let n = &mut self.system_notifications;
@@ -757,7 +751,7 @@ impl Hangar {
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_terminal(false, window, cx);
         self.mention.close();
-        if self.switch_draft.is_none() { self.return_server = None; self.active_token.clear(); }
+        self.active_token.clear();
         self.connection += 1;
         self.selection += 1;
         self.revision += 1;
@@ -962,6 +956,8 @@ impl Hangar {
             Payload::Backdrop(seq, result) => { self.receive_backdrop(seq, result, window, cx); return; }
             Payload::BackdropPicked(result) => { self.receive_picked_backdrop(result, window, cx); return; }
             Payload::BackdropRemoved(result) => { self.receive_removed_backdrop(result, window, cx); return; }
+            // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
+            Payload::Remote(generation, key, update) => { self.receive_remote(generation, key, update, cx); return; }
             payload => payload,
         };
         if envelope.connection != self.connection { return; }
@@ -977,18 +973,20 @@ impl Hangar {
             Payload::Sessions(Ok(sessions)) => {
                 self.list_error = None;
                 if let Some((address, token)) = self.unsaved_connection.take() {
+                    let known = self.servers.iter().any(|s| servers::norm(&s.address) == servers::norm(&address));
+                    let label = if known { String::new() } else { servers::default_label(&address) };
+                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false });
                     // Disco fora da thread da janela; só a falha volta.
-                    let (connection, tx) = (self.connection, self.tx.clone());
-                    self.runtime.spawn(async move {
-                        let saved = tokio::task::spawn_blocking(move || save_connection(&address, &token).map_err(|e| e.to_string())).await;
-                        if let Err(error) = saved.map_err(|e| e.to_string()).and_then(|r| r) {
-                            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::ConnectionNotSaved(error) }).await;
-                        }
-                    });
+                    self.persist_servers();
                 }
                 self.replace_sessions(sessions, window, cx);
+                if let Some(name) = self.pending_open.take()
+                    && let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() {
+                    self.select(session, window, cx);
+                }
             }
             Payload::Sessions(Err(error)) => {
+                self.pending_open = None;
                 if matches!(error.status, Some(401 | 403)) {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
@@ -1135,25 +1133,6 @@ impl Hangar {
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
-            Payload::ServerSwitch(seq, address, token, result) => {
-                if seq != self.switch_seq { return; }
-                if self.selected.is_some() {
-                    if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_finished(None, cx)); }
-                    return;
-                }
-                if let Some(view) = self.new_chat.clone() { view.update(cx, |view, cx| view.switch_finished(result.as_ref().err().map(Self::setting_failure), cx)); }
-                if let Ok(sessions) = result {
-                    if self.return_server.is_none() {
-                        self.return_server = self.api.as_ref().map(|api| (api.identity(), self.active_token.clone()));
-                    }
-                    self.switch_draft = Some(self.composer.read(cx).value().to_string());
-                    self.ready_sessions = Some(sessions);
-                    self.address.update(cx, |input, cx| input.set_value(address, window, cx));
-                    self.token.update(cx, |input, cx| input.set_value(token, window, cx));
-                    self.connect(window, cx);
-                }
-                return;
-            }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Sidebar(reply) => {
                 if matches!(&reply, sidebar::SidebarReply::Wrote(_, sidebar::Write::Mute(_), _)) { self.load_notification_preferences(); }
@@ -1166,7 +1145,8 @@ impl Hangar {
             Payload::DesktopPalette(seq, result) => { self.receive_desktop_palette(seq, result, window, cx); return; }
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
-                | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..) => unreachable!(),
+                | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
+                | Payload::Remote(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
@@ -3703,26 +3683,53 @@ impl Hangar {
         let mut children: Vec<AnyElement> = Vec::new();
         // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
         let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
-        let rows = |list: &[&SessionInfo], children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
-            let selected = selected_name == Some(session.name.as_str());
-            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, window, cx) }
-                else { self.render_session_row((*session).clone(), selected, mixed, window, cx) });
+        let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
+            let selected = remote.is_none() && selected_name == Some(session.name.as_str());
+            let remote = remote.map(str::to_owned);
+            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, remote, window, cx) }
+                else { self.render_session_row((*session).clone(), selected, mixed, remote, window, cx) });
         };
-        if !layout.waiting.is_empty() {
-            children.push(section(tr("sidebar_awaiting"), Some(layout.waiting.len())).into_any_element());
-            rows(&layout.waiting, &mut children, window, cx);
-        }
-        for group in &layout.groups {
-            if layout.by_project {
-                let awaiting = group.sessions.iter().filter(|s| s.state == "awaiting_input").count();
-                children.push(self.render_group_header(group, awaiting, window, cx));
-                if self.sidebar.is_collapsed(&group.key) { continue; }
-            } else {
-                children.push(section(group.label.clone(), None).into_any_element());
+        let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
+            if !layout.waiting.is_empty() {
+                children.push(section(tr("sidebar_awaiting"), Some(layout.waiting.len())).into_any_element());
+                rows(&layout.waiting, remote, children, window, cx);
             }
-            rows(&group.sessions, &mut children, window, cx);
+            for group in &layout.groups {
+                if layout.by_project {
+                    let awaiting = group.sessions.iter().filter(|s| s.state == "awaiting_input").count();
+                    children.push(self.render_group_header(group, awaiting, window, cx));
+                    if self.sidebar.is_collapsed(&group.key) { continue; }
+                } else if remote.is_none() && !self.multi_server() {
+                    children.push(section(group.label.clone(), None).into_any_element());
+                }
+                rows(&group.sessions, remote, children, window, cx);
+            }
+        };
+        let mut total = layout.total;
+        let mut remote_rows = 0;
+        if self.multi_server() {
+            // Como o web com mais de uma máquina: um bloco por servidor, na ordem da lista.
+            let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
+            let (query, by_project, none) = (self.sidebar.filter.read(cx).value().to_string(), Self::by_project(), HashSet::new());
+            for entry in self.servers.iter().filter(|s| !s.disabled) {
+                let key = servers::norm(&entry.address);
+                if key == active {
+                    children.push(self.render_server_header(&key, &entry.label, layout.total, self.list_online, self.list_error.clone(), cx));
+                    if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
+                } else if let Some(list) = self.remote.get(&key) {
+                    let mut remote = sidebar::layout(&list.sessions, &query, by_project, &none);
+                    // Recolher um projeto numa máquina não recolhe o de mesmo caminho na outra.
+                    for group in &mut remote.groups { group.key = format!("{key}::{}", group.key); }
+                    total += remote.total;
+                    remote_rows += remote.total;
+                    children.push(self.render_server_header(&key, &entry.label, remote.total, list.online, list.error.clone(), cx));
+                    if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&remote, Some(&key), &mut children, window, cx); }
+                }
+            }
+        } else {
+            place(&layout, None, &mut children, window, cx);
         }
-        let empty = self.sessions.iter().all(|s| self.sidebar.hidden().contains(&s.name));
+        let empty = remote_rows == 0 && self.sessions.iter().all(|s| self.sidebar.hidden().contains(&s.name));
         let list = div().id("session-list").min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col().gap(px(2.))
             // A borda do painel já ocupa parte do recuo externo de oito pixels.
             .when(conversations, |el| el.pl(px(if floating { 7. } else { 8. })).pr(px(7.)))
@@ -3771,7 +3778,7 @@ impl Hangar {
             .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).mb(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
                 .child(chrome::small_icon(IconName::Server, 16., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(tr("sidebar_all_sessions")))
-                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(layout.total.to_string()))
+                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(total.to_string()))
                 .child(self.render_group_picker(cx)))
             .children(filter)
             .child(list)
@@ -3878,14 +3885,17 @@ impl Hangar {
     }
 
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
-    fn render_conversation_row(&self, session: SessionInfo, selected: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `remote` é a chave da máquina de uma linha que não é do servidor ativo: clicar troca de máquina, e o menu, a prévia e o foco
+    /// são do ativo, então ela fica sem eles.
+    fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = appearance::get().sidebar_compact;
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
-        let focus = self.tab_focus.get(&name);
+        let local = remote.is_none();
+        let focus = self.tab_focus.get(&name).filter(|_| local);
         let focused = focus.is_some_and(|f| f.contains_focused(window, cx));
-        let hovered = self.sidebar.hover.as_deref() == Some(name.as_str());
-        let menu_open = self.sidebar.button_menu.as_deref() == Some(name.as_str());
+        let hovered = local && self.sidebar.hover.as_deref() == Some(name.as_str());
+        let menu_open = local && self.sidebar.button_menu.as_deref() == Some(name.as_str());
         let show_menu = hovered || focused || menu_open;
         let outcome = selected.then(|| self.selected_key()).flatten().and_then(|key| self.delivery.outcome(&key));
         let queued = selected && self.history_installed && self.queued_count() > 0;
@@ -3926,18 +3936,19 @@ impl Hangar {
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
         let hover_name = name.clone();
-        div().id(SharedString::from(format!("conversation-row-{name}"))).relative().flex_shrink_0()
+        let row_id = match &remote { Some(key) => format!("conversation-row-{key}::{name}"), None => format!("conversation-row-{name}") };
+        div().id(SharedString::from(row_id)).relative().flex_shrink_0()
             .h(px(if branch.is_some() { 45. } else { 29. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
             .when_some(focus, |el, focus| el.track_focus(focus))
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(selection))
             .when(!selected, |el| el.hover(|el| el.bg(hover)))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .when(local, |el| el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered { this.sidebar.hover = Some(hover_name.clone()); }
                 else if this.sidebar.hover.as_deref() == Some(hover_name.as_str()) { this.sidebar.hover = None; }
                 this.redraw(panes::Area::Nav, cx);
-            }))
+            })))
             .role(Role::Button).aria_selected(selected).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(title)
@@ -3951,19 +3962,23 @@ impl Hangar {
                 this.select(open.clone(), window, cx);
                 cx.stop_propagation();
             }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
-                let hover = this.sidebar.hover.take();
-                this.start_menu(menu_name.clone(), cx);
-                this.sidebar.hover = hover;
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                let hover = this.sidebar.hover.take();
-                this.hide_preview();
-                this.sidebar.hover = hover;
-                this.select(session.clone(), window, cx);
-                if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
-            }))
-            .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element()
+            .map(|el| match remote {
+                Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
+                    .into_any_element(),
+                None => el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                    let hover = this.sidebar.hover.take();
+                    this.start_menu(menu_name.clone(), cx);
+                    this.sidebar.hover = hover;
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let hover = this.sidebar.hover.take();
+                    this.hide_preview();
+                    this.sidebar.hover = hover;
+                    this.select(session.clone(), window, cx);
+                    if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                }))
+                .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element(),
+            })
     }
 
     /// Linha do web (Sidebar.svelte): a marca tingida pelo estado no lugar do avatar; nome com a conta e a hora da última
@@ -3971,7 +3986,8 @@ impl Hangar {
     /// de main/master e o diff. Servidor não aparece: a lista é de um servidor só.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let local = remote.is_none();
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
@@ -4000,11 +4016,11 @@ impl Hangar {
         let name = session.name.clone();
         let questions = session.pending_questions;
         let editing = self.sidebar.editing.as_ref().filter(|e| e.old == name).map(|e| e.input.clone());
-        let focus = self.tab_focus.get(&name).cloned();
+        let focus = self.tab_focus.get(&name).cloned().filter(|_| local);
         let focused = focus.as_ref().is_some_and(|f| f.contains_focused(window, cx));
-        let hovered = self.sidebar.hover.as_deref() == Some(name.as_str());
+        let hovered = local && self.sidebar.hover.as_deref() == Some(name.as_str());
         let weak = cx.entity().downgrade();
-        let menu_open = self.sidebar.button_menu.as_deref() == Some(name.as_str());
+        let menu_open = local && self.sidebar.button_menu.as_deref() == Some(name.as_str());
         let show_menu = selected || hovered || focused || menu_open;
         // O ⋯ mora no lugar do tempo: com ele à vista, o tempo sai (senão sobra um pedaço do "12m" atrás dele).
         let when = when.filter(|_| !show_menu);
@@ -4028,16 +4044,18 @@ impl Hangar {
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
         let (hover_name, press_name, menu_name, key_open, menu_session) = (name.clone(), name.clone(), name.clone(), session.clone(), session.clone());
-        div().id(SharedString::from(session.name.clone())).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
+        let row_id = match &remote { Some(key) => format!("{key}::{name}"), None => name.clone() };
+        div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
             .when_some(focus.as_ref(), |el, focus| el.track_focus(focus))
             .when(focus.as_ref().is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(theme::selected_row()))
             .when(!selected, |el| el.hover(|el| el.bg(theme::hover())))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.row_hover(hover_name.clone(), *hovered, cx)))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.row_pointer(f32::from(event.position.y))))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.row_press(press_name.clone(), window, cx)))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.row_release()))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
+            .when(local, |el| el
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.row_hover(hover_name.clone(), *hovered, cx)))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.row_pointer(f32::from(event.position.y))))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.row_press(press_name.clone(), window, cx)))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.row_release()))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 // Só a própria linha: Enter no ⋯ ou no campo do nome é deles.
                 if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.tab_focus.get(&key_open.name).is_some_and(|f| f.is_focused(window)) { return; }
@@ -4069,17 +4087,21 @@ impl Hangar {
                     .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
                     .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.hide_preview();
-                if this.take_long_press() { return; }
-                this.select(session.clone(), window, cx);
-                // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
-                if !this.connection_dialog && session.readable() {
-                    this.composer.update(cx, |input, cx| input.focus(window, cx));
-                }
-            }))
-            .context_menu(sidebar::session_menu(weak, menu_session))
-            .into_any_element()
+            .map(|el| match remote {
+                Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
+                    .into_any_element(),
+                None => el.on_click(cx.listener(move |this, _, window, cx| {
+                    this.hide_preview();
+                    if this.take_long_press() { return; }
+                    this.select(session.clone(), window, cx);
+                    // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
+                    if !this.connection_dialog && session.readable() {
+                        this.composer.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                }))
+                .context_menu(sidebar::session_menu(weak, menu_session))
+                .into_any_element(),
+            })
     }
 }
 
@@ -4172,7 +4194,14 @@ fn load_connection() -> Option<(String, String)> {
     (!address.is_empty() && !token.is_empty()).then(|| (address.to_owned(), token.to_owned()))
 }
 
-fn save_connection(address: &str, token: &str) -> std::io::Result<()> {
+/// As máquinas conhecidas, gravadas junto da conexão ativa (o `cp_servers` do web).
+/// `None` é o arquivo de antes da lista (ou nenhum): ainda não houve escolha de máquinas.
+fn load_servers() -> Option<Vec<servers::ServerEntry>> {
+    let value: Value = serde_json::from_slice(&std::fs::read(saved_connection_path()?).ok()?).ok()?;
+    serde_json::from_value(value.get("servers")?.clone()).ok()
+}
+
+fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry]) -> std::io::Result<()> {
     let path = saved_connection_path().ok_or_else(|| std::io::Error::other("sem pasta de configuração"))?;
     let dir = path.parent().ok_or_else(|| std::io::Error::other("caminho sem pasta"))?;
     std::fs::create_dir_all(dir)?;
@@ -4184,7 +4213,7 @@ fn save_connection(address: &str, token: &str) -> std::io::Result<()> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         options.mode(0o600);
     }
-    std::io::Write::write_all(&mut options.open(&tmp)?, json!({"address": address, "token": token}).to_string().as_bytes())?;
+    std::io::Write::write_all(&mut options.open(&tmp)?, json!({"address": address, "token": token, "servers": servers}).to_string().as_bytes())?;
     std::fs::rename(&tmp, &path)
 }
 

@@ -50,7 +50,7 @@ impl Hangar {
                 });
             }
             (Background::Desktop, Wallpaper::Glass) => {
-                let Some(api) = self.api.clone() else { return self.fail_backdrop(tr("settings_desktop_offline"), window, cx) };
+                let Some(api) = self.desktop_api() else { return self.fail_backdrop(tr("settings_desktop_offline"), window, cx) };
                 // A mesma foto não é decodificada de novo: a releitura acontece a cada volta do foco.
                 let current = self.backdrop.as_ref().map(|(sig, _)| *sig);
                 self.runtime.spawn(async move {

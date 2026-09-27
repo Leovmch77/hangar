@@ -4463,6 +4463,7 @@
   "native_electron_import_done": "Importado do app Electron: {what}.",
   "native_electron_import_same": "As configurações do app Electron já eram as daqui.",
   "native_electron_import_server": "servidor {address}",
+  "native_electron_import_servers": "{n} servidores",
   "native_settings_preview_question": "como ficou o texto?",
   "native_settings_preview_answer": "Assim. Esta é a sua conversa com os ajustes de agora: tamanho, entrelinha, fonte e largura da coluna.",
   "native_settings_theme": "Tema",

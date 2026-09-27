@@ -237,10 +237,11 @@ fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: 
 /// A conexão da abertura. Guardada no diálogo porque as respostas chegam com o `Hangar` em atualização, e o pedido seguinte
 /// (a pasta da raiz que chegou) não pode passar por ele.
 struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
-    owner: WeakEntity<Hangar>, return_server: Option<(String, String)> }
+    owner: WeakEntity<Hangar>, servers: Vec<ServerChoice>, servers_rev: u64 }
 
+/// Uma máquina da lista do app; `key` é o endereço normalizado.
 #[derive(Clone)]
-struct ServerChoice { id: String, label: String, address: String, token: Option<String> }
+pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String }
 
 /// Os menus da tela sem sessão, cada um preso à própria pílula.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,9 +267,6 @@ pub(in crate::app) struct NewSession {
     /// A busca dos menus de lista (máquina, modelo, conta, branch); a pasta usa a `query` da lista de pastas.
     menu_query: Entity<InputState>,
     servers: Remote<Vec<ServerChoice>>,
-    servers_error: Option<String>,
-    switching: bool,
-    switch_error: Option<String>,
     roots: Remote<Vec<Root>>,
     root: Option<Root>,
     /// A pasta listada à esquerda.
@@ -378,8 +376,7 @@ impl NewSession {
             }),
         ];
         Self {
-            link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(), servers_error: None,
-            switching: false, switch_error: None,
+            link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             checkout: Remote::default(), branch: String::new(),
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
@@ -414,56 +411,33 @@ impl NewSession {
         }));
     }
 
-    fn load_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// As máquinas vêm da lista do app, já na mão: nada a buscar.
+    fn load_servers(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let seq = self.servers.start();
-        let (api, origin) = (self.link.api.clone(), self.link.return_server.clone());
-        let current = api.identity();
-        let (done, result) = tokio::sync::oneshot::channel();
-        self.link.runtime.spawn(async move { let _ = done.send(api.server_read(&["peers"], &[], 15).await); });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = result.await.unwrap_or_else(|_| Err(Failure::local("network_error")));
-            let _ = this.update_in(cx, |this, _, cx| {
-                if seq != this.servers.seq { return; }
-                let mut choices = vec![ServerChoice { id: current.clone(),
-                    label: current.trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/').to_owned(),
-                    address: current.clone(), token: None }];
-                if let Some((address, token)) = origin {
-                    if address.trim_end_matches('/') != current.trim_end_matches('/') {
-                        choices.push(ServerChoice { id: address.clone(), label: address.trim_end_matches('/').to_owned(), address, token: Some(token) });
-                    }
-                }
-                this.servers_error = result.map_err(|error| Hangar::setting_failure(&error)).and_then(|value| {
-                    let list = value.as_array().ok_or_else(|| tr("invalid_response"))?;
-                    for item in list {
-                        let (Some(id), Some(address)) = (item.get("id").and_then(Value::as_str), item.get("base_url").and_then(Value::as_str)) else {
-                            return Err(tr("invalid_response"));
-                        };
-                        if item.get("enabled").and_then(Value::as_bool) == Some(false) || address.trim_end_matches('/') == current.trim_end_matches('/') { continue; }
-                        if let Some(choice) = choices.iter_mut().find(|choice| choice.address.trim_end_matches('/') == address.trim_end_matches('/')) {
-                            choice.label = id.to_owned();
-                        } else {
-                            choices.push(ServerChoice { id: id.to_owned(), label: id.to_owned(), address: address.to_owned(), token: None });
-                        }
-                    }
-                    Ok(())
-                }).err();
-                this.servers.finish(seq, Ok(choices));
-                cx.notify();
-            });
-        }).detach();
+        self.servers.finish(seq, Ok(self.link.servers.clone()));
         cx.notify();
     }
 
-    pub(super) fn switch_started(&mut self, cx: &mut Context<Self>) {
-        self.switching = true;
-        self.switch_error = None;
+    /// Escolher outra máquina troca o servidor ativo sem perguntar, como os chips do web.
+    fn pick_machine(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu.set(None);
+        let owner = self.link.owner.clone();
+        window.defer(cx, move |window, cx| { let _ = owner.update(cx, |app, cx| app.pick_machine(key, window, cx)); });
         cx.notify();
     }
 
-    pub(super) fn switch_finished(&mut self, error: Option<String>, cx: &mut Context<Self>) {
-        self.switching = false;
-        self.switch_error = error;
-        cx.notify();
+    /// Chips de máquina no topo do diálogo, só com mais de uma máquina (os do `CreateSessionSheet`).
+    fn render_machines(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let list = self.servers.ok().filter(|list| list.len() > 1)?;
+        Some(div().id("create-machines").role(Role::Group).aria_label(tr("new_chat_machine")).flex().flex_wrap().items_center().gap(px(6.))
+            .child(chrome::small_icon(IconName::Monitor, 14., theme::muted()))
+            .children(list.iter().map(|machine| {
+                let on = self.current_server(machine);
+                let key = machine.key.clone();
+                choice(SharedString::from(format!("create-machine-{}", machine.key)), on, cx).small().rounded_full()
+                    .label(machine.label.clone()).tooltip(machine.address.clone()).disabled(self.creating)
+                    .when(!on, |b| b.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
+            })).into_any_element())
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1087,6 +1061,7 @@ impl NewSession {
         // Com uma conversa escolhida, a coluna larga vira a leitura dela: a pasta já está escolhida.
         if let Some(c) = self.target() { return column.child(self.render_preview(c, cx)); }
         column
+            .children(self.render_machines(cx))
             .child(self.render_roots(cx))
             .when(self.root.is_some(), |el| el.child(Input::new(&self.query).rounded(px(10.)).cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::muted()))
                 .aria_label(tr("create_search"))))
@@ -1281,9 +1256,7 @@ impl NewSession {
             .into_any_element()
     }
 
-    fn current_server(&self, choice: &ServerChoice) -> bool {
-        choice.address.trim_end_matches('/') == self.link.api.identity().trim_end_matches('/')
-    }
+    fn current_server(&self, choice: &ServerChoice) -> bool { choice.key == super::servers::norm(&self.link.api.identity()) }
 
     fn server_label(&self) -> String {
         self.servers.ok().and_then(|list| list.iter().find(|c| self.current_server(c))).map(|c| c.label.clone())
@@ -1293,11 +1266,11 @@ impl NewSession {
     /// Máquina e pasta, acima do compositor e à direita.
     pub(super) fn render_top_pills(&self, cx: &mut Context<Self>) -> Div {
         let open = self.menu.get();
-        let machine = if self.switching { tr("loading") } else { self.server_label() };
+        let machine = self.server_label();
         let folder = self.picked.as_deref().map(basename).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| tr("new_chat_folder"));
         let folders_ready = !self.roots.loading && self.roots.ok().is_some_and(|roots| !roots.is_empty());
         div().flex().justify_end().items_center().gap(px(2.)).pb(px(6.))
-            .child(quiet_pill(Menu::Machine, open == Some(Menu::Machine), IconName::Monitor, machine, tr("new_chat_machine"), self.switching, cx))
+            .child(quiet_pill(Menu::Machine, open == Some(Menu::Machine), IconName::Monitor, machine, tr("new_chat_machine"), false, cx))
             .child(quiet_pill(Menu::Folder, open == Some(Menu::Folder), IconName::Folder, folder, tr("new_chat_folder"), !folders_ready, cx))
     }
 
@@ -1342,7 +1315,6 @@ impl NewSession {
         let claude = self.provider == "claude";
         [
             self.error.clone(),
-            self.switch_error.clone(),
             failed(&self.roots).map(|e| format!("{} {e}", tr("create_roots_failed"))),
             failed(&self.configs).filter(|_| claude).cloned(),
             failed(&self.codex).filter(|_| self.provider == "codex").cloned(),
@@ -1366,26 +1338,13 @@ impl NewSession {
                 (_, Some(list)) => {
                     let rows = list.iter().filter(|c| wanted(&query, &c.label, &c.address)).map(|choice| {
                         let current = self.current_server(choice);
-                        let (choice, owner) = (choice.clone(), self.link.owner.clone());
-                        menu_row(SharedString::from(format!("new-chat-machine-{}", choice.id)), current, choice.label.clone(),
+                        let key = choice.key.clone();
+                        menu_row(SharedString::from(format!("new-chat-machine-{}", choice.key)), current, choice.label.clone(),
                             if current { tr("create_current") } else { String::new() })
-                            .when(!current, |row| row.on_click(cx.listener(move |this, _, window, cx| {
-                                this.menu.set(None);
-                                let (id, address, token, owner) = (choice.id.clone(), choice.address.clone(), choice.token.clone(), owner.clone());
-                                chrome::confirm_alert(window, cx, tr("new_chat_switch_title").replace("{server}", &choice.label),
-                                    tr("new_chat_switch_description"), tr("new_chat_switch_action"), ButtonVariant::Primary,
-                                    move |_, cx| {
-                                        let _ = owner.update(cx, |app, cx| app.switch_server(id.clone(), address.clone(), token.clone(), cx));
-                                        true
-                                    });
-                                cx.notify();
-                            })))
+                            .when(!current, |row| row.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
                             .into_any_element()
                     }).collect();
-                    div().child(Self::menu_list("new-chat-machine-list", rows))
-                        .children(self.servers_error.clone().map(|error| Self::menu_failure("new-chat-peers-error", error,
-                            |this, window, cx| this.load_servers(window, cx), cx)))
-                        .into_any_element()
+                    div().child(Self::menu_list("new-chat-machine-list", rows)).into_any_element()
                 }
                 _ => div().into_any_element(),
             },
@@ -1509,9 +1468,9 @@ impl Hangar {
         let Some(api) = self.api.clone() else {
             return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
         };
-        if self.new_chat.as_ref().is_none_or(|view| view.read(cx).link.connection != self.connection) {
+        if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-                owner: cx.entity().downgrade(), return_server: self.return_server.clone() };
+                owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
             self.new_chat_folders.set(None);
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
@@ -1543,7 +1502,7 @@ impl Hangar {
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-            owner: cx.entity().downgrade(), return_server: self.return_server.clone() };
+            owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
