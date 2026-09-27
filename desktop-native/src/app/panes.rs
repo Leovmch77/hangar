@@ -48,7 +48,8 @@ impl Panes {
     }
 }
 
-/// Só para medir: HANGAR_NATIVE_PANE_FRAMES=1 escreve no stderr cada desenho de área. Sem a variável, nada sai.
+/// Só para medir: HANGAR_NATIVE_PANE_FRAMES=1 escreve no stderr cada desenho de área, com o tempo de montar a árvore dela
+/// (µs) e o instante do desenho (ms desde a primeira linha). Sem a variável, nada sai.
 fn count_frames() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("HANGAR_NATIVE_PANE_FRAMES").is_some())
@@ -57,13 +58,19 @@ fn count_frames() -> bool {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area;
-        if count_frames() { eprintln!("pane {area:?}"); }
+        let started = count_frames().then(Instant::now);
         rendered(cx.entity_id(), window, cx);
         let Some(hangar) = self.hangar.upgrade() else { return div().into_any_element() };
-        hangar.update(cx, |this, cx| {
+        let element = hangar.update(cx, |this, cx| {
             this.panes.marks.borrow_mut().retain(|place| place.area != area);
             this.render_area(area, window, cx)
-        })
+        });
+        if let Some(started) = started {
+            static EPOCH: OnceLock<Instant> = OnceLock::new();
+            let epoch = *EPOCH.get_or_init(|| started);
+            eprintln!("pane {area:?} {} {}", started.elapsed().as_micros(), started.duration_since(epoch).as_millis());
+        }
+        element
     }
 }
 
