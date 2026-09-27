@@ -4256,6 +4256,25 @@ impl Hangar {
             else { self.render_sidebar(selected_name.as_deref(), window, cx) }
     }
 
+    /// Conversa sem mensagens: a marca do harness, o título e o convite, no meio da área.
+    fn render_empty_chat(&self) -> Div {
+        let provider = self.provider().0;
+        let (color, glyph) = theme::provider(provider);
+        // Superfície dos menus por baixo da marca: sobre o papel de parede a cor do harness sozinha some.
+        let mark = div().size(px(48.)).rounded(px(14.)).bg(theme::popup_fill(theme::raised())).border_1().border_color(theme::glass_border())
+            .shadow(theme::popover_shadow()).flex().items_center().justify_center().text_color(color)
+            .map(|el| match chrome::provider_logo(provider, 26., color) {
+                Some(logo) => el.child(logo),
+                None => el.text_size(px(20.)).font_weight(FontWeight::BOLD).child(glyph),
+            });
+        div().flex_1().px_6().pb_6().flex().flex_col().items_center().justify_center().gap_3()
+            .child(mark)
+            .child(div().flex().flex_col().items_center().gap_1()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(tr("empty_chat")))
+                .child(div().max_w(px(360.)).text_sm().text_center().text_color(theme::muted())
+                    .child(tr("empty_chat_hint").replace("{agent}", agent_name(provider)))))
+    }
+
     /// Entre o cabeçalho e a faixa de baixo: o cartão de antes da conversa, a lista ou o aviso de vazio.
     fn render_conversation_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // A miniatura só conta como vista quando a conversa é desenhada: guardada entre quadros, ela segue na tela.
@@ -4276,7 +4295,7 @@ impl Hangar {
                         .when(self.loading, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("loading"))))));
                 }
                 if self.row_ids.is_empty() && !self.loading && self.error.is_none() {
-                    content = content.child(div().flex_1().p_6().text_color(theme::muted()).child(tr("empty_chat")));
+                    content = content.child(self.render_empty_chat());
                 } else {
                     let view = cx.entity().downgrade();
                     // Leitura Folha: uma folha da largura da coluna atrás das mensagens, com o fundo nas margens.
