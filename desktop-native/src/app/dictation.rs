@@ -61,9 +61,12 @@ impl Recorder {
             return Ok(recorder);
         }
         if !cfg!(target_os = "linux") { return Err(Failure::local("dictation_platform")); }
-        let mut child = Command::new("pw-record").args(["--raw", "--format", "s16", "--rate", "16000", "--channels", "1", "-"])
+        let mut command = Command::new("pw-record");
+        if let Some(target) = microphone()? { command.args(["--target", &target]); }
+        let mut child = command.args(["--raw", "--format", "s16", "--rate", "16000", "--channels", "1", "-"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-            .map_err(|_| Failure::local("dictation_recorder_error"))?;
+            .map_err(|error| Failure::local(if error.kind() == std::io::ErrorKind::NotFound {
+                "dictation_recorder_missing" } else { "dictation_recorder_error" }))?;
         let mut stdout = child.stdout.take().expect("piped recorder stdout");
         recorder.child = Some(child);
         let pcm = recorder.pcm.clone();
@@ -119,6 +122,27 @@ impl Recorder {
         if pcm.len() < 2 { return Err(Failure::local("dictation_empty_audio")); }
         Ok(wav(&pcm[..pcm.len() & !1]))
     }
+}
+
+/// Sem fonte padrão o `pw-record` sai na hora com "no target node available"; aí grava do microfone que o PipeWire
+/// mais prioriza. Sem `pw-dump` legível segue como antes e deixa o `pw-record` decidir.
+fn microphone() -> Result<Option<String>, Failure> {
+    let Ok(output) = Command::new("pw-dump").stdin(Stdio::null()).stderr(Stdio::null()).output() else { return Ok(None); };
+    let Ok(Value::Array(objects)) = serde_json::from_slice(&output.stdout) else { return Ok(None); };
+    pick_microphone(&objects).ok_or_else(|| Failure::local("dictation_no_microphone"))
+}
+
+/// `Some(None)`: há fonte padrão. `Some(Some(nome))`: sem padrão, o microfone de maior prioridade. `None`: nenhum.
+fn pick_microphone(objects: &[Value]) -> Option<Option<String>> {
+    let has_default = objects.iter()
+        .filter(|object| object.pointer("/props/metadata.name").and_then(Value::as_str) == Some("default"))
+        .flat_map(|object| object["metadata"].as_array().into_iter().flatten())
+        .any(|entry| entry["key"] == "default.audio.source");
+    if has_default { return Some(None); }
+    objects.iter().filter_map(|object| object.pointer("/info/props"))
+        .filter(|props| props["media.class"].as_str().is_some_and(|class| class.starts_with("Audio/Source")))
+        .max_by_key(|props| props["priority.session"].as_i64().unwrap_or(0))
+        .and_then(|props| props["node.name"].as_str()).map(|name| Some(name.to_owned()))
 }
 
 fn wav(pcm: &[u8]) -> Vec<u8> {
@@ -589,8 +613,23 @@ fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{dictation_insert, wav, wav_pcm, Dictation, Recorder, Vad};
+    use super::{dictation_insert, pick_microphone, wav, wav_pcm, Dictation, Recorder, Vad};
     use std::time::{Duration, Instant};
+    #[test]
+    fn microphone_uses_default_or_highest_priority_source() {
+        use serde_json::json;
+        let source = |name: &str, class: &str, priority: i64| json!({"type": "PipeWire:Interface:Node",
+            "info": {"props": {"media.class": class, "node.name": name, "priority.session": priority}}});
+        let default = |key: &str| json!({"type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
+            "metadata": [{"subject": 0, "key": key, "value": {"name": "x"}}]});
+        let nodes = vec![source("sink", "Audio/Sink", 3000), source("low", "Audio/Source", 1000),
+            source("mic", "Audio/Source", 2009), default("default.audio.sink")];
+        assert_eq!(pick_microphone(&nodes), Some(Some("mic".into())));
+        let mut with_default = nodes.clone();
+        with_default.push(default("default.audio.source"));
+        assert_eq!(pick_microphone(&with_default), Some(None));
+        assert_eq!(pick_microphone(&[source("sink", "Audio/Sink", 1)]), None);
+    }
     #[test]
     fn hands_free_waits_for_speech_and_two_seconds_of_silence() {
         let base = Instant::now();
