@@ -40,7 +40,7 @@ mod subagent;
 mod dictation;
 mod sync;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -48,6 +48,8 @@ const PREVIEW: &str = "__preview__";
 const WORKING: &str = "__working__";
 /// Entrada da linha "trabalhando"; a marca, desenhada fora da conversa, entra no mesmo tempo.
 const WORKING_FADE: Duration = Duration::from_millis(200);
+/// A chegada da primeira mensagem da tela sem sessão: o compositor desce ao lugar dele e a conversa aparece (a do Zeron).
+const LANDING: Duration = Duration::from_millis(420);
 /// Quanto "Enviando…" espera o turno começar depois da entrega; passou disso, a sessão não vai trabalhar.
 const SENT_BRIDGE: Duration = Duration::from_secs(5);
 /// Prefixo da linha do cartão fixo de um agente rodando, seguido do id do tool_use.
@@ -386,6 +388,8 @@ pub struct Hangar {
     new_chat: Option<Entity<create::NewSession>>,
     /// O menu aberto da tela sem sessão (máquina, pasta, modelo, conta, branch): a tela escreve; a camada da raiz lê.
     new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
+    /// A chegada em curso: quando começou e quantos pixels o compositor desce do meio da tela até o pé dela.
+    landing: Option<(Instant, f32)>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -435,7 +439,7 @@ impl Hangar {
         cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, Some("!Terminal")), KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")),
             KeyBinding::new("ctrl-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("ctrl-f", FocusSettingsSearch, Some("!Terminal")),
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
-            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal"))]);
+            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -500,7 +504,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None,
-            new_chat_folders: Default::default(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -809,6 +813,53 @@ impl Hangar {
         }
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
+        cx.notify();
+    }
+
+    /// Quadro da chegada: quanto o compositor ainda está acima do lugar dele e a opacidade da conversa, que entra no meio
+    /// da descida, como no Zeron. Fora dela, `(0, 1)`. O fim é zerado depois das áreas desenhadas (`finish_landing`).
+    fn landing_frame(&mut self, window: &mut Window) -> (f32, f32) {
+        let Some((start, travel)) = self.landing.filter(|_| self.selected.is_some()) else { self.landing = None; return (0., 1.) };
+        let t = (start.elapsed().as_secs_f32() / LANDING.as_secs_f32()).min(1.);
+        window.request_animation_frame();
+        let fade = ((t - 0.2) / 0.45).clamp(0., 1.);
+        (travel * (1. - chrome::ease_out(t)), fade * fade * (3. - 2. * fade))
+    }
+
+    pub(super) fn landing_active(&self) -> bool { self.landing.is_some() }
+
+    /// A chegada terminou: as áreas voltam a ser guardadas, redesenhadas uma vez, porque a última cópia guardada delas é
+    /// de antes da tela sem sessão.
+    fn finish_landing(&mut self, window: &mut Window) {
+        if self.landing.is_none_or(|(start, _)| start.elapsed() < LANDING) { return; }
+        self.landing = None;
+        let panes = [self.panes.conversation.clone(), self.panes.bottom.clone(), self.panes.side.clone()];
+        window.on_next_frame(move |_, cx| for pane in &panes { pane.update(cx, |_, cx| cx.notify()); });
+    }
+
+    /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
+    pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
+        if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
+        if self.selected.is_some() {
+            self.close_terminal(false, window, cx);
+            if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+            self.selection += 1;
+            if let Some(task) = self.session_task.take() { task.abort(); }
+            if let Some(task) = self.history_task.take() { task.abort(); }
+            self.selected = None;
+            self.chat = Chat::default();
+            self.turn_seen = None;
+            self.reset_details();
+            self.cancel_preview_drop();
+            self.clear_visible_preview();
+            self.error = None;
+            self.loading = false;
+            self.chat_online = false;
+            self.close_popups();
+            self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -3573,6 +3624,15 @@ impl Hangar {
                 .child(chrome::hangar_mark(16., theme::accent()))
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
                 .child(div().px_2().py(px(1.)).rounded_full().bg(theme::hover()).text_size(px(10.)).text_color(theme::faint()).child(tr("experimental"))))
+            // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
+            .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).child(Button::new("sidebar-new-chat").ghost().w_full().h(px(32.)).px(px(8.))
+                .rounded(px(7.)).selected(self.new_chat_screen()).disabled(self.api.is_none()).accessibility_label(tr("new_chat_title"))
+                .child(div().w_full().flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
+                    .child(chrome::small_icon(IconName::SquarePen, 16., theme::muted()))
+                    .child(div().flex_1().min_w_0().truncate().child(tr("new_chat_title")))
+                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window)
+                        .map(|key| popup::key_hint("").child(key.appearance(false)))))
+                .on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))))
             .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).mb(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
                 .child(chrome::small_icon(IconName::Server, 16., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(tr("sidebar_all_sessions")))
@@ -3669,6 +3729,8 @@ impl Hangar {
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .child(strip)
+            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen())
+                .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
             .child(self.new_session_button(true, cx))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
                 .child(div().min_w_0().truncate().text_xs().text_color(theme::warning()).child(text))
@@ -4306,6 +4368,7 @@ impl Render for Hangar {
         let limited_now = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
+        let (drop, shown) = self.landing_frame(window);
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
             .when(chat_background, |el| el.bg(theme::window_fill()))
             .when(cutout, |el| {
@@ -4314,6 +4377,7 @@ impl Render for Hangar {
             })
             .when(chat_background, |el| el.children(self.render_backdrop(window)))
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
+                .opacity(shown)
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
                 .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(selected_name.clone().unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
@@ -4329,11 +4393,13 @@ impl Render for Hangar {
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
             // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
-            .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation, StyleRefinement::default().w_full().flex_1().min_h_0(), cx)))
-            // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca.
-            .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
+            .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation,
+                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown), cx)))
+            // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca. Sem a
+            // conversa na tela, os lugares dela são do último desenho, de outra sessão.
+            .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
             .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
-                else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())) }, cx))
+                else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }, cx))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
         let nav = if page.is_some() { None }
@@ -4343,7 +4409,7 @@ impl Render for Hangar {
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
-        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0()
+        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).left(px(12. * (1. - shown)))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
@@ -4385,6 +4451,7 @@ impl Render for Hangar {
                         this.root_focus.focus(window, cx);
                     }
                 }))));
+        self.finish_landing(window);
 
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
@@ -4420,6 +4487,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();

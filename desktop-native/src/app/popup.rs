@@ -23,7 +23,7 @@ pub(super) fn anchor<E: ParentElement>(el: E, id: impl Into<SharedString>) -> E 
     }, |_, _, _, _| {}).absolute().top_0().left_0().size_full())
 }
 
-fn anchor_bounds(id: &str) -> Option<Bounds<Pixels>> { ANCHORS.with(|a| a.borrow().get(id).copied()) }
+pub(super) fn anchor_bounds(id: &str) -> Option<Bounds<Pixels>> { ANCHORS.with(|a| a.borrow().get(id).copied()) }
 
 /// Ciclo do painel: o estado do app diz se está aberto; aqui fica a última cópia desenhada, para a saída animar o
 /// mesmo conteúdo depois que o app já fechou.

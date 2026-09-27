@@ -92,6 +92,13 @@ impl Hangar {
                 return frame.child(self.panes.overlay.clone()).into_any_element();
             }
         };
+        // Na chegada da primeira mensagem a conversa e o painel desenham a cada quadro: a cópia guardada não acompanha a
+        // opacidade de quem a envolve.
+        if self.landing_active() && matches!(area, Area::Conversation | Area::Side) {
+            let mut frame = div();
+            frame.style().refine(&style);
+            return frame.child(AnyView::from(pane.clone())).into_any_element();
+        }
         // O painel mostra a aba Atividade, que tem views próprias com texto selecionável dentro dele.
         let nested = if area == Area::Side { self.activity_views(cx) } else { Vec::new() };
         cached_selectable(pane.clone().into(), nested, style)
