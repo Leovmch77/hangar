@@ -6,6 +6,7 @@
 mod actions;
 mod codex;
 mod keys;
+mod usage;
 
 use super::*;
 use super::device::Remote;
@@ -176,6 +177,8 @@ pub(super) struct Accounts {
     reset: Option<ResetTry>,
     /// Leitura da lista pedida depois de uma redefinição (número dela, se a redefinição valeu): a falha dela entra no aviso.
     reset_refresh: Option<(u64, bool)>,
+    /// Cartão de contas aberto pelo anel de uso do compositor.
+    pub(super) card: bool,
 }
 
 pub(super) enum AccountsReply {

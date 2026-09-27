@@ -29,6 +29,8 @@ pub struct SessionInfo {
     pub limit_reset: Option<String>,
     /// Sessão que recebe um prompt quando esta terminar (`PUT …/then`).
     pub then_target: Option<String>,
+    /// Credencial que a sessão usa (`claude:<config_dir>`), o id da lista de contas.
+    pub conta: Option<String>,
 }
 
 impl SessionInfo {

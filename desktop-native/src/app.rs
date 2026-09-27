@@ -2970,9 +2970,10 @@ impl Hangar {
             let account = status.as_ref().and_then(|s| s.five_hour_pct).filter(|_| readable);
             let ring = |id: &'static str, pct: Option<f64>, tip: String| div().id(id).flex_shrink_0().flex().items_center().gap(px(5.))
                 .child(chrome::ring(pct)).child(percent(pct))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx));
+                .when(!tip.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)));
             let ctx_tip = [Some(format!("{} {}", tr("ring_context"), percent(ctx_pct))), stats].into_iter().flatten().collect::<Vec<_>>().join("\n");
-            let account_tip = format!("{}: {}", tr("ring_account"), limits.unwrap_or_else(|| tr("no_data")));
+            // Com o cartão aberto a dica sairia por cima dele.
+            let account_tip = if self.accounts.card { String::new() } else { format!("{}: {}", tr("ring_account"), limits.unwrap_or_else(|| tr("no_data"))) };
             div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
                 .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 14., theme::faint())).child(div().max_w(px(200.)).truncate().child(f)))
                 .when(!branch.is_empty(), |el| el.child(div().ml(px(4.)).flex().items_center().gap(px(4.)).min_w_0()
@@ -2984,7 +2985,8 @@ impl Hangar {
                 .child(div().flex_1())
                 // A linha de estatísticas do turno fica na dica do anel de contexto.
                 .child(ring("composer-ctx", ctx_pct, ctx_tip))
-                .child(div().ml(px(6.)).child(ring("composer-account", account, account_tip)))
+                .child(popup::anchor(div().ml(px(6.)), "composer-account").child(ring("composer-account", account, account_tip)
+                    .cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
                 .when_some(cost, |el, cost| el.child(div().flex_shrink_0().child("·")).child(div().flex_shrink_0().child(cost)))
         });
 
