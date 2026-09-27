@@ -71,7 +71,38 @@ fn window_size() -> Size<Pixels> {
     size(px(w), px(h))
 }
 
+/// Pasta de logs do Hangar, a mesma do backend e do shell Electron (`log_paths.base()`).
+fn log_dir() -> std::path::PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| home_dir().join("AppData/Local"));
+        root.join("hangar/logs/privado")
+    } else {
+        home_dir().join(".hangar/logs/privado")
+    }
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from).unwrap_or_default()
+}
+
+/// Aberto pelo lançador, o stderr vai pro nada: sem isto um pânico fecha a janela sem deixar rastro.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let dir = log_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("native.log")) {
+            let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let thread = std::thread::current().name().unwrap_or("?").to_owned();
+            let _ = writeln!(file, "[{when}] pânico na thread {thread} (v{}): {info}", env!("CARGO_PKG_VERSION"));
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    log_panics();
     let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime"));
     // Lida antes da primeira janela: o tema já nasce na escolha salva. Falha de leitura abre no padrão e aparece na tela.
     let appearance_error = match appearance::load() { Ok(value) => { appearance::set(value); None } Err(e) => Some(e) };
