@@ -386,6 +386,8 @@ pub struct Hangar {
     /// Envio entregue que o turno ainda não pegou: "Enviando…" segue até o estado virar trabalhando ou o prazo passar.
     sent_until: Option<(SessionKey, Instant)>,
     new_chat: Option<Entity<create::NewSession>>,
+    /// A linha "Nova conversa" do topo da barra lateral, alcançável pelo Tab.
+    new_chat_focus: FocusHandle,
     /// O menu aberto da tela sem sessão (máquina, pasta, modelo, conta, branch): a tela escreve; a camada da raiz lê.
     new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
     /// A chegada da primeira mensagem da tela sem sessão (`landing.rs`).
@@ -503,7 +505,7 @@ impl Hangar {
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
-            new_chat: None,
+            new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
@@ -3614,14 +3616,30 @@ impl Hangar {
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
                 .child(div().px_2().py(px(1.)).rounded_full().bg(theme::hover()).text_size(px(10.)).text_color(theme::faint()).child(tr("experimental"))))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
-            .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).child(Button::new("sidebar-new-chat").ghost().w_full().h(px(32.)).px(px(8.))
-                .rounded(px(7.)).selected(self.new_chat_screen()).disabled(self.api.is_none()).accessibility_label(tr("new_chat_title"))
-                .child(div().w_full().flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
+            // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
+            // lista, e o atalho aparece apagado só com o ponteiro em cima.
+            .child({
+                let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+                div().id("sidebar-new-chat").group("sidebar-new-chat").flex_shrink_0().mx(px(8.)).mt(px(4.)).h(px(32.)).px(px(8.))
+                    .flex().items_center().gap_2().rounded(px(8.)).font_weight(FontWeight::MEDIUM)
+                    .track_focus(&self.new_chat_focus)
+                    .when(self.new_chat_focus.is_focused(window), |el| el.focus_ring_style(window, cx))
+                    .role(Role::Button).aria_selected(on).aria_label(tr("new_chat_title"))
+                    .when(on, |el| el.bg(theme::selected_row()))
+                    .when(!enabled, |el| el.opacity(0.5))
+                    .when(enabled && !on, |el| el.cursor_pointer().hover(|el| el.bg(theme::hover())))
                     .child(chrome::small_icon(IconName::SquarePen, 16., theme::muted()))
                     .child(div().flex_1().min_w_0().truncate().child(tr("new_chat_title")))
-                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window)
-                        .map(|key| popup::key_hint("").child(key.appearance(false)))))
-                .on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))))
+                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window).map(|key| div().flex_shrink_0()
+                        .font_family(theme::MONO).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint())
+                        .opacity(0.).group_hover("sidebar-new-chat", |s| s.opacity(1.)).child(key.appearance(false))))
+                    .when(enabled, |el| el.on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if !matches!(event.keystroke.key.as_str(), "enter" | "space") { return; }
+                            this.go_home(window, cx);
+                            cx.stop_propagation();
+                        })))
+            })
             .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).mb(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
                 .child(chrome::small_icon(IconName::Server, 16., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(tr("sidebar_all_sessions")))
