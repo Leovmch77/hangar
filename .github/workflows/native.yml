@@ -55,10 +55,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libfontconfig-dev libfreetype-dev libwayland-dev \
             libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
-      # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. O cache guarda só as dependências.
-      - uses: Swatinem/rust-cache@v2
+      # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. actions/cache e não rust-cache: a
+      # política do repositório só libera actions do GitHub e de criadores verificados.
+      - uses: actions/cache@v4
         with:
-          workspaces: desktop-native
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-native/target
+          key: native-${{ runner.os }}-${{ hashFiles('desktop-native/Cargo.lock', 'desktop-native/rust-toolchain.toml') }}
+          restore-keys: native-${{ runner.os }}-
       # Perfil do tools/build-otimizado.sh: é o binário que o usuário roda.
       - run: cargo build --locked --release
         env:
