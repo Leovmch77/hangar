@@ -148,10 +148,13 @@ impl Hangar {
         self.follow.pinned = true;
         self.follow.wheel = 0.;
         if cx.reduce_motion() { self.list_state.scroll_to_end(); self.redraw(Area::Conversation, cx); return; }
+        // Mais de uma janela longe do fim, deslizar vira espera: salta direto.
         let viewport = f32::from(self.list_state.viewport_bounds().size.height);
-        let distance = self.distance_from_bottom();
-        if viewport > 0. && distance > GLIDE_MAX_VIEWPORTS * viewport {
-            self.list_state.scroll_by(px(distance - GLIDE_MAX_VIEWPORTS * viewport));
+        if viewport > 0. && self.distance_from_bottom() > viewport {
+            self.list_state.scroll_to_end();
+            self.follow.spring = StickSpring::default();
+            self.redraw(Area::Conversation, cx);
+            return;
         }
         self.follow.kick = true;
         self.redraw(Area::Conversation, cx);
