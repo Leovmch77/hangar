@@ -566,3 +566,38 @@ nome ou rótulo do servidor não basta. Os IDs originais continuam nas ações e
 O grupo mostra a origem de cada sessão. Títulos compridos quebram linha dentro da largura da
 barra. Na prova real, o par apareceu uma vez com contador 2, sem exceder a largura do cabeçalho.
 Os servidores offline ficam em um resumo recolhido; expandi-lo não dispara consultas.
+
+## Dois clientes desktop: o PWA no Electron e o app nativo em Rust (27/09/2026)
+
+Com o app nativo (`desktop-native/`, Rust/GPUI) publicado na release `native-latest`, o desktop
+passou a ter dois clientes do mesmo backend: o front web (`frontend/`), que o Electron de `shell/`
+carrega, e o nativo. Toda mudança agora tem dois lugares para entrar, e sem regra os dois se
+afastam calados: o nativo não importa `packages/core`, então nada do que vai para o core chega
+nele sozinho.
+
+- **O que os dois compartilham**: a API do backend e os textos de `messages/*.json` (o nativo lê
+  os dois arquivos em `desktop-native/src/i18n.rs`, com as chaves próprias no prefixo `native_`).
+  Lógica que puder morar no backend serve os dois clientes de uma vez; lógica no `core` serve só
+  o web e o celular.
+- **Mudança de tela ou comportamento na visão desktop do `frontend/` entra também no nativo no
+  mesmo trabalho.** Se não der, vira uma linha `pendente` com o motivo em
+  `desktop-native/docs/chat-parity.md`. Vale no sentido inverso: o que nascer no nativo entra no
+  web ou fica registrado ali.
+- **Diferença deliberada** entre os dois também vai para `chat-parity.md`, com o motivo, para
+  não ser "corrigida" depois como se fosse descuido.
+
+### Pendente: o nativo virar o padrão
+
+Hoje o Electron é o padrão e o nativo é experimental (`desktop-native/README.md`). Depois de mais
+testes de uso com o nativo, a decisão é trocar. A troca envolve:
+
+- `shell/hangar.desktop`: `Name=Hangar (Electron)`. O `install.sh` (linha que grava
+  `$APPS_DIR/hangar.desktop`) regrava o lançador a partir desse arquivo, então editar só o
+  lançador instalado volta atrás na próxima instalação.
+- `install.sh`/`install.ps1`: baixar o nativo da `native-latest`, conferir o `.sha256` e registrar
+  o lançador "Hangar" dele (`StartupWMClass=com.hangar.native`, o `app_id` de
+  `desktop-native/src/main.rs`).
+- `desktop-native/README.md` e `docs/USAGE.md`: trocar "não substitui o Electron" pela instrução
+  nova.
+- Antes: fechar ou aceitar por escrito as linhas `pendente` de `chat-parity.md` e os módulos
+  listados ali como fora do nativo (terminal, navegador, Git completo, voz, Board/Canvas).

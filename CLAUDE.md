@@ -197,6 +197,12 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Lógica (API, formatação, parser, tipos) entra em `packages/core` e serve as duas. Tela é por
   interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
   que cobre as três.
+- **Desktop tem dois clientes: o PWA no Electron e o app nativo em Rust (`desktop-native/`).**
+  O nativo não importa `packages/core`; o que os dois compartilham é a API do backend e os
+  `messages/*.json`. Mudança de tela ou comportamento na visão desktop do `frontend/` entra no
+  nativo no mesmo trabalho, ou vira linha `pendente` com o motivo em
+  `desktop-native/docs/chat-parity.md` (e vice-versa). Electron segue padrão até o nativo passar
+  nos testes de uso; o que a troca exige está na entrada da decisão.
 - **Two views: mobile & desktop (820px).** `Sidebar` (desktop) e `SessionList` (mobile) são
   arquivos separados: template e CSS mudam nos DOIS e se verifica nos DOIS. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma
