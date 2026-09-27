@@ -43,6 +43,8 @@ class Handler(base.Handler):
     def do_GET(self):
         url = urlsplit(self.path)
         path, query = url.path, parse_qs(url.query)
+        if path == "/api/peers":
+            return self.reply([])
         if path in ("/api/fs/scan", "/api/fs/branches"):
             root = query.get("root", [""])[0]
             folder = Path(query.get("path", [root])[0]).resolve()
@@ -64,7 +66,7 @@ class Handler(base.Handler):
                 return self.reply(self.branches(self.server.no_git if self.case() == "no-git" else folder))
             except (ValueError, subprocess.TimeoutExpired) as exc:
                 return self.error("erro_criacao_sessao", str(exc), 409)
-        if path.startswith("/api/sessions/") and path.endswith("/events"):
+        if path != "/api/sessions/events" and path.startswith("/api/sessions/") and path.endswith("/events"):
             name = path.split("/")[3]
             with self.server.lock:
                 if name not in self.server.sessions:

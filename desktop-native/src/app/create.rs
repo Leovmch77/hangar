@@ -1338,8 +1338,8 @@ impl Hangar {
             cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         }
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca.
-        div().flex_1().min_h_0().flex().items_center().justify_center().p_6()
-            .child(self.new_chat.as_ref().unwrap().clone()).into_any_element()
+        div().id("new-chat-scroll").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().items_center().p_6()
+            .child(div().my_auto().flex_shrink_0().w_full().max_w(rems(42.)).child(self.new_chat.as_ref().unwrap().clone())).into_any_element()
     }
 
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).

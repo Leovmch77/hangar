@@ -33,6 +33,18 @@ class Handler(BASE["Handler"]):
             AUTH["drop_list"] = True
             self.send_json({"ok": True})
             return
+        if urlparse(self.path).path == "/api/sessions/sintetica-bastao/bastao/dossie":
+            if not self.authorized():
+                return
+            BASE["record"]("GET", self.path, None)
+            data = BASE["DOSSIE"].format(n="sintetica-parser").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            print("HTTP 200 GET /api/sessions/sintetica-bastao/bastao/dossie", flush=True)
+            return
         super().do_GET()
 
     def frame(self, event, data, eid=None):
