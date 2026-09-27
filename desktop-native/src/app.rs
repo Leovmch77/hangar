@@ -398,6 +398,8 @@ pub struct Hangar {
     side_seen: Option<(Option<SessionKey>, Option<f32>)>,
     /// O painel entrando ou saindo: quando começou, se está abrindo e a largura dele.
     side_slide: Option<(Instant, bool, f32)>,
+    /// Linhas que chegaram com a conversa aberta, e quando: entram com o `fade-in` do kit, uma vez.
+    arrived: HashMap<String, Instant>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -512,7 +514,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
-            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -2088,6 +2090,14 @@ impl Hangar {
         // Só linha que muda de altura puxa a mola: um quadro sem mudança não pode desgrudar a lista do fim.
         if spliced || !resized.is_empty() || !rewritten.is_empty() { self.follow_content_changed(cx); }
         if spliced { self.splice_rows(prefix..self.row_ids.len()-suffix, ids.len()-prefix-suffix); }
+        // Só o bloco novo entra animado: um acréscimo pequeno no meio ou no fim de uma conversa já aberta. Troca de linha (a
+        // prévia virando a resposta gravada, o envio virando a mensagem real), histórico carregando ou páginas antigas
+        // chegando em cima aparecem direto.
+        let added = ids.len() - prefix - suffix;
+        if prefix > 0 && prefix + suffix == self.row_ids.len() && (1..=4).contains(&added) {
+            let now = Instant::now();
+            for id in &ids[prefix..prefix + added] { if id != WORKING { self.arrived.insert(id.clone(), now); } }
+        }
         for index in resized { self.list_state.remeasure_items(index..index + 1); }
         for (index, body) in rewritten {
             let Some(cached) = self.rich.get_mut(&ids[index]) else { continue };
@@ -2105,6 +2115,7 @@ impl Hangar {
         let rows: HashSet<&String> = self.row_ids.iter().collect();
         // Visões fora da lista (plano, diff do painel) usam linha "__…__" e saem só pelo limite do cache.
         self.rich.retain(|_, rich| rows.contains(&rich.row) || rich.row.starts_with("__"));
+        self.arrived.retain(|id, _| rows.contains(id));
     }
 
     /// Passo do streaming com a linha da prévia já na lista: só ela muda, e o resto da conversa não é refeito
@@ -2170,7 +2181,7 @@ impl Hangar {
         view
     }
 
-    fn render_row(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = self.row_ids.get(index).cloned() else { return div().into_any_element(); };
         let inner = match (id.as_str(), self.items.get(index).cloned()) {
             (PREVIEW, _) => self.render_message(index, &id, cx),
@@ -2192,7 +2203,14 @@ impl Hangar {
             (_, None) => div().into_any_element(),
         };
         let message = id == PREVIEW || id == landing::OPENING || matches!(self.items.get(index), Some(Item::Event(_)));
-        row_frame(inner, message).id(SharedString::from(id)).into_any_element()
+        let row = row_frame(inner, message);
+        // Pede quadro só para a área da conversa, e só enquanto a linha entra; rolar até ela depois não a anima de novo.
+        let entering = self.arrived.get(&id).map(|at| motion::FADE_IN.raw(*at)).filter(|raw| *raw < 1. && !cx.reduce_motion());
+        let row = match entering {
+            Some(raw) => { motion::request_frame(window, cx); motion::fade_in(row, motion::FADE_IN.ease(raw)) }
+            None => { self.arrived.remove(&id); row }
+        };
+        row.id(SharedString::from(id)).into_any_element()
     }
 
     fn disclosure(&self, key: &str, open: bool) -> Button {
