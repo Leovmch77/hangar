@@ -1,5 +1,7 @@
 # Paridade do chat nativo
 
+> **Substituído para o que falta** por [`2026-09-25-native-chat-parity-v2.md`](2026-09-25-native-chat-parity-v2.md) (replanejamento com ondas paralelas, aprovado pelo usuário em 2026-09-25T19:47, base 9a769263). Este arquivo fica como histórico: Tasks 9, 11, 16–21 e o resto da 12 morreram aqui e voltaram cortadas, com número próprio, no v2.
+
 **Última ampliação aprovada:** compositor e barra direita também devem alcançar paridade funcional, mantendo o visual nativo. Inventário readonly em composer-rightbar-inventory.md no diretório operacional; fechar recorte em Tasks específicas após o inventário, sem parar o trabalho autorizado. Papéis atualizados: árbitra Opus5.5/xhigh exclusivamente Claude200-5 ao transferir; executores Opus5.5/medium e revisores Opus5.5/high alternando Jefferson/200-3. Sol atual só encerra Task1. Estas escolhas substituem as tabelas iniciais abaixo.
 
 **Primeira ação após compactação:** ler o registro de retomada `docs/handoffs/native-chat-parity.handoff.md` e `/home/jefferson/.hangar/orq/2026-09-23-native-parity/succession.md`; executar `check-quota.py` desse diretório. Ordem do usuário: aos50% da conta Codex pessoal, passar arbitragem para nova sessão Claude200-5 com claude-opus-5-5/xhigh e cessar Codex; depois somente ClaudeJefferson/200-5/200-3. O monitor independente `hangar-native-quota-watch-20260923.service` avisa aos45%/50% e não deve ser desligado por compactação.
@@ -111,37 +113,133 @@ Status: ready-for-agent (depois da Task 8 e antes da Task 9, por ordem do usuár
 Risk: high
 Origem: usuário em 2026-09-24 depois de ver o Zeron rodando: "não é uma cópia, é uma inspiração neles, mas com as nossas também"; "a sidebar deles o padrão pode ser a deles, mas no nosso já tem a opção de ser solta e não colada, e aí fica a nossa, isso fica nas opções de aparência"; "o nosso já tem um visual e uma direção que quero seguir, mas o deles tem coisas melhores e mais profissionais"; "a tela de configs deles com certeza é melhor que a minha… mas tem que ter as minhas opções; ele entra só como referência de organização e de layout padrão". Escolha A: só no app nativo; o web fica como está.
 Régua: o desenho do Zeron vira o PADRÃO do nativo (organização do chat, sidebar colada, configurações com navegação por seção e cartões com ícone/título/descrição/controle à direita); o visual atual do Hangar (sidebar solta, vidro, paleta) continua como OPÇÃO de Aparência, com melhorias. Nenhuma função do Hangar sai. Configurações como PÁGINA igual à do Zeron (a barra lateral vira a navegação das seções, com Voltar; conteúdo no centro), por ordem do usuário em 2026-09-24 ~12:40: "não disse pra fazer igual o do Zeron só que com as minhas opções?". A regra "config em modal" do CLAUDE.md segue valendo para o web. Fonte das opções: o modal de configurações do web (`frontend/src/…` Settings), só leitura. Referência: Zeron rodando local (unidade zeron-view, pasta pessoal temporária) e seu código; inspiração, não cópia de código.
-- [ ] **Step 28: Folha de desenho para aprovação do usuário (sem código de produto)**
+- [x] **Step 28: Folha de desenho para aprovação do usuário (sem código de produto)**
 Capturas lado a lado: Zeron × nativo atual × proposta (mock) para chat, sidebar colada/solta, compositor e modal de configurações (Aparência e uma seção de servidor). Inventário das seções/opções do modal web e onde cada uma fica. O usuário aprova ou corrige antes de qualquer código; a aprovação vira o detalhamento dos Steps seguintes.
 - [ ] **Step 29: Implementar o desenho aprovado — verificação manual**
 Recorte e ordem definidos na aprovação do Step 28 (pode virar mais de uma Task se o inventário for grande). Prova lado a lado com a folha aprovada e com o Zeron; alternância padrão Zeron × visual Hangar nas opções de Aparência sem perder função.
+Aprovação do usuário em 2026-09-24 ~12:45 ("parece bom"): folha `~/.hangar/orq/2026-09-23-native-parity/visual/task12-design/design-proposta.md` com as 5 recomendações — (1) todas as páginas de configuração, em várias Tasks, na ordem Aparência (Colados × Caixa solta) → Geral, Sobre, Diário → Contas e modelos → Atalhos → Notificações, Anexos, Avançado → as demais; (2) painel de contexto aberto e colado no padrão; (3) o nativo controla só a transparência, desfoque fica com o compositor; (4) copiar mensagem no menu de contexto e no atalho; (5) sans embutida como "Sistema", monoespaçada só em código e como opção. Fora desta primeira versão, por ordem do usuário: canvas e kanban (Board/Canvas), inclusive o botão que alterna lista/board/canvas e qualquer opção que só sirva a eles. Primeiro recorte liberado: a janela no desenho padrão + a página de Configurações com a Aparência completa.
+Progresso (servidor jefferson-felizardo, 2026-09-24): primeiro recorte ENTREGUE em cinco rodadas aprovadas e commitadas, sem push — R1 janela + página (445c5228), R2a temas e cor (f819880d), R2b fundo e leitura (e871537d), R3a conversa (66e1490b), R3b abas no topo, Ver ao vivo e busca (a7782e5f). Pareceres e decisões em `~/.hangar/orq/2026-09-23-native-parity/`. Próximo recorte, na ordem da recomendação 1: Geral, Sobre e Diário de uso (R4); depois Contas e modelos; Atalhos; Notificações, Anexos, Avançado; as demais.
 
 ### Task 9: Popover, cópia de código, notificação e fontes
-Status: ready-for-agent (depois da Task 12)
+Status: ready-for-agent (depois da Task 16 — ordem A do usuário em 2026-09-25T05:3x: o chat completo antes das páginas restantes da Task 12; o GIF animado do Step 23 passou para a Task 16, Step 37, que mexe no mesmo código de imagem)
 Risk: high
 Origem: escolha B do usuário em 2026-09-24 sobre o levantamento do Zeron (`zeron-survey.md`, itens 5, 6, 7, 8). Referências de arquivo:linha estão no levantamento; conferir contra gpui-kit 0.6.6.
 - [ ] **Step 22: Popover preso ao gatilho e fechando ao clicar fora**
 Seletores e painéis do compositor ancorados no botão que os abriu, sem vazar clique para o que está atrás, fechando ao clicar fora (Zeron popover.rs: `deferred(anchored())` + `occlude` + `on_mouse_down_out`).
 - [ ] **Step 23: Copiar bloco de código, notificação do sistema e fontes embutidas — verificação manual**
-GIF animado na prévia da conversa como no web (task8-r1 NOTED 1: `img` precisa de `.id()` e redesenho contínuo só enquanto o GIF está visível, dentro do teto de memória da Task 8); botão copiar em bloco de código (gpui-kit `TextView::code_block_actions` se existir na 0.6.6); notificação do sistema quando a sessão selecionada termina ou pede resposta com a janela sem foco, no mesmo critério do web; fontes da interface embutidas com fallback, sem depender da JetBrainsMono instalada.
+(GIF animado: movido para a Task 16, Step 37.) Botão copiar em bloco de código (gpui-kit `TextView::code_block_actions` se existir na 0.6.6); notificação do sistema quando a sessão selecionada termina ou pede resposta com a janela sem foco, no mesmo critério do web; fontes da interface embutidas com fallback, sem depender da JetBrainsMono instalada.
 
 ### Task 10: Markdown estável durante o streaming
-Status: ready-for-agent (depois da Task 9)
+Status: ready-for-agent — **em lote paralelo com o resto da Task 12** (ordem do usuário, 2026-09-24T21:0x): worktree própria `hangar-native-t10`, branch `native-desktop-t10` sobre 1e3ff900, merge na native-desktop depois do APROVA. Auditoria das quatro condições e as condições do lote: `~/.hangar/orq/2026-09-23-native-parity/auditoria-lote-task10.md` e o contrato, seção "Lote paralelo".
 Risk: high
 Origem: escolha B do usuário (`zeron-survey.md`, itens 3 e 4).
-- [ ] **Step 24: Fechar marcação pendente só na exibição e esmaecer o texto novo**
+Conferido em 2026-09-24: o esmaecimento existe em `gpui_kit::base` (gpui-base 0.6.6, `TextViewMotion::with_stream_fade`, src/text/stream_fade.rs:44) e respeita `reduce_motion`; usado na linha da prévia, sem esmaecer enquanto uma marcação está aberta (o kit só esmaece texto que estende o anterior). O anel desenhado com path saiu na R1 da Task 12 (desenho aprovado), então o Step 25 fecha sem código, salvo pedido do usuário.
+- [x] **Step 24: Fechar marcação pendente só na exibição e esmaecer o texto novo**
 O texto em streaming não reflui quando fecha `**`, `` ` `` ou `[link](` (Zeron mend.rs `close_hanging`, aplicado só na exibição); texto novo entra esmaecendo (gpui-kit `TextViewMotion::with_stream_fade`, se existir na 0.6.6). O transcript gravado não muda.
-- [ ] **Step 25: Anel de contexto correto sobre o vidro — verificação manual**
+- [x] **Step 25: Anel de contexto correto sobre o vidro — verificação manual**
+Fechado sem código (2026-09-24): o anel desenhado com path saiu na R1 da Task 12; nenhum `PathBuilder`/`paint_path` em desktop-native/src. Task 10 aprovada (ffc3ff6c) e juntada na native-desktop em 4fe9dd94.
 Contorno para caminho com alfa somado em janela transparente (fundo opaco atrás do anel ou desenho com quads/SVG), sem mudar o vidro do resto da janela.
 
 ### Task 11: @menção de arquivo no compositor
-Status: ready-for-agent (depois da Task 10)
+Status: ready-for-agent (depois da Task 18 — ordem A do usuário em 2026-09-25T05:3x; usa `files/search`, o mesmo cliente de arquivos da Task 17)
 Risk: high
 Origem: escolha B do usuário (`zeron-survey.md`, item 9).
 - [ ] **Step 26: Confirmar a rota de busca de arquivos que o backend já tem**
 Backend não muda. Se não existir rota de busca/lista de arquivos da sessão utilizável, a Task para e volta à árbitra com o que falta, sem simular.
 - [ ] **Step 27: @menção com lista, busca e inserção do caminho — verificação manual**
 Digitar `@` abre lista filtrada dos arquivos do projeto da sessão, teclado e mouse, insere o caminho no rascunho como o web faz; nada é enviado sozinho.
+
+## Chat completo (ordem A do usuário, 2026-09-25)
+
+Origem comum das Tasks 13–21: o usuário acordou às 05:00, viu o levantamento de paridade do chat e escolheu **A** — o chat completo antes das páginas restantes da Task 12 (Sincronização, Orquestração, Harnesses, Controle do Windows), "que aí já dá pra eu começar a testar o app". Ordem de execução: 13 → 14a → 22 → 14b → 15 → 16 → 9 → 17 → 18 → 11 → 19 → 20 → 21 → resto da Task 12 (a 22, suavidade, entrou por pedido do usuário em 2026-09-25). Escopo de cada Task: `~/.hangar/orq/2026-09-23-native-parity/pesquisa-chat-web.md` (web/Electron e nativo, arquivo:linha) e `pesquisa-zeron-editor.md` (Zeron c338a6e0 e o que o gpui-kit 0.6.6 já traz). Régua: o componente web/Electron equivalente, desenhado no tema e nos componentes do nativo aprovados na Task 12; o Zeron é referência de desempenho e de solução em GPUI, não de aparência. Backend não muda. Cada Task nova, ao ser liberada, ganha `tasks/task-<N>.md` com os itens copiados do código do web.
+
+### Task 13: Criar sessão nova
+Status: ready-for-agent (primeira do chat)
+Risk: high
+Régua: `CreateSessionSheet.svelte` + `FolderScanner.svelte` do web, desktop (≥820 px, modal de duas colunas), no `Dialog` e no tema do nativo. Escopo: pesquisa-chat-web.md, frente 4, "criar sessão".
+- [x] **Step 30: Diálogo de criar sessão**
+"+ Nova" na barra lateral e "+" das abas, como no web. Pasta por raízes liberadas, navegação, filtro, "Usar esta pasta" e caminho digitado em Avançado; aviso de pasta já em uso sem bloquear; nome limpo e único com a regra do backend; provider com disponibilidade; conta Claude e conta Codex; tmux × sem terminal; modelo, esforço e permissão pelo catálogo global `model-options`; "Mais opções" (motor, modelo de subagente, Jev); retomar conversa antiga e bastão. Tudo volta ao padrão a cada abertura, como no web. Item que não existe no web não entra.
+- [x] **Step 31: Criar, acompanhar e abrir a sessão criada — verificação manual**
+POST `/api/sessions` com os campos do `CreateBody`; botão desligado nas mesmas condições do web; progresso por `creation-progress`; erros do backend visíveis junto do botão; abre a sessão pelo `name` que VOLTA na resposta (o web abre pelo digitado e erra quando o backend limpa o nome). Prova de criação só contra fixture: nenhuma sessão criada no backend real.
+
+### Task 14: Barra lateral — busca, ordem e menu
+Status: ready-for-agent (depois da Task 13)
+Risk: high
+Régua: `Sidebar.svelte`, `lib/sessionListModel.svelte.ts` e `SessionContextMenu.svelte` do web, na barra lateral aprovada na Task 12 (R1). Escopo: pesquisa-chat-web.md, frente 4, "barra lateral".
+- [x] **Step 32: Filtro, ordem, agrupamento e teclado**
+Filtro a partir de 7 sessões, em nome, pasta e rótulo; aguardando primeiro e o resto em ordem alfabética; agrupar Nenhum/Projeto com grupos recolhíveis e contagem (por servidor não se aplica: o nativo fala com um servidor); "? N" na linha; prévia da última resposta depois de 400 ms parado; Ctrl/Cmd+↓/↑ troca de sessão.
+- [x] **Step 33: Menu de contexto da sessão — verificação manual**
+Clique direito e ⋯, com os itens do web: renomear, silenciar notificações, copiar pasta, abrir no editor, Git/pull/trocar branch, "quando terminar, enviar p/…", passar o bastão (abre o diálogo da Task 13 no modo bastão, CreateSessionSheet.svelte:38-42, 553-601, 1511-1558) e excluir com confirmação (a linha some na hora e volta se falhar). Ações que mudam algo só contra fixture.
+
+### Task 22: Suavidade — a janela inteira fluida
+Status: ready-for-agent (depois da 14a, antes da 14b; pedido do usuário em 2026-09-25)
+Risk: high
+Régua: a aparência aprovada não muda; muda o tempo de quadro. Escopo: `~/.hangar/orq/2026-09-23-native-parity/tasks/task-22.md`, a partir de `pesquisa-suavidade.md` (leitura de código do nativo, da gpui-pre 0.3.6 e do Zeron c338a6e).
+- [x] **Step 47: Consertos pontuais — verificação manual**
+Medição com `ZED_MEASUREMENTS=1` antes e depois em 5 cenários (abrir o diálogo de criar, streaming longo, rolar, trocar de sessão, parado 10 s). Spinner e esqueletos a no máximo 30 quadros por segundo, com o esqueleto só depois de ~150 ms; texto em streaming avançando no ritmo da tela; evento do servidor sem reconstruir a conversa; texto calculado fora do render; lista de pastas virtualizada; janela sem foco sem teto de 30.
+- [x] **Step 48: Uma view por área, guardada entre quadros — verificação manual**
+Conversa, barra lateral, compositor e painel como entidades próprias com `.cached`; resposta longa sem remontar a mensagem inteira a cada quadro. A divisão é proposta ao árbitro antes de codar. Meta: p95 abaixo de 16,7 ms nos cenários e zero quadros parado.
+Fechado sem código (2026-09-25): a 22a (001ed044) já cumpre a meta — maior p95 dos 5 cenários 12,0 ms a 60 Hz, parado 0 q/s sem campo focado (2 q/s do cursor com a conversa aberta), texto em streaming por quadro, sem o degrau de 33 ms (entrega-task-22a-rodada2.md). Reabre se o usuário ainda sentir engasgo no uso.
+
+### Task 15: "Trabalhando" no fim da conversa e subagentes
+Status: ready-for-agent (depois da Task 14)
+Risk: high
+Régua: `MessageList.svelte` (linha de trabalhando e cartões fixos), `icons/HangarWorking.svelte`, `ToolCard.svelte` (Agent), `ActivitySheet.svelte` como aba Atividade do painel de contexto, `SubagenteCard.svelte` (Codex). Escopo: pesquisa-chat-web.md, frentes 5 e 6; referência de estado do Zeron em pesquisa-zeron-editor.md, seção 6.
+- [x] **Step 34: Linha de trabalhando com a marca animada**
+Linha no fim da conversa quando a sessão trabalha sem prévia nem pensamento ou ferramenta ao vivo, com o rótulo do estado vindo do backend ou "Trabalhando…"; marca animada que respeita movimento reduzido e para fora da tela; a mesma marca na linha da barra lateral e nas abas.
+- [x] **Step 35: Subagentes — estado real, cartões fixos e aba Atividade — verificação manual**
+Agente em segundo plano continua rodando depois do "Async agent launched" até o fim real (`task:<id>` ou `<task-notification>`); cartão fixo depois da linha de trabalhando; aba Atividade com lista e detalhe (conversa interna só leitura), consulta periódica que para em falha repetida ou 404; cartão do subagente do Codex.
+
+### Task 16: Imagens na conversa
+Status: ready-for-agent (depois da Task 15)
+Risk: high
+Régua: o visor do web (`lib/visor.ts`), `FileAttachment.svelte`, `ImageBubble.svelte`, `ToolCard.svelte:59-66`; geometria do visor do Zeron (`image_viewer.rs`) como referência. Escopo: pesquisa-chat-web.md, frente 3; pesquisa-zeron-editor.md, seção 3.
+- [ ] **Step 36: Visor de imagem dentro do app**
+Camada por cima da janela, imagem em tamanho real fora do cache das miniaturas e dentro do teto da Task 8; zoom pela roda ancorado no cursor, arrastar para mover, ←/→ entre as imagens da mensagem com volta no fim, Esc fecha e devolve o foco, Salvar, "não carregou" na falha.
+- [ ] **Step 37: GIF, imagem do Read e `![..](..)` — verificação manual**
+GIF animado (vindo da Task 9: `img()` com `.id()` e os bytes originais, redesenho só enquanto visível, dentro do teto da Task 8); imagem lida pela ferramenta Read mostrada pelo `/file`; `![..](..)` como no web (caminho local vira rótulo e miniatura; URL remota vira link) e sai o aviso "abrir no Hangar Electron"; miniatura de URL remota só por um cliente sem token.
+
+### Task 17: Visualizador e editor de arquivo dentro do app
+Status: ready-for-agent (depois da Task 9)
+Risk: high
+Régua: `FileViewer.svelte` + `CodeEditor.svelte` do web (desktop: camada sobre a conversa); editor = `EditorState` do gpui-kit 0.6.6; práticas de desempenho do Zeron (pesquisa-zeron-editor.md, seções 1, 7 e 8). Escopo: pesquisa-chat-web.md, frente 2. Realce de sintaxe (feature `tree-sitter-*` do kit): decisão do usuário antes de liberar.
+- [ ] **Step 38: Abrir e ler arquivo**
+`files/resolver`, depois `files/read` dentro da pasta da sessão ou `file/text` para arquivo citado fora dela; carregando, vazio, erro e sucesso; binário e arquivo cortado com o texto do web; pular para a linha; abas (fechar passa para a vizinha), Alt+W, Ctrl+PgUp/PgDn, Esc fecha e devolve o foco.
+- [ ] **Step 39: Editar e salvar com digest — verificação manual**
+Rascunho por caminho em memória; Descartar e Salvar só com alteração; "✓ Salvo" por 2 s; Ctrl+S; 409 de arquivo mudado no disco e os demais erros com os textos do web, nunca gravando por cima; busca no arquivo pelo editor do kit. Escrita provada só em arquivo sintético próprio, contra fixture.
+
+### Task 18: Caminho de arquivo citado com ícone
+Status: ready-for-agent (depois da Task 17)
+Risk: high
+Régua: `renderInline` (`lib/markdown.ts:19-67`), `core/arquivosCitados.ts`, `core/fileIcons.ts` do web. Escopo: pesquisa-chat-web.md, frente 1. Chip dentro do texto × abaixo da mensagem: decisão do usuário antes de liberar.
+- [ ] **Step 40: Chip de caminho e abrir no visualizador — verificação manual**
+Detecção igual ao web (caminho solto, crase com nome puro, destino de link, `:linha`); `files/resolver` com a busca de nome puro nos caminhos citados; clique abre o visualizador da Task 17 na linha; imagem abre o visor da Task 16; ícone por tipo de arquivo.
+
+### Task 19: Ditado no compositor
+Status: ready-for-agent (depois da Task 11)
+Risk: high
+Origem própria: "Ditado não tem no zeron mas tem no app electron e pra ter no nativo" (user, 2026-09-25T05:29). Régua: ditado do `Composer.svelte` e `DitadoEstiloPopover.svelte` do web. Escopo: pesquisa-chat-web.md, frente 7. Dependência de captura de áudio: decisão do usuário antes de liberar.
+- [ ] **Step 41: Gravar, transcrever e inserir no cursor**
+Microfone no compositor, Ctrl+Espaço; preparando, gravando com tempo e volume; parar transcreve por `/transcribe` com o estilo; o texto entra no cursor sem enviar; os erros do web, inclusive o 503 que manda configurar a chave.
+- [ ] **Step 42: Estilos, versões e transcrever de novo**
+Pílula de estilo gravada no servidor; barra de versões (Cru, Só limpar, Reorganizar, Briefing) por `ditado/relimpar`, guardada por sessão; transcrever de novo o mesmo áudio.
+- [ ] **Step 43: Mãos livres — verificação manual**
+Para sozinho depois do silêncio, conta antes de enviar e qualquer toque cancela, como o web; liga a opção que a página de Voz mostra hoje desligada ("chega na próxima versão").
+
+### Task 20: Terminal da sessão
+Status: ready-for-agent (depois da Task 19)
+Risk: high
+Régua: `TerminalPanel.svelte` do web; terminal do Zeron como referência técnica (pesquisa-zeron-editor.md, seção 4). Escopo: pesquisa-chat-web.md, frente 8. Dependências (WebSocket e emulador) e token na URL do `/term`: decisão do usuário antes de liberar.
+- [ ] **Step 44: Conexão e emulador**
+WebSocket `/term` com o token só em memória, redimensionar com espera, bytes crus do terminal, emulador com grade, cursor, seleção e histórico, teclas traduzidas, fundo transparente.
+- [ ] **Step 45: Painel, Shell e estados — verificação manual**
+Painel encaixado embaixo com alça e maximizar, abas sessão/Shell, ↗ abrir terminal do sistema, caiu/reconectar, sessão não encontrada, um painel por vez, nada para sessão sem terminal; abrir aqui derruba o painel web da mesma sessão (avisado). Prova só em sessão tmux descartável própria.
+
+### Task 21: Build otimizado para o usuário
+Status: ready-for-agent (fecha o bloco do chat)
+Risk: high
+- [ ] **Step 46: Build otimizado instalado — verificação manual**
+Perfil combinado com o usuário antes (proposta: `CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` só na linha de comando, sem mexer no `Cargo.toml`), compilado no tmpfs; tamanho e tempo de abertura antes e depois; o árbitro instala o binário no caminho da unidade `hangar-native-view`.
 
 ## Cotas e sucessão
 Config dirs conferidos: Jefferson=/home/jefferson/.claude-jefferson;200-3=/home/jefferson/.claude-claude-200-3;200-5=/home/jefferson/.claude-claude-200-5. Não deduzir caminho pelo apelido. Helper/monitor e regras atuais em /home/jefferson/.hangar/orq/2026-09-23-native-parity/succession.md. Dados de cota precisam ser relidos antes de alocar; nunca consumir reset credit automaticamente. Ao atingir50% Codex pessoal, transferir coordenação e cessar essa conta. Histórico de escolhas anteriores está em registro.md, não autoriza alocações antigas.
