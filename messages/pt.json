@@ -4020,6 +4020,8 @@
   "native_network_error": "Sem resposta do servidor.",
   "native_list_stale": "Lista desatualizada. Não foi possível buscar o estado atual das sessões.",
   "native_invalid_response": "O servidor retornou dados inválidos.",
+  "native_costs_back": "Voltar",
+  "native_costs_hidden_not_saved": "Não gravei a lista de projetos escondidos: {reason}",
   "native_invalid_url": "Use um endereço HTTP ou HTTPS, sem token, usuário ou senha na URL.",
   "native_invalid_token": "Confira o token de acesso.",
   "native_auth_error": "Token recusado. Abra Conexão e confira a credencial.",

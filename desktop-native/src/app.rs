@@ -42,8 +42,10 @@ mod subagent;
 mod dictation;
 mod sync;
 mod tree;
+mod costs;
+mod stats;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -372,6 +374,9 @@ pub struct Hangar {
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
     machines: machines::Machines,
+    // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
+    costs: costs::Costs,
+    usage_stats: stats::UsageStats,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -443,7 +448,9 @@ impl Hangar {
         cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, Some("!Terminal")), KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")),
             KeyBinding::new("ctrl-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("ctrl-f", FocusSettingsSearch, Some("!Terminal")),
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
-            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal"))]);
+            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
+            // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
+            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -503,7 +510,8 @@ impl Hangar {
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
-            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(),
+            costs: Default::default(), usage_stats: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
@@ -664,6 +672,7 @@ impl Hangar {
             forward_stream(api, None, connection, None, tx).await;
         }));
         self.reset_device(cx);
+        self.costs_reconnected(cx);
         // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
         self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
         // Página do servidor aberta na troca: relê do servidor novo.
@@ -4347,8 +4356,9 @@ impl Render for Hangar {
             && appearance::get().wallpaper == appearance::Wallpaper::Window;
         // Página de Configurações ocupa a janela; a caixa ao vivo deixa a janela da conversa por baixo.
         let page = self.settings.filter(|_| !self.settings_ui.live);
+        let costs_page = self.costs.view.is_some();
         let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
-        let cutout = chat_background && page.is_none() && (desktop_window || floating);
+        let cutout = chat_background && page.is_none() && !costs_page && (desktop_window || floating);
         let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
 
         // Sessão sem conversa não tem stream próprio: o estado é o da lista.
@@ -4395,7 +4405,7 @@ impl Render for Hangar {
                 else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }, cx))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
-        let nav = if page.is_some() { None }
+        let nav = if page.is_some() || costs_page { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(appearance::get().navigation.sidebar_width())).h_full().flex_shrink_0()
@@ -4468,9 +4478,9 @@ impl Render for Hangar {
             }).absolute().inset_0()))
             .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
-            .when(floating && page.is_none(), |el| el.p(px(10.)).gap(px(10.)))
+            .when(floating && page.is_none() && !costs_page, |el| el.p(px(10.)).gap(px(10.)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                let page_open = this.settings.is_some() && !this.settings_live();
+                let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some();
                 if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(|s| s.readable())
                     || this.selected.is_none() && this.api.is_some()) {
                     this.composer.update(cx, |input, cx| input.focus(window, cx));
@@ -4479,6 +4489,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 if !this.connection_dialog { this.open_settings(settings::Page::Appearance, window, cx); }
             }))
+            .on_action(cx.listener(|this, _: &OpenCosts, window, cx| this.toggle_costs(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
@@ -4488,11 +4499,13 @@ impl Render for Hangar {
                 let page_open = this.settings.is_some() && !this.settings_live();
                 if let Some(text) = this.last_reply().filter(|_| !page_open) { cx.write_to_clipboard(ClipboardItem::new_string(text)); }
             }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| if this.costs_page_key(event, window) { cx.stop_propagation() }))
             // Esc fora do campo fecha o painel aberto sobre o compositor (o clique no botão tira o foco do campo).
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Com a confirmação aberta, o Esc é dela: fecha só o diálogo.
                 if event.keystroke.key != "escape" || this.connection_dialog || this.search_focused(window, cx) || window.has_active_dialog(cx) { return; }
                 if this.shortcuts_escape(window, cx) { cx.stop_propagation(); return; }
+                if this.costs_escape(window, cx) { cx.stop_propagation(); return; }
                 // O painel preso a um botão é a camada de cima: fecha antes de arquivos e terminal, e o foco volta ao campo.
                 // Com a página de configurações aberta nenhum painel está na tela; a flag das pastas fica para quando ela fechar.
                 if (this.settings.is_none() || this.settings_live()) && this.close_popups() {
@@ -4536,6 +4549,7 @@ impl Render for Hangar {
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
             .map(|el| match (page, nav) {
+                _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
                 (None, Some(bar)) if tabs => el.flex_col().child(bar)

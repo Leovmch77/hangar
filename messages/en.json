@@ -4020,6 +4020,8 @@
   "native_network_error": "The server did not respond.",
   "native_list_stale": "Session list is out of date. The current state could not be loaded.",
   "native_invalid_response": "The server returned invalid data.",
+  "native_costs_back": "Back",
+  "native_costs_hidden_not_saved": "Couldn't save the hidden projects list: {reason}",
   "native_invalid_url": "Use an HTTP or HTTPS address without a token, username or password in the URL.",
   "native_invalid_token": "Check the access token.",
   "native_auth_error": "Token rejected. Open Connection and check your credentials.",
