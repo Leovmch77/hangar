@@ -21,6 +21,17 @@ pub enum MediaState { Loading, Image(Arc<RenderImage>), Failed(String) }
 pub const BACKDROP_MAX_BYTES: u64 = 25 * 1024 * 1024;
 const BACKDROP_SIDE: u32 = 2560;
 
+/// Só para medir: com `HANGAR_NATIVE_MEDIA_TRACE` no ambiente, cada etapa das miniaturas vai ao stderr com os ms
+/// desde a primeira chamada. Sem a variável, `format_args!` nem é formatado.
+pub fn trace(what: std::fmt::Arguments) {
+    static START: std::sync::OnceLock<Option<std::time::Instant>> = std::sync::OnceLock::new();
+    if let Some(start) = START.get_or_init(|| std::env::var_os("HANGAR_NATIVE_MEDIA_TRACE").map(|_| std::time::Instant::now())) {
+        eprintln!("media {:9.1} {what}", start.elapsed().as_secs_f64() * 1000.);
+    }
+}
+
+fn ms(since: std::time::Instant) -> f64 { since.elapsed().as_secs_f64() * 1000. }
+
 /// Formato só pelo conteúdo real: nome que diz png com bytes de outra coisa não vira imagem.
 fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     Some(match bytes {
@@ -49,9 +60,14 @@ pub(crate) fn decode(bytes: &[u8], w: u32, h: u32, effect: Option<(crate::effect
     reader.limits(limits());
     let mut decoder = reader.into_decoder().ok()?;
     let orientation = decoder.orientation().ok()?;
+    let started = std::time::Instant::now();
     let mut picture = DynamicImage::from_decoder(decoder).ok()?;
     picture.apply_orientation(orientation);
-    Some(Arc::new(RenderImage::new(vec![Frame::new(fit(picture, w, h, effect))])))
+    let (decoded, (pw, ph)) = (ms(started), (picture.width(), picture.height()));
+    let started = std::time::Instant::now();
+    let pixels = fit(picture, w, h, effect);
+    trace(format_args!("decode {pw}x{ph} {decoded:.1} ms, fit to {}x{} {:.1} ms", pixels.width(), pixels.height(), ms(started)));
+    Some(Arc::new(RenderImage::new(vec![Frame::new(pixels)])))
 }
 
 /// Guarda só a miniatura; o original é buscado de novo em Abrir/Salvar. GIF dentro do teto anima.
@@ -133,13 +149,15 @@ fn cost(state: &MediaState) -> usize {
     }
 }
 
-struct Entry { state: MediaState, seen: u64 }
+struct Entry { state: MediaState, seen: u64, drawn: bool }
 
 /// Cache das prévias com teto: sai primeiro a menos vista, nunca uma desenhada no último quadro.
-pub struct MediaCache<K> { map: HashMap<K, Entry>, bytes: usize, frame: u64 }
+pub struct MediaCache<K> { map: HashMap<K, Entry>, bytes: usize, frame: u64, budget: usize }
 
-impl<K: Eq + Hash + Clone> MediaCache<K> {
-    pub fn new() -> Self { Self { map: HashMap::new(), bytes: 0, frame: 0 } }
+impl<K: Eq + Hash + Clone + std::fmt::Debug> MediaCache<K> {
+    pub fn new() -> Self { Self::with_budget(BUDGET) }
+
+    pub fn with_budget(budget: usize) -> Self { Self { map: HashMap::new(), bytes: 0, frame: 0, budget } }
 
     /// Chamado no início de cada quadro; o que for lido depois conta como visível neste quadro.
     pub fn next_frame(&mut self) { self.frame += 1; }
@@ -148,18 +166,22 @@ impl<K: Eq + Hash + Clone> MediaCache<K> {
 
     pub fn get(&mut self, key: &K) -> Option<&MediaState> {
         let frame = self.frame;
-        self.map.get_mut(key).map(|entry| { entry.seen = frame; &entry.state })
+        self.map.get_mut(key).map(|entry| {
+            entry.seen = frame;
+            if !entry.drawn && matches!(entry.state, MediaState::Image(_)) { entry.drawn = true; trace(format_args!("drawn {key:?}")); }
+            &entry.state
+        })
     }
 
     /// Marca a busca em andamento; não pesa no teto e não expulsa nada.
-    pub fn start(&mut self, key: K) { self.map.insert(key, Entry { state: MediaState::Loading, seen: self.frame }); }
+    pub fn start(&mut self, key: K) { self.map.insert(key, Entry { state: MediaState::Loading, seen: self.frame, drawn: false }); }
 
     /// Grava e devolve o que saiu pelo teto, para liberar do atlas da GPU.
     pub fn insert(&mut self, key: K, state: MediaState) -> Vec<Arc<RenderImage>> {
         self.bytes += cost(&state);
-        if let Some(old) = self.map.insert(key, Entry { state, seen: self.frame }) { self.bytes -= cost(&old.state); }
+        if let Some(old) = self.map.insert(key, Entry { state, seen: self.frame, drawn: false }) { self.bytes -= cost(&old.state); }
         let mut evicted = Vec::new();
-        while self.bytes > BUDGET {
+        while self.bytes > self.budget {
             let Some(victim) = self.map.iter()
                 .filter(|(_, entry)| entry.seen < self.frame && !matches!(entry.state, MediaState::Loading))
                 .min_by_key(|(_, entry)| entry.seen).map(|(key, _)| key.clone()) else { break };
@@ -168,6 +190,7 @@ impl<K: Eq + Hash + Clone> MediaCache<K> {
                 if let MediaState::Image(image) = entry.state { evicted.push(image); }
             }
         }
+        trace(format_args!("cache {} entries, {:.1} MiB, evicted {}", self.map.len(), self.bytes as f64 / 1048576., evicted.len()));
         evicted
     }
 

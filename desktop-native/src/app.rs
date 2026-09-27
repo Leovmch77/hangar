@@ -348,6 +348,7 @@ pub struct Hangar {
     terminal_suggestion: String,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
+    full_images: viewer::FullImages,
     stats: Option<Stats>,
     side: side::Side,
     controls: controls::Controls,
@@ -521,7 +522,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None,
             mention: Default::default(),
-            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), stats: None,
+            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -766,6 +767,7 @@ impl Hangar {
         self.rich.clear();
         // Resposta de imagem da conexão anterior é descartada no filtro; sem limpar, a prévia ficava em "Carregando".
         for image in self.media.clear() { cx.drop_image(image, Some(window)); }
+        for image in self.full_images.borrow_mut().clear() { cx.drop_image(image, Some(window)); }
         self.error = None;
         self.list_error = None;
         self.list_online = false;
@@ -1074,9 +1076,12 @@ impl Hangar {
                     Ok(None) => MediaState::Failed(tr("media_unreadable")),
                     Err(error) => MediaState::Failed(Self::fetch_failure(&error)),
                 };
+                let started = std::time::Instant::now();
+                media::trace(format_args!("thumb installed {source:?}"));
                 for image in self.media.insert((key, source), state) { cx.drop_image(image, Some(window)); }
                 let rows = self.row_ids.len();
                 if rows > 0 { self.follow_content_changed(cx); self.list_state.remeasure_items(0..rows); }
+                media::trace(format_args!("thumb install took {:.2} ms, remeasured {rows} rows", started.elapsed().as_secs_f64() * 1000.));
             }
             Payload::Config(seq, result) => {
                 if seq != self.system_notifications.seq { return; }
@@ -1622,7 +1627,7 @@ impl Hangar {
         self.uploading.insert(key.clone(), list.iter().map(|a| a.id).collect());
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
-            let retention = match uploads { disk::Uploads::Local(_) => disk::retention(&api).await, disk::Uploads::Remote => None };
+            let retention = match uploads { disk::Uploads::Local { .. } => disk::retention(&api).await, disk::Uploads::Remote => None };
             for (id, name, bytes) in jobs {
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, None) }).await;
                 let result = uploads.upload(&api, &key.name, &name, bytes.to_vec(), retention).await;
@@ -1785,12 +1790,18 @@ impl Hangar {
         let slot = (key.clone(), source.clone());
         if self.media.contains(&slot) { return; }
         self.media.start(slot);
+        media::trace(format_args!("thumb start {source:?}"));
         let (connection, tx, source, uploads) = (self.connection, self.tx.clone(), source.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
+            let started = std::time::Instant::now();
             let result = match uploads.fetch(&api, &key.name, &source).await {
-                Ok(bytes) => Ok(tokio::task::spawn_blocking(move || media::thumbnail(&bytes)).await.ok().flatten()),
+                Ok(bytes) => {
+                    media::trace(format_args!("thumb fetched {source:?} {} B in {:.1} ms", bytes.len(), started.elapsed().as_secs_f64() * 1000.));
+                    Ok(tokio::task::spawn_blocking(move || media::thumbnail(&bytes)).await.ok().flatten())
+                }
                 Err(error) => Err(error),
             };
+            media::trace(format_args!("thumb ready {source:?} in {:.1} ms", started.elapsed().as_secs_f64() * 1000.));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Media(key, source, result) }).await;
         });
     }
