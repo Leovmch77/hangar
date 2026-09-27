@@ -161,6 +161,10 @@ impl TermView {
         true
     }
 
+    pub fn dimensions(&self) -> (u16, u16) {
+        (self.term.grid().columns() as u16, self.term.grid().screen_lines() as u16)
+    }
+
     /// A T66 impede a propagação se handled e redesenha apenas se redraw.
     pub fn key_down(&mut self, event: &KeyDownEvent) -> KeyResult {
         let key = event.keystroke.key.as_str();
