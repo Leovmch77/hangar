@@ -336,6 +336,8 @@ pub struct Hangar {
     suggest_dismissed: Option<String>,
     mention: mention::Mention,
     command_panel: bool,
+    /// Cartão aberto pelo anel de contexto do compositor.
+    context_card: bool,
     command_search: Entity<InputState>,
     confirm: Option<Confirm>,
     terminal_suggestion: String,
@@ -494,7 +496,7 @@ impl Hangar {
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
-            suggest_pick: 0, suggest_dismissed: None, command_panel: false, command_search, confirm: None,
+            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None,
             mention: Default::default(),
             terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
@@ -3058,25 +3060,19 @@ impl Hangar {
             let (added, removed) = session.as_ref().map(|s| (s.git_added.filter(|n| *n > 0), s.git_removed.filter(|n| *n > 0))).unwrap_or((None, None));
             let folder = repo.clone().or_else(|| session.as_ref().and_then(folder_name));
             let cost = status.as_ref().and_then(|s| s.cost_usd).map(|usd| self.money(usd));
-            let stats = self.stats.as_ref().filter(|_| readable).map(side::stats_line);
             // Anéis de contexto e de uso da conta; sem dado dizem isso, nunca 0%.
             let percent = |pct: Option<f64>| pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| tr("no_data"));
-            let windows: Vec<(String, f64)> = status.as_ref().filter(|_| readable).map(|s| [(tr("limit_5h"), s.five_hour_pct),
-                (tr("limit_7d"), s.weekly_pct), (tr("limit_30d"), s.monthly_pct)].into_iter()
-                .filter_map(|(label, pct)| pct.map(|pct| (label, pct))).collect()).unwrap_or_default();
             // O anel mostra a janela de 5 h; conta que só publica a semanal (Codex, alguns planos) mostra a semanal.
-            let account = windows.first().map(|(_, pct)| *pct);
-            let limits = (!windows.is_empty()).then(|| windows.iter().map(|(label, pct)| format!("{label} {}", percent(Some(*pct))))
-                .collect::<Vec<_>>().join(" · "));
-            // Anel e número com a mesma geometria nos dois, e a cor da faixa também no número.
-            let ring = |id: &'static str, pct: Option<f64>, tip: String| div().id(id).flex_shrink_0().h(px(22.)).px(px(6.)).rounded(px(6.))
-                .flex().items_center().gap(px(5.))
-                .child(chrome::ring(pct))
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(chrome::ring_text(pct)).child(percent(pct)))
-                .when(!tip.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)));
-            let ctx_tip = [Some(format!("{} {}", tr("ring_context"), percent(ctx_pct))), stats].into_iter().flatten().collect::<Vec<_>>().join("\n");
-            // Com o cartão aberto a dica sairia por cima dele.
-            let account_tip = if self.accounts.card { String::new() } else { format!("{}: {}", tr("ring_account"), limits.unwrap_or_else(|| tr("no_data"))) };
+            let account = status.as_ref().filter(|_| readable).and_then(|s| s.five_hour_pct.or(s.weekly_pct).or(s.monthly_pct));
+            // Anel, nome curto e número com a mesma geometria nos dois; o detalhe de cada um abre num cartão, não numa dica.
+            let ring = |id: &'static str, name: String, pct: Option<f64>, open: bool| Button::new(id)
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::faint()).hover(theme::hover()).active(theme::hover()))
+                .when(open, |el| el.bg(theme::hover())).flex_shrink_0().h(px(22.)).px(px(6.)).rounded(px(6.))
+                .accessibility_label(format!("{name}: {}", percent(pct)))
+                .child(div().flex().items_center().gap(px(5.)).text_xs()
+                    .child(chrome::ring(pct))
+                    .child(div().text_color(theme::faint()).child(name))
+                    .child(div().font_weight(FontWeight::MEDIUM).text_color(chrome::ring_text(pct)).child(percent(pct))));
             let has_git = !branch.is_empty();
             let place = div().min_w_0().flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
                 .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 14., theme::faint())).child(div().max_w(px(200.)).truncate().child(f)))
@@ -3093,13 +3089,11 @@ impl Hangar {
                     .tooltip(tr("git_open")).accessibility_label(tr("git_open")).child(place)
                     .on_click(cx.listener(|this, _, window, cx| this.open_git_panel(window, cx))).into_any_element()
             } else { place.into_any_element() };
-            let card_open = self.accounts.card;
             // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
             let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
-                // A linha de estatísticas do turno fica na dica do anel de contexto.
-                .child(ring("composer-ctx", ctx_pct, ctx_tip))
-                .child(popup::anchor(div(), "composer-account").child(ring("composer-account", account, account_tip)
-                    .cursor_pointer().hover(|el| el.bg(theme::hover())).when(card_open, |el| el.bg(theme::hover()))
+                .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
+                .child(popup::anchor(div(), "composer-account").child(ring("composer-account", tr("ring_account"), account, self.accounts.card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));

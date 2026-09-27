@@ -1,4 +1,5 @@
-//! Cartão do anel de uso do compositor (o `account_usage` do Zeron): as contas do provider da sessão, a que ela usa
+//! Cartões dos anéis do compositor. O de contexto mostra a ocupação e o uso da sessão. O de uso (o `account_usage` do
+//! Zeron) mostra as contas do provider da sessão, a que ela usa
 //! primeiro, com plano e as janelas de sessão e semana. Lê a mesma lista da página Contas e só quando abre: o servidor
 //! devolve a cota guardada, sem releitura periódica daqui.
 use super::*;
@@ -11,6 +12,48 @@ impl Hangar {
         self.accounts.card = open;
         if open && !self.accounts.list.loading { self.load_accounts(false, cx); }
         cx.notify();
+    }
+
+    /// O anel de contexto abre o cartão dele pela mesma regra do de contas.
+    pub(in crate::app) fn toggle_context_card(&mut self, cx: &mut Context<Self>) {
+        let open = !self.context_card;
+        self.close_popups();
+        self.context_card = open;
+        cx.notify();
+    }
+
+    /// Cartão do anel de contexto, no padrão do de contas: o número grande com a barra, como o bloco do painel, e o uso da
+    /// sessão numa grade rotulada de duas colunas.
+    pub(in crate::app) fn render_context_card(&self) -> AnyElement {
+        let status = self.status();
+        let pct = status.as_ref().and_then(|s| s.ctx_pct);
+        let window = match (status.as_ref().and_then(|s| s.ctx_used), status.as_ref().and_then(|s| s.ctx_total)) {
+            (Some(used), Some(total)) => Some(tr("side_ctx_of").replace("{used}", &side::tokens(used)).replace("{total}", &side::tokens(total))),
+            (None, Some(total)) => Some(side::tokens(total)),
+            _ => None,
+        };
+        let number = div().px(px(8.)).flex().items_baseline().gap(px(8.))
+            .child(div().flex_shrink_0().text_size(px(28.)).line_height(px(32.)).font_weight(FontWeight::SEMIBOLD)
+                .text_color(match pct { Some(p) if p >= 70. => chrome::ring_text(pct), Some(_) => theme::text(), None => theme::faint() })
+                .child(pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| "—".into())))
+            .child(div().min_w_0().truncate().text_xs().text_color(theme::faint())
+                .child(window.map_or_else(|| tr("side_ctx_label"), |w| format!("{} · {w}", tr("side_ctx_label")))));
+        let gauge = match pct {
+            Some(p) => div().px(px(8.)).pt(px(8.)).pb(px(6.)).child(chrome::meter(p)),
+            None => div().px(px(8.)).pt(px(4.)).pb(px(6.)).text_xs().text_color(theme::muted()).whitespace_normal().child(tr("side_ctx_unknown")),
+        };
+        let cells = self.stats.as_ref().map(side::stats_cells).unwrap_or_default();
+        let grid = (!cells.is_empty()).then(|| div().px(px(8.)).pb(px(4.)).flex().flex_wrap().gap_y(px(6.))
+            .children(cells.into_iter().map(|(label, value)| div().w(relative(0.5)).pr(px(12.)).flex().items_baseline().justify_between().gap(px(8.))
+                .text_size(px(12.))
+                .child(div().min_w_0().truncate().text_color(theme::muted()).child(label))
+                .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(value)))));
+        div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
+            .child(popup::title(tr("ring_context"), None))
+            .child(number)
+            .child(gauge)
+            .when_some(grid, |el, grid| el.child(popup::separator()).child(popup::title(tr("ctx_card_usage"), None)).child(grid))
+            .into_any_element()
     }
 
     pub(in crate::app) fn render_usage_card(&self) -> AnyElement {

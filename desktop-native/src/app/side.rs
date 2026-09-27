@@ -162,20 +162,22 @@ fn agent_label(provider: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-pub(super) fn stats_line(stats: &Stats) -> String {
-    let mut parts = vec![
-        tr(if stats.turns == 1 { "stats_turn" } else { "stats_turns" }).replace("{n}", &stats.turns.to_string()),
-        tr(if stats.steps == 1 { "stats_step" } else { "stats_steps" }).replace("{n}", &stats.steps.to_string()),
-        tr("stats_tokens").replace("{in}", &tokens(stats.in_tok as f64)).replace("{out}", &tokens(stats.out_tok as f64)),
+/// O uso da sessão em pares rótulo e valor, na ordem da grade do cartão de contexto; o que não foi medido fica fora.
+pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
+    let mut cells = vec![
+        (tr("ctx_card_turns"), stats.turns.to_string()),
+        (tr("ctx_card_calls"), stats.steps.to_string()),
+        (tr("ctx_card_in"), format!("{} tok", tokens(stats.in_tok as f64))),
+        (tr("ctx_card_out"), format!("{} tok", tokens(stats.out_tok as f64))),
     ];
     if let Some(ms) = stats.llm_ms.filter(|v| *v > 0.) {
-        parts.push(tr("stats_llm").replace("{d}", &duration(ms)));
-        if let Some(tool) = stats.tool_ms.filter(|v| *v > 0.) { parts.push(tr("stats_tools").replace("{d}", &duration(tool))); }
+        cells.push((tr("ctx_card_llm"), duration(ms)));
+        if let Some(tool) = stats.tool_ms.filter(|v| *v > 0.) { cells.push((tr("ctx_card_tools"), duration(tool))); }
     }
-    if let Some(rate) = stats.tok_s.filter(|v| *v > 0.) { parts.push(tr("stats_rate").replace("{n}", &rate.round().to_string())); }
-    if let Some(ms) = stats.ttft_ms.filter(|v| *v > 0.) { parts.push(tr("stats_ttft").replace("{d}", &duration(ms))); }
-    if let Some(cache) = stats.cache_pct { parts.push(tr("stats_cache").replace("{n}", &cache.round().to_string())); }
-    parts.join(" · ")
+    if let Some(rate) = stats.tok_s.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate"), tr("stats_rate").replace("{n}", &rate.round().to_string()))); }
+    if let Some(ms) = stats.ttft_ms.filter(|v| *v > 0.) { cells.push((tr("ctx_card_ttft"), format!("~{}", duration(ms)))); }
+    if let Some(cache) = stats.cache_pct { cells.push((tr("ctx_card_cache"), format!("{}%", cache.round()))); }
+    cells
 }
 
 impl Hangar {
