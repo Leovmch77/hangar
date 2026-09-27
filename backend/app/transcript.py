@@ -606,18 +606,20 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
     wanted = {needle for needle in needles if needle}
     if not wanted:
         return {}
-    pattern = re.compile("(?=(" + "|".join(re.escape(x) for x in sorted(wanted, key=len, reverse=True)) + "))")
+    # Busca de bytes em vez de texto + regex por linha: o transcript passa de centenas de MB e cada
+    # imagem citada na tela faz a rota refazer esta varredura.
+    encoded = [(needle, needle.encode()) for needle in wanted]
     seen: set[str] = set()
     cwds: dict[str, list[str]] = {}
     try:
-        with open(jsonl, encoding="utf-8", errors="replace") as fh:
+        with open(jsonl, "rb") as fh:
             for line in fh:
-                matched = {m.group(1) for m in pattern.finditer(line)}
+                matched = {needle for needle, raw in encoded if raw in line}
                 if not matched:
                     continue
                 seen.update(matched)
                 try:
-                    cwd = json.loads(line).get("cwd")
+                    cwd = json.loads(line.decode("utf-8", errors="replace")).get("cwd")
                 except (json.JSONDecodeError, AttributeError):
                     continue
                 if isinstance(cwd, str) and cwd:
@@ -652,13 +654,17 @@ def get_transcript_image(jsonl: str | Path, uuid: str, idx: int) -> Optional[tup
     Fonte das imagens coladas no terminal (a image-cache do Claude não persiste). Serve sob demanda
     pra não inchar o payload do histórico/SSE com base64."""
     try:
-        fh = Path(jsonl).open(encoding="utf-8", errors="replace")
+        fh = Path(jsonl).open("rb")
     except OSError:
         return None
+    needle = uuid.encode()
     with fh:  # streaming linha-a-linha: nao carrega o transcript inteiro (dezenas de MB) em RAM
         for line in fh:
+            # Só a linha que contém o uuid vira JSON: decodificar todas custava segundos por imagem.
+            if needle not in line:
+                continue
             try:
-                obj = json.loads(line)
+                obj = json.loads(line.decode("utf-8", errors="replace"))
             except (json.JSONDecodeError, ValueError):
                 continue
             if obj.get("uuid") != uuid:
