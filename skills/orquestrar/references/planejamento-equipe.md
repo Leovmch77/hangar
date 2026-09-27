@@ -1,7 +1,7 @@
-# Planner — the team, the plan skeleton, the bars, the contract and the launch
+# Planner — the team, the plan skeleton, the contract and the launch
 
 Sibling of `planejamento.md`: "The team" is read at its step 3 ("Team first"), "The plan
-skeleton" and "The bar" at step 4, "Phase 2" and the contract skeleton at step 6. The
+skeleton" at steps 4 and 5, "Phase 2" and the contract skeleton at step 7. The
 decomposition and the exit gate stay in `planejamento.md`.
 
 `orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir>`.
@@ -31,8 +31,8 @@ ls -d ~/.claude ~/.claude-*                          # Claude accounts
    account in use, or entering a per-token account, requires the user's word.
 5. Cast per Task, from the inventory (a model in an example is an example): mechanical volume,
    subtle reasoning or visual judgment → who writes (possibly one writer per Task); where its error
-   shows → what the reviewer must be able to do; visual Task with an executor that cannot see
-   images → `executor-visual.md` vision protocol in the contract; account and quota → engines and
+   shows → what the reviewer must be able to do; a roteiro needing a capability the executor
+   lacks (vision, a device) → who covers it, in the contract; account and quota → engines and
    fallback.
 6. One role, one session; each role gets its own. Phase switch (planner → arbiter) and succession
    are not stacking. Final review in a fresh session. One writer per tree.
@@ -95,45 +95,32 @@ Team table in `regras-<gid>.md`, raw values only (`-` = empty). Start from
 
 ## The plan skeleton
 
-The orchestration plan (`planejamento.md`, step 4): a second short file pointing at the user's
-plan, adding only what the gate needs.
+The orchestration plan (`planejamento.md`, steps 4 and 5): a second short file pointing at the
+user's plan, adding only what the gate needs. `preparar-plano` writes it in this shape.
 
 ```markdown
 # Orchestration plan — <work>
 User's plan: <absolute path>   (it is in charge; this file only orchestrates)
 
+## Projeto
+Checagens: `<cmd>` · `<cmd>`          (or —)
+Integração: `<cmd>`                   (or —)
+Prova: nenhuma | por-task | lote(N) | manual
+Paralelo: sequencial | até N
+Revisão: subagente | sessão
+Correção pelo revisor: até <N> linhas
+
 ## Tasks
-| # | What it is | Where in their plan | Files | Verification | Proof | Tela |
+| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |
 |---|---|---|---|---|---|---|
-| 1 | create the schema | section "Database", 2nd paragraph | `<paths>` | `<test command>` | green suite + the table exists | — |
-| 2 | <screen Task> | <where> | `<paths>` | `<test command>` | screenshots of <states> | `Tela: própria` (its wave's) |
+| 1 | create the schema | section "Database", 2nd paragraph | `<paths>` | `<test command>` | 1 | — |
 
 ## What their plan does NOT decide, and I decided here
-- Waves: 1 (T1, T2) · 2 (T3). Wave with screen proof: `Tela: própria | compartilhada`, repeated
-  in each of its Tasks (column `Tela`).
 - Untouchables: <paths>.
-- Bar for Task 2: <screen, width>.
 ```
 
-## The bar
-
-- One line per pixel-touching Task. Three tests, all mandatory: named (a specific screen), findable
-  (absolute screenshot path, or an app screen that can be opened), comparable (same state, same
-  width). A Task that draws nothing needs no bar.
-- Propose, instead of asking "what's the bar?": two or three candidates already passed through the
-  three tests, one sentence each on why it is hard, plus "no bar":
-
-```
-Task 3 touches the Settings sheet. Bar — pick one:
-a) `EnginesSheet.svelte`, desktop, centered modal, 1440px — same `wide`/`centered` pair.
-b) `Git.svelte`, same width — same glass material, with tabs.
-c) A screenshot from another product — send me the path.
-d) No bar for this Task.
-```
-
-- "No bar" chosen → `Bar: none — user's decision, <date>`; that Task's visual gate is the
-  `executor-visual.md` protocol without the blind comparison.
-- Weak candidates → say so and propose others.
+`orq plan-check <plan> --repo <repo> --stamp` writes the `Preparado:` line under the title;
+editing the plan afterwards voids it.
 
 ## Phase 2 — Launch (the user's single "go ahead")
 
@@ -162,7 +149,7 @@ when, why) goes to the journal through `orq event sessao_trocada`, never here.
 A group notice contradicting that table: the table wins.
 
 ## What the plan owns (point, don't copy)
-Task order, steps, verification per Task, untouchables, phase-1 bars: <plan, section>.
+Task order, steps, verification per Task, untouchables, roteiros: <plan, section>.
 Baseline: <command> → <result>, <date>.
 
 ## Review tooling (per Task type)
@@ -170,13 +157,10 @@ Baseline: <command> → <result>, <date>.
 |---|---|---|
 
 ## What the review must cover
-<full flow, sibling callers, concurrency, final state, visual>
+<full flow, sibling callers, concurrency, final state>
 
 ## Quota and fallback
 <remaining quota per account, with reading time; where to migrate when it runs out>
-
-## Bars decided AFTER plan approval
-Task N — Bar: <screen, state, width> | none — user's decision, <date>
 
 ## Progress
 | Task | Hash | Verdict | Who fixed |
@@ -186,5 +170,5 @@ Task N — Bar: <screen, state, width> | none — user's decision, <date>
 <date> — <decision, whose, reason in one line>
 
 ## Task N — <title>
-<that Task's specifics: bar, its wave's `Tela:` line, its port and worktree, untouchable exceptions, recipe path>
+<that Task's specifics: its worktree, its roteiro path, untouchable exceptions, recipe path>
 ````

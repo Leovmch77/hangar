@@ -20,7 +20,7 @@ Proof: <test/harness to create or run, and what it must say>
   saying what is missing.
 - The caller inventory is mandatory for "unify X", "centralize Y", "every path must validate
   Z": run the `git grep`, paste the list, say what each caller becomes.
-- Async data read by a screen → the recipe declares the three states (success, failure,
+- Async data read by a consumer → the recipe declares the three states (success, failure,
   pending). An action that types into the user's session → the recipe declares its trigger.
   Same for a recipe the arbiter closes in a replanning.
 
@@ -30,7 +30,7 @@ Proof: <test/harness to create or run, and what it must say>
   PERFORM the action (`git grep` the verb); the recipe fixes all at once. Write the cause as
   what the code does wrong; a recipe naming a state or an origin component describes the entry.
 - Defect is a STATE stuck or wrong → count the doors that reach the condition, including those
-  through no symbol (a media-query `{#if}` unmount, a route change, a parent going away).
+  through no symbol (a conditional unmount, a route change, a parent going away).
   Prefer the fix that closes the condition over one per door.
 
 ## Prove the recipe before sending it

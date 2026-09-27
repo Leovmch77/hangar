@@ -45,7 +45,7 @@ its page and reads that page plus the sibling pages it names; nothing else of th
 
 | Role | Page | You are this when |
 |---|---|---|
-| planner | `references/planejamento.md` (+ `references/planejamento-equipe.md` for team, bars, contract and launch) | the user asked you for the work; no kick-off exists |
+| planner | `references/planejamento.md` (+ `references/planejamento-equipe.md` for team, plan skeleton, contract and launch) | the user asked you for the work; no kick-off exists |
 | arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | you wrote the plan and the user approved it |
 | executor | `~/.claude/skills/orquestrar/references/executor.md` | kick-off says `Role: executor` |
 | reviewer | `~/.claude/skills/orquestrar/references/revisor.md` | kick-off says `Role: reviewer` |
@@ -75,10 +75,11 @@ The commit comes AFTER the review, and the arbiter is out of the transport: the 
 the round (dirty tree, stash object) and sends it to the reviewer directly; the APROVA
 authorizes the commit, and the commit check notifies the arbiter. One Task = one commit. What
 still reaches the arbiter is decision, not transport: DEVOLVIDO, recipe disagreement, a skipped
-skill step, pixels with no bar, a stolen browser tab, a session replacement request, and the
-second rejection of the same Task. Transport and bookkeeping go through `scripts/orq.py`:
-events, journal, the commit check, the shared-screen lock, who has the ball, and the triage of
-every message to the arbiter.
+skill step, a session replacement request, and the second rejection of the same Task.
+Transport and bookkeeping are `scripts/orq.py`'s: events, journal, checks, commit check,
+locks, proof queue, the ball, and triage of every message to the arbiter. Checks, integration,
+proof mode, parallelism and review mode are the plan's `## Projeto`, written by the
+`preparar-plano` agent and required by `orq init`.
 
 ## Locks for the planner and the arbiter
 
@@ -106,9 +107,9 @@ every message to the arbiter.
   A tool's silence counts only when you know what it read.
 - Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 - Verification runs the command the plan defined for that Task, cwd-independent, with
-  `set -o pipefail` or `${PIPESTATUS[0]}`. A Task's command is focused: the tests of the files
-  it touches, run once per round, after the last edit. Full suites (whole-repo type check, full test run, build) run once, in phase 4,
-  before any push; never per Task, per round or per merge.
+  `set -o pipefail` or `${PIPESTATUS[0]}`, once per round after the last edit; the plan's
+  `Checagens:` through `orq check` per round, `Integração:` after each merge, both once more
+  on the branch in phase 4, before any push.
 - A guideline is written as a principle, imperative, without reason, case or date; the measured
   case goes to the journal, the commit message or the project's `CLAUDE.md`. The full writing
   rule and the size ceilings are in `references/retrospectiva.md`, section 5, and apply to any

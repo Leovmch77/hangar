@@ -20,14 +20,11 @@ Read at step 4 of `executor.md`.
 
 Before pasting a proof, say what would make it fail. Then:
 
-- Visual proof is of the component mounted in the served app: build → open what is served →
-  check the loaded artifact matches the build → capture. Static HTML proves nothing.
+- A proof of something served checks what the target loaded, never what your side built.
 - "X shows up when it should not" needs a negative assertion on the same real fixture.
 - Real world before mock; mock only after the real one failed, saying why.
 - A long-lived service serves the code from when it started: check its start time against the
-  commit, or bring up your own instance on another port. The user's service keeps running.
-- Image reading and DOM disagree about something visible → the screenshot rules; "there is no
-  X in the image" is a result.
+  commit, or bring up your own instance. The user's service keeps running.
 - A blocker fix ships with its trap in the same round: the test that fails without the fix
   exists; undo the fix and watch it go red. Same for a finding an automatic reviewer raised.
   A check this work writes down ships the same way: run it once in the state it exists to catch,
@@ -39,7 +36,7 @@ Before pasting a proof, say what would make it fail. Then:
 
 - Own `HOME`: `HOME=<proof dir> <command> --directory <worktree>/...`.
 - The project's installers (`install*.sh`) stay unrun.
-- Own port, torn down at the end; the user's services and ports keep running.
+- Own instance, torn down at the end; the user's services keep running.
 - Kill by exact PID. Used `pkill -f` anyway → say so unprompted.
 
 ## Waiting on an external condition (any step)
@@ -49,12 +46,12 @@ Before pasting a proof, say what would make it fail. Then:
 - An identical response 3 times in a row → change the check, or stop and report.
 - The stage of your proof (server, test account, proof session) is created by you, as an
   explicit step, before checking. Repeated exit 0 is as stalled as repeated error.
-- The screen queue (`orq screen take`, `executor.md`) is not an external wait: no cap, run it
-  again until it is yours.
+- A shared-resource lock (`orq lock take`, `executor.md`) is not an external wait: no cap, run
+  it again until it is yours.
 
 ## Report line
 
 ```
 Removed lines: <output of the removed-lines `grep` of "Run", or "none">
-Served: <start time of the long-lived service against the round, or your own instance's port — or "nothing served">
+Served: <start time of the long-lived service against the round, or your own instance — or "nothing served">
 ```

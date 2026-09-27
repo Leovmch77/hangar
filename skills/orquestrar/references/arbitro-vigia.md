@@ -31,7 +31,7 @@ Done when the `[vigia] ARMED …` prompt arrives in your session within 2 min of
 ## Idleness — who owes work
 
 1. You always know who has the ball: the executor of the released Task, or the reviewer of the open round.
-2. Owner `working` → wait; the question "how's it going?" is never sent. `working` with the same last command for 3 readings is a loop, not work; `orq screen take` repeated is the screen queue, not a loop.
+2. Owner `working` → wait; the question "how's it going?" is never sent. `working` with the same last command for 3 readings is a loop, not work; `orq lock take` repeated is a lock queue, not a loop.
 3. Owner `idle` and nothing received → one of three, resolved without asking anyone:
    1. the message didn't arrive → resend once, saying it is a resend;
    2. the reply was produced and not sent → read its transcript (`~/.claude*/projects/<sanitized-cwd>/<uuid>.jsonl`, the most recent, messages `type: "assistant"`, the last one);
@@ -82,17 +82,16 @@ It becomes a case only if the repo is strange (unexplained dirty tree, unreporte
 
 - Executor: one session per Task, retired at the approved milestone.
 - Mid-gate swap, mandatory: the same cause failing round after round. Swap now, mid-gate, before the gate closes.
-- The context ceiling (the row's `janela`, default 50% of the session's own window, or a ceiling the user set) is a reference for your decision, never an order to stop. At it, decide by cost, with numbers: the session's context now, what is left (actions, screenshots, report) and the context it will end at, against a new session's start (its opening context, uncached, plus rereading the handover and the code).
+- The context ceiling (the row's `janela`, default 50% of the session's own window, or a ceiling the user set) is a reference for your decision, never an order to stop. At it, decide by cost, with numbers: the session's context now, what is left (actions, report) and the context it will end at, against a new session's start (its opening context, uncached, plus rereading the handover and the code).
   - Little left to close the act or the round → the session finishes, past the ceiling if needed.
   - Much left → swap at the nearest clean point (end of a step or of the round).
   - Either way, `orq log --task <N> "…"` the decision with its numbers.
 - Writer at the ceiling: it reports what is left (the watchdog prompts it) and keeps working until you decide.
 - Reviewer: before dispatching a round, add the round's measured cost (measure it on Task 1) to its current context; crossing the ceiling → decide as above before the correction arrives.
 - Reviewer rotated with a report in flight: the retired report dies, the successor judges from scratch, and the round closes only with the verdict of a reviewer named in the journal. Rotation between accounts never puts two reviewers on one commit.
-- Screen Task with a short-window reviewer: count one reviewer per round. A wide-window model on the user's machine → suggest it for the plan from round 1; the user chooses; no rule depends on it.
 - Provider drops are not a reason; throughput is: swap when ctx barely moves between drops, or no revival after two nudges.
 - Handover in a file that points: HEAD, `git status`, uncommitted disk, what remains, traps paid, paths of plan, contract and Task excerpt, and every decision made. No line count; never a context copy.
-- Retiring is an act with a message: stop, don't capture, don't commit, release the stage without killing. In the same act tell the reviewer the new address.
+- Retiring is an act with a message: stop, don't commit, release the stage without killing. In the same act tell the reviewer the new address.
 - Mid-gate: release, don't kill; close it once the substitute confirms. Closed milestone (approved, committed, nothing in flight): close it at once.
 - Every executor or reviewer replacement: `orq event sessao_trocada --de <old> --para <new> --motivo <reason>` before the substitute's kick-off.
 - The substitute gets the full kick-off (`arbitro-lancamento.md`) with `Frozen round`, and proves model/effort before its first `Edit`. Interrupted turn → list the half-edited paths as untrusted draft.
@@ -129,7 +128,6 @@ Done when `hangar-send --list` shows only the current phase's sessions plus you.
 | irreversible outside the repo (push, MR, domain, upload, payment) | always the user |
 | another session writing in the tree | resolve with it; unresolved → wake |
 | phase-1 item missing (untouchables, verification command) | decide the conservative default, record, report later |
-| Task touches pixels, plan brought no bar | wake before releasing — `arbitro-lancamento.md`, "Visual Task without a bar" |
 | two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline: ask the user whether the path is worth the cost, spend in hand. User unavailable and the spiral started → tighten the criterion in the next reviewer kick-off (`arbitro-lancamento.md`, "Tightened criterion"); journal it with the date; not before the third round |
 
 Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask without stopping: declare decision and default, proceed. 0–3 → decide, record, report later. Stop between Tasks, never during. Wake with the decision ready: stakes, options, recommendation.
@@ -141,4 +139,4 @@ Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask 
 | Account | inside the table | inside, quota tight | outside the table |
 
 - Talk little with the user. Write only: one line when a batch/block closes; a team quota ran out; a decision only they can make, decision ready; something broke you cannot solve. Never narration or summaries.
-- A finding about the REPORT (caption, executor report, command description, review report) is fixed in the report; only a product finding pays new proof. Caption fix: an image repeating another frame declares it and points at the real proof; an image showing a defect says so and names it.
+- A finding about the REPORT (executor report, command description, review report) is fixed in the report; only a product finding pays new proof.

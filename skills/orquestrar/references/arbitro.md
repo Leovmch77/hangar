@@ -1,9 +1,8 @@
 # Role: arbiter
 
 Read-only in code from the user's "go ahead" to the end. You open and close the gate, check
-every report against the repo and maintain the contract. Only you write the contract. The
-correction recipe goes reviewer → executor without you. Read this page whole; open a sibling only at the
-step that names it.
+every report against the repo and maintain the contract. Read this page whole; open a sibling
+only at the step that names it.
 
 `orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir>`.
 
@@ -33,17 +32,19 @@ written: time and rounds per Task · account policy read and copied into the con
    "A rotating role"): open that role's session ("Opening a session"); the one at hand keeps
    its role, roles never stack. The session that executed never reviews its own commit, even
    after `/clear`; separate sessions on the same model are fine.
-3. Pixels without a bar in the plan → ask before releasing (`arbitro-lancamento.md`, "Visual
-   Task without a bar").
+3. `Prova: lote(N)`: the close notice says `Proof batch ready` → `orq batch take`, open one
+   proof session (executor row) with the printed roteiros on the integrated branch and one judge
+   (reviewer row); failures become one fix Task in the next wave.
 4. Handoff checklist below, then the kick-off (`arbitro-lancamento.md`, "Kick-off"): it names
    the reviewer and carries one Task ("One Task per executor").
 
 Handoff checklist — before every handoff, in order:
 
-1. This finding's guideline in `licoes.md`? No → write it now and paste it into this kick-off.
+1. This finding's guideline in `licoes.md`? No → write it now; the next Task needing it gets it
+   in its `## Task N` contract section.
 2. Kick-off/recipe in a file; the message is the path, via `"$(cat <<'EOF' … EOF)"`.
 3. `entregue` read → check engagement: ctx left zero within 1 min. Kick-off only.
-4. `orq event task_inicio --task <N> --titulo <t> --executor <session> --par <reviewer session>`
+4. `orq event task_inicio --task <N> --titulo <t> --executor <session> --par <reviewer session | subagente>`
    before the kick-off.
 5. A decision of yours goes in with `orq log --task <N> "…"` before the next action.
 6. Sending someone to check a set → the command that discovers the list (`run \`git grep -n
@@ -82,13 +83,12 @@ made mid-work enters the contract before you use it.
 | a small finding | it blocks this Task; the next Task never carries it |
 | a blocker fix, including one an automatic reviewer provoked mid-Task | accepted with its trap (a test that bites) in the same commit; no test → not accepted, on both sides of the gate |
 | executor needs context only you have — the one case you relay | send the path, never prose |
-| pixels with no bar in the contract · stolen browser tab | yours; the bar as in step 2 |
 | a `low` Task rejected 2× for the same cause, or a `Decided alone:` line the reviewer flagged | re-tag `Risk: high` in the orchestration plan, upward only; journal the reason; the next executor session is born on the `high` row (replacement kick-off, `Frozen round`); `orq event sessao_trocada … --motivo <reason>`. Route `audit` → `replanejar.md`, `audit` → `full` |
 | two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline; `arbitro-vigia.md`, "Deciding vs waking the user" (ask the user, spend in hand; unavailable → "Tightened criterion") |
 | plan untrustworthy (fallen premise, method without executing half, two consecutive Tasks blowing the estimate for the same cause, user order) | `replanejar.md`: propose and conduct the swap; never rewrite your own plan. A recipe the plan declared "closes after Task N-1" is planning: the planner or a fresh session with the spec closes it; you deliver inputs and excerpt the result |
 | a user's suspicion about the product | a verification item: journal it, hand it to the next reviewer as a directed question; the answer comes from proof, never from memory |
 | a user order given to a non-arbiter session, contradicting yours · early release at the user's word | `arbitro-vigia.md`, "Authorization from outside" |
-| silence · vanished session · context cap · session replacement request · "configuration changed in the panel" | `arbitro-vigia.md`; every replacement → `orq event sessao_trocada` before the substitute's kick-off |
+| silence · vanished session · context cap · session replacement request | `arbitro-vigia.md`; every replacement → `orq event sessao_trocada` before the substitute's kick-off |
 | unforeseen | ask, decision ready (stakes, options, recommendation); never fill the gap yourself. Decide alone or wake, the score, findings about a report: `arbitro-vigia.md`, "Deciding vs waking the user" |
 
 Done when the item is journaled and the ball is back with executor or reviewer.
@@ -102,13 +102,13 @@ Done when the item is journaled and the ball is back with executor or reviewer.
    Context counts only for rotation.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.
-   - An untouchable exception written in the contract → `orq init` again with the new
-     `--untouchable` list; once that Task's `orq commit` passes, `orq init` again with the
-     full original list.
+   - An untouchable exception written in the contract → `orq init` again (same `--plan
+     <durable>/orq-plano.md`) with the new `--untouchable` list; once that Task's `orq commit`
+     passes, `orq init` again with the full original list.
    - No other commit in the checkout between a round's freeze and its `orq commit`; your plan
      edits stay uncommitted until the Task closes.
 2. Every round, the last included, is the reviewer's (directly or via the authorized
-   verifier), whatever a plan says: tests, diff, screenshots, defect reproduction and editor
+   verifier), whatever a plan says: tests, diff, proofs, defect reproduction and editor
    stay with them; you never run, read, reproduce, redo or open them.
 3. The commit is born reviewed: one Task = one commit on the normal path.
 4. Wave: merge one at a time after its APROVA; `git fetch` before every merge, only then read
@@ -132,13 +132,13 @@ Done when the branch is in the user's hands, the retrospective delivered,
 | File | Contains | Who reads |
 |---|---|---|
 | `~/.hangar/orq/<date>-<gid>/registro.md` — journal | one line per entry, written by `orq` (`event`, `commit`, `log`) | you, only through `orq read journal [--task N]` |
-| `<config>/.hangar-pair/regras-<gid>.md` — rules | who is who, untouchables, gates, method, domain skill, branch, bars, review coverage, accounts; common part ≤ 8k characters, each Task's specifics in a `## Task N` section at the end | executor and reviewer, through `orq read contract --task N` |
-| `~/.hangar/orq/<date>-<gid>/licoes.md` — lessons | born empty with a header; every guideline born mid-work, one per block, with date and measured proof | nobody whole; you paste 3–4 per kick-off |
+| `<config>/.hangar-pair/regras-<gid>.md` — rules | who is who, untouchables, gates, method, domain skill, branch, review coverage, accounts; common part ≤ 8k characters, each Task's specifics in a `## Task N` section at the end | executor and reviewer, through `orq read contract --task N` |
+| `~/.hangar/orq/<date>-<gid>/licoes.md` — lessons | born empty with a header; every guideline born mid-work, one per block, with date and measured proof | nobody whole; a Task's section carries what it needs |
 | `~/.hangar/orq/<date>-<gid>/eventos.jsonl` — events | one JSON line per event | machines: app screens, phase 5 |
 
 - Only you write rules and lessons. Journal and events are written through `orq` by whoever acts: you (`task_inicio`, `sessao_trocada`, `execucao_*`, `log`), the executor (`entrega`, `commit`), the reviewer (`veredito`).
 - Lessons live in the durable directory, never in `<config>/.hangar-pair/`.
-- Lessons: raw material is the **waste** line of each review report; its "would have prevented" becomes a guideline written as a principle, with the measured case as proof next to it — in `licoes.md`, never in `regras-<gid>.md`. Every guideline stays: no cap, never deleted. The cap is how much goes into a kick-off: pick by subject (screen, database, channel, file), never by age; in doubt, paste; text, never the path.
+- Lessons: raw material is the **waste** line of each review report; its "would have prevented" becomes a guideline written as a principle, with the measured case as proof next to it — in `licoes.md`, never in `regras-<gid>.md`. Every guideline stays: no cap, never deleted. A Task gets the guidelines of its subject (database, channel, file), never by age, as text in its `## Task N` section; no kick-off carries `licoes.md`.
 - By type, not subject: it happened → journal; agreement decided at launch → rules; guideline born now → lessons.
 - Turn state (released Task, counterpart) goes in the kick-off and `orq event`; the rules get only the Progress hash.
 - First lines of the rules file:
@@ -149,6 +149,9 @@ Done when the branch is in the user's hands, the retrospective delivered,
 > Method: <name | none> · Executes with: <command | none> · Domain skill: <name | none> · Route: <audit | full>
 > Read with: ~/.claude/skills/orquestrar/scripts/orq.py --dir ~/.hangar/orq/<date>-<gid> read contract --task <N>
 ```
+
+`read contract` exits 3, or a session reports `contract over the cap`: cut the common part below
+8k characters (specifics to `## Task N`) before the next kick-off.
 
 ## The contract commands
 

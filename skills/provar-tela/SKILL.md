@@ -6,6 +6,7 @@ description: Rules to prove a change on a screen — the bar (reference screen),
 # Provar na tela
 
 Two sides: who captures (`references/executor.md`) and who judges (`references/revisor.md`).
-The bar is chosen before the work (`references/barra.md`). A shared screen is taken with
+The bar is chosen before the work (`references/barra.md`). `Tela: própria` → your own browser,
+no lock; `Tela: compartilhada`, or no `Tela:` → take the shared screen first:
 `orq lock take screen --owner <you>` when running under orquestrar, or by agreement otherwise.
 Read only the side that is yours.

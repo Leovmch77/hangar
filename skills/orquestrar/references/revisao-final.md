@@ -37,7 +37,7 @@ Done when every item above has an answer for this range.
 
 ### 3. Verify
 
-Run the plan's `Final verification:` (full suites: whole-repo type check, full test run, build)
+Run the plan's `Checagens:` and `Integração:` (plus its `Final verification:`, when it has one)
 once on the branch tip, cwd-independent, `set -o pipefail` or `${PIPESTATUS[0]}`; yourself, or
 through the contract's optional `verificador` line (`revisor-verificador.md`). No such line →
 the project's documented full checks. A red test → run it on `<base>` in a detached worktree;

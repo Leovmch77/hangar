@@ -5,8 +5,8 @@ model and effort approved at planning). Without the line, verify in your own ses
 own model. Rotation, when the line has it, uses the current Task; in the final review the turn
 must be defined in the contract.
 
-Grunt work it takes: a disposable environment, click scripts, captures, suite runs. Judgment
-stays yours: you read the screenshots, and a finding you did not reproduce is no blocker.
+Grunt work it takes: a disposable environment, scripted runs, roteiro steps, suite runs.
+Judgment stays yours: you read the evidence, and a finding you did not reproduce is no blocker.
 
 ```bash
 hangar-send --new <work>-verif-<task> <worktree> --provider <provider> --model <id> --effort <level> --read-only   # + the account flag of the line
@@ -16,7 +16,7 @@ hangar-send <work>-verif-<task> "<closed script>"
 # 3. capture the end, then: hangar-send --close <work>-verif-<task>
 ```
 
-- The script is closed: exact steps, states to capture, absolute save paths, what to report
+- The script is closed: exact steps, what to collect, absolute save paths, what to report
   (command run, raw output, each file's path), the object and base under test, the protection
   of `protecao.md`, the artifact destination.
 - The verifier runs and reports failures to you only; fixes, architecture and approval stay

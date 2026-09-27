@@ -55,9 +55,9 @@ permitido() {  # $1 = linha inteira do grep
   return 1
 }
 
-# proibido <padrao-grep> <explicacao>
+# proibido <padrao-grep> <explicacao> [flags extras do grep]
 proibido() {
-  local pat="$1" msg="$2" achou=0 linha
+  local pat="$1" msg="$2" flags="${3:-}" achou=0 linha
   while IFS= read -r linha; do
     [ -z "$linha" ] && continue
     permitido "$linha" && continue
@@ -68,7 +68,7 @@ proibido() {
       falhou=1
     fi
     echo "    $linha"
-  done < <(grep -rn -- "$pat" "${arquivos[@]}" 2>/dev/null)
+  done < <(grep -rn ${flags:+"$flags"} -- "$pat" "${arquivos[@]}" 2>/dev/null)
 }
 
 # obrigatorio <arquivo> <padrao-grep-F> <explicacao> — regra que nao pode sumir da pagina.
@@ -115,6 +115,11 @@ done
 # 0f. Data literal nao entra no texto da skill: a medicao mora no commit e no registro do trabalho.
 proibido '20[0-9][0-9]-[01][0-9]-[0-3][0-9]\|[0-3][0-9]/[01][0-9]/20[0-9][0-9]' \
   'Skill nao carrega data literal — a evidencia datada vai pra mensagem de commit ou pro registro.'
+
+# 0g. A skill e generica: extensao de arquivo, pixel e ferramenta de navegador sao do projeto.
+#     `build` fica fora do padrao: aparece de forma legitima como exemplo de checagem.
+proibido '\.svelte|\.tsx|\.vue|pixel|screenshot|agent-browser|hangar-preview' \
+  'A skill e generica: isso e do plano (`## Projeto`, roteiro) ou da skill provar-tela.' -iE
 
 # 3. "Step" (maiusculo) nao enuncia mecanica em lugar nenhum — a camada de baixo se chama "step".
 proibido 'Step' \

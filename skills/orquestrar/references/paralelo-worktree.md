@@ -10,8 +10,8 @@
 ## The trigger — four conditions, all together
 
 - The planner audits them in phase 1, with the user, by exit-gate item 3 (`planejamento.md`):
-  files per Task × `git merge-tree`, output pasted; files from the steps' text, or from the repo
-  via subagent. A written declaration of independence does not replace the audit. The arbiter
+  `preparar-plano` runs files per Task × `git merge-tree`, files from the steps' text, and pastes
+  the output. A written declaration of independence does not replace the audit. The arbiter
   does not deduce it later.
 - New repo: audit condition 3 on the design (who creates what, who consumes), not on the disk.
 
@@ -26,8 +26,8 @@
 4. **Isolated verification.** Each Task's verification runs alone, in its worktree.
 
 - One fails → that Task goes to a later wave, after the Task it collides with.
-- No fixed wave size: the arbiter releases the whole wave while the team's accounts have quota;
-  the plan may set a lower `Lote máximo` with the user.
+- No wave larger than the plan's `Paralelo:`; the arbiter releases the whole wave while the
+  team's accounts have quota.
 - Trigger passed → the plan carries the setup below per worktree.
 
 ## What does not change
@@ -56,19 +56,12 @@ git worktree add /path/wt-t3 -b <work>-t3 "$BASE"
 ## The cost
 
 - Each worktree carries its own environment (dependencies installed per tree).
-- The port table per Task goes in the plan.
-- Each wave with visual proof declares its screen in the plan:
-  - `Tela: própria` — a browser per session (the Hangar desktop app's embedded browser, one per
-    session, or separate `agent-browser` sessions), each worktree serving on its own port: the
-    proofs run at once, with no lock.
-  - `Tela: compartilhada` — one window serves all (a native app on one display): the proofs
-    queue through `orq screen take`/`release` (`executor.md`).
-  - The executor checks the tab before every capture regardless (`executor-visual.md`,
-    "3. Capture").
-- A global device resource (the device, its port forwarding, the app's storage) is a critical
-  section: forwarding redone right before every capture; executors may negotiate time slots among
-  themselves; whoever holds releases before closing their own work; the arbiter checks who holds
-  what whenever a session idles with no apparent reason.
+- A resource each worktree needs its own copy of (a port, a data directory) goes in the plan,
+  per Task.
+- A resource the worktrees share (a device, a display, an external account) is a critical
+  section: the roteiro takes `orq lock take <resource>` before using it and releases it after
+  (`executor.md`); whoever holds releases before closing their own work; the arbiter checks who
+  holds what whenever a session idles with no apparent reason.
 - Shared additive file (i18n catalog, exports index): the plan writes the insertion discipline —
   each Task in its own block, in a declared order, never at the end.
 - Git hooks are shared: a worktree never runs `git merge main`; the arbiter integrates in the main
@@ -80,7 +73,7 @@ One branch at a time, only after that Task's `APROVA`:
 
 ```bash
 git merge --no-ff <work>-t2
-# the merged Tasks' verifications, here, now
+# the plan's `Integração:` commands, here, now
 ```
 
 - Merge conflict → the regions overlapped. Don't resolve it yourself: the losing Task gets a
@@ -88,7 +81,7 @@ git merge --no-ff <work>-t2
   approved diff as reference, only its own region redone. Exception: a positional conflict in a
   file the plan declared additive — resolve it at the merge by merge strategy and prove it by
   content (key counts on each side before and after, zero values changed).
-- The merged Tasks' verifications after each merge. Red → back to that Task's executor even
+- The plan's `Integração:` after each merge. Red → back to that Task's executor even
   with its isolated `APROVA`: fix on the main line, reviewer judges before the commit — dirty
   tree, frozen round, `APROVA`, then the commit.
 - While any round is open on the main line (a post-merge fix, or a serial Task beside the batch),
