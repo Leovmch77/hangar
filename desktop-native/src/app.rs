@@ -40,7 +40,7 @@ mod subagent;
 mod dictation;
 mod sync;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -435,7 +435,7 @@ impl Hangar {
         cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, Some("!Terminal")), KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")),
             KeyBinding::new("ctrl-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("ctrl-f", FocusSettingsSearch, Some("!Terminal")),
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
-            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal"))]);
+            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -809,6 +809,32 @@ impl Hangar {
         }
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
+        cx.notify();
+    }
+
+    /// Volta à tela sem sessão, a da nova conversa. O rascunho da sessão fica guardado como na troca de sessão.
+    pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
+        if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
+        if self.selected.is_some() {
+            self.close_terminal(false, window, cx);
+            if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+            self.selection += 1;
+            if let Some(task) = self.session_task.take() { task.abort(); }
+            if let Some(task) = self.history_task.take() { task.abort(); }
+            self.selected = None;
+            self.chat = Chat::default();
+            self.turn_seen = None;
+            self.reset_details();
+            self.cancel_preview_drop();
+            self.clear_visible_preview();
+            self.error = None;
+            self.loading = false;
+            self.chat_online = false;
+            self.close_popups();
+            self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -3573,6 +3599,15 @@ impl Hangar {
                 .child(chrome::hangar_mark(16., theme::accent()))
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
                 .child(div().px_2().py(px(1.)).rounded_full().bg(theme::hover()).text_size(px(10.)).text_color(theme::faint()).child(tr("experimental"))))
+            // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
+            .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).child(Button::new("sidebar-new-chat").ghost().w_full().h(px(32.)).px(px(8.))
+                .rounded(px(7.)).selected(self.new_chat_screen()).disabled(self.api.is_none()).accessibility_label(tr("new_chat_title"))
+                .child(div().w_full().flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
+                    .child(chrome::small_icon(IconName::SquarePen, 16., theme::muted()))
+                    .child(div().flex_1().min_w_0().truncate().child(tr("new_chat_title")))
+                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window)
+                        .map(|key| popup::key_hint("").child(key.appearance(false)))))
+                .on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))))
             .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).mb(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
                 .child(chrome::small_icon(IconName::Server, 16., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(tr("sidebar_all_sessions")))
@@ -3669,6 +3704,8 @@ impl Hangar {
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .child(strip)
+            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen())
+                .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
             .child(self.new_session_button(true, cx))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
                 .child(div().min_w_0().truncate().text_xs().text_color(theme::warning()).child(text))
@@ -4420,6 +4457,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();
