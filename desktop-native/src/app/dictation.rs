@@ -217,7 +217,7 @@ impl Hangar {
             self.composer.update(cx, |input, cx| input.focus(window, cx));
             return;
         }
-        if self.connection_dialog || self.settings.is_some() || self.new_chat.is_some() || window.has_active_dialog(cx) { return; }
+        if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
         if self.selected_key().is_none() || !self.chat_online || !self.history_installed { return; }
         self.dictation.cancel();
         match Recorder::start() {
