@@ -403,6 +403,16 @@ Validado ao vivo: resposta de 4574 caracteres lida inteira do buffer, sem buffer
   the Windows shell wrapper (`scripts/shell/claude.ps1`); the POSIX wrappers are untouched. The
   fallback everywhere else already reads absence as `~/.claude` (hooks, sidecars, `projects/`), so
   nothing else moves.
+- **Superseded on POSIX (2026-09-27).** The "always `-e` in tmux" half split the default account in
+  two: terminal-opened Claude went through the wrapper, which since `51ea3f7d` unsets the variable,
+  and read `~/.claude.json` (168 KB, hangar MCP, trusted folders, history). App and
+  `hangar-send --new` sessions got `-e CLAUDE_CONFIG_DIR=~/.claude` and read
+  `~/.claude/.claude.json` (96 KB, no hangar MCP). Now the default account never becomes `-e` in
+  tmux either; the server leak is blocked by `exec env -u CLAUDE_CONFIG_DIR <command>`. Measured
+  on an isolated tmux server started with `CLAUDE_CONFIG_DIR=/tmp/conta-vazada`: a pane without
+  protection printed `[/tmp/conta-vazada]`, and with `env -u` it printed `[]` (under zsh and under
+  fish). Only the hidden login shell keeps the explicit `-e` in tmux: it has no command to carry the
+  `env -u`.
 
 ## Windows-only trap in the installer: encoding is per interpreter, and ASCII is never the answer.
 

@@ -234,12 +234,15 @@ def test_nav_hook_entra_no_user_prompt_submit(tmp_path, monkeypatch):
 NAV_HOOK = Path(__file__).parent.parent / "hooks" / "nav_hook.py"
 
 
-def _roda_nav_hook(home: Path, pane: str | None = None) -> str:
+def _roda_nav_hook(home: Path, pane: str | None = None,
+                   prompt: str = "abre a página de login no localhost") -> str:
+    # Sem navegador aberto, a dica só vai em mensagem de tela; sem chave do Jev, a regex decide.
     env = {**os.environ, "HOME": str(home)}
     env.pop("TMUX_PANE", None)
+    env.pop("TYPESAFE_API_KEY", None)
     if pane:
         env["TMUX_PANE"] = pane
-    r = subprocess.run([sys.executable, str(NAV_HOOK)], input="{}", text=True,
+    r = subprocess.run([sys.executable, str(NAV_HOOK)], input=json.dumps({"prompt": prompt}), text=True,
                        capture_output=True, env=env)
     assert r.returncode == 0
     return r.stdout

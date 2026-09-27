@@ -63,3 +63,20 @@ def test_jev_decide_antes_da_regex_e_regex_vale_quando_ele_falha(monkeypatch):
     assert mod.precisa_de_navegador("abre a página de login") is True
     assert mod.precisa_de_navegador("faz o commit") is False
     assert mod.precisa_de_navegador("") is False
+
+
+def test_regex_ignora_palavra_comum_de_codigo(monkeypatch):
+    mod = carregar()
+    monkeypatch.setattr(mod, "_jev_precisa", lambda p: None)
+    assert mod.precisa_de_navegador("roda os testes do backend") is False
+    assert mod.precisa_de_navegador("a interface do adapter mudou") is False
+    assert mod.precisa_de_navegador("o teste do login quebrou") is False
+    assert mod.precisa_de_navegador("testa o login") is True
+
+
+def test_notificacao_de_subagente_nao_recebe_a_dica(tmp_path, monkeypatch, capsys):
+    # Nem com o navegador aberto: ninguem escreveu a notificacao pedindo tela.
+    preparar(tmp_path, monkeypatch, url="http://x",
+             prompt="<task-notification>\n<summary>testa a tela do front</summary>")
+    carregar().main()
+    assert capsys.readouterr().out == ""

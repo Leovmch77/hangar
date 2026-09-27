@@ -609,20 +609,34 @@ def _e_config_dir(cfg: str) -> list[str]:
     method", escolher tema) com a credencial intacta, e lia o settings.json da pasta errada junto
     (o fullscreen da TUI sumia com ele).
 
+    No tmux o valor padrao tambem fica de fora: o vazamento do servidor e barrado por
+    `env -u CLAUDE_CONFIG_DIR` no comando do pane (`_prefixo_sem_config_dir`), a mesma saida do
+    wrapper do terminal. Com o `-e` o app lia `~/.claude/.claude.json` e o terminal
+    `~/.claude.json`: MCP, pastas confiaveis e historico divididos entre os dois.
+
     Duas guardas ficam de pe:
       - valor DIFERENTE do padrao (conta escolhida) -> vai sempre, nos dois sistemas: e o unico
         jeito de a conta chegar no pane.
       - backend com `CLAUDE_CONFIG_DIR` proprio -> vai sempre, mesmo quando o valor e o padrao:
         como o pane herda o ambiente do backend, omitir aqui NAO apaga a variavel de la, e mandar
         explicito e o que garante que valeu o valor pedido. Canto assumido: backend na contaB mais
-        escolha EXPLICITA da conta padrao no Windows manda `=~/.claude` e a sessao volta a nascer
-        na tela de boas-vindas — conta certa vale mais que tela de boas-vindas.
+        escolha EXPLICITA da conta padrao manda `=~/.claude` e a sessao le o `.claude.json` de
+        dentro dele — conta certa vale mais que o arquivo certo.
     """
-    if not _pane_herda_env_do_chamador():
-        return ["-e", f"CLAUDE_CONFIG_DIR={cfg}"]
     if os.environ.get("CLAUDE_CONFIG_DIR") or not _mesmo_dir(cfg, _config_dir_padrao()):
         return ["-e", f"CLAUDE_CONFIG_DIR={cfg}"]
     return []
+
+
+def _prefixo_sem_config_dir(cfg: str) -> str:
+    """`env -u CLAUDE_CONFIG_DIR ` quando o pane do tmux nasce sem o `-e` da conta.
+
+    Sem `-e`, o pane herdaria a variavel do SERVIDOR tmux (de quem o subiu), e a sessao nasceria
+    na conta de outra, calada. Tirar no proprio comando mantem a conta padrao como AUSENCIA da
+    variavel. No psmux nada vaza do servidor, entao nao precisa."""
+    if _pane_herda_env_do_chamador() or _e_config_dir(cfg):
+        return ""
+    return "env -u CLAUDE_CONFIG_DIR "
 
 
 def config_dir_de(config_dir: str | None) -> str:
@@ -637,7 +651,9 @@ def claude_json_de(config_dir: str | None) -> Path:
     Nao e derivavel do config dir sozinho: com `CLAUDE_CONFIG_DIR` ausente o CLI le o da HOME, e
     com ela setada le o de DENTRO do config dir — dois arquivos diferentes (ver
     `_config_dir_padrao`). Quem decide se a variavel chega ao pane e o `_e_config_dir`, entao a
-    resposta vem dele, nunca de uma segunda copia da regra. Sem isso o pre-trust da pasta escrevia
+    resposta vem dele, nunca de uma segunda copia da regra. Excecao: a janela escondida de login
+    (`new_hidden_shell`) manda a pasta padrao por `-e` no tmux; ela morre logo depois do login e
+    ninguem le o `.claude.json` de dentro dela. Sem isso o pre-trust da pasta escrevia
     no `~/.claude.json` enquanto o pane lia `~/.claude/.claude.json`, e a sessao nova nascia presa
     no "trust this folder?".
     """
@@ -655,18 +671,15 @@ def new_session(name: str, cwd: str, command: str, config_dir: str | None = None
     # Ver docs/tmux-truecolor-setup.md.
     # Retorna False quando o tmux recusa (ex: nome duplicado) -> o caller NAO pode mapear a sessao
     # nova pra um jsonl, senao reusaria a sessao existente de mesmo nome (= "sessao nova foi pra 0").
-    # Padrao EXPLICITO, nunca string vazia — e, no tmux, nunca "sem -e": o ambiente do pane e o
-    # global do SERVIDOR tmux somado ao da sessao, e o global vem de quem subiu o servidor. Se foi
-    # um `claude-conta contaA`, toda sessao aberta depois SEM -e nasce na contaA, calada —
-    # exatamente a troca silenciosa de conta que esta feature existe pra impedir. Reproduzido:
+    # Padrao EXPLICITO, nunca string vazia: viraria config dir "" e cada leitor decide se trata
+    # como ausente. No tmux o pane herda o global do SERVIDOR, e o global vem de quem subiu o
+    # servidor: se foi um `claude-conta contaA`, sessao aberta sem defesa nasce na contaA, calada.
+    # Reproduzido:
     #   CLAUDE_CONFIG_DIR=/tmp/conta-a tmux -L t new-session -d -s um 'sleep 30'
     #   env -u CLAUDE_CONFIG_DIR tmux -L t new-session -d -s dois 'sh -c "echo $CLAUDE_CONFIG_DIR"'
     #   -> /tmp/conta-a
-    # String vazia nao serve de padrao: viraria config dir "" e cada leitor decide se trata como
-    # ausente. O wrapper do shell (scripts/shell/claude.posix.sh) usa a MESMA regra.
-    # QUANDO esse valor vira `-e` e decisao do `_e_config_dir`: no psmux o pane herda o ambiente do
-    # chamador, entao la o `-e` com o valor PADRAO nao defende de vazamento nenhum e ainda joga a
-    # sessao no `.claude.json` errado (a tela de boas-vindas). O valor calculado aqui nao muda.
+    # A defesa: conta escolhida vai por `-e` (`_e_config_dir`); a padrao sai com `env -u` no
+    # comando (`_prefixo_sem_config_dir`), igual ao wrapper scripts/shell/claude.posix.sh.
     cfg = config_dir_de(config_dir)
     # CP_SESSION_NAME: identidade CARIMBADA no nascimento — "quem sou eu" pra tudo que roda dentro do
     # pane (o hangar-send usa pra assinar recado, parear e desparear). Antes o hangar-send perguntava
@@ -698,9 +711,8 @@ def new_session(name: str, cwd: str, command: str, config_dir: str | None = None
         args += ["-e", f"WAYLAND_DISPLAY={wl}"]
     for chave, valor in (env or {}).items():
         args += ["-e", f"{chave}={valor}"]
-    # Config dir escolhido (ou o do backend, ou o padrao). NAO e um `-e` incondicional: no psmux
-    # exportar o valor PADRAO e o proprio bug — `_e_config_dir` explica, com a medicao. No POSIX a
-    # lista sai byte por byte igual a de antes.
+    # Config dir escolhido (ou o do backend). O valor PADRAO nao vira `-e`: exporta-lo troca o
+    # `.claude.json` que a sessao le — `_e_config_dir` explica, com a medicao.
     args += _e_config_dir(cfg)
     # `exec`: o tmux SEMPRE roda o comando via `$SHELL -c` (fish aqui). Sem exec, o fish fica como
     # dono do tty/grupo de foreground e o `send-keys` (input do app) NAO chega no claude -> ele
@@ -708,7 +720,7 @@ def new_session(name: str, cwd: str, command: str, config_dir: str | None = None
     # SO no POSIX: o psmux (Windows) roda o comando direto no ConPTY, sem shell no meio, e o
     # `exec` viraria um argumento que nenhum shell do Windows conhece — o pane nasce e morre na
     # hora, com o new-session ainda devolvendo 0, ou seja, o app reportaria sessao criada.
-    args.append(f"exec {command}" if os.name == "posix" else command)
+    args.append(f"exec {_prefixo_sem_config_dir(cfg)}{command}" if os.name == "posix" else command)
     ok = _run(args).returncode == 0
     if ok:
         # Servidor tmux reiniciado zera o contador de `%N`: uma sessao recriada com o MESMO nome
@@ -790,7 +802,10 @@ def new_hidden_shell(name: str, cwd: str, config_dir: str | None = None) -> str 
     if not has_session(alvo):
         args = [*_scope_prefix(), "tmux", "new-session", "-d", "-s", alvo, "-c", cwd]
         if config_dir:
-            args += _e_config_dir(config_dir)
+            # O shell nao tem comando onde por o `env -u`: no tmux o `-e` segue explicito, senao o
+            # `claude auth login` digitado aqui podia gravar na conta que o servidor herdou.
+            args += _e_config_dir(config_dir) or (
+                [] if _pane_herda_env_do_chamador() else ["-e", f"CLAUDE_CONFIG_DIR={config_dir}"])
         cp = _run(args)
         if cp.returncode != 0:
             return alvo if has_session(alvo) else None

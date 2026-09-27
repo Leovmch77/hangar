@@ -295,24 +295,33 @@ def _valores_de_config_dir(args):
     return [a for a in args if str(a).startswith("CLAUDE_CONFIG_DIR=")]
 
 
-def test_new_session_sempre_manda_config_dir_no_tmux(monkeypatch, tmp_path):
-    """No TMUX, SEM config_dir e SEM a variavel, o -e tem que sair mesmo assim, com o ~/.claude
-    explicito — e este caso e o que prende o comportamento do Linux, byte por byte.
-
-    O ambiente do pane e o global do SERVIDOR tmux somado ao da sessao, e o global vem de quem
-    subiu o servidor. Se foi um `claude-conta contaA`, uma sessao aberta depois sem -e nasce na
-    contaA em silencio — a troca de conta que esta feature existe pra impedir. Reproduzido a mao:
+@pytest.mark.skipif(os.name != "posix", reason="o `exec` com o prefixo so existe no comando POSIX")
+def test_new_session_conta_padrao_no_tmux_sai_sem_a_variavel(monkeypatch, tmp_path):
+    """No TMUX, conta padrao = AUSENCIA da variavel, como no wrapper do terminal: sem `-e` (que
+    faria o CLI ler `~/.claude/.claude.json` em vez de `~/.claude.json`) e com `env -u` no comando,
+    que barra a variavel herdada do SERVIDOR tmux. Reproduzido a mao, o vazamento que o `env -u`
+    impede:
         CLAUDE_CONFIG_DIR=/tmp/conta-a tmux -L t new-session -d -s um 'sleep 30'
         env -u CLAUDE_CONFIG_DIR tmux -L t new-session -d -s dois 'sh -c "echo $CLAUDE_CONFIG_DIR"'
         -> /tmp/conta-a
     """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    padrao = _casa_home(monkeypatch, tmp_path)
+    _casa_home(monkeypatch, tmp_path)
     monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
-    # `tmp_path / ".claude"` e nao um f-string com `/`: o tmux.py monta o valor com
-    # `str(Path.home() / ".claude")`, que no Windows sai com `\`. No Linux o resultado e
-    # identico ao de antes — o caso continua valendo nos dois sistemas em vez de virar skip.
-    assert f"CLAUDE_CONFIG_DIR={padrao}" in _args_de_new_session(monkeypatch)
+    args = _args_de_new_session(monkeypatch)
+    assert _valores_de_config_dir(args) == []
+    assert args[-1] == "exec env -u CLAUDE_CONFIG_DIR claude --session-id x"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o `exec` com o prefixo so existe no comando POSIX")
+def test_new_session_conta_escolhida_no_tmux_vai_por_e_sem_env_u(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    _casa_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
+    conta = str(tmp_path / ".claude-work")
+    args = _args_de_new_session(monkeypatch, config_dir=conta)
+    assert f"CLAUDE_CONFIG_DIR={conta}" in args
+    assert args[-1] == "exec claude --session-id x"
 
 
 def test_new_session_omite_config_dir_padrao_no_psmux(monkeypatch, tmp_path):
@@ -369,14 +378,13 @@ def test_claude_json_de_segue_o_mesmo_e_config_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     padrao = _casa_home(monkeypatch, tmp_path)
     conta = str(tmp_path / ".claude-work")
-    # tmux: o -e vai sempre -> o pane le o de dentro do config dir, padrao incluido.
-    monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
-    assert tmux.claude_json_de(None) == padrao / ".claude.json"
-    assert tmux.claude_json_de(conta) == Path(conta) / ".claude.json"
-    # psmux: com o valor padrao o -e e OMITIDO (a variavel nao chega) -> o pane le o da HOME.
-    monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: True)
-    assert tmux.claude_json_de(None) == tmp_path / ".claude.json"
-    assert tmux.claude_json_de(conta) == Path(conta) / ".claude.json"
+    # Nos dois multiplexadores o valor padrao nao vira -e (a variavel nao chega) -> o pane le o da
+    # HOME; conta escolhida chega e le o de dentro dela.
+    for herda in (False, True):
+        monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda h=herda: h)
+        assert tmux.claude_json_de(None) == tmp_path / ".claude.json"
+        assert tmux.claude_json_de(str(padrao)) == tmp_path / ".claude.json"
+        assert tmux.claude_json_de(conta) == Path(conta) / ".claude.json"
 
 
 def test_pretrust_escreve_no_json_que_a_sessao_vai_ler(monkeypatch, tmp_path):
@@ -388,9 +396,9 @@ def test_pretrust_escreve_no_json_que_a_sessao_vai_ler(monkeypatch, tmp_path):
     padrao.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
     registry._pretrust_cwd("/tmp/pasta-nova", None)
-    lido = json.loads((padrao / ".claude.json").read_text(encoding="utf-8"))
+    lido = json.loads((tmp_path / ".claude.json").read_text(encoding="utf-8"))
     assert lido["projects"]["/tmp/pasta-nova"]["hasTrustDialogAccepted"] is True
-    assert not (tmp_path / ".claude.json").exists()
+    assert not (padrao / ".claude.json").exists()
 
 
 def test_new_hidden_shell_segue_a_mesma_regra_do_config_dir(monkeypatch, tmp_path):
@@ -420,6 +428,13 @@ def test_new_hidden_shell_segue_a_mesma_regra_do_config_dir(monkeypatch, tmp_pat
     with patch.object(tmux, "RUN", _run_falso):
         tmux.new_hidden_shell("s", "/tmp", config_dir=conta)
     assert f"CLAUDE_CONFIG_DIR={conta}" in capturado[-1]
+
+    # No tmux o shell nao tem comando pra levar o `env -u`: a pasta padrao segue explicita.
+    capturado.clear()
+    monkeypatch.setattr(tmux, "_pane_herda_env_do_chamador", lambda: False)
+    with patch.object(tmux, "RUN", _run_falso):
+        tmux.new_hidden_shell("s", "/tmp", config_dir=str(padrao))
+    assert f"CLAUDE_CONFIG_DIR={padrao}" in capturado[-1]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="systemd-run so existe no POSIX; no Windows _scope_prefix devolve [] sem olhar o env")
@@ -474,12 +489,14 @@ def test_new_session_skips_wayland_without_socket(monkeypatch, tmp_path):
 @pytest.mark.skipif(os.name != "posix", reason="o `exec` e so do POSIX: no psmux o comando roda direto no ConPTY, sem shell no meio")
 def test_new_session_execs_command_so_claude_owns_tty(monkeypatch):
     # O comando vai prefixado com `exec`: o tmux roda via `fish -c`, e sem exec o fish ficaria como
-    # dono do tty e o send-keys nao chegaria no claude. Com exec, o fish vira o claude.
+    # dono do tty e o send-keys nao chegaria no claude. Com exec, o fish vira o claude (o `env` do
+    # prefixo da conta padrao tambem so faz exec, sem ficar no meio).
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     captured = {}
     with patch.object(tmux, "RUN", lambda args, **k: (captured.update(args=args) or _CP())):
         tmux.new_session("s", "/tmp", "claude --session-id x")
-    assert captured["args"][-1] == "exec claude --session-id x"
+    assert captured["args"][-1].startswith("exec ")
+    assert captured["args"][-1].endswith("claude --session-id x")
 
 
 # --- scrollback real vs tela alternada ------------------------------------------------------
