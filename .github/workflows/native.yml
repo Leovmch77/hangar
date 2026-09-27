@@ -133,14 +133,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(jq -r .version out/native-latest.json)
-          notes="Build $version ($GITHUB_SHA). Linux: download desta versão."
+          notes="Versão $version ($GITHUB_SHA). Linux: arquivo desta versão."
           for spec in 'Windows:Hangar-windows-x86_64.exe' 'macOS:Hangar-macos-aarch64'; do
             platform=${spec%%:*}
             file=${spec#*:}
             if test -f "out/$file"; then
-              notes+=$'\n'"$platform: download desta versão."
+              notes+=$'\n'"$platform: arquivo desta versão."
             else
-              notes+=$'\n'"$platform: o build falhou; se houver download nesta página, é de uma publicação anterior. Não corresponde ao manifesto desta versão."
+              notes+=$'\n'"$platform: a compilação falhou; se houver arquivo nesta página, é de uma publicação anterior. Não corresponde ao manifesto desta versão."
             fi
           done
           gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
