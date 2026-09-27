@@ -144,8 +144,17 @@ impl Hangar {
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn_blocking(move || { let _ = done.send(crate::electron::load(base).map(|imported| imported.servers)); });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(list)) = result.await else { return };
-            let _ = this.update(cx, |this, cx| { this.merge_servers(list); cx.notify(); });
+            let result = result.await.unwrap_or_else(|_| Err(crate::electron::Failure::Read(tr("electron_import_stopped"))));
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(list) => this.merge_servers(list),
+                    // Sem app Electron neste computador não há o que adotar.
+                    Err(crate::electron::Failure::Missing) => {}
+                    Err(crate::electron::Failure::Read(reason)) => window.push_notification(
+                        Notification::warning(tr("electron_import_failed").replace("{reason}", &reason)), cx),
+                }
+                cx.notify();
+            });
         }).detach();
     }
 

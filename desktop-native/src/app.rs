@@ -719,6 +719,8 @@ impl Hangar {
         let api = match Api::new(&address, &token) {
             Ok(api) => api,
             Err(error) => {
+                // A sessão de outra máquina que pediu esta troca não abre mais tarde no servidor que ficou.
+                self.pending_open = None;
                 self.error = Some(Self::failure(&error));
                 self.address.update(cx, |input, cx| input.focus(window, cx));
                 cx.notify();
@@ -730,13 +732,13 @@ impl Hangar {
         if let Some(key) = self.selected_key() { self.drafts.insert(key, self.composer.read(cx).value().to_string()); }
         // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
         let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
-            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online));
+            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone()));
         self.drop_connection(window, cx);
         self.active_token = token;
         self.api = Some(api.clone());
         self.server = Some(api.identity());
-        if let Some((key, sessions, online)) = previous {
-            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error: None });
+        if let Some((key, sessions, online, error)) = previous {
+            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error });
         }
         self.start_remote_lists();
         self.connection_dialog = false;
