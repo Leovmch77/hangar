@@ -472,7 +472,8 @@ def record_check(d: Path, task: int, commit: str, ok: bool, log: str) -> None:
 
 def check_ok(d: Path, task: int, commit: str) -> bool:
     p = d / "checks.jsonl"
-    if not p.exists():
+    # An empty prefix would match every recorded commit of the Task.
+    if not commit or not p.exists():
         return False
     last = None
     for line in p.read_text(encoding="utf-8").splitlines():
@@ -480,7 +481,8 @@ def check_ok(d: Path, task: int, commit: str) -> bool:
             c = json.loads(line)
         except ValueError:
             continue
-        if c.get("task") == task and (c.get("commit", "").startswith(commit) or commit.startswith(c.get("commit", "-"))):
+        got = c.get("commit") or ""
+        if c.get("task") == task and got and (got.startswith(commit) or commit.startswith(got)):
             last = c
     return bool(last and last.get("ok"))
 
@@ -615,10 +617,13 @@ def cmd_event(a) -> int:
             ev[k] = v
     if a.reincide:
         ev["reincide"] = True
-    if (ev.get("tipo") == "entrega" and ev.get("fase") != "prova"
-            and plan_of(d).get("checagens") and not check_ok(d, ev.get("task"), ev.get("commit") or "")):
-        raise OrqError(f"run `orq check --task {ev.get('task')} --commit {ev.get('commit') or '<stash>'}` "
-                       "first: the plan declares checks and none passed on this object")
+    if ev.get("tipo") == "entrega" and ev.get("fase") != "prova" and plan_of(d).get("checagens"):
+        if not ev.get("commit"):
+            raise OrqError("the plan declares checks: deliver with `--commit <stash>`, the object "
+                           f"`orq check --task {ev.get('task')}` passed on")
+        if not check_ok(d, ev.get("task"), ev["commit"]):
+            raise OrqError(f"run `orq check --task {ev.get('task')} --commit {ev['commit']}` "
+                           "first: the plan declares checks and none passed on this object")
     if ev.get("tipo") == "entrega" and ev.get("fase") == "prova":
         ok = _code_approved_object(d, ev.get("task"))
         got = ev.get("commit") or ""

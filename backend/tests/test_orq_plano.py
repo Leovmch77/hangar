@@ -147,10 +147,20 @@ def test_entrega_sem_check_e_recusada_e_com_check_passa(tmp_path, repo):
     d, e, _ = iniciar(tmp_path, r)
     h = congelar(r, g)
     res = run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e, check=False)
-    assert res.returncode == 2 and "orq check --task 1" in res.stderr
+    assert res.returncode == 2 and f"run `orq check --task 1 --commit {h}` first" in res.stderr
     out = run("check", "--task", "1", "--commit", h, env=e).stdout
     assert out.startswith("check T1 ok 1/1")
     run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+
+
+def test_entrega_sem_commit_nao_herda_check_de_outra_rodada(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+    res = run("event", "entrega", "--task", "1", "--rodada", "2", env=e, check=False)
+    assert res.returncode == 2 and "--commit <stash>" in res.stderr
 
 
 def test_check_recusa_arvore_diferente_do_objeto(tmp_path, repo):
@@ -172,7 +182,7 @@ def test_checagem_que_falha_nao_libera_entrega(tmp_path, repo):
     res = run("check", "--task", "1", "--commit", h, env=e, check=False)
     assert res.returncode == 1 and "check failed" in res.stdout
     res = run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e, check=False)
-    assert res.returncode == 2
+    assert res.returncode == 2 and "none passed on this object" in res.stderr
 
 
 def test_execucao_sem_plano_entrega_sem_check(tmp_path, repo):
