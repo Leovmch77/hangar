@@ -1,5 +1,7 @@
-"""nav_hook: a dica genérica do navegador não entra em sessão sem terminal; a URL aberta entra."""
+"""nav_hook: com navegador aberto diz a página; fechado, a dica só vai em mensagem de tela (Jev
+primeiro, regex sem ele), com ou sem terminal."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -14,34 +16,50 @@ def carregar():
     return mod
 
 
-def preparar(tmp_path, monkeypatch, headless: bool, url: str | None):
+def preparar(tmp_path, monkeypatch, url: str | None, prompt: str = "", headless: bool = False):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     nav = tmp_path / ".hangar" / "nav"; nav.mkdir(parents=True)
     (nav / "_srv.json").write_text(json.dumps({"pid": os.getpid()}))
     if url:
         (nav / "s.json").write_text(json.dumps({"chave": "s", "url": url}))
     monkeypatch.delenv("TMUX_PANE", raising=False)
-    if headless:
+    monkeypatch.delenv("CP_SESSION_KEY", raising=False)
+    if headless or url:
         pasta = tmp_path / ".hangar" / "claude-headless"; pasta.mkdir(parents=True)
         (pasta / "s.json").write_text(json.dumps({"key": "k1", "name": "s"}))
         monkeypatch.setenv("CP_SESSION_KEY", "k1")
-    else:
-        monkeypatch.delenv("CP_SESSION_KEY", raising=False)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"prompt": prompt})))
 
 
-def test_sem_terminal_sem_navegador_aberto_nao_diz_nada(tmp_path, monkeypatch, capsys):
-    preparar(tmp_path, monkeypatch, headless=True, url=None)
+def test_mensagem_que_nao_e_de_tela_nao_leva_dica(tmp_path, monkeypatch, capsys):
+    preparar(tmp_path, monkeypatch, url=None, prompt="faz o commit e roda os testes do backend")
     carregar().main()
     assert capsys.readouterr().out == ""
 
 
-def test_sem_terminal_com_navegador_aberto_diz_a_url(tmp_path, monkeypatch, capsys):
-    preparar(tmp_path, monkeypatch, headless=True, url="http://x")
+def test_mensagem_de_tela_leva_dica_com_as_tools_do_mcp(tmp_path, monkeypatch, capsys):
+    for headless in (False, True):
+        preparar(tmp_path / str(headless), monkeypatch, url=None, headless=headless,
+                 prompt="abre a página de login e vê se o botão aparece")
+        carregar().main()
+        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "browser_open" in ctx and "Não use agent-browser" in ctx, headless
+
+
+def test_navegador_aberto_sempre_diz_a_url(tmp_path, monkeypatch, capsys):
+    preparar(tmp_path, monkeypatch, url="http://x", prompt="faz o commit")
     carregar().main()
     assert "http://x" in capsys.readouterr().out
 
 
-def test_terminal_session_without_open_browser_keeps_generic_hint(tmp_path, monkeypatch, capsys):
-    preparar(tmp_path, monkeypatch, headless=False, url=None)
-    carregar().main()
-    assert "hangar-preview open <url>" in capsys.readouterr().out
+def test_jev_decide_antes_da_regex_e_regex_vale_quando_ele_falha(monkeypatch):
+    mod = carregar()
+    monkeypatch.setattr(mod, "_jev_precisa", lambda p: False)
+    assert mod.precisa_de_navegador("abre a página de login") is False
+    monkeypatch.setattr(mod, "_jev_precisa", lambda p: True)
+    assert mod.precisa_de_navegador("faz o commit") is True
+    monkeypatch.setattr(mod, "_jev_precisa", lambda p: None)
+    assert mod.precisa_de_navegador("abre a página de login") is True
+    assert mod.precisa_de_navegador("faz o commit") is False
+    assert mod.precisa_de_navegador("") is False
