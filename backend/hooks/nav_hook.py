@@ -115,6 +115,8 @@ def main() -> None:
         return
     nome = _nome_da_sessao()
     url = _url_do_navegador(nav_dir, nome) if nome else None
+    if url is None and _nome_headless():
+        return   # sem terminal ninguém abre navegador por conta; a dica só custava contexto a cada prompt
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                              "additionalContext": texto(url)}}))
 
