@@ -1549,6 +1549,11 @@ impl Hangar {
         // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
         let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
         if current { self.select(session, window, cx); }
+        // Da tela sem sessão para a conversa: o compositor desce do meio da tela, onde estava, ao pé dela.
+        if compact && current && !cx.reduce_motion() {
+            let travel = popup::anchor_bounds("composer").map_or(0., |b| f32::from(window.viewport_size().height - b.bottom()) - 10.);
+            self.landing = Some((Instant::now(), travel.max(0.)));
+        }
         // O fechar devolveu o foco ao botão que abriu; a sessão nova é onde se escreve em seguida, como no clique na aba.
         if current && readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
         for note in notes { window.push_notification(Notification::info(note), cx); }
