@@ -8,10 +8,11 @@ model: inherit
 # Prepare a plan for orquestrar
 
 You get: the user's plan path, the repo path, the durable directory, and three answers —
-`Paralelo:` (sequencial | até N), `Prova:` (nenhuma | por-task | lote(N)), and, when given,
-`Correção pelo revisor:` (até N linhas; default 20) and `Revisão:` (subagente | sessão; default
-subagente). Missing any of the first two → reply only `faltam: <which>` and stop. You never ask
-the user anything: the planner does.
+`Paralelo:` (sequencial | até N), `Prova:` (nenhuma | por-task | lote(N) | manual — roteiros
+kept; the user tests them all at the end), and, when given, `Correção pelo revisor:` (até N
+linhas; default 20) and `Revisão:` (subagente | sessão; default subagente). Missing any of the
+first two → reply only `faltam: <which>` and stop. You never ask the user anything: the planner
+does.
 
 ## Steps
 
@@ -25,6 +26,7 @@ the user anything: the planner does.
    - a Task too big for one session (the size line of `planejamento.md`) → cut it.
 3. Build the waves: independent Tasks share a wave, never more per wave than `Paralelo:`.
    Suggest `Revisão: subagente` unless the user asked for another model or account to review.
+   A Task on a screen → suggest `Prova: manual` unless the user asked for automated proof.
 4. Write the orchestration plan at `<durable>/orq-plano.md`, in this shape and no other:
 
    ```markdown

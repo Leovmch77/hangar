@@ -271,3 +271,19 @@ def test_por_task_nao_enfileira(tmp_path, repo):
     d, e, _ = iniciar(tmp_path, r, projeto=PROJETO.replace("lote(2)", "por-task"))
     fechar(tmp_path, r, g, e, 2, "b.txt")
     assert not (d / "prova-fila.jsonl").exists()
+
+
+def test_prova_manual_guarda_roteiro_sem_anunciar_e_entrega_no_fim(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r, projeto=PROJETO.replace("lote(2)", "manual"))
+    fechar(tmp_path, r, g, e, 2, "b.txt")
+    fila = [json.loads(l) for l in (d / "prova-fila.jsonl").read_text().splitlines()]
+    assert [f["task"] for f in fila] == [2]
+    assert "Proof" not in log.read_text().splitlines()[-1]
+    out = run("batch", "take", env=e).stdout
+    assert out.startswith("lote 1: T2 ")
+
+
+def test_plan_check_aceita_manual_com_roteiro(tmp_path):
+    p = escrever(tmp_path, projeto=PROJETO.replace("lote(2)", "manual"))
+    assert "plan-check ok" in run("plan-check", str(p), "--repo", str(tmp_path)).stdout

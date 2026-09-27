@@ -413,7 +413,7 @@ def projeto(text: str) -> dict:
         if key in ("checagens", "integracao"):
             out[key] = re.findall(r"`([^`]+)`", v)
         elif key == "prova":
-            m = re.fullmatch(r"(nenhuma|por-task)|lote\((\d+)\)", v)
+            m = re.fullmatch(r"(nenhuma|por-task|manual)|lote\((\d+)\)", v)
             out[key] = ((m.group(1), 0) if m.group(1) else ("lote", int(m.group(2)))) if m else ("?", 0)
         elif key == "paralelo":
             m = re.fullmatch(r"sequencial|at[eé] (\d+)", v)
@@ -560,7 +560,7 @@ def cmd_plan_check(a) -> int:
         if pj[key] is None:
             problems.append(f"## Projeto: missing line '{label}:'")
     if pj["prova"] and pj["prova"][0] == "?":
-        problems.append("## Projeto: Prova must be nenhuma | por-task | lote(N)")
+        problems.append("## Projeto: Prova must be nenhuma | por-task | manual | lote(N)")
     if pj["paralelo"] == 0:
         problems.append("## Projeto: Paralelo must be sequencial | até N")
     if pj["revisao"] == "?":
@@ -980,10 +980,10 @@ def pending_proofs(d: Path) -> list[dict]:
 
 
 def _queue_proof(d: Path, task: int, full: str) -> str:
-    """Batch mode: the committed Task's proof waits in line; the text to add to the close notice."""
+    """lote/manual: the committed Task's proof waits in line; the text to add to the close notice."""
     pj = plan_of(d)
     prova = pj.get("prova")
-    if not prova or prova[0] != "lote":
+    if not prova or prova[0] not in ("lote", "manual"):
         return ""
     tasks = plan_tasks(plan_text(config(d)["plan"]))
     me = next((t for t in tasks if t["n"] == task), None)
@@ -993,6 +993,9 @@ def _queue_proof(d: Path, task: int, full: str) -> str:
     if me and me["roteiro"] and task not in queued:
         with fila.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": now(), "task": task, "roteiro": me["roteiro"], "hash": full}) + "\n")
+    # Manual: the arbiter takes the queue at the end, for the user's own test; nothing to announce.
+    if prova[0] == "manual":
+        return ""
     pend = pending_proofs(d)
     if not pend:
         return ""
