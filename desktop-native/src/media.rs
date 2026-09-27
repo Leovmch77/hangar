@@ -152,10 +152,12 @@ fn cost(state: &MediaState) -> usize {
 struct Entry { state: MediaState, seen: u64, drawn: bool }
 
 /// Cache das prévias com teto: sai primeiro a menos vista, nunca uma desenhada no último quadro.
-pub struct MediaCache<K> { map: HashMap<K, Entry>, bytes: usize, frame: u64 }
+pub struct MediaCache<K> { map: HashMap<K, Entry>, bytes: usize, frame: u64, budget: usize }
 
 impl<K: Eq + Hash + Clone + std::fmt::Debug> MediaCache<K> {
-    pub fn new() -> Self { Self { map: HashMap::new(), bytes: 0, frame: 0 } }
+    pub fn new() -> Self { Self::with_budget(BUDGET) }
+
+    pub fn with_budget(budget: usize) -> Self { Self { map: HashMap::new(), bytes: 0, frame: 0, budget } }
 
     /// Chamado no início de cada quadro; o que for lido depois conta como visível neste quadro.
     pub fn next_frame(&mut self) { self.frame += 1; }
@@ -179,7 +181,7 @@ impl<K: Eq + Hash + Clone + std::fmt::Debug> MediaCache<K> {
         self.bytes += cost(&state);
         if let Some(old) = self.map.insert(key, Entry { state, seen: self.frame, drawn: false }) { self.bytes -= cost(&old.state); }
         let mut evicted = Vec::new();
-        while self.bytes > BUDGET {
+        while self.bytes > self.budget {
             let Some(victim) = self.map.iter()
                 .filter(|(_, entry)| entry.seen < self.frame && !matches!(entry.state, MediaState::Loading))
                 .min_by_key(|(_, entry)| entry.seen).map(|(key, _)| key.clone()) else { break };

@@ -348,6 +348,7 @@ pub struct Hangar {
     terminal_suggestion: String,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
+    full_images: viewer::FullImages,
     stats: Option<Stats>,
     side: side::Side,
     controls: controls::Controls,
@@ -521,7 +522,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None,
             mention: Default::default(),
-            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), stats: None,
+            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -766,6 +767,7 @@ impl Hangar {
         self.rich.clear();
         // Resposta de imagem da conexão anterior é descartada no filtro; sem limpar, a prévia ficava em "Carregando".
         for image in self.media.clear() { cx.drop_image(image, Some(window)); }
+        for image in self.full_images.borrow_mut().clear() { cx.drop_image(image, Some(window)); }
         self.error = None;
         self.list_error = None;
         self.list_online = false;

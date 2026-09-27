@@ -58,6 +58,14 @@ fn zoom(view: View, image: (f32, f32), limit: (f32, f32), anchor: (f32, f32), fa
     clamp(View { scale, x: anchor.0 + dx - (anchor.0 - view.x) * ratio, y: anchor.1 + dy - (anchor.1 - view.y) * ratio }, image, after)
 }
 
+/// Imagens inteiras já abertas no visor, fora do atlas da GPU: reabrir a mesma não busca nem decodifica de novo.
+pub(super) type FullImages = std::rc::Rc<std::cell::RefCell<media::MediaCache<(SessionKey, Source)>>>;
+
+/// ponytail: ~8 capturas de tela de 1920×1080 decodificadas; sai a aberta há mais tempo. Subir se reabrir antigas pesar.
+const FULL_BUDGET: usize = 64 * 1024 * 1024;
+
+pub(super) fn full_images() -> FullImages { std::rc::Rc::new(std::cell::RefCell::new(media::MediaCache::with_budget(FULL_BUDGET))) }
+
 enum Shown { Loading, Image(Arc<RenderImage>), Failed(String) }
 
 pub(super) struct Viewer {
@@ -66,6 +74,7 @@ pub(super) struct Viewer {
     /// Anexos do cofre lidos do disco quando a sessão é desta máquina.
     uploads: super::disk::Uploads,
     runtime: Arc<Runtime>,
+    full: FullImages,
     key: SessionKey,
     sources: Vec<Source>,
     index: usize,
@@ -113,10 +122,27 @@ impl Viewer {
 
     fn stage_size(&self) -> Option<(f32, f32)> { self.limit.map(|limit| self.stage_box(limit)) }
 
-    /// A imagem inteira é buscada de novo aqui e solta ao trocar ou fechar: o cache da conversa guarda só miniaturas.
+    /// A imagem inteira sai do atlas ao trocar ou fechar, mas fica em `full`: reabrir é na hora. O cache da conversa
+    /// guarda só miniaturas.
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(window, cx);
         self.seq += 1;
+        let slot = (self.key.clone(), self.sources[self.index].clone());
+        let hit = {
+            let mut full = self.full.borrow_mut();
+            // Cada abertura é um "quadro": a que está à vista nunca é a expulsa.
+            full.next_frame();
+            match full.get(&slot) { Some(media::MediaState::Image(image)) => Some(image.clone()), _ => None }
+        };
+        if let Some(image) = hit {
+            media::trace(format_args!("viewer hit {:?}", slot.1));
+            if let Some(old) = self.fetching.take() { old.abort(); }
+            self._load = Task::ready(());
+            self.shown = Shown::Image(image);
+            self.view = self.image_size().zip(self.limit).map(|(image, limit)| fitted(image, limit));
+            cx.notify();
+            return;
+        }
         let (seq, api, name, source, uploads) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone(), self.uploads.clone());
         // ponytail: a decodificação do fundo reduz a 2560 px de lado; zoom além disso amplia pixels. Subir se incomodar.
         let job = self.runtime.spawn(async move {
@@ -135,7 +161,11 @@ impl Viewer {
                 if this.seq != seq { return; }
                 let name = source_name(&this.sources[this.index]);
                 this.shown = match result {
-                    Ok(Some(image)) => Shown::Image(image),
+                    Ok(Some(image)) => {
+                        let evicted = this.full.borrow_mut().insert(slot, media::MediaState::Image(image.clone()));
+                        for old in evicted { cx.drop_image(old, None); }
+                        Shown::Image(image)
+                    }
                     Ok(None) => Shown::Failed(tr("media_failed").replace("{name}", &name).replace("{reason}", &tr("media_unreadable"))),
                     Err(error) => Shown::Failed(tr("media_failed").replace("{name}", &name).replace("{reason}", &Hangar::fetch_failure(&error))),
                 };
@@ -294,7 +324,7 @@ impl Hangar {
     pub(super) fn open_image(&mut self, key: SessionKey, sources: Vec<Source>, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         if index >= sources.len() { return; }
-        let (hangar, runtime, uploads) = (cx.entity().downgrade(), self.runtime.clone(), self.uploads_for(&key));
+        let (hangar, runtime, uploads, full) = (cx.entity().downgrade(), self.runtime.clone(), self.uploads_for(&key), self.full_images.clone());
         let viewer = cx.new(|cx| {
             // Rede de segurança para um fechamento que não passe pelo `on_close`: a entidade morre com o diálogo.
             cx.on_release(|viewer: &mut Viewer, cx| {
@@ -302,7 +332,7 @@ impl Hangar {
                 if let Shown::Image(image) = &viewer.shown { cx.drop_image(image.clone(), None); }
             }).detach();
             Viewer {
-                hangar, api, uploads, runtime, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
+                hangar, api, uploads, runtime, full, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
                 focus: cx.focus_handle(), stage: None, limit: None, held: None, view: None, drag: None,
             }
         });
