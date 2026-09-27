@@ -372,10 +372,9 @@ impl Hangar {
         Some(format!("{}{count} · {label}", tr("loop")))
     }
 
-    fn render_context(&mut self, status: Option<&StatusFields>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_context(&mut self, status: Option<&StatusFields>, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let (provider, _) = self.provider();
         let provider = provider.to_owned();
-        // `.sec-agora` do web: o número grande do contexto à esquerda, o custo à direita, a barra embaixo.
         let pct = status.and_then(|s| s.ctx_pct);
         let used = status.and_then(|s| s.ctx_used).map(tokens);
         let total = status.and_then(|s| s.ctx_total).map(tokens);
@@ -399,32 +398,47 @@ impl Hangar {
                 Some((_, None, error)) => Some(("—".into(), error.clone())),
             }
         } else { status.and_then(|s| s.cost_usd).map(|usd| (self.money(usd), Some(tr("side_cost_session")))) };
-        let cost = cost.unwrap_or_else(|| ("—".into(), None));
         let mut line = Vec::new();
         if self.chat.state.state != "working" {
-            if let Some(at) = self.selected.as_ref().and_then(|s| s.last_activity) { line.push(tr("side_idle_for").replace("{t}", &ago(now_seconds() - at))); }
+            if let Some(at) = self.selected.as_ref().and_then(|s| s.last_activity) { line.push((tr("side_idle_for").replace("{t}", &ago(now_seconds() - at)), false)); }
         }
-        if let (Some(tin), Some(tout)) = (status.and_then(|s| s.turn_in), status.and_then(|s| s.turn_out)) {
-            line.push(tr("side_last_turn_line").replace("{in}", &tokens(tin)).replace("{out}", &tokens(tout)));
+        let (tin, tout) = (status.and_then(|s| s.turn_in), status.and_then(|s| s.turn_out));
+        if tin.is_some() || tout.is_some() {
+            line.push((tr("side_last_turn_line").replace("{in}", &tokens(tin.unwrap_or(0.))).replace("{out}", &tout.map(tokens).unwrap_or_else(|| "—".into())), true));
         }
-        if let Some(time) = status.and_then(|s| s.session_time.clone()) { line.push(tr("side_session_time_line").replace("{t}", &time)); }
-        // `.rsec` do mock: número grande e custo na mesma linha, barra, janela em tokens e a nota do custo embaixo.
-        let mut body = div().flex().flex_col()
-            .child(div().flex().items_baseline().justify_between().gap_3()
-                .child(div().whitespace_nowrap().text_size(px(30.)).font_weight(FontWeight::SEMIBOLD).text_color(pct_color)
-                    .child(pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| "—".into())))
-                .child(div().whitespace_nowrap().child(cost.0)));
-        body = match pct {
-            Some(p) => body.child(div().mt(px(8.)).mb(px(4.)).child(chrome::meter(p))),
-            None => body.child(div().mt(px(8.)).text_xs().text_color(theme::faint()).child(tr("side_ctx_unknown"))),
+        // `.sec-agora` do web: número de 44 px com "do contexto · usado de total" na mesma linha de base, custo à direita,
+        // barra larga, a linha do turno e as janelas de cota lado a lado, tudo num bloco só. Painel até 380 px segue a
+        // container query do web: legenda desce para a linha de baixo e as partes da linha do turno empilham.
+        let narrow = width <= 380.;
+        let number = div().flex_shrink_0().whitespace_nowrap().text_size(px(44.)).line_height(px(44.)).font_weight(FontWeight::SEMIBOLD).text_color(pct_color)
+            .child(pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| "—".into()));
+        let caption = div().min_w_0().flex().items_baseline().when(narrow, |el| el.flex_wrap()).text_xs().text_color(theme::faint())
+            .child(div().flex_shrink_0().whitespace_nowrap().child(tr("side_ctx_label")))
+            .when(!window_text.is_empty(), |el| el.child(div().min_w_0().when(!narrow, |el| el.truncate()).font_family(crate::theme::MONO).child(format!("\u{a0}· {window_text}"))));
+        let cost = cost.map(|(value, note)| div().flex_shrink_0().flex().flex_col().items_end()
+            .child(div().whitespace_nowrap().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(value))
+            .when_some(note, |el, note| el.child(div().max_w(px(180.)).truncate().text_size(px(11.)).text_color(theme::faint()).child(note))));
+        let top = if narrow {
+            div().mb_2().flex().flex_col().gap(px(2.))
+                .child(div().flex().items_start().justify_between().gap_2().child(number).children(cost))
+                .child(caption)
+        } else {
+            div().mb_2().flex().items_end().justify_between().gap_3()
+                .child(div().min_w_0().flex().items_baseline().gap_2().child(number).child(caption))
+                .children(cost)
         };
-        body = body.child(div().mt(px(4.)).flex().justify_between().gap_2().text_size(px(12.5)).text_color(theme::faint())
-            .child(div().flex_shrink_0().font_family(crate::theme::MONO).text_xs().child(if window_text.is_empty() { tr("side_ctx_label") } else { window_text }))
-            .when_some(cost.1, |el, note| el.child(div().min_w_0().truncate().text_right().child(note))));
+        let mut body = div().flex().flex_col().child(top);
+        body = match pct {
+            Some(p) => body.child(div().mt_3().child(chrome::meter(p))),
+            None => body.child(div().mt(px(3.)).text_xs().text_color(theme::faint()).child(tr("side_ctx_unknown"))),
+        };
         if !line.is_empty() {
-            body = body.child(div().mt_2().flex().flex_col().gap(px(2.)).text_size(px(11.)).text_color(theme::faint()).font_family(crate::theme::MONO)
-                .children(line.into_iter().map(|l| div().whitespace_nowrap().truncate().child(l))));
+            let texts = line.into_iter().map(|(text, mono)| div().min_w_0().when(!narrow, |el| el.truncate()).when(mono, |el| el.font_family(crate::theme::MONO)).child(text));
+            body = body.child(div().mt_2().flex().text_size(px(11.)).text_color(theme::faint())
+                .map(|el| if narrow { el.flex_col().gap(px(2.)) } else { el.items_baseline().justify_between().gap_2() })
+                .children(texts));
         }
+        body = body.children(self.render_limits(status).map(|limits| div().mt_4().child(limits)));
         let _ = cx;
         body.into_any_element()
     }
@@ -445,23 +459,25 @@ impl Hangar {
         let reset = self.chat.state.limit_reset.clone().or_else(|| self.selected.as_ref().and_then(|s| s.limit_reset.clone()));
         let windows: Vec<(String, f64, Option<String>)> = status.map(|s| [
             (tr("limit_5h"), s.five_hour_pct, s.five_hour_reset.clone()),
-            (tr("limit_7d"), s.weekly_pct, s.weekly_reset.clone()),
+            (tr("side_limit_7d"), s.weekly_pct, s.weekly_reset.clone()),
             (tr("limit_30d"), s.monthly_pct, s.monthly_reset.clone()),
         ].into_iter().filter_map(|(label, pct, reset)| Some((label, pct?, reset))).collect()).unwrap_or_default();
         if !limited && windows.is_empty() { return None; }
-        // "Cota da conta" do mock: janela e número na linha, barra embaixo, "reseta" em cinza por último.
-        Some(div().flex().flex_col().gap(px(8.))
-            .child(chrome::section_label(tr("side_quota")))
+        // `RateChips variant="bars"` do web: janelas lado a lado (quebram quando a coluna estreita), rótulo mono calmo
+        // à esquerda e número forte à direita, trilho de 4 px e "reseta" embaixo; o aviso de limite vem depois.
+        Some(div().flex().flex_col().gap_2()
+            .child(div().flex().flex_wrap().gap_3()
+                .children(windows.into_iter().map(|(label, pct, reset)| {
+                    let tone = if pct >= 90. { theme::danger() } else if pct >= 70. { theme::warning() } else { theme::text() };
+                    div().flex_grow(1.).flex_basis(px(118.)).min_w_0().flex().flex_col()
+                        .child(div().flex().justify_between().gap_2().text_xs().font_family(crate::theme::MONO)
+                            .child(div().text_color(theme::faint()).child(label))
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(tone).child(format!("{}%", pct.round()))))
+                        .child(div().mt(px(6.)).child(chrome::meter(pct)))
+                        .when_some(reset, |el, r| el.child(div().mt(px(3.)).text_size(px(11.)).text_color(theme::faint()).truncate().child(tr("side_resets").replace("{reset}", &r))))
+                })))
             .when(limited, |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::limited())
                 .child(reset.map(|r| tr("side_limited_until").replace("{reset}", &r)).unwrap_or_else(|| tr("side_limited")))))
-            .children(windows.into_iter().map(|(label, pct, reset)| {
-                div().flex().flex_col().gap(px(4.))
-                    .child(div().flex().justify_between().text_size(px(12.5))
-                        .child(div().child(label))
-                        .child(div().child(format!("{}%", pct.round()))))
-                    .child(chrome::meter(pct))
-                    .when_some(reset, |el, r| el.child(div().text_size(px(12.5)).text_color(theme::faint()).truncate().child(tr("side_resets").replace("{reset}", &r))))
-            }))
             .into_any_element())
     }
 
@@ -624,9 +640,8 @@ impl Hangar {
                     .into_any_element());
             }
             notices.extend(self.render_ctx_warning(status.as_ref(), cx));
-            content = content.child(section(self.render_context(status.as_ref(), cx)))
+            content = content.child(section(self.render_context(status.as_ref(), width, cx)))
                 .when(!notices.is_empty(), |el| el.child(div().px_4().py_3().border_b_1().border_color(theme::border()).flex().flex_col().gap_2().children(notices)));
-            if let Some(limits) = self.render_limits(status.as_ref()) { content = content.child(section(limits)); }
             if let Some(project) = self.render_project(status.as_ref(), cx) { content = content.child(section(project)); }
             if let Some(actions) = self.render_shortcuts(readable, cx) { content = content.child(div().px_4().py(px(14.)).child(actions)); }
         }
