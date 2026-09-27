@@ -47,10 +47,8 @@ Handoff checklist — before every handoff, in order:
 4. `orq event task_inicio --task <N> --titulo <t> --executor <session> --par <reviewer session | subagente>`
    before the kick-off.
 5. A decision of yours goes in with `orq log --task <N> "…"` before the next action.
-6. Sending someone to check a set → the command that discovers the list (`run \`git grep -n
-   <sym> -- src/\` and check ALL that show up`), never the list; no command possible → the
-   question ("who else calls this?"), never the answer. Recipes, kick-offs, directed questions
-   alike.
+6. Sending someone to check a set → the command that discovers the list (`git grep -n <sym>`),
+   never the list; no command → the question ("who else calls this?"), never the answer.
 
 Done when the kick-off is delivered and engaged, and `orq ball` names the executor.
 
@@ -74,8 +72,8 @@ made mid-work enters the contract before you use it.
 | Arrives | Do |
 |---|---|
 | DEVOLVIDO, any round | gate stays closed; resolve, send it back and log the ball: `orq event task_inicio …` (executor) or the round's `orq event entrega …` (reviewer) again |
-| `"reincide": true` (second rejection of the same cause) — the single door into the loop | ask the reviewer for a recipe with a new approach, or rotate the reviewer |
-| recipe disagreement, with evidence (the arrow is one-way: the executor never replies to the reviewer) | decide on it, never by re-running; evidence doesn't close → one specific question to one of them, usually the reviewer |
+| `"reincide": true` (second rejection of the same cause) — the single door into the loop | ask the reviewer for a recipe with a new approach, or rotate the reviewer; on `Revisão: subagente`, write the demand in the Task's `## Task N` section |
+| recipe disagreement, with evidence (the arrow is one-way: the executor never replies to the reviewer) | decide on it, never by re-running; evidence doesn't close → one specific question to one of them, usually the reviewer (on `subagente`, the executor) |
 | recipe missing the six fields or the caller inventory; report without `VEREDITO:` / `Verified` (commands, results, who ran them) | back to the reviewer; the executor waits. Form you enforce, merit never |
 | two verdicts for one `entrega` | treat as DEVOLVIDO, order a new judgment |
 | reviewer rotated with a report in flight | `arbitro-vigia.md`, "Rotation" |
@@ -83,7 +81,7 @@ made mid-work enters the contract before you use it.
 | a small finding | it blocks this Task; the next Task never carries it |
 | a blocker fix, including one an automatic reviewer provoked mid-Task | accepted with its trap (a test that bites) in the same commit; no test → not accepted, on both sides of the gate |
 | executor needs context only you have — the one case you relay | send the path, never prose |
-| a `low` Task rejected 2× for the same cause, or a `Decided alone:` line the reviewer flagged | re-tag `Risk: high` in the orchestration plan, upward only; journal the reason; the next executor session is born on the `high` row (replacement kick-off, `Frozen round`); `orq event sessao_trocada … --motivo <reason>`. Route `audit` → `replanejar.md`, `audit` → `full` |
+| a `low` Task rejected 2× for the same cause, or a `Decided alone:` line the reviewer flagged | re-tag `Risk: high` in the orchestration plan, upward only, and stamp it again (`orq plan-check … --stamp`); journal the reason; the next executor session is born on the `high` row (replacement kick-off, `Frozen round`); `orq event sessao_trocada … --motivo <reason>`. Route `audit` → `replanejar.md`, `audit` → `full` |
 | two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline; `arbitro-vigia.md`, "Deciding vs waking the user" (ask the user, spend in hand; unavailable → "Tightened criterion") |
 | plan untrustworthy (fallen premise, method without executing half, two consecutive Tasks blowing the estimate for the same cause, user order) | `replanejar.md`: propose and conduct the swap; never rewrite your own plan. A recipe the plan declared "closes after Task N-1" is planning: the planner or a fresh session with the spec closes it; you deliver inputs and excerpt the result |
 | a user's suspicion about the product | a verification item: journal it, hand it to the next reviewer as a directed question; the answer comes from proof, never from memory |
@@ -102,8 +100,8 @@ Done when the item is journaled and the ball is back with executor or reviewer.
    Context counts only for rotation.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.
-   - An untouchable exception written in the contract → `orq init` again (same `--plan
-     <durable>/orq-plano.md`) with the new `--untouchable` list; once that Task's `orq commit`
+   - An untouchable exception written in the contract → `orq init` again (same `--plan`, stamped
+     again after any edit) with the new `--untouchable` list; once that Task's `orq commit`
      passes, `orq init` again with the full original list.
    - No other commit in the checkout between a round's freeze and its `orq commit`; your plan
      edits stay uncommitted until the Task closes.
@@ -121,8 +119,8 @@ Done when `orq commit`'s message reached you and the contract carries the hash.
 
 ### 6. After the last Task
 
-`arbitro-encerramento.md`: "Phase 4" (the branch review), the branch reopened, the
-retrospective, your succession.
+`arbitro-encerramento.md`: the user's roteiro (`Prova: manual`), "Phase 4" (the branch
+review), the branch reopened, the retrospective, your succession.
 
 Done when the branch is in the user's hands, the retrospective delivered,
 `orq event execucao_fim --resultado <result>` logged, the watchdog disarmed.
@@ -133,12 +131,11 @@ Done when the branch is in the user's hands, the retrospective delivered,
 |---|---|---|
 | `~/.hangar/orq/<date>-<gid>/registro.md` — journal | one line per entry, written by `orq` (`event`, `commit`, `log`) | you, only through `orq read journal [--task N]` |
 | `<config>/.hangar-pair/regras-<gid>.md` — rules | who is who, untouchables, gates, method, domain skill, branch, review coverage, accounts; common part ≤ 8k characters, each Task's specifics in a `## Task N` section at the end | executor and reviewer, through `orq read contract --task N` |
-| `~/.hangar/orq/<date>-<gid>/licoes.md` — lessons | born empty with a header; every guideline born mid-work, one per block, with date and measured proof | nobody whole; a Task's section carries what it needs |
+| `~/.hangar/orq/<date>-<gid>/licoes.md` — lessons | born empty with a header; every guideline born mid-work, one per block, with date and measured proof | nobody whole; you copy what a Task needs into its section |
 | `~/.hangar/orq/<date>-<gid>/eventos.jsonl` — events | one JSON line per event | machines: app screens, phase 5 |
 
 - Only you write rules and lessons. Journal and events are written through `orq` by whoever acts: you (`task_inicio`, `sessao_trocada`, `execucao_*`, `log`), the executor (`entrega`, `commit`), the reviewer (`veredito`).
-- Lessons live in the durable directory, never in `<config>/.hangar-pair/`.
-- Lessons: raw material is the **waste** line of each review report; its "would have prevented" becomes a guideline written as a principle, with the measured case as proof next to it — in `licoes.md`, never in `regras-<gid>.md`. Every guideline stays: no cap, never deleted. A Task gets the guidelines of its subject (database, channel, file), never by age, as text in its `## Task N` section; no kick-off carries `licoes.md`.
+- Lessons: raw material is the **waste** line of each review report; its "would have prevented" becomes a guideline written as a principle, with the measured case as proof next to it, born in `licoes.md`. Every guideline stays: no cap, never deleted. You copy the ones a Task needs, by subject (database, channel, file), never by age, into its `## Task N` section; no kick-off carries `licoes.md`.
 - By type, not subject: it happened → journal; agreement decided at launch → rules; guideline born now → lessons.
 - Turn state (released Task, counterpart) goes in the kick-off and `orq event`; the rules get only the Progress hash.
 - First lines of the rules file:

@@ -77,13 +77,14 @@ chosen model has a card or a `## What they say` section.
 
 ### 4. The orchestration plan
 
-1. **The file.** The user's plan stays theirs, in their file, as the source: write a second
-   short file pointing at it, adding only what the gate needs (skeleton in `planejamento-equipe.md`,
-   "The plan skeleton"). "Where in their plan" points at a section, paragraph, line
-   or domain-skill step. Empty cell → the item goes in the bottom list; show it to the user
-   before launching. No plan at all → the orchestration plan is the plan, in the chosen method or
-   by hand. Want the bar → write the steps in the literal format here, never by reformatting the
-   user's; a recipe shared by several Tasks → repeat the steps inside each Task.
+1. **The file.** The user's plan stays theirs, in their file, as the source: write a second short
+   file pointing at it, `<user plan dir>/<user plan stem>.orq.md`, adding only what the gate needs
+   (skeleton in `planejamento-equipe.md`, "The plan skeleton"). "Where in their plan" points at a
+   section, paragraph, line or domain-skill step. Empty cell → the item goes in the bottom list;
+   show it to the user before launching. No plan at all → the orchestration plan is the plan, in
+   the chosen method or by hand. Want the bar → write the steps in the literal format here, never
+   by reformatting the user's; a recipe shared by several Tasks → repeat the steps inside each
+   Task.
 
 2. **Each Task carries:**
    - Wave: parallel by default. Tasks passing the four conditions of `paralelo-worktree.md`
@@ -140,8 +141,8 @@ Done when every Task has its row, the header is filled and the user saw the bott
    - Proof: `nenhuma`, `por-task`, `lote(N)` or `manual` (roteiros queued; the user tests them at
      the end)? Mark `lote(8)` as the suggestion; screen Tasks → mark `manual`, unless the user
      asks for automated proof.
-2. Dispatch the `preparar-plano` agent with: the user's plan path, the repo, the durable
-   directory, the three answers and `Revisão: subagente` (`sessão` when the user asked for
+2. Dispatch the `preparar-plano` agent with: the orchestration plan of step 4, the user's plan,
+   the repo, the three answers and `Revisão: subagente` (`sessão` when the user asked for
    another model or account to review). A harness without agents: a plain subagent whose prompt
    is `~/.claude/skills/orquestrar/agents/preparar-plano.md` without its header.
 3. It replies `faltam:` → ask the user what is missing and dispatch again.
@@ -189,8 +190,10 @@ PRODUCE = write it in the orchestration plan.
     list means the list was incomplete, never that the hit is out of scope. And what the old home
     did for free: what reset, who owned the value after the await, what was dead there and becomes
     live.
+14. AUDIT — after the PRODUCE items: `orq plan-check <plan> --repo <repo> --stamp` again; any
+    later edit of the plan → stamp again before `orq init`.
 
-Done when all 13 items are closed and the plan is approved.
+Done when all 14 items are closed and the plan is approved.
 
 ### 7. Launch (phase 2)
 

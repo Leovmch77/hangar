@@ -29,12 +29,12 @@ session is opened or a Task released. Back to `arbitro.md` once the team stands.
    write", below) and the closing items (`arbitro-encerramento.md`); write the a-priori
    estimate: time and rounds per Task.
 5. Survey the tooling (below), once.
-6. Create, in order: `--new` ("Opening a session", below) → `--pair` → read the `gid` in your
-   own sidecar → write the contract (skeleton in `planejamento-equipe.md`; each Task's specifics in
-   a `## Task N` section at the end) → `orq init --arbiter <you> --repo <repo> --contract <regras
-   path> --plan <durable>/orq-plano.md --untouchable <glob>…` → `orq event execucao_inicio --plano
-   <plan> --branch <branch> --gid <gid>` → arm the watchdog and prove it (`arbitro-vigia.md`,
-   "Arming") → kick-offs ("Kick-off", below).
+6. Create, in order: `--new` ("Opening a session", below) → `--pair` → read the `gid` in your own
+   sidecar → write the contract (skeleton in `planejamento-equipe.md`; each Task's specifics in a
+   `## Task N` section at the end) → `orq init --arbiter <you> --repo <repo> --contract <regras
+   path> --plan <user plan dir>/<user plan stem>.orq.md --untouchable <glob>…` (the stamped plan
+   itself, never a copy) → `orq event execucao_inicio --plano <plan> --branch <branch> --gid <gid>`
+   → arm the watchdog and prove it (`arbitro-vigia.md`, "Arming") → kick-offs ("Kick-off", below).
 
    ```bash
    hangar-send --pair <session> "<work> — each session's role is in the regras-<gid>.md contract" --orq   # one call per session
@@ -157,7 +157,7 @@ Read ONLY these files. The whole plan, the journal and the lessons file are NOT 
 
 ### Tightened criterion (reviewer kick-off, spiral with the user unavailable)
 
-Write it in the kick-off; it loosens nothing:
+Write it in the kick-off (on `Revisão: subagente`, in the Task's `## Task N` contract section: the package carries it); it loosens nothing:
 
 - a blocker is what a real user reaches, and the report writes how to get there;
 - a case that exists only by fabricating a race in a test is a NOTE;

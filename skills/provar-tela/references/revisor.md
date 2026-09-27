@@ -10,7 +10,7 @@ follow your normal flow.
 - The round carries the absolute paths of the per-state screenshots, the visual question asked
   of each, and the answer. DOM, CSS and the accessibility tree do not substitute.
 - A screenshot from before the fix does not count.
-- Task with a bar: the `Visual:` line points at the executor's visual report, which carries per
+- Task with a bar: the `Proof:` line points at the executor's visual report, which carries per
   round who won, which letter was their work, the biggest hole named and what they fixed.
   "I compared and it looks good" blocks.
 
@@ -37,9 +37,9 @@ and the bar, hunting:
 
 ## No bar, or a waived bar
 
-- Pixels touched and no bar at all in the contract: `DEVOLVIDO`, the report saying "Task N
-  draws a screen and the contract carries neither a bar nor a waiver; the bar is the user's
-  decision".
+- Pixels touched and no bar at all in the contract: `DEVOLVIDO` (the case this skill adds to
+  the reviewer's cannot-be-judged list), the report saying "Task N draws a screen and the
+  contract carries neither a bar nor a waiver; the bar is the user's decision".
   Do not propose one, pick one, or judge as if it existed.
 - Contract says `Bar: none — user's decision`: judge normally without the blind comparison
   (per-state screenshots, missing state is a finding) and enforce no bar.

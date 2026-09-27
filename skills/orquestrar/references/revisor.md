@@ -84,7 +84,8 @@ WASTE this round: <what the executor did that became nothing> — would have pre
 - REPROVA with ≥1 blocker; APROVA only with zero. A finding is a blocker with a recipe, or
   NOTED and nobody fixes it now.
 - DEVOLVIDO = it cannot be judged, four cases: the base moved; the object is not in the repo;
-  the diff file does not match the object; the verifications do not run. Say which; no verdict.
+  the diff file does not match the object; the verifications do not run. A skill the roteiro
+  cites may add a case in its reviewer side. Say which; no verdict.
 - The tree moved while you read → still a verdict, and the WASTE line says so (`orq commit`
   compares the commit's files with the approved round).
 - The WASTE line is written on APROVA too; you name the instruction, the arbiter decides

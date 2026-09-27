@@ -88,8 +88,7 @@ Then `git status --short` and `git diff --cached --stat`: only the Task's paths 
 `$H` is the round's identity; `git stash apply <H>` recovers it.
 
 Run `orq check --task <N> --commit $H` (in a wave, plus `--repo <your worktree>`). It fails →
-fix and freeze again; `orq event entrega` refuses a round without a passing check when the plan
-declares checks.
+fix and freeze again: `orq event entrega` refuses a round whose declared checks did not pass.
 
 Done when `$H` is stored, the diff file exists and `orq check` exits 0.
 
@@ -101,7 +100,7 @@ To the reviewer the kick-off named, in this format and no other:
 Task: <N> | Round: <R> | Object: <stash hash> | Base: <HEAD hash> | Phase: <codigo|prova>
    (`| Phase:` on a two-phase Task only)
 Diff: <path to diff-task-N-rR.txt>
-Verification: `orq check` log: <path it printed>
+Verification: `orq check` log: <path it printed, or `nothing declared`>
    plus <command> → <last ~3 lines, PASTED>, one per command the Task's verification orders
 Page lines: <the `Report line` of each sibling page read this round, one per line>
 git status --short: <pasted output>

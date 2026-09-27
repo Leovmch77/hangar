@@ -95,8 +95,10 @@ Team table in `regras-<gid>.md`, raw values only (`-` = empty). Start from
 
 ## The plan skeleton
 
-The orchestration plan (`planejamento.md`, steps 4 and 5): a second short file pointing at the
-user's plan, adding only what the gate needs. `preparar-plano` writes it in this shape.
+The orchestration plan (`planejamento.md`, steps 4 and 5), `<user plan dir>/<user plan
+stem>.orq.md`: a second short file pointing at the user's plan, adding only what the gate needs.
+`preparar-plano` rewrites the planner's draft into this shape; roteiros go to
+`<user plan dir>/roteiros/`.
 
 ```markdown
 # Orchestration plan — <work>
@@ -111,16 +113,17 @@ Revisão: subagente | sessão
 Correção pelo revisor: até <N> linhas
 
 ## Tasks
-| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |
-|---|---|---|---|---|---|---|
-| 1 | create the schema | section "Database", 2nd paragraph | `<paths>` | `<test command>` | 1 | — |
+| # | What it is | Where in their plan | Files | Verification | Wave | Risk | Roteiro |
+|---|---|---|---|---|---|---|---|
+| 1 | create the schema | section "Database", 2nd paragraph | `<paths>` | `<test command>` | 1 | — | — |
 
 ## What their plan does NOT decide, and I decided here
 - Untouchables: <paths>.
 ```
 
 `orq plan-check <plan> --repo <repo> --stamp` writes the `Preparado:` line under the title;
-editing the plan afterwards voids it.
+editing the plan afterwards voids it. `Risk`: `low | high` when the executor row is selected by
+risk, `—` otherwise.
 
 ## Phase 2 — Launch (the user's single "go ahead")
 
