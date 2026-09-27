@@ -44,6 +44,7 @@ impl Hangar {
 
 fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
     let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
+    let email = login.and_then(|l| l.email.clone()).filter(|e| !e.is_empty());
     let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
     // O servidor manda o plano cru ("max", "pro").
     let plan = login.and_then(|l| l.plan.as_deref()).and_then(|p| {
@@ -63,7 +64,9 @@ fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
     };
     div().flex().items_center().gap(px(12.)).px(px(8.)).py(px(7.)).rounded(px(7.)).when(in_use, |el| el.bg(theme::accent_dim()))
         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-            .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title))
+            .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(title.clone()))
+            // Apelido não diz qual login é: o email vem embaixo, a menos que já seja o próprio título.
+            .when_some(email.filter(|e| *e != title), |el, email| el.child(div().truncate().text_size(px(11.5)).text_color(theme::faint()).child(email)))
             .child(meta))
         .child(div().w(px(176.)).flex_shrink_0().child(meters))
 }
