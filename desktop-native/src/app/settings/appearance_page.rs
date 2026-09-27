@@ -259,14 +259,15 @@ impl Hangar {
                 .child(div().flex().items_center().justify_between().gap_2().child(eyebrow)
                     .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(tr(section))))
                 .child(sample))
-            .child(self.mark(settings_box().p(px(16.)).flex().flex_col().gap(px(10.))
+            // A coluna tem rolagem própria e fica sempre à vista: a busca só destaca, sem rolar a página ao lado.
+            .child(settings_box().p(px(16.)).flex().flex_col().gap(px(10.)).when(self.search_hit("settings_style"), |el| el.bg(theme::accent_dim()))
                 .child(div().flex().items_center().gap(px(10.))
                     .child(div().size(px(30.)).flex_shrink_0().rounded(px(8.)).bg(theme::accent_dim()).flex().items_center().justify_center()
                         .child(chrome::small_icon(IconName::Sparkles, 16., theme::accent_text())))
                     .child(div().flex_1().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr("settings_style")))
                     .child(self.style_button(cx)))
                 .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal()
-                    .child(tr(if compact { "settings_style_applied" } else { "settings_style_hint" }))), "settings_style"))
+                    .child(tr(if compact { "settings_style_applied" } else { "settings_style_hint" }))))
             .into_any_element()
     }
 
@@ -392,8 +393,8 @@ impl Hangar {
             .child(picker(&self.settings_ui.tint_picker, matches!(colors.tint, Swatch::Custom(_))));
         let no_tint = colors.tint == Swatch::Preset(0);
         // "Vale para o modo escuro. Copiar do claro": copia destaque, tinta e força do outro modo. No cabeçalho da seção,
-        // porque vale para a seção inteira.
-        let mode_note = (!from_wallpaper && !live).then(|| div().flex().items_center().gap_1().text_size(px(12.5)).text_color(theme::muted())
+        // porque vale para a seção inteira; na caixa ao vivo o cabeçalho não tem largura e ela desce para o corpo.
+        let mode_note = (!from_wallpaper).then(|| div().flex().flex_wrap().items_center().gap_1().text_size(px(12.5)).text_color(theme::muted())
             .child(tr(if dark { "settings_colors_for_dark" } else { "settings_colors_for_light" }))
             .child(Button::new("copy-other-mode").outline().xsmall().text_color(theme::text())
                 .label(tr(if dark { "settings_copy_from_light" } else { "settings_copy_from_dark" }))
@@ -403,8 +404,8 @@ impl Hangar {
                     *next.colors_mut(dark) = *next.colors(!dark);
                     this.apply_appearance(next, true, cx);
                     this.sync_sliders(window, cx);
-                })))
-            .into_any_element());
+                }))));
+        let (mode_head, mode_body) = if live { (None, mode_note) } else { (mode_note.map(IntoElement::into_any_element), None) };
         let palette = segmented("palette", &[tr("settings_palette_neutral"), tr("settings_palette_classic")],
             if a.palette == Palette::Neutral { 0 } else { 1 }, !from_wallpaper,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.palette = if index == 0 { Palette::Neutral } else { Palette::Classic }; this.apply_appearance(next, true, cx); }, cx);
@@ -417,6 +418,7 @@ impl Hangar {
                 .flex().items_start().gap(px(10.)).text_size(px(13.)).text_color(theme::text())
                 .child(div().pt(px(1.)).flex_shrink_0().child(chrome::small_icon(IconName::Info, 15., theme::accent_text())))
                 .child(div().flex_1().min_w_0().whitespace_normal().child(tr("settings_color_desktop_note")))))
+            .when_some(mode_body, |el, note| el.child(note.px(inset).pb(px(10.))))
             .child(self.line("settings_palette", None, !from_wallpaper, palette, false))
             .child(self.line("settings_accent", None, !from_wallpaper, accents.into_any_element(), false))
             .child(self.line("settings_tint", (!from_wallpaper).then(|| tr("settings_tint_desc")), !from_wallpaper, tints.into_any_element(), false))
@@ -630,7 +632,7 @@ impl Hangar {
             .children(style)
             .when(!wide && !live, |el| el.child(self.conversation_sample().mt(px(18.))))
             .child(self.section(SECTIONS[0], IconName::Monitor, None, None, theme_body, cx))
-            .child(self.section(SECTIONS[1], IconName::Palette, None, mode_note, color_body, cx))
+            .child(self.section(SECTIONS[1], IconName::Palette, None, mode_head, color_body, cx))
             .child(self.section(SECTIONS[2], IconName::Image, None, None, background_body, cx))
             .child(self.section(SECTIONS[3], IconName::BookOpen, (!live).then(|| tr("settings_reading_desc")), None, reading_body, cx))
             .child(self.section(SECTIONS[4], IconName::Type, None, None, text_body, cx))
