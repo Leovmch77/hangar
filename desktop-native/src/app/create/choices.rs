@@ -194,13 +194,75 @@ impl NewSession {
     }
 
     /// A conta Claude com a cota de cada uma na dica ("atual · 5h 42% · 7d 18%").
+    /// A dica da conta Claude: "atual · 5h 42% · 7d 18%".
+    pub(super) fn config_hint(&self, c: &ConfigDir) -> String {
+        let quota = self.quota_of(&format!("claude:{}", c.path)).map(QuotaLine::summary).unwrap_or_default();
+        [c.active.then(|| tr("create_current")), Some(quota).filter(|q| !q.is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    }
+
+    /// A pílula de modelo da tela sem sessão, dentro do compositor: o provider, o modelo e o esforço escolhidos.
+    pub(super) fn render_model_pill(&self, cx: &mut Context<Self>) -> Div {
+        let id = Menu::Model.anchor();
+        let model = self.catalog().iter().find(|m| m.value() == self.model).map(ModelOption::label)
+            .unwrap_or_else(|| provider_name(self.provider).to_owned());
+        popup::anchor(div(), id).child(chrome::pill_button(id, cx).gap(px(6.)).selected(self.menu.get() == Some(Menu::Model)).disabled(self.creating)
+            .accessibility_label(format!("{}: {model}", tr("create_model")))
+            .child(chrome::provider_glyph(self.provider, 16.))
+            .child(div().max_w(px(160.)).truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(model))
+            .when(!self.effort.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).child(self.effort.clone())))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Model, window, cx))))
+    }
+
+    /// O menu da pílula de modelo, no desenho do Zeron: o provider em abas, a busca, a lista e o esforço no rodapé.
+    pub(super) fn render_model_menu(&self, cx: &mut Context<Self>) -> Div {
+        let query = self.menu_filter(cx);
+        let tabs = div().id("new-chat-providers").role(Role::Group).aria_label(tr("create_provider_aria")).flex().items_center().gap(px(2.))
+            .px(px(4.)).pb(px(4.)).children(PROVIDERS.iter().map(|&p| {
+                let available = self.providers.ok().and_then(|m| m.get(p)).is_none_or(|probe| probe.disponivel);
+                Button::new(SharedString::from(format!("new-chat-provider-{p}"))).ghost().small().selected(self.provider == p)
+                    .disabled(!available || self.creating).tooltip(provider_name(p)).accessibility_label(provider_name(p))
+                    .child(chrome::provider_glyph(p, 18.))
+                    .on_click(cx.listener(move |this, _, window, cx| this.set_provider(p, window, cx)))
+            }));
+        let list = match &self.models.value {
+            _ if self.models.loading || self.models.value.is_none() => popup::skeleton("new-chat-models", 5).into_any_element(),
+            Some(Err(error)) => Self::menu_failure("new-chat-models-error", format!("{}: {error}", tr("create_models_failed")),
+                |this, window, cx| this.load_models(window, cx), cx),
+            _ => {
+                let rows = std::iter::once((String::new(), tr("create_default"), String::new()))
+                    .chain(self.catalog().iter().filter(|m| m.id != "default").map(|m| (m.value(), m.label(), m.hint())))
+                    .filter(|(_, label, hint)| wanted(&query, label, hint))
+                    .map(|(id, label, hint)| {
+                        let on = self.model == id;
+                        menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
+                                this.model = id.clone();
+                                if !this.levels().contains(&this.effort) { this.effort.clear(); }
+                                this.build_effort_pick(window, cx);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    }).collect();
+                Self::menu_list("new-chat-model-list", rows)
+            }
+        };
+        let levels = self.levels();
+        let effort = (!levels.is_empty()).then(|| div().flex().flex_col().gap(px(2.))
+            .child(popup::separator())
+            .child(popup::title(tr("new_chat_reasoning"), None))
+            .child(div().id("new-chat-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().flex_wrap()
+                .gap(px(4.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
+                    let label = if level.is_empty() { tr("create_default") } else { level.clone() };
+                    Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().selected(self.effort == level).label(label)
+                        .on_click(cx.listener(move |this, _, window, cx| { this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
+                }))));
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort)
+    }
+
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(list) = self.configs.ok() else { self.config_pick = None; return };
-        let choices: Vec<ModelChoice> = list.iter().map(|c| {
-            let quota = self.quota_of(&format!("claude:{}", c.path)).map(QuotaLine::summary).unwrap_or_default();
-            let hint = [c.active.then(|| tr("create_current")), Some(quota).filter(|q| !q.is_empty())].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-            ModelChoice { id: c.path.clone(), label: c.label.clone(), hint }
-        }).collect();
+        let choices: Vec<ModelChoice> = list.iter().map(|c| ModelChoice { id: c.path.clone(), label: c.label.clone(), hint: self.config_hint(c) }).collect();
         let at = choices.iter().position(|c| Some(&c.id) == self.config.as_ref());
         self.config_pick = Some(picker(choices, at, |this, path, window, cx| {
             this.config = Some(path);

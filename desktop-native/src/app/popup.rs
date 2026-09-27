@@ -64,13 +64,15 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), Folders }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu) }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
         // Sem o compositor na tela, o gatilho não foi desenhado e o painel não tem onde se prender.
         let page = self.settings.is_some() && !self.settings_ui.live;
-        if !page && self.selected.is_none() && self.api.is_some() && self.new_chat_folders.get() { return Some(Floating::Folders); }
+        if let Some(menu) = self.new_chat_folders.get().filter(|_| !page && self.selected.is_none() && self.api.is_some()) {
+            return Some(Floating::NewChat(menu));
+        }
         if page || !self.selected.as_ref().is_some_and(|s| s.readable()) { return None; }
         if let Some(open) = self.ctl_snapshot() { return Some(Floating::Controls(open)); }
         if self.command_panel { return Some(Floating::Commands); }
@@ -79,7 +81,7 @@ impl Hangar {
 
     /// Fecha o painel aberto sobre o compositor; diz se havia um.
     pub(super) fn close_popups(&mut self) -> bool {
-        let folders = self.new_chat_folders.replace(false);
+        let folders = self.new_chat_folders.replace(None).is_some();
         let open = folders || self.controls_open() || self.command_panel || self.recent.is_some();
         self.close_controls();
         self.command_panel = false;
@@ -94,6 +96,7 @@ impl Hangar {
         let presence = window.use_keyed_state("composer-popup", cx, |_, _| Presence::<Floating>::default());
         let (shown, visible, leaving) = presence.update(cx, |presence, _| presence.frame(live, still))?;
         if visible < 1. { window.request_animation_frame(); }
+        let mut placement = Placement::Bottom;
         let (anchor, align, narrow, content) = match shown {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
             Floating::Commands => ("composer".to_owned(), Align::Start, false, Some(self.render_command_panel(cx))),
@@ -103,11 +106,15 @@ impl Hangar {
                 self.recent = live;
                 ("attach-recent".to_owned(), Align::Start, true, content)
             }
-            Floating::Folders => {
-                let room = anchor_bounds("new-chat-folder").map(|t|
-                    (window.viewport_size().height - t.bottom()).max(t.top()) - px(16.)).unwrap_or(px(0.));
-                ("new-chat-folder".to_owned(), Align::Start, true,
-                    self.new_chat.clone().map(|view| view.update(cx, |view, cx| view.render_compact_folders(cx).p_3().max_h(room).into_any_element())))
+            Floating::NewChat(menu) => {
+                let viewport = window.viewport_size().height;
+                let (above, below) = anchor_bounds(menu.anchor()).map(|t| (t.top(), viewport - t.bottom())).unwrap_or_default();
+                // Acima só com espaço para a lista de pastas; janela baixa abre para baixo, por cima do compositor.
+                let up = menu.above() && (above >= px(360.) || above >= below);
+                let room = if up { above } else { below } - px(16.);
+                if up { placement = Placement::Top; }
+                (menu.anchor().to_owned(), if menu.above() { Align::End } else { Align::Start }, true,
+                    self.new_chat.clone().map(|view| view.update(cx, |view, cx| view.render_menu(menu, room, cx))))
             }
         };
         let trigger = anchor_bounds(&anchor)?;
@@ -118,17 +125,17 @@ impl Hangar {
             cx.stop_propagation();
             cx.notify();
         });
-        Some(layer(trigger, align, surface, visible, leaving, dismiss))
+        Some(layer(trigger, placement, align, surface, visible, leaving, dismiss))
     }
 }
 
 /// Cortina que fecha no clique fora sem deixar o clique chegar ao que está atrás, e a superfície presa ao gatilho,
 /// abaixo dele ou virada para cima quando não cabe. Saindo, nada ali responde ao ponteiro.
-fn layer(trigger: Bounds<Pixels>, align: Align, surface: AnyElement, visible: f32, leaving: bool,
+fn layer(trigger: Bounds<Pixels>, placement: Placement, align: Align, surface: AnyElement, visible: f32, leaving: bool,
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static) -> AnyElement {
     let surface = div().relative().opacity(chrome::ease_out(visible)).child(surface)
         .when(leaving, |el| el.child(div().absolute().inset_0().occlude()));
-    let placed = Positioner::side(trigger).placement(Placement::Bottom).align(align).offset(px(8.)).margin(px(8.));
+    let placed = Positioner::side(trigger).placement(placement).align(align).offset(px(8.)).margin(px(8.));
     div().absolute().inset_0()
         .when(!leaving, |el| el.child(div().id("popup-scrim").absolute().inset_0().occlude().on_any_mouse_down(dismiss)))
         .child(if leaving { placed } else { placed.occlude() }.child(surface))
