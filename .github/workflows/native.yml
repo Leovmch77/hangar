@@ -140,7 +140,7 @@ jobs:
             if test -f "out/$file"; then
               notes+=$'\n'"$platform: arquivo desta versão."
             else
-              notes+=$'\n'"$platform: a compilação falhou; se houver arquivo nesta página, é de uma publicação anterior. Não corresponde ao manifesto desta versão."
+              notes+=$'\n'"$platform: não houve arquivo desta versão; se houver arquivo nesta página, é de uma publicação anterior. Não corresponde ao manifesto desta versão."
             fi
           done
           gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
