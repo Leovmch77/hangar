@@ -3051,6 +3051,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "chrono",
+ "embed-resource",
  "eventsource-stream",
  "futures",
  "gpui-kit",

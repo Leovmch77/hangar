@@ -29,6 +29,9 @@ alacritty_terminal = { version = "=0.26.0", default-features = false }
 rusty-leveldb = "=4.0.1"
 notify = "=7.0.0"
 
+[build-dependencies]
+embed-resource = "=3.0.11"
+
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component-0.6.6" }
 gpui-base = { path = "vendor/gpui-base-0.6.6" }

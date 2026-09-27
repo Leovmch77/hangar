@@ -19,6 +19,12 @@ Execute o comando na raiz desta worktree. O seletor `+1.98.1` mantém a versão 
 
 No Linux, o fundo do chat usa transparência; a prova com dois fundos coloridos está em [verification.md](docs/verification.md). Windows e macOS mantêm fundo opaco até sua conferência visual. O estado exato das verificações e os limites desta entrega estão no mesmo documento.
 
+O ícone do aplicativo vem de `assets/brand/icon.png`; o executável Windows incorpora
+`assets/brand/icon.ico`. No Linux, o nome do lançador precisa ser
+`com.hangar.native.desktop` para combinar com o `app_id` da janela; seu campo `Icon` aponta
+para o PNG. O `icon.icns` está pronto para o macOS, mas a release atual publica um binário avulso:
+o Finder só exibe ícone próprio quando ele está num pacote `.app` que referencia esse arquivo.
+
 ## Baixar pronto e atualização
 
 Cada push na `main` que mexe no app recompila e publica na release fixa [`native-latest`](https://github.com/jeffer1312/hangar/releases/tag/native-latest) (workflow `.github/workflows/native.yml`): `Hangar-linux-x86_64.tar.gz`, `Hangar-windows-x86_64.zip` e `Hangar-macos-aarch64.zip`, cada um com o `.sha256` ao lado (`sha256sum -c`). Dentro do arquivo o executável é `hangar` (`Hangar.exe` no Windows). Não são assinados: no macOS, abra pelo botão direito na primeira vez. Windows e macOS compilam sem conferência de uso; se o build deles falhar, a release sai só com o Linux.

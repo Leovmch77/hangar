@@ -21,6 +21,13 @@ fn civil(days: i64) -> (i64, i64, i64) {
 }
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=assets/brand/icon.ico");
+        println!("cargo:rerun-if-changed=assets/brand/icon.rc");
+        embed_resource::compile("assets/brand/icon.rc", embed_resource::ParamsIncludeDirs(["assets/brand"]))
+            .manifest_required()
+            .unwrap();
+    }
     let version = git(&["log", "-1", "--format=%cd-%h", "--date=format:%Y.%m.%d"]).map(|v| {
         let dirty = git(&["status", "--porcelain", "--", "."]).is_some();
         if dirty { format!("{v}-dirty") } else { v }

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="tile" x2="0" y2="1">
+      <stop stop-color="#303335"/>
+      <stop offset=".48" stop-color="#1b1d1f"/>
+      <stop offset="1" stop-color="#141617"/>
+    </linearGradient>
+    <linearGradient id="metal" x2=".18" y2="1">
+      <stop stop-color="#ffffff"/>
+      <stop offset=".44" stop-color="#f1f1ec"/>
+      <stop offset="1" stop-color="#b9bec0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="198" height="198" rx="43" fill="url(#tile)" stroke="#586064" stroke-width="2"/>
+  <rect x="4" y="4" width="192" height="192" rx="40" fill="none" stroke="#ffffff" stroke-opacity=".12"/>
+  <g fill="none" stroke-linecap="round" transform="translate(0 16)">
+    <g stroke="#050607" stroke-width="18" transform="translate(0 2)">
+      <path d="M 34.18 138 A 76 76 0 1 1 165.82 138"/>
+      <path d="M 49.59 116.38 A 53 53 0 1 1 150.41 116.38"/>
+      <path d="M 70.16 103.14 A 30 30 0 1 1 129.84 103.14"/>
+    </g>
+    <g stroke="url(#metal)" stroke-width="13">
+      <path d="M 34.18 138 A 76 76 0 1 1 165.82 138"/>
+      <path d="M 49.59 116.38 A 53 53 0 1 1 150.41 116.38"/>
+      <path d="M 70.16 103.14 A 30 30 0 1 1 129.84 103.14"/>
+    </g>
+    <g stroke="#ffffff" stroke-opacity=".45" stroke-width="2.5" transform="translate(0 -2)">
+      <path d="M 34.18 138 A 76 76 0 1 1 165.82 138"/>
+      <path d="M 49.59 116.38 A 53 53 0 1 1 150.41 116.38"/>
+      <path d="M 70.16 103.14 A 30 30 0 1 1 129.84 103.14"/>
+    </g>
+  </g>
+</svg>

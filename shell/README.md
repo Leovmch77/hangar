@@ -104,8 +104,8 @@ cd shell && npm install     # primeira vez
 npm run dist                # gera dist/Hangar-<versão>.AppImage
 ```
 
-O ícone vem de `frontend/public/icons/icon-512.png` (copiado pra `shell/build/icon.png` — não é
-gerado nem versionado à parte). `shell/dist/` é saída de build e não deve ser commitado.
+O ícone vem de `assets/brand/icon.svg`: `assets/brand/gen.py` gera e copia o PNG, o ICO e o ICNS
+para `shell/build/`, além dos arquivos do PWA. `shell/dist/` é saída de build e não deve ser commitado.
 
 **O AppImage continua sendo só a janela.** Rodando numa máquina nova, ele precisa de um cockpit
 (backend `uv run python -m app.main`) alcançável do endereço configurado — local (`COCKPIT_URL`

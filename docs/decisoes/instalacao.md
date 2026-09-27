@@ -285,8 +285,8 @@ Referência: [configurações nativas do Agendador](https://learn.microsoft.com/
 O atualizador é filho do backend e herda sua permissão. O instalador confere nível e logon após
 registrar; falha no modo elevado não pode reutilizar silenciosamente uma tarefa comum.
 
-Os atalhos no Menu Iniciar e na Área de Trabalho usam `shell/build/icon.ico`, convertido do
-`frontend/public/icons/icon-512.png`, e o flag `RunAsUser` acompanha o nível da instalação.
+Os atalhos no Menu Iniciar e na Área de Trabalho usam `shell/build/icon.ico`, gerado do
+`assets/brand/icon.svg` (com a versão de dois arcos em tamanhos pequenos), e o flag `RunAsUser` acompanha o nível da instalação.
 `shell/build/icon.png` usa a mesma imagem na janela Electron e no empacotamento. A Área de
 Trabalho vem de `GetFolderPath`, inclusive quando redirecionada. O Electron já aberto precisa
 ser fechado pelo usuário para a próxima abertura assumir a elevação.

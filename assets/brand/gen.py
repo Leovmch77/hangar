@@ -5,6 +5,7 @@ Rodar:  python3 assets/brand/gen.py        (precisa de rsvg-convert e magick)
 
 A marca sao arcos concentricos. As pontas caem numa reta porque o angulo cai
 linearmente com o raio — e o que separa "desenho em grid" de "traco a mao".
+O icone do aplicativo vem de icon.svg; icon-small.svg simplifica os tamanhos pequenos.
 
 DUAS VERSOES, de proposito:
   - 3 arcos: uso normal (>= 48px).
@@ -12,12 +13,11 @@ DUAS VERSOES, de proposito:
     de verdade pra 16px, nao no olho.
 
 COR: dentro do app a marca usa `currentColor` e adota o `--accent`, que vem da
-paleta Material You do papel de parede (lib/desktopTheme.ts) — logo, muda por
-maquina. Os arquivos ESTATICOS daqui nao tem como seguir isso, entao sao
-monocromaticos: branco no escuro, tinta no claro. Mono nao briga com paleta
-nenhuma.
+paleta Material You do papel de parede (lib/desktopTheme.ts). O icone do
+aplicativo usa a placa grafite com arcos em relevo, igual em todas as plataformas.
 """
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +94,27 @@ def png(svg: str, saida: str, larg: int, alt: int | None = None) -> None:
     subprocess.run(cmd, check=True)
 
 
+def gerar_ico(nome: str, tamanhos: tuple[int, ...]) -> None:
+    partes = []
+    for tamanho in tamanhos:
+        saida = f"_{nome}-{tamanho}.png"
+        png("icon-small.svg" if tamanho <= 32 else "icon.svg", saida, tamanho)
+        partes.append(str(AQUI / saida))
+    subprocess.run(["magick", *partes, str(AQUI / nome)], check=True)
+
+
+def gerar_icns() -> None:
+    partes = []
+    for tamanho, tipo in ((16, b"icp4"), (32, b"icp5"), (64, b"icp6"),
+                          (128, b"ic07"), (256, b"ic08"), (512, b"ic09"), (1024, b"ic10")):
+        saida = f"_icns-{tamanho}.png"
+        png("icon-small.svg" if tamanho <= 32 else "icon.svg", saida, tamanho)
+        dados = (AQUI / saida).read_bytes()
+        partes.append(tipo + (len(dados) + 8).to_bytes(4, "big") + dados)
+    corpo = b"".join(partes)
+    (AQUI / "icon.icns").write_bytes(b"icns" + (len(corpo) + 8).to_bytes(4, "big") + corpo)
+
+
 def main() -> None:
     # ---- fonte vetorial (o que o app importa; segue o --accent via currentColor)
     escrever("mark.svg", marca(P3, "currentColor"))
@@ -101,31 +122,24 @@ def main() -> None:
     escrever("logo-lockup-dark.svg", lockup(BRANCO, "#F2F2F2", None))
     escrever("logo-lockup-light.svg", lockup(TINTA_ESCURA, TINTA_ESCURA, None))
 
-    # ---- favicon: SVG que inverte sozinho conforme o tema do navegador
-    fav = marca(P2, BRANCO, fundo=TINTA_ESCURA, rx=44).replace(
-        "</svg>",
-        '  <style>@media (prefers-color-scheme: light){'
-        'rect{fill:#f8f6f2} g{color:#100e11}}</style>\n</svg>')
-    escrever("favicon.svg", fav)
+    # ---- favicon: o desenho de dois arcos continua legivel em 16 px
+    escrever("favicon.svg", (AQUI / "icon-small.svg").read_text())
 
     # ---- PWA (os tamanhos que o manifest.webmanifest declara)
-    escrever("_ic-512.svg", marca(P3, BRANCO, fundo=TINTA_ESCURA, rx=44))
-    escrever("_ic-180.svg", marca(P3, BRANCO, fundo=TINTA_ESCURA, rx=40))
-    escrever("_ic-mask.svg", marca(P3, BRANCO, fundo=TINTA_ESCURA, rx=0, escala=0.72))
-    png("_ic-512.svg", "icon-512.png", 512)
-    png("_ic-512.svg", "icon-192.png", 192)
-    png("_ic-180.svg", "icon-180.png", 180)
-    png("_ic-mask.svg", "icon-maskable-512.png", 512)
+    png("icon.svg", "icon-512.png", 512)
+    png("icon.svg", "icon-192.png", 192)
+    png("icon.svg", "icon-180.png", 180)
+    subprocess.run(["magick", "-size", "512x512", "xc:#141617", "(",
+                    str(AQUI / "icon-512.png"), "-resize", "368x368", ")",
+                    "-gravity", "center", "-composite", "-depth", "8",
+                    str(AQUI / "icon-maskable-512.png")], check=True)
 
-    # ---- Electron: electron-builder deriva o resto de um 512 quadrado
-    png("_ic-512.svg", "electron-icon-512.png", 512)
+    # ---- empacotamento de Electron e app nativo
+    png("icon.svg", "electron-icon-512.png", 512)
+    gerar_ico("icon.ico", (16, 24, 32, 48, 64, 128, 256))
+    gerar_icns()
 
-    # ---- favicon.ico: 2 arcos, sem canto arredondado (16px nao mostra raio)
-    escrever("_ico.svg", marca(P2, BRANCO, fundo=TINTA_ESCURA, rx=0))
-    for s in (16, 32, 48):
-        png("_ico.svg", f"_ico-{s}.png", s)
-    subprocess.run(["magick"] + [str(AQUI / f"_ico-{s}.png") for s in (16, 32, 48)]
-                   + [str(AQUI / "favicon.ico")], check=True)
+    gerar_ico("favicon.ico", (16, 32, 48))
 
     # ---- X/Twitter: avatar e recortado em CIRCULO -> nada de canto, marca recuada
     escrever("_avatar.svg", marca(P3, BRANCO, fundo=TINTA_ESCURA, rx=200, escala=0.80))
@@ -145,6 +159,34 @@ def main() -> None:
     # ---- README: lockup rasterizado nas duas tintas
     png("logo-lockup-dark.svg", "logo-lockup-dark.png", 1000, 260)
     png("logo-lockup-light.svg", "logo-lockup-light.png", 1000, 260)
+
+    # ---- uma fonte para os icones de todos os clientes
+    raiz = AQUI.parent.parent
+    for nome in ("icon-180.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png"):
+        shutil.copyfile(AQUI / nome, raiz / "frontend/public/icons" / nome)
+    for nome in ("favicon.svg", "favicon.ico"):
+        shutil.copyfile(AQUI / nome, raiz / "frontend/public" / nome)
+    for origem, destino in (("icon-512.png", "icon.png"), ("icon.ico", "icon.ico"),
+                            ("icon.icns", "icon.icns")):
+        shutil.copyfile(AQUI / origem, raiz / "shell/build" / destino)
+        shutil.copyfile(AQUI / origem, raiz / "desktop-native/assets/brand" / destino)
+
+    mobile = raiz / "mobile/assets"
+    png("icon.svg", "_mobile-icon.png", 1024)
+    subprocess.run(["magick", "-size", "1024x1024", "xc:#141617",
+                    str(AQUI / "_mobile-icon.png"), "-composite", "-alpha", "off", "-depth", "8",
+                    str(mobile / "icon.png")], check=True)
+    shutil.copyfile(AQUI / "_mobile-icon.png", mobile / "splash-icon.png")
+    png("icon-small.svg", "_mobile-favicon.png", 48)
+    shutil.copyfile(AQUI / "_mobile-favicon.png", mobile / "favicon.png")
+    subprocess.run(["magick", str(AQUI / "icon-512.png"), "-resize", "368x368",
+                    "-background", "none", "-gravity", "center", "-extent", "512x512",
+                    str(mobile / "android-icon-foreground.png")], check=True)
+    subprocess.run(["magick", "-size", "512x512", "xc:#141617", "-depth", "8",
+                    str(mobile / "android-icon-background.png")], check=True)
+    escrever("_mobile-mono.svg", marca(P3, BRANCO, escala=0.72))
+    png("_mobile-mono.svg", "_mobile-mono.png", 432)
+    shutil.copyfile(AQUI / "_mobile-mono.png", mobile / "android-icon-monochrome.png")
 
     for tmp in AQUI.glob("_*"):
         tmp.unlink()

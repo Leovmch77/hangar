@@ -44,13 +44,13 @@
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.ico"
     },
     "mac": {
       "target": [
         "dmg"
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.icns"
     }
   }
 }
