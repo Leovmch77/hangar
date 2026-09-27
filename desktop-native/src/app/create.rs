@@ -891,6 +891,15 @@ fn choice(id: impl Into<ElementId>, on: bool, cx: &App) -> Button {
         .border_1().border_color(if on { theme::accent() } else { theme::border() }).when(on, |b| b.bg(theme::accent_dim()))
 }
 
+/// Escolha sem borda do diálogo (abas de raiz, linhas de pasta): realce de passagem neutro; a escolhida com o fundo de
+/// destaque suave, que não muda sob o ponteiro, para seleção e passagem não se confundirem.
+fn soft_choice(id: impl Into<ElementId>, on: bool, idle: Hsla, cx: &App) -> Button {
+    let fill = if on { theme::accent_dim() } else { transparent_black() };
+    let hover = if on { fill } else { theme::hover() };
+    Button::new(id).custom(ButtonCustomVariant::new(cx).color(fill).foreground(if on { theme::accent_text() } else { idle })
+        .hover(hover).active(hover)).selected(on)
+}
+
 /// Cartão de uma escolha entre duas (onde roda, quem escreve o resumo): o ponto de rádio, o título e o resumo da escolha.
 fn option_card(id: &'static str, on: bool, title: String, beta: bool, summary: String, busy: bool, cx: &App) -> Button {
     choice(id, on, cx).flex_1().min_w_0().h_auto().py(px(8.)).px(px(12.)).rounded(px(8.)).selected(on).disabled(busy)
@@ -952,11 +961,15 @@ impl NewSession {
         match self.roots.value.as_ref() {
             Some(Err(error)) => alert("create-roots-error", format!("{} {error}", tr("create_roots_failed"))).into_any_element(),
             Some(Ok(list)) if list.is_empty() => muted(tr("create_no_roots")).into_any_element(),
-            _ => div().id("create-roots").role(Role::Group).aria_label(tr("create_roots")).flex().flex_wrap().gap(px(8.))
+            // No diálogo, as raízes são abas numa trilha em pílula; no menu de pasta da tela sem sessão, ficam como estavam.
+            _ => div().id("create-roots").role(Role::Group).aria_label(tr("create_roots")).flex().flex_wrap()
+                .map(|el| if self.compact { el.gap(px(8.)) } else { el.self_start().gap(px(2.)).p(px(3.)).rounded_full().bg(theme::inset()) })
                 .children(self.roots.ok().into_iter().flatten().enumerate().map(|(n, root)| {
                     let on = self.root.as_ref().is_some_and(|r| r.path == root.path);
                     let pick = root.clone();
-                    choice(SharedString::from(format!("create-root-{n}")), on, cx).small().rounded_full().label(root.name.clone()).disabled(self.creating)
+                    let id = SharedString::from(format!("create-root-{n}"));
+                    if self.compact { choice(id, on, cx) } else { soft_choice(id, on, theme::muted(), cx).px(px(14.)) }
+                        .small().rounded_full().label(root.name.clone()).disabled(self.creating)
                         .accessibility_label(root.name.clone()).tooltip(root.path.clone())
                         .on_click(cx.listener(move |this, _, window, cx| this.select_root(pick.clone(), window, cx)))
                 })).into_any_element(),
@@ -1001,20 +1014,28 @@ impl NewSession {
         let entry = self.scan.ok()?.entries.get(*self.folders.get(ix)?)?;
         let on = self.picked.as_deref() == Some(entry.path.as_str());
         let (pick, open) = (entry.path.clone(), entry.path.clone());
-        let badge = |text: &str| div().px(px(6.)).rounded(px(4.)).border_1().border_color(theme::border()).text_size(px(10.5))
-            .font_family(theme::MONO).text_color(theme::muted()).child(text.to_owned());
+        // No diálogo, linha sem borda com o ícone da pasta à frente e etiquetas apagadas; o menu da tela sem sessão fica como estava.
+        let soft = !self.compact;
+        let badge = |text: &str| div().px(px(6.)).rounded(px(if soft { 5. } else { 4. })).text_size(px(10.5)).font_family(theme::MONO)
+            .map(|el| if soft { el.py(px(1.)).bg(theme::hover()).text_color(theme::faint()) } else { el.border_1().border_color(theme::border()).text_color(theme::muted()) })
+            .child(text.to_owned());
+        let id = SharedString::from(format!("create-folder-{}", entry.path));
+        let row = if soft { soft_choice(id, on, theme::text(), cx).py(px(8.)).rounded(px(10.)) } else { choice(id, on, cx).py(px(6.)).rounded(px(8.)) };
         // A linha da lista virtual não estica sozinha como o filho da coluna esticava.
         Some(div().w_full().flex().items_center().gap(px(4.)).pb(px(2.))
-            .child(choice(SharedString::from(format!("create-folder-{}", entry.path)), on, cx).disabled(self.creating).flex_1().min_w_0().h_auto().py(px(6.)).px(px(10.))
-                .rounded(px(8.)).accessibility_label(entry.name.clone()).selected(on)
-                .child(div().w_full().min_w_0().flex().flex_col().items_start().gap(px(2.))
+            .child(row.disabled(self.creating).flex_1().min_w_0().h_auto().px(px(10.)).accessibility_label(entry.name.clone()).selected(on)
+                .child(div().w_full().min_w_0().flex().items_center().gap(px(12.))
+                .when(soft, |el| el.child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(if on { theme::accent_dim() } else { theme::hover() })
+                    .flex().items_center().justify_center()
+                    .child(chrome::small_icon(if on { IconName::FolderOpen } else { IconName::Folder }, 16., if on { theme::accent() } else { theme::muted() }))))
+                .child(div().flex_1().min_w_0().flex().flex_col().items_start().gap(px(2.))
                     .child(div().w_full().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(entry.name.clone()))
                     .child(div().w_full().flex().items_center().gap(px(6.))
                         .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted())
                             .child(rel_path(&root.path, &entry.path)))
                         .when(entry.is_git, |el| el.child(badge("git")))
                         .when(entry.has_claude_md, |el| el.child(badge("CLAUDE.md")))
-                        .when_some(entry.mtime, |el, t| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(folder_time(t))))))
+                        .when_some(entry.mtime, |el, t| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(folder_time(t)))))))
                 .on_click(cx.listener(move |this, _, window, cx| this.pick(pick.clone(), window, cx))))
             .child(Button::new(SharedString::from(format!("create-open-{}", entry.path))).ghost().small().flex_shrink_0().disabled(self.creating)
                 .icon(IconName::ChevronRight).accessibility_label(tr("create_open").replace("{nome}", &entry.name))
@@ -1048,9 +1069,9 @@ impl NewSession {
                 .child(div().flex_1().min_w_0().child(Input::new(&self.manual).small().font_family(theme::MONO).aria_label(tr("create_path_aria"))))
                 .child(Button::new("create-use-typed").outline().small().label(tr("create_use")).disabled(!manual_ready || self.creating)
                     .on_click(cx.listener(|this, _, window, cx| this.use_typed(window, cx))))));
-        let title = div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr(if self.baton.is_some() { "create_baton_title" } else { "create_title" }));
+        let title = div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr(if self.baton.is_some() { "create_baton_title" } else { "create_title" }));
         let column = div().w(relative(0.45)).flex_shrink_0().h_full().min_h_0().pr(px(20.)).border_r_1().border_color(theme::border()).flex().flex_col()
-            .gap(px(12.)).child(match &self.baton {
+            .gap(px(14.)).child(match &self.baton {
                 Some(b) => div().flex().flex_col().gap(px(4.)).child(title)
                     .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("create_baton_origin").replace("{n}", &b.name))),
                 None => title,
@@ -1059,7 +1080,7 @@ impl NewSession {
         if let Some(c) = self.target() { return column.child(self.render_preview(c, cx)); }
         column
             .child(self.render_roots(cx))
-            .when(self.root.is_some(), |el| el.child(Input::new(&self.query).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::muted()))
+            .when(self.root.is_some(), |el| el.child(Input::new(&self.query).rounded(px(10.)).cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::muted()))
                 .aria_label(tr("create_search"))))
             .children(path_row)
             // A lista de pastas rola sozinha; carregando, vazia ou com erro, a caixa é que rola.
@@ -1410,14 +1431,15 @@ impl Render for NewSession {
         // A tela sem sessão é desenhada pelo `Hangar` (`render_new_chat`), em volta do compositor dele.
         if self.compact { return div(); }
         // Topo, margem de baixo do kit e o preenchimento do diálogo: o resto da janela, até a altura do web.
-        let height = (window.viewport_size().height - px(DIALOG_TOP + 16. + 32.)).min(px(760.)).max(px(320.));
+        let height = (window.viewport_size().height - px(DIALOG_TOP + 16. + 40.)).min(px(760.)).max(px(320.));
         let right = match self.picked.clone() {
             Some(path) => self.render_form(&path, cx),
-            None => div().flex_1().min_w_0().h_full().pl(px(20.)).flex().flex_col().items_center().justify_center().gap(px(8.))
-                .child(div().size(px(56.)).rounded(px(14.)).bg(theme::inset()).mb(px(8.)).flex().items_center().justify_center()
-                    .child(chrome::small_icon(IconName::Folder, 26., theme::muted())))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("create_empty_title")))
-                .child(div().max_w(px(300.)).text_center().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("create_empty_sub"))),
+            None => div().flex_1().min_w_0().h_full().pl(px(20.)).flex().flex_col().items_center().justify_center().gap(px(6.))
+                .child(div().size(px(88.)).mb(px(12.)).rounded_full().bg(theme::hover()).flex().items_center().justify_center()
+                    .child(div().size(px(60.)).rounded_full().bg(theme::accent_dim()).border_1().border_color(theme::accent_focus())
+                        .flex().items_center().justify_center().child(chrome::small_icon(IconName::FolderOpen, 26., theme::accent()))))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("create_empty_title")))
+                .child(div().max_w(px(320.)).text_center().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("create_empty_sub"))),
         };
         div().h(height).w_full().flex().child(self.render_left(cx)).child(right)
     }
@@ -1484,7 +1506,7 @@ impl Hangar {
             // Criando, o diálogo não fecha: ele é o único lugar onde o resultado aparece, como o Adicionar de Máquinas.
             let busy = dialog.read(cx).creating;
             let (weak, me) = (weak.clone(), dialog.entity_id());
-            d.w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
+            popup::dialog(d).w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(enter_to_focused)
                 .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
                     if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
