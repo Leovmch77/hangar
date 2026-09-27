@@ -120,11 +120,12 @@ def repo(tmp_path):
     return r, g
 
 
-def iniciar(tmp_path, r, projeto=PROJETO):
+def iniciar(tmp_path, r, projeto=PROJETO, tasks=TASKS):
     d = tmp_path / "orq"; d.mkdir()
+    (tmp_path / "roteiro-1.md").write_text("x\n")
     (tmp_path / "roteiro-2.md").write_text("x\n")
     p = tmp_path / "orq-plano.md"
-    p.write_text(f"# Orchestration plan — x\n\n{projeto}\n{TASKS}")
+    p.write_text(f"# Orchestration plan — x\n\n{projeto}\n{tasks}")
     run("plan-check", str(p), "--repo", str(r), "--stamp")
     c = tmp_path / "regras.md"; c.write_text("")
     log = tmp_path / "sent.log"
@@ -207,19 +208,46 @@ def fechar(tmp_path, r, g, e, task, arquivo):
     run("commit", "--task", str(task), "--hash", g("rev-parse", "HEAD"), env=e)
 
 
-def test_lote_enfileira_so_task_com_roteiro_e_avisa_quando_nao_ha_task_aberta(tmp_path, repo):
+def _tasks(onda1, onda2, rot1="`roteiro-1.md`"):
+    return TASKS.replace("| `true` | 1 | — |", f"| `true` | {onda1} | {rot1} |").replace(
+        "| `true` | 1 | `roteiro-2.md` |", f"| `true` | {onda2} | `roteiro-2.md` |")
+
+
+def test_lote_espera_a_onda_mesmo_sem_task_aberta(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r, tasks=_tasks(1, 1))   # lote(2), T1 e T2 com roteiro, onda 1
+    fechar(tmp_path, r, g, e, 1, "a.txt")
+    # Nada aberto, mas T2 da mesma onda ainda não fechou: espera.
+    assert log.read_text().splitlines()[-1].endswith("Proof queued (1/2).")
+    fechar(tmp_path, r, g, e, 2, "b.txt")
+    assert "Proof batch ready: T1, T2." in log.read_text().splitlines()[-1]
+
+
+def test_lote_sai_quando_a_onda_da_task_acaba(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r, tasks=_tasks(1, 2))   # lote(2), T1 onda 1, T2 onda 2
+    # T2 aberta: só o fim da onda 1 explica o aviso de T1.
+    run("event", "task_inicio", "--task", "2", "--titulo", "t", "--executor", "ex2", "--par", "rev2", env=e)
+    fechar(tmp_path, r, g, e, 1, "a.txt")
+    assert "Proof batch ready: T1." in log.read_text().splitlines()[-1]
+    out = run("batch", "take", env=e).stdout
+    assert out.startswith("lote 1: T1 roteiro-1.md ")
+    assert run("batch", "take", env=e).stdout.strip() == "no pending proof"
+    fechar(tmp_path, r, g, e, 2, "b.txt")
+    assert "Proof batch ready: T2." in log.read_text().splitlines()[-1]
+    assert run("batch", "take", env=e).stdout.startswith("lote 2: T2 ")
+
+
+def test_lote_so_enfileira_com_roteiro_e_commit_repetido_nao_duplica(tmp_path, repo):
     r, g = repo
     d, e, log = iniciar(tmp_path, r)          # TASKS: T1 sem roteiro, T2 com roteiro; lote(2)
     fechar(tmp_path, r, g, e, 1, "a.txt")
     assert not (d / "prova-fila.jsonl").exists()
     fechar(tmp_path, r, g, e, 2, "b.txt")
+    run("commit", "--task", "2", "--hash", g("rev-parse", "HEAD"), env=e)
     fila = [json.loads(l) for l in (d / "prova-fila.jsonl").read_text().splitlines()]
     assert [f["task"] for f in fila] == [2]
-    # Fila com 1 < 2, mas nenhuma Task aberta: o lote sai assim mesmo.
-    assert "Proof batch ready: T2" in log.read_text().splitlines()[-1]
-    out = run("batch", "take", env=e).stdout
-    assert out.startswith("lote 1: T2 ")
-    assert run("batch", "take", env=e).stdout.strip() == "no pending proof"
+    assert "Proof batch ready: T2." in log.read_text().splitlines()[-1]
 
 
 def test_por_task_nao_enfileira(tmp_path, repo):
