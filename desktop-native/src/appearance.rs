@@ -78,6 +78,11 @@ impl Navigation {
 #[serde(rename_all = "snake_case")]
 pub enum SidebarGroup { None, Project }
 
+/// Aba do painel da direita, lembrada entre aberturas (`ctxPanel.aba` do web).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideTab { Files, Activity, Git, #[serde(other)] Context }
+
 /// Automático segue a preferência do sistema; Desktop pinta com a paleta do papel de parede.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -223,6 +228,7 @@ pub struct Appearance {
     /// Contas e modelos em uma linha por conta, sem barras: escolha deste aparelho, como no web.
     pub accounts_compact: bool,
     pub sidebar_group: SidebarGroup,
+    pub side_tab: SideTab,
     pub terminal_font: CodeFont,
     /// Tamanho em pixels, independente do texto e do código da conversa.
     pub terminal_size: u16,
@@ -237,7 +243,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
-    language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None,
+    language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
 
 impl Default for Appearance {
@@ -258,7 +264,7 @@ impl Appearance {
             surface_material: self.surface_material,
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
-            language: self.language, currency: self.currency, hands_free: self.hands_free, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group,
+            language: self.language, currency: self.currency, hands_free: self.hands_free, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
             code_font: self.code_font, terminal_font: self.terminal_font,
             ..Self::default() }
     }

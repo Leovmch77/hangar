@@ -33,6 +33,12 @@ class Handler(base.Handler):
     def cwd(self):
         return str(self.server.repo)
 
+    def switch_mode(self, terminal):
+        """Terminal ⇄ sem terminal como o backend responde; só troca o `headless` da lista."""
+        with self.server.lock:
+            self.server.sessions[NAME]["headless"] = not terminal
+        return {"ok": True, "terminal": terminal}
+
     def run(self, fn, *args):
         try:
             return self.reply(fn(*args))
@@ -87,6 +93,7 @@ class Handler(base.Handler):
             "git/commit": lambda: ops.commit(cwd, body["message"], body.get("paths", []), body.get("amend", False), body.get("new_branch")),
             "git/push": lambda: ops.push(cwd),
             "git/branch": lambda: ops.create_branch_at(cwd, body["name"], body.get("sha"), body.get("switch_after", False)),
+            "modo-execucao": lambda: self.switch_mode(bool(body["terminal"])),
         }
         if rest not in routes:
             return self.reply({"detail": "Method Not Allowed"}, 405)

@@ -7,6 +7,8 @@ use super::*;
 use super::device::Remote;
 use super::sidebar::git_note;
 use gpui_kit::component::{WindowExt, notification::NotificationType, popover::Popover, tab::{Tab, TabBar}};
+use crate::appearance::SideTab;
+use std::rc::Rc;
 
 /// O diálogo no tamanho do painel expandido: `min(1100, 92% da janela)` por `min(720, 78%)`.
 const MAX_W: f32 = 1100.;
@@ -303,11 +305,14 @@ pub(super) struct GitPanel {
     picker: bool,
     branch_query: Entity<InputState>,
     branch_error: Option<String>,
+    /// Na aba Git do painel direito: lista estreita, e o diff e o histórico abrem no diálogo por aqui.
+    expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl GitPanel {
-    fn new(source: Source, runtime: Arc<Runtime>, name: String, title: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(source: Source, runtime: Arc<Runtime>, name: String, title: String, expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+        window: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).placeholder(tr("git_message")));
         let branch_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("git_branch_search")));
         let notify = |_: &mut Self, _: Entity<_>, event: &InputEvent, cx: &mut Context<Self>| if matches!(event, InputEvent::Change) { cx.notify() };
@@ -323,7 +328,7 @@ impl GitPanel {
         Self {
             source, runtime, name, title, pane: Pane::default(), repo: Remote::default(), work: Review::new(), round: 0, chosen: HashSet::new(),
             seen: HashSet::new(), message, amend: false, busy: None, error: None, output: None, log: Remote::default(), log_limit: LOG_PAGE,
-            ahead_behind: (None, None), opened: None, picker: false, branch_query, branch_error: None, _subscriptions: subscriptions,
+            ahead_behind: (None, None), opened: None, picker: false, branch_query, branch_error: None, expand, _subscriptions: subscriptions,
         }
     }
 
@@ -876,29 +881,125 @@ fn clone_remote(remote: &Remote<Patch>) -> Remote<Patch> {
     Remote { value: remote.value.clone(), loading: remote.loading, seq: remote.seq }
 }
 
-impl Render for GitPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let height = (f32::from(window.viewport_size().height) * 0.78).min(MAX_H);
-        let repo = self.repo.ok().cloned();
-        let branch = repo.as_ref().and_then(|r| r.current.clone());
-        let dirty = repo.as_ref().is_some_and(|r| r.dirty);
-        // Seletor de branch do Zeron: chip com o nome e a seta, lista com busca num popover.
+impl GitPanel {
+    /// Seletor de branch do Zeron: chip com o nome e a seta, lista com busca num popover.
+    fn branch_picker(&self, max_w: f32, cx: &mut Context<Self>) -> Popover {
+        let repo = self.repo.ok();
+        let branch = repo.and_then(|r| r.current.clone());
+        let dirty = repo.is_some_and(|r| r.dirty);
         let panel = cx.entity();
         let chip = Button::new("git-branch").ghost().small().disabled(repo.is_none())
-            .child(div().flex().items_center().gap_1()
+            .child(div().min_w_0().flex().items_center().gap_1()
                 .child(chrome::small_icon(IconName::GitBranch, 14., theme::muted()))
-                .child(div().max_w(px(220.)).truncate().font_family(theme::MONO).text_size(px(12.)).child(branch.clone().unwrap_or_else(|| "—".into())))
+                .child(div().max_w(px(max_w)).truncate().font_family(theme::MONO).text_size(px(12.)).child(branch.unwrap_or_else(|| "—".into())))
                 .when(dirty, |el| el.child(div().text_color(theme::warning()).child("*")))
                 .child(chrome::small_icon(IconName::ChevronDown, 12., theme::faint())));
-        let picker = Popover::new("git-branch-picker").anchor(Anchor::TopLeft).open(self.picker)
+        Popover::new("git-branch-picker").anchor(Anchor::TopLeft).open(self.picker)
             .on_open_change({ let panel = panel.clone(); move |open, window, cx| panel.update(cx, |this, cx| this.open_picker(*open, window, cx)) })
             .trigger(chip)
-            .content({ let panel = panel.clone(); move |_, _, cx| panel.update(cx, |this, cx| this.render_picker(cx)) });
-        let header = div().flex().items_center().gap_2().pr(px(36.)).h(px(28.))
+            .content(move |_, _, cx| panel.update(cx, |this, cx| this.render_picker(cx)))
+    }
+
+    fn ahead_behind(&self, el: Div) -> Div {
+        el.when_some(self.ahead_behind.0.filter(|n| *n > 0), |el, n| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::accent()).child(tr("git_ahead").replace("{n}", &n.to_string()))))
+            .when_some(self.ahead_behind.1.filter(|n| *n > 0), |el, n| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::warning()).child(tr("git_behind").replace("{n}", &n.to_string()))))
+    }
+
+    /// A aba Git do painel direito: branch, arquivos alterados com a marca do commit e a barra de commit empilhada. O diff
+    /// não cabe na largura do painel; ele e o histórico abrem no diálogo grande.
+    fn render_compact(&mut self, expand: Rc<dyn Fn(&mut Window, &mut App)>, cx: &mut Context<Self>) -> AnyElement {
+        let open = expand.clone();
+        let header = self.ahead_behind(div().flex_shrink_0().flex().items_center().gap_1().px_3().pb_2()
+            .child(div().flex_1().min_w_0().flex().child(self.branch_picker(150., cx))))
+            .child(chrome::icon_button("git-side-reload", IconName::RefreshCw, tr("git_reload"), cx).disabled(self.repo.loading)
+                .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))))
+            .child(chrome::icon_button("git-side-expand", IconName::Maximize, tr("git_expand"), cx)
+                .on_click(move |_, window, cx| open(window, cx)));
+        let note = |text: String| div().flex_1().flex().items_center().justify_center().px_4().text_size(px(12.)).text_color(theme::faint())
+            .whitespace_normal().child(text).into_any_element();
+        let files = self.repo.ok().map(|r| r.files.clone());
+        let body = match &self.repo.value {
+            None => popup::skeleton("git-side-loading", 5).into_any_element(),
+            Some(Err(reason)) => div().id("git-side-failed").p_4().flex().flex_col().items_start().gap_3().role(Role::Alert)
+                .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(reason.clone()))
+                .child(Button::new("git-side-retry").small().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.load(window, cx))))
+                .into_any_element(),
+            Some(Ok(repo)) if repo.files.is_empty() => note(tr("git_clean")),
+            Some(Ok(repo)) => {
+                let count = repo.files.len();
+                let label = if count == 1 { tr("git_uncommitted_1") } else { tr("git_uncommitted").replace("{n}", &count.to_string()) };
+                let all: Vec<String> = repo.files.iter().map(|(p, _)| p.clone()).collect();
+                let busy = self.busy.is_some();
+                let rows = repo.files.iter().map(|(path, code)| {
+                    let (tag, tag_color) = code_tag(code);
+                    let counts = self.work.files.iter().find(|e| &e.path == path).and_then(|e| e.patch.ok()).map(|p| (p.added, p.removed));
+                    let (name, dir) = match path.rsplit_once('/') { Some((dir, name)) => (name.to_owned(), Some(dir.to_owned())), None => (path.clone(), None) };
+                    let (pick, drop) = (path.clone(), path.clone());
+                    let open = expand.clone();
+                    let id = |what: &str| SharedString::from(format!("git-side-{what}-{path}"));
+                    div().h(px(30.)).w_full().flex_shrink_0().flex().items_center().gap_2().px_3().hover(|el| el.bg(theme::hover()))
+                        .child(Checkbox::new(id("pick")).checked(self.chosen.contains(path))
+                            .accessibility_label(tr("git_include").replace("{path}", path))
+                            .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                                if *checked { this.chosen.insert(pick.clone()); } else { this.chosen.remove(&pick); }
+                                cx.notify();
+                            })))
+                        .child(div().id(id("open")).flex_1().min_w_0().h_full().flex().items_center().gap_2().cursor_pointer()
+                            .tooltip({ let full = path.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx) })
+                            .on_click(move |_, window, cx| open(window, cx))
+                            .child(div().w(px(12.)).flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(tag_color).child(tag))
+                            .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::text()).child(name))
+                            .when_some(dir, |el, dir| el.child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme::faint()).child(dir)))
+                            .when_some(counts, |el, (a, r)| el
+                                .child(div().ml_auto().flex_shrink_0().font_family(theme::MONO).text_size(px(10.5)).text_color(theme::success()).child(format!("+{a}")))
+                                .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(10.5)).text_color(theme::removed()).child(format!("−{r}")))))
+                        .child(chrome::icon_button(id("discard"), IconName::Undo2, tr("git_discard_hint"), cx).xsmall().disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| this.ask_discard(drop.clone(), window, cx))))
+                }).collect::<Vec<_>>();
+                div().flex_1().min_h_0().flex().flex_col()
+                    .child(div().flex_shrink_0().flex().items_center().gap_1().px_3().pb_1().text_size(px(11.)).text_color(theme::faint())
+                        .child(div().flex_1().min_w_0().truncate().child(format!("{label} · {}",
+                            tr("git_picked").replace("{n}", &self.picked().len().to_string()).replace("{total}", &count.to_string()))))
+                        .child(Button::new("git-side-all").ghost().xsmall().label(tr("git_all"))
+                            .on_click(cx.listener(move |this, _, _, cx| { this.chosen = all.iter().cloned().collect(); cx.notify(); })))
+                        .child(Button::new("git-side-none").ghost().xsmall().label(tr("git_none"))
+                            .on_click(cx.listener(|this, _, _, cx| { this.chosen.clear(); cx.notify(); }))))
+                    .child(div().id("git-side-files").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().children(rows))
+                    .into_any_element()
+            }
+        };
+        let can = self.can_commit(cx);
+        let committing = self.busy.as_deref() == Some("commit");
+        let commit_bar = div().flex_shrink_0().flex().flex_col().gap_2().p_3().border_t_1().border_color(theme::border())
+            .child(div().id("git-side-message").child(Textarea::new(&self.message).aria_label(tr("git_message")).disabled(self.busy.is_some())))
+            .child(Checkbox::new("git-side-amend").label(tr("git_amend")).checked(self.amend)
+                .on_change(cx.listener(|this, checked: &bool, window, cx| this.set_amend(*checked, window, cx))))
+            .child(div().flex().gap_2()
+                .child(Button::new("git-side-commit").small().flex_1().label(if committing { tr("git_committing") } else { tr("git_commit") }).disabled(!can)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))))
+                .when(!self.amend, |el| el.child(Button::new("git-side-commit-push").small().primary().flex_1().label(tr("git_commit_push")).disabled(!can)
+                    .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))))));
+        div().size_full().flex().flex_col().pt_1()
+            .child(header)
+            .child(body)
+            .when(files.is_some_and(|f| !f.is_empty()), |el| el.child(commit_bar))
+            .when_some(self.error.clone(), |el, error| el.child(div().id("git-side-error").flex_shrink_0().px_3().pb_2().role(Role::Alert)
+                .text_xs().text_color(theme::danger()).whitespace_normal().child(error)))
+            .when_some(self.output.clone(), |el, text| el.child(div().id("git-side-output").flex_shrink_0().mx_3().mb_2().max_h(px(72.)).overflow_y_scroll()
+                .px_2().py_1().rounded(px(8.)).bg(theme::inset()).border_1().border_color(theme::border())
+                .font_family(theme::MONO).text_xs().text_color(theme::muted()).whitespace_normal().child(text)))
+            .into_any_element()
+    }
+}
+
+impl Render for GitPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(expand) = self.expand.clone() { return self.render_compact(expand, cx); }
+        let height = (f32::from(window.viewport_size().height) * 0.78).min(MAX_H);
+        let repo = self.repo.ok().cloned();
+        let header = self.ahead_behind(div().flex().items_center().gap_2().pr(px(36.)).h(px(28.))
             .child(div().flex_shrink_0().max_w(px(260.)).truncate().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(self.title.clone()))
-            .child(picker)
-            .when_some(self.ahead_behind.0.filter(|n| *n > 0), |el, n| el.child(div().text_size(px(11.)).text_color(theme::accent()).child(tr("git_ahead").replace("{n}", &n.to_string()))))
-            .when_some(self.ahead_behind.1.filter(|n| *n > 0), |el, n| el.child(div().text_size(px(11.)).text_color(theme::warning()).child(tr("git_behind").replace("{n}", &n.to_string()))))
+            .child(self.branch_picker(220., cx)))
             .child(div().flex_1())
             .child(chrome::icon_button("git-reload", IconName::RefreshCw, tr("git_reload"), cx).disabled(self.repo.loading)
                 .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))));
@@ -939,24 +1040,58 @@ impl Render for GitPanel {
             .when_some(self.output.clone(), |el, text| el.child(div().id("git-output").flex_shrink_0().max_h(px(72.)).overflow_y_scroll()
                 .px_2().py_1().rounded(px(8.)).bg(theme::inset()).border_1().border_color(theme::border())
                 .font_family(theme::MONO).text_xs().text_color(theme::muted()).whitespace_normal().child(text)))
+            .into_any_element()
     }
 }
 
 impl Hangar {
-    /// A faixa do compositor abre o git da sessão aberta.
-    pub(super) fn open_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.clone()) else { return };
+    /// O git da sessão aberta, lido do disco ou pelas rotas; `expand` faz dele a lista estreita da aba.
+    fn new_git_panel(&self, expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<GitPanel>> {
+        let (Some(api), Some(session)) = (self.api.clone(), self.selected.clone()) else { return None };
         let title = folder_name(&session).unwrap_or_else(|| session.name.clone());
         let runtime = self.runtime.clone();
         // Servidor nesta máquina e a pasta existe aqui: o git roda direto no disco, pela pasta real da sessão.
         let here = session.cwd.as_deref().filter(|_| api.is_loopback()).and_then(|cwd| std::fs::canonicalize(cwd).ok()).filter(|p| p.is_dir());
         let source = match here { Some(cwd) => Source::Local(Arc::new(cwd)), None => Source::Remote(api, session.name.clone()) };
-        let panel = cx.new(|cx| GitPanel::new(source, runtime, session.name.clone(), title, window, cx));
+        let panel = cx.new(|cx| GitPanel::new(source, runtime, session.name.clone(), title, expand, window, cx));
         panel.update(cx, |panel, cx| panel.load(window, cx));
+        Some(panel)
+    }
+
+    /// A faixa do compositor e o "Git" do menu: a aba Git do painel direito; sem espaço para o painel, o diálogo grande.
+    pub(super) fn open_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_open = self.side.open;
+        self.side.open = true;
+        if !self.side_shown(window) {
+            self.side.open = was_open;
+            self.open_git_dialog(window, cx);
+            return;
+        }
+        if let Some((_, panel)) = self.side.git.clone() { panel.update(cx, |panel, cx| panel.load(window, cx)); }
+        self.choose_side_tab(SideTab::Git, window, cx);
+    }
+
+    /// Diff e histórico no tamanho do painel expandido; ao fechar, a aba relê o que o diálogo pode ter mudado.
+    fn open_git_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = self.new_git_panel(None, window, cx) else { return };
+        let side = self.side.git.as_ref().map(|(_, panel)| panel.downgrade());
         window.open_dialog(cx, move |dialog, window, _| {
             let width = (f32::from(window.viewport_size().width) * 0.92).min(MAX_W);
+            let side = side.clone();
             popup::dialog(dialog).w(px(width)).margin_top(px(24.)).on_ok(super::machines::enter_to_focused).child(panel.clone())
+                .on_close(move |_, window, cx| { if let Some(side) = side.as_ref() { let _ = side.update(cx, |panel, cx| panel.load(window, cx)); } })
         });
+    }
+
+    /// O painel da aba Git desta sessão, criado na primeira vez que a aba aparece.
+    pub(super) fn side_git(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<GitPanel>> {
+        let owner = self.session_owner()?;
+        if let Some((key, panel)) = &self.side.git && key == &owner { return Some(panel.clone()); }
+        let weak = cx.entity().downgrade();
+        let expand: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| { let _ = weak.update(cx, |this, cx| this.open_git_dialog(window, cx)); });
+        let panel = self.new_git_panel(Some(expand), window, cx)?;
+        self.side.git = Some((owner, panel.clone()));
+        Some(panel)
     }
 }
 

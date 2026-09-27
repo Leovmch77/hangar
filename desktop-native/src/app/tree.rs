@@ -108,9 +108,12 @@ fn mark_color(mark: char) -> Hsla {
 }
 
 impl Hangar {
-    pub(super) fn toggle_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tree.open = !self.tree.open;
-        if self.tree.open { self.tree.focus.focus(window, cx); } else { self.tree_stop(); }
+    /// A aba Arquivos entrou ou saiu de cena. O foco só vai para a árvore quando veio de um gesto (`window`).
+    pub(super) fn show_tree(&mut self, open: bool, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if let (true, Some(window)) = (open, window) { self.tree.focus.focus(window, cx); }
+        if self.tree.open == open { return; }
+        self.tree.open = open;
+        if !open { self.tree_stop(); }
         cx.notify();
     }
 
