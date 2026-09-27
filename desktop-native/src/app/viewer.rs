@@ -63,6 +63,8 @@ enum Shown { Loading, Image(Arc<RenderImage>), Failed(String) }
 pub(super) struct Viewer {
     hangar: WeakEntity<Hangar>,
     api: Api,
+    /// Anexos do cofre lidos do disco quando a sessão é desta máquina.
+    uploads: super::disk::Uploads,
     runtime: Arc<Runtime>,
     key: SessionKey,
     sources: Vec<Source>,
@@ -115,10 +117,10 @@ impl Viewer {
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(window, cx);
         self.seq += 1;
-        let (seq, api, name, source) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone());
+        let (seq, api, name, source, uploads) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone(), self.uploads.clone());
         // ponytail: a decodificação do fundo reduz a 2560 px de lado; zoom além disso amplia pixels. Subir se incomodar.
         let job = self.runtime.spawn(async move {
-            let bytes = api.fetch(&name, &source).await?;
+            let bytes = uploads.fetch(&api, &name, &source).await?;
             Ok(tokio::task::spawn_blocking(move || media::backdrop(&bytes)).await.ok().flatten())
         });
         if let Some(old) = self.fetching.replace(job.abort_handle()) { old.abort(); }
@@ -287,7 +289,7 @@ impl Hangar {
     pub(super) fn open_image(&mut self, key: SessionKey, sources: Vec<Source>, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         if index >= sources.len() { return; }
-        let (hangar, runtime) = (cx.entity().downgrade(), self.runtime.clone());
+        let (hangar, runtime, uploads) = (cx.entity().downgrade(), self.runtime.clone(), self.uploads_for(&key));
         let viewer = cx.new(|cx| {
             // Rede de segurança para um fechamento que não passe pelo `on_close`: a entidade morre com o diálogo.
             cx.on_release(|viewer: &mut Viewer, cx| {
@@ -295,7 +297,7 @@ impl Hangar {
                 if let Shown::Image(image) = &viewer.shown { cx.drop_image(image.clone(), None); }
             }).detach();
             Viewer {
-                hangar, api, runtime, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
+                hangar, api, uploads, runtime, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
                 focus: cx.focus_handle(), stage: None, limit: None, held: None, view: None, drag: None,
             }
         });
