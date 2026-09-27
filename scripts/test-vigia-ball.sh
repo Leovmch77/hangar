@@ -62,6 +62,7 @@ Checagens: —
 Integração: —
 Prova: por-task
 Paralelo: até 4
+Revisão: sessão
 Correção pelo revisor: até 0 linhas
 
 ## Tasks

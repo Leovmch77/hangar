@@ -41,7 +41,7 @@ def sent(log):
 
 
 PLANO = ("# Orchestration plan — t\n\n## Projeto\nChecagens: —\n"
-    "Integração: —\nProva: por-task\nParalelo: até 4\nCorreção pelo revisor: até 0 linhas\n\n"
+    "Integração: —\nProva: por-task\nParalelo: até 4\nRevisão: sessão\nCorreção pelo revisor: até 0 linhas\n\n"
     "## Tasks\n| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |\n"
     "|---|---|---|---|---|---|---|\n| 1 | t | §1 | `a.txt` | `true` | 1 | — |\n")
 

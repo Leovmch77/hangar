@@ -38,7 +38,8 @@ SECTION = re.compile(r"^## (.+?)\s*$")
 # The whole line, newline included: removing it must give back the text that was hashed.
 PREPARADO = re.compile(r"^Preparado: .* · sha ([0-9a-f]{12})[ \t]*(?:\n|$)", re.MULTILINE)
 PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova": "Prova",
-                "paralelo": "Paralelo", "correcao": "Correção pelo revisor"}
+                "paralelo": "Paralelo", "correcao": "Correção pelo revisor", "revisao": "Revisão"}
+SUBAGENT = "subagente"   # `--par` of a Task reviewed by a subagent: a name, never a session
 CHECK_TIMEOUT_S = 900
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
@@ -237,7 +238,8 @@ def state(d: Path) -> dict:
         open_tasks.append(task)
         r = roles.get(task, {})
         if ev["tipo"] == "entrega":
-            owner = r.get("par")
+            # A subagent reviewer runs inside the executor's turn: the executor holds the ball.
+            owner = r.get("executor") if r.get("par") == SUBAGENT else r.get("par")
         elif ev["tipo"] == "veredito" and ev.get("resultado") == "devolvido":
             owner = None  # the arbiter's, and he is always watched
         else:
@@ -266,14 +268,15 @@ def done(d: Path) -> list[tuple[str, str]]:
     for de, para in st["replaced"]:
         if de:
             out.setdefault(de, f"replaced by {para}")
-    return [(n, why) for n, why in out.items() if n not in busy and n != st["arbiter"]]
+    return [(n, why) for n, why in out.items()
+            if n not in busy and n != st["arbiter"] and n != SUBAGENT]
 
 
 def team(d: Path) -> list[str]:
     """Who must be in the arbiter's group: the open Tasks' executors and reviewers, then him."""
     st = state(d)
     names = [st["roles"].get(t, {}).get(k) for t in st["open"] for k in ("executor", "par")]
-    return [n for n in dict.fromkeys(names) if n and n != st["arbiter"]] + [st["arbiter"]]
+    return [n for n in dict.fromkeys(names) if n and n != st["arbiter"] and n != SUBAGENT] + [st["arbiter"]]
 
 
 def _event_line(ev: dict) -> str:
@@ -415,6 +418,8 @@ def projeto(text: str) -> dict:
         elif key == "paralelo":
             m = re.fullmatch(r"sequencial|at[eé] (\d+)", v)
             out[key] = (1 if not m.group(1) else int(m.group(1))) if m else 0
+        elif key == "revisao":
+            out[key] = {"subagente": "subagente", "sessão": "sessao", "sessao": "sessao"}.get(v, "?")
         else:
             m = re.search(r"\d+", v)
             out[key] = int(m.group()) if m else 0
@@ -558,6 +563,8 @@ def cmd_plan_check(a) -> int:
         problems.append("## Projeto: Prova must be nenhuma | por-task | lote(N)")
     if pj["paralelo"] == 0:
         problems.append("## Projeto: Paralelo must be sequencial | até N")
+    if pj["revisao"] == "?":
+        problems.append("## Projeto: Revisão must be subagente | sessão")
     # A command typed without backticks parses to no command: it would disable the check silently.
     for line in _section(text, "Projeto"):
         k, sep, v = line.partition(":")
@@ -648,6 +655,13 @@ def cmd_event(a) -> int:
     if ev.get("tipo") == "veredito" and ev.get("resultado") == "corrige":
         ev["patch"] = str(Path(ev.get("patch") or "").expanduser().resolve()) if ev.get("patch") else ""
         _check_patch(d, ev)
+    if ev.get("tipo") == "veredito" and state(d)["roles"].get(ev.get("task"), {}).get("par") == SUBAGENT:
+        obj = round_object(d, ev["task"], ev.get("rodada"))
+        repo = a.repo or config(d)["repo"]
+        if obj and subprocess.run(["git", "-C", repo, "diff", "--quiet", obj, "--"],
+                                  capture_output=True).returncode != 0:
+            raise OrqError(f"worktree changed during the review of round {ev['rodada']}: a reviewer "
+                           "never edits code; restore the round and judge again")
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
     _after_event(d, ev)
@@ -876,6 +890,10 @@ def cmd_apply_patch(a) -> int:
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
     par = state(d)["roles"].get(a.task, {}).get("par")
+    if par == SUBAGENT:
+        print(f"round {rnd + 1} frozen: {h}. Now run `orq review-package --task {a.task} --rodada "
+              f"{rnd + 1}` and dispatch a NEW revisor-orq with that path: it judges the patch fresh.")
+        return 0
     send(par, f"Task {a.task} round {rnd + 1} = round {rnd} + your patch {patch}, checks ok, object "
               f"{h}. Review the patch with a clean-context subagent (revisor.md, \"Round of your own "
               f"patch\") and give the verdict of round {rnd + 1}.")
@@ -895,6 +913,50 @@ def _jsonl(p: Path) -> list[dict]:
         if isinstance(v, dict):
             out.append(v)
     return out
+
+
+def cmd_review_package(a) -> int:
+    """Everything a subagent reviewer sees, built by orq: the executor cannot choose it."""
+    d = base_dir(a.dir)
+    cfg = config(d)
+    repo = a.repo or cfg["repo"]
+    obj = round_object(d, a.task, a.rodada)
+    if not obj:
+        raise OrqError(f"round {a.rodada} of Task {a.task} was never delivered")
+    try:
+        common, sections = _contract_parts(Path(cfg["contract"]).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        common, sections = "(no contract)", {}
+    plan = cfg.get("plan")
+    row = next((t for t in plan_tasks(plan_text(plan)) if t["n"] == a.task), None) if plan else None
+    check = next((c for c in reversed(_jsonl(d / "checks.jsonl"))
+                  if c.get("task") == a.task and c.get("commit", "-").startswith(obj[:12])), None)
+    patch_of = next((ev.get("motivo") for ev in reversed(events(d)) if ev.get("tipo") == "entrega"
+                     and ev.get("task") == a.task and ev.get("rodada") == a.rodada), "") or ""
+    report = Path(a.report).read_text(encoding="utf-8") if a.report else "(no report given)"
+    diff = git(repo, "diff", "--stat", f"{obj}^1", obj) + "\n" + git(repo, "diff", f"{obj}^1", obj)
+    out = d / "review" / f"task{a.task}-r{a.rodada}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    verdict = (f"python3 {Path(__file__).resolve()} --dir {d} event veredito --task {a.task} "
+               f"--rodada {a.rodada} --resultado <aprova|reprova|devolvido|corrige> --sessao revisor-orq "
+               f"--motivo {d}/pareceres/task{a.task}-r{a.rodada}.md --repo {repo}")
+    out.write_text("\n".join([
+        f"# Review package — Task {a.task}, round {a.rodada}",
+        f"Object: {obj}  Base: {obj}^1  Repo: {repo}  Durable dir: {d}",
+        f"This round is {patch_of}." if "reviewer patch" in patch_of else "",
+        "## Contract", common.rstrip(), sections.get(a.task, f"(no '## Task {a.task}' section)").rstrip(),
+        "## Plan row", json.dumps(row, ensure_ascii=False) if row else "(no plan row)",
+        "## Roteiro", (row or {}).get("roteiro") or "none",
+        "## Check log", (check or {}).get("log") or "none",
+        "## Round report", report.rstrip(),
+        "## Diff", "```diff", diff.rstrip(), "```",
+        "## How to answer",
+        f"Write the report to {d}/pareceres/task{a.task}-r{a.rodada}.md "
+        f"(and the patch, for corrige, to {d}/pareceres/task{a.task}-r{a.rodada}.patch, passing --patch). "
+        f"Then run:\n{verdict}",
+    ]) + "\n", encoding="utf-8")
+    print(out)
+    return 0
 
 
 def pending_proofs(d: Path) -> list[dict]:
@@ -1109,6 +1171,7 @@ def build_parser() -> argparse.ArgumentParser:
     for k in EVENT_FIELDS_STR:
         s.add_argument(f"--{k}")
     s.add_argument("--reincide", action="store_true")
+    s.add_argument("--repo", help="the Task's worktree; default orq.json's")
     s = sub.add_parser("check", help="run the plan's checks on a frozen round")
     s.add_argument("--task", type=int, required=True)
     s.add_argument("--commit", required=True)
@@ -1116,6 +1179,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("apply-patch", help="apply the reviewer's patch as the next round")
     s.add_argument("--task", type=int, required=True)
     s.add_argument("--repo", help="the Task's worktree; default orq.json's")
+    s = sub.add_parser("review-package", help="build the one file a subagent reviewer reads")
+    s.add_argument("--task", type=int, required=True)
+    s.add_argument("--rodada", type=int, required=True)
+    s.add_argument("--repo", help="the Task's worktree; default orq.json's")
+    s.add_argument("--report", help="the executor's round report")
     s = sub.add_parser("read", help="the contract's common part + one Task, or the journal's tail")
     s.add_argument("what", choices=["contract", "journal"])
     s.add_argument("--task", type=int)
@@ -1151,7 +1219,7 @@ def build_parser() -> argparse.ArgumentParser:
 CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
-        "apply-patch": cmd_apply_patch, "batch": cmd_batch}
+        "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package}
 
 
 def main(argv: list[str] | None = None) -> int:

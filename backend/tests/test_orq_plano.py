@@ -14,6 +14,7 @@ Checagens: `true`
 Integração: —
 Prova: lote(2)
 Paralelo: até 2
+Revisão: subagente
 Correção pelo revisor: até 20 linhas
 """
 

@@ -116,3 +116,19 @@ def test_checagem_que_suja_a_arvore_nao_entra_na_rodada_e_o_desfazer_falho_e_dit
     congelado = g("stash", "list").splitlines()[0]
     assert "round 2 (reviewer patch)" in congelado
     assert g("show", "stash@{0}:a.txt") == "3"
+
+
+def test_apply_patch_no_modo_subagente_manda_o_executor_abrir_um_revisor_novo(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r)
+    run("event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex",
+        "--par", "subagente", env=e)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+    p = patch_de(r, g, tmp_path)
+    run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "corrige",
+        "--sessao", "revisor-orq", "--patch", p, env=e)
+    out = run("apply-patch", "--task", "1", "--repo", str(r), env=e).stdout
+    assert "orq review-package --task 1 --rodada 2" in out and "NEW revisor-orq" in out
+    assert not any(l.startswith("subagente ") for l in log.read_text().splitlines())
