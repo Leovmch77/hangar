@@ -865,6 +865,7 @@ fn bar_cell(v: f64, max: f64, weight: bool) -> Div {
 
 /// Colunas por dia com rótulos no início, meio e fim; com `cx`, passar o mouse marca o dia.
 fn day_bars(id: &'static str, days: &[Item], value: impl Fn(&Item) -> f64, height: f32, hover: Option<&str>, cx: Option<&mut Context<Hangar>>) -> Div {
+    if days.is_empty() { return div(); }
     let top = days.iter().map(&value).fold(0., f64::max);
     let top = if top > 0. { top } else { 1. };
     let n = days.len();
