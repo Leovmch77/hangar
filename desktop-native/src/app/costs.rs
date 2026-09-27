@@ -1640,6 +1640,8 @@ fn table_row_el(first: Div, cells: Vec<(String, f32, bool)>) -> Div {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob traz o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     fn combo(dia: &str, source: &str, model: &str, sub: bool, id: &str, cost: f64) -> Combo {
         Combo { dia: dia.into(), provider: "p".into(), source: source.into(), project: "/x/proj".into(), model: model.into(), subagente: sub,

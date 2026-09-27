@@ -238,6 +238,8 @@ pub(crate) fn severity(mark: char) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn local_paths_stay_inside_the_root_and_out_of_git() {

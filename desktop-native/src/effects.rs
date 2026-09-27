@@ -88,6 +88,8 @@ pub fn apply(source: RgbaImage, effect: BackgroundEffect, light: bool) -> RgbaIm
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
     #[test]
     fn shown_variant_tracks_only_effective_theme_changes() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

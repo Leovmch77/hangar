@@ -271,6 +271,8 @@ fn claim(real: &ChatEvent, queued: &ChatEvent) -> Option<(u8, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     fn event(kind: &str, id: &str, text: &str) -> ChatEvent {
         ChatEvent { kind: kind.into(), id: id.into(), text: Some(text.into()), ..Default::default() }

@@ -252,6 +252,8 @@ async fn pump(stream: &mut (impl AsyncRead + AsyncWrite + Unpin), input: Receive
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     fn server_frame(opcode: u8, fin: bool, data: &[u8]) -> Vec<u8> {
         let mut wire = encode(opcode, data, [0; 4]);

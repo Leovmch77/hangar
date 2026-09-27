@@ -181,6 +181,8 @@ impl<K: Eq + Hash + Clone> MediaCache<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     fn picture(side: u32) -> MediaState { MediaState::Image(Arc::new(RenderImage::new(vec![Frame::new(RgbaImage::new(side, side))]))) }
 

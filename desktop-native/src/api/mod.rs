@@ -333,6 +333,8 @@ pub struct History { pub events: Option<Vec<ChatEvent>>, pub etag: Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn backend_error_detail_keeps_string_and_object_messages() {

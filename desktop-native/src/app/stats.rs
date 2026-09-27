@@ -894,6 +894,8 @@ fn day_bars(id: &'static str, days: &[Item], value: impl Fn(&Item) -> f64, heigh
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob traz o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn plugin_groups_merge_same_name_and_order_by_weight() {

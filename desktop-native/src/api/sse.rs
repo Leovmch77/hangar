@@ -72,6 +72,8 @@ fn valid_cursor(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn cursor_requires_stem_and_decimal_offset() {

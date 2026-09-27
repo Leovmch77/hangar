@@ -125,6 +125,8 @@ pub fn short(value: f64, decimal: char, percent: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn numbers_follow_the_web_rules_and_the_screen_language() {

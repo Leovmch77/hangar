@@ -559,6 +559,8 @@ pub fn clip(source: &str, max: usize) -> (&str, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
     use serde_json::json;
 
     fn ev(kind: &str, id: &str) -> ChatEvent { ChatEvent { kind: kind.into(), id: id.into(), ..Default::default() } }

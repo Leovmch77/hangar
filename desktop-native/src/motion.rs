@@ -159,6 +159,8 @@ pub fn request_frame(window: &Window, cx: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn catalog_matches_zeron() {

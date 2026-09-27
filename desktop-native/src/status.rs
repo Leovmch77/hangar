@@ -213,6 +213,8 @@ pub fn parse(raw: Option<&str>, session: Option<&SessionInfo>) -> Option<StatusF
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     fn codex(branch: Option<&str>, dirty: Option<i64>) -> SessionInfo {
         SessionInfo { name: "cx".into(), provider: "codex".into(), cwd: Some("C:\\Projetos\\hangar".into()),

@@ -392,6 +392,8 @@ pub fn save() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[test]
     fn compact_style_preserves_other_choices_and_keeps_adjustments_after_reload() {

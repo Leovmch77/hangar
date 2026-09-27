@@ -164,6 +164,8 @@ fn setext_line(block: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     #[track_caller]
     fn mends(input: &str, expected: &str) { assert_eq!(close_hanging(input), expected, "{input:?}"); }

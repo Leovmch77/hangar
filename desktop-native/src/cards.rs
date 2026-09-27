@@ -122,6 +122,8 @@ pub fn peer_message(text: &str) -> Option<PeerMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
 
     // As linhas do `bastao.kickoff` do backend.
     fn kickoff(dossier_line: &str, from_line: &str) -> String {
