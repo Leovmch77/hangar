@@ -95,7 +95,7 @@ impl Side {
 
     // Largura efetiva: nunca tira da conversa menos que CHAT_MIN; sem espaço, o painel não aparece.
     // Com as abas no topo não há barra lateral ocupando a esquerda.
-    fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
+    pub(super) fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
         let room = viewport - sidebar_width - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. };
         (room >= MIN_WIDTH).then(|| self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room))
     }
@@ -624,6 +624,7 @@ impl Hangar {
         let on_activity = self.activity_tab();
         // O botão de árvore do cabeçalho do Zeron: troca o corpo do painel pelos arquivos da sessão.
         let files = self.tree.open && readable;
+        let tab_in = self.side_tab_in(window, cx);
         let header = div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().justify_between()
             .child(if files { div().font_weight(FontWeight::SEMIBOLD).child(activity::web("arq_aba")).into_any_element() } else { self.render_side_title(cx) })
             .child(div().flex().items_center().gap_1()
@@ -671,10 +672,11 @@ impl Hangar {
                     else { el.border_l_1().border_color(theme::border()) })
                 .child(header)
                 .when(!files, |el| el.children(self.render_subagent_tabs(cx)))
-                .child(if files { div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element() }
+                .child(div().flex_1().min_h_0().flex().flex_col().opacity(tab_in)
+                    .child(if files { div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element() }
                     else if let Some(view) = self.subagent_tab_view(cx) { div().flex_1().min_h_0().child(view).into_any_element() }
                     else if on_activity { div().flex_1().min_h_0().child(self.activity_view(cx)).into_any_element() }
-                    else { div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element() })
+                    else { div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element() }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))
                     .child(div().min_w_0().truncate().text_color(theme::faint()).child(format!("{} · {server}", agent_label(&session.provider))))
                     .when(queued > 0, |el| el.child(div().flex_shrink_0().text_color(theme::muted()).child(tr("side_queued").replace("{n}", &queued.to_string()))))),

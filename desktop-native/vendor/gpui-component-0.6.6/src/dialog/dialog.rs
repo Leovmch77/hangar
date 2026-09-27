@@ -19,7 +19,8 @@ use crate::{
     v_flex,
 };
 
-pub static ANIMATION_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_secs_f64(0.25));
+// Modified for Hangar: Zeron's `dialog-in`, 180 ms `ease`, fading in while settling 2px up.
+pub static ANIMATION_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(180));
 pub use gpui_base::actions::{Cancel, Confirm};
 
 /// Dialog button props.
@@ -567,16 +568,7 @@ impl RenderOnce for Dialog {
             paddings.bottom = pb.to_pixels(base_size, rem_size);
         }
 
-        // x1 = 1/3, x2 = 2/3 make the bezier's time mapping the identity,
-        // preserving the trajectory this dialog was tuned with before
-        // `cubic_bezier` solved for x; vaul's (0.32, 0.72, 0., 1.) is far
-        // more front-loaded under the CSS-correct solver.
-        let animation = Animation::new(*ANIMATION_DURATION).with_easing(cubic_bezier(
-            1. / 3.,
-            0.72,
-            2. / 3.,
-            1.,
-        ));
+        let animation = Animation::new(*ANIMATION_DURATION).with_easing(cubic_bezier(0.25, 0.1, 0.25, 1.));
 
         anchored()
             .position(point(window_paddings.left, window_paddings.top))
@@ -747,7 +739,7 @@ impl RenderOnce for Dialog {
                                                     inset: false,
                                                 },
                                             ];
-                                            this.top(y * delta).shadow(shadow)
+                                            this.top(y + px(2.) * (1. - delta)).shadow(shadow)
                                         },
                                     )
                                     .text_selection_scope(selection_scope),

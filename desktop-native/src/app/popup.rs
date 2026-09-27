@@ -1,12 +1,10 @@
 //! Superfície flutuante presa ao gatilho: a posição vem do `Positioner` do gpui-base (vira de lado quando falta
-//! espaço), uma cortina por baixo engole o clique fora e fecha, e entrada e saída duram `FADE`. Mais as peças das
-//! linhas dos menus, iguais em todo popover.
+//! espaço), uma cortina por baixo engole o clique fora e fecha, e entrada e saída são o `menu-in`/`menu-out` do kit de
+//! movimento. Mais as peças das linhas dos menus, iguais em todo popover.
 use super::*;
 use std::cell::RefCell;
 use gpui_kit::base::{Align, Placement, Positioner};
 use gpui_kit::component::dialog::Dialog;
-
-const FADE: Duration = Duration::from_millis(140);
 
 thread_local! {
     // ponytail: uma janela só; com várias, o id do gatilho precisaria levar a janela.
@@ -26,35 +24,38 @@ pub(super) fn anchor<E: ParentElement>(el: E, id: impl Into<SharedString>) -> E 
 pub(super) fn anchor_bounds(id: &str) -> Option<Bounds<Pixels>> { ANCHORS.with(|a| a.borrow().get(id).copied()) }
 
 /// Ciclo do painel: o estado do app diz se está aberto; aqui fica a última cópia desenhada, para a saída animar o
-/// mesmo conteúdo depois que o app já fechou.
-struct Presence<T> { shown: Option<T>, since: Instant, leaving: bool }
+/// mesmo conteúdo depois que o app já fechou. `from` é quanto dele aparecia (0 a 1) quando a direção virou em `since`:
+/// a entrada anda no tempo do `menu-in` e a saída, mais curta, no do `menu-out`.
+struct Presence<T> { shown: Option<T>, since: Instant, from: f32, leaving: bool }
 
 impl<T> Default for Presence<T> {
-    fn default() -> Self { Self { shown: None, since: Instant::now(), leaving: false } }
+    fn default() -> Self { Self { shown: None, since: Instant::now(), from: 0., leaving: false } }
 }
 
 impl<T: Clone> Presence<T> {
+    /// Quanto aparece agora, sem curva.
+    fn visible(&self) -> f32 {
+        let (spec, sign) = if self.leaving { (motion::MENU_OUT, -1.) } else { (motion::MENU_IN, 1.) };
+        (self.from + sign * self.since.elapsed().as_secs_f32() / spec.total().as_secs_f32()).clamp(0., 1.)
+    }
+
+    /// Vira a direção partindo de onde está: reaberto no meio da saída, não pisca.
+    fn turn(&mut self, leaving: bool) {
+        self.from = if self.shown.is_some() { self.visible() } else { 0. };
+        (self.since, self.leaving) = (Instant::now(), leaving);
+    }
+
     /// O que desenhar neste quadro, quanto dele aparece (0 a 1) e se está saindo.
     fn frame(&mut self, live: Option<T>, still: bool) -> Option<(T, f32, bool)> {
-        let progress = |since: Instant| if still { 1. } else { (since.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.) };
         match live {
             Some(value) => {
-                if self.shown.is_none() || self.leaving {
-                    // Reaberto no meio da saída, volta da opacidade em que estava, sem piscar.
-                    let from = if self.shown.is_some() { 1. - progress(self.since) } else { 0. };
-                    self.since = Instant::now() - FADE.mul_f32(from);
-                    self.leaving = false;
-                }
+                if self.shown.is_none() || self.leaving { self.turn(false); }
                 self.shown = Some(value.clone());
-                Some((value, progress(self.since), false))
+                Some((value, if still { 1. } else { self.visible() }, false))
             }
             None => {
-                if !self.leaving && self.shown.is_some() {
-                    let from = 1. - progress(self.since);
-                    self.since = Instant::now() - FADE.mul_f32(from);
-                    self.leaving = true;
-                }
-                let left = 1. - progress(self.since);
+                if !self.leaving && self.shown.is_some() { self.turn(true); }
+                let left = self.visible();
                 if still || left <= 0. { self.shown = None; self.leaving = false; return None; }
                 Some((self.shown.clone()?, left, true))
             }
@@ -99,7 +100,7 @@ impl Hangar {
         let still = cx.reduce_motion();
         let presence = window.use_keyed_state("composer-popup", cx, |_, _| Presence::<Floating>::default());
         let (shown, visible, leaving) = presence.update(cx, |presence, _| presence.frame(live, still))?;
-        if visible < 1. { window.request_animation_frame(); }
+        if visible < 1. { motion::request_frame(window, cx); }
         let mut placement = Placement::Bottom;
         let (anchor, align, narrow, content) = match shown {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
@@ -137,10 +138,11 @@ impl Hangar {
 
 /// Cortina que fecha no clique fora sem deixar o clique chegar ao que está atrás, e a superfície presa ao gatilho,
 /// abaixo dele ou virada para cima quando não cabe. Saindo, nada ali responde ao ponteiro.
-fn layer(trigger: Bounds<Pixels>, placement: Placement, align: Align, surface: AnyElement, visible: f32, leaving: bool,
+fn layer(trigger: Bounds<Pixels>, placement: Placement, align: Align, surface_content: AnyElement, visible: f32, leaving: bool,
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static) -> AnyElement {
-    let surface = div().relative().opacity(chrome::ease_out(visible)).child(surface)
-        .when(leaving, |el| el.child(div().absolute().inset_0().occlude()));
+    let surface = if leaving { motion::menu_out(div(), motion::MENU_OUT.ease(1. - visible)) }
+        else { motion::menu_in(div(), motion::MENU_IN.ease(visible)) };
+    let surface = surface.child(surface_content).when(leaving, |el| el.child(div().absolute().inset_0().occlude()));
     let placed = Positioner::side(trigger).placement(placement).align(align).offset(px(8.)).margin(px(8.));
     div().absolute().inset_0()
         .when(!leaving, |el| el.child(div().id("popup-scrim").absolute().inset_0().occlude().on_any_mouse_down(dismiss)))
@@ -204,20 +206,22 @@ pub(super) fn row(id: impl Into<ElementId>, selected: bool) -> Button {
 /// Linhas vazias no lugar da lista enquanto ela carrega.
 pub(super) fn skeleton(id: &str, rows: usize) -> Div {
     div().flex().flex_col().gap(px(6.)).px(px(8.)).py(px(4.))
-        .children((0..rows).map(|n| chrome::Skeleton::new(SharedString::from(format!("{id}-{n}"))).h(px(22.)).rounded(px(7.))))
+        .children((0..rows).map(|n| chrome::Skeleton::new(SharedString::from(format!("{id}-{n}"))).row(n).h(px(22.)).rounded(px(7.))))
 }
 
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{FADE, Presence};
+    use super::Presence;
+    use crate::motion;
 
     #[test]
     fn closing_keeps_the_last_copy_until_the_fade_ends() {
         let mut presence = Presence::default();
         assert_eq!(presence.frame(Some(1), false).map(|(v, _, leaving)| (v, leaving)), Some((1, false)));
+        presence.since -= motion::MENU_IN.total();
         assert_eq!(presence.frame(None, false).map(|(v, _, leaving)| (v, leaving)), Some((1, true)));
-        presence.since -= FADE;
+        presence.since -= motion::MENU_OUT.total();
         assert_eq!(presence.frame(None, false), None);
     }
 

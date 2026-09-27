@@ -79,7 +79,7 @@ impl DeliveryTracker {
     }
 }
 
-fn matches_real(real: &str, sent: &str) -> bool {
+pub fn matches_real(real: &str, sent: &str) -> bool {
     let real = real.trim();
     let sent = sent.trim();
     if sent.is_empty() { return false; }

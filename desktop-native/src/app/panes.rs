@@ -48,7 +48,8 @@ impl Panes {
     }
 }
 
-/// Só para medir: HANGAR_NATIVE_PANE_FRAMES=1 escreve no stderr cada desenho de área. Sem a variável, nada sai.
+/// Só para medir: HANGAR_NATIVE_PANE_FRAMES=1 escreve no stderr cada desenho de área, com o tempo de montar a árvore dela
+/// (µs) e o instante do desenho (ms desde a primeira linha). Sem a variável, nada sai.
 fn count_frames() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("HANGAR_NATIVE_PANE_FRAMES").is_some())
@@ -57,13 +58,19 @@ fn count_frames() -> bool {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area;
-        if count_frames() { eprintln!("pane {area:?}"); }
+        let started = count_frames().then(Instant::now);
         rendered(cx.entity_id(), window, cx);
         let Some(hangar) = self.hangar.upgrade() else { return div().into_any_element() };
-        hangar.update(cx, |this, cx| {
+        let element = hangar.update(cx, |this, cx| {
             this.panes.marks.borrow_mut().retain(|place| place.area != area);
             this.render_area(area, window, cx)
-        })
+        });
+        if let Some(started) = started {
+            static EPOCH: OnceLock<Instant> = OnceLock::new();
+            let epoch = *EPOCH.get_or_init(|| started);
+            eprintln!("pane {area:?} {} {}", started.elapsed().as_micros(), started.duration_since(epoch).as_millis());
+        }
+        element
     }
 }
 
@@ -73,7 +80,14 @@ impl Hangar {
             Area::Nav => self.render_nav(window, cx),
             Area::Conversation => self.render_conversation_area(window, cx),
             Area::Bottom => self.render_bottom_area(window, cx),
-            Area::Side => self.render_side(window, cx).unwrap_or_else(|| div().into_any_element()),
+            Area::Side => {
+                // Fechando, o painel ainda desliza para fora com o conteúdo de antes.
+                let open = self.side.open;
+                self.side.open |= self.side_closing();
+                let side = self.render_side(window, cx);
+                self.side.open = open;
+                side.unwrap_or_else(|| div().into_any_element())
+            }
             Area::Overlay => div().absolute().inset_0()
                 .children(Root::render_dialog_layer(window, cx))
                 .children(Root::render_notification_layer(window, cx))
@@ -92,9 +106,9 @@ impl Hangar {
                 return frame.child(self.panes.overlay.clone()).into_any_element();
             }
         };
-        // Na chegada da primeira mensagem a conversa e o painel desenham a cada quadro: a cópia guardada não acompanha a
-        // opacidade de quem a envolve.
-        if self.landing_active() && matches!(area, Area::Conversation | Area::Side) {
+        // Na chegada da primeira mensagem a conversa, o painel e a faixa de baixo (que, antes de a sessão nascer, desenha a
+        // conversa por vir) desenham a cada quadro: a cópia guardada não acompanha a opacidade de quem a envolve.
+        if self.landing_active() && matches!(area, Area::Conversation | Area::Side | Area::Bottom) {
             let mut frame = div();
             frame.style().refine(&style);
             return frame.child(AnyView::from(pane.clone())).into_any_element();
@@ -226,7 +240,7 @@ impl Element for FloatingMark {
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
             let t = if self.reduce_motion { 1. }
-                else { super::chrome::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
+                else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
             let inner = match place.draw {
                 Floating::Mark(color) => super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color)
                     .into_any_element(),

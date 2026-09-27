@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, FocusHandle,
+    Animation, AnimationExt as _, Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, FocusHandle,
     Focusable, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement,
     Styled, Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
@@ -213,7 +213,13 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                                         menu.focus_handle(cx).focus(window, cx);
                                                     }
 
-                                                    this.child(menu.clone())
+                                                    // Modified for Hangar: Zeron's `menu-in`, as the dropdowns.
+                                                    this.child(div().child(menu.clone()).with_animation(
+                                                        "context-menu-in",
+                                                        Animation::new(std::time::Duration::from_millis(140))
+                                                            .with_easing(crate::animation::cubic_bezier(0.25, 0.1, 0.25, 1.)),
+                                                        |el, t| el.relative().top(px(-2. * (1. - t))).opacity(0.3 + 0.7 * t),
+                                                    ))
                                                 }),
                                         ),
                                 ),

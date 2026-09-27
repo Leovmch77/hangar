@@ -6,7 +6,7 @@ use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
     conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::tr, theme,
-    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance};
+    interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
 
@@ -51,7 +51,7 @@ const LIVE_TOOL: &str = "__tool__";
 const PREVIEW: &str = "__preview__";
 const WORKING: &str = "__working__";
 /// Entrada da linha "trabalhando"; a marca, desenhada fora da conversa, entra no mesmo tempo.
-const WORKING_FADE: Duration = Duration::from_millis(200);
+const WORKING_FADE: Duration = motion::WORKING.duration();
 /// Quanto "Enviando…" espera o turno começar depois da entrega; passou disso, a sessão não vai trabalhar.
 const SENT_BRIDGE: Duration = Duration::from_secs(5);
 /// Prefixo da linha do cartão fixo de um agente rodando, seguido do id do tool_use.
@@ -393,10 +393,20 @@ pub struct Hangar {
     /// Envio entregue que o turno ainda não pegou: "Enviando…" segue até o estado virar trabalhando ou o prazo passar.
     sent_until: Option<(SessionKey, Instant)>,
     new_chat: Option<Entity<create::NewSession>>,
+    /// A linha "Nova conversa" do topo da barra lateral, alcançável pelo Tab.
+    new_chat_focus: FocusHandle,
     /// O menu aberto da tela sem sessão (máquina, pasta, modelo, conta, branch): a tela escreve; a camada da raiz lê.
     new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
     /// A chegada da primeira mensagem da tela sem sessão (`landing.rs`).
     landing: Option<landing::Landing>,
+    /// A mensagem mandada da tela sem sessão, mostrada como enviada até o transcript trazer a real (`landing.rs`).
+    opening: Option<landing::Opening>,
+    /// O painel direito do último quadro (conversa e largura), para ver quando ele abre ou fecha.
+    side_seen: Option<(Option<SessionKey>, Option<f32>)>,
+    /// O painel entrando ou saindo: quando começou, se está abrindo e a largura dele.
+    side_slide: Option<(Instant, bool, f32)>,
+    /// Linhas que chegaram com a conversa aberta, e quando: entram com o `fade-in` do kit, uma vez.
+    arrived: HashMap<String, Instant>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -510,8 +520,8 @@ impl Hangar {
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
-            new_chat: None,
-            new_chat_folders: Default::default(), landing: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
+            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -763,6 +773,8 @@ impl Hangar {
     }
 
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
+        self.opening = None;
         if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
         }
@@ -834,6 +846,7 @@ impl Hangar {
             if let Some(task) = self.session_task.take() { task.abort(); }
             if let Some(task) = self.history_task.take() { task.abort(); }
             self.selected = None;
+            self.opening = None;
             self.chat = Chat::default();
             self.turn_seen = None;
             self.reset_details();
@@ -1523,7 +1536,8 @@ impl Hangar {
             if text.trim().is_empty() { return; }
             if let Some(view) = self.new_chat.clone() {
                 let selection = self.selection;
-                view.update(cx, |view, cx| view.create(Some((selection, text)), cx));
+                view.update(cx, |view, cx| view.create(Some((selection, text.clone())), cx));
+                if view.read(cx).creating { self.begin_opening(view, text, window, cx); }
                 cx.notify();
             }
             return;
@@ -2044,6 +2058,7 @@ impl Hangar {
     /// Ids e assinaturas das linhas, splice na lista e texto das linhas que mudaram. `full` = os itens foram refeitos;
     /// sem ele, só as linhas depois dos itens são comparadas.
     fn sync_row_ids(&mut self, full: bool, cx: &mut Context<Self>) {
+        let opening = self.opening_row_shown();
         let events = &self.chat.events;
         let items = self.items.len();
         let (mut ids, mut signatures): (Vec<String>, Vec<String>) = if full {
@@ -2052,6 +2067,7 @@ impl Hangar {
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
         if let Some(tool) = &self.chat.live_tool { ids.push(LIVE_TOOL.into()); signatures.push(format!("{}{}", tool.name, tool.input)); }
         if !self.visible_preview.text.is_empty() { ids.push(PREVIEW.into()); signatures.push(String::new()); }
+        if opening { ids.push(landing::OPENING.into()); signatures.push(String::new()); }
         if self.working_row_shown() { ids.push(WORKING.into()); signatures.push(String::new()); }
         for agent in self.activity.running_agents() { ids.push(format!("{PINNED}{}", events[agent.call].id)); signatures.push(String::new()); }
         let prefix = self.row_ids.iter().zip(&ids).take_while(|(a,b)| a == b).count();
@@ -2082,6 +2098,14 @@ impl Hangar {
         // Só linha que muda de altura puxa a mola: um quadro sem mudança não pode desgrudar a lista do fim.
         if spliced || !resized.is_empty() || !rewritten.is_empty() { self.follow_content_changed(cx); }
         if spliced { self.splice_rows(prefix..self.row_ids.len()-suffix, ids.len()-prefix-suffix); }
+        // Só o bloco novo entra animado: um acréscimo pequeno no meio ou no fim de uma conversa já aberta. Troca de linha (a
+        // prévia virando a resposta gravada, o envio virando a mensagem real), histórico carregando ou páginas antigas
+        // chegando em cima aparecem direto.
+        let added = ids.len() - prefix - suffix;
+        if prefix > 0 && prefix + suffix == self.row_ids.len() && (1..=4).contains(&added) {
+            let now = Instant::now();
+            for id in &ids[prefix..prefix + added] { if id != WORKING { self.arrived.insert(id.clone(), now); } }
+        }
         for index in resized { self.list_state.remeasure_items(index..index + 1); }
         for (index, body) in rewritten {
             let Some(cached) = self.rich.get_mut(&ids[index]) else { continue };
@@ -2099,6 +2123,7 @@ impl Hangar {
         let rows: HashSet<&String> = self.row_ids.iter().collect();
         // Visões fora da lista (plano, diff do painel) usam linha "__…__" e saem só pelo limite do cache.
         self.rich.retain(|_, rich| rows.contains(&rich.row) || rich.row.starts_with("__"));
+        self.arrived.retain(|id, _| rows.contains(id));
     }
 
     /// Passo do streaming com a linha da prévia já na lista: só ela muda, e o resto da conversa não é refeito
@@ -2164,13 +2189,14 @@ impl Hangar {
         view
     }
 
-    fn render_row(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = self.row_ids.get(index).cloned() else { return div().into_any_element(); };
         let inner = match (id.as_str(), self.items.get(index).cloned()) {
             (PREVIEW, _) => self.render_message(index, &id, cx),
             (LIVE_THINKING, _) => self.render_live_thinking(cx),
             (LIVE_TOOL, _) => self.render_live_tool(),
             (WORKING, _) => self.render_working(cx),
+            (landing::OPENING, _) => self.render_opening_bubble(cx),
             (pin, _) if pin.starts_with(PINNED) => match self.pinned_call(&pin[PINNED.len()..]) {
                 // Sem resultado: o do lançamento em segundo plano não é o fim.
                 Some(call) => self.render_tool(Tool { call, result: None }, &id, cx),
@@ -2184,11 +2210,15 @@ impl Hangar {
             (_, Some(Item::Tasks { tasks, .. })) => self.render_tasks(&id, &tasks, cx),
             (_, None) => div().into_any_element(),
         };
-        let message = id == PREVIEW || matches!(self.items.get(index), Some(Item::Event(_)));
-        div().id(SharedString::from(id)).w_full().px(px(36.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
-            .flex().justify_center()
-            .child(div().w_full().max_w(px(column_width())).child(inner))
-            .into_any_element()
+        let message = id == PREVIEW || id == landing::OPENING || matches!(self.items.get(index), Some(Item::Event(_)));
+        let row = row_frame(inner, message);
+        // Pede quadro só para a área da conversa, e só enquanto a linha entra; rolar até ela depois não a anima de novo.
+        let entering = self.arrived.get(&id).map(|at| motion::FADE_IN.raw(*at)).filter(|raw| *raw < 1. && !cx.reduce_motion());
+        let row = match entering {
+            Some(raw) => { motion::request_frame(window, cx); motion::fade_in(row, motion::FADE_IN.ease(raw)) }
+            None => { self.arrived.remove(&id); row }
+        };
+        row.id(SharedString::from(id)).into_any_element()
     }
 
     fn disclosure(&self, key: &str, open: bool) -> Button {
@@ -2289,7 +2319,7 @@ impl Hangar {
             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(verb))
             .when_some(since, |el, since| el.child(self.elapsed_slot(panes::Area::Conversation, "working-elapsed", since)));
         if cx.reduce_motion() { return row.into_any_element(); }
-        row.with_animation("working-line-in", Animation::new(WORKING_FADE).with_easing(chrome::ease_out),
+        row.with_animation("working-line-in", Animation::new(WORKING_FADE).with_easing(motion::ease_out),
             |el, t| el.opacity(t).top(px(6. * (1. - t)))).into_any_element()
     }
 
@@ -2309,7 +2339,7 @@ impl Hangar {
         let pill = if glass { chrome::Glass::new(pill, px(15.)).into_any_element() } else { pill.into_any_element() };
         let wrap = div().absolute().left_0().right_0().bottom(px(16.)).flex().justify_center().child(pill);
         if cx.reduce_motion() { return wrap.into_any_element(); }
-        wrap.with_animation("jump-latest-in", Animation::new(WORKING_FADE).with_easing(chrome::ease_out),
+        wrap.with_animation("jump-latest-in", Animation::new(WORKING_FADE).with_easing(motion::ease_out),
             |el, t| el.opacity(t).bottom(px(10. + 6. * t))).into_any_element()
     }
 
@@ -3438,6 +3468,13 @@ fn chat_text(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView
 /// Grupo de hover da linha da mensagem: a faixa de hora e copiar acende com ele.
 const ROW_GROUP: &str = "message-row";
 
+/// Recuo e coluna de uma linha da conversa; mensagem tem mais ar em cima e embaixo.
+fn row_frame(inner: AnyElement, message: bool) -> Div {
+    div().w_full().px(px(36.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
+        .flex().justify_center()
+        .child(div().w_full().max_w(px(column_width())).child(inner))
+}
+
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
@@ -3627,14 +3664,30 @@ impl Hangar {
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
                 .child(div().px_2().py(px(1.)).rounded_full().bg(theme::hover()).text_size(px(10.)).text_color(theme::faint()).child(tr("experimental"))))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
-            .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).child(Button::new("sidebar-new-chat").ghost().w_full().h(px(32.)).px(px(8.))
-                .rounded(px(7.)).selected(self.new_chat_screen()).disabled(self.api.is_none()).accessibility_label(tr("new_chat_title"))
-                .child(div().w_full().flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
+            // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
+            // lista, e o atalho aparece apagado só com o ponteiro em cima.
+            .child({
+                let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+                div().id("sidebar-new-chat").group("sidebar-new-chat").flex_shrink_0().mx(px(8.)).mt(px(4.)).h(px(32.)).px(px(8.))
+                    .flex().items_center().gap_2().rounded(px(8.)).font_weight(FontWeight::MEDIUM)
+                    .track_focus(&self.new_chat_focus)
+                    .when(self.new_chat_focus.is_focused(window), |el| el.focus_ring_style(window, cx))
+                    .role(Role::Button).aria_selected(on).aria_label(tr("new_chat_title"))
+                    .when(on, |el| el.bg(theme::selected_row()))
+                    .when(!enabled, |el| el.opacity(0.5))
+                    .when(enabled && !on, |el| el.cursor_pointer().hover(|el| el.bg(theme::hover())))
                     .child(chrome::small_icon(IconName::SquarePen, 16., theme::muted()))
                     .child(div().flex_1().min_w_0().truncate().child(tr("new_chat_title")))
-                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window)
-                        .map(|key| popup::key_hint("").child(key.appearance(false)))))
-                .on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))))
+                    .children(gpui_kit::component::kbd::Kbd::global_binding_for_action(&NewChat, window).map(|key| div().flex_shrink_0()
+                        .font_family(theme::MONO).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(theme::faint())
+                        .opacity(0.).group_hover("sidebar-new-chat", |s| s.opacity(1.)).child(key.appearance(false))))
+                    .when(enabled, |el| el.on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if !matches!(event.keystroke.key.as_str(), "enter" | "space") { return; }
+                            this.go_home(window, cx);
+                            cx.stop_propagation();
+                        })))
+            })
             .child(div().flex_shrink_0().mx(px(8.)).mt(px(4.)).mb(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap_2().font_weight(FontWeight::MEDIUM)
                 .child(chrome::small_icon(IconName::Server, 16., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(tr("sidebar_all_sessions")))
@@ -4364,6 +4417,24 @@ impl Hangar {
             .when(self.selected.is_some() || self.api.is_some(), |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx)));
         self.measured_bottom(content.into_any_element())
     }
+
+    /// O painel direito abrindo ou fechando na mesma conversa: a largura dele e quanto está à vista (0 a 1), pedindo
+    /// quadros até acabar. Trocar de conversa, a chegada da primeira mensagem e o movimento reduzido não deslizam.
+    fn side_slide_frame(&mut self, window: &mut Window, cx: &App) -> Option<(f32, f32)> {
+        let now = (self.selected_key(), self.side_width(window));
+        if let Some((key, width)) = self.side_seen.replace(now.clone())
+            && key == now.0 && width.is_some() != now.1.is_some() && !cx.reduce_motion() && !self.landing_active() {
+            self.side_slide = now.1.or(width).map(|w| (Instant::now(), now.1.is_some(), w));
+        }
+        let (start, opening, width) = self.side_slide?;
+        if start.elapsed() >= motion::RESIZE.total() { self.side_slide = None; return None; }
+        motion::request_frame(window, cx);
+        let t = motion::RESIZE.ease(motion::RESIZE.raw(start));
+        Some((width, if opening { t } else { 1. - t }))
+    }
+
+    /// Saindo, o painel ainda desenha o que mostrava enquanto desliza para fora.
+    pub(super) fn side_closing(&self) -> bool { self.side_slide.is_some_and(|(_, opening, _)| !opening) }
 }
 
 impl Render for Hangar {
@@ -4389,7 +4460,8 @@ impl Render for Hangar {
         let limited_now = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
-        let landing::Frame { drop, shown, rise } = self.landing_frame(window);
+        let landing::Frame { drop, shown, rise } = self.landing_frame(window, cx);
+        let opening = self.opening.clone().filter(|_| self.selected.is_none());
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
             .when(chat_background, |el| el.bg(theme::window_fill()))
             .when(cutout, |el| {
@@ -4400,7 +4472,9 @@ impl Render for Hangar {
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
                 .relative().opacity(shown).top(px(rise))
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
-                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(selected_name.clone().unwrap_or_else(|| tr("title"))))
+                .when_some(opening.as_ref(), |el, o| el.child(chrome::provider_glyph(&o.provider, 18.)))
+                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
+                    .child(selected_name.clone().or_else(|| opening.as_ref().map(|o| o.name.clone())).unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
                 .child(div().flex_1())
                 .child(if session_chip { chrome::state_chip(&chip_state, tr(&format!("chip_{chip_state}")), true) }
@@ -4432,12 +4506,21 @@ impl Render for Hangar {
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
-        let side = self.side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
+        let slide = self.side_slide_frame(window, cx);
+        let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
             .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
             .when(self.activity_tab(), |el| el.child(self.activity_mark_float(cx)))
-            .child(self.subagent_mark_float(cx)).into_any_element());
+            .child(self.subagent_mark_float(cx)).into_any_element())
+            // Entrando ou saindo, o painel desliza da borda com a largura final: a conversa muda de largura uma vez só.
+            .map(|side| match slide {
+                Some((width, shown)) => div().w(px(width)).h_full().flex_shrink_0().overflow_hidden()
+                    .child(div().relative().left(px(width * (1. - shown))).h_full().child(side)).into_any_element(),
+                None => side,
+            })
+            .or_else(|| self.opening_side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
+                .when(chat_background, |el| el.bg(theme::background().alpha(1.))).child(self.render_opening_side(width)).into_any_element()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
@@ -4476,6 +4559,8 @@ impl Render for Hangar {
                 }))));
         self.finish_landing(window);
 
+        let ticker = motion::ticker(window, cx);
+        let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
             .bg(if !chat_background { theme::window_fill() }
@@ -4564,7 +4649,7 @@ impl Render for Hangar {
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, window, cx| this.drag_live(event.position, false, window, cx))))
             .map(|el| match (page, nav) {
-                (Some(page), _) => el.child(self.render_settings(page, cx)),
+                (Some(page), _) => el.child(self.render_settings(page, window, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
                 (None, Some(bar)) if tabs => el.flex_col().child(bar)
                     .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),
@@ -4579,7 +4664,8 @@ impl Render for Hangar {
             .children(self.render_popup(window, cx))
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
             .child(self.panes.overlay.clone())
-            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude()
+            .child(ticker)
+            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
                 .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if this.api.is_some() {
                         this.connection_dialog = false;
@@ -4589,9 +4675,9 @@ impl Render for Hangar {
                     cx.stop_propagation();
                 }))
                 .flex().items_start().justify_center().pt(dialog_top)
-                .child(if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
+                .child(div().relative().top(px(2. * (1. - dialog_in))).child(if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
                     chrome::Glass::new(dialog.focus_trap("connection-dialog", &self.connection_focus), px(16.)).into_any_element()
-                } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() }))
+                } else { dialog.focus_trap("connection-dialog", &self.connection_focus).into_any_element() })))
                 .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)))
     }
 }

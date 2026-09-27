@@ -3,6 +3,7 @@ use gpui_kit::{component::{ActiveTheme, Icon, Sizable, StyledExt, button::*}, pr
 use gpui_kit::assets::IconName;
 use crate::theme;
 use crate::appearance::{self, SurfaceMaterial};
+pub use crate::motion::ease_out;
 use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
 /// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. O `Spinner`/`Skeleton` do
@@ -75,38 +76,41 @@ impl RenderOnce for Spinner {
     }
 }
 
-/// O `Skeleton` do kit (mesma cor, pulso de 2 s) no relógio comum de 30 batidas, numa view própria que só aparece depois
-/// de `SKELETON_DELAY`; até lá ocupa o mesmo espaço, vazio.
+/// O `Skeleton` do kit (mesma cor) com o `zeron-pulse` do kit de movimento (2,4 s, em onda), no relógio comum de 30
+/// batidas, numa view própria que só aparece depois de `SKELETON_DELAY`; até lá ocupa o mesmo espaço, vazio. Em lista, cada
+/// linha anda um pouco atrás da de cima.
 #[derive(IntoElement)]
-pub struct Skeleton { key: ElementId, style: StyleRefinement, secondary: bool }
+pub struct Skeleton { key: ElementId, style: StyleRefinement, secondary: bool, lag: f32 }
 
 impl Skeleton {
-    pub fn new(key: impl Into<ElementId>) -> Self { Self { key: key.into(), style: StyleRefinement::default(), secondary: false } }
+    pub fn new(key: impl Into<ElementId>) -> Self { Self { key: key.into(), style: StyleRefinement::default(), secondary: false, lag: 0. } }
     pub fn secondary(mut self) -> Self { self.secondary = true; self }
+    /// A linha `row` de uma lista de esqueletos: a onda desce por elas.
+    pub fn row(mut self, row: usize) -> Self { self.lag = row as f32 * 0.08; self }
 }
 
 impl Styled for Skeleton {
     fn style(&mut self) -> &mut StyleRefinement { &mut self.style }
 }
 
-struct SkeletonView { style: StyleRefinement, secondary: bool, born: Instant }
+struct SkeletonView { style: StyleRefinement, secondary: bool, born: Instant, lag: f32 }
 
 impl Render for SkeletonView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = div().w_full().h_4().refine_style(&self.style);
         if self.born.elapsed() < SKELETON_DELAY { return base; }
         let color = if self.secondary { cx.theme().skeleton.opacity(0.5) } else { cx.theme().skeleton };
-        let delta = if cx.reduce_motion() { 0. } else { bounce(ease_in_out)(pulse_phase(Duration::from_secs(2))) };
-        base.bg(color).opacity(1.0 - delta * 0.5)
+        let wave = if cx.reduce_motion() { 0. } else { crate::motion::pulse_wave((pulse_phase(crate::motion::PULSE) - self.lag).rem_euclid(1.)) };
+        base.bg(color).opacity(1.0 - wave * 0.5)
     }
 }
 
 impl RenderOnce for Skeleton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (style, secondary) = (self.style, self.secondary);
+        let (style, secondary, lag) = (self.style, self.secondary, self.lag);
         let view = keyed_view(self.key, window, cx, |cx| {
             pulse(SKELETON_DELAY, |_| true, cx);
-            SkeletonView { style: style.clone(), secondary, born: Instant::now() }
+            SkeletonView { style: style.clone(), secondary, born: Instant::now(), lag }
         });
         view.update(cx, |view, cx| {
             if view.style != style || view.secondary != secondary { (view.style, view.secondary) = (style.clone(), secondary); cx.notify(); }
@@ -149,17 +153,6 @@ impl RenderOnce for Breathing {
         // Sem encolher: dentro do botão a caixa guardada perdia largura e o ícone saía cortado à direita.
         view.cached(StyleRefinement::default().size(size).flex_shrink_0())
     }
-}
-
-/// `--ease-out` do web: `cubic-bezier(0.23, 1, 0.32, 1)`.
-pub fn ease_out(x: f32) -> f32 {
-    let curve = |s: f32, a: f32, b: f32| 3. * (1. - s) * (1. - s) * s * a + 3. * (1. - s) * s * s * b + s * s * s;
-    let (mut lo, mut hi) = (0f32, 1f32);
-    for _ in 0..20 {
-        let mid = (lo + hi) / 2.;
-        if curve(mid, 0.23, 0.32) < x { lo = mid } else { hi = mid }
-    }
-    curve((lo + hi) / 2., 1., 1.)
 }
 
 // A marca "trabalhando" do web (HangarWorking.svelte), no quadro de 24: raio, abertura e atraso de entrada e de giro de cada arco.
