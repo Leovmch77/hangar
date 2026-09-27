@@ -495,9 +495,12 @@ impl NewSession {
         }
     }
 
-    /// A linha da cota de `credential` nos menus da tela sem sessão; nada enquanto não há leitura.
+    /// A linha da cota de `credential` nos menus da tela sem sessão, só sessão (5h) e semana (7d): as janelas por modelo
+    /// ficam no diálogo, onde há largura. Nada enquanto não há leitura.
     pub(super) fn quota_line(&self, id: String, credential: &str) -> Option<AnyElement> {
-        Some(self.render_quota(id, self.quota_of(credential)?).into_any_element())
+        let mut quota = self.quota_of(credential)?.clone();
+        quota.windows.retain(|w| matches!(w.label.as_str(), "5h" | "7d"));
+        Some(self.render_quota(id, &quota).into_any_element())
     }
 
     pub(super) fn render_codex_quota(&self, credential: Option<&str>) -> Option<Stateful<Div>> {
