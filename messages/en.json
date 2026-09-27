@@ -3340,7 +3340,7 @@
   "orqcfg_viva": "live",
   "orqcfg_nao_aberta": "not open",
   "orqcfg_agora_viva": "Now: {sessao} is live on {modelo} · {esforco}.",
-  "orqcfg_agora_diverge": "The contract says {modelo} · {esforco}. The arbiter switches it once idle; if working, the next one.",
+  "orqcfg_agora_diverge": "The contract says {modelo} · {esforco}. It applies when the role's next session opens.",
   "orqcfg_agora_nao_medido": "Session is live, but its model is not measured (no statusline).",
   "orqcfg_rodando_em": "running on {v}",
   "orqcfg_aplica_proxima": "When you save, the row applies to each role's next session; running sessions keep going as they are.",

@@ -3340,7 +3340,7 @@
   "orqcfg_viva": "viva",
   "orqcfg_nao_aberta": "não aberta",
   "orqcfg_agora_viva": "Agora: {sessao} está viva em {modelo} · {esforco}.",
-  "orqcfg_agora_diverge": "O contrato diz {modelo} · {esforco}. O árbitro troca quando ela estiver parada; trabalhando, na próxima.",
+  "orqcfg_agora_diverge": "O contrato diz {modelo} · {esforco}. Vale quando a próxima sessão do papel abrir.",
   "orqcfg_agora_nao_medido": "Sessão viva, mas sem medição de modelo (sem statusline).",
   "orqcfg_rodando_em": "rodando em {v}",
   "orqcfg_aplica_proxima": "Ao salvar, a linha vale na próxima sessão de cada papel; as sessões que estão rodando continuam como estão.",
