@@ -1,7 +1,6 @@
 # Reviewer — the visual gate
 
-This page belongs to the Task that touches pixels. Diff draws nothing: go back to `revisor.md`
-and `revisor-catalogo.md`.
+This page belongs to the Task that touches pixels. Diff draws nothing: this page does not apply.
 
 `orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir from the kick-off>`.
 
@@ -19,8 +18,8 @@ and `revisor-catalogo.md`.
 Do not redo the executor's blind protocol. Make one pass at the end over the final screenshot
 and the bar, hunting:
 
-- the bar swapped midway: check the four invalidators of `executor-visual.md`, step 3
-  (viewport, language, edge-cut element, effect framed with the state);
+- the bar swapped midway: check the four capture invalidators (viewport, language,
+  edge-cut element, effect framed with the state);
 - they won and it is still wrong: an opaque rectangle over the wallpaper, cut-off text, a state
   nobody captured.
 
@@ -37,9 +36,9 @@ and the bar, hunting:
 
 ## No bar, or a waived bar
 
-- Pixels touched and no bar at all in the contract: `DEVOLVIDO` (`revisor.md`, step 5), the
-  report saying "Task N draws a screen and the contract carries neither a bar nor a waiver; the
-  bar is the user's decision".
+- Pixels touched and no bar at all in the contract: `DEVOLVIDO`, the report saying "Task N
+  draws a screen and the contract carries neither a bar nor a waiver; the bar is the user's
+  decision".
   Do not propose one, pick one, or judge as if it existed.
 - Contract says `Bar: none — user's decision`: judge normally without the blind comparison
   (per-state screenshots, missing state is a finding) and enforce no bar.
