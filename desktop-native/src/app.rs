@@ -755,8 +755,8 @@ impl Hangar {
         self.reset_device(cx);
         self.costs_reconnected(cx);
         self.search_reconnected(cx);
-        self.load_today(cx);
         self.refresh_default_account(cx);
+        self.schedule_account_refresh(cx);
         // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
         self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
         // Página do servidor aberta na troca: relê do servidor novo.
@@ -1388,8 +1388,6 @@ impl Hangar {
                 if turned { self.restart_subagent_count(cx); }
                 self.sync_activity(cx);
                 if finished { self.discover_plan(); }
-                // O turno gastou: a pílula de custo de hoje relê (a leitura em voo, se houver, já pega o novo).
-                if finished && !self.topbar_loading() { self.load_today(cx); }
                 if resumed { self.controls.clear_plan_preview(); }
                 if self.chat.ask.is_none() { self.ask_form = AskForm::default(); }
                 if self.chat.state.state == "working" { self.cancel_preview_drop(); }

@@ -4029,7 +4029,6 @@
   "native_invalid_response": "The server returned invalid data.",
   "native_costs_back": "Back",
   "native_search_sessions": "Sessions",
-  "native_topbar_today": "Today",
   "native_search_conversations": "Conversations",
   "native_search_resume": "Resume the conversation",
   "native_search_resuming": "Resuming the conversation in a new session…",
