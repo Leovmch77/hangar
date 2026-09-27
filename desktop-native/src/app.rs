@@ -1074,9 +1074,12 @@ impl Hangar {
                     Ok(None) => MediaState::Failed(tr("media_unreadable")),
                     Err(error) => MediaState::Failed(Self::fetch_failure(&error)),
                 };
+                let started = std::time::Instant::now();
+                media::trace(format_args!("thumb installed {source:?}"));
                 for image in self.media.insert((key, source), state) { cx.drop_image(image, Some(window)); }
                 let rows = self.row_ids.len();
                 if rows > 0 { self.follow_content_changed(cx); self.list_state.remeasure_items(0..rows); }
+                media::trace(format_args!("thumb install took {:.2} ms, remeasured {rows} rows", started.elapsed().as_secs_f64() * 1000.));
             }
             Payload::Config(seq, result) => {
                 if seq != self.system_notifications.seq { return; }
@@ -1785,12 +1788,18 @@ impl Hangar {
         let slot = (key.clone(), source.clone());
         if self.media.contains(&slot) { return; }
         self.media.start(slot);
+        media::trace(format_args!("thumb start {source:?}"));
         let (connection, tx, source, uploads) = (self.connection, self.tx.clone(), source.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
+            let started = std::time::Instant::now();
             let result = match uploads.fetch(&api, &key.name, &source).await {
-                Ok(bytes) => Ok(tokio::task::spawn_blocking(move || media::thumbnail(&bytes)).await.ok().flatten()),
+                Ok(bytes) => {
+                    media::trace(format_args!("thumb fetched {source:?} {} B in {:.1} ms", bytes.len(), started.elapsed().as_secs_f64() * 1000.));
+                    Ok(tokio::task::spawn_blocking(move || media::thumbnail(&bytes)).await.ok().flatten())
+                }
                 Err(error) => Err(error),
             };
+            media::trace(format_args!("thumb ready {source:?} in {:.1} ms", started.elapsed().as_secs_f64() * 1000.));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Media(key, source, result) }).await;
         });
     }

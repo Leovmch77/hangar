@@ -120,8 +120,13 @@ impl Viewer {
         let (seq, api, name, source, uploads) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone(), self.uploads.clone());
         // ponytail: a decodificação do fundo reduz a 2560 px de lado; zoom além disso amplia pixels. Subir se incomodar.
         let job = self.runtime.spawn(async move {
+            let started = std::time::Instant::now();
+            media::trace(format_args!("viewer start {source:?}"));
             let bytes = uploads.fetch(&api, &name, &source).await?;
-            Ok(tokio::task::spawn_blocking(move || media::backdrop(&bytes)).await.ok().flatten())
+            media::trace(format_args!("viewer fetched {source:?} {} B in {:.1} ms", bytes.len(), started.elapsed().as_secs_f64() * 1000.));
+            let image = tokio::task::spawn_blocking(move || media::backdrop(&bytes)).await.ok().flatten();
+            media::trace(format_args!("viewer ready {source:?} in {:.1} ms", started.elapsed().as_secs_f64() * 1000.));
+            Ok(image)
         });
         if let Some(old) = self.fetching.replace(job.abort_handle()) { old.abort(); }
         self._load = cx.spawn(async move |this, cx| {
