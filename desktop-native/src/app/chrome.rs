@@ -477,17 +477,20 @@ pub fn meter(pct: f64) -> AnyElement {
         .into_any_element()
 }
 
-/// Anel de uso do rodapé (16 px, traço 1,8), com a cor do `meter`. Só quads: o `PathBuilder` soma alfa na janela
-/// transparente. O trilho é um quad só de borda; o arco, pontos redondos opacos que se cobrem. Sem dado, só o trilho.
+/// Anel de uso do rodapé (caixa de 16 px, anel de 14, traço 2), com a cor do `meter`. Só quads: o `PathBuilder` soma
+/// alfa na janela transparente. O trilho é um quad só de borda, na tinta do texto para aparecer sobre qualquer fundo; o
+/// arco, pontos redondos opacos que se cobrem. Sem dado, só o trilho.
 pub fn ring(pct: Option<f64>) -> AnyElement {
     const SIZE: f32 = 16.;
-    const STROKE: f32 = 1.8;
-    let track = theme::raised();
+    const RING: f32 = 14.;
+    const STROKE: f32 = 2.;
+    let track = theme::text().opacity(0.16);
     let arc = pct.map(|pct| (pct.clamp(0., 100.) as f32 / 100., meter_color(pct)));
     div().size(px(SIZE)).flex_shrink_0().child(canvas(|_, _, _| (), move |bounds, _, window, _| {
-        window.paint_quad(outline(bounds, track, BorderStyle::Solid).border_widths(px(STROKE)).corner_radii(px(SIZE / 2.)));
+        let ring = Bounds::centered_at(bounds.center(), size(px(RING), px(RING)));
+        window.paint_quad(outline(ring, track, BorderStyle::Solid).border_widths(px(STROKE)).corner_radii(px(RING / 2.)));
         let Some((share, color)) = arc.filter(|(share, _)| *share > 0.) else { return };
-        let (center, radius) = (bounds.center(), (SIZE - STROKE) / 2.);
+        let (center, radius) = (bounds.center(), (RING - STROKE) / 2.);
         // Um ponto a cada meio pixel de arco, do topo em sentido horário.
         let steps = (std::f32::consts::TAU * radius * share / 0.5).ceil().max(1.) as usize;
         for step in 0..=steps {
@@ -500,6 +503,11 @@ pub fn ring(pct: Option<f64>) -> AnyElement {
 
 fn meter_color(pct: f64) -> Hsla {
     if pct >= 90. { theme::danger() } else if pct >= 70. { theme::warning() } else { theme::accent() }
+}
+
+/// Número ao lado do anel: as faixas do bloco de contexto do painel; sem dado, apagado.
+pub fn ring_text(pct: Option<f64>) -> Hsla {
+    match pct { Some(p) if p >= 90. => theme::danger(), Some(p) if p >= 70. => theme::warning(), Some(_) => theme::muted(), None => theme::faint() }
 }
 
 /// Marca do Hangar (dois arcos), tingida pela cor do estado.

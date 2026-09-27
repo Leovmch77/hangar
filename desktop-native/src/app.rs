@@ -3068,8 +3068,11 @@ impl Hangar {
             let account = windows.first().map(|(_, pct)| *pct);
             let limits = (!windows.is_empty()).then(|| windows.iter().map(|(label, pct)| format!("{label} {}", percent(Some(*pct))))
                 .collect::<Vec<_>>().join(" · "));
-            let ring = |id: &'static str, pct: Option<f64>, tip: String| div().id(id).flex_shrink_0().flex().items_center().gap(px(5.))
-                .child(chrome::ring(pct)).child(percent(pct))
+            // Anel e número com a mesma geometria nos dois, e a cor da faixa também no número.
+            let ring = |id: &'static str, pct: Option<f64>, tip: String| div().id(id).flex_shrink_0().h(px(22.)).px(px(6.)).rounded(px(6.))
+                .flex().items_center().gap(px(5.))
+                .child(chrome::ring(pct))
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(chrome::ring_text(pct)).child(percent(pct)))
                 .when(!tip.is_empty(), |el| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)));
             let ctx_tip = [Some(format!("{} {}", tr("ring_context"), percent(ctx_pct))), stats].into_iter().flatten().collect::<Vec<_>>().join("\n");
             // Com o cartão aberto a dica sairia por cima dele.
@@ -3090,14 +3093,20 @@ impl Hangar {
                     .tooltip(tr("git_open")).accessibility_label(tr("git_open")).child(place)
                     .on_click(cx.listener(|this, _, window, cx| this.open_git_panel(window, cx))).into_any_element()
             } else { place.into_any_element() };
+            let card_open = self.accounts.card;
+            // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
+            let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
+                // A linha de estatísticas do turno fica na dica do anel de contexto.
+                .child(ring("composer-ctx", ctx_pct, ctx_tip))
+                .child(popup::anchor(div(), "composer-account").child(ring("composer-account", account, account_tip)
+                    .cursor_pointer().hover(|el| el.bg(theme::hover())).when(card_open, |el| el.bg(theme::hover()))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
+                .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
+                    .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
             div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
                 .child(place)
                 .child(div().flex_1())
-                // A linha de estatísticas do turno fica na dica do anel de contexto.
-                .child(ring("composer-ctx", ctx_pct, ctx_tip))
-                .child(popup::anchor(div().ml(px(6.)), "composer-account").child(ring("composer-account", account, account_tip)
-                    .cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
-                .when_some(cost, |el, cost| el.child(div().flex_shrink_0().child("·")).child(div().flex_shrink_0().child(cost)))
+                .child(usage)
         });
 
         let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() { "sending" } else { "send" });
