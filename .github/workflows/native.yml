@@ -133,7 +133,41 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(jq -r .version out/native-latest.json)
-          notes="Versão $version ($GITHUB_SHA). Linux: arquivo desta versão."
+          # O commit da versão anterior vem do manifesto ainda publicado: ele só é trocado no fim deste passo.
+          previous=$(gh release download native-latest --repo "$GITHUB_REPOSITORY" -p native-latest.json -O - | jq -r '.commit // empty') || {
+            echo "::warning::manifesto anterior indisponível; as notas saem sem 'O que mudou'"
+            previous=""
+          }
+          changes=""
+          if test -n "$previous" && git cat-file -e "$previous^{commit}" 2>/dev/null; then
+            changes=$(git log --no-merges -n 40 --format='- %s' "$previous..$GITHUB_SHA" -- desktop-native VERSION .github/workflows/native.yml)
+          fi
+          notes=$(cat <<'EOF'
+          ## Hangar para desktop
+
+          App nativo do Hangar para acompanhar e comandar as sessões do Claude Code, Codex e dos outros agentes direto do computador, ligado ao servidor Hangar desta máquina ou de outras.
+
+          ### Qual arquivo baixar
+
+          | Sistema | Arquivo |
+          |---|---|
+          | Windows (x64) | `Hangar-windows-x86_64.zip` |
+          | macOS (Apple Silicon) | `Hangar-macos-aarch64.zip` |
+          | Linux (x64) | `Hangar-linux-x86_64.tar.gz` |
+
+          ### Como instalar
+
+          - **Windows:** descompacte e abra `Hangar.exe`. Se o SmartScreen avisar que o app não é reconhecido, use "Mais informações" e depois "Executar assim mesmo".
+          - **macOS:** descompacte e arraste `Hangar.app` para Aplicativos. Na primeira vez, abra com o botão direito e escolha "Abrir": o app não é assinado.
+          - **Linux:** `tar xzf Hangar-linux-x86_64.tar.gz` e depois `./install-linux.sh`, que instala o app, o ícone e o atalho no menu.
+
+          Instalado, o app mostra um botão de atualizar quando sai versão nova. Os binários não são assinados; confira pelo `.sha256` ao lado de cada arquivo.
+          EOF
+          )
+          if test -n "$changes"; then
+            notes+=$'\n\n'"### O que mudou"$'\n\n'"$changes"
+          fi
+          notes+=$'\n\n'"### Esta versão"$'\n\n'"Versão $version ($GITHUB_SHA). Linux: arquivo desta versão."
           for spec in 'Windows:Hangar-windows-x86_64.exe' 'macOS:Hangar-macos-aarch64'; do
             platform=${spec%%:*}
             file=${spec#*:}
