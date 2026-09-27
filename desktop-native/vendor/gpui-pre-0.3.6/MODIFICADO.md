@@ -6,3 +6,5 @@ Entra no build por `[patch.crates-io]` em `desktop-native/Cargo.toml`.
 `src/scene.rs` e `src/window.rs` foram modificados pelo Hangar para receber regiões de desfoque do conteúdo já pintado. O mecanismo de ordem, repetição de cenas guardadas e a entrada de pintura foram portados de `zeronsh/zui` na revisão `18a89af`, também Apache-2.0. Cada arquivo alterado traz um aviso no cabeçalho.
 
 O renderer usa essas regiões em uma etapa posterior. Sem suporte no renderer, `paint_backdrop_blur` não muda os pixels; quem chama deve manter um preenchimento translúcido como reserva.
+
+`src/window.rs` e `src/element.rs` também guardam, só enquanto houver um receptor instalado por `Window::set_element_map_sink`, os elementos com id do quadro (`ElementRecord`: caminho de ids, bounds lógicos, visível). Views em cache copiam a faixa junto com os hitboxes. Sem receptor nada é registrado. O app usa isso no mapa de elementos das provas (`HANGAR_NATIVE_UI_MAP`).

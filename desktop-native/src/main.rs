@@ -17,6 +17,7 @@ mod status;
 mod tables;
 mod ws;
 mod theme;
+mod ui_map;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};
 use std::{borrow::Cow, sync::Arc};
 
@@ -86,6 +87,7 @@ fn main() {
             inactive_frame_interval: None,
             ..Default::default()
         }, |window, cx| {
+            ui_map::install(window);
             let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), window, cx));
             cx.new(|cx| {
                 let root = Root::new(view, window, cx);

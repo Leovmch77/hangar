@@ -1,3 +1,4 @@
+// Modified for Hangar: records elements with an id while an element map sink is set.
 //! Elements are the workhorses of GPUI. They are responsible for laying out and painting all of
 //! the contents of a window. Elements form a tree and are laid out according to the web layout
 //! standards as implemented by [taffy](https://github.com/DioxusLabs/taffy). Most of the time,
@@ -364,6 +365,16 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let bounds = window.layout_bounds(layout_id);
+                if window.element_map.is_some() {
+                    if let Some(global_id) = global_id.as_ref() {
+                        let visible = !bounds.intersect(&window.content_mask().bounds).is_empty();
+                        window.next_frame.element_records.push(crate::ElementRecord {
+                            path: global_id.0.clone(),
+                            bounds,
+                            visible,
+                        });
+                    }
+                }
                 let mut pushed_a11y_node = false;
                 if window.a11y.is_active() {
                     if let Some(global_id) = global_id.as_ref() {
