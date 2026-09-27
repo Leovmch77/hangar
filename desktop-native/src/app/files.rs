@@ -504,7 +504,7 @@ impl Hangar {
             (Some(Picture::Failed(error)), _) | (None, Some(Err(error))) => state(error.clone(), theme::danger()),
             (None, Some(Ok(doc))) if tab.preview && doc.markdown.is_some() => {
                 let (tx, connection, document) = (self.tx.clone(), self.connection, tab.path.clone());
-                div().id("file-markdown").size_full().overflow_y_scroll().flex().justify_center().px_6().py_4()
+                div().id("file-markdown").size_full().overflow_y_scroll().flex().justify_center().items_start().px_6().py_4()
                     .child(conversation_text(div().w_full().max_w(px(900.))).children(doc.markdown.as_ref().map(|view| chat_text(view, cx)
                         .on_link_click(move |url, event, window, cx| match link_target(&document, url) {
                             Some(path) => { let _ = tx.try_send(Envelope { connection, selection: None, payload: Payload::FileView(FileReply::Open(path)) }); }
