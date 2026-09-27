@@ -12,6 +12,11 @@ const STEP: f32 = 1.25;
 const EDGE: f32 = 24.;
 /// Altura da janela que não é palco: bordas, respiro do diálogo e a faixa com nome e botões.
 const CHROME_H: f32 = 128.;
+/// Largura do diálogo que não é palco: respiro dos lados e a borda.
+const CHROME_W: f32 = 34.;
+/// Menor palco: a faixa de cima precisa caber nome, zoom, Abrir e Salvar.
+const MIN_W: f32 = 480.;
+const MIN_H: f32 = 160.;
 
 /// Onde a imagem está no palco: pixels da tela por pixel da imagem e o canto de cima à esquerda.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -26,14 +31,31 @@ fn clamp(view: View, image: (f32, f32), stage: (f32, f32)) -> View {
     View { scale: view.scale, x: axis(view.x, image.0 * view.scale, stage.0), y: axis(view.y, image.1 * view.scale, stage.1) }
 }
 
-fn fitted(image: (f32, f32), stage: (f32, f32)) -> View { clamp(View { scale: fit_scale(image, stage), x: 0., y: 0. }, image, stage) }
+/// Maior palco que a janela comporta.
+fn limit(window: &Window) -> (f32, f32) {
+    let size = window.viewport_size();
+    ((f32::from(size.width) - EDGE * 2. - CHROME_W).max(1.), (f32::from(size.height) - CHROME_H).max(MIN_H))
+}
 
-/// Zoom que mantém parado o ponto da imagem sob `anchor` (coordenada do palco); nunca abaixo do encaixe.
-fn zoom(view: View, image: (f32, f32), stage: (f32, f32), anchor: (f32, f32), factor: f32) -> View {
-    let fit = fit_scale(image, stage);
+/// O palco abraça a imagem na escala dada, entre o mínimo e o `limit` da janela.
+fn stage_for(image: (f32, f32), scale: f32, limit: (f32, f32)) -> (f32, f32) {
+    ((image.0 * scale).clamp(MIN_W.min(limit.0), limit.0), (image.1 * scale).clamp(MIN_H.min(limit.1), limit.1))
+}
+
+fn fitted(image: (f32, f32), limit: (f32, f32)) -> View {
+    let scale = fit_scale(image, limit);
+    clamp(View { scale, x: 0., y: 0. }, image, stage_for(image, scale, limit))
+}
+
+/// Zoom que mantém parado o ponto da imagem sob `anchor` (coordenada do palco); nunca abaixo do encaixe. O diálogo é
+/// centrado, então o palco que cresce se abre metade para cada lado e a âncora anda metade do crescimento.
+fn zoom(view: View, image: (f32, f32), limit: (f32, f32), anchor: (f32, f32), factor: f32) -> View {
+    let fit = fit_scale(image, limit);
     let scale = (view.scale * factor).clamp(fit, MAX_SCALE.max(fit));
     let ratio = scale / view.scale;
-    clamp(View { scale, x: anchor.0 - (anchor.0 - view.x) * ratio, y: anchor.1 - (anchor.1 - view.y) * ratio }, image, stage)
+    let (before, after) = (stage_for(image, view.scale, limit), stage_for(image, scale, limit));
+    let (dx, dy) = ((after.0 - before.0) / 2., (after.1 - before.1) / 2.);
+    clamp(View { scale, x: anchor.0 + dx - (anchor.0 - view.x) * ratio, y: anchor.1 + dy - (anchor.1 - view.y) * ratio }, image, after)
 }
 
 enum Shown { Loading, Image(Arc<RenderImage>), Failed(String) }
@@ -41,6 +63,8 @@ enum Shown { Loading, Image(Arc<RenderImage>), Failed(String) }
 pub(super) struct Viewer {
     hangar: WeakEntity<Hangar>,
     api: Api,
+    /// Anexos do cofre lidos do disco quando a sessão é desta máquina.
+    uploads: super::disk::Uploads,
     runtime: Arc<Runtime>,
     key: SessionKey,
     sources: Vec<Source>,
@@ -54,6 +78,10 @@ pub(super) struct Viewer {
     focus: FocusHandle,
     /// Palco medido no último quadro; o zoom e o arrasto precisam da origem dele.
     stage: Option<Bounds<Pixels>>,
+    /// Maior palco que a janela comporta, lido no último quadro.
+    limit: Option<(f32, f32)>,
+    /// Último palco com imagem: carregando a próxima, o diálogo fica do tamanho que estava em vez de piscar.
+    held: Option<(f32, f32)>,
     view: Option<View>,
     drag: Option<(Point<Pixels>, View)>,
 }
@@ -75,16 +103,24 @@ impl Viewer {
         Some((size.width.0 as f32, size.height.0 as f32))
     }
 
-    fn stage_size(&self) -> Option<(f32, f32)> { self.stage.map(|b| (f32::from(b.size.width), f32::from(b.size.height))) }
+    /// Tamanho do palco dentro de `limit`; o diálogo usa o mesmo cálculo para a própria largura.
+    fn stage_box(&self, limit: (f32, f32)) -> (f32, f32) {
+        match self.image_size().zip(self.view) {
+            Some((image, view)) => stage_for(image, view.scale, limit),
+            None => self.held.map_or((MIN_W.min(limit.0), (MIN_H * 1.5).min(limit.1)), |(w, h)| (w.min(limit.0), h.min(limit.1))),
+        }
+    }
+
+    fn stage_size(&self) -> Option<(f32, f32)> { self.limit.map(|limit| self.stage_box(limit)) }
 
     /// A imagem inteira é buscada de novo aqui e solta ao trocar ou fechar: o cache da conversa guarda só miniaturas.
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.release(window, cx);
         self.seq += 1;
-        let (seq, api, name, source) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone());
+        let (seq, api, name, source, uploads) = (self.seq, self.api.clone(), self.key.name.clone(), self.sources[self.index].clone(), self.uploads.clone());
         // ponytail: a decodificação do fundo reduz a 2560 px de lado; zoom além disso amplia pixels. Subir se incomodar.
         let job = self.runtime.spawn(async move {
-            let bytes = api.fetch(&name, &source).await?;
+            let bytes = uploads.fetch(&api, &name, &source).await?;
             Ok(tokio::task::spawn_blocking(move || media::backdrop(&bytes)).await.ok().flatten())
         });
         if let Some(old) = self.fetching.replace(job.abort_handle()) { old.abort(); }
@@ -98,7 +134,7 @@ impl Viewer {
                     Ok(None) => Shown::Failed(tr("media_failed").replace("{name}", &name).replace("{reason}", &tr("media_unreadable"))),
                     Err(error) => Shown::Failed(tr("media_failed").replace("{name}", &name).replace("{reason}", &Hangar::fetch_failure(&error))),
                 };
-                this.view = this.image_size().zip(this.stage_size()).map(|(image, stage)| fitted(image, stage));
+                this.view = this.image_size().zip(this.limit).map(|(image, limit)| fitted(image, limit));
                 cx.notify();
             });
         });
@@ -121,27 +157,20 @@ impl Viewer {
     }
 
     fn zoom_at(&mut self, anchor: Option<(f32, f32)>, factor: f32, cx: &mut Context<Self>) {
-        let (Some(image), Some(stage), Some(view)) = (self.image_size(), self.stage_size(), self.view) else { return };
+        let (Some(image), Some(stage), Some(limit), Some(view)) = (self.image_size(), self.stage_size(), self.limit, self.view) else { return };
         let anchor = anchor.unwrap_or((stage.0 / 2., stage.1 / 2.));
-        let next = zoom(view, image, stage, anchor, factor);
+        let next = zoom(view, image, limit, anchor, factor);
         if next != view { self.view = Some(next); cx.notify(); }
     }
 
     fn fit(&mut self, cx: &mut Context<Self>) {
-        let (Some(image), Some(stage)) = (self.image_size(), self.stage_size()) else { return };
-        self.view = Some(fitted(image, stage));
+        let (Some(image), Some(limit)) = (self.image_size(), self.limit) else { return };
+        self.view = Some(fitted(image, limit));
         cx.notify();
     }
 
-    fn set_stage(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        // A origem só serve para os eventos; ela anda na animação de abrir sem a imagem precisar mudar.
-        let resized = self.stage.map(|stage| stage.size) != Some(bounds.size);
-        self.stage = Some(bounds);
-        if !resized { return; }
-        // Janela redimensionada: a imagem volta a caber inteira.
-        self.view = self.image_size().map(|image| fitted(image, (f32::from(bounds.size.width), f32::from(bounds.size.height))));
-        cx.notify();
-    }
+    /// A origem só serve para os eventos; o tamanho do palco sai do zoom e da janela, não da medida.
+    fn set_stage(&mut self, bounds: Bounds<Pixels>) { self.stage = Some(bounds); }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
@@ -165,7 +194,14 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let stage_h = (f32::from(window.viewport_size().height) - CHROME_H).max(160.);
+        let limit = limit(window);
+        if self.limit != Some(limit) {
+            // Janela redimensionada: a imagem volta a caber inteira.
+            self.limit = Some(limit);
+            self.view = self.image_size().map(|image| fitted(image, limit));
+        }
+        let (stage_w, stage_h) = self.stage_box(limit);
+        if self.image_size().is_some() { self.held = Some((stage_w, stage_h)); }
         let total = self.sources.len();
         let zoomed = match (self.view, self.image_size(), self.stage_size()) {
             (Some(view), Some(image), Some(stage)) => view.scale > fit_scale(image, stage) + 0.001,
@@ -209,7 +245,7 @@ impl Render for Viewer {
                 .child(div().rounded_md().bg(theme::scrim()).child(Button::new(id).ghost().icon(icon).tooltip(label)
                     .on_click(cx.listener(move |this: &mut Self, _, window, cx| this.step(forward, window, cx)))))
         };
-        let stage = div().id("viewer-stage").relative().w_full().h(px(stage_h)).overflow_hidden().rounded_md().bg(theme::inset())
+        let stage = div().id("viewer-stage").relative().w(px(stage_w)).h(px(stage_h)).overflow_hidden().rounded_md().bg(theme::inset())
             .when(zoomed, |el| el.cursor(if self.drag.is_some() { CursorStyle::ClosedHand } else { CursorStyle::OpenHand }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let Some(stage) = this.stage else { return };
@@ -236,7 +272,7 @@ impl Render for Viewer {
             .child(canvas(move |bounds, window, cx| {
                 if entity.read(cx).stage == Some(bounds) { return; }
                 let entity = entity.clone();
-                window.defer(cx, move |_, cx| entity.update(cx, |this, cx| this.set_stage(bounds, cx)));
+                window.defer(cx, move |_, cx| entity.update(cx, |this, _| this.set_stage(bounds)));
             }, |_, _, _, _| {}).absolute().size_full())
             .child(body)
             .when(total > 1, |el| el
@@ -253,7 +289,7 @@ impl Hangar {
     pub(super) fn open_image(&mut self, key: SessionKey, sources: Vec<Source>, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         if index >= sources.len() { return; }
-        let (hangar, runtime) = (cx.entity().downgrade(), self.runtime.clone());
+        let (hangar, runtime, uploads) = (cx.entity().downgrade(), self.runtime.clone(), self.uploads_for(&key));
         let viewer = cx.new(|cx| {
             // Rede de segurança para um fechamento que não passe pelo `on_close`: a entidade morre com o diálogo.
             cx.on_release(|viewer: &mut Viewer, cx| {
@@ -261,16 +297,18 @@ impl Hangar {
                 if let Shown::Image(image) = &viewer.shown { cx.drop_image(image.clone(), None); }
             }).detach();
             Viewer {
-                hangar, api, runtime, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
-                focus: cx.focus_handle(), stage: None, view: None, drag: None,
+                hangar, api, uploads, runtime, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
+                focus: cx.focus_handle(), stage: None, limit: None, held: None, view: None, drag: None,
             }
         });
         viewer.update(cx, |viewer, cx| viewer.load(window, cx));
         let (shown, closed) = (viewer.clone(), viewer.clone());
-        window.open_dialog(cx, move |dialog, window, _| {
-            let width = f32::from(window.viewport_size().width) - EDGE * 2.;
+        window.open_dialog(cx, move |dialog, window, cx| {
+            // Do tamanho da imagem até o da janela, centrado; o construtor roda a cada quadro e acompanha zoom e troca.
+            let (w, h) = shown.read(cx).stage_box(limit(window));
+            let top = ((f32::from(window.viewport_size().height) - h - (CHROME_H - EDGE * 2.)) / 2.).max(EDGE);
             let closed = closed.clone();
-            dialog.w(px(width)).margin_top(px(EDGE)).on_ok(enter_to_focused).child(shown.clone())
+            dialog.w(px(w + CHROME_W)).margin_top(px(top)).on_ok(enter_to_focused).child(shown.clone())
                 .on_close(move |_, window, cx| closed.update(cx, |viewer, cx| viewer.release(window, cx)))
         });
         // O kit põe o foco no diálogo ao abrir; as setas e o zoom pelo teclado precisam dele no visor.
@@ -282,13 +320,21 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{MAX_SCALE, View, clamp, fitted, zoom};
+    use super::{MAX_SCALE, MIN_H, MIN_W, View, clamp, fitted, stage_for, zoom};
 
     #[test]
     fn fit_never_enlarges_and_centers() {
-        assert_eq!(fitted((100., 50.), (400., 300.)), View { scale: 1., x: 150., y: 125. });
+        assert_eq!(fitted((100., 50.), (400., 300.)), View { scale: 1., x: 150., y: 55. });
         let big = fitted((800., 400.), (400., 300.));
-        assert_eq!((big.scale, big.x, big.y), (0.5, 0., 50.));
+        assert_eq!((big.scale, big.x, big.y), (0.5, 0., 0.));
+    }
+
+    #[test]
+    fn stage_hugs_the_image_between_the_minimum_and_the_window() {
+        let limit = (1800., 900.);
+        assert_eq!(stage_for((425., 41.), 1., limit), (MIN_W, MIN_H));
+        assert_eq!(stage_for((425., 41.), 4., limit), (1700., 164.));
+        assert_eq!(stage_for((4000., 3000.), 1., limit), limit);
     }
 
     #[test]
@@ -298,7 +344,8 @@ mod tests {
         let anchor = (100., 150.);
         let before = ((anchor.0 - start.x) / start.scale, (anchor.1 - start.y) / start.scale);
         let zoomed = zoom(start, image, stage, anchor, 2.);
-        let after = ((anchor.0 - zoomed.x) / zoomed.scale, (anchor.1 - zoomed.y) / zoomed.scale);
+        // O palco cresceu de 200 para 300 de altura, metade para cima: o ponto sob o cursor desceu 50.
+        let after = ((anchor.0 - zoomed.x) / zoomed.scale, (anchor.1 + 50. - zoomed.y) / zoomed.scale);
         assert_eq!(zoomed.scale, 1.);
         assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
         assert_eq!(zoom(zoomed, image, stage, anchor, 0.01), start);

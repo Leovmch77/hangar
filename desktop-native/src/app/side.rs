@@ -277,9 +277,12 @@ impl Hangar {
             Shortcut::Shell { label, command, .. } => {
                 let Some(api) = self.api.clone() else { return; };
                 self.action_feedback.insert(key.clone(), (tr("shortcut_started").replace("{label}", &label), false));
-                let (connection, tx) = (self.connection, self.tx.clone());
+                let (connection, tx, local) = (self.connection, self.tx.clone(), self.local_shell(&key.name, command.clone()));
                 self.runtime.spawn(async move {
-                    let result = api.act(&key.name, &["shortcut-shell"], Some(json!({"command": command})), false, 30).await;
+                    let result = match local {
+                        Some(run) => run.await,
+                        None => api.act(&key.name, &["shortcut-shell"], Some(json!({"command": command})), false, 30).await,
+                    };
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Shell(label), result) }).await;
                 });
             }

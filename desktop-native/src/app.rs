@@ -24,6 +24,7 @@ mod landing;
 mod git;
 mod harness;
 mod viewer;
+mod disk;
 mod machines;
 mod orchestration;
 mod panes;
@@ -1586,11 +1587,12 @@ impl Hangar {
             jobs.push((attachment.id, attachment.name.clone(), attachment.bytes.clone()));
         }
         self.uploading.insert(key.clone(), list.iter().map(|a| a.id).collect());
-        let (connection, tx) = (self.connection, self.tx.clone());
+        let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
+            let retention = match uploads { disk::Uploads::Local(_) => disk::retention(&api).await, disk::Uploads::Remote => None };
             for (id, name, bytes) in jobs {
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, None) }).await;
-                let result = api.upload(&key.name, &name, composer::mime_for(&name), bytes.to_vec()).await;
+                let result = uploads.upload(&api, &key.name, &name, bytes.to_vec(), retention).await;
                 let failed = result.is_err();
                 if tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, Some(result)) }).await.is_err() { return; }
                 if failed { break; }
@@ -1723,9 +1725,9 @@ impl Hangar {
         self.command_panel = false;
         self.close_controls();
         self.recent = Some(Recent { key: key.clone(), files: None });
-        let (connection, tx) = (self.connection, self.tx.clone());
+        let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
-            let result = api.uploads(&key.name).await;
+            let result = uploads.list(&api, &key.name).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Recent(key, result) }).await;
         });
         cx.notify();
@@ -1735,9 +1737,9 @@ impl Hangar {
     fn reattach(&mut self, filename: String, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
         self.recent = None;
-        let (connection, tx) = (self.connection, self.tx.clone());
+        let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
-            let result = api.fetch(&key.name, &Source::Upload(filename.clone())).await
+            let result = uploads.fetch(&api, &key.name, &Source::Upload(filename.clone())).await
                 .map(|bytes| Picked { name: filename.clone(), bytes })
                 .map_err(|error| format!("{}: {}", filename, Self::fetch_failure(&error)));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Files(key, vec![result]) }).await;
@@ -1750,9 +1752,9 @@ impl Hangar {
         let slot = (key.clone(), source.clone());
         if self.media.contains(&slot) { return; }
         self.media.start(slot);
-        let (connection, tx, source) = (self.connection, self.tx.clone(), source.clone());
+        let (connection, tx, source, uploads) = (self.connection, self.tx.clone(), source.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
-            let result = match api.fetch(&key.name, &source).await {
+            let result = match uploads.fetch(&api, &key.name, &source).await {
                 Ok(bytes) => Ok(tokio::task::spawn_blocking(move || media::thumbnail(&bytes)).await.ok().flatten()),
                 Err(error) => Err(error),
             };
@@ -1770,11 +1772,11 @@ impl Hangar {
             cx.notify();
             return;
         }
-        let (connection, tx, runtime) = (self.connection, self.tx.clone(), self.runtime.clone());
+        let (connection, tx, runtime, uploads) = (self.connection, self.tx.clone(), self.runtime.clone(), self.uploads_for(&key));
         let write = move |target: Option<PathBuf>| {
             runtime.spawn(async move {
                 let result = async {
-                    let bytes = api.fetch(&key.name, &source).await.map_err(|error| format!("{safe}: {}", Self::fetch_failure(&error)))?;
+                    let bytes = uploads.fetch(&api, &key.name, &source).await.map_err(|error| format!("{safe}: {}", Self::fetch_failure(&error)))?;
                     let path = match target { Some(path) => path, None => private_copy(&safe).map_err(|_| tr("save_failed"))? };
                     // Até 100 MiB: a escrita não pode ocupar uma das duas threads do runtime.
                     tokio::task::spawn_blocking(move || std::fs::write(&path, bytes).map(|()| path)).await
