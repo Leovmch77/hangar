@@ -334,11 +334,22 @@ pub fn kbd(keys: &'static str) -> Div {
         .font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(keys)
 }
 
-/// Selo quadrado do provider (C, X, π…) na cor da marca, como na lista e no cabeçalho do mock.
+/// Selo quadrado do provider na cor da marca, com os mesmos traçados do `ProviderGlyph` do web;
+/// Pi e omp não têm marca vetorial e ficam no glifo tipográfico (π, Ω), como lá.
 pub fn provider_glyph(provider: &str, size: f32) -> Div {
     let (color, glyph) = theme::provider(provider);
-    div().size(px(size)).flex_shrink_0().rounded(px(4.)).bg(color.opacity(0.2)).flex().items_center().justify_center()
-        .text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph)
+    let seal = div().size(px(size)).flex_shrink_0().rounded(px(4.)).bg(color.opacity(0.2)).flex().items_center().justify_center()
+        .text_color(color);
+    match provider_logo(provider, size * 0.72, color) {
+        Some(logo) => seal.child(logo),
+        None => seal.text_size(px(10.)).font_weight(FontWeight::BOLD).child(glyph),
+    }
+}
+
+/// Logo vetorial do provider (Claude, Codex/OpenAI, Kimi); `None` para quem não tem marca.
+pub fn provider_logo(provider: &str, size: f32, color: Hsla) -> Option<Svg> {
+    let path = match provider { "claude" => "providers/claude.svg", "codex" => "providers/codex.svg", "kimi" => "providers/kimi.svg", _ => return None };
+    Some(svg().path(path).size(px(size)).flex_shrink_0().text_color(color))
 }
 
 const GLASS_BLUR: Pixels = px(16.);

@@ -509,7 +509,7 @@ impl Hangar {
         let f = self.accounts.codex.as_ref()?;
         let (color, _) = theme::provider("codex");
         let avatar = div().size(px(36.)).flex_shrink_0().rounded(px(10.)).bg(color.opacity(0.16)).flex().items_center().justify_center()
-            .text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child("X");
+            .children(chrome::provider_logo("codex", 20., color));
         let title = match &f.account { Some(id) => tr("accounts_codex_title_of").replace("{name}", id), None => tr("accounts_add_codex") };
         let head = div().flex().items_center().gap(px(12.)).child(avatar)
             .child(div().flex().flex_col().gap(px(2.)).min_w_0()
