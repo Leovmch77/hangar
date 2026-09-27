@@ -851,7 +851,10 @@ def _check_patch(d: Path, ev: dict) -> None:
     outside = sorted({p for _, _, p in rows} - inside)
     if outside:
         raise OrqError(f"patch touches files outside the round: {outside}")
-    total = sum(int(a) + int(b) for a, b, _ in rows if a.isdigit() and b.isdigit())
+    # A binary change reports "-" for both counts, so the line limit cannot measure it.
+    if not all(a.isdigit() and b.isdigit() for a, b, _ in rows):
+        raise OrqError("corrige does not take binary changes: reject the round as usual")
+    total = sum(int(a) + int(b) for a, b, _ in rows)
     if total > limit:
         raise OrqError(f"patch changes {total} lines, the plan's limit is {limit}: reject the round as usual")
 

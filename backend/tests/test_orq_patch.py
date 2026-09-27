@@ -132,3 +132,20 @@ def test_apply_patch_no_modo_subagente_manda_o_executor_abrir_um_revisor_novo(tm
     out = run("apply-patch", "--task", "1", "--repo", str(r), env=e).stdout
     assert "orq review-package --task 1 --rodada 2" in out and "NEW revisor-orq" in out
     assert not any(l.startswith("subagente ") for l in log.read_text().splitlines())
+
+
+def test_corrige_recusa_patch_binario_que_o_limite_nao_mede(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    entregar_r1(tmp_path, r, g, e)
+    atual = (r / "a.txt").read_bytes()
+    (r / "a.txt").write_bytes(b"\x00bin\n")
+    diff = subprocess.run(["git", "-C", str(r), "diff", "--binary", "--", "a.txt"],
+                          capture_output=True).stdout
+    (r / "a.txt").write_bytes(atual)
+    p = tmp_path / "t1-r1.patch"; p.write_bytes(diff)
+    assert subprocess.run(["git", "-C", str(r), "apply", "--numstat", str(p)],
+                          capture_output=True, text=True).stdout.startswith("-\t-\ta.txt")
+    res = run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "corrige",
+              "--sessao", "rev", "--patch", str(p), env=e, check=False)
+    assert res.returncode == 2 and "corrige does not take binary changes" in res.stderr
