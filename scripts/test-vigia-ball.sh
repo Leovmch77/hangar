@@ -54,7 +54,23 @@ novo() {
   d="$t/$1"; mkdir -p "$d"
   : > "$t/sent.log"; : > "$t/urls"; : > "$t/err"
   rm -f "$t/falha" "$t/api-down" "$t/history.json" "$t/close-fails" "$t/close-404" "$t/pair-fails"
-  orq init --arbiter arb --repo "$raiz" --contract "$t/regras.md"
+  cat > "$t/orq-plano.md" <<'MD'
+# Orchestration plan — t
+
+## Projeto
+Checagens: —
+Integração: —
+Prova: por-task
+Paralelo: até 4
+Correção pelo revisor: até 0 linhas
+
+## Tasks
+| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |
+|---|---|---|---|---|---|---|
+| 1 | t | §1 | `README.md` | `true` | 1 | — |
+MD
+  python3 "$ORQPY" plan-check "$t/orq-plano.md" --repo "$raiz" --stamp >/dev/null
+  orq init --arbiter arb --repo "$raiz" --contract "$t/regras.md" --plan "$t/orq-plano.md"
 }
 # M, CICLOS, INTERVALO, REP e CLOSE_IDLE_S mudam por cenário (VAR=x vigia); o stderr do vigia vai pro $VT/err.
 vigia() {

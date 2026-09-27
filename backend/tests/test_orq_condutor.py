@@ -40,11 +40,27 @@ def sent(log):
     return log.read_text().splitlines() if log.exists() else []
 
 
+PLANO = ("# Orchestration plan — t\n\n## Projeto\nChecagens: —\n"
+    "Integração: —\nProva: por-task\nParalelo: até 4\nCorreção pelo revisor: até 0 linhas\n\n"
+    "## Tasks\n| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |\n"
+    "|---|---|---|---|---|---|---|\n| 1 | t | §1 | `a.txt` | `true` | 1 | — |\n")
+
+
+def plano(tmp_path) -> str:
+    """Plano mínimo carimbado: o init novo recusa plano sem `Preparado:`."""
+    p = tmp_path / "orq-plano.md"
+    if not p.exists():
+        p.write_text(PLANO)
+        subprocess.run([sys.executable, str(ORQ), "plan-check", str(p), "--repo", str(tmp_path),
+                        "--stamp"], check=True, capture_output=True)
+    return str(p)
+
+
 def init(e, tmp_path, contract="", untouchable=()):
     c = tmp_path / "regras.md"
     c.write_text(contract)
     extra = [x for u in untouchable for x in ("--untouchable", u)]
-    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), *extra)
+    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path), *extra)
 
 
 def test_event_valida_anexa_e_escreve_no_registro(env, tmp_path):
@@ -131,11 +147,11 @@ def test_init_recusa_contrato_acima_do_teto_e_a_task_longa_nao_conta(env, tmp_pa
     d, _, e = env
     c = tmp_path / "regras.md"
     c.write_text("x" * 8100 + "\n## Task 1\nt\n")
-    r = run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), check=False)
+    r = run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path), check=False)
     assert r.returncode == 2 and "8000" in r.stderr
     assert not (d / "orq.json").exists()
     c.write_text("x" * 100 + "\n## Task 1\n" + "t" * 9000 + "\n")
-    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c))
+    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path))
     assert (d / "orq.json").exists()
 
 
@@ -147,7 +163,7 @@ def test_init_contract_unreadable_exits_2_without_traceback(env, tmp_path, kind)
         c.mkdir()
     else:
         c.write_bytes(b"\xff\xfe\x80 not utf-8")
-    r = run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), check=False)
+    r = run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path), check=False)
     assert r.returncode == 2 and "orq: contract unreadable:" in r.stderr
     assert "Traceback" not in r.stderr and not (d / "orq.json").exists()
 
@@ -241,7 +257,7 @@ def _rodada_aprovada(e, r, g, extra=()):
 def test_aprova_avisa_o_executor_e_nao_o_arbitro(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     _rodada_aprovada(e, r, g)
     msgs = sent(log)
     assert any(m.startswith("ex APROVA Task 1 round 1") for m in msgs)
@@ -265,7 +281,7 @@ def test_reprova_nao_acorda_ninguem_e_devolvido_acorda_o_arbitro(env, tmp_path):
 def test_commit_conferido_fecha_a_task_e_acorda_o_arbitro_uma_vez(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     h = _rodada_aprovada(e, r, g)
     out = run(e, "commit", "--task", "1", "--hash", h[:8]).stdout
     assert "ok" in out
@@ -279,7 +295,7 @@ def test_commit_conferido_fecha_a_task_e_acorda_o_arbitro_uma_vez(env, repo, tmp
 def test_task_reaberta_depois_de_fechada_volta_a_ter_a_vez(env, repo, tmp_path):
     d, _, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     run(e, "commit", "--task", "1", "--hash", _rodada_aprovada(e, r, g))
     assert run(e, "ball").stdout.split() == []
     time.sleep(1.1)  # ts has second precision; a close in the same second still wins
@@ -294,7 +310,7 @@ def test_task_reaberta_depois_de_fechada_volta_a_ter_a_vez(env, repo, tmp_path):
 def test_commit_de_rodada_que_nao_e_stash_e_recusado_limpo(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex", "--par", "rev")
     (r / "a.txt").write_text("2\n")
     g("commit", "-qam", "t1")
@@ -315,7 +331,7 @@ def test_commit_de_rodada_que_nao_e_stash_e_recusado_limpo(env, repo, tmp_path):
 def test_commit_sem_a_edicao_nao_staged_que_o_revisor_viu_e_recusado(env, repo, tmp_path):
     d, _, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     (r / "a.txt").write_text("2\n")
     g("add", "a.txt")
     (r / "a.txt").write_text("3\n")  # in the round's tree, not in its index
@@ -330,7 +346,7 @@ def test_commit_sem_a_edicao_nao_staged_que_o_revisor_viu_e_recusado(env, repo, 
 def test_commit_com_arquivo_fora_da_rodada_ou_intocavel_e_recusado(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"),
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path),
         "--untouchable", "secret/*")
     h = _rodada_aprovada(e, r, g, extra=("secret/k.txt",))
     res = run(e, "commit", "--task", "1", "--hash", h, check=False)
@@ -344,7 +360,7 @@ def test_commit_com_arquivo_fora_da_rodada_ou_intocavel_e_recusado(env, repo, tm
 def test_commit_com_intocavel_acentuado_e_recusado_com_o_nome_cru(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"),
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path),
         "--untouchable", "secret/*")
     h = _rodada_aprovada(e, r, g, extra=("secret/decisão.txt",))
     res = run(e, "commit", "--task", "1", "--hash", h, check=False)
@@ -356,7 +372,7 @@ def test_commit_com_intocavel_acentuado_e_recusado_com_o_nome_cru(env, repo, tmp
 def test_commit_que_nao_e_a_ponta_e_recusado(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     h = _rodada_aprovada(e, r, g)
     (r / "a.txt").write_text("3\n")
     g("commit", "-qam", "outro")
@@ -367,7 +383,7 @@ def test_commit_que_nao_e_a_ponta_e_recusado(env, repo, tmp_path):
 def test_commit_de_correcao_fecha_a_task_contando_desde_a_base_da_rodada(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     (r / "a.txt").write_text("2\n")
     (r / "b.txt").write_text("b\n")
     g("add", "a.txt", "b.txt")
@@ -386,7 +402,7 @@ def test_commit_de_correcao_fecha_a_task_contando_desde_a_base_da_rodada(env, re
 def test_intocavel_commitado_e_revertido_e_recusado(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"),
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path),
         "--untouchable", "secret/*")
     _rodada_aprovada(e, r, g, extra=("secret/k.txt",))
     g("rm", "-q", "secret/k.txt")
@@ -401,7 +417,7 @@ def test_intocavel_commitado_e_revertido_e_recusado(env, repo, tmp_path):
 def test_conteudo_diferente_da_rodada_e_recusado_e_a_correcao_fecha(env, repo, tmp_path):
     d, log, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     (r / "a.txt").write_text("2\n")
     g("add", "a.txt")
     _aprova(e, g)
@@ -419,7 +435,7 @@ def test_conteudo_diferente_da_rodada_e_recusado_e_a_correcao_fecha(env, repo, t
 def test_commit_com_repo_confere_na_worktree_do_lote(env, repo, tmp_path):
     d, _, e = env
     r, g = repo
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     wt = tmp_path / "wt"
     g("worktree", "add", "-q", "-b", "t1", str(wt))
 
@@ -845,7 +861,7 @@ def _code_ok(e, h, rnd=1):
 
 
 def _fases_init(e, r, tmp_path):
-    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"))
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", str(tmp_path / "c.md"), "--plan", plano(tmp_path))
     run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex", "--par", "rev")
 
 

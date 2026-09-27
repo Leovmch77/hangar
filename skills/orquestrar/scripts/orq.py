@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import http.client
 import importlib.util
 import io
@@ -33,6 +34,12 @@ COMMON_CAP = 8_000
 # A session that died holding the screen cannot freeze the team; a legit proof re-takes it.
 SCREEN_STALE_S = 60 * 60
 TASK_HEAD = re.compile(r"^## Task (\d+)\b")
+SECTION = re.compile(r"^## (.+?)\s*$")
+# The whole line, newline included: removing it must give back the text that was hashed.
+PREPARADO = re.compile(r"^Preparado: .* · sha ([0-9a-f]{12})[ \t]*(?:\n|$)", re.MULTILINE)
+PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova": "Prova",
+                "paralelo": "Paralelo", "correcao": "Correção pelo revisor"}
+CHECK_TIMEOUT_S = 900
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
                     "de", "para", "plano", "branch", "gid", "fase")
@@ -362,6 +369,102 @@ def _over_cap(common: str) -> str | None:
             "the arbiter must cut it — Task specifics go in `## Task N` sections")
 
 
+def plan_text(path) -> str:
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise OrqError(f"plan not found: {path}") from None
+
+
+def _section(text: str, name: str) -> list[str]:
+    out, inside = [], False
+    for line in text.splitlines():
+        m = SECTION.match(line)
+        if m:
+            inside = m.group(1).strip() == name
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def projeto(text: str) -> dict:
+    """The plan's `## Projeto`: a missing line stays None, so plan-check can name it."""
+    raw: dict[str, str] = {}
+    for line in _section(text, "Projeto"):
+        k, sep, v = line.partition(":")
+        if sep:
+            raw[k.strip().lower()] = v.strip()
+    out: dict = {k: None for k in PROJETO_KEYS}
+    for key, label in PROJETO_KEYS.items():
+        v = raw.get(label.lower())
+        if v is None:
+            continue
+        if key in ("checagens", "integracao"):
+            out[key] = re.findall(r"`([^`]+)`", v)
+        elif key == "prova":
+            m = re.fullmatch(r"(nenhuma|por-task)|lote\((\d+)\)", v)
+            out[key] = ((m.group(1), 0) if m.group(1) else ("lote", int(m.group(2)))) if m else ("?", 0)
+        elif key == "paralelo":
+            m = re.fullmatch(r"sequencial|at[eé] (\d+)", v)
+            out[key] = (1 if not m.group(1) else int(m.group(1))) if m else 0
+        else:
+            m = re.search(r"\d+", v)
+            out[key] = int(m.group()) if m else 0
+    return out
+
+
+def plan_tasks(text: str) -> list[dict]:
+    rows = [l for l in _section(text, "Tasks") if l.strip().startswith("|")]
+    if len(rows) < 2:
+        return []
+    head = [c.strip().lower() for c in rows[0].strip().strip("|").split("|")]
+    col = {name: head.index(name) for name in ("#", "files", "verification", "wave", "roteiro")
+           if name in head}
+    out = []
+    for row in rows[2:]:
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        get = lambda name: cells[col[name]] if name in col and col[name] < len(cells) else ""
+        if not get("#").isdigit():
+            continue
+        rot = get("roteiro").strip("`")
+        out.append({"n": int(get("#")), "files": re.findall(r"`([^`]+)`", get("files")),
+                    "verification": get("verification"), "wave": get("wave"),
+                    "roteiro": "" if rot in ("", "—", "-") else rot})
+    return out
+
+
+def plan_sha(text: str) -> str:
+    """Over the text without the `Preparado:` line and with blank runs collapsed, so stamping
+    (which inserts that line) never changes the sha it writes."""
+    body = re.sub(r"\n{3,}", "\n\n", PREPARADO.sub("", text))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+
+
+def plan_of(d: Path) -> dict:
+    """`{}` for a run started before plans were stamped: every plan-driven gate stays off."""
+    p = config(d).get("plan")
+    return projeto(plan_text(p)) if p else {}
+
+
+def run_checks(repo: str, cmds: list[str], log: Path) -> tuple[bool, str]:
+    """Each declared command in the repo, output to `log`; (ok, first failure's line)."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("w", encoding="utf-8") as f:
+        for c in cmds:
+            f.write(f"$ {c}\n")
+            f.flush()
+            try:
+                r = subprocess.run(c, shell=True, cwd=repo, stdout=f, stderr=subprocess.STDOUT,
+                                   timeout=CHECK_TIMEOUT_S)
+                rc = r.returncode
+            except subprocess.TimeoutExpired:
+                rc = "timeout"
+            if rc != 0:
+                return False, f"check failed: `{c}` (rc={rc}), log {log}"
+    return True, ""
+
+
 def cmd_init(a) -> int:
     d = base_dir(a.dir)
     contract = Path(a.contract).expanduser().resolve()
@@ -373,11 +476,84 @@ def cmd_init(a) -> int:
         raise OrqError(f"contract unreadable: {contract}: {e}")
     if too_big:
         raise OrqError(too_big)
+    plan = Path(a.plan).expanduser().resolve()
+    ptext = plan_text(plan)
+    m = PREPARADO.search(ptext)
+    if not m:
+        raise OrqError("plan not prepared: run the preparar-plano agent, which ends with "
+                       "`orq plan-check <plan> --repo <repo> --stamp`")
+    if m.group(1) != plan_sha(ptext):
+        raise OrqError("plan changed after preparation: run `orq plan-check <plan> --repo <repo> "
+                       "--stamp` again")
     cfg = {"arbiter": a.arbiter, "repo": str(Path(a.repo).expanduser().resolve()),
-           "contract": str(contract), "untouchables": a.untouchable}
+           "contract": str(contract), "untouchables": a.untouchable, "plan": str(plan)}
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}")
     print("ok")
+    return 0
+
+
+def cmd_plan_check(a) -> int:
+    path = Path(a.plan).expanduser().resolve()
+    text = plan_text(path)
+    repo = Path(a.repo).expanduser().resolve()
+    problems: list[str] = []
+    pj = projeto(text)
+    if not _section(text, "Projeto"):
+        problems.append("missing section: ## Projeto")
+    for key, label in PROJETO_KEYS.items():
+        if pj[key] is None:
+            problems.append(f"## Projeto: missing line '{label}:'")
+    if pj["prova"] and pj["prova"][0] == "?":
+        problems.append("## Projeto: Prova must be nenhuma | por-task | lote(N)")
+    if pj["paralelo"] == 0:
+        problems.append("## Projeto: Paralelo must be sequencial | até N")
+    tasks = plan_tasks(text)
+    if not tasks:
+        problems.append("missing table: ## Tasks with columns #, Files, Verification, Wave, Roteiro")
+    waves: dict[str, int] = {}
+    for t in tasks:
+        n = t["n"]
+        if not t["files"]:
+            problems.append(f"T{n}: no Files")
+        for f in t["files"]:
+            if not (repo / f).exists() and not (repo / f).parent.is_dir():
+                problems.append(f"T{n}: neither the file nor its directory exists: {f}")
+        if not t["verification"]:
+            problems.append(f"T{n}: no Verification")
+        if not t["wave"].isdigit():
+            problems.append(f"T{n}: Wave is not a number: {t['wave'] or '(empty)'}")
+        else:
+            waves[t["wave"]] = waves.get(t["wave"], 0) + 1
+        if t["roteiro"]:
+            if pj["prova"] and pj["prova"][0] == "nenhuma":
+                problems.append(f"T{n}: roteiro given but Prova: nenhuma")
+            elif not (path.parent / t["roteiro"]).exists() and not Path(t["roteiro"]).exists():
+                problems.append(f"T{n}: roteiro not found: {t['roteiro']}")
+    if pj["paralelo"]:
+        for w, count in sorted(waves.items()):
+            if count > pj["paralelo"]:
+                problems.append(f"wave {w} has {count} Tasks, Paralelo allows {pj['paralelo']}")
+    for c in pj["checagens"] or []:
+        ok, why = run_checks(str(repo), [c], path.parent / "plan-check.log")
+        if not ok:
+            problems.append(why.split(", log ")[0])
+    if problems:
+        print("\n".join(problems))
+        return 1
+    print("plan-check ok")
+    if a.stamp:
+        prova = pj["prova"]
+        prova_txt = f"lote({prova[1]})" if prova[0] == "lote" else prova[0]
+        par = "sequencial" if pj["paralelo"] == 1 else str(pj["paralelo"])
+        body = PREPARADO.sub("", text)
+        body = re.sub(r"\n{3,}", "\n\n", body)
+        lines = body.splitlines(keepends=True)
+        stamp = (f"Preparado: {datetime.now().date().isoformat()} · paralelo {par} · prova {prova_txt}"
+                 f" · plan-check limpo · sha {plan_sha(body)}\n")
+        lines.insert(1, stamp)
+        path.write_text("".join(lines), encoding="utf-8")
+        print(stamp.strip())
     return 0
 
 
@@ -695,6 +871,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", required=True)
     s.add_argument("--contract", required=True)
     s.add_argument("--untouchable", action="append", default=[])
+    s.add_argument("--plan", required=True)
+    s = sub.add_parser("plan-check", help="check the orchestration plan's structure; --stamp marks it prepared")
+    s.add_argument("plan")
+    s.add_argument("--repo", required=True)
+    s.add_argument("--stamp", action="store_true")
     s = sub.add_parser("event", help="validate and append one eventos.jsonl line")
     s.add_argument("tipo")
     for k in EVENT_FIELDS_INT:
@@ -727,7 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-CMDS = {"init": cmd_init, "event": cmd_event, "read": cmd_read, "ball": cmd_ball,
+CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "read": cmd_read, "ball": cmd_ball,
         "done": cmd_done, "team": cmd_team,
         "screen": cmd_screen, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log}
 
