@@ -7,9 +7,9 @@ use super::*;
 impl Hangar {
     /// Abre ou fecha o cartão, fechando o painel que estiver aberto sobre o compositor.
     pub(in crate::app) fn toggle_usage_card(&mut self, cx: &mut Context<Self>) {
-        let open = !self.accounts.card;
+        let open = !self.accounts.card || self.accounts.card_top;
         self.close_popups();
-        self.accounts.card = open;
+        (self.accounts.card, self.accounts.card_top) = (open, false);
         if open && !self.accounts.list.loading { self.load_accounts(false, cx); }
         cx.notify();
     }
@@ -56,11 +56,39 @@ impl Hangar {
             .into_any_element()
     }
 
+    /// A pílula da barra do topo abre o mesmo cartão, preso a ela e com a conta padrão do Claude.
+    pub(in crate::app) fn toggle_top_usage_card(&mut self, cx: &mut Context<Self>) {
+        let open = !(self.accounts.card && self.accounts.card_top);
+        self.close_popups();
+        (self.accounts.card, self.accounts.card_top) = (open, open);
+        if open && !self.accounts.list.loading { self.load_accounts(false, cx); }
+        cx.notify();
+    }
+
+    /// Relê a lista de contas (com a cota guardada do servidor), para a pílula da barra do topo.
+    pub(in crate::app) fn refresh_default_account(&mut self, cx: &mut Context<Self>) {
+        if !self.accounts.list.loading { self.load_accounts(false, cx); }
+    }
+
+    /// A conta padrão do Claude para a pílula da barra do topo: nome e a janela mostrada — a de 5 h ou, sem ela, a que
+    /// houver (a semanal), com o rótulo dela. `None` antes da lista chegar ou sem conta do Claude marcada como padrão.
+    pub(in crate::app) fn default_account(&self) -> Option<(String, Option<(String, f64)>)> {
+        let c = self.accounts.list.ok()?.iter().find(|c| c.kind == "claude" && c.active)?;
+        let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
+        let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
+        let window = match build_row(c, &HashMap::new(), false, now()).quota {
+            QuotaView::Bars { bars, .. } => bars.iter().find(|b| b.label == "5h").or_else(|| bars.first()).map(|b| (b.label.clone(), b.pct)),
+            _ => None,
+        };
+        Some((title, window))
+    }
+
     pub(in crate::app) fn render_usage_card(&self) -> AnyElement {
-        let session = self.selected.as_ref();
+        let top = self.accounts.card_top;
+        let session = self.selected.as_ref().filter(|_| !top);
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
         let name = match kind { "claude" => "Claude Code", "codex" => "Codex", other => other };
-        // A conta da sessão; servidor sem esse campo cai na conta padrão do provider.
+        // A conta da sessão; servidor sem esse campo (ou o cartão da barra do topo) cai na conta padrão do provider.
         let conta = session.and_then(|s| s.conta.as_deref());
         let in_use = |c: &Credential| conta.map_or(c.active, |id| id == c.id);
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
