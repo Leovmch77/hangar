@@ -5,7 +5,7 @@ use gpui_kit::component::input::{Editor, EditorState, Position, RopeExt};
 actions!(file_view, [CloseFile, NextFile, PreviousFile, SaveFile]);
 
 pub(super) struct Files {
-    owner: (u64, u64),
+    owner: Option<(u64, String)>,
     hidden: bool,
     tabs: Vec<FileTab>,
     active: usize,
@@ -101,7 +101,7 @@ impl Files {
         ]);
         let focus = cx.focus_handle();
         let lost = cx.on_focus_lost(window, |this, window, cx| this.files_focus_lost(window, cx));
-        Self { owner: (0, 0), hidden: false, tabs: Vec::new(), active: 0, serial: 0,
+        Self { owner: None, hidden: false, tabs: Vec::new(), active: 0, serial: 0,
             focus, return_focus: None, _focus_lost: lost }
     }
 }
@@ -126,15 +126,16 @@ async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<Str
 
 impl Hangar {
     fn files_visible(&self) -> bool {
-        self.files.owner == (self.connection, self.selection) && !self.files.tabs.is_empty() && !self.files.hidden
+        self.files.owner.is_some() && self.files.owner == self.session_owner() && !self.files.tabs.is_empty() && !self.files.hidden
             && (self.settings.is_none() || self.settings_live())
     }
 
     pub(super) fn open_file(&mut self, path: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
         if !self.files_visible() {
-            if self.files.owner != (self.connection, self.selection) { self.files.tabs.clear(); }
-            self.files.owner = (self.connection, self.selection);
+            let owner = self.session_owner();
+            if self.files.owner != owner { self.files.tabs.clear(); }
+            self.files.owner = owner;
             self.files.hidden = false;
             self.files.return_focus = window.focused(cx);
         }
@@ -149,7 +150,7 @@ impl Hangar {
         self.files.tabs.push(FileTab { id, path: path.clone(), line, content: None });
         self.files.active = self.files.tabs.len() - 1;
         self.focus_file(window, cx);
-        let (connection, selection, tx) = (self.connection, Some(self.selection), self.tx.clone());
+        let (connection, selection, tx) = (self.connection, None, self.tx.clone());
         let mut candidates = Vec::new();
         if !path.contains('/') {
             fn collect(value: &Value, name: &str, out: &mut Vec<String>) {
@@ -216,7 +217,7 @@ impl Hangar {
         (doc.saving, doc.saved, doc.error) = (true, None, None);
         // A resposta não pode apagar uma edição feita depois do envio.
         doc.editor.update(cx, |state, cx| state.set_readonly(true, cx));
-        let (id, connection, selection, tx) = (tab.id, self.connection, Some(self.selection), self.tx.clone());
+        let (id, connection, selection, tx) = (tab.id, self.connection, None, self.tx.clone());
         self.runtime.spawn(async move {
             let result = api.act(&key.name, &route, Some(body), false, 30).await;
             let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Saved(id, text, result)) }).await;

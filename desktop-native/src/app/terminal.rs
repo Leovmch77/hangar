@@ -112,12 +112,12 @@ impl Hangar {
         };
         // O Shell é oculto da lista de sessões; o POST que o criou já validou o alvo.
         if tab == 1 { self.open_terminal_socket(tab, id, generation); return; }
-        let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
+        let (connection, tx) = (self.connection, self.tx.clone());
         // Reqwest roda no Tokio; a resposta da leitura e o socket têm a mesma geração.
         self.runtime.spawn(async move {
             let result = api.sessions().await.and_then(|sessions| sessions.iter().any(|session| session.name == name)
                 .then_some(()).ok_or_else(|| Failure { status: Some(404), ..Failure::local("session_missing") }));
-            let _ = tx.send(Envelope { connection, selection: Some(selection),
+            let _ = tx.send(Envelope { connection, selection: None,
                 payload: Payload::Terminal(Reply::Probe(id, tab, generation, result)) }).await;
         });
     }
@@ -130,10 +130,10 @@ impl Hangar {
         let socket = ws::Terminal::open(self.runtime.handle(), api, &slot.name, self.active_token.clone(), cols, rows);
         let events = socket.events();
         slot.socket = Some(socket);
-        let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
+        let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             while let Ok(event) = events.recv().await {
-                if tx.send(Envelope { connection, selection: Some(selection),
+                if tx.send(Envelope { connection, selection: None,
                     payload: Payload::Terminal(Reply::Socket(id, tab, generation, event)) }).await.is_err() { break; }
             }
         });
@@ -149,10 +149,10 @@ impl Hangar {
             panel.shell_request += 1;
             let (id, request, name) = (panel.id, panel.shell_request, panel.session.clone());
             if let Some(api) = self.api.clone() {
-                let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
+                let (connection, tx) = (self.connection, self.tx.clone());
                 self.runtime.spawn(async move {
                     let result = api.act(&name, &["shell"], None, false, 15).await;
-                    let _ = tx.send(Envelope { connection, selection: Some(selection),
+                    let _ = tx.send(Envelope { connection, selection: None,
                         payload: Payload::Terminal(Reply::Shell(id, request, result)) }).await;
                 });
             } else {

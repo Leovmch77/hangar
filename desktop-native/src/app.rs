@@ -604,6 +604,11 @@ impl Hangar {
         SessionKey::new(self.server.as_deref()?, self.selected.as_ref()?)
     }
 
+    /// Dono do que sobrevive a reabrir a mesma sessão (terminal, arquivos, ditado): `selection` muda até no clique na própria aba.
+    pub(super) fn session_owner(&self) -> Option<(u64, String)> {
+        self.selected.as_ref().map(|session| (self.connection, session.name.clone()))
+    }
+
     fn open_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.connection_dialog { self.connection_origin = window.focused(cx).map(|focus| focus.downgrade()); }
         self.connection_dialog = true;
@@ -781,6 +786,8 @@ impl Hangar {
         self.terminal_suggestion.clear();
         self.recent = None;
         self.command_panel = false;
+        // O painel de pastas é da tela sem sessão: sem isto, o Esc seguinte seria gasto nele, já fora da tela.
+        self.new_chat_folders.set(false);
         self.suggest_dismissed = None;
         self.side.on_select();
         self.dossier = None;
@@ -4304,6 +4311,14 @@ impl Render for Hangar {
                 // Com a confirmação aberta, o Esc é dela: fecha só o diálogo.
                 if event.keystroke.key != "escape" || this.connection_dialog || this.search_focused(window, cx) || window.has_active_dialog(cx) { return; }
                 if this.shortcuts_escape(window, cx) { cx.stop_propagation(); return; }
+                // O painel preso a um botão é a camada de cima: fecha antes de arquivos e terminal, e o foco volta ao campo.
+                // Com a página de configurações aberta nenhum painel está na tela; a flag das pastas fica para quando ela fechar.
+                if (this.settings.is_none() || this.settings_live()) && this.close_popups() {
+                    this.composer.update(cx, |input, cx| input.focus(window, cx));
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.files_escape(window, cx) { cx.stop_propagation(); return; }
                 if this.terminal.is_some() && (this.settings.is_none() || this.settings_live()) {
                     this.close_terminal(true, window, cx);
@@ -4313,13 +4328,6 @@ impl Render for Hangar {
                 if this.settings.is_some() {
                     this.close_settings(window, cx);
                     cx.stop_propagation();
-                    return;
-                }
-                // O painel preso a um botão fecha e o foco volta ao campo, o próximo alvo de quem digitava.
-                if this.close_popups() {
-                    this.composer.update(cx, |input, cx| input.focus(window, cx));
-                    cx.stop_propagation();
-                    cx.notify();
                 }
             }))
             // Clique em área sem foco próprio devolve o foco à raiz, para os atalhos continuarem chegando.
