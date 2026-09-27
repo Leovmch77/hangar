@@ -61,26 +61,33 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Troca o binário em disco. Devolve o caminho do anterior guardado.
-fn swap(exe: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+/// Confere o sha256 e troca o binário em disco. Devolve o caminho do anterior guardado, ou a frase da falha.
+fn swap(exe: &Path, bytes: &[u8], sha256: &str) -> Result<PathBuf, String> {
     use std::io::Write;
+    if sha256_hex(bytes) != sha256 { return Err(tr("app_update_bad_sha")); }
+    let fail = |e: std::io::Error| tr("app_update_swap_failed").replace("{reason}", &e.to_string());
     let (new, old) = (sibling(exe, ".new"), sibling(exe, ".old"));
-    let mut file = std::fs::File::create(&new)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    let mut file = std::fs::File::create(&new).map_err(fail)?;
+    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(fail)?;
     drop(file);
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
         // Cópia, não rename: entre dois renames o caminho do app ficaria vazio.
-        std::fs::copy(exe, &old)?;
-        std::fs::rename(&new, exe)?;
+        std::fs::copy(exe, &old).map_err(fail)?;
+        std::fs::rename(&new, exe).map_err(fail)?;
     }
     // No Windows o executável em uso não pode ser sobrescrito, mas pode ser renomeado.
     #[cfg(windows)] {
         let _ = std::fs::remove_file(&old);
-        std::fs::rename(exe, &old)?;
-        if let Err(error) = std::fs::rename(&new, exe) { let _ = std::fs::rename(&old, exe); return Err(error); }
+        std::fs::rename(exe, &old).map_err(fail)?;
+        if let Err(error) = std::fs::rename(&new, exe) {
+            // Sem desfazer, o caminho do app fica vazio: essa falha não pode sair como "nada foi trocado".
+            if let Err(back) = std::fs::rename(&old, exe) {
+                return Err(tr("app_update_rollback_failed").replace("{reason}", &format!("{error}; {back}")));
+            }
+            return Err(fail(error));
+        }
     }
     Ok(old)
 }
@@ -107,12 +114,10 @@ async fn alive(child: &mut std::process::Child, path: &Path) -> bool {
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
     let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
         .bytes().await.map_err(|e| e.to_string())?;
-    if sha256_hex(&bytes) != offer.sha256 { return Err(tr("app_update_bad_sha")); }
     let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
-    // Dezenas de MB gravados e copiados: fora das duas threads do runtime.
+    // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
-    let old = tokio::task::spawn_blocking(move || swap(&target, &bytes)).await.map_err(std::io::Error::other).and_then(|r| r)
-        .map_err(|e| tr("app_update_swap_failed").replace("{reason}", &e.to_string()))?;
+    let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &offer.sha256)).await.map_err(|e| e.to_string())??;
     let signal = sibling(&exe, ".alive");
     let _ = std::fs::remove_file(&signal);
     let started = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
