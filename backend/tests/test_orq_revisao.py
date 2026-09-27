@@ -107,3 +107,17 @@ def test_review_package_da_o_roteiro_como_caminho_absoluto(tmp_path, repo):
     run("check", "--task", "2", "--commit", h, env=e)
     run("event", "entrega", "--task", "2", "--rodada", "1", "--commit", h, env=e)
     assert f"## Roteiro\n{(tmp_path / 'roteiro-2.md').resolve()}\n" in _pacote(e, 2, 1)
+
+
+def test_review_package_leva_a_linha_crua_do_plano_e_o_plano_do_usuario(tmp_path, repo):
+    r, g = repo
+    d, e, _ = iniciar(tmp_path, r)
+    run("event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex",
+        "--par", "subagente", env=e)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+    txt = _pacote(e, 1, 1)
+    # "What it is" (a) e "Where in their plan" (§1) chegam ao revisor, não só os campos do orq.
+    assert ("## Plan row\nUser's plan: /x/plano.md\n| # | What it is | Where in their plan |" in txt)
+    assert "| 1 | a | §1 | `a.txt` | `true` | 1 | — |" in txt

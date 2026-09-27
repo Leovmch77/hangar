@@ -531,17 +531,28 @@ def cmd_init(a) -> int:
         raise OrqError(f"contract unreadable: {contract}: {e}")
     if too_big:
         raise OrqError(too_big)
-    plan = Path(a.plan).expanduser().resolve()
-    ptext = plan_text(plan)
-    m = PREPARADO.search(ptext)
-    if not m:
-        raise OrqError("plan not prepared: run the preparar-plano agent, which ends with "
-                       "`orq plan-check <plan> --repo <repo> --stamp`")
-    if m.group(1) != plan_sha(ptext):
-        raise OrqError("plan changed after preparation: run `orq plan-check <plan> --repo <repo> "
-                       "--stamp` again")
     cfg = {"arbiter": a.arbiter, "repo": str(Path(a.repo).expanduser().resolve()),
-           "contract": str(contract), "untouchables": a.untouchable, "plan": str(plan)}
+           "contract": str(contract), "untouchables": a.untouchable}
+    if a.plan:
+        plan = Path(a.plan).expanduser().resolve()
+        ptext = plan_text(plan)
+        m = PREPARADO.search(ptext)
+        if not m:
+            raise OrqError("plan not prepared: run the preparar-plano agent, which ends with "
+                           "`orq plan-check <plan> --repo <repo> --stamp`")
+        if m.group(1) != plan_sha(ptext):
+            raise OrqError("plan changed after preparation: run `orq plan-check <plan> --repo <repo> "
+                           "--stamp` again")
+        cfg["plan"] = str(plan)
+    else:
+        # Only a run started before plans were stamped re-inits without one, and stays plan-less.
+        try:
+            old = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+        if not isinstance(old, dict) or "plan" in old:
+            raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
+                           "started without a plan re-inits without one")
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}")
     print("ok")
@@ -928,7 +939,13 @@ def cmd_review_package(a) -> int:
     except FileNotFoundError:
         common, sections = "(no contract)", {}
     plan = cfg.get("plan")
-    row = next((t for t in plan_tasks(plan_text(plan)) if t["n"] == a.task), None) if plan else None
+    ptext = plan_text(plan) if plan else ""
+    row = next((t for t in plan_tasks(ptext) if t["n"] == a.task), None)
+    # The raw row keeps "What it is" and "Where in their plan": the requirement the reviewer judges.
+    table = [l for l in _section(ptext, "Tasks") if l.strip().startswith("|")]
+    raw = next((l for l in table[2:] if l.strip().strip("|").split("|")[0].strip() == str(a.task)), None)
+    users_plan = next((l for l in ptext.splitlines() if l.startswith("User's plan:")), "")
+    plan_row = "\n".join(x for x in (users_plan, *table[:2], raw) if x) if raw else "(no plan row)"
     check = next((c for c in reversed(_jsonl(d / "checks.jsonl"))
                   if c.get("task") == a.task and c.get("commit", "-").startswith(obj[:12])), None)
     evs = events(d)
@@ -959,7 +976,7 @@ def cmd_review_package(a) -> int:
         f"Phase: {fase or 'none'}",
         f"This round is {patch_of}." if "reviewer patch" in patch_of else "",
         "## Contract", common.rstrip(), sections.get(a.task, f"(no '## Task {a.task}' section)").rstrip(),
-        "## Plan row", json.dumps(row, ensure_ascii=False) if row else "(no plan row)",
+        "## Plan row", plan_row,
         "## Roteiro", roteiro or "none",
         "## Check log", (check or {}).get("log") or "none",
         "## Earlier verdicts", "\n".join(earlier) or "none",
@@ -1059,7 +1076,11 @@ def cmd_commit(a) -> int:
     with (d / "closed.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": now(), "task": a.task, "hash": full}) + "\n")
     journal_append(d, f"commit T{a.task} {full[:12]} checked ({len(files)} file(s))")
-    extra = _queue_proof(d, a.task, full)
+    # closed.jsonl is already written: an unreadable plan must not swallow the close notice.
+    try:
+        extra = _queue_proof(d, a.task, full)
+    except OrqError as e:
+        extra = f" (proof queue skipped: {e})"
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
                               f"{len(files)} file(s), tip = hash, matches the approved round. "
                               "Release the next ready Task(s)." + extra)
@@ -1073,11 +1094,13 @@ def cmd_batch(a) -> int:
     if not pend:
         print("no pending proof")
         return 0
+    # Plan-relative in the plan; the proof session runs elsewhere and needs a path it can open.
+    base = Path(config(d)["plan"]).expanduser().resolve().parent
     n = len(_jsonl(d / "prova-lotes.jsonl")) + 1
     with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
     journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
-    print(f"lote {n}: " + " ".join(f"T{p['task']} {p['roteiro']} {p['hash'][:12]}" for p in pend))
+    print(f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend))
     return 0
 
 
@@ -1177,7 +1200,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", required=True)
     s.add_argument("--contract", required=True)
     s.add_argument("--untouchable", action="append", default=[])
-    s.add_argument("--plan", required=True)
+    s.add_argument("--plan", help="required, except to re-init a run started without a plan")
     s = sub.add_parser("plan-check", help="check the orchestration plan's structure; --stamp marks it prepared")
     s.add_argument("plan")
     s.add_argument("--repo", required=True)

@@ -110,6 +110,27 @@ def test_init_exige_plano_carimbado_e_sem_mudanca(tmp_path):
     assert json.loads((d / "orq.json").read_text())["plan"] == str(p.resolve())
 
 
+def _init_sem_plano(tmp_path, d):
+    c = tmp_path / "regras.md"; c.write_text("")
+    return run("--dir", str(d), "init", "--arbiter", "arb", "--repo", str(tmp_path),
+               "--contract", str(c), "--untouchable", "x/*", check=False)
+
+
+def test_init_sem_plano_so_reinicia_execucao_que_nunca_teve_plano(tmp_path):
+    d = tmp_path / "orq"; d.mkdir()
+    r = _init_sem_plano(tmp_path, d)
+    assert r.returncode == 2 and "plan required" in r.stderr
+    # Execução antiga (orq.json sem `plan`): a exceção de intocável reinicia e segue sem plano.
+    (d / "orq.json").write_text(json.dumps({"arbiter": "arb", "repo": str(tmp_path), "contract": "c",
+                                            "untouchables": []}))
+    assert _init_sem_plano(tmp_path, d).returncode == 0
+    cfg = json.loads((d / "orq.json").read_text())
+    assert "plan" not in cfg and cfg["untouchables"] == ["x/*"]
+    cfg["plan"] = "/p.md"; (d / "orq.json").write_text(json.dumps(cfg))
+    r = _init_sem_plano(tmp_path, d)
+    assert r.returncode == 2 and "plan required" in r.stderr
+
+
 @pytest.fixture
 def repo(tmp_path):
     r = tmp_path / "repo"; r.mkdir()
@@ -126,7 +147,7 @@ def iniciar(tmp_path, r, projeto=PROJETO, tasks=TASKS):
     (tmp_path / "roteiro-1.md").write_text("x\n")
     (tmp_path / "roteiro-2.md").write_text("x\n")
     p = tmp_path / "orq-plano.md"
-    p.write_text(f"# Orchestration plan — x\n\n{projeto}\n{tasks}")
+    p.write_text(f"# Orchestration plan — x\nUser's plan: /x/plano.md\n\n{projeto}\n{tasks}")
     run("plan-check", str(p), "--repo", str(r), "--stamp")
     c = tmp_path / "regras.md"; c.write_text("")
     log = tmp_path / "sent.log"
@@ -232,7 +253,8 @@ def test_lote_sai_quando_a_onda_da_task_acaba(tmp_path, repo):
     fechar(tmp_path, r, g, e, 1, "a.txt")
     assert "Proof batch ready: T1." in log.read_text().splitlines()[-1]
     out = run("batch", "take", env=e).stdout
-    assert out.startswith("lote 1: T1 roteiro-1.md ")
+    # Absolute: the proof session runs outside the plan's directory.
+    assert out.startswith(f"lote 1: T1 {(tmp_path / 'roteiro-1.md').resolve()} ")
     assert run("batch", "take", env=e).stdout.strip() == "no pending proof"
     # Commit repetido depois do take: fila vazia, nenhum lote vazio anunciado.
     run("commit", "--task", "1", "--hash", g("rev-parse", "HEAD"), env=e)
@@ -287,3 +309,18 @@ def test_prova_manual_guarda_roteiro_sem_anunciar_e_entrega_no_fim(tmp_path, rep
 def test_plan_check_aceita_manual_com_roteiro(tmp_path):
     p = escrever(tmp_path, projeto=PROJETO.replace("lote(2)", "manual"))
     assert "plan-check ok" in run("plan-check", str(p), "--repo", str(tmp_path)).stdout
+
+
+def test_commit_avisa_o_fechamento_mesmo_com_o_plano_ilegivel(tmp_path, repo):
+    r, g = repo
+    d, e, log = iniciar(tmp_path, r)
+    h = congelar(r, g)
+    run("check", "--task", "1", "--commit", h, env=e)
+    run("event", "entrega", "--task", "1", "--rodada", "1", "--commit", h, env=e)
+    run("event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova",
+        "--sessao", "rev", env=e)
+    g("commit", "-qm", "t1", "--", "a.txt")
+    (tmp_path / "orq-plano.md").unlink()
+    run("commit", "--task", "1", "--hash", g("rev-parse", "HEAD"), env=e)
+    last = log.read_text().splitlines()[-1]
+    assert "Task 1 closed and checked" in last and "(proof queue skipped: plan not found:" in last
