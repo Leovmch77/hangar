@@ -4127,26 +4127,6 @@ async def orq_get(name: str):
     }
 
 
-def _recado_arbitro(novos: list[orq_papeis.Papel], gid: str) -> str:
-    # Prefixo `[painel: orquestração]` = mesma família do `[de: <sessão>]` do hangar-send: o front
-    # desenha o chip "configuração · orquestração" e a sessão sabe que é recado automático.
-    linhas = "; ".join("`" + p.papel + "` agora é provider `" + p.provider + "`, conta `" + p.conta
-                       + "`, modelo `" + (p.modelo or "-") + "`, esforço `" + (p.esforco or "-") + "`"
-                       + (", abertura `" + orq_papeis.abertura_texto(p) + "`"
-                          if orq_papeis.abertura_texto(p) else "")
-                       + (", teto de contexto `" + p.janela + "%`" if p.janela else "")
-                       for p in novos)
-    return ("[painel: orquestração] A configuração de modelos do grupo mudou no painel: " + linhas
-            + ". Releia `" + str(orq_papeis.regras_path(gid))
-            + "`. Aplicação, papel a papel: sessão desse papel PARADA (idle) → feche-a e abra outra já na "
-            "configuração nova (o Claude não troca conta/modelo com a sessão aberta); sessão "
-            "TRABALHANDO → deixe terminar a tarefa atual e a próxima sessão desse papel nasce na nova. "
-            "A linha já está gravada: não reescreva a tabela. "
-            "Se o papel for o seu (árbitro): faça a sucessão pela seção \"Arbiter succession\" de "
-            "`~/.claude/skills/orquestrar/references/arbitro-encerramento.md`, com o sucessor "
-            "nascendo na configuração nova.")
-
-
 class PapelItem(_StrictBody):
     papel: str
     sessao: str = ""
@@ -4176,6 +4156,9 @@ async def _validar_abertura(p: orq_papeis.Papel) -> None:
         raise HTTPException(400, detail=erro(codigo, f"{msg}: {p.papel}"))
     if p.headless and p.provider not in ("claude", "codex"):
         recusa("erro_orq_headless_provider", "sem terminal só vale para claude ou codex")
+    if p.headless and "--read-only" in (p.abertura_extra or ""):
+        recusa("erro_orq_headless_read_only",
+               "sem terminal não aceita --read-only (o backend recusa a sessão): desligue o sem terminal")
     if p.motor:
         if p.provider != "claude":
             recusa("erro_motor_sem_claude", "motor so vale para provider claude")
@@ -4214,17 +4197,13 @@ async def _validar_abertura(p: orq_papeis.Papel) -> None:
 class PapeisBody(_StrictBody):
     papeis: list[PapelItem]
     mtime: float
-    # Falso = grava e NÃO acorda o árbitro. É o "salvar e continuar montando o time": quem monta
-    # o grupo mexe em vários papéis em sessões separadas da tela, e um recado por rodada de edição
-    # faz o árbitro parar o que está fazendo pra ler meia configuração. O aviso vai no fim, uma vez.
+    # Sem efeito: salvar nunca acorda o árbitro. Fica porque o corpo é estrito e clientes antigos o mandam.
     avisar: bool = True
 
 
-async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
-                          avisar: bool = True) -> dict:
-    """Grava TODAS as linhas numa escrita só e manda UM recado ao árbitro listando as mudanças —
-    o usuário edita vários papéis e salva no fim (medido em 26/08/2026: salvar um por vez
-    descartava o resto sem aviso). `avisar=False` grava sem acordar o árbitro."""
+async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) -> dict:
+    """Grava TODAS as linhas numa escrita só: o usuário edita vários papéis e salva no fim, e
+    salvar um por vez descartava o resto sem aviso."""
     if not itens:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", "nenhum papel"))
     gid = await asyncio.to_thread(_gid_de, name)
@@ -4256,7 +4235,7 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
                 raise HTTPException(400, detail=erro(motivo, "a política de contas não permite esta escolha: " + novo.papel))
             await _validar_abertura(novo)
             # ponytail: validar_celula roda dentro de escrever_papel — texto do cliente nunca chega
-            # ao arquivo nem ao recado sem passar por ali.
+            # ao arquivo sem passar por ali.
             texto = orq_papeis.escrever_papel(texto, novo)
             novos.append(novo)
         mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, mtime_lido)
@@ -4265,24 +4244,10 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float,
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o contrato mudou desde a leitura — recarregue"))
-    # Gravado. Sem aviso, para aqui: o arquivo é a verdade do grupo, e o árbitro relê o contrato
-    # quando for usar — o recado é conveniência, não o canal de entrega da configuração.
-    if not avisar:
-        return {"papeis": [asdict(p) for p in novos], "papel": asdict(novos[0]), "mtime": mtime,
-                "arbitro": None, "aviso": "nao_avisado", "erro": None}
-    arb = next((p for p in orq_papeis.ler(texto) if p.e_arbitro()), None)
-    infos = await asyncio.to_thread(registry.list)
-    # Time padrão não tem árbitro vivo pra avisar: uma sessão que por acaso case o nome não é dele.
-    arbitro = orq_papeis.casar_viva(arb, infos) if arb and gid != orq_papeis.GID_PADRAO else None
-    aviso, err = "sem_arbitro", None
-    if arbitro:
-        res = await _enviar(arbitro, _recado_arbitro(novos, gid))
-        if res["ok"]:
-            aviso = "enviado" if res.get("delivered") else "enfileirado"
-        else:
-            aviso, err = "falhou", res["error"]
+    # A linha vale na próxima sessão de cada papel: o árbitro lê a tabela ao abrir. Nada que está
+    # rodando é fechado nem trocado por causa de um salvar.
     return {"papeis": [asdict(p) for p in novos], "papel": asdict(novos[0]), "mtime": mtime,
-            "arbitro": arbitro, "aviso": aviso, "erro": err}
+            "arbitro": None, "aviso": "proxima_sessao", "erro": None}
 
 
 @app.post("/api/sessions/{name}/orq/papel", dependencies=[Depends(require_auth)])
@@ -4292,7 +4257,7 @@ async def orq_papel_set(name: str, body: PapelBody):
 
 @app.post("/api/sessions/{name}/orq/papeis", dependencies=[Depends(require_auth)])
 async def orq_papeis_set(name: str, body: PapeisBody):
-    return await _aplicar_papeis(name, body.papeis, body.mtime, body.avisar)
+    return await _aplicar_papeis(name, body.papeis, body.mtime)
 
 
 class ComecarBody(_StrictBody):

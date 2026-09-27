@@ -300,6 +300,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_orq_conta_travada: () => m.erro_orq_conta_travada(),
   erro_orq_esforco_invalido: () => m.erro_orq_esforco_invalido(),
   erro_orq_headless_provider: () => m.erro_orq_headless_provider(),
+  erro_orq_headless_read_only: () => m.erro_orq_headless_read_only(),
 
   // Estado errado: terminal aberto, sessao trabalhando, loop ativo
   erro_terminal_aberto: () => m.erro_terminal_aberto(),

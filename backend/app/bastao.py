@@ -951,7 +951,7 @@ def origem_resumida(jsonl: str, provider: str = "claude", codex_home: str | None
 
 
 # Prefixo do recado, mesma família do `[de: <sessão>]` do hangar-send e do
-# `[painel: orquestração]` do `_recado_arbitro`: quem lê sabe na primeira palavra que isto é
+# `[painel: orquestração]` do `orq_comecar`: quem lê sabe na primeira palavra que isto é
 # recado do app, não uma mensagem digitada pelo usuário.
 _KICKOFF_PREFIXO = "[hangar: passagem de bastão]"
 

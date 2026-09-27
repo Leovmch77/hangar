@@ -273,7 +273,7 @@
     });
     salvando = true; erro = ''; aviso = '';
     try {
-      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime, avisar: false });
+      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime });
       clienteQuery.setQueryData(orqGrupo(sessionName).queryKey, { ...grupo, mtime: r.mtime, papeis: r.papeis.map((x) => ({ ...x, viva: null })) });
       limparRascunhosDe(itens[0].papel);
       sel = null;
@@ -421,11 +421,11 @@
 
   /** Grava linhas no contrato e põe o resultado no cache. Serve ao salvar e à troca rápida.
    * Devolve o índice da última linha gravada, ou -1 se não gravou. */
-  async function gravar(itens: Rascunho[], avisar: boolean): Promise<number> {
+  async function gravar(itens: Rascunho[]): Promise<number> {
     if (!grupo || !itens.length) return -1;
     salvando = true; erro = ''; aviso = ''; conflito = false;
     try {
-      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime, avisar });
+      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime });
       const lista = [...grupo.papeis];
       let ultimo = -1;
       for (const p of r.papeis) {
@@ -437,17 +437,11 @@
       }
       // Escreve no cache, não num state local: o painel reabre com o que foi salvo, sem esperar
       // uma releitura do disco que já sabemos como terminaria.
-      // `arbitro` só é reescrito quando houve aviso: salvando sem avisar o backend devolve null
-      // (não foi procurar quem é), e escrever esse null apagaria o árbitro que a tela já conhecia.
-      clienteQuery.setQueryData(orqGrupo(sessionName).queryKey,
-        { ...grupo, mtime: r.mtime, papeis: lista, arbitro: avisar ? r.arbitro : grupo.arbitro });
-      const arb = r.arbitro ?? '';
-      avisoRuim = r.aviso === 'falhou' || r.aviso === 'sem_arbitro';
-      aviso = r.aviso === 'nao_avisado' ? m.orqcfg_aviso_salvo_sem_avisar()
-        : r.aviso === 'enviado' ? m.orqcfg_aviso_enviado({ arbitro: arb })
-        : r.aviso === 'enfileirado' ? m.orqcfg_aviso_enfileirado({ arbitro: arb })
-        : r.aviso === 'sem_arbitro' ? m.orqcfg_aviso_sem_arbitro()
-        : m.orqcfg_aviso_falhou({ erro: r.erro ?? '' });
+      // `arbitro` fica o do cache: o backend não procura quem é ao salvar e devolve null, e escrever
+      // esse null apagaria o árbitro que a tela já conhecia.
+      clienteQuery.setQueryData(orqGrupo(sessionName).queryKey, { ...grupo, mtime: r.mtime, papeis: lista });
+      avisoRuim = false;
+      aviso = m.orqcfg_aviso_proxima_sessao();
       return ultimo;
     } catch (e) {
       const err = e as Error & { status?: number };
@@ -466,34 +460,32 @@
     return libera ? modelo : '';
   }
 
-  /** Cota no limite: troca a conta da linha pela de mais folga e já avisa o árbitro. */
+  /** Cota no limite: troca a conta da linha pela de mais folga; vale na próxima sessão do papel. */
   async function trocarAgora(p: Papel, conta: string) {
     const atual = vista(p);
     const prov = (atual.provider || 'claude') as Provider;
     const modelo = modeloQueSegue(prov, conta, atual.modelo);
     const aberta = sel === papeis.indexOf(p);
     const i = await gravar([{ papel: atual.papel, sessao: atual.sessao, provider: prov, conta, modelo, esforco: atual.esforco,
-      vez: atual.vez ?? '', janela: atual.janela ?? '', ...aberturaDe(atual) }], true);
+      vez: atual.vez ?? '', janela: atual.janela ?? '', ...aberturaDe(atual) }]);
     if (i < 0) return;
     delete rascunhos[chaveLinha(p)];
     if (aberta) escolher(i);
   }
 
-  // `avisar=false`: grava o contrato e volta pra lista pra continuar montando o time. O recado ao
-  // árbitro sai uma vez, no fim — antes, cada papel salvo acordava ele com meia configuração.
-  async function salvar(avisar = true) {
+  async function salvar(voltarParaLista = false) {
     guardarRascunho();
     const aberta = typeof sel === 'number' ? papeis[sel] : null;
     // Vez trocada muda a chave da linha: ela é gravada noutra posição e `sel` apontaria a antiga.
     const mesmaLinha = !!aberta && (rascunhos[chaveDe(sel as number)]?.vez ?? aberta.vez ?? '') === (aberta.vez ?? '');
     const itens = Object.values(rascunhos).filter((r) => r.papel && r.conta);
-    const ultimo = await gravar(itens, avisar);
+    const ultimo = await gravar(itens);
     if (ultimo < 0) return;
     rascunhos = {};
-    // Salvou sem avisar = ainda está montando o time: volta pra lista, pronto pro próximo papel.
-    // Avisando, fica na MESMA linha: o formulário guarda os valores dela, e apontar `sel` pra
-    // outra linha fazia o efeito do rascunho gravar esses valores como edição da outra.
-    if (!avisar || !mesmaLinha) sel = null;
+    // Salvar e continuar volta pra lista, pronto pro próximo papel. Salvar fica na MESMA linha:
+    // o formulário guarda os valores dela, e apontar `sel` pra outra linha fazia o efeito do
+    // rascunho gravar esses valores como edição da outra.
+    if (voltarParaLista || !mesmaLinha) sel = null;
   }
 </script>
 
@@ -581,13 +573,12 @@
             <li><b>{x.papel}</b>{#if x.novo} · {m.orqcfg_mudanca_novo()}{:else}: {x.mudancas.map((c) => `${ROTULO_CAMPO[c.campo]().toLowerCase()} ${valorCampo(c.campo, c.de)} → ${valorCampo(c.campo, c.para)}`).join('; ')}{/if}</li>
           {/each}
         </ul>
-        <!-- Dois caminhos porque são dois momentos: montar o time (salva sem acordar ninguém) e
-             fechar a configuração (salva e avisa o árbitro, uma vez só). -->
+        <!-- Os dois gravam igual e nenhum acorda o árbitro; só muda pra onde a tela vai depois. -->
         <div class="os-botoes">
           <button type="button" class="os-link" onclick={descartar} disabled={salvando}>{m.orqcfg_descartar()}</button>
-          <button type="button" class="os-secundario" onclick={() => salvar(false)} disabled={salvando || conflito}>{m.orqcfg_salvar_continuar()}</button>
-          <button type="button" class="os-primary" onclick={() => salvar(true)} disabled={salvando || conflito}>
-            {salvando ? m.orqcfg_salvando() : m.orqcfg_salvar_avisar()}
+          <button type="button" class="os-secundario" onclick={() => salvar(true)} disabled={salvando || conflito}>{m.orqcfg_salvar_continuar()}</button>
+          <button type="button" class="os-primary" onclick={() => salvar(false)} disabled={salvando || conflito}>
+            {salvando ? m.orqcfg_salvando() : m.orqcfg_salvar()}
           </button>
         </div>
         <p class="os-rodape">{m.orqcfg_rodape_papel({ arquivo: grupo?.arquivo?.split('/').pop() ?? '' })}</p>

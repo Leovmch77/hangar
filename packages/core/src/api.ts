@@ -768,10 +768,10 @@ export async function putOrqConta(
 export async function getOrqGrupo(name: string): Promise<import('./orquestracao').OrqGrupo> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/orq`);
 }
-// Vários papéis numa escrita só e um recado só pro árbitro.
+// Vários papéis numa escrita só.
 export async function postOrqPapeis(
   name: string,
-  // `avisar: false` grava sem acordar o árbitro — é o "salvar e continuar montando o time".
+  // `avisar` é aceito e ignorado: salvar nunca acorda o árbitro.
   body: { papeis: ({ papel: string; sessao?: string; provider: string; conta: string; modelo?: string; esforco?: string; vez?: string; janela?: string }
     & Partial<import('./orquestracao').AberturaPapel>)[]; mtime: number; avisar?: boolean },
 ): Promise<import('./orquestracao').RespostaPapel> {

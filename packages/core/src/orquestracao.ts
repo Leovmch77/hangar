@@ -127,11 +127,10 @@ export interface RespostaPapel {
   papel: Omit<Papel, 'viva' | 'id_cota'>;
   papeis: Omit<Papel, 'viva' | 'id_cota'>[];
   mtime: number;
-  arbitro: string | null;
-  // `nao_avisado` = gravou com `avisar: false` (o "salvar e continuar"); não é falha, é o árbitro
-  // deliberadamente não acordado ainda.
-  aviso: 'enviado' | 'enfileirado' | 'sem_arbitro' | 'falhou' | 'nao_avisado';
-  erro: string | null;
+  // Salvar nunca acorda o árbitro: a linha vale na próxima sessão de cada papel.
+  arbitro: null;
+  aviso: 'proxima_sessao';
+  erro: null;
 }
 
 export interface OrqGrupo {
