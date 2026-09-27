@@ -12,9 +12,11 @@ use gpui_kit::{App, Bounds, ContentMask, Element, ElementId, GlobalElementId, Hs
     IntoElement, KeyDownEvent, LayoutId, Pixels, ScrollWheelEvent, ShapedLine, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle,
     Window, fill, font, point, px, relative, rgb, size};
 
-fn terminal_font(window: &Window) -> gpui_kit::Font {
-    if crate::appearance::get().terminal_font == crate::appearance::CodeFont::JetBrainsMono {
-        return font(crate::theme::CODE_MONO);
+pub(crate) fn terminal_font(window: &Window) -> gpui_kit::Font {
+    match crate::appearance::get().terminal_font {
+        crate::appearance::CodeFont::JetBrainsMono => return font(crate::theme::CODE_MONO),
+        crate::appearance::CodeFont::Named(name) => return font(name.0),
+        crate::appearance::CodeFont::System => {}
     }
     // A fonte do kit já pode ter sido trocada pela preferência de código da conversa.
     static SYSTEM_MONO: std::sync::OnceLock<gpui_kit::SharedString> = std::sync::OnceLock::new();

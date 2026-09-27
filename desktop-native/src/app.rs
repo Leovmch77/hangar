@@ -64,7 +64,7 @@ fn in_column(el: impl IntoElement) -> Div {
 /// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência.
 fn conversation_text(el: Div) -> Div {
     let a = crate::appearance::get();
-    el.font_family(if a.font == crate::appearance::Font::Mono { theme::MONO } else { theme::SANS })
+    el.font_family(a.font.family())
         .text_size(px(14. * a.text_size as f32 / 100.)).line_height(relative(1.45 * a.line_height as f32 / 100.))
 }
 const DETAIL_MAX: usize = 20_000;

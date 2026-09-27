@@ -6,7 +6,8 @@ use std::{cell::Cell, rc::Rc};
 use crate::appearance::{self, Appearance, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, SurfaceMaterial, Swatch,
     ThemeMode, ThinkingTools, ToolLook, Wallpaper};
 use gpui_kit::base::AccordionTrigger;
-use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip};
+use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip,
+    IndexPath, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
@@ -54,7 +55,7 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 37] = [
     ("settings_transparency", Some("settings_transparency_desc")), ("settings_surface_material", Some("settings_surface_material_desc")), ("settings_solidity", None),
     ("settings_blur", Some("settings_blur_hint")), ("settings_wallpaper", Some("settings_wallpaper_desc")),
     ("settings_reading", Some("settings_reading_desc")), ("settings_sheet_solidity", None), ("settings_contrast", None),
-    ("settings_font", None), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
+    ("settings_font", Some("settings_font_desc")), ("settings_text_size", None), ("settings_code_font", Some("settings_code_font_desc")),
     ("settings_code_size", None), ("settings_terminal_font", Some("settings_terminal_font_desc")),
     ("settings_terminal_size", None), ("settings_line_height", None), ("settings_column", None),
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
@@ -143,39 +144,118 @@ const LIVE_WIDTH: f32 = 360.;
 const LIVE_VISIBLE: [f32; 2] = [120., 40.];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Size, CodeSize, TerminalSize, Line, Column }
+enum Knob { TintStrength, Transparency, Solidity, SheetSolidity, Contrast, Line, Column }
 
 impl Knob {
-    const ALL: [Knob; 10] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Size, Knob::CodeSize, Knob::TerminalSize, Knob::Line, Knob::Column];
+    const ALL: [Knob; 7] = [Knob::TintStrength, Knob::Transparency, Knob::Solidity, Knob::SheetSolidity, Knob::Contrast, Knob::Line, Knob::Column];
 
     // A força da tinta é do modo que está na tela (escuro ou claro), como a cor.
     fn read(self, a: &Appearance) -> u16 {
         match self { Knob::TintStrength => a.colors(theme::is_dark()).tint_strength, Knob::Transparency => a.transparency, Knob::Solidity => a.solidity,
-            Knob::SheetSolidity => a.sheet_solidity, Knob::Contrast => a.text_contrast,
-            Knob::Size => a.text_size, Knob::CodeSize => a.code_size, Knob::TerminalSize => a.terminal_size, Knob::Line => a.line_height, Knob::Column => a.column }
+            Knob::SheetSolidity => a.sheet_solidity, Knob::Contrast => a.text_contrast, Knob::Line => a.line_height, Knob::Column => a.column }
     }
 
     fn write(self, a: &mut Appearance, value: u16) {
         match self { Knob::TintStrength => a.colors_mut(theme::is_dark()).tint_strength = value, Knob::Transparency => a.transparency = value,
             Knob::Solidity => a.solidity = value, Knob::SheetSolidity => a.sheet_solidity = value, Knob::Contrast => a.text_contrast = value,
-            Knob::Size => a.text_size = value, Knob::CodeSize => a.code_size = value, Knob::TerminalSize => a.terminal_size = value, Knob::Line => a.line_height = value, Knob::Column => a.column = value }
+            Knob::Line => a.line_height = value, Knob::Column => a.column = value }
     }
 
     fn range(self) -> (f32, f32) {
         match self {
             Knob::TintStrength => (5., 100.),
             Knob::Transparency | Knob::Solidity | Knob::SheetSolidity | Knob::Contrast => (0., 100.),
-            Knob::Size | Knob::Line | Knob::Column => (50., 150.),
-            Knob::CodeSize => (16., 48.),
-            Knob::TerminalSize => (8., 24.),
+            Knob::Line | Knob::Column => (50., 150.),
         }
     }
 }
 
+/// As três áreas com fonte e tamanho escolhidos em listas, como no Zeron.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Area { Text, Code, Terminal }
+
+impl Area {
+    const ALL: [Area; 3] = [Area::Text, Area::Code, Area::Terminal];
+
+    /// Tamanhos oferecidos, como o arquivo os grava: texto em % de 14 px, código em meio pixel, terminal em px.
+    fn sizes(self) -> Vec<u16> {
+        match self {
+            Area::Text => (11..=20).map(|px| (px as f32 * 100. / 14.).round() as u16).collect(),
+            Area::Code => (20..=36).collect(),
+            Area::Terminal => (8..=24).collect(),
+        }
+    }
+
+    fn px(self, stored: u16) -> f32 {
+        match self { Area::Text => 14. * stored as f32 / 100., Area::Code => stored as f32 / 2., Area::Terminal => stored as f32 }
+    }
+
+    fn size(self, a: &Appearance) -> u16 {
+        match self { Area::Text => a.text_size, Area::Code => a.code_size, Area::Terminal => a.terminal_size }
+    }
+
+    fn set_size(self, a: &mut Appearance, value: u16) {
+        match self { Area::Text => a.text_size = value, Area::Code => a.code_size = value, Area::Terminal => a.terminal_size = value }
+    }
+
+    fn set_font(self, a: &mut Appearance, family: &str) {
+        match self {
+            Area::Text => a.font = Font::from_family(family),
+            Area::Code => a.code_font = CodeFont::from_family(family),
+            Area::Terminal => a.terminal_font = CodeFont::from_family(family),
+        }
+    }
+
+    /// A família que o desenho usa hoje, com "Sistema" já resolvida.
+    fn family(self, a: &Appearance, window: &Window, cx: &App) -> SharedString {
+        match self {
+            Area::Text => a.font.family().into(),
+            Area::Code => match a.code_font {
+                CodeFont::JetBrainsMono => theme::CODE_MONO.into(),
+                CodeFont::System => theme::original_code_typography(cx).0,
+                CodeFont::Named(name) => name.0.into(),
+            },
+            Area::Terminal => crate::term_view::terminal_font(window).family,
+        }
+    }
+
+    /// Fontes instaladas com a de agora marcada; a de agora entra no topo se não estiver instalada.
+    fn font_items(self, fonts: &[SharedString], window: &Window, cx: &App) -> (SearchableVec<SharedString>, IndexPath) {
+        let current = self.family(&appearance::get(), window, cx);
+        let mut items = fonts.to_vec();
+        let at = items.iter().position(|f| *f == current).unwrap_or_else(|| { items.insert(0, current); 0 });
+        (SearchableVec::new(items), IndexPath::new(at))
+    }
+
+    /// Lista de tamanhos com o mais perto do gravado marcado: um valor antigo do deslizante pode cair entre dois.
+    fn size_items(self) -> (Vec<SizeChoice>, IndexPath) {
+        let (sizes, stored) = (self.sizes(), self.size(&appearance::get()));
+        let at = sizes.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(stored)).map_or(0, |(n, _)| n);
+        (sizes.into_iter().map(|value| SizeChoice { label: px_label(self.px(value)).into(), value }).collect(), IndexPath::new(at))
+    }
+}
+
+/// "12,5 px": meio pixel é o passo mais fino que as listas oferecem.
+fn px_label(px: f32) -> String { format!("{} px", ((px * 2.).round() / 2.).to_string().replace('.', &tr("decimal"))) }
+
+#[derive(Clone)]
+struct SizeChoice { label: SharedString, value: u16 }
+
+impl SearchableListItem for SizeChoice {
+    type Value = u16;
+    fn title(&self) -> SharedString { self.label.clone() }
+    fn value(&self) -> &u16 { &self.value }
+}
+
+type FontPick = Entity<SelectState<SearchableVec<SharedString>>>;
+type SizePick = Entity<SelectState<Vec<SizeChoice>>>;
+
 /// Estado vivo da página: os controles deslizantes guardam posição e arrasto entre desenhos.
 pub(super) struct SettingsUi {
     sliders: Vec<(Knob, Entity<SliderState>)>,
-    terminal_size_focus: FocusHandle,
+    /// Fontes instaladas, lidas uma vez ao abrir o app.
+    fonts: Vec<SharedString>,
+    type_picks: Vec<(Area, FontPick, SizePick)>,
     /// Cor livre de Destaque e de Tinta.
     accent_picker: Entity<ColorPickerState>,
     tint_picker: Entity<ColorPickerState>,
@@ -224,6 +304,27 @@ impl SettingsUi {
             }));
             sliders.push((knob, state));
         }
+        let fonts: Vec<SharedString> = window.text_system().all_font_names().into_iter().map(SharedString::from).collect();
+        let mut type_picks = Vec::new();
+        for area in Area::ALL {
+            let (items, at) = area.font_items(&fonts, window, cx);
+            let font = cx.new(|cx| SelectState::new(items, Some(at), window, cx).searchable(true));
+            subscriptions.push(cx.subscribe_in(&font, window, move |this: &mut Hangar, _, event: &SelectEvent<SearchableVec<SharedString>>, _, cx| {
+                let SelectEvent::Confirm(Some(family)) = event else { return };
+                let mut next = appearance::get();
+                area.set_font(&mut next, family);
+                this.apply_appearance(next, true, cx);
+            }));
+            let (items, at) = area.size_items();
+            let size = cx.new(|cx| SelectState::new(items, Some(at), window, cx));
+            subscriptions.push(cx.subscribe_in(&size, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<SizeChoice>>, _, cx| {
+                let SelectEvent::Confirm(Some(value)) = event else { return };
+                let mut next = appearance::get();
+                area.set_size(&mut next, *value);
+                this.apply_appearance(next, true, cx);
+            }));
+            type_picks.push((area, font, size));
+        }
         let mut picker = |which: Custom, cx: &mut Context<Hangar>| {
             let colors = *current.colors(theme::is_dark());
             let saved = match which { Custom::Accent => colors.accent, Custom::Tint => colors.tint };
@@ -255,7 +356,7 @@ impl SettingsUi {
             InputEvent::PressEnter { .. } => this.search_go(None, cx),
             _ => {}
         }));
-        Self { sliders, terminal_size_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+        Self { sliders, fonts, type_picks,
             accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
             reveal: Rc::new(Cell::new(false)), live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
     }
@@ -289,6 +390,7 @@ impl Hangar {
     /// Idioma trocado: o texto guardado no campo de busca acompanha.
     pub(super) fn relabel_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_ui.search.update(cx, |input, cx| input.set_placeholder(tr("settings_search"), window, cx));
+        self.sync_type_picks(window, cx);
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -409,6 +511,7 @@ impl Hangar {
         for (knob, state) in self.settings_ui.sliders.clone() {
             state.update(cx, |slider, cx| slider.set_value(knob.read(&current) as f32, window, cx));
         }
+        self.sync_type_picks(window, cx);
         // Os seletores de cor livre mostram a do modo na tela.
         let colors = *current.colors(theme::is_dark());
         for (state, saved) in [(self.settings_ui.accent_picker.clone(), colors.accent), (self.settings_ui.tint_picker.clone(), colors.tint)] {
@@ -416,6 +519,16 @@ impl Hangar {
                 Swatch::Custom(Hex(hex)) => picker.set_value(rgb(hex), window, cx),
                 Swatch::Preset(_) => picker.clear_value(window, cx),
             });
+        }
+    }
+
+    /// Listas de fonte e tamanho no valor gravado, com o rótulo no idioma da tela ("12,5 px" / "12.5 px").
+    fn sync_type_picks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (area, font, size) in self.settings_ui.type_picks.clone() {
+            let (items, at) = area.font_items(&self.settings_ui.fonts, window, cx);
+            font.update(cx, |select, cx| { select.set_items(items, window, cx); select.set_selected_index(Some(at), window, cx); });
+            let (items, at) = area.size_items();
+            size.update(cx, |select, cx| { select.set_items(items, window, cx); select.set_selected_index(Some(at), window, cx); });
         }
     }
 
@@ -602,7 +715,7 @@ impl Hangar {
         let thumb = px(if live { 60. } else { 92. });
 
         let preview = div().mt(px(18.)).p(px(14.)).flex().flex_col().gap(px(10.)).rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::inset())
-            .font_family(if a.font == Font::Mono { theme::MONO } else { theme::SANS })
+            .font_family(a.font.family())
             .text_size(px(14. * a.text_size as f32 / 100.)).line_height(relative(1.45 * a.line_height as f32 / 100.))
             .child(div().flex().justify_end().child(div().px(px(12.)).py(px(8.)).rounded(px(16.)).bg(theme::user_bubble()).child(tr("settings_preview_question"))))
             .child(div().child(tr("settings_preview_answer")))
@@ -852,27 +965,20 @@ impl Hangar {
             .child(self.slider_row(IconName::Contrast, "settings_contrast", (!text_on).then(|| tr("settings_contrast_only")),
                 Knob::Contrast, text_on, &a, cx));
 
-        let font = segmented("font", &[tr("settings_font_system"), tr("settings_font_mono")], if a.font == Font::Mono { 1 } else { 0 }, true,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.font = if index == 1 { Font::Mono } else { Font::System }; this.apply_appearance(next, true, cx); }, cx);
-        let code_font = segmented("code-font", &[tr("settings_code_font_jetbrains"), tr("settings_code_font_system")],
-            if a.code_font == CodeFont::System { 1 } else { 0 }, true,
-            |this: &mut Hangar, index, _: &mut Window, cx| {
-                let mut next = appearance::get(); next.code_font = if index == 1 { CodeFont::System } else { CodeFont::JetBrainsMono };
-                this.apply_appearance(next, true, cx);
-            }, cx);
-        let terminal_font = segmented("terminal-font", &[tr("settings_code_font_jetbrains"), tr("settings_code_font_system")],
-            if a.terminal_font == CodeFont::System { 1 } else { 0 }, true,
-            |this: &mut Hangar, index, _: &mut Window, cx| {
-                let mut next = appearance::get(); next.terminal_font = if index == 1 { CodeFont::System } else { CodeFont::JetBrainsMono };
-                this.apply_appearance(next, true, cx);
-            }, cx);
+        // Fonte e tamanho na mesma linha; a busca pelo tamanho ("Tamanho do código") destaca a linha da fonte.
+        let type_row = |area: Area, title: &'static str, description: &'static str, size_key: &'static str| {
+            let (_, font, size) = self.settings_ui.type_picks.iter().find(|(a, ..)| *a == area).expect("every area has pickers");
+            let control = div().flex().items_center().gap_2()
+                .child(Select::new(font).id(SharedString::from(format!("font-{area:?}"))).small().w(px(if live { 172. } else { 200. }))
+                    .menu_width(px(260.)).search_placeholder(tr("settings_font_search")).accessibility_label(tr(title)))
+                .child(Select::new(size).id(SharedString::from(format!("font-size-{area:?}"))).small().w(px(96.)).accessibility_label(tr(size_key)))
+                .into_any_element();
+            self.mark(self.row(IconName::Type, title, Some(tr(description)), true, control), size_key)
+        };
         let text_box = settings_box()
-            .child(self.row(IconName::Type, "settings_font", None, true, font))
-            .child(self.slider_row(IconName::Type, "settings_text_size", None, Knob::Size, true, &a, cx))
-            .child(self.row(IconName::Type, "settings_code_font", Some(tr("settings_code_font_desc")), true, code_font))
-            .child(self.slider_row(IconName::Type, "settings_code_size", None, Knob::CodeSize, true, &a, cx))
-            .child(self.row(IconName::Type, "settings_terminal_font", Some(tr("settings_terminal_font_desc")), true, terminal_font))
-            .child(self.slider_row(IconName::Type, "settings_terminal_size", None, Knob::TerminalSize, true, &a, cx))
+            .child(type_row(Area::Text, "settings_font", "settings_font_desc", "settings_text_size"))
+            .child(type_row(Area::Code, "settings_code_font", "settings_code_font_desc", "settings_code_size"))
+            .child(type_row(Area::Terminal, "settings_terminal_font", "settings_terminal_font_desc", "settings_terminal_size"))
             .child(self.slider_row(IconName::SlidersHorizontal, "settings_line_height", None, Knob::Line, true, &a, cx))
             .child(self.slider_row(IconName::PanelLeft, "settings_column", None, Knob::Column, true, &a, cx));
 
@@ -979,10 +1085,8 @@ impl Hangar {
         cx: &mut Context<Self>) -> Div {
         let state = self.settings_ui.slider(knob);
         let value = match knob {
-            Knob::TerminalSize => format!("{} px", a.terminal_size),
             Knob::Column => format!("{:.0} px", column_width()),
-            Knob::CodeSize => format!("{} px", (a.code_size as f32 / 2.).to_string().replace('.', &tr("decimal"))),
-            _ => knob.read(a).to_string(),
+            _ => format!("{}%", knob.read(a)),
         };
         let control = div().w(px(230.)).flex().items_center()
             .child(self.slider_edge(knob, false, enabled, cx))
@@ -990,27 +1094,7 @@ impl Hangar {
             .child(self.slider_edge(knob, true, enabled, cx))
             .child(div().w(px(60.)).flex_shrink_0().text_right().text_size(px(12.5))
                 .text_color(theme::muted()).child(value));
-        let control = if knob == Knob::TerminalSize {
-            control.id("terminal-size-control").track_focus(&self.settings_ui.terminal_size_focus)
-                .role(Role::Group).aria_label(tr(title)).rounded(px(6.)).border_1().border_color(transparent_black())
-                .focus_visible(|el| el.border_color(theme::accent_focus()))
-                .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if event.button == MouseButton::Left { this.settings_ui.terminal_size_focus.focus(window, cx); }
-                }))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    let mut next = appearance::get();
-                    let value = match event.keystroke.key.as_str() {
-                        "left" | "down" => next.terminal_size.saturating_sub(1),
-                        "right" | "up" => next.terminal_size + 1,
-                        "home" => 8, "end" => 24, _ => return,
-                    };
-                    cx.stop_propagation();
-                    next.terminal_size = value.clamp(8, 24);
-                    this.apply_appearance(next, true, cx);
-                    this.sync_sliders(window, cx);
-                })).into_any_element()
-        } else { control.into_any_element() };
-        self.row(icon, title, description, enabled, control)
+        self.row(icon, title, description, enabled, control.into_any_element())
     }
 }
 
