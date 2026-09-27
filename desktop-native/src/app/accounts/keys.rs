@@ -31,10 +31,12 @@ impl Provider {
 
 /// Selo do provedor: a cor da marca quando o app a conhece, e duas letras.
 fn provider_badge(url: &str, name: &str, size: f32) -> Div {
-    let (color, _) = theme::provider(if url.contains("kimi") { "kimi" } else { "" });
+    let provider = if url.contains("kimi") { "kimi" } else { "" };
+    let (color, _) = theme::provider(provider);
     let letters: String = name.chars().filter(|c| c.is_alphanumeric()).take(2).collect::<String>().to_uppercase();
-    div().size(px(size)).flex_shrink_0().rounded(px(size * 0.28)).bg(color.opacity(0.16)).flex().items_center().justify_center()
-        .text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(letters)
+    let badge = div().size(px(size)).flex_shrink_0().rounded(px(size * 0.28)).bg(color.opacity(0.16)).flex().items_center().justify_center()
+        .text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(color);
+    match chrome::provider_logo(provider, size * 0.55, color) { Some(logo) => badge.child(logo), None => badge.child(letters) }
 }
 
 /// Uma linha do catálogo no diálogo "Adicionar…": selo, nome, o que é e o botão.

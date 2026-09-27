@@ -665,7 +665,11 @@ impl Hangar {
         let (color, _) = theme::provider(row.glyph.0);
         let size = if compact { 28. } else { 36. };
         let avatar = div().size(px(size)).flex_shrink_0().rounded(px(if compact { 8. } else { 10. })).bg(color.opacity(0.16)).flex().items_center().justify_center()
-            .text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(row.glyph.1.clone());
+            .text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(color);
+        let avatar = match chrome::provider_logo(row.glyph.0, size * 0.55, color) {
+            Some(logo) => avatar.child(logo),
+            None => avatar.child(row.glyph.1.clone()),
+        };
         let renaming = self.accounts.rename.as_ref().filter(|r| r.id == row.id);
         let name_line = match renaming {
             Some(rename) => self.render_rename(rename, &row.name, cx),

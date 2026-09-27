@@ -33,6 +33,12 @@ struct AppAssets;
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == HANGAR_MARK { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/hangar-mark.svg")))); }
+        match path {
+            "providers/claude.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/claude.svg")))),
+            "providers/codex.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/codex.svg")))),
+            "providers/kimi.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/kimi.svg")))),
+            _ => {}
+        }
         if let Some(bytes) = fileicons::load(path) { return Ok(Some(Cow::Borrowed(bytes))); }
         if let Some(bytes) = ExtraIcons.load(path)? { return Ok(Some(bytes)); }
         gpui_kit::assets::Assets.load(path)
