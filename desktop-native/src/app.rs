@@ -68,12 +68,43 @@ const COLUMN: f32 = 780.;
 const FIRST_PAGE: usize = 60;
 const HISTORY_PAGE: usize = 400;
 
-/// Largura da coluna da conversa e do compositor: a do mock vezes o ajuste de Aparência.
+/// Largura da tela sem sessão: a do mock vezes o ajuste de Aparência.
 fn column_width() -> f32 { COLUMN * crate::appearance::get().column as f32 / 100. }
 
-/// Põe uma faixa na coluna da conversa: mesma margem e mesma largura das mensagens e do compositor.
-fn in_column(el: impl IntoElement) -> Div {
+/// Tela sem sessão: faixas na largura de `column_width`.
+fn landing_column(el: impl IntoElement) -> Div {
     div().w_full().flex_shrink_0().px(px(36.)).flex().justify_center().child(div().w_full().max_w(px(column_width())).child(el))
+}
+
+thread_local! {
+    /// Largura da janela e painel direito aberto no quadro atual: os degraus da coluna do web são media queries da janela.
+    static COLUMN_FRAME: std::cell::Cell<(f32, bool)> = const { std::cell::Cell::new((1280., false)) };
+}
+
+/// Caixa da coluna da conversa, como o `max-width` da `.messages-inner` e do `.composer-card` do web (MessageList.svelte,
+/// Chat.svelte, Composer.svelte): teto por degrau da janela, maior com o painel direito aberto, e a escala da Aparência
+/// sobre o menor entre o teto e o espaço, sem passar do espaço.
+fn column_box(composer: bool) -> Div {
+    let (window, side) = COLUMN_FRAME.get();
+    let a = crate::appearance::get();
+    let scale = a.column as f32 / 100.;
+    let step = |wide: f32, mid: f32, base: f32| if window >= 1900. { wide } else if window >= 1600. { mid } else { base };
+    let (ceiling, scale) = if side { (step(1440., 1320., 1200.) * scale, scale) }
+        // Sem o painel, o compositor não segue a escala: é o `.composer-dock` do web.
+        else if composer { (1400f32.min(window * 0.94), 1.) }
+        else {
+            let read = if a.palette == crate::appearance::Palette::Neutral { 920. } else { step(1200., 1080., 920.) };
+            ((read * scale).min(window * step(0.76, 0.82, 0.94)), scale)
+        };
+    div().w(relative(scale.min(1.))).max_w(px(ceiling))
+}
+
+/// Recuo do texto dentro da coluna (`padding-inline` da `.messages-inner`); a margem de fora é o `padding` da lista.
+fn column_padding() -> f32 { if COLUMN_FRAME.get().0 >= 1280. { 32. } else { 24. } }
+
+/// Põe uma faixa na coluna da conversa: mesma margem e mesma largura das mensagens.
+fn in_column(el: impl IntoElement) -> Div {
+    div().w_full().flex_shrink_0().px(px(16.)).flex().justify_center().child(column_box(false).px(px(column_padding())).child(el))
 }
 
 /// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência. Em 100% são os do web no desktop:
@@ -2796,11 +2827,10 @@ impl Hangar {
 
     fn interaction_card(&self, title: String, body: AnyElement, footer: AnyElement) -> AnyElement {
         // Pedido que espera você: moldura âmbar suave, como `.ask` do mock.
-        div().px(px(36.)).py_2().flex().justify_center()
-            .child(div().w_full().max_w(px(column_width())).p(px(14.)).rounded(px(14.)).border_1().border_color(theme::warning().opacity(0.35))
+        in_column(div().p(px(14.)).rounded(px(14.)).border_1().border_color(theme::warning().opacity(0.35))
                 .bg(theme::warning().opacity(0.06)).flex().flex_col().gap(px(10.))
                 .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                .child(body).child(footer))
+                .child(body).child(footer)).py_2()
             .into_any_element()
     }
 
@@ -3229,10 +3259,13 @@ impl Hangar {
             .child(field)
             .children(dictation_strip)
             .child(control_row);
-        div().id("composer").relative().flex_shrink_0().w_full().px(px(36.)).pb(px(10.)).flex().justify_center()
+        // Na conversa, a caixa e o recuo de 12 px do `.composer` do web; a tela sem sessão fica na largura dela.
+        let landing = self.new_chat_screen();
+        let frame = if landing { div().w_full().max_w(px(column_width())) } else { column_box(true) };
+        div().id("composer").relative().flex_shrink_0().w_full().px(px(if landing { 36. } else { 12. })).pb(px(10.)).flex().justify_center()
             .when(readable, |el| el.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(theme::accent_dim()))
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.read_paths(paths.paths().to_vec(), cx))))
-            .child(popup::anchor(div().relative().w_full().max_w(px(column_width())).flex().flex_col(), "composer")
+            .child(popup::anchor(frame.relative().flex().flex_col(), "composer")
                 .when(!floating.is_empty(), |el| el.child(div().absolute().left_0().right_0().bottom(relative(1.)).pb_2().flex().flex_col().gap_2()
                     .occlude().children(floating)))
                 .children(queue_row)
@@ -3513,9 +3546,9 @@ const ROW_GROUP: &str = "message-row";
 
 /// Recuo e coluna de uma linha da conversa; mensagem tem mais ar em cima e embaixo.
 fn row_frame(inner: AnyElement, message: bool) -> Div {
-    div().w_full().px(px(36.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
+    div().w_full().px(px(16.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
         .flex().justify_center()
-        .child(div().w_full().max_w(px(column_width())).child(inner))
+        .child(column_box(false).px(px(column_padding())).child(inner))
 }
 
 /// A conversa ainda sem histórico: turnos fantasmas no formato das linhas (pergunta em bolha à direita, resposta em
@@ -4457,8 +4490,8 @@ impl Hangar {
                     let view = cx.entity().downgrade();
                     // Leitura Folha: uma folha da largura da coluna atrás das mensagens, com o fundo nas margens.
                     let sheet = (appearance::get().effective_reading() == appearance::Reading::Sheet).then(|| div().absolute().inset_0()
-                        .px(px(20.)).pt(px(4.)).pb(px(8.)).flex().justify_center()
-                        .child(div().w_full().h_full().max_w(px(column_width() + 32.)).rounded(px(14.)).border_1().border_color(theme::border())
+                        .px(px(16.)).pt(px(4.)).pb(px(8.)).flex().justify_center()
+                        .child(column_box(false).h_full().rounded(px(14.)).border_1().border_color(theme::border())
                             .bg(theme::sheet()).shadow(theme::sheet_shadow())));
                     content = content.child(div().relative().flex_1().min_h_0().flex().flex_col()
                         .children(sheet)
@@ -4641,6 +4674,8 @@ impl Render for Hangar {
             .or_else(|| self.opening_side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
                 .when(chat_background, |el| el.bg(theme::background().alpha(1.))).child(self.render_opening_side(width)).into_any_element()));
         let side = side.filter(|_| !files_expanded);
+        // Antes das áreas guardadas desenharem: elas leem a coluna daqui.
+        COLUMN_FRAME.set((f32::from(window.viewport_size().width), side.is_some()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))

@@ -1155,10 +1155,8 @@ impl Hangar {
     fn slider_row(&self, icon: IconName, title: &'static str, description: Option<String>, knob: Knob, enabled: bool, a: &Appearance,
         cx: &mut Context<Self>) -> Div {
         let state = self.settings_ui.slider(knob);
-        let value = match knob {
-            Knob::Column => format!("{:.0} px", column_width()),
-            _ => format!("{}%", knob.read(a)),
-        };
+        // A coluna depende da janela e do painel, como no web: a escala é o que se escolhe.
+        let value = format!("{}%", knob.read(a));
         let control = div().w(px(230.)).flex().items_center()
             .child(self.slider_edge(knob, false, enabled, cx))
             .child(Slider::new(state).flex_1().bg(theme::accent()).text_color(theme::text()).disabled(!enabled))
