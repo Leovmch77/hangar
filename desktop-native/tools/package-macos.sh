@@ -16,4 +16,9 @@ install -m755 "$binary" "$bundle/Contents/MacOS/hangar"
 install -m644 "$source_dir/assets/brand/icon.icns" "$bundle/Contents/Resources/Hangar.icns"
 sed -e "s/__SHORT_VERSION__/$version/" -e "s/__BUILD_NUMBER__/$build/" \
     "$source_dir/assets/brand/Info.plist" > "$bundle/Contents/Info.plist"
+# Marcador digitado errado no Info.plist não faz o sed falhar: o pacote sairia sem a versão.
+grep -q "<string>$version</string>" "$bundle/Contents/Info.plist" && grep -q "<string>$build</string>" "$bundle/Contents/Info.plist" || {
+    echo 'Info.plist sem a versão: marcador não substituído' >&2
+    exit 1
+}
 echo "$bundle"
