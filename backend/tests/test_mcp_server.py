@@ -128,12 +128,15 @@ async def test_enviar_nao_dobra_o_prefixo_escrito_pelo_modelo(identidade, monkey
 async def test_sessoes_marca_a_propria(identidade, monkeypatch):
     from types import SimpleNamespace
     from app import api
-    infos = [SimpleNamespace(name=n, state="idle", cwd="/x", provider="claude", headless=False)
-             for n in ("eu", "outra")]
+    infos = [SimpleNamespace(name=n, state="idle", cwd="/x", provider="claude", headless=False,
+                             pair_gid=g)
+             for n, g in (("eu", "g1"), ("outra", None))]
     monkeypatch.setattr(api, "list_sessions", lambda: _coro(infos))
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         res = await s.call_tool("sessoes", {})
         assert {d["name"]: d["voce"] for d in res.structured_content["result"]} == {"eu": True, "outra": False}
+        # Entrada e saída não são avisadas: o grupo se consulta aqui.
+        assert {d["name"]: d["grupo"] for d in res.structured_content["result"]} == {"eu": "g1", "outra": None}
     async with sessao_mcp({}) as s:
         res = await s.call_tool("sessoes", {})
         assert not res.is_error
