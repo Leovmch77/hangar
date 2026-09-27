@@ -2,7 +2,7 @@
 
 This page belongs to the Task whose diff touches pixels: `.svelte`/`.tsx`/`.vue`, CSS,
 templates, anything that draws. Its gate is mandatory even when the plan does not ask. Diff
-draws nothing: this page does not apply.
+draws nothing: this page does not apply; follow your normal flow.
 
 After `CODE OK`, any code fix below is a `--fase codigo` round first;
 recapture on the newly approved stash.
@@ -122,8 +122,9 @@ state and width as yours. Capture both and ask a fresh subagent, without saying 
 - Diff touches pixels and the contract has neither bar nor waiver: stop and report to the
   arbiter before sending the round.
 - The blind choice answers "which looks more finished", never "which does more". A Task that
-  replaces an existing surface still owes the arbiter the inventory of what the old one did;
-  a blind win and an inventory rejection in the same round is normal.
+  replaces an existing surface still owes every item of the old surface's inventory listed in
+  the ready criterion (one line per thing a person can do or read, per mode); a blind win
+  and an inventory rejection in the same round is normal.
 
 ## What goes in the report
 

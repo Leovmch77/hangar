@@ -1,6 +1,7 @@
 # Reviewer — the visual gate
 
-This page belongs to the Task that touches pixels. Diff draws nothing: this page does not apply.
+This page belongs to the Task that touches pixels. Diff draws nothing: this page does not apply;
+follow your normal flow.
 
 `orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir from the kick-off>`.
 
