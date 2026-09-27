@@ -4525,7 +4525,9 @@ impl Render for Hangar {
                 else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }, cx))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
-        let nav = if page.is_some() || costs_page { None }
+        // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
+        let files_expanded = self.files_expanded();
+        let nav = if page.is_some() || costs_page || files_expanded { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(appearance::get().navigation.sidebar_width())).h_full().flex_shrink_0()
@@ -4533,7 +4535,7 @@ impl Render for Hangar {
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
         let slide = self.side_slide_frame(window, cx);
-        let beside = beside_sidebar.then(|| self.side_width(window)
+        let beside = beside_sidebar.then(|| self.side_width(window).filter(|_| !files_expanded)
             .or(slide.map(|(width, _)| width)).or_else(|| self.opening_side_width(window)).unwrap_or(0.));
         let topbar = self.render_topbar(beside, cx);
         let (topbar, topbar_beside) = if beside_sidebar { (None, Some(chat_fill(div(), self, window).relative().flex_1().min_w_0().h_full().flex().flex_col().child(topbar))) }
@@ -4552,6 +4554,7 @@ impl Render for Hangar {
             })
             .or_else(|| self.opening_side_width(window).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
                 .when(chat_background, |el| el.bg(theme::background().alpha(1.))).child(self.render_opening_side(width)).into_any_element()));
+        let side = side.filter(|_| !files_expanded);
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
         let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
