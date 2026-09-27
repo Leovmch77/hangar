@@ -34,9 +34,10 @@ impl Hangar {
         // Antes do primeiro layout a lista mede zero: aí desenha, e a medida certa decide no quadro seguinte.
         if width > 0. && width < MIN_WIDTH { return None; }
         let events = &self.chat.events;
-        // Recado de outra sessão não é pergunta sua.
+        // Recado de outra sessão não é pergunta sua. Trocando de sessão, o chat zera antes das linhas serem
+        // refeitas: índice que não existe mais é linha da sessão anterior.
         let rows: Vec<(usize, usize)> = self.items.iter().enumerate().filter_map(|(row, item)| match item {
-            Item::Event(i) if events[*i].kind == "user_msg" && peer_of(&events[*i]).is_none() => Some((row, *i)),
+            Item::Event(i) => events.get(*i).filter(|e| e.kind == "user_msg" && peer_of(e).is_none()).map(|_| (row, *i)),
             _ => None,
         }).collect();
         // Uma pergunta só não é navegação.
