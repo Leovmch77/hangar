@@ -1540,7 +1540,9 @@ impl Render for PopupMenu {
             radius: cx.theme().radius.min(px(8.)),
         };
 
-        v_flex()
+        // Modified for Hangar: the application's `PopupSurface`, when set, paints the surface.
+        let painted = crate::popover::PopupSurface::active(cx);
+        crate::popover::PaintedSurface::new(v_flex()
             .id("popup-menu")
             .test_support()
             .role(Role::Menu)
@@ -1556,6 +1558,7 @@ impl Render for PopupMenu {
             .popover_style(cx)
             .text_color(cx.theme().popover_foreground)
             .when_some(self.appearance.as_ref(), |this, appearance| this.refine_style(&appearance.surface))
+            .when(painted, |this| this.bg(gpui::transparent_black()).border_color(gpui::transparent_black()).shadow(Vec::new()))
             .relative()
             .occlude()
             .child(
@@ -1584,7 +1587,7 @@ impl Render for PopupMenu {
             )
             .when(self.scrollable, |this| {
                 this.vertical_scrollbar(&self.scroll_handle)
-            })
+            }), cx)
     }
 }
 

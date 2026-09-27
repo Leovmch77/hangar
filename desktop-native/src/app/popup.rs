@@ -135,6 +135,21 @@ fn layer(trigger: Bounds<Pixels>, align: Align, surface: AnyElement, visible: f3
         .into_any_element()
 }
 
+/// Superfície de todo menu e lista suspensa do kit, igual à do `chrome::popover` (raio 12, borda de vidro, sombra
+/// `--elev-2`), com o desfoque atrás no Vidro. Lê a aparência a cada desenho: instala uma vez só.
+/// O desfoque vai na camada que o kit abre para a superfície: numa camada própria, de ordem maior, ele rodaria depois
+/// do conteúdo do menu e apagaria separadores e ícones.
+pub(super) fn install_kit_surface(cx: &mut App) {
+    cx.set_global(gpui_kit::component::popover::PopupSurface::new(|bounds, window, _| {
+        let radius = px(12.);
+        if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
+            window.paint_backdrop_blur(bounds, Corners::all(radius), chrome::GLASS_BLUR);
+        }
+        window.paint_drop_shadows(bounds, Corners::all(radius), &theme::popover_shadow());
+        window.paint_quad(quad(bounds, radius, theme::popup_fill(theme::raised()), px(1.), theme::glass_border(), BorderStyle::Solid));
+    }));
+}
+
 /// O mesmo cartão para confirmações e formulários; o kit continua cuidando do foco, da altura e da rolagem.
 pub(super) fn dialog(surface: Dialog) -> Dialog {
     let surface = surface.p(px(20.)).rounded(px(16.)).bg(theme::popup_fill(theme::raised()))

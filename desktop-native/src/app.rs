@@ -507,6 +507,7 @@ impl Hangar {
     fn watch_system(window: &mut Window, cx: &mut Context<Self>) {
         theme::set_system_dark(matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
         theme::sync_kit(Some(window), cx);
+        popup::install_kit_surface(cx);
         cx.observe_window_appearance(window, |this, window, cx| {
             theme::set_system_dark(matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark));
             theme::sync_kit(Some(window), cx);

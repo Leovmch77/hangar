@@ -341,7 +341,7 @@ pub fn provider_glyph(provider: &str, size: f32) -> Div {
         .text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(color).child(glyph)
 }
 
-const GLASS_BLUR: Pixels = px(16.);
+pub(super) const GLASS_BLUR: Pixels = px(16.);
 
 /// O cartão pinta o desfoque antes do seu conteúdo, sobre o que já foi desenhado atrás dele.
 pub fn paint_glass(bounds: Bounds<Pixels>, radius: Pixels, window: &mut Window) {
