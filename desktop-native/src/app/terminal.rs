@@ -197,7 +197,7 @@ impl Hangar {
                         slot.status = Status::Connected;
                     }
                     Ok(ws::Event::Data(bytes)) => { slot.view.feed(&bytes); Self::flush_terminal(slot); }
-                    Ok(ws::Event::Closed(_)) => { slot.socket = None; slot.status = Status::Failed(tr("term_disconnected")); }
+                    Ok(ws::Event::Closed) => { slot.socket = None; slot.status = Status::Failed(tr("term_disconnected")); }
                     Err(error) => { slot.socket = None; slot.status = Status::Failed(socket_error(error)); }
                 }
             }

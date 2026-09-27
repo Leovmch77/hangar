@@ -10,7 +10,7 @@ use serde::Deserialize;
 const PROVIDERS: [&str; 5] = ["claude", "codex", "pi", "kimi", "omp"];
 
 #[derive(Clone, Deserialize)]
-struct Policy { provider: String, conta: String, apelido: String, modelos: Vec<String>, trocar: bool }
+pub(super) struct Policy { provider: String, conta: String, apelido: String, modelos: Vec<String>, trocar: bool }
 
 #[derive(Deserialize)]
 struct Account {

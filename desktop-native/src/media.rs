@@ -110,12 +110,6 @@ pub fn adopt_backdrop(source: &std::path::Path, dest: &std::path::Path) -> Resul
     Ok(image)
 }
 
-/// Bloqueante: relê a cópia guardada. O arquivo pode ter sumido ou estragado desde a escolha.
-pub fn load_backdrop(path: &std::path::Path) -> Result<Arc<RenderImage>, &'static str> {
-    let bytes = std::fs::read(path).map_err(|_| "backdrop_missing")?;
-    if bytes.len() as u64 > BACKDROP_MAX_BYTES { return Err("backdrop_too_big"); }
-    backdrop(&bytes).ok_or("backdrop_invalid")
-}
 
 /// Grão da Textura: ruído cinza opaco, desenhado em ladrilhos com pouca opacidade. Tira o degrau do gradiente escuro.
 pub fn grain() -> Arc<RenderImage> {
@@ -280,7 +274,7 @@ mod tests {
         assert_eq!(adopt_backdrop(&dir.join("sumiu.png"), &dest).err(), Some("backdrop_missing"));
         // Recusas não tocam na cópia boa.
         assert_eq!(std::fs::read(&dest).unwrap(), png);
-        assert!(load_backdrop(&dest).is_ok());
+        assert!(backdrop(&std::fs::read(&dest).unwrap()).is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

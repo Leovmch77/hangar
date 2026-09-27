@@ -30,7 +30,7 @@ impl fmt::Display for Error {
     }
 }
 
-pub enum Event { Connected, Data(Vec<u8>), Closed(Option<u16>) }
+pub enum Event { Connected, Data(Vec<u8>), Closed }
 struct Frame { opcode: u8, fin: bool, data: Vec<u8> }
 
 /// A janela possui este cliente; descartá-lo cancela inclusive a conexão pendente.
@@ -61,13 +61,13 @@ impl Terminal {
                 Err(error) => Err(error),
                 Ok(mut stream) => match pump(&mut stream, input, &output, &mut stopped).await {
                     Err(Error::Closed) => write_frame(&mut stream, 8, &1000u16.to_be_bytes()).await
-                        .map(|()| Event::Closed(Some(1000))),
+                        .map(|()| Event::Closed),
                     Err(error @ (Error::Protocol | Error::Utf8 | Error::TooLarge)) => {
                         let code: u16 = match error { Error::Utf8 => 1007, Error::TooLarge => 1009, _ => 1002 };
                         let _ = write_frame(&mut stream, 8, &code.to_be_bytes()).await;
                         Err(error)
                     }
-                    result => result.map(Event::Closed),
+                    result => result.map(|_| Event::Closed),
                 },
             };
             // O consumidor parado não pode manter a tarefa viva; EOF também sinaliza desconexão.
@@ -385,7 +385,7 @@ mod tests {
             assert!(matches!(events.recv().await, Ok(Ok(Event::Data(bytes))) if bytes == b"!"));
             terminal.close();
             assert_eq!(terminal.send(b"late"), Err(Error::Closed));
-            assert!(matches!(events.recv().await, Ok(Ok(Event::Closed(Some(1000))))));
+            assert!(matches!(events.recv().await, Ok(Ok(Event::Closed))));
             peer.await.unwrap();
             (&mut terminal.task).await.unwrap();
         }).await.unwrap();

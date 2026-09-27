@@ -159,8 +159,6 @@ pub struct Preview {
 pub struct Delivery {
     pub ok: bool,
     #[serde(default)] pub delivered: bool,
-    #[serde(default)] pub steered: bool,
-    #[serde(default)] pub native: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

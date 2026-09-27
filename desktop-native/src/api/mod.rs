@@ -152,7 +152,7 @@ impl Api {
             .send().await.map_err(|_| Failure::transport(true))?;
         let value: Value = Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))?;
         if value.get("ok").and_then(Value::as_bool) != Some(true) { return Err(Failure::transport(true)); }
-        Ok(Delivery { ok: true, delivered: true, steered: true, native: false })
+        Ok(Delivery { ok: true, delivered: true })
     }
 
     pub async fn commands(&self, name: &str) -> Result<Vec<CommandInfo>, Failure> {
