@@ -27,6 +27,11 @@ fn main() {
     }).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned());
     let days = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86_400).unwrap_or(0);
     let (y, m, d) = civil(days);
+    // Versão comparável com a release, na regra do projeto: `VERSION` da raiz + número de commits (`0.1.0.2533`).
+    // Sem git sai só o `VERSION`, que compara como mais velha que qualquer release e recebe a oficial.
+    let base = std::fs::read_to_string("../VERSION").map(|v| v.trim().to_owned()).unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
+    let release = git(&["rev-list", "--count", "HEAD"]).map_or(base.clone(), |n| format!("{base}.{n}"));
+    println!("cargo:rustc-env=HANGAR_NATIVE_RELEASE={release}");
     println!("cargo:rustc-env=HANGAR_NATIVE_VERSION={version}");
     println!("cargo:rustc-env=HANGAR_NATIVE_BUILD_DATE={y:04}-{m:02}-{d:02}");
 }

@@ -20,6 +20,7 @@ mod tables;
 mod ws;
 mod theme;
 mod ui_map;
+mod update;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};
 use std::{borrow::Cow, sync::Arc};
 
@@ -117,6 +118,7 @@ fn main() {
             eprintln!("fonte embutida recusada: {error}");
         }
         theme::sync_kit(None, cx);
+        update::start(runtime.clone(), cx);
         cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window_size(), cx))),
             app_id: Some("com.hangar.native".into()),
@@ -133,6 +135,7 @@ fn main() {
                 if cfg!(target_os = "linux") { root.bg(rgba(0x00000000)) } else { root }
             })
         }).expect("open native window");
+        update::report_alive();
         cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
         cx.activate(true);
     });

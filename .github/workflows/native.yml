@@ -1,0 +1,128 @@
+# App desktop nativo (desktop-native/, Rust/GPUI): compila Linux, Windows e macOS e publica numa release FIXA
+# `native-latest`, reescrita a cada push na main — o mesmo esquema do `dist-latest` do ci.yml. O app lê o
+# `native-latest.json` dessa release para oferecer o "Atualizar" (desktop-native/src/update.rs).
+name: Native
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop-native/**"
+      - "messages/**"
+      - "VERSION"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+# Dois pushes seguidos não publicam ao mesmo tempo: o segundo espera, e a release termina no commit mais novo.
+concurrency:
+  group: native-latest
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            exe: ""
+            experimental: false
+          # Windows e macOS nunca foram compilados antes deste workflow: falha deles não segura a release do Linux.
+          - os: windows-latest
+            platform: windows-x86_64
+            exe: ".exe"
+            experimental: true
+          - os: macos-latest
+            platform: macos-aarch64
+            exe: ""
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: desktop-native
+        shell: bash
+    steps:
+      # Histórico inteiro: a versão embutida é `VERSION` + número de commits, e clone raso contaria 1.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libfontconfig-dev libfreetype-dev libwayland-dev \
+            libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
+      # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. O cache guarda só as dependências.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-native
+      # Perfil do tools/build-otimizado.sh: é o binário que o usuário roda.
+      - run: cargo build --locked --release
+        env:
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      # Binário cru com nome limpo (o que o app baixa para se atualizar) + arquivo compactado para quem baixa à mão.
+      # Dentro do arquivo o executável continua `hangar-native`, o nome que os lançadores já usam.
+      - name: Empacotar
+        run: |
+          name=Hangar-${{ matrix.platform }}
+          mkdir -p out stage
+          cp "target/release/hangar-native${{ matrix.exe }}" "out/$name${{ matrix.exe }}"
+          cp "target/release/hangar-native${{ matrix.exe }}" stage/
+          case "$RUNNER_OS" in
+            Linux) tar -czf "out/$name.tar.gz" -C stage "hangar-native" ;;
+            Windows) (cd stage && 7z a -tzip "../out/$name.zip" "hangar-native.exe") ;;
+            macOS) (cd stage && zip "../out/$name.zip" "hangar-native") ;;
+          esac
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: desktop-native/out/*
+          retention-days: 1
+
+  # Só este job escreve, como o `publica-dist` do ci.yml.
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: out
+          merge-multiple: true
+      # sha256 com o NOME PURO (como o release.yml) e o manifesto calculados aqui, num sistema só, para os três
+      # saírem no mesmo formato. A versão é a mesma conta do build.rs sobre o mesmo commit.
+      - name: sha256 e manifesto
+        run: |
+          test -f out/Hangar-linux-x86_64 || { echo "sem o binário do Linux, nada a publicar"; exit 1; }
+          version="$(tr -d '[:space:]' < VERSION).$(git rev-list --count HEAD)"
+          cd out
+          for f in Hangar-*; do sha256sum "$f" > "$f.sha256"; done
+          jq -n --arg version "$version" --arg commit "$GITHUB_SHA" \
+            '{version: $version, commit: $commit, files: [inputs | capture("^(?<sha>[0-9a-f]{64})  (?<name>.+)$") | {(.name): .sha}] | add}' \
+            -R Hangar-*.sha256 > native-latest.json
+          cat native-latest.json
+      # O manifesto sobe por ÚLTIMO: até ele trocar, o app ainda vê o sha antigo e recusa o binário novo em vez de
+      # instalar um par trocado. Sistema que não compilou desta vez fica com o arquivo anterior na release (build
+      # instável não apaga o único binário dele) e fora do manifesto, então o app daquele sistema não oferece nada.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create native-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+                 --title 'Hangar desktop (topo da main)' \
+                 --notes 'Reescrita a cada push na main. Binários não assinados; confira pelo .sha256 ao lado.'
+          cd out
+          gh release upload native-latest Hangar-* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload native-latest native-latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/native-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null

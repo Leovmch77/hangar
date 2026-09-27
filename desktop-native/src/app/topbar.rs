@@ -135,7 +135,9 @@ impl Hangar {
             .map(|el| {
                 let controls = div().flex().justify_end().gap(px(6.))
                     .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
-                    .child(control(pill)).child(control(gear));
+                    .child(control(pill))
+                    .children(cx.try_global::<crate::update::Handle>().map(|updater| control(updater.0.clone())))
+                    .child(control(gear));
                 match beside {
                     // Com o painel direito aberto, a busca centra no chat e os controles ficam sobre o painel; mais largos que
                     // ele, invadem o vazio do chat sem empurrar a busca.
