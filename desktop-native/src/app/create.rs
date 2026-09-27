@@ -1302,6 +1302,12 @@ impl NewSession {
     }
 
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
+    /// O nome que a sessão da tela sem sessão vai ter (a pasta; o desempate do servidor pode somar um número) e o agente.
+    pub(super) fn opening_name(&self) -> String { self.picked.as_deref().map(basename).unwrap_or_default().to_owned() }
+    pub(super) fn provider(&self) -> &'static str { self.provider }
+    /// O passo da criação em curso e os segundos desde o pedido.
+    pub(super) fn progress(&self) -> (String, u64) { (self.step.clone(), self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)) }
+
     pub(super) fn note(&self) -> Option<(String, bool)> {
         if self.creating { return Some((tr("new_chat_sending"), false)); }
         fn failed<T>(remote: &Remote<T>) -> Option<&String> { remote.value.as_ref().filter(|_| !remote.loading)?.as_ref().err() }
@@ -1489,6 +1495,7 @@ impl Hangar {
             cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         }
         let view = self.new_chat.clone().unwrap();
+        if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
         let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
         let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
@@ -1531,7 +1538,14 @@ impl Hangar {
             CreateReply::CreatedWithInput(_, selection, text, result, _) => Some((*selection, text.clone(), result.clone())),
             _ => None,
         };
-        let Some(Opened { session, notes, warning }) = entity.update(cx, |d, cx| d.receive(reply, window, cx)) else { return };
+        let finished = matches!(&reply, CreateReply::Created(..) | CreateReply::CreatedWithInput(..));
+        let Some(Opened { session, notes, warning }) = entity.update(cx, |d, cx| d.receive(reply, window, cx)) else {
+            // A tela sem sessão já mostrava a mensagem como enviada: volta com o erro dela e o texto no campo.
+            if compact && finished && !entity.read(cx).creating { self.fail_opening(window, cx); cx.notify(); }
+            return;
+        };
+        // A mensagem enviada da tela sem sessão segue na conversa da sessão nova; a chegada já começou no Enviar.
+        let opening = if compact { self.opening.take() } else { None };
         if let Some((_, text, result)) = &first
             && let Some(key) = self.server.as_deref().and_then(|server| SessionKey::new(server, &session)) {
             self.drafts.entry(key.clone()).or_insert_with(|| text.clone());
@@ -1549,8 +1563,17 @@ impl Hangar {
         let readable = session.readable();
         // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
         let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
+        let key = self.server.as_deref().and_then(|server| SessionKey::new(server, &session));
         if current { self.select(session, window, cx); }
-        if let Some(home) = home.filter(|_| current && !cx.reduce_motion()) { self.start_landing(home, window); }
+        let sent = first.as_ref().is_some_and(|(_, _, result)| result.is_ok());
+        match opening.filter(|_| current) {
+            // O envio que falhou volta ao campo pelo rascunho, com o aviso da entrega; a bolha não fica.
+            Some(opening) => if sent {
+                self.opening = Some(super::landing::Opening { key, ..opening });
+                self.sync_rows(cx);
+            },
+            None => if let Some(home) = home.filter(|_| current && !cx.reduce_motion()) { self.start_landing(home, window); },
+        }
         // O fechar devolveu o foco ao botão que abriu; a sessão nova é onde se escreve em seguida, como no clique na aba.
         if current && readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
         for note in notes { window.push_notification(Notification::info(note), cx); }

@@ -31,12 +31,11 @@ use std::time::{Duration, Instant};
 
 /// Uma entrada do catálogo: duração e curva `cubic-bezier`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Spec { ms: u64, curve: [f32; 4] }
+pub struct Spec { ms: u64, delay: u64, curve: [f32; 4] }
 
 const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.];
 const EASE_OUT: [f32; 4] = [0., 0., 0.58, 1.];
 const EASE_OUT_EXPO: [f32; 4] = [0.16, 1., 0.3, 1.];
-const EASE_OUT_QUINT: [f32; 4] = [0.22, 1., 0.36, 1.];
 /// `--ease-out` do web (`cubic-bezier(0.23, 1, 0.32, 1)`), a curva da marca e da linha "trabalhando".
 const EASE_OUT_WEB: [f32; 4] = [0.23, 1., 0.32, 1.];
 
@@ -52,17 +51,22 @@ pub const MENU_OUT: Spec = Spec::new(100, EASE);
 pub const DIALOG_IN: Spec = Spec::new(180, EASE);
 /// Painéis abrindo e fechando: 200 ms `ease-out`.
 pub const RESIZE: Spec = Spec::new(200, EASE_OUT);
-/// A primeira mensagem da tela sem sessão: o compositor desce ao lugar dele.
-pub const NEW_THREAD: Spec = Spec::new(420, EASE_OUT_QUINT);
+/// `splash-out`: a tela que sai, 0,5 s depois de 0,15 s parada, opacidade e 6 px subindo.
+pub const SPLASH_OUT: Spec = Spec::new(500, EASE).after(150);
 /// A linha "trabalhando" e a marca dela entrando (tempo e curva do web).
 pub const WORKING: Spec = Spec::new(200, EASE_OUT_WEB);
 /// `zeron-pulse`: período dos esqueletos de carregando.
 pub const PULSE: Duration = Duration::from_millis(2400);
 
 impl Spec {
-    const fn new(ms: u64, curve: [f32; 4]) -> Self { Self { ms, curve } }
+    const fn new(ms: u64, curve: [f32; 4]) -> Self { Self { ms, delay: 0, curve } }
+
+    const fn after(mut self, delay: u64) -> Self { self.delay = delay; self }
 
     pub const fn duration(self) -> Duration { Duration::from_millis(self.ms) }
+
+    /// Espera mais duração: quando a linha do tempo inteira acaba.
+    pub const fn total(self) -> Duration { Duration::from_millis(self.delay + self.ms) }
 
     /// Progresso com a curva para `raw` de 0 a 1 do tempo; fora disso, preso às pontas.
     pub fn ease(self, raw: f32) -> f32 {
@@ -70,8 +74,10 @@ impl Spec {
         cubic_bezier(x1, y1, x2, y2)(raw)
     }
 
-    /// Quanto do tempo passou desde `start`, de 0 a 1, sem curva.
-    pub fn raw(self, start: Instant) -> f32 { (start.elapsed().as_secs_f32() / self.duration().as_secs_f32()).min(1.) }
+    /// Quanto do tempo passou desde `start`, de 0 a 1, sem curva; 0 durante a espera.
+    pub fn raw(self, start: Instant) -> f32 {
+        ((start.elapsed().as_secs_f32() - self.delay as f32 / 1000.) / self.duration().as_secs_f32()).clamp(0., 1.)
+    }
 }
 
 /// A curva `--ease-out` do web para quem monta os próprios trechos (a marca "trabalhando").
@@ -111,9 +117,8 @@ pub fn enter(key: impl Into<ElementId>, spec: Spec, window: &mut Window, cx: &Ap
         let start = start.unwrap_or_else(Instant::now);
         (start, start)
     }));
-    let raw = spec.raw(start);
-    if raw < 1. { request_frame(window, cx); }
-    spec.ease(raw)
+    if start.elapsed() < spec.total() { request_frame(window, cx); }
+    spec.ease(spec.raw(start))
 }
 
 /// A view vazia que a raiz monta para pedir quadros só para si.
@@ -156,9 +161,9 @@ mod tests {
 
     #[test]
     fn catalog_matches_zeron() {
-        assert_eq!((FADE_IN.ms, FADE_QUICK.ms, MENU_IN.ms, MENU_OUT.ms, DIALOG_IN.ms, RESIZE.ms, NEW_THREAD.ms),
-            (500, 150, 140, 100, 180, 200, 420));
-        for spec in [FADE_IN, FADE_QUICK, MENU_IN, DIALOG_IN, RESIZE, NEW_THREAD, WORKING] {
+        assert_eq!((FADE_IN.ms, FADE_QUICK.ms, MENU_IN.ms, MENU_OUT.ms, DIALOG_IN.ms, RESIZE.ms, SPLASH_OUT.ms, SPLASH_OUT.delay),
+            (500, 150, 140, 100, 180, 200, 500, 150));
+        for spec in [FADE_IN, FADE_QUICK, MENU_IN, DIALOG_IN, RESIZE, SPLASH_OUT, WORKING] {
             assert_eq!((spec.ease(0.), spec.ease(1.), spec.ease(2.)), (0., 1., 1.));
             let mut last = 0.;
             for i in 0..=100 {

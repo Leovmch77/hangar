@@ -92,9 +92,9 @@ impl Hangar {
                 return frame.child(self.panes.overlay.clone()).into_any_element();
             }
         };
-        // Na chegada da primeira mensagem a conversa e o painel desenham a cada quadro: a cópia guardada não acompanha a
-        // opacidade de quem a envolve.
-        if self.landing_active() && matches!(area, Area::Conversation | Area::Side) {
+        // Na chegada da primeira mensagem a conversa, o painel e a faixa de baixo (que, antes de a sessão nascer, desenha a
+        // conversa por vir) desenham a cada quadro: a cópia guardada não acompanha a opacidade de quem a envolve.
+        if self.landing_active() && matches!(area, Area::Conversation | Area::Side | Area::Bottom) {
             let mut frame = div();
             frame.style().refine(&style);
             return frame.child(AnyView::from(pane.clone())).into_any_element();

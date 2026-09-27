@@ -392,6 +392,8 @@ pub struct Hangar {
     new_chat_folders: std::rc::Rc<std::cell::Cell<Option<create::Menu>>>,
     /// A chegada da primeira mensagem da tela sem sessão (`landing.rs`).
     landing: Option<landing::Landing>,
+    /// A mensagem mandada da tela sem sessão, mostrada como enviada até o transcript trazer a real (`landing.rs`).
+    opening: Option<landing::Opening>,
     return_server: Option<(String, String)>,
     active_token: String,
     switch_seq: u64,
@@ -506,7 +508,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
-            new_chat_folders: Default::default(), landing: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, opening: None, return_server: None, active_token: String::new(), switch_seq: 0, switch_draft: None, ready_sessions: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -758,6 +760,8 @@ impl Hangar {
     }
 
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
+        self.opening = None;
         if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
         }
@@ -829,6 +833,7 @@ impl Hangar {
             if let Some(task) = self.session_task.take() { task.abort(); }
             if let Some(task) = self.history_task.take() { task.abort(); }
             self.selected = None;
+            self.opening = None;
             self.chat = Chat::default();
             self.turn_seen = None;
             self.reset_details();
@@ -1518,7 +1523,8 @@ impl Hangar {
             if text.trim().is_empty() { return; }
             if let Some(view) = self.new_chat.clone() {
                 let selection = self.selection;
-                view.update(cx, |view, cx| view.create(Some((selection, text)), cx));
+                view.update(cx, |view, cx| view.create(Some((selection, text.clone())), cx));
+                if view.read(cx).creating { self.begin_opening(view, text, window, cx); }
                 cx.notify();
             }
             return;
@@ -2038,6 +2044,7 @@ impl Hangar {
     /// Ids e assinaturas das linhas, splice na lista e texto das linhas que mudaram. `full` = os itens foram refeitos;
     /// sem ele, só as linhas depois dos itens são comparadas.
     fn sync_row_ids(&mut self, full: bool, cx: &mut Context<Self>) {
+        let opening = self.opening_row_shown();
         let events = &self.chat.events;
         let items = self.items.len();
         let (mut ids, mut signatures): (Vec<String>, Vec<String>) = if full {
@@ -2046,6 +2053,7 @@ impl Hangar {
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
         if let Some(tool) = &self.chat.live_tool { ids.push(LIVE_TOOL.into()); signatures.push(format!("{}{}", tool.name, tool.input)); }
         if !self.visible_preview.text.is_empty() { ids.push(PREVIEW.into()); signatures.push(String::new()); }
+        if opening { ids.push(landing::OPENING.into()); signatures.push(String::new()); }
         if self.working_row_shown() { ids.push(WORKING.into()); signatures.push(String::new()); }
         for agent in self.activity.running_agents() { ids.push(format!("{PINNED}{}", events[agent.call].id)); signatures.push(String::new()); }
         let prefix = self.row_ids.iter().zip(&ids).take_while(|(a,b)| a == b).count();
@@ -2165,6 +2173,7 @@ impl Hangar {
             (LIVE_THINKING, _) => self.render_live_thinking(cx),
             (LIVE_TOOL, _) => self.render_live_tool(),
             (WORKING, _) => self.render_working(cx),
+            (landing::OPENING, _) => self.render_opening_bubble(cx),
             (pin, _) if pin.starts_with(PINNED) => match self.pinned_call(&pin[PINNED.len()..]) {
                 // Sem resultado: o do lançamento em segundo plano não é o fim.
                 Some(call) => self.render_tool(Tool { call, result: None }, &id, cx),
@@ -2178,11 +2187,8 @@ impl Hangar {
             (_, Some(Item::Tasks { tasks, .. })) => self.render_tasks(&id, &tasks, cx),
             (_, None) => div().into_any_element(),
         };
-        let message = id == PREVIEW || matches!(self.items.get(index), Some(Item::Event(_)));
-        div().id(SharedString::from(id)).w_full().px(px(36.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
-            .flex().justify_center()
-            .child(div().w_full().max_w(px(column_width())).child(inner))
-            .into_any_element()
+        let message = id == PREVIEW || id == landing::OPENING || matches!(self.items.get(index), Some(Item::Event(_)));
+        row_frame(inner, message).id(SharedString::from(id)).into_any_element()
     }
 
     fn disclosure(&self, key: &str, open: bool) -> Button {
@@ -3427,6 +3433,13 @@ fn chat_text(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView
 /// Grupo de hover da linha da mensagem: a faixa de hora e copiar acende com ele.
 const ROW_GROUP: &str = "message-row";
 
+/// Recuo e coluna de uma linha da conversa; mensagem tem mais ar em cima e embaixo.
+fn row_frame(inner: AnyElement, message: bool) -> Div {
+    div().w_full().px(px(36.)).when(message, |el| el.py(px(8.))).when(!message, |el| el.py(px(2.)))
+        .flex().justify_center()
+        .child(div().w_full().max_w(px(column_width())).child(inner))
+}
+
 /// Bolha do usuário, na conversa e no subagente.
 fn user_bubble(content: impl IntoElement) -> Div {
     div().max_w(relative(0.78)).px(px(14.)).py(px(10.)).rounded(px(18.)).bg(theme::user_bubble()).child(content)
@@ -4375,7 +4388,8 @@ impl Render for Hangar {
         let limited_now = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
-        let landing::Frame { drop, shown, rise } = self.landing_frame(window);
+        let landing::Frame { drop, shown, rise } = self.landing_frame(window, cx);
+        let opening = self.opening.clone().filter(|_| self.selected.is_none());
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
             .when(chat_background, |el| el.bg(theme::window_fill()))
             .when(cutout, |el| {
@@ -4386,7 +4400,9 @@ impl Render for Hangar {
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
                 .relative().opacity(shown).top(px(rise))
                 .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
-                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).child(selected_name.clone().unwrap_or_else(|| tr("title"))))
+                .when_some(opening.as_ref(), |el, o| el.child(chrome::provider_glyph(&o.provider, 18.)))
+                .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
+                    .child(selected_name.clone().or_else(|| opening.as_ref().map(|o| o.name.clone())).unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
                 .child(div().flex_1())
                 .child(if session_chip { chrome::state_chip(&chip_state, tr(&format!("chip_{chip_state}")), true) }
