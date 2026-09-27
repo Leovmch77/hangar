@@ -450,7 +450,9 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
         .with_border(border())
         .with_dark(kit.is_dark())
         .with_paragraph_gap(rems(0.75))
-        .with_heading_font_size(|level, base| match level { 1 => px(19.), 2 => px(16.), 3 => px(15.), _ => base })
+        // Em relação ao texto da resposta, como os `em` do `.prose` do web; lido no desenho, o tamanho muda sem refazer o estilo.
+        .with_heading_font_size(|level, _| px(17. * appearance::get().text_size as f32 / 100.
+            * match level { 1 => 1.4, 2 => 1.25, 3 => 1.1, _ => 1. }))
         .with_inline_code(HighlightStyle { color: Some(accent_text()), background_color: Some(accent_dim()), ..Default::default() })
         .with_code_block(code_block)
         .with_table(StyleRefinement::default().border_0().bg(transparent_black()))

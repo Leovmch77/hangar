@@ -76,11 +76,13 @@ fn in_column(el: impl IntoElement) -> Div {
     div().w_full().flex_shrink_0().px(px(36.)).flex().justify_center().child(div().w_full().max_w(px(column_width())).child(el))
 }
 
-/// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência.
-fn conversation_text(el: Div) -> Div {
+/// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência. Em 100% são os do web no desktop:
+/// resposta 17 px/1,7 (`.prose`, AssistantBubble.svelte) e bolha do usuário 16 px/1,55 (`.bubble-text`, UserBubble.svelte).
+fn conversation_text(el: Div, user: bool) -> Div {
     let a = crate::appearance::get();
+    let (size, line) = if user { (16., 1.55) } else { (17., 1.7) };
     el.font_family(a.font.family())
-        .text_size(px(14. * a.text_size as f32 / 100.)).line_height(relative(1.45 * a.line_height as f32 / 100.))
+        .text_size(px(size * a.text_size as f32 / 100.)).line_height(relative(line * a.line_height as f32 / 100.))
 }
 const DETAIL_MAX: usize = 20_000;
 const LIVE_THINKING_TAIL: usize = 1_500;
@@ -3434,7 +3436,7 @@ impl Hangar {
                     value: std::rc::Rc::new(move |cx| view.upgrade().and_then(|view| view.read(cx).copy_text(&copy_id)).unwrap_or_default()),
                 })
         });
-        let content = conversation_text(div().flex().flex_col().gap_2())
+        let content = conversation_text(div().flex().flex_col().gap_2(), user)
             .when(!user && !plain, |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::muted() }).child(label)))
             .when_some(peer_head, |el, head| el.child(head))
             .when_some(thumbs, |el, thumbs| el.child(thumbs))

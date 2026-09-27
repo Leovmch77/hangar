@@ -136,7 +136,7 @@ impl Hangar {
         let text = self.opening.as_ref().map(|o| o.text.clone()).unwrap_or_default();
         let view = self.text_view(OPENING, OPENING, safe_markdown(&text), cx);
         div().w_full().flex().flex_col().gap_2().items_end()
-            .child(user_bubble(conversation_text(div().flex().flex_col().gap_2()).child(chat_text(&view, cx))))
+            .child(user_bubble(conversation_text(div().flex().flex_col().gap_2(), true).child(chat_text(&view, cx))))
             // A faixa de hora e copiar da linha real, vazia: a altura não muda quando ela chega.
             .child(div().h(px(24.)))
             .into_any_element()

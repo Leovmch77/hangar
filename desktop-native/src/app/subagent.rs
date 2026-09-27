@@ -306,7 +306,7 @@ impl SubConversation {
                 let (long, more_key) = (user && long_message(&markdown), format!("{id}:more"));
                 let open = self.expanded.contains(&more_key);
                 let view = self.text(id.clone(), markdown, cx);
-                let content = conversation_text(div().flex().flex_col().gap_2())
+                let content = conversation_text(div().flex().flex_col().gap_2(), user)
                     .when_some(label, |el, (label, error)| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD)
                         .text_color(if error { theme::warning() } else { theme::muted() }).child(label)))
                     .child(collapse(chat_text(&view, cx).on_link_click(open_web_link), long, open))

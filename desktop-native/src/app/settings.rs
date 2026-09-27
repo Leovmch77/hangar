@@ -781,10 +781,8 @@ impl Hangar {
         let thumb = px(if live { 60. } else { 92. });
 
         let preview = div().mt(px(18.)).p(px(14.)).flex().flex_col().gap(px(10.)).rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::inset())
-            .font_family(a.font.family())
-            .text_size(px(14. * a.text_size as f32 / 100.)).line_height(relative(1.45 * a.line_height as f32 / 100.))
-            .child(div().flex().justify_end().child(div().px(px(12.)).py(px(8.)).rounded(px(16.)).bg(theme::user_bubble()).child(tr("settings_preview_question"))))
-            .child(div().child(tr("settings_preview_answer")))
+            .child(div().flex().justify_end().child(conversation_text(div(), true).px(px(12.)).py(px(8.)).rounded(px(16.)).bg(theme::user_bubble()).child(tr("settings_preview_question"))))
+            .child(conversation_text(div(), false).child(tr("settings_preview_answer")))
             .child(div().font_family(theme::MONO).text_size(px(12.5)).child("npm run check"));
 
         // Miniatura: barra lateral à esquerda e conversa à direita, com duas linhas de texto em cada.
