@@ -128,15 +128,27 @@ jobs:
           cat native-latest.json
       # O manifesto sobe por ÚLTIMO: até ele trocar, o app ainda vê o sha antigo e recusa o binário novo em vez de
       # instalar um par trocado. Sistema que não compilou desta vez fica com o arquivo anterior na release (build
-      # instável não apaga o único binário dele) e fora do manifesto, então o app daquele sistema não oferece nada.
+      # instável não apaga o único binário dele) e fora do manifesto; as notas da release avisam quem baixa à mão.
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          version=$(jq -r .version out/native-latest.json)
+          notes="Build $version ($GITHUB_SHA). Linux: download desta versão."
+          for spec in 'Windows:Hangar-windows-x86_64.exe' 'macOS:Hangar-macos-aarch64'; do
+            platform=${spec%%:*}
+            file=${spec#*:}
+            if test -f "out/$file"; then
+              notes+=$'\n'"$platform: download desta versão."
+            else
+              notes+=$'\n'"$platform: o build falhou; se houver download nesta página, é de uma publicação anterior. Não corresponde ao manifesto desta versão."
+            fi
+          done
           gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create native-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
                  --title 'Hangar desktop (topo da main)' \
-                 --notes 'Reescrita a cada push na main. Binários não assinados; confira pelo .sha256 ao lado.'
+                 --notes "$notes"
           cd out
           gh release upload native-latest Hangar-* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit native-latest --repo "$GITHUB_REPOSITORY" --notes "$notes"
           gh release upload native-latest native-latest.json --repo "$GITHUB_REPOSITORY" --clobber
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/native-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
