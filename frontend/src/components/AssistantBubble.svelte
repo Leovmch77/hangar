@@ -392,22 +392,6 @@
 
   .prose :global(a) { color: var(--accent); text-decoration: underline; }
 
-  .prose :global(.file-citation) {
-    display: inline-flex; align-items: baseline; gap: 4px; max-width: 100%; min-height: 0;
-    vertical-align: baseline; padding: 0 5px; border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
-    color: var(--text-primary); font: inherit; font-size: 0.85em; line-height: 1.5;
-    cursor: pointer; text-align: left; transition: background 150ms ease-out, border-color 150ms ease-out;
-  }
-  .prose :global(.file-citation:hover) { background: var(--surface-raised); border-color: var(--text-muted); }
-  .prose :global(.file-citation:active) { background: var(--surface-inset); }
-  .prose :global(.file-citation:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .prose :global(.file-citation-name) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .prose :global(.file-citation-line) { color: var(--text-muted); margin-left: -4px; flex: none; }
-  .prose :global(.file-citation-icon) { display: inline-flex; align-self: center; width: 14px; height: 14px; flex: none; }
-  .prose :global(.file-citation-icon svg) { width: 100%; height: 100%; }
-
   /* ── Leitura em linha longa ─────────────────────────────────────────────
      SEM cap de medida: largura cheia e decisao registrada no DESIGN.md, e no uso real (texto
      tecnico intercalado com codigo e saida de comando) a coluna estreita custa mais do que ajuda —

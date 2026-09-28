@@ -37,7 +37,7 @@ import * as m from '../paraglide/messages';
   const canal = $derived(from ? parseCanal(text) : null);
   const voice = $derived(!from ? parseRealtimeDelegation(text) : null);
   const corpo = $derived(canal ? canal.text : text);
-  const html = $derived(from ? renderMarkdown(corpo) : '');
+  const html = $derived(from ? renderMarkdown(corpo, { fileLinks: true }) : '');
 
   function formatTime(ts: number | null | undefined): string {
     if (!ts) return '';

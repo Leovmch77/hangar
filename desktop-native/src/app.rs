@@ -4514,7 +4514,9 @@ fn prepare_detail(full: String) -> Prepared {
 fn prepare_message(event: &ChatEvent) -> Prepared {
     let card = message_card(event);
     let body = display_body(event);
-    let source = if event.kind == "assistant_msg" { composer::citation_markdown(&body) } else { body.clone() };
+    // Recado de outra sessão também é escrito por agente: cita arquivo do mesmo jeito que a resposta.
+    let cites = event.kind == "assistant_msg" || peer_of(event).is_some();
+    let source = if cites { composer::citation_markdown(&body) } else { body.clone() };
     Prepared::Message { markdown: safe_markdown(&source), blank: body.trim().is_empty(), card }
 }
 
