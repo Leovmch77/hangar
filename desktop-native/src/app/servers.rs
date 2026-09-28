@@ -121,13 +121,14 @@ impl Hangar {
         if let Some(draft) = draft { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
     }
 
-    /// A máquina escolhida no diálogo Nova sessão: o diálogo reabre já ligado a ela.
-    pub(super) fn pick_machine(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.server_entry(&key).cloned() else { return };
-        let dialog = self.new_session.take().is_some();
-        if dialog { window.close_dialog(cx); }
+    /// A sessão criada em outra máquina: ela vira a ativa uma vez, já com a sessão nova na lista guardada, para a lista que
+    /// chega primeiro não fechá-la.
+    pub(super) fn activate_for_created(&mut self, key: &str, session: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.server_entry(key).cloned() else { return };
+        if let Some(list) = self.remote.get_mut(key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
+            list.sessions.push(session.clone());
+        }
         self.activate_server(entry, window, cx);
-        if dialog { self.open_new_session(None, window, cx); }
     }
 
     /// Servidores trazidos de fora (o app Electron): entram na lista, gravada junto da conexão.
@@ -186,7 +187,7 @@ impl Hangar {
         self.servers.iter().filter(|s| !s.disabled).map(|s| {
             let key = norm(&s.address);
             let offline = self.remote.get(&key).is_some_and(|l| l.error.is_some());
-            super::create::ServerChoice { key, label: s.label.clone(), address: s.address.clone(), offline }
+            super::create::ServerChoice { key, label: s.label.clone(), address: s.address.clone(), token: s.token.clone(), offline }
         }).collect()
     }
 

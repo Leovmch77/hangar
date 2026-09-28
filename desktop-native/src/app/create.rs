@@ -235,13 +235,15 @@ fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: 
 }
 
 /// A conexão da abertura. Guardada no diálogo porque as respostas chegam com o `Hangar` em atualização, e o pedido seguinte
-/// (a pasta da raiz que chegou) não pode passar por ele.
+/// (a pasta da raiz que chegou) não pode passar por ele. `api` é a máquina onde a sessão vai nascer: começa na ativa e troca
+/// no seletor de máquina sem mexer na conexão do app.
 struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
-    owner: WeakEntity<Hangar>, servers: Vec<ServerChoice>, servers_rev: u64 }
+    servers: Vec<ServerChoice>, servers_rev: u64 }
 
 /// Uma máquina da lista do app; `key` é o endereço normalizado. `offline`: a lista dela falhou na abertura do diálogo.
 #[derive(Clone)]
-pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String, pub(super) offline: bool }
+pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String, pub(super) token: String,
+    pub(super) offline: bool }
 
 /// Os menus da tela sem sessão, cada um preso à própria pílula.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -418,17 +420,39 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Escolher outra máquina troca o servidor ativo sem perguntar, como os chips do web.
+    /// Escolher outra máquina troca só o destino deste diálogo e relê o que é dela (raízes, pastas, contas, modelos); o app
+    /// continua na máquina ativa até a sessão nascer, como o `targetServer` do web.
     fn pick_machine(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu.set(None);
-        let owner = self.link.owner.clone();
-        window.defer(cx, move |window, cx| { let _ = owner.update(cx, |app, cx| app.pick_machine(key, window, cx)); });
+        if self.creating || self.account_busy || self.baton.is_some() { return; }
+        let Some(choice) = self.servers.ok().and_then(|list| list.iter().find(|c| c.key == key)).cloned() else { return };
+        match Api::new(&choice.address, &choice.token) {
+            Ok(api) => self.link.api = api,
+            Err(error) => { self.error = Some(Hangar::failure(&error)); cx.notify(); return; }
+        }
+        (self.root, self.picked, self.config, self.config_pick) = (None, None, None, None);
+        (self.same_folder, self.error, self.notice, self.created_path, self.asking, self.confirming) = (false, None, None, None, false, false);
+        self.dir.clear();
+        self.folders.clear();
+        self.branch.clear();
+        self.roots.reset();
+        self.scan.reset();
+        self.checkout.reset();
+        self.sessions.reset();
+        self.providers.reset();
+        self.configs.reset();
+        // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
+        self.models.reset();
+        self.before = None;
+        self.load_target(cx);
+        // O arquivo da pasta volta vazio até a pasta nova.
+        if !self.compact { self.load_archive(window, cx); }
         cx.notify();
     }
 
     /// Chips de máquina no topo do diálogo (os do `CreateSessionSheet`): as ligadas e a atual mesmo fora do ar, com uma linha
     /// contando as que sumiram, senão a pessoa não sabe se a máquina foi apagada ou está desligada. No bastão a máquina fica a da
-    /// origem: o resumo é arquivo de lá, e trocar reabriria o diálogo sem ele.
+    /// origem: o resumo é arquivo de lá.
     fn render_machines(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let list = self.servers.ok()?;
         let shown: Vec<&ServerChoice> = list.iter().filter(|m| !m.offline || self.current_server(m)).collect();
@@ -458,14 +482,20 @@ impl NewSession {
             .into_any_element())
     }
 
-    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.load_servers(window, cx);
+    /// O que é da máquina de destino. Contas Codex e o contexto delas só com o Codex escolhido.
+    fn load_target(&mut self, cx: &mut Context<Self>) {
         if self.compact { self.load_quotas(cx); }
         self.load_roots(cx);
         self.load_providers(cx);
         self.load_configs(cx);
+        if self.provider == "codex" { self.load_codex(cx); self.load_context(cx); }
+        if !self.compact { self.load_extras(cx); }
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_servers(window, cx);
+        self.load_target(cx);
         if self.compact { return; }
-        self.load_extras(cx);
         // A continuação trabalha na mesma árvore: a pasta da origem já vem escolhida. Sem pasta conhecida, o nome sai já e a
         // pasta fica por escolher.
         match self.baton.as_ref().map(|b| (b.cwd.clone().filter(|c| !c.is_empty()), b.name.clone())) {
@@ -1490,7 +1520,7 @@ impl Hangar {
         };
         if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-                owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
+                servers: self.server_choices(), servers_rev: self.servers_rev };
             self.new_chat_folders.set(None);
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
@@ -1522,7 +1552,7 @@ impl Hangar {
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-            owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
+            servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
@@ -1555,7 +1585,17 @@ impl Hangar {
         };
         // A mensagem enviada da tela sem sessão segue na conversa da sessão nova; a chegada já começou no Enviar.
         let opening = if compact { self.opening.take() } else { None };
-        if let Some((_, text, result)) = &first
+        // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
+        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
+        // Nasceu em outra máquina: ela vira a ativa agora, uma vez, e o resto segue como se sempre tivesse sido ela.
+        let target = super::servers::norm(&entity.read(cx).link.api.identity());
+        if current && self.server.as_deref().map(super::servers::norm) != Some(target.clone()) {
+            self.activate_for_created(&target, &session, window, cx);
+        }
+        // Chaves e seleção valem só na máquina onde a sessão nasceu.
+        let here = self.server.as_deref().map(super::servers::norm) == Some(target);
+        let current = current && here;
+        if let Some((_, text, result)) = first.as_ref().filter(|_| here)
             && let Some(key) = self.server.as_deref().and_then(|server| SessionKey::new(server, &session)) {
             self.drafts.entry(key.clone()).or_insert_with(|| text.clone());
             if result.is_err() && self.selected_key().as_ref() == Some(&key) && self.composer.read(cx).value().is_empty() {
@@ -1570,8 +1610,6 @@ impl Hangar {
             None
         };
         let readable = session.readable();
-        // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
-        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
         let key = self.server.as_deref().and_then(|server| SessionKey::new(server, &session));
         if current { self.select(session, window, cx); }
         let sent = first.as_ref().is_some_and(|(_, _, result)| result.is_ok());
