@@ -81,6 +81,14 @@ pub struct ChatEvent {
     pub desistiu: Option<bool>,
     pub hook_error: Option<String>,
     pub image_count: Option<u32>,
+    /// Só em notice `skill_loaded`: a skill que o harness injetou como fala do usuário.
+    pub skill: Option<SkillLoaded>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct SkillLoaded {
+    pub name: String,
+    #[serde(default)] pub body: String,
 }
 
 impl ChatEvent {

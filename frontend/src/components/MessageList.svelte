@@ -12,6 +12,7 @@
   import ToolCard from './ToolCard.svelte';
   import ToolGroup from './ToolGroup.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
+  import SkillNotice from './SkillNotice.svelte';
   import PensamentoVivo from './PensamentoVivo.svelte';
   import TaskRows from './TaskRows.svelte';
   import { foldTasks } from '@hangar/core';
@@ -655,6 +656,8 @@
               <p>{m.notice_hook_prompt()}</p>
               {#if ev.hook_error}<p class="notice-hook-texto">{ev.hook_error}</p>{/if}
             </div>
+          {:else if ev.text === 'skill_loaded' && ev.skill}
+            <SkillNotice skill={ev.skill} />
           {:else}
           <p class="notice">{ev.text === 'interrupted' || ev.text === 'turn_aborted'
             ? m.notice_interrupted()

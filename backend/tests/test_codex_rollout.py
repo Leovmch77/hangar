@@ -31,6 +31,30 @@ def test_mensagem_real_grudada_no_aviso_nao_vira_aviso():
     assert ev.kind == "user_msg" and "faz outra coisa" in (ev.text or "")
 
 
+def _skill_obj(text: str) -> dict:
+    # Forma real: a entrada que o Codex grava logo depois do `/nome-da-skill` digitado.
+    return {"timestamp": "t", "type": "response_item", "payload": {
+        "type": "message", "role": "user", "id": "msg_x",
+        "content": [{"type": "input_text", "text": text}],
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": "t1", "content_item_kinds": ["skills.selected_skill_instructions"]}}}
+
+
+def test_skill_injetada_vira_aviso_com_corpo():
+    text = ("<skill>\n<name>retomar-tarefa</name>\n<path>/home/fulano/.agents/skills/retomar-tarefa/SKILL.md</path>\n"
+            "---\nname: retomar-tarefa\ndescription: Retoma uma tarefa.\n---\n\n# Retomar\n\nPasso 1.\n\n</skill>")
+    [ev] = parse_rollout_obj(_skill_obj(text))
+    assert ev.kind == "notice" and ev.text == "skill_loaded"
+    assert ev.skill["name"] == "retomar-tarefa"
+    assert ev.skill["path"] == "/home/fulano/.agents/skills/retomar-tarefa/SKILL.md"
+    assert ev.skill["body"].startswith("---\nname: retomar-tarefa") and ev.skill["body"].endswith("Passo 1.")
+
+
+def test_fala_real_grudada_na_skill_continua_fala():
+    [ev] = parse_rollout_obj(_skill_obj("<skill>\n<name>x</name>\ncorpo\n</skill>\nfaz isso"))
+    assert ev.kind == "user_msg" and "faz isso" in (ev.text or "")
+
+
 def test_developer_message_ignored():
     obj = {"timestamp": "t", "type": "response_item",
            "payload": {"type": "message", "role": "developer",

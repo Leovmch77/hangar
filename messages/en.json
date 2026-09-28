@@ -903,6 +903,7 @@
   "notice_interrupted": "You interrupted this turn",
   "notice_compacted": "Context compacted",
   "notice_hook_prompt": "A hook reopened the turn",
+  "notice_skill_loaded": "Skill {name} loaded",
   "composer_preview_rodando": "Project preview running",
   "composer_pareamento_sessoes": "Session pairing",
   "composer_parear_outra": "Pair with another session",

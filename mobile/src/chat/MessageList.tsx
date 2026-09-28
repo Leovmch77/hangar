@@ -108,6 +108,8 @@ export function MessageList({
           const frase = conhecido ? m.notice_interrupted()
             : ev.text === 'compacted' ? m.notice_compacted()
             : ev.text === 'hook_prompt' ? [m.notice_hook_prompt(), ev.hook_error].filter(Boolean).join('\n')
+            // ponytail: só a linha; abrir o SKILL.md no app nativo fica pra quando pedirem.
+            : ev.text === 'skill_loaded' && ev.skill ? m.notice_skill_loaded({ name: ev.skill.name })
             : ev.text;
           return <Text style={styles.notice}>{frase}</Text>;
         }

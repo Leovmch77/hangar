@@ -27,6 +27,10 @@ _CONTEXT_WRAPPER_RE = re.compile(
 _TURNO_ABORTADO_RE = re.compile(r"^<turn_aborted>.*</turn_aborted>$", re.DOTALL)
 # Hook de Stop que devolve `block`: o Codex reabre o turno e grava o motivo como fala do usuário.
 _HOOK_PROMPT_RE = re.compile(r"^<hook_prompt\b[^>]*>(.*)</hook_prompt>$", re.DOTALL)
+# Skill invocada (`/nome` ou `$nome`): o Codex grava o SKILL.md inteiro como fala do usuário, logo
+# depois do comando que a pessoa digitou. Ancorado nas duas pontas pelo mesmo motivo do aborto.
+_SKILL_RE = re.compile(
+    r"^<skill>\s*<name>([^<]*)</name>\s*(?:<path>([^<]*)</path>)?\s*(.*?)\s*</skill>$", re.DOTALL)
 
 
 def _is_context_wrapper(text: str) -> bool:
@@ -242,6 +246,13 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
                 # Não é fala da pessoa: vira aviso, com o que o hook escreveu como detalhe.
                 return [ChatEvent(kind="notice", id=_event_id(obj), text="hook_prompt",
                                   hook_error=hook.group(1).strip())]
+            skill = _SKILL_RE.match(text.strip())
+            if skill:
+                # Linha recolhida na interface; o corpo vai junto pra abrir sob demanda.
+                return [ChatEvent(kind="notice", id=_event_id(obj), text="skill_loaded",
+                                  skill={"name": skill.group(1).strip(),
+                                         "path": (skill.group(2) or "").strip() or None,
+                                         "body": skill.group(3)})]
             return [ChatEvent(kind="user_msg", id=_event_id(obj), text=text)]
         if role == "assistant":
             text = _blocks_text(payload.get("content"), "output_text")

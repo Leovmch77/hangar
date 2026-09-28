@@ -903,6 +903,7 @@
   "notice_interrupted": "Turno interrompido por você",
   "notice_compacted": "Contexto compactado",
   "notice_hook_prompt": "Um hook reabriu o turno",
+  "notice_skill_loaded": "Skill {name} carregada",
   "composer_preview_rodando": "Preview de projeto rodando",
   "composer_pareamento_sessoes": "Pareamento de sessões",
   "composer_parear_outra": "Parear com outra sessão",

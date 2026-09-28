@@ -145,6 +145,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   pessoa.** No Codex é a mensagem de usuário `<hook_prompt …>`; no Claude, o anexo
   `hook_additional_context` de `Stop`. O de `UserPromptSubmit` fica fora: vem em todo prompt.
   Nenhum dos dois grava o nome do script — quem se identifica é o texto do próprio hook.
+- **Skill invocada no Codex vira aviso (`notice` `skill_loaded` com `skill: {name, path, body}`),
+  nunca fala da pessoa.** O Codex grava o SKILL.md inteiro como mensagem de usuário
+  `<skill><name>…</name><path>…</path>…</skill>` logo depois do `/nome` digitado; a interface
+  mostra uma linha recolhida e abre o corpo sob demanda. O Pi usa outro formato
+  (`<skill name="…" location="…">`) e ainda não é tratado.
 - **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
   o instalador preserva o que está lá.
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e

@@ -3422,7 +3422,10 @@ impl Hangar {
             let label = match event.kind.as_str() {
                 "user_msg" => tr("you"), "assistant_msg" => tr("assistant"), "thinking" => tr("thinking"),
                 "tool_use" | "tool_result" => event.tool_name.clone().unwrap_or_else(|| tr("tool")),
-                "notice" => tr("notice"), _ => tr("unknown"),
+                "notice" => event.skill.as_ref()
+                    .and_then(|skill| crate::i18n::tr_web("notice_skill_loaded", &HashMap::from([("name".to_owned(), skill.name.clone())])))
+                    .unwrap_or_else(|| tr("notice")),
+                _ => tr("unknown"),
             };
             let mut notes = Vec::new();
             if event.desistiu == Some(true) || event.id.starts_with("held:") || event.hook_error.is_some() {
@@ -3465,9 +3468,15 @@ impl Hangar {
         let thumbs = self.render_thumbs(&id, images.into_iter().map(|(source, _, _)| source).collect(), cx);
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
         let more_key = format!("{id}#more");
-        let long = user && long_message(&markdown);
+        // Skill injetada: só o rótulo, e o SKILL.md inteiro no "mostrar mais" (como a linha recolhida do web).
+        let skill = match self.items.get(index) {
+            Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).is_some_and(|e| e.skill.is_some()),
+            _ => false,
+        };
+        let long = skill || (user && long_message(&markdown));
         let open = self.expanded.contains(&more_key);
         let text: Vec<AnyElement> = match charted {
+            None if skill && !open => Vec::new(),
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
             None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
@@ -4338,7 +4347,8 @@ fn select_snapshot(state: &SessionState) -> String { json!([state.question, stat
 
 fn display_body(event: &ChatEvent) -> String {
     match event.kind.as_str() {
-        "notice" => tr(&event.body()),
+        // Skill injetada: o corpo é o SKILL.md, que a linha recolhida só mostra ao abrir.
+        "notice" => event.skill.as_ref().map(|skill| skill.body.clone()).unwrap_or_else(|| tr(&event.body())),
         "assistant_msg" => interaction::plan_display(&event.body()),
         // Anexos viram cartões próprios; o texto mostra só a legenda.
         "user_msg" => {
