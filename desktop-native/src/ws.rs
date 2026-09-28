@@ -43,11 +43,13 @@ pub struct Terminal {
 
 impl Terminal {
     /// `token` é a credencial da conexão de `api`, nunca o texto atual do formulário.
-    pub fn open(runtime: &Handle, api: &Api, session: &str, token: String, cols: u16, rows: u16) -> Self {
+    /// `shortcut`: terminal de atalho da sessão; o backend confere o dono antes de anexar.
+    pub fn open(runtime: &Handle, api: &Api, session: &str, shortcut: Option<&str>, token: String, cols: u16, rows: u16) -> Self {
         let (cols, rows) = dimensions(cols, rows);
         let mut url = api.endpoint(Some(session), Some("term"));
         url.query_pairs_mut().append_pair("token", token.trim())
             .append_pair("cols", &cols.to_string()).append_pair("rows", &rows.to_string());
+        if let Some(id) = shortcut { url.query_pairs_mut().append_pair("shortcut", id); }
         let (commands, input) = async_channel::bounded(8);
         let (output, events) = async_channel::bounded(8);
         let (stop, mut stopped) = oneshot::channel();
@@ -377,7 +379,7 @@ mod tests {
                     if opcode == 1 { socket.write_all(&[0x82, 1, b'!']).await.unwrap(); }
                 }
             });
-            let mut terminal = Terminal::open(&Handle::current(), &api, "fixture", STANDARD.encode([17; 24]), 999, 0);
+            let mut terminal = Terminal::open(&Handle::current(), &api, "fixture", None, STANDARD.encode([17; 24]), 999, 0);
             let events = terminal.events();
             assert!(matches!(events.recv().await, Ok(Ok(Event::Connected))));
             terminal.send(b"echo hi\r").unwrap();

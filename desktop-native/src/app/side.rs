@@ -58,12 +58,16 @@ pub(super) struct Side {
     reloading: HashSet<SessionKey>,
     /// A aba Git da sessão aberta (dono = `session_owner`).
     pub(super) git: Option<((u64, String), Entity<super::git::GitPanel>)>,
+    /// Terminais dos atalhos shell por nome de sessão, e a aba que o painel deve trazer pra frente.
+    pub(super) shortcut_terms: HashMap<String, Vec<super::terminal::ShortcutTerm>>,
+    pub(super) shortcut_focus: HashMap<String, String>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         Self { open: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None }
+            files: None, diff: None, reloading: HashSet::new(), git: None,
+            shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new() }
     }
 }
 
@@ -74,6 +78,8 @@ impl Side {
         self.cost = None;
         self.on_select();
         self.reloading.clear();
+        self.shortcut_terms.clear();
+        self.shortcut_focus.clear();
     }
 
     pub fn on_select(&mut self) {
@@ -278,15 +284,14 @@ impl Hangar {
                     self.deliver(key, text, String::new(), false, known, cx);
                 }
             }
+            // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira
+            // aba do painel, onde dá pra ver a saída e fechar o programa.
             Shortcut::Shell { label, command, .. } => {
                 let Some(api) = self.api.clone() else { return; };
                 self.action_feedback.insert(key.clone(), (tr("shortcut_started").replace("{label}", &label), false));
-                let (connection, tx, local) = (self.connection, self.tx.clone(), self.local_shell(&key.name, command.clone()));
+                let (connection, tx) = (self.connection, self.tx.clone());
                 self.runtime.spawn(async move {
-                    let result = match local {
-                        Some(run) => run.await,
-                        None => api.act(&key.name, &["shortcut-shell"], Some(json!({"command": command})), false, 30).await,
-                    };
+                    let result = api.act(&key.name, &["shortcut-shell"], Some(json!({"command": command, "label": label})), false, 30).await;
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Shell(label), result) }).await;
                 });
             }
@@ -353,6 +358,10 @@ impl Hangar {
                 });
             }
             Reply::Shell(label) => {
+                // A aba do terminal vai pra frente (sem abrir o painel); a que falhou também, com a saída inteira.
+                let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str);
+                self.side.shortcut_focus.insert(key.name.clone(), terminal.map(str::to_owned).unwrap_or_default());
+                self.refresh_shortcut_terms(&key.name);
                 let note = match result {
                     Ok(_) => (tr("shortcut_launched").replace("{label}", &label), false),
                     Err(error) if matches!(error.status, Some(404 | 405)) => (tr("shortcut_shell_unsupported"), true),

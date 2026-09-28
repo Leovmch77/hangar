@@ -1,5 +1,6 @@
-//! Servidor nesta máquina: anexos, atalhos de programa e o editor vão direto ao disco e ao processo, com as regras de
-//! `backend/app/uploads.py` e das rotas `upload`, `shortcut-shell` e `open-editor` de `backend/app/api.py`. Servidor
+//! Servidor nesta máquina: anexos e o editor vão direto ao disco e ao processo, com as regras de
+//! `backend/app/uploads.py` e das rotas `upload` e `open-editor` de `backend/app/api.py`. Atalho shell vai sempre ao
+//! backend: é ele quem cria o terminal escondido que vira aba do painel. Servidor
 //! remoto, pasta que não existe aqui ou vídeo (quadros e fala saem do backend) seguem pelo backend.
 use super::*;
 use crate::api::MAX_BYTES;
@@ -158,64 +159,6 @@ fn prune(project: &Path, days: i64) {
     }
 }
 
-/// `shortcut-shell`: o comando pelo shell do usuário, no cwd da sessão, desprendido e sem saída.
-/// `$SHELL` e não `/bin/sh`, igual ao backend: função/alias do fish (`delphi-vm`) não existe pro sh.
-fn shell(cwd: &Path, command: &str) -> Result<Value, Failure> {
-    let command = command.trim();
-    if command.is_empty() { return Err(refusal(400, "comando vazio")); }
-    // Saída num arquivo temporário: só é lida se o comando morrer com erro na janela abaixo.
-    let path = std::env::temp_dir().join(format!("hangar-shortcut-{}-{}", std::process::id(), SHORTCUT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-    let file = std::fs::File::create(&path).map_err(|error| refusal(500, error.to_string()))?;
-    let err = file.try_clone().map_err(|error| refusal(500, error.to_string()))?;
-    let mut cmd = Command::new(user_shell());
-    cmd.arg("-c").arg(command).current_dir(cwd).stdout(file).stderr(err);
-    #[cfg(unix)] { use std::os::unix::process::CommandExt; cmd.process_group(0); }
-    let mut child = match cmd.stdin(Stdio::null()).spawn() {
-        Ok(child) => child,
-        Err(error) => { let _ = std::fs::remove_file(&path); return Err(refusal(500, error.to_string())); }
-    };
-    // Quem clicou precisa saber que falhou, igual ao backend: comando que erra morre em segundos;
-    // o que ainda roda depois da janela é programa longo e conta como ok.
-    let deadline = std::time::Instant::now() + SHORTCUT_FAIL_WINDOW;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
-            _ => break None,
-        }
-    };
-    let failed = status.filter(|s| !s.success());
-    let tail = failed.map(|_| output_tail(&std::fs::read(&path).unwrap_or_default()));
-    // No Unix o arquivo some do disco já; o programa longo segue escrevendo nele sem ninguém ler.
-    let _ = std::fs::remove_file(&path);
-    if status.is_none() { std::thread::spawn(move || { let _ = child.wait(); }); }
-    match (failed, tail) {
-        (Some(status), Some(tail)) => {
-            let code = status.code().map_or_else(|| "sinal".to_owned(), |c| c.to_string());
-            let mut msg = format!("o comando saiu com o código {code}");
-            if !tail.is_empty() { msg.push_str(": "); msg.push_str(&tail); }
-            Err(refusal(422, msg))
-        }
-        _ => Ok(json!({"ok": true})),
-    }
-}
-
-const SHORTCUT_FAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-static SHORTCUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// `_shortcut_output_tail` do backend: últimas linhas, curtas o bastante pro aviso da tela.
-fn output_tail(raw: &[u8]) -> String {
-    let text = String::from_utf8_lossy(raw);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let tail = lines[lines.len().saturating_sub(5)..].join(" | ");
-    let count = tail.chars().count();
-    if count <= 400 { tail } else { format!("…{}", tail.chars().skip(count - 400).collect::<String>()) }
-}
-
-fn user_shell() -> String {
-    std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/sh".into())
-}
-
 /// `open-editor`: o binário da configuração do servidor com a pasta como único argumento, sem shell.
 fn editor(binary: &str, cwd: &str) -> Result<Value, Failure> {
     launch(Command::new(binary).arg(cwd)).map_err(|error| refusal(500, format!("editor '{binary}' falhou: {error}")))
@@ -317,12 +260,6 @@ impl Hangar {
         local.unwrap_or(Uploads::Remote)
     }
 
-    /// `shortcut-shell` local quando a sessão é desta máquina; `None` manda ao backend.
-    pub(super) fn local_shell(&self, name: &str, command: String) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
-        let (_, real) = self.local_cwd(name)?;
-        Some(blocking(move || shell(&real, &command)))
-    }
-
     /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor.
     pub(super) fn local_editor(&self, name: &str) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
         let (cwd, _) = self.local_cwd(name)?;
@@ -338,19 +275,9 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{cited, output_tail, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
+    use super::{cited, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
     use std::path::Path;
 
-    #[test]
-    fn output_tail_keeps_last_five_lines_and_caps_length() {
-        assert_eq!(output_tail(b"a\n\n  b  \nc\nd\ne\nf\n"), "b | c | d | e | f");
-        assert_eq!(output_tail(b""), "");
-        let long = output_tail("x".repeat(500).as_bytes());
-        assert!(long.starts_with('\u{2026}'));
-        assert_eq!(long.chars().count(), 401);
-    }
-
-    #[cfg(unix)]
     #[test]
     fn cited_path_stays_in_the_session_folder_and_out_of_git() {
         let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("hangar-cited-{}", std::process::id()));

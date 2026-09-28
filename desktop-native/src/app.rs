@@ -880,6 +880,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
+        self.refresh_shortcut_terms(&session.name);
         if session.readable() {
             if let Some(api) = self.api.clone() {
                 let tx = self.tx.clone();
@@ -4669,7 +4670,8 @@ impl Render for Hangar {
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
                     .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))))
-                .when(self.selected.is_some(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
+                // Sessão sem pane só tem terminal quando um atalho abriu um.
+                .when(self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
                         tr("term_toggle"), cx).selected(self.terminal.is_some())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
