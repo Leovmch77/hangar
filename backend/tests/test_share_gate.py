@@ -1,0 +1,257 @@
+import asyncio
+import dataclasses
+import socket
+
+import pytest
+from fastapi import FastAPI, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from app import share_api, share_gate, share_store, termsock, tmux
+from app.config import settings
+
+SHARED = share_store.Share(
+    id="s1", session="cc", life="L1", created_at=0.0, code_expires_at=0.0, code_hash="c",
+    token_hash="t", device="Pixel", redeemed_at=1.0, revoked_at=None)
+GUEST = {"Authorization": "Bearer g"}
+# Simula `share_store.revoke(...)` no meio de um stream: o próximo lookup devolve o revogado.
+STATE = {"revoked": False, "unsure": False}
+
+
+def _lookup(t):
+    if t != "g":
+        return None
+    return dataclasses.replace(SHARED, revoked_at=2.0) if STATE["revoked"] else SHARED
+
+
+def _life(name):
+    # `unsure` simula o tmux que parou de responder no meio: a vida some, a ausência não é confirmada.
+    if name != "cc" or STATE["unsure"]:
+        return None
+    return "L1"
+
+
+@pytest.fixture(autouse=True)
+def _fakes(monkeypatch):
+    settings.auth_token = "secret"
+    STATE["revoked"] = False
+    STATE["unsure"] = False
+    share_gate._life_cache.clear()
+    share_api.changing_mode.discard("cc")
+    monkeypatch.setattr(share_store, "lookup_token", _lookup)
+    monkeypatch.setattr(share_gate, "session_life", _life)
+    monkeypatch.setattr(share_api, "confirmed_absent", lambda name: False)
+
+
+def _app():
+    a = FastAPI()
+
+    @a.get("/api/sessions/events")
+    async def lista():
+        async def corpo():
+            # Teto de 500 pedaços (~5 s): se o vigia falhar, o teste termina e acusa pela contagem.
+            for i in range(500):
+                yield f"data: {i}\n\n"
+                if i == 0:
+                    STATE["revoked"] = True
+                await asyncio.sleep(0.01)
+        return StreamingResponse(corpo(), media_type="text/event-stream")
+
+    @a.get("/api/sessions/{name}/events")
+    async def eventos(name: str):
+        async def corpo():
+            for i in range(30):
+                yield f"data: {i}\n\n"
+                if i == 0:
+                    STATE["unsure"] = True
+                await asyncio.sleep(0.02)
+        return StreamingResponse(corpo(), media_type="text/event-stream")
+
+    @a.websocket("/api/sessions/{name}/term-hold")
+    async def terminal_aberto(ws: WebSocket, name: str):
+        # Terminal que fica aberto: só o vigia do porteiro fecha.
+        await ws.accept()
+        await ws.send_text("aberto")
+        STATE["revoked"] = True
+        await ws.receive_text()
+
+    @a.websocket("/api/sessions/{name}/term")
+    async def term(ws: WebSocket, name: str):
+        prep = await termsock._porta_de_entrada(ws, name)
+        if prep:
+            await ws.accept()
+            await ws.send_text(f"ok {prep[2]}")
+            await ws.close()
+
+    @a.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    def qualquer(path: str, request: Request):
+        g = share_gate.guest_of(request)
+        return {"path": path, "guest": g.session if g else None}
+
+    a.add_middleware(share_gate.ShareGate)
+    a.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    return a
+
+
+def _guest_client():
+    return TestClient(_app(), base_url="http://127.0.0.1:8766", client=("203.0.113.9", 1))
+
+
+def test_porta_do_dono_nao_passa_pelo_porteiro():
+    c = TestClient(_app(), base_url="http://127.0.0.1:8765")
+    r = c.get("/api/config")
+    assert r.status_code == 200 and r.json()["guest"] is None
+
+
+def test_rota_da_sessao_marca_o_convidado():
+    r = _guest_client().get("/api/sessions/cc/history", headers=GUEST)
+    assert r.status_code == 200 and r.json()["guest"] == "cc"
+
+
+def test_token_por_query_vale():
+    assert _guest_client().get("/api/sessions/cc/events?token=g").status_code == 200
+
+
+def test_token_do_dono_e_cookie_recusados():
+    c = _guest_client()
+    assert c.get("/api/sessions/cc/history", headers={"Authorization": "Bearer secret"}).status_code == 401
+    c.cookies.set("cp_token", "g")
+    assert c.get("/api/sessions/cc/history").status_code == 401
+
+
+def test_outra_sessao_e_rota_global_fora_da_lista_dao_403():
+    c = _guest_client()
+    for path in ("/api/sessions/outra/history", "/api/config", "/api/fs/roots", "/"):
+        r = c.get(path, headers=GUEST)
+        assert r.status_code == 403, path
+        assert r.json()["detail"]["code"] == "erro_fora_do_convite"
+
+
+@pytest.mark.parametrize("path", [
+    "/api/sessions/cc/pair", "/api/sessions/cc/pair-remote", "/api/sessions/cc/group-message",
+    "/api/sessions/cc/orq/papel", "/api/sessions/cc/bastao", "/api/sessions/cc/open-terminal",
+    "/api/sessions/cc/open-editor", "/api/sessions/cc/nav", "/api/sessions/cc/share"])
+def test_lista_de_bloqueio(path):
+    assert _guest_client().post(path, headers=GUEST).status_code == 403
+
+
+def test_rotas_globais_do_chat_passam():
+    c = _guest_client()
+    assert c.get("/api/model-options", headers=GUEST).status_code == 200
+    assert c.post("/api/pensamento/pt", headers=GUEST).status_code == 200
+    assert c.get("/api/tts/audio/abc", headers=GUEST).status_code == 200
+
+
+def test_fechar_a_propria_sessao_passa():
+    assert _guest_client().delete("/api/sessions/cc", headers=GUEST).status_code == 200
+
+
+def test_revogado_da_410():
+    STATE["revoked"] = True
+    r = _guest_client().get("/api/sessions/cc/history", headers=GUEST)
+    assert r.status_code == 410
+    assert r.json()["detail"]["code"] == "erro_convite_encerrado"
+
+
+def test_token_desconhecido_da_401():
+    r = _guest_client().get("/api/sessions/cc/history", headers={"Authorization": "Bearer x"})
+    assert r.status_code == 401
+
+
+def test_stream_aberto_termina_quando_o_acesso_e_revogado(monkeypatch):
+    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    r = _guest_client().get("/api/sessions/events", headers=GUEST)
+    pedacos = [l for l in r.text.splitlines() if l.startswith("data:")]
+    assert 1 <= len(pedacos) < 500
+
+
+def test_websocket_aberto_fecha_com_4410_quando_o_acesso_e_revogado(monkeypatch):
+    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    with _guest_client().websocket_connect("/api/sessions/cc/term-hold?token=g") as ws:
+        assert ws.receive_text() == "aberto"
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_text()
+    assert e.value.code == 4410
+
+
+def test_troca_de_modo_da_503_e_nao_410():
+    share_api.changing_mode.add("cc")
+    r = _guest_client().get("/api/sessions/cc/history", headers=GUEST)
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "5"
+
+
+def test_vida_sem_resposta_do_tmux_da_503_e_ausencia_confirmada_da_410(monkeypatch):
+    STATE["unsure"] = True
+    c = _guest_client()
+    r = c.get("/api/sessions/cc/history", headers=GUEST)
+    assert r.status_code == 503 and r.headers["retry-after"] == "5"
+    monkeypatch.setattr(share_api, "confirmed_absent", lambda name: True)
+    assert c.get("/api/sessions/cc/history", headers=GUEST).status_code == 410
+
+
+def test_stream_aberto_sobrevive_a_incerteza(monkeypatch):
+    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr(share_gate, "_LIFE_TTL", 0)
+    r = _guest_client().get("/api/sessions/cc/events", headers=GUEST)
+    assert len([l for l in r.text.splitlines() if l.startswith("data:")]) == 30
+
+
+def test_stream_aberto_termina_quando_a_ausencia_e_confirmada(monkeypatch):
+    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr(share_gate, "_LIFE_TTL", 0)
+    monkeypatch.setattr(share_api, "confirmed_absent", lambda name: True)
+    r = _guest_client().get("/api/sessions/cc/events", headers=GUEST)
+    assert 1 <= len([l for l in r.text.splitlines() if l.startswith("data:")]) < 30
+
+
+def test_sessao_recriada_com_o_mesmo_nome_da_410(monkeypatch):
+    monkeypatch.setattr(share_gate, "session_life", lambda name: "OUTRA-VIDA")
+    assert _guest_client().get("/api/sessions/cc/history", headers=GUEST).status_code == 410
+
+
+def test_rotas_abertas_sem_token():
+    c = _guest_client()
+    assert c.get("/convite/ABC").status_code == 200
+    assert c.post("/api/guest/redeem").status_code == 200
+
+
+def test_403_sai_com_cabecalho_cors_e_preflight_passa():
+    c = _guest_client()
+    r = c.get("/api/config", headers={**GUEST, "Origin": "https://app-do-convidado.example"})
+    assert r.status_code == 403
+    assert r.headers["access-control-allow-origin"] == "*"
+    pre = c.options("/api/sessions/cc/input", headers={
+        "Origin": "https://app-do-convidado.example", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization"})
+    assert pre.status_code == 200
+
+
+def test_terminal_do_convidado_com_origem_estrangeira(monkeypatch):
+    monkeypatch.setattr(tmux, "has_session", lambda name: name in ("cc", "term-cc"))
+    c = _guest_client()
+    for alvo in ("cc", "term-cc"):
+        with c.websocket_connect(f"/api/sessions/{alvo}/term?token=g",
+                                 headers={"origin": "https://app-do-convidado.example"}) as ws:
+            assert ws.receive_text() == f"ok {alvo}"
+
+
+def test_terminal_de_outra_sessao_recusado(monkeypatch):
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    with pytest.raises(WebSocketDisconnect):
+        with _guest_client().websocket_connect("/api/sessions/outra/term?token=g") as ws:
+            ws.receive_text()
+
+
+def test_porta_do_convite_ocupada_nao_derruba_o_boot(monkeypatch):
+    from app import main
+    ocupada = socket.socket()
+    ocupada.bind(("127.0.0.1", 0))
+    ocupada.listen()
+    monkeypatch.setattr(main, "GUEST_PORT", ocupada.getsockname()[1])
+    try:
+        assert main._guest_socket() is None
+    finally:
+        ocupada.close()

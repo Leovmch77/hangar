@@ -1,4 +1,6 @@
 import io
+import os
+import socket
 import sys
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from app.hook_installer import (
 from app import migracao_sidecars, orq_politica, resilient_accept
 from app.hook_state import hook_state
 from app.pi_inbox import escrever_endpoint
+from app.share_tunnel import GUEST_PORT
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
@@ -123,6 +126,23 @@ def _passos_pendentes_da_versao() -> None:
         print(f"[hangar] AVISO: passo de atualizacao falhou ({e}); o app segue subindo")
 
 
+def _guest_socket() -> socket.socket | None:
+    # Só loopback: quem expõe é o Funnel. Porta ocupada (outra instância nesta máquina) não
+    # derruba o boot; só este backend fica sem compartilhar sessão.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if os.name != "nt":
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", GUEST_PORT))
+    except OSError as e:
+        s.close()
+        print(f"[hangar] AVISO: porta do convite {GUEST_PORT} indisponível ({e}); "
+              "compartilhar sessão fica desligado")
+        return None
+    s.set_inheritable(True)
+    return s
+
+
 def main():
     bind = resolve_bind_ip(settings)
     _saida_utf8()   # antes de qualquer print: o QR abaixo quebra em cp1252
@@ -175,8 +195,16 @@ def main():
     # proxy_headers + forwarded_allow_ips: atras de um TLS proxy (Caddy/Tailscale), faz o uvicorn ler
     # X-Forwarded-For/-Proto SO do proxy confiavel -> request.client.host vira o IP real do cliente
     # (rate limiter por-cliente, nao um balde global) e request.url.scheme vira https (cookie Secure).
-    uvicorn.run("app.api:app", host=bind, port=settings.port, reload=settings.reload, workers=1,
-                proxy_headers=True, forwarded_allow_ips=settings.forwarded_allow_ips)
+    kw = dict(host=bind, port=settings.port, workers=1, proxy_headers=True,
+              forwarded_allow_ips=settings.forwarded_allow_ips)
+    if settings.reload:
+        # O reload recria o processo e só religa o endereço da config: no dev não há porta de convite.
+        uvicorn.run("app.api:app", reload=True, **kw)
+        return
+    # Um Server com dois sockets: um lifespan só (dois Server rodariam watchers e hooks em dobro).
+    config = uvicorn.Config("app.api:app", **kw)
+    guest = _guest_socket()
+    uvicorn.Server(config).run(sockets=[config.bind_socket()] + ([guest] if guest else []))
 
 
 if __name__ == "__main__":

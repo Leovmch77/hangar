@@ -112,7 +112,11 @@ def reset_backoff() -> None:
 
 
 def require_auth(request: Request) -> None:
-    auth = request.headers.get("Authorization", "")
+    # Import tardio: share_gate puxa store/tmux, e auth é importado cedo por quase tudo.
+    from app.share_gate import guest_of
+    if guest_of(request) is not None:
+        return
+    auth =request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:]
         mecanismo = "bearer"

@@ -9,6 +9,7 @@ from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from app import runtime_config
 from app.auth import require_auth
 from app.codex_voice_broker import VoiceBroker
+from app.share_gate import guest_of
 from app.termsock import _origem_aceita
 
 _log = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ async def voice_ws(ws: WebSocket, name: str, adapter, provider_of=None) -> None:
         await ws.close(code=1008)
         return
     origin = ws.headers.get("origin")
-    if origin and not _origem_aceita(origin, ws.headers.get("host")):
+    if origin and guest_of(ws) is None and not _origem_aceita(origin, ws.headers.get("host")):
         await ws.close(code=1008)
         return
     if runtime_config.get("codex_voice_beta") is not True:

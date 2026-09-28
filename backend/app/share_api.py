@@ -32,7 +32,7 @@ def sync_tunnel() -> None:
         _log.warning("[share] sincronizar funnel falhou: %s", e.fix)
 
 
-def _confirmed_absent(name: str) -> bool:
+def confirmed_absent(name: str) -> bool:
     # `session_life` devolve None também quando o tmux falha; só vale como "morreu" com a
     # ausência confirmada (tmux respondeu que não há a sessão e não sobrou sidecar).
     return (tmux.sessao_existe(name) is False
@@ -44,7 +44,7 @@ def _alive(session: str, life: str) -> bool:
         return True
     atual = session_life(session)
     if atual is None:
-        return not _confirmed_absent(session)
+        return not confirmed_absent(session)
     return atual == life
 
 

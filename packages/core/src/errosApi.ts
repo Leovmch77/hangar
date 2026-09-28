@@ -215,6 +215,13 @@ const ERROS: Record<string, (params: Parametros) => string> = {
 
   // /api/sync — hub zero-knowledge (login, cadastro, rate limit)
   erro_nao_autorizado: () => m.erro_nao_autorizado(),
+  erro_fora_do_convite: () => m.erro_fora_do_convite(),
+  erro_convite_encerrado: () => m.erro_convite_encerrado(),
+  erro_convite_usado: () => m.erro_convite_usado(),
+  erro_convite_vencido: () => m.erro_convite_vencido(),
+  erro_convite_revogado: () => m.erro_convite_revogado(),
+  erro_convite_inexistente: () => m.erro_convite_inexistente(),
+  erro_sessao_indisponivel: () => m.erro_sessao_indisponivel(),
   erro_bootstrap_invalido: () => m.erro_bootstrap_invalido(),
   erro_ja_registrado: () => m.erro_ja_registrado(),
   erro_muitas_tentativas: () => m.erro_muitas_tentativas(),
