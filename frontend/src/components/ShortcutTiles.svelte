@@ -58,8 +58,11 @@
   }
   .acoes-add:hover { background: var(--surface-raised); color: var(--text-primary); }
   .acoes-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  /* auto-fill + minmax: a quantidade de colunas sai da largura, e os blocos dividem a linha. */
-  .acoes-grade { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 6px; }
+  /* auto-fit + minmax: as colunas saem da largura e as vazias somem, então poucos blocos dividem a
+     linha inteira em vez de ficarem encostados à esquerda. */
+  .acoes { container-type: inline-size; }
+  .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 6px; }
+  @container (max-width: 200px) { .acoes-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .acao-bloco {
     min-width: 0; min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 4px; padding: 8px 4px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
