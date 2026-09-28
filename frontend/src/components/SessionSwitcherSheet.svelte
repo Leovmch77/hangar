@@ -5,7 +5,7 @@ import * as m from '../paraglide/messages';
   import ThemeToggle from './ThemeToggle.svelte';
   import BackgroundToggle from './BackgroundToggle.svelte';
   import { basename, relativeTime, rotuloEstado, stateColors } from '@hangar/core';
-  import { listServers, selectServer, serverColor, getActiveId } from '../lib/auth';
+  import { listServers, listOwnServers, selectServer, serverColor, getActiveId } from '../lib/auth';
   import { searchTranscriptsForServer, askHistoryForServer, getSearchContextForServer, type SearchHit } from '@hangar/core';
   import type { ChatEvent, SessionInfo, State } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
@@ -166,7 +166,7 @@ import * as m from '../paraglide/messages';
   async function runSearch(term: string) {
     // Fan-out: 1 chamada por servidor (mesmo padrao de fetchSessionsForServer); um server lento/offline
     // falha isolado (allSettled) sem segurar os outros.
-    const servers = listServers();
+    const servers = listOwnServers();   // a busca de transcrição é do servidor inteiro: convite a barra
     const settled = await Promise.allSettled(servers.map((s) => searchTranscriptsForServer(s, term)));
     // Resultado velho: a query mudou (ou trocou de modo) enquanto o fetch voltava -> descarta.
     if (term !== query.trim() || mode !== 'search') return;

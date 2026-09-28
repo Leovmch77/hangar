@@ -494,4 +494,18 @@ describe('servidor de convite', () => {
     expect(cb).toHaveBeenCalledTimes(1);
     expect(convite.listAllServers().find((s) => s.id === id)?.inviteEnded).toBe(true);
   });
+
+  it('401 no convite ativo marca encerrado e não apaga o servidor nem pede recarga', () => {
+    const id = convite.addInviteServer(R);
+    expect(convite.handleUnauthorized()).toBe(false);
+    expect(convite.listAllServers().find((s) => s.id === id)).toMatchObject({ invite: true, inviteEnded: true });
+  });
+
+  it('401 num servidor próprio ativo apaga só ele e pede recarga', () => {
+    store.set('cp_servers', JSON.stringify([S('a', 'http://casa:8765')]));
+    store.set('cp_active', 'a');
+    convite.addInviteServer(R);
+    expect(convite.handleUnauthorized()).toBe(true);
+    expect(convite.listAllServers().map((s) => s.id)).not.toContain('a');
+  });
 });

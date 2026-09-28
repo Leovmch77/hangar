@@ -78,7 +78,7 @@
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
-  import { listServers, getActiveId, getBaseUrl, selectServer } from '../lib/auth';
+  import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer } from '../lib/auth';
   import { getIdentificador } from '../lib/peers';
   import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
@@ -2746,7 +2746,7 @@
     // Servidor fora do ar segura a resposta até o timeout: se a pessoa já saiu desta tela, o clique
     // velho não pode trocar o servidor ativo nem navegar por cima do que ela abriu depois.
     const hashDoClique = window.location.hash;
-    const destino = await destinoDoRemetente(from, listServers(), getActiveId(),
+    const destino = await destinoDoRemetente(from, listOwnServers(), getActiveId(),
       async (s) => cache.get(s.id) ?? (await getIdentificador(s)).identificador);
     if (window.location.hash !== hashDoClique) return;
     if (!destino) { mostrarAviso(m.user_remetente_fora_do_aparelho({ n: from })); return; }

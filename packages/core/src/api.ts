@@ -282,9 +282,10 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   }
   // Respondeu — inclusive com erro HTTP: a máquina está de pé, e é isso que o esfriamento mede.
   if (server) registrarSucesso(server.id);
-  // Só o 410 encerra: o 503 (erro_sessao_indisponivel) é a trava do dono numa troca de modo ou
-  // com o tmux mudo, e passa sozinho.
-  if (convite && res.status === 410) apiEnv().onInviteEnded?.(server?.id ?? null);
+  // 410 e 401 encerram (o dono revogou, ou apagou o registro do convite): 401 aqui nunca é
+  // "token a repareamento". O 503 (erro_sessao_indisponivel) é a trava do dono numa troca de modo
+  // ou com o tmux mudo, e passa sozinho.
+  if (convite && (res.status === 410 || res.status === 401)) apiEnv().onInviteEnded?.(server?.id ?? null);
   {
     const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
     if (_semRede.delete(`${base}|${rota}`)) {
@@ -2796,9 +2797,9 @@ export function revokeAllShares(name: string): Promise<{ ok: boolean; revoked: n
 }
 
 // Stream da lista de um convite caiu: 410 aqui é o dono ter encerrado, e o gancho do `apiFetchRes`
-// já avisou. 503 devolve false (indisponível por instantes, não encerrado). `probe`: a queda acabou
+// já avisou (401 vale o mesmo que 410). 503 devolve false (indisponível por instantes, não encerrado). `probe`: a queda acabou
 // de esfriar o servidor, e esta pergunta não pode esperar o prazo.
 export async function checkInviteForServer(s: Server): Promise<boolean> {
   const res = await apiFetchRes('/api/sessions', { signal: AbortSignal.timeout(4000) }, s, true);
-  return res.status === 410;
+  return res.status === 410 || res.status === 401;
 }

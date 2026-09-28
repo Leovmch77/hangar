@@ -114,6 +114,20 @@ describe('trava do servidor de convite em apiFetchRes', () => {
     expect(await checkInviteForServer(CONVITE)).toBe(true);
     expect(onInviteEnded).toHaveBeenCalledWith('srv-i');
   });
+  it('401 de um servidor de convite também encerra (registro apagado pelo dono)', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(401, { detail: 'x' }));
+    expect(await checkInviteForServer(CONVITE)).toBe(true);
+    expect(onInviteEnded).toHaveBeenCalledWith('srv-i');
+  });
+  it('401 de servidor que NÃO é convite não chama onInviteEnded', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(401, { detail: 'x' }));
+    await checkInviteForServer({ ...CONVITE, invite: false });
+    expect(onInviteEnded).not.toHaveBeenCalled();
+  });
   it('503 de um servidor de convite NÃO encerra: é indisponibilidade passageira', async () => {
     const onInviteEnded = vi.fn();
     ambiente({ onInviteEnded });

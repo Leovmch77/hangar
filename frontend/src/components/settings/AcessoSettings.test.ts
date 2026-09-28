@@ -21,7 +21,7 @@ vi.mock('../../lib/alcance', async (importOriginal) => {
 });
 
 // A tela resolve o servidor alvo pela rota (?srv=) ou pelo ativo. O SettingsModal é
-// intocável, então o teste monta o componente direto e mocka o ativo (listServers +
+// intocável, então o teste monta o componente direto e mocka o ativo (listOwnServers +
 // getActiveId) — a resolução cai no ativo.
 const SRV: Server = { id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 'x' } as Server;
 
@@ -30,6 +30,7 @@ vi.mock('../../lib/auth', async (importOriginal) => {
   return {
     ...real,
     listServers: vi.fn(() => [SRV]),
+    listOwnServers: vi.fn(() => [SRV]),
     getActiveId: vi.fn(() => 'srv-a'),
   };
 });

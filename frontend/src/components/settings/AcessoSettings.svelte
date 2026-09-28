@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as m from '../../paraglide/messages';
   import { tick, type Snippet } from 'svelte';
-  import { getActiveId, listServers, type Server } from '../../lib/auth';
+  import { getActiveId, listOwnServers, type Server } from '../../lib/auth';
   import { parseConfig } from '../../lib/configRoute';
   import { isTimeoutError } from '@hangar/core';
   import { alcanceDoServidor, fraseDeEstado, pareamentoDoServidor, type EnderecoAlcance, type EstadoEndereco, type TipoEndereco } from '../../lib/alcance';
@@ -24,8 +24,9 @@
 
   function servidorAlvo(): Server | null {
     const r = parseConfig(location.hash);
-    const porSrv = r?.srv ? listServers().find((s) => s.id === r.srv) ?? null : null;
-    return porSrv ?? listServers().find((s) => s.id === getActiveId()) ?? null;
+    const proprios = listOwnServers();   // acesso/endereços são da máquina, nunca de um convite
+    const porSrv = r?.srv ? proprios.find((s) => s.id === r.srv) ?? null : null;
+    return porSrv ?? proprios.find((s) => s.id === getActiveId()) ?? proprios[0] ?? null;
   }
 
   function servidorAtual(): Server | null {

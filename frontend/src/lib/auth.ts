@@ -546,6 +546,18 @@ export function dropActiveServer(): void {
   if (id) removeServer(id, false);
 }
 
+// 401 no servidor ativo. Em convite ele significa o mesmo que 410 (o dono apagou o registro):
+// marca como encerrado e NÃO apaga o servidor nem manda para o login. Devolve true quando o
+// servidor foi descartado e a página precisa recarregar.
+export function handleUnauthorized(): boolean {
+  if (isActiveInvite()) {
+    markInviteEnded(getActiveId());
+    return false;
+  }
+  dropActiveServer();
+  return true;
+}
+
 // api.ts mira SEMPRE o servidor ativo -> aponta pro dono da operação e restaura no fim (mesmo em
 // throw). Compartilhado por Sidebar e SessionContextMenu.
 export async function withServer<T>(serverId: string, fn: () => Promise<T>): Promise<T> {

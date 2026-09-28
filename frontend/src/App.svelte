@@ -194,8 +194,9 @@
     if (id) segredos.carregar();
   });
 
-  // SEMPRE `listServers().find`. NUNCA o caminho de activeServer(): auth.ts:151-155 faz `?? list[0]`,
-  // entao um id desconhecido devolveria O PRIMEIRO SERVIDOR DA LISTA, silenciosamente.
+  // SEMPRE `listOwnServers().find`. NUNCA o caminho de activeServer(): ele faz `?? list[0]`, entao
+  // um id desconhecido devolveria O PRIMEIRO SERVIDOR DA LISTA, silenciosamente — e convite nunca
+  // é alvo de configuração.
   const alvoConfig = $derived.by(() => {
     versaoServidores;                                   // dependencia explicita, ver acima
     if (cfg?.srv) return listOwnServers().find((s) => s.id === cfg.srv) ?? null;

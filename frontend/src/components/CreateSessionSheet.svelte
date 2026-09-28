@@ -539,7 +539,7 @@
   // Derivados da ORIGEM, nunca de `targetServer`: o rótulo é o que a frase "o dossiê está no disco
   // de X" afirma, e `targetServer` é só o que está selecionado. Se a origem sumisse da lista, a
   // seleção cairia noutra máquina e a frase nomearia, com toda a confiança, a máquina errada.
-  const servidorDaOrigem = $derived(bastao ? servers.find((s) => s.id === bastao.serverId) ?? null : null);
+  const servidorDaOrigem = $derived(bastao ? proprios.find((s) => s.id === bastao.serverId) ?? null : null);
   const rotuloServidor = $derived(servidorDaOrigem?.label ?? '');
   // Servidor da origem fora da lista (removido, ou a folha aberta com um id que não existe mais):
   // NÃO dá pra passar o bastão — o dossiê é arquivo no disco dele. A folha diz isso e o botão
@@ -646,10 +646,10 @@
       // Só é modo bastão se o servidor da origem AINDA existe. Sumiu, a folha abre mostrando a
       // recusa (`bastaoSemServidor`) e o alvo cai no de sempre — mas o botão fica travado, então
       // ninguém cria uma sessão sem dossiê achando que passou o bastão.
-      const b = bastao && servers.some((s) => s.id === bastao.serverId) ? bastao : null;
+      const b = bastao && proprios.some((s) => s.id === bastao.serverId) ? bastao : null;
       // Modo bastão: o servidor é o da ORIGEM, não o ativo. O dossiê é um arquivo no disco daquela
       // máquina — criar no servidor B daria uma sessão apontando pra um caminho que não existe lá.
-      const target = b && servers.some((s) => s.id === b.serverId)
+      const target = b && proprios.some((s) => s.id === b.serverId)
         ? b.serverId
         : (proprios.find((s) => s.id === cur) ? cur! : proprios[0]?.id ?? '');
       if (target) pickTarget(target);      // pickTarget ja carrega configs, motores e providers do alvo
