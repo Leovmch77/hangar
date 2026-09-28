@@ -17,6 +17,11 @@
   let { serverId = null, compact = false, onDone }: Props = $props();
 
   let menuOpen = $state(false);
+  let menuEl: HTMLElement | undefined = $state();
+
+  function closeMenuOutside(e: PointerEvent) {
+    if (menuOpen && menuEl && !menuEl.contains(e.target as Node)) menuOpen = false;
+  }
   let input = $state<HTMLInputElement | null>(null);
   let note = $state<{ text: string; error: boolean } | null>(null);
   let noteTimer: ReturnType<typeof setTimeout> | undefined;
@@ -99,8 +104,10 @@
 
 <input bind:this={input} type="file" accept="application/json,.json" class="sr-only" onchange={onFile} tabindex="-1" aria-hidden="true" />
 
+<svelte:window onpointerdown={closeMenuOutside} onkeydown={(e) => { if (menuOpen && e.key === 'Escape') menuOpen = false; }} />
+
 {#if compact}
-  <span class="tr-menu">
+  <span class="tr-menu" bind:this={menuEl}>
     <button type="button" class="tr-mais" onclick={() => (menuOpen = !menuOpen)} aria-haspopup="menu"
             aria-expanded={menuOpen} aria-label={m.atalhos_transferir()} title={m.atalhos_transferir()}>⋯</button>
     {#if menuOpen}

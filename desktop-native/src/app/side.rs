@@ -388,7 +388,11 @@ impl Hangar {
             Reply::Shell(label) => {
                 // A aba do terminal vai pra frente (sem abrir o painel); a que falhou também, com a saída inteira.
                 let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str).map(str::to_owned);
-                self.side.shortcut_focus.insert(key.name.clone(), terminal.clone().unwrap_or_default());
+                // Só o 422 deixa terminal para trás; sem ele, a aba "mais nova" seria a de outro atalho.
+                let failed_with_terminal = result.as_ref().err().is_some_and(|error| error.status == Some(422));
+                if terminal.is_some() || failed_with_terminal {
+                    self.side.shortcut_focus.insert(key.name.clone(), terminal.clone().unwrap_or_default());
+                }
                 self.refresh_shortcut_terms(&key.name);
                 let note = match result {
                     Ok(_) => {

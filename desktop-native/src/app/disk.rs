@@ -278,6 +278,7 @@ mod tests {
     use super::{cited, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
     use std::path::Path;
 
+    #[cfg(unix)]
     #[test]
     fn cited_path_stays_in_the_session_folder_and_out_of_git() {
         let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("hangar-cited-{}", std::process::id()));

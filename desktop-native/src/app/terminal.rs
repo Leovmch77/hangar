@@ -328,7 +328,11 @@ impl Hangar {
             }
             Reply::List(name, result) => {
                 // Falha de leitura mantém a lista anterior: o botão não some por um GET perdido.
-                let Ok(value) = result else { return; };
+                let Ok(value) = result else {
+                    // Sem isto a releitura para, e o aviso "rodando" fica na tela para sempre.
+                    if self.side.shortcut_running.contains_key(&name) { self.recheck_shortcut_terms(&name); }
+                    return;
+                };
                 let terms = parse_shortcut_terms(&value);
                 // Terminal do atalho fechado ou morto: o aviso "rodando" dele deixa de ser verdade.
                 if let Some((id, text)) = self.side.shortcut_running.get(&name).cloned() {

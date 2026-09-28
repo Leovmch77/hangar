@@ -130,11 +130,18 @@ def export_payload() -> dict:
     return {"version": VERSION, "shortcuts": out, "removed": removed}
 
 
+MAX_IMPORT_CHARS = 1_000_000
+
+
 def _parse(data) -> list[dict]:
     items = data.get("shortcuts") if isinstance(data, dict) else data
     if not isinstance(items, list):
         raise ValueError("arquivo sem lista de atalhos")
-    rc._validate_shortcuts(json.dumps(items))
+    raw = json.dumps(items)
+    # Vai inteiro pra config e pra resposta da prévia; um arquivo errado de MBs travaria as duas.
+    if len(raw) > MAX_IMPORT_CHARS:
+        raise ValueError("arquivo grande demais para uma lista de atalhos")
+    rc._validate_shortcuts(raw)
     return items
 
 
