@@ -474,6 +474,9 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
     let mut code_block = StyleRefinement::default();
     code_block.corner_radii = CornersRefinement { top_left: Some(radius.into()), top_right: Some(radius.into()),
         bottom_left: Some(radius.into()), bottom_right: Some(radius.into()) };
+    // Rolagem liga o layout que mede o texto real: o padrão divide a largura por contagem de letras e parte palavra da coluna curta.
+    let mut table = StyleRefinement::default().border_0().bg(transparent_black());
+    table.overflow.x = Some(Overflow::Scroll);
     gpui_kit::base::TextViewStyle::default()
         .with_foreground(kit.foreground)
         .with_muted_foreground(kit.muted_foreground)
@@ -489,7 +492,7 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
             * match level { 1 => 1.4, 2 => 1.25, 3 => 1.1, _ => 1. }))
         .with_inline_code(HighlightStyle { color: Some(accent_text()), background_color: Some(accent_dim()), ..Default::default() })
         .with_code_block(code_block)
-        .with_table(StyleRefinement::default().border_0().bg(transparent_black()))
+        .with_table(table)
         .with_table_head(StyleRefinement::default().bg(transparent_black()).font_weight(FontWeight::BOLD))
         .with_table_cell(StyleRefinement::default().border_r_0().px_3().py_1p5())
         .with_list_marker_width(Some(px(26.)))
