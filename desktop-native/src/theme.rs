@@ -217,8 +217,14 @@ pub fn panel_glass() -> bool {
 /// ponta leve da Solidez, e 100 continua opaco.
 fn glass_tint() -> f32 { let s = solidity(); 0.15 + 0.85 * s * s }
 
-/// Quanto os painéis translúcidos tapam o fundo: a Solidez, ou a tinta do vidro quando há desfoque atrás.
-fn panel_alpha() -> f32 { if panel_glass() { glass_tint() } else { solidity() } }
+/// Quanto os painéis translúcidos tapam o fundo: a tinta do vidro quando há desfoque atrás. Sem ele, no escuro, a do vidro
+/// líquido do Electron (`--glass-bg`: 0,22 a 0,92 pela Solidez), para o mesmo número dar a mesma barra nos dois apps; o
+/// claro do web usa outro vidro ali (branco fino deixa a tinta escura de trás atravessar) e fica na Solidez crua.
+fn panel_alpha() -> f32 {
+    if panel_glass() { return glass_tint(); }
+    let s = solidity();
+    if colors().dark { 0.22 + 0.70 * s } else { s }
+}
 
 /// Fundo da janela. Colados é opaco; na caixa solta a Transparência diz quanto do fundo do sistema aparece.
 pub fn background() -> Hsla {
@@ -320,11 +326,16 @@ pub fn accent_text() -> Hsla {
     let a = accent();
     hsla(a.h, a.s.min(0.8), if colors().dark { 0.87 } else { 0.34 }, 1.)
 }
-/// Sombra das caixas soltas; colado não tem sombra, a borda separa.
+/// Canto dos painéis soltos (barra, contexto, abas), o `--radius-xl` do web.
+pub const PANEL_RADIUS: f32 = 24.;
+/// `--elev-3` do web: a sombra da caixa solta e o brilho de 1 px na borda de cima, que é o que faz o painel ler como
+/// vidro e não como recorte. Colado não tem nenhum dos dois, a borda separa.
 pub fn panel_shadow() -> Vec<BoxShadow> {
-    if !floating() { return Vec::new(); }
-    let alpha = if colors().dark { 0.35 } else { 0.13 };
-    vec![BoxShadow { color: hsla(0., 0., 0., alpha), offset: point(px(0.), px(18.)), blur_radius: px(48.), spread_radius: px(0.), inset: false }]
+    let mut shadow = card_shadow();
+    if shadow.is_empty() { return shadow; }
+    let rim = match (colors().dark, appearance::get().palette) { (false, _) => 0.95, (true, Palette::Neutral) => 0.18, (true, _) => 0.30 };
+    shadow.push(BoxShadow { color: hsla(0., 0., 1., rim), offset: point(px(0.), px(1.)), blur_radius: px(1.), spread_radius: px(0.), inset: true });
+    shadow
 }
 /// `--elev-2`: popovers e menus.
 pub fn popover_shadow() -> Vec<BoxShadow> {
@@ -342,7 +353,19 @@ pub fn popup_content_fill() -> Hsla {
     if appearance::get().surface_material == SurfaceMaterial::Glass { transparent_black() }
     else { raised() }
 }
-pub fn card_shadow() -> Vec<BoxShadow> { panel_shadow() }
+/// Só a sombra da caixa solta, sem o brilho de borda: o compositor tem borda de foco própria.
+pub fn card_shadow() -> Vec<BoxShadow> {
+    if !floating() { return Vec::new(); }
+    let alpha = if colors().dark { 0.35 } else { 0.13 };
+    vec![BoxShadow { color: hsla(0., 0., 0., alpha), offset: point(px(0.), px(18.)), blur_radius: px(48.), spread_radius: px(0.), inset: false }]
+}
+
+/// Cor fixa de cada máquina na barra, a mesma do web (`serverColor` do core): o hash do id escolhe na mesma lista.
+pub fn server_color(id: &str) -> Hsla {
+    const COLORS: [u32; 6] = [0x7c6af7, 0x3ba55d, 0xe0a23b, 0xe0563b, 0x3b9fe0, 0xc43be0];
+    let hash = id.encode_utf16().fold(0u32, |h, unit| h.wrapping_mul(31).wrapping_add(unit as u32));
+    rgb(COLORS[hash as usize % COLORS.len()]).into()
+}
 pub fn border() -> Hsla { hex(colors().line, if floating() { 0.09 } else { 0.08 }) }
 pub fn border_strong() -> Hsla { hex(colors().line_strong, if floating() { 0.16 } else { 0.14 }) }
 pub fn glass_border() -> Hsla { border_strong() }
@@ -510,5 +533,14 @@ mod tests {
     fn light_accent_gets_dark_text() {
         assert!(super::luminance(0xe9b93f) > 0.45);
         assert!(super::luminance(0x5b6ad0) < 0.45);
+    }
+
+    #[test]
+    fn server_color_matches_web_hash() {
+        use gpui_kit::{Hsla, rgb};
+        let color = |hex: u32| -> Hsla { rgb(hex).into() };
+        assert_eq!(super::server_color("srv-kbueb3n5"), color(0xe0563b));
+        assert_eq!(super::server_color("a"), color(0x3ba55d));
+        assert_eq!(super::server_color("notebook"), color(0xc43be0));
     }
 }

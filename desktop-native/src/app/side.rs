@@ -703,7 +703,7 @@ impl Hangar {
         let floating = theme::is_floating();
         Some(div().w(px(width)).h_full().flex_shrink_0().relative()
             .child(chrome::glass_panel(div().size_full().flex().flex_col().bg(theme::chrome()).overflow_hidden()
-                .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+                .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                     else { el.border_l_1().border_color(theme::border()) })
                 .child(header)
                 .children(self.render_subagent_tabs(cx))
@@ -717,7 +717,7 @@ impl Hangar {
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))
                     .child(div().min_w_0().truncate().text_color(theme::faint()).child(format!("{} · {server}", agent_label(&session.provider))))
                     .when(queued > 0, |el| el.child(div().flex_shrink_0().text_color(theme::muted()).child(tr("side_queued").replace("{n}", &queued.to_string()))))),
-                px(if floating { 18. } else { 0. })))
+                px(if floating { theme::PANEL_RADIUS } else { 0. })))
             .child(handle)
             .into_any_element())
     }

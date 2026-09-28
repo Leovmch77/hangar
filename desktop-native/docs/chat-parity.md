@@ -131,6 +131,23 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | "Ver em grade" e "Todas lado a lado" / lado a lado por membro no painel do grupo | pendente | o nativo não tem grade de comparação nem vista dividida para abrir |
 | Abrir o painel do grupo pelas ações da sessão e pelo painel de contexto | pendente | só o chip do compositor abre |
 
+## Barra lateral: caixa, cabeçalho e rodapé
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Tinta da barra, do painel de contexto e do compositor sobre a área de trabalho, no escuro: a do vidro líquido do Electron (`--glass-bg`, 0,22 + 0,70 × Solidez) | implementado | `theme::panel_alpha`; com Vidro desenhado pela janela segue a tinta própria (`glass_tint`) e no claro a Solidez crua, porque o web usa `--glass-panel` ali. O mesmo número de Solidez dá a mesma barra nos dois apps |
+| Importar do Electron traz a "Solidez das caixas" (`cp_surface_solid`, padrão 12 do web) | implementado | antes ficava a Solidez do nativo (padrão 70 = tinta 0,71, contra 0,39 do Electron com Solidez 24) |
+| Solidez padrão do nativo igual à do web (12) | pendente | o nativo nasce em 70; baixar muda a primeira impressão de quem nunca mexeu, incluindo o Vidro (0,16), e é escolha de produto |
+| Canto dos painéis soltos (barra, contexto, abas, Configurações, páginas) em 24 px, o `--radius-xl` | implementado | `theme::PANEL_RADIUS` |
+| Brilho de 1 px na borda de cima do painel solto (`inset 0 1px 1px --glass-specular` do `--elev-3`) | implementado | `theme::panel_shadow`; o compositor fica só com a sombra (`card_shadow`) |
+| Cabeçalho: marca de 20 px e "Hangar" em 16 px | implementado | as linhas "Nova conversa" e "Todas as sessões" seguem, desenho do nativo |
+| Seletor "Chat / Quadro / Canvas" e botão de busca abaixo do cabeçalho | pendente | Quadro e Canvas não existem no nativo; a busca mora na barra de cima (Ctrl K) |
+| Botão de modo seleção (enviar para várias) no cabeçalho e o aviãozinho "enviar p/ todas" no cabeçalho de cada máquina | pendente | o envio para várias sessões não existe no nativo |
+| Cabeçalho da máquina: ponto na cor fixa da máquina (`serverColor` do core), rótulo em caixa alta 11 px negrito apagado, contagem em pílula | implementado | a cor sai do id; importadas do Electron têm o mesmo id, cadastradas aqui ganham id próprio e podem cair noutra cor |
+| Cabeçalho da máquina focável pelo teclado, com o anel de foco do destaque | pendente | hoje só o clique alterna; precisa de um foco por máquina |
+| Contagem de quem espera (âmbar) no cabeçalho da máquina | pendente | o nativo mostra a seção "Aguardando você" no topo da lista |
+| Rodapé: pílula cheia no destaque "+ Nova" (36 px) e o recolher ao lado | implementado | rótulo curto do web; leitor de tela e dica dizem "Nova sessão". A linha da conexão embaixo é do nativo |
+
 ## Como rodar a prova
 
 ```bash

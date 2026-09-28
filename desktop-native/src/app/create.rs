@@ -1637,7 +1637,9 @@ impl Hangar {
             Button::new(id).custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
                 .icon(chrome::small_icon(IconName::Plus, 16., theme::muted())).size(px(28.)).rounded(px(6.)).flex_shrink_0().tooltip(tr("create_title"))
         } else {
-            Button::new(id).outline().small().w_full().icon(IconName::Plus).label(tr("create_title"))
+            // O `.cta-new` do web: pílula cheia no destaque, com o rótulo curto; o nome inteiro fica no leitor de tela.
+            Button::new(id).primary().icon(IconName::Plus).label(super::costs::web("lista_nova_curto")).h(px(36.)).px(px(12.)).rounded_full()
+                .font_weight(FontWeight::SEMIBOLD).flex_shrink_0().tooltip(tr("create_title"))
         };
         FocusOnClick { id: id.into(), button: button.accessibility_label(tr("create_title")).disabled(self.api.is_none()), open: Rc::new(move |window, cx| {
             let _ = weak.update(cx, |this, cx| this.open_new_session(None, window, cx));

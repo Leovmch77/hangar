@@ -1553,7 +1553,7 @@ fn line_chart(points: Vec<(String, Vec<f64>)>, colors: Vec<Hsla>, fmt: impl Fn(f
 /// Fundo da página inteira no padrão das páginas soltas (a de Configurações): na caixa solta vira painel.
 pub(super) fn page_frame(content: Div) -> AnyElement {
     if theme::is_floating() {
-        div().size_full().p(px(10.)).child(content.rounded(px(18.)).border_1().border_color(theme::border()).bg(theme::chrome())
+        div().size_full().p(px(10.)).child(content.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome())
             .shadow(theme::panel_shadow()).overflow_hidden()).into_any_element()
     } else { content.bg(theme::chrome()).into_any_element() }
 }

@@ -199,20 +199,20 @@ impl Hangar {
             .or_else(|| self.api.clone())
     }
 
-    /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto do estado, nome em caixa alta e a contagem. Clicar recolhe.
-    pub(super) fn render_server_header(&self, key: &str, label: &str, count: usize, online: bool, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+    /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto na cor da máquina, nome em caixa alta e a contagem numa
+    /// pílula. Clicar recolhe; a falha vem por extenso embaixo.
+    pub(super) fn render_server_header(&self, id: &str, key: &str, label: &str, count: usize, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let group = format!("server:{key}");
         let open = !self.sidebar.is_collapsed(&group);
-        let offline = !online || error.is_some();
         div().id(SharedString::from(format!("server-header-{key}"))).flex_shrink_0().mt(px(8.)).px(px(8.)).py(px(4.)).rounded(px(8.))
-            .flex().flex_col().gap(px(2.)).cursor_pointer().hover(|el| el.bg(theme::hover()))
+            .flex().flex_col().gap(px(2.)).cursor_pointer().text_color(theme::faint()).hover(|el| el.text_color(theme::muted()))
             .role(Role::Button).aria_expanded(open).aria_label(format!("{label} · {count}"))
-            .child(div().flex().items_center().gap(px(6.))
+            .child(div().flex().items_center().gap(px(8.))
                 .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme::faint()))
-                .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if offline { theme::warning() } else { theme::accent() }))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
-                    .child(label.to_uppercase()))
-                .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string())))
+                .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::server_color(id)))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_weight(FontWeight::BOLD).child(label.to_uppercase()))
+                .when(count > 0, |el| el.child(div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(theme::inset())
+                    .flex().justify_center().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(count.to_string()))))
             .when_some(error, |el, text| el.child(div().pl(px(24.)).text_xs().text_color(theme::warning()).truncate().child(text)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(group.clone(), cx)))
             .into_any_element()

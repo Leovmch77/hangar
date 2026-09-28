@@ -3765,13 +3765,13 @@ impl Hangar {
         let panel = chrome::glass_panel(div().w(px(width)).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
             // A linha da janela estica os filhos; "Só o conteúdo" solta a barra do fundo.
             .map(|el| if fit_content { el.max_h_full() } else { el.h_full() })
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .when(conversations, |el| el.border_color(border))
             .relative()
             .child(content)
             .children(handle),
-            px(if floating { 18. } else { 0. }));
+            px(if floating { theme::PANEL_RADIUS } else { 0. }));
         // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
         if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
     }
@@ -3830,7 +3830,7 @@ impl Hangar {
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
                 if key == active {
-                    children.push(self.render_server_header(&key, &entry.label, layout.total, self.list_online, self.list_error.clone(), cx));
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, layout.total, self.list_error.clone(), cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
                 } else if let Some(list) = self.remote.get(&key) {
                     let mut remote = sidebar::layout(&list.sessions, &query, by_project, &none);
@@ -3838,7 +3838,7 @@ impl Hangar {
                     for group in &mut remote.groups { group.key = format!("{key}::{}", group.key); }
                     total += remote.total;
                     remote_rows += remote.total;
-                    children.push(self.render_server_header(&key, &entry.label, remote.total, list.online, list.error.clone(), cx));
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, remote.total, list.error.clone(), cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&remote, Some(&key), &mut children, window, cx); }
                 }
             }
@@ -3860,8 +3860,8 @@ impl Hangar {
                 .aria_label(tr("sidebar_filter"))));
         div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
-                .child(chrome::hangar_mark(16., theme::accent()))
-                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
+                .child(chrome::hangar_mark(20., theme::accent()))
+                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
@@ -3899,7 +3899,7 @@ impl Hangar {
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
             // O CTA do rodapé da barra do web, com o recolher ao lado.
             .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).flex().items_center().gap_2()
-                .child(div().flex_1().min_w_0().child(self.new_session_button(false, cx)))
+                .child(self.new_session_button(false, cx))
                 .child(self.fold_button(cx)))
             // A engrenagem mora na barra do app, acima de tudo; o rodapé fica com a conexão.
             .child(div().h(px(48.)).flex_shrink_0().px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(theme::border())
@@ -3977,7 +3977,7 @@ impl Hangar {
             .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
         chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .child(strip)
@@ -3993,7 +3993,7 @@ impl Hangar {
                     .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                     .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
                 .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))),
-            px(if floating { 18. } else { 0. }))
+            px(if floating { theme::PANEL_RADIUS } else { 0. }))
     }
 
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.

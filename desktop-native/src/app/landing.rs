@@ -122,13 +122,13 @@ impl Hangar {
         let floating = theme::is_floating();
         div().w(px(width)).h_full().flex_shrink_0().child(chrome::glass_panel(div().size_full().flex().flex_col().bg(theme::chrome())
             .overflow_hidden()
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_l_1().border_color(theme::border()) })
             .child(div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().font_weight(FontWeight::SEMIBOLD)
                 .child(tr("side_context")))
             .child(div().px_4().py(px(14.)).flex().flex_col().gap(px(10.))
                 .children((0..3usize).map(|n| chrome::Skeleton::new(("opening-side", n)).row(n).h(px(12.)).rounded(px(4.))))),
-            px(if floating { 18. } else { 0. }))).into_any_element()
+            px(if floating { theme::PANEL_RADIUS } else { 0. }))).into_any_element()
     }
 
     /// A mensagem enviada, na bolha do usuário e com o mesmo recuo da linha real, para a troca não mexer nada.

@@ -646,7 +646,7 @@ impl Hangar {
             .text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(label);
         let server = self.server_label(cx);
         let nav = div().w(px(284.)).flex_shrink_0().h_full().flex().flex_col().px(px(10.)).bg(theme::chrome())
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .child(div().h(px(44.)).flex_shrink_0().px(px(6.)).flex().items_center().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("settings")))
             // Setas escolhem o resultado antes do campo andar o cursor; Esc limpa ou fecha.
