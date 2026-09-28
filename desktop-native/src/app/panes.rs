@@ -1,7 +1,7 @@
 // Áreas da janela em views próprias: o que se mexe numa área (streaming, rolagem, digitação, animação do diálogo) não
 // redesenha as outras. O estado continua no `Hangar`; cada view só guarda o desenho dela entre quadros.
 use std::{cell::{Cell, RefCell}, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
-use gpui_kit::{component::Root, *};
+use gpui_kit::{component::Root, prelude::FluentBuilder, *};
 use super::Hangar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub(super) struct Panes {
 /// O que se pinta num lugar: a marca animada (com o selo do provider por cima, quando a linha tem um) ou os segundos da
 /// linha "trabalhando".
 #[derive(Clone)]
-pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant) }
+pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant, Option<SharedString>), Shimmer(SharedString) }
 
 /// Um lugar vazio deixado por uma área guardada: posição, recorte dela e quando o lugar nasceu. A área que não repinta
 /// deixa os lugares do último desenho, que continuam certos; a que redesenha apaga os seus e grava os que aparecerem.
@@ -181,8 +181,19 @@ impl Hangar {
     }
 
     /// O lugar dos segundos contados desde `since`, pintados fora da view guardada: o tique de 1 s não redesenha a área.
-    pub(super) fn elapsed_slot(&self, area: Area, key: impl Into<SharedString>, since: Instant) -> AnyElement {
-        div().w(px(ELAPSED_WIDTH)).h_full().flex_shrink_0().child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Elapsed(since)))
+    /// `suffix` vai depois dos segundos no mesmo texto ("29s · ↓ 1.4k tokens"); com ele o lugar ocupa o resto da linha.
+    pub(super) fn elapsed_slot(&self, area: Area, key: impl Into<SharedString>, since: Instant, suffix: Option<SharedString>) -> AnyElement {
+        div().h_full().map(|el| if suffix.is_some() { el.flex_1().min_w_0() } else { el.w(px(ELAPSED_WIDTH)).flex_shrink_0() })
+            .child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Elapsed(since, suffix)))
+            .into_any_element()
+    }
+
+    /// O título `text` com o brilho passando, pintado fora da view guardada; na área fica o mesmo texto invisível, que
+    /// dá a medida e o corte.
+    pub(super) fn shimmer_slot(&self, area: Area, key: impl Into<SharedString>, text: String) -> AnyElement {
+        let text = SharedString::from(text);
+        div().relative().min_w_0().truncate().text_color(transparent_black()).child(text.clone())
+            .child(div().absolute().inset_0().child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Shimmer(text))))
             .into_any_element()
     }
 
@@ -202,6 +213,12 @@ pub(super) fn float_marks(places: MarkPlaces, area: Area, fade: Duration, reduce
 /// O mesmo lugar de `working_mark_slot`, na lista de lugares de quem chama.
 pub(super) fn mark_slot(places: &MarkPlaces, area: Area, key: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
     div().size(px(size)).flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Mark(color, None))).into_any_element()
+}
+
+/// O mesmo lugar de `elapsed_slot`, na lista de lugares de quem chama.
+pub(super) fn elapsed_place(places: &MarkPlaces, area: Area, key: impl Into<SharedString>, since: Instant) -> AnyElement {
+    div().w(px(ELAPSED_WIDTH)).h_full().flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Elapsed(since, None)))
+        .into_any_element()
 }
 
 fn mark_place(places: MarkPlaces, area: Area, key: SharedString, draw: Floating) -> impl IntoElement {
@@ -247,7 +264,8 @@ impl Element for FloatingMark {
         // Cópia dos lugares: desenhar o filho não pode achar a lista emprestada.
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
-            let t = if self.reduce_motion { 1. }
+            // O brilho não entra com fade: o texto parado some da área no mesmo quadro.
+            let t = if self.reduce_motion || matches!(place.draw, Floating::Shimmer(_)) { 1. }
                 else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
             // Só a marca entra com o fade: o selo já estava na linha antes de ela começar a trabalhar.
             let (inner, badge) = match place.draw {
@@ -255,7 +273,8 @@ impl Element for FloatingMark {
                     super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color).into_any_element(),
                     badge.map(|provider| super::chrome::provider_badge(&provider)),
                 ),
-                Floating::Elapsed(since) => (super::chrome::Elapsed::new(place.key.clone(), since).into_any_element(), None),
+                Floating::Elapsed(since, suffix) => (super::chrome::Elapsed::new(place.key.clone(), since).suffix(suffix).into_any_element(), None),
+                Floating::Shimmer(text) => (super::chrome::Shimmer::new(place.key.clone(), text).into_any_element(), None),
             };
             let mut child = div().size_full().relative().child(div().size_full().opacity(t).child(inner)).children(badge)
                 .into_any_element();

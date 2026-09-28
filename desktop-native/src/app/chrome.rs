@@ -257,24 +257,27 @@ impl RenderOnce for WorkingMark {
 /// Segundos desde `since` ("6s", "1m 5s", "1h 2m"), numa view própria com chave que se redesenha só na virada de cada
 /// segundo, como a `WorkingMark`: a área em volta não acorda.
 #[derive(IntoElement)]
-pub struct Elapsed { key: ElementId, since: Instant }
+pub struct Elapsed { key: ElementId, since: Instant, suffix: Option<SharedString> }
 
 impl Elapsed {
-    pub fn new(key: impl Into<ElementId>, since: Instant) -> Self { Self { key: key.into(), since } }
+    pub fn new(key: impl Into<ElementId>, since: Instant) -> Self { Self { key: key.into(), since, suffix: None } }
+    /// Texto depois dos segundos, separado por " · ".
+    pub fn suffix(mut self, suffix: Option<SharedString>) -> Self { self.suffix = suffix; self }
 }
 
-struct ElapsedView { since: Instant }
+struct ElapsedView { since: Instant, suffix: Option<SharedString> }
 
 impl Render for ElapsedView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().flex().items_center().pt(px(1.)).text_size(px(11.)).text_color(theme::faint())
-            .child(format_elapsed(self.since.elapsed()))
+        let elapsed = format_elapsed(self.since.elapsed());
+        div().size_full().min_w_0().flex().items_center().pt(px(1.)).text_size(px(11.)).text_color(theme::faint())
+            .child(div().min_w_0().truncate().child(match &self.suffix { Some(suffix) => format!("{elapsed} · {suffix}"), None => elapsed }))
     }
 }
 
 impl RenderOnce for Elapsed {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let since = self.since;
+        let (since, suffix) = (self.since, self.suffix);
         let view = keyed_view(self.key, window, cx, |cx| {
             cx.spawn(async move |view, cx| loop {
                 let Ok(since) = view.read_with(cx, |view: &ElapsedView, _| view.since) else { break };
@@ -286,15 +289,59 @@ impl RenderOnce for Elapsed {
                 cx.background_executor().timer(turn).await;
                 if view.update(cx, |_, cx| cx.notify()).is_err() { break; }
             }).detach();
-            ElapsedView { since }
+            ElapsedView { since, suffix: suffix.clone() }
         });
         // O começo vem de um horário de parede convertido a cada desenho e varia em microssegundos: só um salto conta.
         view.update(cx, |view, cx| {
+            if view.suffix != suffix { view.suffix = suffix; cx.notify(); }
             if since.saturating_duration_since(view.since).max(view.since.saturating_duration_since(since)) > Duration::from_millis(500) {
                 view.since = since;
                 cx.notify();
             }
         });
+        view.cached(StyleRefinement::default().size_full())
+    }
+}
+
+/// Texto apagado com uma faixa clara passando (o brilho do título do grupo que roda, como no Zeron), numa view própria
+/// no relógio comum de 30 batidas; fora da área visível para de pedir quadro, e com movimento reduzido fica parado.
+#[derive(IntoElement)]
+pub struct Shimmer { key: ElementId, text: SharedString }
+
+impl Shimmer {
+    pub fn new(key: impl Into<ElementId>, text: SharedString) -> Self { Self { key: key.into(), text } }
+}
+
+struct ShimmerView { text: SharedString, born: Instant, visible: Rc<Cell<bool>> }
+
+impl Render for ShimmerView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (base, lit) = (theme::muted(), theme::text());
+        let chars = self.text.chars().count().max(1) as f32;
+        // Cor por letra pela posição no título: sem medir glifo, e a faixa anda por fração da largura.
+        let highlights: Vec<_> = if cx.reduce_motion() { Vec::new() } else {
+            let phase = (self.born.elapsed().as_secs_f32() / crate::motion::TOOL_SHIMMER.as_secs_f32()).fract();
+            self.text.char_indices().enumerate().filter_map(|(n, (at, ch))| {
+                let amount = crate::motion::shimmer_amount((n as f32 + 0.5) / chars, phase);
+                (amount > 0.).then(|| (at..at + ch.len_utf8(), HighlightStyle { color: Some(base.blend(lit.alpha(amount))), ..Default::default() }))
+            }).collect()
+        };
+        let visible = self.visible.clone();
+        div().size_full().min_w_0().flex().items_center().text_sm().text_color(base)
+            .child(div().min_w_0().truncate().child(StyledText::new(self.text.clone()).with_highlights(highlights)))
+            .child(canvas(move |bounds, window, _| visible.set(window.content_mask().bounds.intersects(&bounds)), |_, _, _, _| {})
+                .absolute().inset_0())
+    }
+}
+
+impl RenderOnce for Shimmer {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let text = self.text;
+        let view = keyed_view(self.key, window, cx, |cx| {
+            pulse(Duration::ZERO, |view: &ShimmerView| view.visible.get(), cx);
+            ShimmerView { text: text.clone(), born: Instant::now(), visible: Rc::new(Cell::new(true)) }
+        });
+        view.update(cx, |view, cx| if view.text != text { view.text = text; cx.notify(); });
         view.cached(StyleRefinement::default().size_full())
     }
 }

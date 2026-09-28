@@ -136,8 +136,13 @@ pub(super) fn chip_group_header(button: Button, events: &[ChatEvent], tools: &[T
 const TREE_TRUNK: f32 = 14.5;
 const TREE_BRANCH_END: f32 = 30.;
 const TREE_LINE: f32 = 32.;
-/// Do fim do ramo até o rótulo: recuo do botão, ícone de 16 e o vão de 8. O texto sob a linha começa ali.
-const TREE_TEXT: f32 = 28.;
+/// Do fim do ramo até o rótulo: recuo do botão, ícone de 14 e o vão de 8. O texto sob a linha começa ali.
+const TREE_TEXT: f32 = 26.;
+const TREE_ICON: f32 = 14.;
+const TREE_HOVER: &str = "tree-line";
+/// Teto da altura de uma linha que entra ou dobra: a linha e as três linhas do raciocínio ao vivo. Passado o tempo, o
+/// teto sai e a linha fica com a altura que tiver.
+pub(super) const TREE_PART_MAX: f32 = TREE_LINE + 66.;
 
 /// Título do grupo da Árvore: o raciocínio primeiro, depois a contagem por família ("Raciocínio · fez 1 busca").
 pub(super) fn tree_title(events: &[ChatEvent], parts: &[Tool]) -> String {
@@ -154,26 +159,36 @@ pub(super) fn tree_title(events: &[ChatEvent], parts: &[Tool]) -> String {
     }
 }
 
-/// Cabeçalho do grupo da Árvore no botão de abrir de quem chama: título sem caixa, falhas e "rodando" em texto.
-pub(super) fn tree_header(button: Button, title: String, failed: usize, running: bool) -> Button {
-    let failed = (failed > 0).then(|| failed_count(failed));
-    button.accessibility_label(failed.as_ref().map_or_else(|| title.clone(), |f| format!("{title} · {f}")))
-        .child(div().min_w_0().truncate().text_color(theme::muted()).child(title))
-        .when_some(failed, |el, failed| el.child(div().flex_shrink_0().text_color(theme::warning()).child(format!("· {failed}"))))
-        .when(running, |el| el.child(div().flex_shrink_0().text_color(theme::accent()).child(tr("chip_running"))))
+/// Cabeçalho do grupo da Árvore no botão de abrir de quem chama: tudo apagado, a falha dentro do título e, rodando, a
+/// marca de quem chama.
+/// O título do cabeçalho da Árvore com a falha dentro.
+pub(super) fn tree_header_title(title: String, failed: usize) -> String {
+    if failed > 0 { format!("{title} · {}", failed_count(failed)) } else { title }
+}
+
+/// `shimmer`: o título já montado com o brilho (grupo rodando), no lugar do texto parado.
+pub(super) fn tree_header(button: Button, title: String, failed: usize, running: Option<AnyElement>, shimmer: Option<AnyElement>) -> Button {
+    let title = tree_header_title(title, failed);
+    button.accessibility_label(title.clone())
+        .child(shimmer.unwrap_or_else(|| div().min_w_0().truncate().text_color(theme::muted()).child(title).into_any_element()))
+        .children(running)
         .child(div().flex_1())
 }
 
-/// Uma linha da árvore: ícone, rótulo e detalhe; o fim só aparece para falha e "rodando". Quem chama liga o clique.
+/// Uma linha da árvore: ícone, rótulo e detalhe, tudo apagado; o hover só acende o rótulo e a falha pinta a linha.
+/// O fim fica para o tamanho da edição. Quem chama liga o clique.
 fn tree_line(id: String, icon: IconName, label: String, detail: String, ending: Option<AnyElement>, failed: bool, cx: &App) -> Button {
     let color = if failed { theme::warning() } else { theme::muted() };
-    Button::new(SharedString::from(id))
-        .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
-        .w_full().h(px(TREE_LINE)).px(px(4.)).rounded(px(6.))
+    let id = SharedString::from(id);
+    Button::new(id.clone())
+        .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(color).hover(transparent_black()).active(transparent_black()))
+        .w_full().h(px(TREE_LINE)).px(px(4.))
         .accessibility_label(format!("{label} {detail}"))
-        .child(div().w_full().min_w_0().flex().items_center().gap(px(8.)).text_size(px(13.))
-            .child(chrome::small_icon(icon, 16., color))
-            .child(div().flex_shrink_0().text_color(if failed { theme::warning() } else { theme::text() }).child(label))
+        .child(div().group(TREE_HOVER).w_full().h_full().min_w_0().flex().items_center().gap(px(8.)).text_size(px(13.))
+            .child(chrome::small_icon(icon, TREE_ICON, color))
+            // Com id: a cor do texto é resolvida no layout, e o hover do grupo precisa de estado estável.
+            .child(div().id(SharedString::from(format!("{id}-label"))).flex_shrink_0().text_color(color)
+                .when(!failed, |el| el.group_hover(TREE_HOVER, |s| s.text_color(theme::text()))).child(label))
             .child(div().flex_1().min_w_0().truncate().text_color(color).child(detail))
             .children(ending))
 }
@@ -189,7 +204,7 @@ pub(super) fn tree_thought_line(id: String, cx: &App) -> Button {
     tree_line(id, IconName::MessageCircle, tr("thinking"), String::new(), None, false, cx)
 }
 
-/// Raciocínio fechado sob a linha: texto corrido cortado em três linhas, como no Zeron.
+/// Raciocínio ainda chegando, fechado sob a linha: texto corrido cortado em três linhas.
 pub(super) fn thought_preview(text: &str) -> AnyElement {
     // Três linhas cabem em bem menos que 120 palavras; o resto nem é juntado.
     let flat = text.split_whitespace().take(120).collect::<Vec<_>>().join(" ");
@@ -199,13 +214,20 @@ pub(super) fn thought_preview(text: &str) -> AnyElement {
 
 /// Linha pendurada no tronco: a curva até ela e, fora a última, o tronco seguindo até a próxima. `below` (texto do
 /// raciocínio, entrada e resultado) fica alinhado ao rótulo.
-pub(super) fn tree_row(last: bool, line: Button, below: Option<AnyElement>) -> Div {
+pub(super) fn tree_row(last: bool, line: Button, below: Option<AnyElement>) -> Div { tree_row_drawn(last, line, below, (1., 1., 1.)) }
+
+/// O `tree_row` com o traço pela metade enquanto a linha chega: `(tronco até ela, ramo, tronco seguindo)`, de 0 a 1.
+pub(super) fn tree_row_drawn(last: bool, line: Button, below: Option<AnyElement>, (incoming, branch, onward): (f32, f32, f32)) -> Div {
     // A borda comum some no fundo; a forte fica perto do traço do Zeron.
     let stroke = theme::border_strong();
+    let elbow = TREE_BRANCH_END - TREE_TRUNK;
     div().relative().pl(px(TREE_BRANCH_END))
-        .when(!last, |el| el.child(div().absolute().top_0().bottom_0().left(px(TREE_TRUNK)).w(px(1.)).bg(stroke)))
-        .child(div().absolute().top_0().left(px(TREE_TRUNK)).w(px(TREE_BRANCH_END - TREE_TRUNK)).h(px(TREE_LINE / 2.))
-            .border_l_1().border_b_1().border_color(stroke).rounded_bl(px(6.)))
+        .when(!last && onward > 0., |el| el.child(div().absolute().top_0().h(relative(onward)).left(px(TREE_TRUNK)).w(px(1.)).bg(stroke)))
+        // Primeiro o tronco desce até a altura da linha; depois a curva sai para o lado.
+        .when(branch <= 0. && incoming > 0., |el| el.child(div().absolute().top_0().left(px(TREE_TRUNK)).w(px(1.))
+            .h(px(TREE_LINE / 2. * incoming)).bg(stroke)))
+        .when(branch > 0., |el| el.child(div().absolute().top_0().left(px(TREE_TRUNK)).w(px((elbow * branch).max(6.))).h(px(TREE_LINE / 2.))
+            .border_l_1().border_b_1().border_color(stroke).rounded_bl(px(6.))))
         .child(line)
         .when_some(below, |el, below| el.child(div().pl(px(TREE_TEXT)).pb(px(6.)).child(below)))
 }
@@ -222,32 +244,55 @@ impl Hangar {
         let call = &events[tool.call];
         let key = call.id.clone();
         let open = self.expanded.contains(&key);
-        // O cartão Agent abre a conversa dele na aba Atividade em vez de expandir; o subagente que acabou em erro de API
-        // fica em aviso, e o que roda leva a marca animada.
-        let agent = super::activity::agent_request(call);
-        let failed = agent.is_some() && self.agent_failed(tool.call);
         let running = self.running(tool.call);
-        let ending = if failed { failed_ending() } else { chip_ending(call, tool.result.map(|i| &events[i]), running, |result| self.result_lines(result)) };
-        let ending = if agent.is_some() && running && tool.result.is_none() && !failed {
-            div().flex_shrink_0().flex().items_center().gap(px(6.))
-                .child(self.working_mark_slot(super::panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())).child(ending)
-                .into_any_element()
-        } else { ending };
+        let ending = chip_ending(call, tool.result.map(|i| &events[i]), running, |result| self.result_lines(result));
         let toggle_key = key.clone();
-        let label = agent.is_some().then(|| format!("{}: {}", super::activity::web("tool_abrir_agente"), chip_text(call)));
-        let button = chip_button(format!("chip-{key}"), call, ending, open, label, cx)
-            .on_click(cx.listener(move |this, _, _, cx| match &agent {
-                Some(request) => this.open_agent(request.clone(), cx),
-                None => this.toggle(toggle_key.clone(), cx),
-            }));
+        let button = chip_button(format!("chip-{key}"), call, ending, open, None, cx)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)));
         let body = open.then(|| self.tool_body(tool, row, cx).px(px(12.)));
         div().flex().flex_col().child(button).children(body).into_any_element()
     }
 
     /// Chamada solta nos Chips: a mesma linha da tabela do grupo, numa caixa de uma linha. Forma única para toda chamada.
     pub(super) fn render_single_chip(&mut self, tool: Tool, row: &str, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(card) = self.render_agent_card(tool, cx) { return card; }
         let line = self.render_chip(tool, row, cx);
         chip_box().child(line).into_any_element()
+    }
+
+    /// Cartão do subagente, igual nos três visuais e nunca dentro de grupo: ladrilho do ícone, tipo, descrição, o
+    /// modelo apagado à direita e, no fim, a marca enquanto roda ou o aviso de falha. O cartão inteiro abre a conversa
+    /// dele na aba Atividade. `None` quando a chamada não é Agent.
+    pub(super) fn render_agent_card(&mut self, tool: Tool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let call = &self.chat.events[tool.call];
+        let request = super::activity::agent_request(call)?;
+        let key = call.id.clone();
+        let input = |field: &str| call.tool_input.as_ref().and_then(|i| i.get(field)).and_then(Value::as_str)
+            .map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+        let name = input("subagent_type").unwrap_or_else(|| conversation::tool_display_name("Agent"));
+        let description = request.1.clone();
+        let model = input("model");
+        let failed = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
+        let running = !failed && tool.result.is_none() && self.running(tool.call);
+        let tint = if failed { theme::warning() } else { theme::muted() };
+        let label = format!("{}: {name} · {description}", super::activity::web("tool_abrir_agente"));
+        let card = Button::new(SharedString::from(format!("agent-card-{key}")))
+            .custom(ButtonCustomVariant::new(cx).color(theme::boxed()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
+            .w_full().h(px(38.)).px(px(10.)).rounded(px(9.)).border_1().border_color(theme::border())
+            .accessibility_label(label)
+            .child(div().w_full().min_w_0().flex().items_center().gap(px(8.)).text_size(px(13.))
+                // Ladrilho de 18 com o ícone de 12, como o do Zeron.
+                .child(div().size(px(18.)).flex_none().rounded(px(5.)).bg(theme::hover()).flex().items_center().justify_center()
+                    .child(chrome::small_icon(IconName::Bot, 12., tint)))
+                .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).text_color(if failed { theme::warning() } else { theme::text() }).child(name))
+                .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(description))
+                // O modelo fica no fim e não na descrição: é o que sobra para ler quando a descrição é cortada.
+                .when_some(model, |el, model| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(model)))
+                .when(running, |el| el.child(self.working_mark_slot(super::panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())))
+                .when(failed, |el| el.child(failed_ending()))
+                .child(chrome::small_icon(IconName::ExternalLink, 14., theme::faint())))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_agent(request.clone(), cx)));
+        Some(card.into_any_element())
     }
 
     /// Grupo no modo Chips: título pela contagem por família e as chamadas numa tabela com borda.
@@ -272,38 +317,76 @@ impl Hangar {
         let live = parts.first().is_some_and(|t| self.running(t.call));
         let open = live != self.expanded.contains(row);
         let toggle_key = row.to_owned();
-        let header = tree_header(self.disclosure(row, open), tree_title(events, parts), failed, running)
+        let mark = running.then(|| self.working_mark_slot(super::panes::Area::Conversation, format!("tree-{row}"), 12., theme::accent()));
+        // Rodando, o título brilha fora da conversa guardada, como a marca.
+        let shimmer = running.then(|| self.shimmer_slot(super::panes::Area::Conversation, format!("tree-title-{row}"),
+            tree_header_title(tree_title(events, parts), failed)));
+        let header = tree_header(self.disclosure(row, open), tree_title(events, parts), failed, mark, shimmer)
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)));
-        let lines: Vec<AnyElement> = if open {
-            parts.iter().enumerate().map(|(n, &tool)| self.render_tree_part(tool, row, n + 1 == parts.len(), cx)).collect()
+        // Aberto ou fechado por clique ou pelo fim do turno, o grupo dobra; o primeiro quadro (histórico) só marca.
+        let fold = self.tree_folds.entry(row.to_owned()).or_insert((open, None));
+        if fold.0 != open { *fold = (open, Some(Instant::now())); }
+        let folding = fold.1.map(|at| motion::TOOL_FOLD.raw(at)).filter(|raw| *raw < 1. && !cx.reduce_motion());
+        if folding.is_none() { fold.1 = None; }
+        let lines: Vec<AnyElement> = if open || folding.is_some() {
+            parts.iter().enumerate().map(|(n, &tool)| self.render_tree_part(tool, row, parts.get(n + 1).copied(), n > 0, live, cx)).collect()
         } else { Vec::new() };
-        div().flex().flex_col().child(header).children(lines).into_any_element()
+        let group = div().flex().flex_col().child(header);
+        match folding {
+            Some(raw) => {
+                self.tree_motion = true;
+                let t = motion::TOOL_FOLD.ease(raw);
+                let shown = if open { t } else { 1. - t };
+                let tall = TREE_LINE * parts.len() as f32 + (TREE_PART_MAX - TREE_LINE);
+                group.child(div().flex().flex_col().max_h(px(tall * shown)).overflow_hidden().children(lines)).into_any_element()
+            }
+            None => group.children(lines).into_any_element(),
+        }
     }
 
-    /// Uma linha do grupo da Árvore: raciocínio (texto cortado embaixo, inteiro ao abrir) ou chamada (entrada e resultado).
-    fn render_tree_part(&mut self, tool: Tool, row: &str, last: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Uma linha do grupo da Árvore: raciocínio (inteiro ao abrir; fechado, as três primeiras linhas só enquanto chega)
+    /// ou chamada (entrada e resultado). Parte que acabou de chegar cresce e sobe no lugar.
+    fn render_tree_part(&mut self, tool: Tool, row: &str, next: Option<Tool>, after: bool, live: bool, cx: &mut Context<Self>) -> AnyElement {
+        let last = next.is_none();
+        // O traço desta linha chegando e o da próxima, que puxa o tronco que sai daqui.
+        let still = cx.reduce_motion();
+        let drawing = |id: &str| self.part_arrived.get(id).map(|at| motion::TOOL_CONNECTOR.raw(*at)).filter(|raw| *raw < 1. && !still);
+        let own = drawing(&self.chat.events[tool.call].id);
+        let onward = next.and_then(|next| drawing(&self.chat.events[next.call].id)).map(|raw| motion::TOOL_CONNECTOR.ease(raw));
+        let (incoming, branch) = own.map_or((1., 1.), |raw| motion::connector_parts(motion::TOOL_CONNECTOR.ease(raw), after));
+        let draw = (incoming, branch, motion::connector_continuation(onward));
         let events = &self.chat.events;
         let event = &events[tool.call];
         let key = event.id.clone();
         let open = self.expanded.contains(&key);
         let toggle_key = key.clone();
         let toggle = cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle(toggle_key.clone(), cx));
-        if event.kind == "thinking" {
+        let part = if event.kind == "thinking" {
             let text = event.text.clone().unwrap_or_default();
             let below = if open {
                 let view = self.text_view(&format!("{key}:thought"), row, safe_markdown(&text), cx);
-                chat_text(&view, cx).text_color(theme::muted()).into_any_element()
-            } else { thought_preview(&text) };
-            return tree_row(last, tree_thought_line(format!("tree-{key}"), cx).on_click(toggle), Some(below)).into_any_element();
+                Some(chat_text(&view, cx).text_color(theme::muted()).into_any_element())
+            } else { (live && last).then(|| thought_preview(&text)) };
+            tree_row_drawn(last, tree_thought_line(format!("tree-{key}"), cx).on_click(toggle), below, draw)
+        } else {
+            let failed = tool.result.is_some_and(|i| events[i].is_error == Some(true));
+            // Estado não vai na linha: a falha pinta, o "rodando" é a marca do cabeçalho. Só a edição diz o tamanho.
+            let ending = if failed { None } else { super::edits::totals(event) };
+            let line = tree_call_line(format!("tree-{key}"), event, ending, failed, cx).on_click(toggle);
+            let body = open.then(|| self.tool_body(tool, row, cx).into_any_element());
+            tree_row_drawn(last, line, body, draw)
+        };
+        if own.is_some() || onward.is_some() { self.tree_motion = true; }
+        let entering = self.part_arrived.get(&key).map(|at| motion::TOOL_REVEAL.raw(*at)).filter(|raw| *raw < 1. && !cx.reduce_motion());
+        match entering {
+            Some(raw) => {
+                self.tree_motion = true;
+                let t = motion::TOOL_REVEAL.ease(raw);
+                div().max_h(px(TREE_PART_MAX * t)).overflow_hidden().child(motion::fade_in(part, t)).into_any_element()
+            }
+            // O traço dura mais que a entrada: a chegada só sai quando ele também acabou.
+            None => { if own.is_none() { self.part_arrived.remove(&key); } part.into_any_element() }
         }
-        let failed = tool.result.is_some_and(|i| events[i].is_error == Some(true));
-        let running = tool.result.is_none() && self.running(tool.call);
-        // Pronta, a linha fica sem fim, menos a edição: o "+5 −2" diz o tamanho antes de abrir.
-        let ending = if failed || running { Some(chip_ending(event, tool.result.map(|i| &events[i]), running, |result| self.result_lines(result))) }
-            else { super::edits::totals(event) };
-        let line = tree_call_line(format!("tree-{key}"), event, ending, failed, cx).on_click(toggle);
-        let body = open.then(|| self.tool_body(tool, row, cx).into_any_element());
-        tree_row(last, line, body).into_any_element()
     }
 
     /// Lista de tarefas do agente, no lugar das chamadas TaskCreate/TaskUpdate: anel de progresso, quanto falta

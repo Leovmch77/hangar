@@ -25,7 +25,8 @@ enum Part { Thought(String, String), Tool(ToolRow) }
 /// Uma linha preparada quando a conversa muda; o desenho só lê.
 #[derive(Clone, Debug, PartialEq)]
 enum Row {
-    Message { id: String, markdown: String, user: bool, label: Option<(String, bool)> },
+    /// `at`: data e hora sob o prompt (a primeira mensagem do usuário), do começo do subagente.
+    Message { id: String, markdown: String, user: bool, label: Option<(String, bool)>, at: Option<String> },
     Tool(ToolRow),
     Group { id: String, label: String, summary: String, status: String, tone: Tone, tools: Vec<ToolRow> },
     Thinking { id: String, summary: String, count: Option<String>, parts: Vec<Part> },
@@ -42,6 +43,8 @@ struct Rich { source: String, view: Entity<TextViewState>, _observer: Subscripti
 pub(super) struct SubConversation {
     events: Vec<ChatEvent>,
     finished: bool,
+    /// `startedAt` do subagente, em segundos desde a época.
+    started: Option<f64>,
     rows: Vec<Row>,
     expanded: HashSet<String>,
     rich: HashMap<String, Rich>,
@@ -65,7 +68,8 @@ fn tool_row(events: &[ChatEvent], call: usize, result: Option<usize>, finished: 
     ToolRow { key: event.id.clone(), call, result, orphan: false, name, summary, status, tone }
 }
 
-fn prepare(events: &[ChatEvent], finished: bool) -> Vec<Row> {
+fn prepare(events: &[ChatEvent], finished: bool, started: Option<f64>) -> Vec<Row> {
+    let prompt = events.iter().position(|e| e.kind == "user_msg");
     let view = conversation::View { thinking: appearance::get().thinking_tools, tasks: false, merge_thinking: tree() };
     let items = conversation::build(events, view, &HashSet::new());
     let paired = conversation::pair_results(events).0;
@@ -79,7 +83,8 @@ fn prepare(events: &[ChatEvent], finished: bool) -> Vec<Row> {
             let label = (!user && (event.kind != "assistant_msg" || error)).then(|| (match event.kind.as_str() {
                 "assistant_msg" => tr("assistant"), "notice" => tr("notice"), _ => tr("unknown"),
             }, error));
-            Row::Message { id: event.id.clone(), markdown: render_source(event), user, label }
+            let at = (prompt == Some(*i)).then(|| stamp(started.or(event.ts))).flatten();
+            Row::Message { id: event.id.clone(), markdown: render_source(event), user, label, at }
         }
         Item::Tool(t) => Row::Tool(tool(t)),
         Item::Orphan(i) => {
@@ -136,30 +141,30 @@ fn owner(rows: &[Row], key: &str) -> Option<usize> {
 
 impl SubConversation {
     pub fn new() -> Self {
-        Self { events: Vec::new(), finished: false, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
+        Self { events: Vec::new(), finished: false, started: None, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
             list: ListState::new(0, ListAlignment::Bottom, px(200.)) }
     }
 
     /// A Aparência mudou: refaz as linhas (pensamento com ou sem ferramentas) e remede todas (Clássico ou Chips).
     pub fn restyle(&mut self, cx: &mut Context<Self>) {
         let events = std::mem::take(&mut self.events);
-        self.set_events(events, self.finished, cx);
+        self.set_events(events, self.finished, self.started, cx);
         self.list.remeasure();
         cx.notify();
     }
 
     /// Outro subagente: nada do anterior fica.
     pub fn clear(&mut self) {
-        (self.events, self.rows, self.finished) = (Vec::new(), Vec::new(), false);
+        (self.events, self.rows, self.finished, self.started) = (Vec::new(), Vec::new(), false, None);
         self.expanded.clear();
         self.rich.clear();
         self.list.reset(0);
     }
 
     /// Conversa nova do mesmo subagente: só o trecho que mudou entra na lista, e linha igual não é remedida.
-    pub fn set_events(&mut self, events: Vec<ChatEvent>, finished: bool, cx: &mut Context<Self>) {
-        let rows = prepare(&events, finished);
-        (self.events, self.finished) = (events, finished);
+    pub fn set_events(&mut self, events: Vec<ChatEvent>, finished: bool, started: Option<f64>, cx: &mut Context<Self>) {
+        let rows = prepare(&events, finished, started);
+        (self.events, self.finished, self.started) = (events, finished, started);
         // Só o estado do subagente mudou (chamadas, fim): as linhas são as mesmas e nada se redesenha.
         if rows == self.rows { return; }
         let old: HashMap<&str, &Row> = self.rows.iter().map(|r| (r.id(), r)).collect();
@@ -265,16 +270,14 @@ impl SubConversation {
         let id = format!("sub-tree-{}", tool.key);
         if event.kind == "thinking" {
             let text = event.text.clone().unwrap_or_default();
-            let below = if open {
+            let below = open.then(|| {
                 let view = self.text(format!("{}:thought", tool.key), safe_markdown(&text), cx);
                 chat_text(&view, cx).text_color(theme::muted()).into_any_element()
-            } else { super::rows::thought_preview(&text) };
-            return super::rows::tree_row(last, super::rows::tree_thought_line(id, cx).on_click(toggle), Some(below)).into_any_element();
+            });
+            return super::rows::tree_row(last, super::rows::tree_thought_line(id, cx).on_click(toggle), below).into_any_element();
         }
         let failed = tool.tone == Tone::Warning;
-        let running = tool.result.is_none() && tool.tone == Tone::Accent;
-        let ending = if failed || running { Some(super::rows::chip_ending(event, tool.result.map(|i| &self.events[i]), running, count_lines)) }
-            else { super::edits::totals(event) };
+        let ending = if failed { None } else { super::edits::totals(event) };
         let line = super::rows::tree_call_line(id, event, ending, failed, cx).on_click(toggle);
         let body = open.then(|| self.tool_body(tool, cx).into_any_element());
         super::rows::tree_row(last, line, body).into_any_element()
@@ -308,7 +311,7 @@ impl SubConversation {
         let message = matches!(row, Row::Message { .. });
         let row_id = SharedString::from(format!("sub-row-{}", row.id()));
         let inner = match row {
-            Row::Message { id, markdown, user, label } => {
+            Row::Message { id, markdown, user, label, at } => {
                 let (long, more_key) = (user && long_message(&markdown), format!("{id}:more"));
                 let open = self.expanded.contains(&more_key);
                 let view = self.text(id.clone(), markdown, cx);
@@ -319,6 +322,7 @@ impl SubConversation {
                     .when(long, |el| el.child(more_button(SharedString::from(format!("sub-more-{id}")), open)
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx)))));
                 div().w_full().flex().flex_col().map(|el| if user { el.items_end().child(user_bubble(content)) } else { el.child(content) })
+                    .when_some(at, |el, at| el.child(div().pt(px(4.)).text_xs().text_color(theme::faint()).child(at)))
                     .into_any_element()
             }
             Row::Tool(tool) => self.render_tool(&tool, cx),
@@ -328,7 +332,8 @@ impl SubConversation {
                 let thinking = |t: &ToolRow| self.events[t.call].kind == "thinking";
                 let failed = tools.iter().filter(|t| !thinking(t) && t.tone == Tone::Warning).count();
                 let running = tools.iter().any(|t| !thinking(t) && t.result.is_none() && t.tone == Tone::Accent);
-                let header = super::rows::tree_header(self.header(&id, cx), super::rows::tree_title(&self.events, &calls), failed, running);
+                let running = running.then(|| div().flex_shrink_0().text_color(theme::faint()).child(tr("chip_running")).into_any_element());
+                let header = super::rows::tree_header(self.header(&id, cx), super::rows::tree_title(&self.events, &calls), failed, running, None);
                 let lines: Vec<AnyElement> = if self.expanded.contains(&id) {
                     tools.iter().enumerate().map(|(n, t)| self.render_tree_part(t, n + 1 == tools.len(), cx)).collect()
                 } else { Vec::new() };
@@ -383,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_key_belongs_to_the_row_with_the_same_id_or_the_longest_one_before_a_colon() {
-        let rows: Vec<Row> = ["U", "U:1", "U:10"].iter().map(|id| Row::Message { id: (*id).into(), markdown: String::new(), user: false, label: None }).collect();
+        let rows: Vec<Row> = ["U", "U:1", "U:10"].iter().map(|id| Row::Message { id: (*id).into(), markdown: String::new(), user: false, label: None, at: None }).collect();
         assert_eq!((owner(&rows, "U"), owner(&rows, "U:1"), owner(&rows, "U:1:input"), owner(&rows, "U:10:result")), (Some(0), Some(1), Some(1), Some(2)));
         assert_eq!((owner(&rows, "U:2:input"), owner(&rows, "V")), (Some(0), None));
     }
@@ -398,9 +403,9 @@ mod tests {
         let events = vec![event("tool_use", "a", Some("Read"), Some("u1")), event("assistant_msg", "m", None, None),
             event("tool_use", "b", Some("Grep"), Some("u2"))];
         let tone = |rows: &[Row], id: &str| rows.iter().find_map(|r| match r { Row::Tool(t) if t.key == id => Some(t.tone), _ => None });
-        let rows = prepare(&events, false);
+        let rows = prepare(&events, false, None);
         assert_eq!((tone(&rows, "a"), tone(&rows, "b")), (Some(Tone::Muted), Some(Tone::Accent)));
-        assert_eq!(tone(&prepare(&events, true), "b"), Some(Tone::Muted));
+        assert_eq!(tone(&prepare(&events, true, None), "b"), Some(Tone::Muted));
     }
 }
 

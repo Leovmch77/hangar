@@ -467,6 +467,13 @@ pub struct Hangar {
     side_slide: Option<(Instant, bool, f32)>,
     /// Linhas que chegaram com a conversa aberta, e quando: entram com o `fade-in` do kit, uma vez.
     arrived: HashMap<String, Instant>,
+    /// Partes dos grupos da Árvore já vistas, e as que chegaram com o grupo na tela (quando começam a entrar).
+    tree_parts: HashSet<String>,
+    part_arrived: HashMap<String, Instant>,
+    /// Grupo da Árvore: aberto no último quadro e quando isso mudou, para dobrar em vez de pular.
+    tree_folds: HashMap<String, (bool, Option<Instant>)>,
+    /// Alguma parte da Árvore animando no desenho da linha atual: a linha pede o próximo quadro.
+    tree_motion: bool,
     active_token: String,
     ready_sessions: Option<Vec<SessionInfo>>,
     /// Todas as máquinas conhecidas, a ativa inclusive, e a lista ao vivo de cada outra.
@@ -611,7 +618,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
-            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), active_token: String::new(), ready_sessions: None,
+            new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, pending_open: None,
             dictation: Default::default(),
             connection_origin: None,
@@ -2217,6 +2224,19 @@ impl Hangar {
             let now = Instant::now();
             for id in &ids[prefix..prefix + added] { if id != WORKING { self.arrived.insert(id.clone(), now); } }
         }
+        // Parte nova num grupo da Árvore entra animada pela mesma regra: conversa já na tela e poucas de uma vez, uma
+        // depois da outra.
+        if full {
+            let parts: Vec<String> = self.items.iter().filter_map(|item| match item { Item::Group { tools, .. } => Some(tools), _ => None })
+                .flatten().map(|tool| self.chat.events[tool.call].id.clone()).collect();
+            let fresh: Vec<&String> = parts.iter().filter(|id| !self.tree_parts.contains(*id)).collect();
+            if prefix > 0 && (1..=4).contains(&fresh.len()) {
+                let now = Instant::now();
+                for (n, id) in fresh.into_iter().enumerate() { self.part_arrived.insert(id.clone(), now + motion::TOOL_STAGGER * n as u32); }
+            }
+            self.tree_parts = parts.into_iter().collect();
+            self.part_arrived.retain(|id, _| self.tree_parts.contains(id));
+        }
         for index in resized { self.list_state.remeasure_items(index..index + 1); }
         for (index, body) in rewritten {
             let Some(cached) = self.rich.get_mut(&ids[index]) else { continue };
@@ -2235,6 +2255,7 @@ impl Hangar {
         // Visões fora da lista (plano, diff do painel) usam linha "__…__" e saem só pelo limite do cache.
         self.rich.retain(|_, rich| rows.contains(&rich.row) || rich.row.starts_with("__"));
         self.arrived.retain(|id, _| rows.contains(id));
+        self.tree_folds.retain(|id, _| rows.contains(id));
     }
 
     /// Passo do streaming com a linha da prévia já na lista: só ela muda, e o resto da conversa não é refeito
@@ -2304,6 +2325,7 @@ impl Hangar {
 
     fn render_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(id) = self.row_ids.get(index).cloned() else { return div().into_any_element(); };
+        self.tree_motion = false;
         let inner = match (id.as_str(), self.items.get(index).cloned()) {
             (PREVIEW, _) => self.render_message(index, &id, cx),
             (LIVE_THINKING, _) => self.render_live_thinking(cx),
@@ -2323,6 +2345,7 @@ impl Hangar {
             (_, Some(Item::Tasks { tasks, .. })) => self.render_tasks(&id, &tasks, cx),
             (_, None) => div().into_any_element(),
         };
+        if self.tree_motion { motion::request_frame(window, cx); }
         let message = id == PREVIEW || id == landing::OPENING || matches!(self.items.get(index), Some(Item::Event(_)));
         let row = row_frame(inner, message);
         // Pede quadro só para a área da conversa, e só enquanto a linha entra; rolar até ela depois não a anima de novo.
@@ -2426,11 +2449,16 @@ impl Hangar {
         let sending = self.sending_shown();
         let verb = if sending { tr("sending") } else { working_verb(self.chat.state.label.as_deref()) };
         let since = if sending { None } else { self.turn_start() };
+        let tokens = if sending { None } else { working_tokens(self.chat.state.label.as_deref()).map(SharedString::from) };
         // Sem recuo: a marca começa na borda da coluna, alinhada com o texto das mensagens.
         let row = div().relative().h(px(38.)).flex().items_center().gap(px(8.))
             .child(self.working_mark_slot(panes::Area::Conversation, "working-line", 14., theme::accent()))
             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(verb))
-            .when_some(since, |el, since| el.child(self.elapsed_slot(panes::Area::Conversation, "working-elapsed", since)));
+            .map(|el| match since {
+                Some(since) => el.child(self.elapsed_slot(panes::Area::Conversation, "working-elapsed", since, tokens)),
+                // Sem começo conhecido não há segundos, mas os tokens do terminal valem sozinhos.
+                None => el.when_some(tokens, |el, tokens| el.child(div().min_w_0().truncate().pt(px(1.)).text_size(px(11.)).text_color(theme::faint()).child(tokens))),
+            });
         if cx.reduce_motion() { return row.into_any_element(); }
         row.with_animation("working-line-in", Animation::new(WORKING_FADE).with_easing(motion::ease_out),
             |el, t| el.opacity(t).top(px(6. * (1. - t)))).into_any_element()
@@ -2457,43 +2485,27 @@ impl Hangar {
     }
 
     fn render_tool(&mut self, tool: Tool, row: &str, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(card) = self.render_agent_card(tool, cx) { return card; }
         if appearance::get().tool_look == appearance::ToolLook::Chips { return self.render_single_chip(tool, row, cx); }
         let call = &self.chat.events[tool.call];
         let key = call.id.clone();
         let name = call.tool_name.clone().unwrap_or_else(|| tr("tool"));
         let summary = conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref());
         let (status, status_color) = self.tool_status(tool);
-        let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
+        let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true));
         let open = self.expanded.contains(&key);
         // Edição pronta mostra "+5 −2" no lugar do "pronto"; rodando ou com erro, o estado vale mais.
         let edit_totals = (!error && tool.result.is_some()).then(|| edits::totals(call)).flatten();
         let toggle_key = key.clone();
-        // O cartão Agent abre a conversa dele na aba Atividade em vez de expandir: ↗ no lugar da seta de abrir, e a
-        // marca animada enquanto o subagente roda.
-        let agent = activity::agent_request(call);
-        let is_agent = agent.is_some();
-        let running = is_agent && tool.result.is_none() && !error && self.running(tool.call);
-        let label = if agent.is_some() { format!("{}: {summary}. {status}", activity::web("tool_abrir_agente")) } else { format!("{name}: {summary}. {status}") };
-        let button = if agent.is_some() {
-            Button::new(SharedString::from(format!("toggle-{key}"))).ghost().small().w_full().h(px(34.)).px(px(10.)).rounded(px(0.))
-                .child(chrome::small_icon(IconName::Bot, 14., if error { theme::warning() } else { theme::muted() }))
-        } else { self.disclosure(&key, open) };
-        let header = button
-            .accessibility_label(label)
+        let header = self.disclosure(&key, open)
+            .accessibility_label(format!("{name}: {summary}. {status}"))
             .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::text() }).child(name))
             .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(summary))
-            .when(running, |el| el.child(self.working_mark_slot(panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())))
             .map(|el| match edit_totals {
                 Some(totals) => el.child(totals),
                 None => el.child(div().flex_shrink_0().max_w(px(320.)).truncate().text_color(status_color).child(status)),
             })
-            .when(agent.is_some(), |el| el.child(chrome::small_icon(IconName::ExternalLink, 14., theme::faint())))
-            .on_click(cx.listener(move |this, _, _, cx| match &agent {
-                Some(request) => this.open_agent(request.clone(), cx),
-                None => this.toggle(toggle_key.clone(), cx),
-            }));
-        // O cartão Agent é um objeto próprio, em caixa como no modo Chips; as outras chamadas seguem linha.
-        if is_agent { return rows::chip_box().child(header).into_any_element(); }
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)));
         let body = open.then(|| self.tool_body(tool, row, cx).pl_6());
         div().flex().flex_col().child(header).children(body).into_any_element()
     }
@@ -4526,6 +4538,12 @@ fn working_verb(label: Option<&str>) -> String {
         .map(str::to_owned).unwrap_or_else(|| tr("working_line"))
 }
 
+/// A contagem de tokens dos parênteses do spinner ("… (37s · ↓ 1.4k tokens · thought for 5s)" → "↓ 1.4k tokens").
+fn working_tokens(label: Option<&str>) -> Option<String> {
+    let inside = label?.split_once(" (")?.1.trim_end_matches(')');
+    inside.split(" · ").map(str::trim).find(|part| part.starts_with(['↑', '↓']) && part.ends_with("tokens")).map(str::to_owned)
+}
+
 fn preview_source(preview: &Preview) -> String {
     if preview.md { return safe_markdown(&composer::citation_markdown(&crate::mend::close_hanging(&preview.text))); }
     let line_count = preview.text.lines().count();
@@ -5085,7 +5103,7 @@ impl Render for Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_card, preview_step, safe_markdown, stream_motion, working_verb};
+    use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::time::Duration;
 
@@ -5157,6 +5175,9 @@ mod tests {
         // Rótulo sem verbo (outro harness) ou ausente: a palavra nossa.
         assert_eq!(working_verb(Some("Running")), tr("working_line"));
         assert_eq!(working_verb(None), tr("working_line"));
+        assert_eq!(working_tokens(Some("Gitifying… (37s · ↓ 1.4k tokens · thought for 5s)")).as_deref(), Some("↓ 1.4k tokens"));
+        assert_eq!(working_tokens(Some("Gitifying… (2m 3s · ↑ 812 tokens)")).as_deref(), Some("↑ 812 tokens"));
+        assert_eq!((working_tokens(Some("Sketching… (6s · esc to interrupt)")), working_tokens(Some("Writing tests…")), working_tokens(None)), (None, None, None));
         let at = |s| super::chrome::format_elapsed(Duration::from_secs(s));
         assert_eq!((at(6), at(65), at(3725)), ("6s".into(), "1m 5s".into(), "1h 2m".into()));
     }

@@ -36,6 +36,8 @@ pub(super) struct SubRun {
     finished: bool, unreadable: bool, tools: Vec<(String, u64)>,
     /// Erro de API no fim do registro (campo `failed` do Claude); servidor sem o campo, `false`.
     failed: bool,
+    /// Primeira linha do registro (`startedAt`), em segundos desde a época; vazio ou ilegível, nada.
+    started: Option<f64>,
 }
 
 fn parse_sub(item: &Value) -> Option<SubRun> {
@@ -51,7 +53,15 @@ fn parse_sub(item: &Value) -> Option<SubRun> {
         tools: item.get("tools").and_then(Value::as_array).map(|tools| tools.iter()
             .filter_map(|t| Some((text(t, "name")?, t.get("count").and_then(Value::as_u64).unwrap_or(0)))).collect()).unwrap_or_default(),
         failed: item.get("failed").and_then(Value::as_bool).unwrap_or(false),
+        started: text(item, "startedAt").and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+            .map(|at| at.timestamp_millis() as f64 / 1000.),
     })
+}
+
+/// O instante local de um horário de parede (segundos desde a época); no futuro, agora.
+fn since_wall(ts: f64) -> Option<Instant> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    Instant::now().checked_sub(std::time::Duration::from_secs_f64((now - ts).max(0.)))
 }
 
 fn parse_subs(value: &Value) -> Vec<SubRun> {
@@ -385,7 +395,8 @@ impl ActivityPanel {
                 let has_events = !events.is_empty();
                 let changed = first || cleared || opened.run != run || opened.has_events != has_events || opened.done != done;
                 (opened.run, opened.raw, opened.has_events, opened.done) = (run, Some(value), has_events, done);
-                self.conversation.update(cx, |view, cx| view.set_events(events, done, cx));
+                let started = opened.run.started;
+                self.conversation.update(cx, |view, cx| view.set_events(events, done, started, cx));
                 if changed { cx.notify(); }
             }
             Err(failure) => {
@@ -571,7 +582,10 @@ impl ActivityPanel {
                 div().size_full().flex().flex_col().child(div().flex_1().min_h_0().child(conversation))
                     .when(running, |el| el.child(div().flex_shrink_0().px_4().h(px(38.)).flex().items_center().gap(px(8.))
                         .child(super::panes::mark_slot(&self.marks, super::panes::Area::Side, "act-sub-working", 14., theme::accent()))
-                        .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(web("pensamento_vivo")))))
+                        .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(web("pensamento_vivo")))
+                        // Os segundos desde a primeira linha do registro, como a linha "trabalhando" da conversa.
+                        .when_some(run.started.and_then(since_wall), |el, since| el.child(
+                            super::panes::elapsed_place(&self.marks, super::panes::Area::Side, "act-sub-elapsed", since)))))
                     .into_any_element()
             }
             // Já chamou ferramentas (ou o registro não foi lido): é falha de leitura, não agente parado.
@@ -1038,7 +1052,7 @@ mod tests {
     }
 
     fn sub(id: &str, prompt: &str) -> SubRun {
-        SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false }
+        SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false, started: None }
     }
 
     #[test]

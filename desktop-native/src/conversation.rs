@@ -121,8 +121,9 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
         flush_thinking(&mut thinking, &mut items);
         if event.kind == "tool_use" {
             let tool = Tool { call: i, result: paired.get(&i).copied() };
-            // Na Árvore o subagente fica fora do grupo: o cartão dele abre a conversa própria.
-            if view.merge_thinking && is_agent_call(event.tool_name.as_deref()) {
+            // O subagente fica fora do grupo em todo visual: o cartão dele abre a conversa própria, e dentro de um grupo
+            // fechado o que ainda roda ficaria escondido.
+            if is_agent_call(event.tool_name.as_deref()) {
                 flush_run(&mut run, &mut items);
                 items.push(Item::Tool(tool));
             } else { run.push(tool); }
@@ -583,6 +584,17 @@ mod tests {
             Item::Group { id: "g-t".into(), tools: vec![tool(0, None), tool(1, Some(2))] }, Item::Event(3),
             Item::Group { id: "g-b".into(), tools: vec![tool(4, None)] }, Item::Tool(tool(5, None)),
             Item::Group { id: "g-t2".into(), tools: vec![tool(6, None)] },
+        ]);
+    }
+
+    #[test]
+    fn agent_calls_never_join_a_group_in_any_look() {
+        let events = vec![call("a", "1", "Bash"), call("b", "2", "Read"), call("g", "3", "Agent"), call("c", "4", "Grep"),
+            call("d", "5", "Grep"), call("e", "6", "Grep")];
+        let tool = |call| Tool { call, result: None };
+        assert_eq!(super::build(&events, View::default(), &HashSet::new()), vec![
+            Item::Tool(tool(0)), Item::Tool(tool(1)), Item::Tool(tool(2)),
+            Item::Group { id: "g-c".into(), tools: vec![tool(3), tool(4), tool(5)] },
         ]);
     }
 

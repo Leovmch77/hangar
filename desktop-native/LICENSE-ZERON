@@ -4,6 +4,9 @@ Parts of the native app are adapted from Zeron (https://github.com/zeronsh/zeron
   (crates/ui/src/files/tree.rs, search.rs, git_status.rs, watch.rs; crates/engine/src/workspace_files.rs).
 - src/app/files.rs: the file viewer tabs, path breadcrumb, preview/source and reveal-in-tree toolbar, and relative
   Markdown link resolution (crates/ui/src/files/preview.rs, markdown_preview.rs; crates/ui/src/shell/tabs.rs).
+- src/app/rows.rs (`render_agent_card`, the tree connector draw) and src/motion.rs (`connector_parts`,
+  `connector_continuation`, `shimmer_amount`): the subagent chip, tool-tree connector timing and group-title shimmer
+  (crates/ui/src/transcript.rs).
 
 MIT License
 
