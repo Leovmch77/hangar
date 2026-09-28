@@ -73,7 +73,7 @@
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { runShortcutShell, sendsDirect } from '@hangar/core';
+  import { runShortcutShell, sendsDirect, shortcutMissingSecret } from '@hangar/core';
   import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals, focusShortcutTerminal } from '../lib/shortcutTerminals.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
@@ -2724,6 +2724,9 @@
   }
 
   async function runShortcut(s: ShortcutSendText | ShortcutShell) {
+    // Importado com a credencial em branco: rodar mandaria o marcador literal.
+    const falta = shortcutMissingSecret(s);
+    if (falta) { mostrarAviso(new Error(m.atalhos_segredo_falta({ nome: falta }))); return; }
     // O 202 do shell é só "o processo nasceu", e o handleSend lança pro Composer mostrar — aqui
     // não há Composer no meio, então sem este aviso o clique falho não faz NADA em silêncio.
     try {

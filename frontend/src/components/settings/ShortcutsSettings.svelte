@@ -10,6 +10,7 @@
   } from '@hangar/core';
   import { loadShortcuts, shortcutsFor, saveShortcuts } from '../../lib/shortcuts.svelte';
   import ShortcutIcon, { GLYPHS } from '../icons/ShortcutIcon.svelte';
+  import ShortcutTransfer from '../ShortcutTransfer.svelte';
   import type { Server } from '../../lib/auth';
 
   interface Props {
@@ -316,6 +317,8 @@
     <div class="rodape">
       <button class="btn" onclick={() => void restoreDefaults()} disabled={saving}
               title={m.atalhos_restaurar_ajuda()}>{m.atalhos_restaurar()}</button>
+      <!-- Importar grava direto no servidor: com edição pendente, salvar depois sobrescreveria o que veio. -->
+      {#if !dirty}<ShortcutTransfer {serverId} onDone={() => void load()} />{/if}
       <span class="feedback">
         {#if saveError}<span class="erro">{saveError}</span>
         {:else if saved}{m.atalhos_salvo()}{/if}

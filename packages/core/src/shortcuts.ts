@@ -90,3 +90,10 @@ export function serializeShortcuts(list: Shortcut[]): string {
 export function sendsDirect(s: ShortcutSendText): boolean {
   return s.send_direct !== false;
 }
+
+/** Credencial que a importação deixou em branco (`⟦SEGREDO:<nome>⟧` no comando ou texto): o
+ * atalho fica salvo mas não roda até alguém preencher. Devolve o nome, ou null. */
+export function shortcutMissingSecret(s: ShortcutSendText | ShortcutShell): string | null {
+  const m = /⟦SEGREDO:([A-Za-z0-9_.-]+)⟧/.exec(s.type === 'shell' ? s.command : s.text);
+  return m ? m[1] : null;
+}

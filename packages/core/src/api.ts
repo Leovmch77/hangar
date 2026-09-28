@@ -2468,6 +2468,32 @@ export async function listShortcutTerminals(srv: Server, name: string): Promise<
   return r.terminals ?? [];
 }
 
+/** Arquivo de exportação dos atalhos: a lista gravada, com cada credencial trocada por
+ * `⟦SEGREDO:<nome>⟧` no backend. `removed` = quantas saíram (não vai pro arquivo). */
+export interface ShortcutExport { version: number; shortcuts: unknown[]; removed: number }
+
+export function exportShortcuts(srv?: Server | null): Promise<ShortcutExport> {
+  const path = '/api/shortcuts/export';
+  return srv ? apiFetchForServer<ShortcutExport>(srv, path) : apiFetch<ShortcutExport>(path);
+}
+
+export interface ShortcutImportResult {
+  added: number;
+  replaced: number;
+  placeholders: { id: string; label: string; names: string[] }[];
+}
+
+/** Importação dos atalhos: sem `apply` só confere e conta; com `apply` preenche os `secrets`
+ * ({id: {nome: valor}}) e junta por id à lista atual. Arquivo inválido volta 400, nada muda. */
+export function importShortcuts(
+  body: { data: unknown; apply?: boolean; secrets?: Record<string, Record<string, string>> },
+  srv?: Server | null,
+): Promise<ShortcutImportResult> {
+  const path = '/api/shortcuts/import';
+  const init = { method: 'POST', body: JSON.stringify(body) };
+  return srv ? apiFetchForServer<ShortcutImportResult>(srv, path, init) : apiFetch<ShortcutImportResult>(path, init);
+}
+
 /** Fecha o terminal de atalho: o backend derruba o processo e a sessão tmux escondida. */
 export function closeShortcutTerminal(srv: Server, name: string, id: string): Promise<{ ok: true }> {
   return apiFetchForServer<{ ok: true }>(

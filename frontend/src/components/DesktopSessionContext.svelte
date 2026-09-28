@@ -28,6 +28,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { StatusFields, Shortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type SessionCostEstimate } from '@hangar/core';
   import ShortcutTiles from './ShortcutTiles.svelte';
+  import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { listServers } from '../lib/auth';
   import { money2 } from '../lib/fmt';
   import { moeda } from '../lib/moeda.svelte';
@@ -746,7 +747,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   <!-- AÇÕES: os atalhos customizados, seção própria em blocos que quebram linha (sem rolar). -->
   {#if customShortcuts.length && onShortcut}
   <section class="sec-break">
-    <ShortcutTiles shortcuts={customShortcuts} onShortcut={onShortcut} onAdd={onEditShortcuts} />
+    <ShortcutTiles shortcuts={customShortcuts} onShortcut={onShortcut} onAdd={onEditShortcuts}>
+      {#snippet extra()}<ShortcutTransfer compact />{/snippet}
+    </ShortcutTiles>
   </section>
   {/if}
 

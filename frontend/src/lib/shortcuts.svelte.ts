@@ -51,3 +51,9 @@ export async function saveShortcuts(list: Shortcut[] | null, serverId?: string |
   else await patchConfig({ shortcuts: value });
   lists[k] = list === null ? defaultShortcuts() : list;
 }
+
+/** Relê do servidor, descartando o cache: depois de uma importação, a lista gravada mudou lá. */
+export function reloadShortcuts(serverId?: string | null): Promise<void> {
+  delete lists[keyFor(serverId)];
+  return loadShortcuts(serverId);
+}

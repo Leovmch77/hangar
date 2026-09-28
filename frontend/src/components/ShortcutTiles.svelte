@@ -3,7 +3,7 @@
   // painel direito do app nativo. Grade que quebra linha em vez de rolar: com mais largura cabem mais
   // colunas, e cada bloco divide a linha por igual. Usada no painel do desktop e no "⋯" do celular.
   import ShortcutIcon from './icons/ShortcutIcon.svelte';
-  import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import { shortcutMissingSecret, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import type { Snippet } from 'svelte';
   import * as m from '../paraglide/messages';
 
@@ -32,7 +32,10 @@
   </div>
   <div class="acoes-grade">
     {#each shortcuts as s (s.id)}
-      <button type="button" class="acao-bloco" onclick={() => onShortcut(s)} aria-label={s.label} title={s.label}>
+      {@const falta = shortcutMissingSecret(s)}
+      <!-- Credencial em branco (veio de uma importação): o bloco fica apagado e o clique avisa. -->
+      <button type="button" class="acao-bloco" class:pendente={!!falta} onclick={() => onShortcut(s)}
+              aria-label={s.label} title={falta ? m.atalhos_segredo_falta({ nome: falta }) : s.label}>
         <ShortcutIcon icon={s.icon} />
         <span class="acao-rotulo">{s.label}</span>
       </button>
@@ -48,7 +51,7 @@
     color: var(--text-muted); font-size: var(--label-size); font-weight: var(--label-weight);
     letter-spacing: var(--label-tracking); text-transform: uppercase;
   }
-  .acoes-ctl { display: inline-flex; align-items: center; gap: 2px; }
+  .acoes-ctl { position: relative; display: inline-flex; align-items: center; gap: 2px; }
   .acoes-add {
     display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
     border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer;
@@ -65,6 +68,7 @@
   }
   .acao-bloco:hover { background: var(--surface-raised); color: var(--text-primary); }
   .acao-bloco:active { background: var(--bg-hover); }
+  .acao-bloco.pendente { opacity: 0.55; border-style: dashed; }
   .acao-bloco:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .acao-bloco :global(svg) { flex-shrink: 0; width: 18px; height: 18px; }
   /* Duas linhas antes de cortar: rótulo curto demais escondia o que o atalho faz. */
