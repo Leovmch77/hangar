@@ -383,7 +383,7 @@ impl NewSession {
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), effort: String::new(),
-            permission: String::new(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
+            permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -576,12 +576,12 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Trocar de provider volta o modo ao padrão (sem terminal onde existe) e zera a permissão (o Codex nasce em "Full Access",
-    /// como no web), e relê o que depende dele.
+    /// Trocar de provider volta modo e permissão ao padrão (sem terminal onde existe; Claude em bypass, Codex em
+    /// "Full Access") e relê o que depende dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if provider == self.provider || self.creating { return; }
         (self.provider, self.headless, self.error) = (provider, true, None);
-        self.permission = if provider == "codex" { "Full Access".into() } else { String::new() };
+        self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
         // A tela sem sessão não retoma conversa antiga: o arquivo da pasta não serve a ela.
