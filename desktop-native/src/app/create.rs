@@ -239,9 +239,9 @@ fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: 
 struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
     owner: WeakEntity<Hangar>, servers: Vec<ServerChoice>, servers_rev: u64 }
 
-/// Uma máquina da lista do app; `key` é o endereço normalizado.
+/// Uma máquina da lista do app; `key` é o endereço normalizado. `offline`: a lista dela falhou na abertura do diálogo.
 #[derive(Clone)]
-pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String }
+pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String, pub(super) offline: bool }
 
 /// Os menus da tela sem sessão, cada um preso à própria pílula.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -426,22 +426,41 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Chips de máquina no topo do diálogo, só com mais de uma máquina (os do `CreateSessionSheet`).
+    /// Chips de máquina no topo do diálogo (os do `CreateSessionSheet`): as ligadas e a atual mesmo fora do ar, com uma linha
+    /// contando as que sumiram, senão a pessoa não sabe se a máquina foi apagada ou está desligada. No bastão a máquina fica a da
+    /// origem: o resumo é arquivo de lá, e trocar reabriria o diálogo sem ele.
     fn render_machines(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let list = self.servers.ok().filter(|list| list.len() > 1)?;
-        Some(div().id("create-machines").role(Role::Group).aria_label(tr("new_chat_machine")).flex().flex_wrap().items_center().gap(px(6.))
-            .child(chrome::small_icon(IconName::Monitor, 14., theme::muted()))
-            .children(list.iter().map(|machine| {
-                let on = self.current_server(machine);
-                let key = machine.key.clone();
-                choice(SharedString::from(format!("create-machine-{}", machine.key)), on, cx).small().rounded_full()
-                    .label(machine.label.clone()).tooltip(machine.address.clone()).disabled(self.creating)
-                    .when(!on, |b| b.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
-            })).into_any_element())
+        let list = self.servers.ok()?;
+        let shown: Vec<&ServerChoice> = list.iter().filter(|m| !m.offline || self.current_server(m)).collect();
+        let hidden = list.len() - shown.len();
+        if shown.len() < 2 && hidden == 0 { return None; }
+        let locked = self.creating || self.account_busy || self.baton.is_some();
+        let hint = match hidden {
+            0 => None,
+            1 => Some(tr("create_servers_offline_one")),
+            n => Some(tr("create_servers_offline").replace("{n}", &n.to_string())),
+        };
+        Some(div().flex().flex_col().gap(px(6.))
+            .when(shown.len() > 1, |el| el.child(div().id("create-machines").role(Role::Group).aria_label(tr("new_chat_server"))
+                .flex().flex_wrap().items_center().gap(px(6.))
+                .child(div().text_sm().text_color(theme::muted()).child(tr("new_chat_server")))
+                .children(shown.iter().map(|machine| {
+                    let on = self.current_server(machine);
+                    let key = machine.key.clone();
+                    let tip = if machine.offline { tr("create_server_offline").replace("{label}", &machine.label) } else { machine.address.clone() };
+                    choice(SharedString::from(format!("create-machine-{}", machine.key)), on, cx).small().rounded_full()
+                        .when(machine.offline, |b| b.icon(IconName::TriangleAlert))
+                        .label(machine.label.clone()).tooltip(tip).disabled(!on && locked)
+                        .when(!on, |b| b.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
+                }))))
+            .children(hint.map(muted))
+            .when(self.baton.is_some() && shown.len() > 1, |el| el.child(muted(tr("create_baton_server_locked").replace("{s}", &self.server_label()))))
+            .into_any_element())
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact { self.load_servers(window, cx); self.load_quotas(cx); }
+        self.load_servers(window, cx);
+        if self.compact { self.load_quotas(cx); }
         self.load_roots(cx);
         self.load_providers(cx);
         self.load_configs(cx);

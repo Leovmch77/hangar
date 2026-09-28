@@ -183,8 +183,11 @@ impl Hangar {
 
     /// As máquinas ligadas, para os seletores de máquina da Nova sessão.
     pub(super) fn server_choices(&self) -> Vec<super::create::ServerChoice> {
-        self.servers.iter().filter(|s| !s.disabled).map(|s| super::create::ServerChoice {
-            key: norm(&s.address), label: s.label.clone(), address: s.address.clone() }).collect()
+        self.servers.iter().filter(|s| !s.disabled).map(|s| {
+            let key = norm(&s.address);
+            let offline = self.remote.get(&key).is_some_and(|l| l.error.is_some());
+            super::create::ServerChoice { key, label: s.label.clone(), address: s.address.clone(), offline }
+        }).collect()
     }
 
     /// Paleta e papel de parede são desta máquina, como no web (o Hangar da própria origem): com outra máquina ativa, pede ao
