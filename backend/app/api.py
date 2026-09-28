@@ -77,6 +77,8 @@ from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, s
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
+from app import share_api, share_store
+from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
 from app import narrar
@@ -381,6 +383,9 @@ async def _lifespan(app: FastAPI):
 
     prune_task.add_done_callback(_prune_done)
 
+    # Primeira varredura na subida já religa o túnel se há convite ativo.
+    share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
+
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
     def _boot_resume_loops() -> None:
@@ -463,6 +468,7 @@ async def _lifespan(app: FastAPI):
         stall_task.cancel()
         loop_monitor_task.cancel()
         prune_task.cancel()
+        share_task.cancel()
         renova_task.cancel()
         await omp_sync.close()
         try:
@@ -593,6 +599,7 @@ app.include_router(harness_api.harness_router)
 app.include_router(peers_api.peers_router)
 app.include_router(plugin_bridge.plugin_router)
 app.include_router(config_sync_api.config_sync_router)
+app.include_router(share_api.router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -2278,6 +2285,8 @@ async def kill_session(name: str, by: str | None = None):
     except KillFailed as e:
         raise HTTPException(500, str(e))
     plugin_bridge.esquecer(name)
+    if await asyncio.to_thread(share_store.revoke_session, name):
+        await asyncio.to_thread(share_api.sync_tunnel)
     warn = None
     if link:
         errs = await _avisar_saida(name, link["peers"])
@@ -2362,6 +2371,14 @@ async def recarregar_sessao(name: str):
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
+    r = await _trocar_modo(name, body)
+    # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
+    # revogaria o convite de uma sessão que continua viva.
+    await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
+    return r
+
+
+async def _trocar_modo(name: str, body: ModoExecucaoBody):
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
@@ -2459,6 +2476,7 @@ def _rename_session(name: str, body: RenameBody):
             atomico.substituir(od, nd)
         with _list_lock:
             _list_snap["snap"] = None
+        share_store.rename(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -2483,6 +2501,7 @@ def _rename_session(name: str, body: RenameBody):
         raise HTTPException(500, detail=erro("sessao_falha_renomear", "falha ao renomear"))
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
+    share_store.rename(name, new)
     from app.pqueue import PromptQueue
     try:
         oq, nq = PromptQueue(name).path, PromptQueue(new).path

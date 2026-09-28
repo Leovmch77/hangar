@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
-from app import atomico, diag, shortcut_terminals, tmux
+from app import atomico, diag, share_store, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
@@ -1720,6 +1720,9 @@ class SessionRegistry:
         await asyncio.to_thread(_decorate_planos)
         for info in infos:
             _decorate_loop(info)
+        ativos = share_store.active_sessions()
+        for info in infos:
+            info.shared = info.name in ativos
         return infos
 
     @diag.rastrear("sessao.criar")

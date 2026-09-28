@@ -390,7 +390,10 @@ def _list_sig(infos) -> str:
           # re-emite a lista se o `jsonl` mudar junto — e a lista fica com o glifo errado (e sem
           # os chips de provider, que so aparecem quando ela mistura harnesses) ate outra coisa
           # qualquer mudar a assinatura.
-          getattr(i, "provider", None))
+          getattr(i, "provider", None),
+          # Ligar/desligar o compartilhamento não mexe em mais nada da sessão: sem isto o selo 🔗
+          # não aparece nem some até outra coisa mudar a assinatura.
+          getattr(i, "shared", False))
          for i in infos],
         ensure_ascii=False,
     )
