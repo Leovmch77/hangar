@@ -21,6 +21,9 @@ pub struct SessionInfo {
     pub git_added: Option<i64>,
     pub git_removed: Option<i64>,
     pub git_dirty: Option<i64>,
+    /// Commits a enviar / a trazer do upstream: o "↑N ↓M" da linha.
+    pub git_ahead: Option<i64>,
+    pub git_behind: Option<i64>,
     pub status_line: Option<String>,
     pub loop_status: Option<String>,
     pub loop_iter: Option<u32>,

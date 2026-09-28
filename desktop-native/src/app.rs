@@ -4077,8 +4077,8 @@ impl Hangar {
     }
 
     /// Linha do web (Sidebar.svelte): a marca tingida pelo estado no lugar do avatar; nome com a conta e a hora da última
-    /// resposta; embaixo, a resposta com ◆, a pergunta ou o que está fazendo; por fim a pasta (só worktree), a branch fora
-    /// de main/master e o diff. Servidor não aparece: a lista é de um servidor só.
+    /// resposta; embaixo, a resposta com ◆, a pergunta ou o que está fazendo; por fim a pasta (lista por servidor ou
+    /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
     fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -4106,9 +4106,12 @@ impl Hangar {
         };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
-        let folder = folder_name(&session).filter(|_| session.worktree == Some(true));
+        // Como o web: a pasta só com a lista por servidor (por projeto o cabeçalho já a diz), e sempre na worktree.
+        let folder = folder_name(&session).filter(|_| session.worktree == Some(true) || (self.multi_server() && !Self::by_project()));
         let branch = shown_branch(&session);
         let (added, removed) = (session.git_added.filter(|n| *n > 0), session.git_removed.filter(|n| *n > 0));
+        let (ahead, behind) = (session.git_ahead.filter(|n| *n > 0), session.git_behind.filter(|n| *n > 0));
+        let sync_title = tr("git_sync_title").replace("{ahead}", &ahead.unwrap_or(0).to_string()).replace("{behind}", &behind.unwrap_or(0).to_string());
         let name = session.name.clone();
         let questions = session.pending_questions;
         let editing = self.sidebar.editing.as_ref().filter(|e| e.old == name).map(|e| e.input.clone());
@@ -4177,13 +4180,19 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
                     .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
-            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint()).child(lane())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
                     .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(f)))
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(b)))
+                    // Zero não desenha: a ausência da seta é "em dia".
+                    .when(ahead.is_some() || behind.is_some(), |el| el.child(div().id(SharedString::from(format!("row-sync-{name}")))
+                        .flex_shrink_0().flex().gap(px(4.)).font_weight(FontWeight::SEMIBOLD)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(sync_title.clone()).build(window, cx))
+                        .when_some(ahead, |el, n| el.child(div().text_color(theme::accent()).child(format!("↑{n}"))))
+                        .when_some(behind, |el, n| el.child(div().text_color(theme::warning()).child(format!("↓{n}"))))))
                     .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
                     .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)

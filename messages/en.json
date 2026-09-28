@@ -4279,6 +4279,7 @@
   "native_git_branch_created": "branch: {n} — created",
   "native_git_ahead": "{n} ahead",
   "native_git_behind": "{n} behind",
+  "native_git_sync_title": "{ahead} to push, {behind} to pull",
   "native_git_col_commit": "Commit",
   "native_git_col_author": "Author",
   "native_git_col_date": "Date",
