@@ -805,8 +805,25 @@
     askOpen = false;
   }
 
+  let listaRef = $state<{ paginar: (tecla: 'PageUp' | 'PageDown' | 'Home' | 'End') => void }>();
+
   function onGlobalKey(e: KeyboardEvent) {
     if (!desktop) return;
+    // Page Up/Down rolam a conversa até com o cursor no composer; Home/End só fora de campo de
+    // texto (dentro dele movem o cursor). Nada disso com diálogo, overlay ou o visor por cima.
+    if ((e.key === 'PageUp' || e.key === 'PageDown' || e.key === 'Home' || e.key === 'End')
+        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !visorAberto && !anyOverlayOpen()
+        && !document.querySelector('[role="dialog"]:not(.board-overlay)')) {
+      const alvo = e.target as HTMLElement | null;
+      const noCampo = !!alvo && (alvo.tagName === 'INPUT' || alvo.tagName === 'TEXTAREA' || alvo.isContentEditable);
+      const noComposer = alvo?.tagName === 'TEXTAREA' && !!alvo.closest('.composer');
+      if ((e.key === 'Home' || e.key === 'End') ? !noCampo : (!noCampo || noComposer)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        listaRef?.paginar(e.key);
+        return;
+      }
+    }
     const mod = e.ctrlKey || e.metaKey;
     if (e.key === 'Escape' && anyOverlayOpen()) {
       // Dialog/sheet components own Escape at their boundary. If the event
@@ -3043,6 +3060,7 @@
       {/if}
     {/snippet}
     <MessageList
+      bind:this={listaRef}
       {events}
       onAbrirAgente={desktop ? abrirAgenteNoPainel : undefined}
       codex={sessionProvider === 'codex'}

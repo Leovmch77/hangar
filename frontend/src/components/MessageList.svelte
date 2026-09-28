@@ -174,6 +174,17 @@
   // que separa "subi pra ler o histórico" (solta) de "a resposta cresceu" (continua acompanhando).
   let gestoAte = 0;
   function marcarGesto() { gestoAte = performance.now() + 400; }
+
+  // Page Up/Down rolam uma tela (com folga), Home vai ao topo do que está carregado e End faz o
+  // mesmo que o botão "ir pro fim". Marca gesto: sem isso a rolagem programada não soltava do fim.
+  export function paginar(tecla: 'PageUp' | 'PageDown' | 'Home' | 'End') {
+    if (!listEl) return;
+    if (tecla === 'End') { extra = piso; atBottom = true; scrollToBottom(); return; }
+    marcarGesto();
+    const pagina = Math.max(listEl.clientHeight - 60, listEl.clientHeight / 2);
+    if (tecla === 'Home') listEl.scrollTop = 0;
+    else listEl.scrollBy({ top: tecla === 'PageUp' ? -pagina : pagina });
+  }
   function onScroll() {
     if (!listEl) return;
     const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
