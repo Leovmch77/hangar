@@ -67,6 +67,7 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo/rodar não aparecem |
 | Fila da sessão | conferido | contagem no rodapé do painel |
 | Recolher e redimensionar | conferido | 240–480 px; some sozinho se a conversa ficaria abaixo de 540 px |
+| Fileira de abas (Contexto, Arquivos, Atividade, Git) no desenho da `.abas` do web | conferido | régua de ponta a ponta, sublinhado na escolhida, texto de 12 px; rótulo da primeira na margem de 16 px das seções; as quatro inteiras a 300 px, reticências a 240 px. Diferenças: o recolher mora na mesma fileira (o web o põe no cabeçalho com nome e estado, que aqui ficam no cabeçalho da conversa) e Git é aba, não o botão que abre a coluna do web |
 
 ## Ciclo e planos
 

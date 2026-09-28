@@ -640,14 +640,18 @@ impl Hangar {
         let tab = (!self.subagent_tab_open()).then(|| self.side_tab());
         self.show_tree(tab == Some(SideTab::Files), None, cx);
         let tab_in = self.side_tab_in(window, cx);
-        let header = div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().justify_between().gap_1()
+        // Fileira de abas do web: régua de ponta a ponta com o sublinhado da escolhida por cima dela; o rótulo da
+        // primeira aba cai na mesma margem de 16 px das seções, e o recolher fica à parte, no canto. A altura casa o centro
+        // do recolher com os botões do cabeçalho da conversa.
+        let header = div().flex_shrink_0().h(px(44.)).relative().pl_2().pr_2().flex().items_center().gap_2()
+            .child(div().absolute().left_0().right_0().bottom_0().h(px(1.)).bg(theme::border()))
             .child(self.render_side_title(cx))
             .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx).flex_shrink_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))));
         let section = |body: AnyElement| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).child(body);
         let mut content = div().flex().flex_col();
         if detail.is_some() || self.loop_text().is_some() {
-            content = content.child(div().px_4().pb_2().flex().flex_col().gap(px(2.))
+            content = content.child(div().px_4().pt_3().pb_2().flex().flex_col().gap(px(2.))
                 .when_some(detail, |el, d| el.child(div().truncate().text_xs().text_color(theme::faint()).child(d)))
                 .when_some(self.loop_text(), |el, text| el.child(div().truncate().text_xs().text_color(theme::accent()).child(text))));
         }
