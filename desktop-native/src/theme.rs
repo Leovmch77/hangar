@@ -280,7 +280,7 @@ pub fn chrome() -> Hsla {
     tinted(if floating() { c.float_chrome } else { c.chrome }, if see_through() { panel_alpha() } else { 1. })
 }
 /// Visor de arquivo e cartões que cobrem a conversa: colados ficam cheios, o texto de baixo não atravessa.
-pub fn surface() -> Hsla { if floating() { chrome() } else { tinted(colors().chrome, 1.) } }
+pub fn surface() -> Hsla { let c = colors(); tinted(if floating() { c.float_chrome } else { c.chrome }, 1.) }
 /// Caixas de conteúdo: compositor e grupos de configuração.
 pub fn boxed() -> Hsla {
     let c = colors();
