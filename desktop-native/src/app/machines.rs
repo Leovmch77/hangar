@@ -16,6 +16,8 @@ use gpui_kit::component::{WindowExt, switch::Switch, tooltip::Tooltip};
 /// O web espera o serviço voltar por até 2 minutos, perguntando a cada 2 segundos.
 const RESTART_WAIT: Duration = Duration::from_secs(120);
 const RESTART_POLL: Duration = Duration::from_secs(2);
+/// Etapas da atualização passam de 5 minutos; a página Sobre espera 10.
+const UPGRADE_WAIT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind { Here, Lan, Tailscale, Public }
@@ -196,6 +198,7 @@ pub(super) enum PeerWrite { Enabled(bool), Removed }
 
 /// Como o reinício terminou, lido do estado que o motor grava (`fase: pronto`, casado pelo pid do pedido).
 pub(super) enum RestartEnd { Done(Option<String>), Failed(Option<String>), Unconfirmed }
+pub(super) enum UpgradeEnd { Done { ts: Option<String>, manual: bool }, Failed(Option<String>), Unconfirmed }
 
 pub(super) enum MachinesReply {
     Reach(u64, Result<Value, Failure>),
@@ -203,6 +206,9 @@ pub(super) enum MachinesReply {
     IdSaved(u64, Result<Value, Failure>),
     Restart(u64, Result<Value, Failure>),
     RestartEnd(u64, RestartEnd),
+    Upgrade(u64, Result<Value, Failure>),
+    UpgradeStep(u64, u64, u64, String),
+    UpgradeEnd(u64, UpgradeEnd),
     Peers(u64, Result<Value, Failure>),
     PeerCheck(String, u64, Result<Value, Failure>),
     PeerSaved(u64, PeerWrite, Result<Value, Failure>),
@@ -226,6 +232,21 @@ struct Restart {
     task: Option<JoinHandle<()>>,
 }
 
+/// A atualização do servidor ativo pedida no cartão: o mesmo motor do "Atualizar" da página Sobre.
+#[derive(Default)]
+struct Upgrade {
+    seq: u64,
+    asking: bool,
+    waiting: bool,
+    step: Option<(u64, u64, String)>,
+    at: Option<String>,
+    manual: bool,
+    error: Option<String>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Upgrade { fn busy(&self) -> bool { self.asking || self.waiting } }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Leave { SignOut, Remove }
 
@@ -240,6 +261,7 @@ pub(in crate::app) struct Machines {
     id_error: Option<String>,
     id_saved: bool,
     restart: Restart,
+    upgrade: Upgrade,
     advanced: bool,
     /// O arquivo da conexão não saiu do disco: a ação não aconteceu. Cada ação mostra a sua falha junto do próprio botão.
     leave_error: Option<(Leave, String)>,
@@ -261,7 +283,10 @@ pub(in crate::app) struct Machines {
 }
 
 impl Drop for Machines {
-    fn drop(&mut self) { if let Some(task) = self.restart.task.take() { task.abort(); } }
+    fn drop(&mut self) {
+        if let Some(task) = self.restart.task.take() { task.abort(); }
+        if let Some(task) = self.upgrade.task.take() { task.abort(); }
+    }
 }
 
 impl Machines {
@@ -285,6 +310,8 @@ impl Hangar {
         let m = &mut self.machines;
         if let Some(task) = m.restart.task.take() { task.abort(); }
         m.restart = Restart { seq: m.restart.seq + 1, ..Restart::default() };
+        // Atualização em curso segue na tela; o resultado de uma anterior sai, como o do reinício.
+        if !m.upgrade.busy() { m.upgrade = Upgrade { seq: m.upgrade.seq + 1, ..Upgrade::default() }; }
         (m.id_saved, m.leave_error, m.peer_error) = (false, None, None);
         // "Não respondem" nasce fechado, como o `<details>` do web remontado.
         m.silent_open = false;
@@ -430,6 +457,56 @@ impl Hangar {
         cx.notify();
     }
 
+    fn confirm_upgrade(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let server = self.server_label(cx);
+        chrome::confirm_alert(window, cx, tr("update_confirm_title").replace("{server}", &server), tr("update_confirm_desc"),
+            tr("update_confirm_ok"), ButtonVariant::Primary,
+            move |_, cx| { let _ = this.update(cx, |this, cx| this.start_upgrade(cx)); true });
+    }
+
+    fn start_upgrade(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        if self.machines.upgrade.busy() || self.machines.restart.asking || self.machines.restart.waiting { return; }
+        let u = &mut self.machines.upgrade;
+        u.seq += 1;
+        (u.asking, u.step, u.at, u.manual, u.error) = (true, None, None, false, None);
+        let (seq, done) = (u.seq, self.machines_send_later());
+        self.runtime.spawn(async move { done(MachinesReply::Upgrade(seq, api.server_post(&["atualizacao", "iniciar"], 30).await)).await });
+        cx.notify();
+    }
+
+    /// Como o reinício: o desfecho é o que o motor lançado por este pedido (o `pid` da resposta) gravou.
+    fn wait_upgrade(&mut self, pid: Option<i64>) {
+        let Some(api) = self.api.clone() else {
+            let u = &mut self.machines.upgrade;
+            (u.waiting, u.error) = (false, Some(tr("update_silent")));
+            return;
+        };
+        let (seq, done) = (self.machines.upgrade.seq, self.machines_send_later());
+        self.machines.upgrade.task = Some(self.runtime.spawn(async move {
+            let deadline = Instant::now() + UPGRADE_WAIT;
+            let end = loop {
+                if Instant::now() >= deadline { break UpgradeEnd::Unconfirmed; }
+                tokio::time::sleep(RESTART_POLL).await;
+                // Servidor caído no reinício do fim da atualização é o esperado: pergunta de novo.
+                let Ok(value) = api.server_read(&["atualizacao"], &[], 10).await else { continue };
+                let state = &value["estado"];
+                let text = |k: &str| state[k].as_str().filter(|t| !t.is_empty()).map(str::to_owned);
+                if state["fase"].as_str() == Some("rodando") {
+                    let number = |k: &str| state[k].as_u64().unwrap_or(0);
+                    done(MachinesReply::UpgradeStep(seq, number("passo"), number("total"), text("texto").unwrap_or_default())).await;
+                    continue;
+                }
+                if state["pid"].as_i64() != pid || state["fase"].as_str() != Some("pronto") { continue; }
+                break if state["ok"].as_bool() == Some(true) {
+                    UpgradeEnd::Done { ts: text("ts"), manual: state["reiniciar_manual"].as_bool() == Some(true) }
+                } else { UpgradeEnd::Failed(text("erro")) };
+            };
+            done(MachinesReply::UpgradeEnd(seq, end)).await
+        }));
+    }
+
     /// Pedir não é reiniciar: quem diz que o serviço voltou é o estado gravado pelo motor que este pedido lançou.
     fn wait_restart(&mut self, pid: Option<i64>) {
         let Some(api) = self.api.clone() else {
@@ -514,6 +591,39 @@ impl Hangar {
                     RestartEnd::Failed(error) => r.error = Some(error.unwrap_or_else(|| tr("machines_restart_failed"))),
                     RestartEnd::Unconfirmed => r.error = Some(tr("machines_restart_unconfirmed")),
                 }
+            }
+            MachinesReply::Upgrade(seq, result) => {
+                let u = &mut self.machines.upgrade;
+                if seq != u.seq { return; }
+                u.asking = false;
+                match result {
+                    Ok(value) => {
+                        u.waiting = true;
+                        self.wait_upgrade(value.get("pid").and_then(Value::as_i64));
+                    }
+                    Err(error) => u.error = Some(tr("update_refused").replace("{reason}", &Self::fetch_failure(&error))),
+                }
+            }
+            MachinesReply::UpgradeStep(seq, step, total, text) => {
+                let u = &mut self.machines.upgrade;
+                if seq == u.seq && u.waiting { u.step = Some((step, total, text)); }
+            }
+            MachinesReply::UpgradeEnd(seq, end) => {
+                let u = &mut self.machines.upgrade;
+                if seq != u.seq { return; }
+                (u.waiting, u.task, u.step) = (false, None, None);
+                match end {
+                    UpgradeEnd::Done { manual: true, .. } => u.manual = true,
+                    UpgradeEnd::Done { ts, .. } => {
+                        let local = ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok()).map(|t| t.with_timezone(&chrono::Local))
+                            .unwrap_or_else(chrono::Local::now);
+                        u.at = Some(local.format("%H:%M:%S").to_string());
+                    }
+                    UpgradeEnd::Failed(error) => u.error = Some(tr("update_failed").replace("{reason}",
+                        error.as_deref().map(|e| e.trim_end_matches('.')).unwrap_or("?"))),
+                    UpgradeEnd::Unconfirmed => u.error = Some(tr("update_silent")),
+                }
+                self.sync_updater(cx);
             }
             MachinesReply::Peers(seq, result) => {
                 let parsed = result.map_err(|e| Self::failure(&e)).and_then(|v| parse_peers(&v).ok_or_else(|| tr("invalid_response")));
@@ -1070,7 +1180,17 @@ impl Hangar {
 
         // Reiniciar não é avançado: é o gesto que faz valer o identificador e as outras chaves do .env.
         let r = &m.restart;
-        let busy = r.asking || r.waiting;
+        let u = &m.upgrade;
+        let busy = r.asking || r.waiting || u.busy();
+        let outdated = cx.try_global::<crate::update::Handle>().map(|h| h.0.read(cx)).filter(|u| u.server_outdated())
+            .map(|u| { let (running, app) = u.outdated_versions(); tr("machines_server_outdated").replace("{running}", &running).replace("{app}", &app) });
+        let upgrade_status = if u.waiting {
+            Some((u.step.as_ref().filter(|(_, total, _)| *total > 0).map(|(step, total, text)| tr("update_step")
+                .replace("{step}", &step.to_string()).replace("{total}", &total.to_string()).replace("{text}", text))
+                .unwrap_or_else(|| tr("update_running")), theme::muted()))
+        } else if let Some(at) = &u.at { Some((tr("machines_updated").replace("{hora}", at), theme::success())) }
+        else if u.manual { Some((tr("update_done_manual"), theme::warning())) } else { None };
+        let upgrade_error = u.error.clone();
         // A ponte do app do computador só existe no Electron; o web a mostra para o servidor desta máquina, depois de um erro
         // que não é recusa.
         let local = self.address.read(cx).value().trim().parse::<url::Url>().ok()
@@ -1078,15 +1198,26 @@ impl Hangar {
             .unwrap_or(false);
         let desktop_note = tr("settings_next_version");
         let service = div().flex().flex_col().gap(px(8.))
+            .when_some(outdated, |el, text| el.child(div().id("machines-server-outdated").role(Role::Status).flex().items_center().gap(px(6.))
+                .text_size(px(12.5)).text_color(theme::warning()).whitespace_normal()
+                .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme::warning())).child(text)))
             .child(muted(tr("machines_service_help")))
             .child(div().flex().flex_wrap().items_center().gap(px(10.))
                 .child(Button::new("machines-restart").primary().small().icon(IconName::RotateCw)
-                    .label(tr(if busy { "machines_restarting" } else { "machines_restart" })).loading(busy).disabled(busy)
+                    .label(tr(if r.asking || r.waiting { "machines_restarting" } else { "machines_restart" })).loading(r.asking || r.waiting)
+                    .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| this.restart_service(cx))))
+                .child(Button::new("machines-update").outline().small().icon(IconName::Download)
+                    .label(tr(if u.busy() { "update_running" } else { "update_confirm_ok" })).loading(u.busy()).disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_upgrade(window, cx))))
                 .when(r.waiting, |el| el.child(div().id("machines-restart-waiting").role(Role::Status).text_size(px(12.5))
                     .text_color(theme::muted()).child(tr("machines_restart_waiting"))))
                 .when_some(r.at.clone(), |el, at| el.child(div().id("machines-restarted").role(Role::Status).text_size(px(12.5))
                     .text_color(theme::success()).child(tr("machines_restarted").replace("{hora}", &at)))))
+            .when_some(upgrade_status, |el, (text, color)| el.child(div().id("machines-update-status").role(Role::Status)
+                .text_size(px(12.5)).text_color(color).whitespace_normal().child(text)))
+            .when_some(upgrade_error, |el, error| el.child(div().id("machines-update-error").role(Role::Alert).text_size(px(12.5))
+                .text_color(theme::danger()).whitespace_normal().child(error)))
             .when_some(r.error.clone(), |el, error| el.child(div().id("machines-restart-error").role(Role::Alert).text_size(px(12.5))
                     .text_color(theme::danger()).whitespace_normal().child(error))
                 .when(!r.refused, |el| el.child(muted(tr("machines_restart_stuck"))))

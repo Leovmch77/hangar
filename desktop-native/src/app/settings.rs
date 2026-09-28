@@ -549,7 +549,7 @@ impl Hangar {
         self.refresh_backdrop(window, cx);
         self.electron_offer = false;
         let before_servers = self.servers.len();
-        self.merge_servers(imported.servers);
+        self.merge_servers(imported.servers, cx);
         if self.servers.len() > before_servers {
             what.push(tr("electron_import_servers").replace("{n}", &(self.servers.len() - before_servers).to_string()));
         }

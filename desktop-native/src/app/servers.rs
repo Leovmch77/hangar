@@ -131,11 +131,22 @@ impl Hangar {
     }
 
     /// Servidores trazidos de fora (o app Electron): entram na lista, gravada junto da conexão.
-    pub(super) fn merge_servers(&mut self, incoming: Vec<ServerEntry>) {
+    pub(super) fn merge_servers(&mut self, incoming: Vec<ServerEntry>, cx: &mut Context<Self>) {
         for entry in incoming { upsert(&mut self.servers, entry); }
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
+        self.sync_updater(cx);
+    }
+
+    /// Dá ao atualizador o servidor ativo (aviso de desatualizado) e o desta máquina ("Atualizar tudo"), este só loopback:
+    /// sem o recuo para o servidor ativo do `desktop_api`, que atualizaria outra máquina com o rótulo "desta máquina".
+    pub(super) fn sync_updater(&self, cx: &mut Context<Self>) {
+        let local = self.api.as_ref().filter(|api| api.is_loopback()).cloned()
+            .or_else(|| self.servers.iter().filter(|s| !s.disabled).find_map(|s| Api::new(&s.address, &s.token).ok().filter(Api::is_loopback)));
+        let active = self.api.clone();
+        let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
+        updater.update(cx, |updater, cx| updater.set_servers(local, active, cx));
     }
 
     /// Só as máquinas do app Electron; a aparência é o Importar das configurações que traz.
@@ -147,7 +158,7 @@ impl Hangar {
             let result = result.await.unwrap_or_else(|_| Err(crate::electron::Failure::Read(tr("electron_import_stopped"))));
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(list) => this.merge_servers(list),
+                    Ok(list) => this.merge_servers(list, cx),
                     // Sem app Electron neste computador não há o que adotar.
                     Err(crate::electron::Failure::Missing) => {}
                     Err(crate::electron::Failure::Read(reason)) => window.push_notification(

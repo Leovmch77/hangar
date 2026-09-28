@@ -14,7 +14,7 @@ mod activity;
 mod backdrop;
 mod baton;
 mod accounts;
-mod chrome;
+pub(crate) mod chrome;
 mod computer;
 mod controls;
 mod create;
@@ -489,6 +489,10 @@ impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        // O aviso de servidor desatualizado mora na barra desta view e vem do estado do atualizador.
+        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+            cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+        }
         let saved = load_connection();
         // Primeira abertura com a lista: as máquinas do app Electron entram sozinhas, como a conexão dele já entrava.
         let (mut known_servers, adopt) = match load_servers() { Some(list) => (list, false), None => (Vec::new(), true) };
@@ -743,6 +747,7 @@ impl Hangar {
             self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error });
         }
         self.start_remote_lists();
+        self.sync_updater(cx);
         self.connection_dialog = false;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
@@ -1015,6 +1020,7 @@ impl Hangar {
                     servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false });
                     // Disco fora da thread da janela; só a falha volta.
                     self.persist_servers();
+                    self.sync_updater(cx);
                 }
                 self.replace_sessions(sessions, window, cx);
                 if let Some(name) = self.pending_open.take()

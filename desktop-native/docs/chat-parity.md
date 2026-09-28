@@ -105,6 +105,9 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Contas e modelos com resumo no topo (em uso, semana esgotada, login que vence primeiro, redefinições do Codex) e atalhos por seção com a contagem | pendente no web | nasceu no nativo (`accounts.rs`); o web segue com os títulos e as listas soltas |
 | Contas em cartões por seção, assinaturas separadas por provider e uma coluna por janela de cota, com a barra crescendo ao abrir | pendente no web | só com a janela larga (1320px); estreita, a linha empilha as barras como antes |
 | Plano da assinatura numa ficha ao lado do nome, também nas contas Claude | pendente no web | no web o plano aparece só no subtítulo do Codex |
+| "Atualizar" ao lado do "Reiniciar" na tela de servidores, com confirmação, etapas e resultado | implementado | nos dois; o nativo age sobre o servidor ativo, o web sobre o escolhido na aba |
+| Pílula "servidor desatualizado" na barra de cima e aviso no cartão do servidor | implementado | só no nativo, de propósito: a tela do web vem do próprio servidor e não fica mais nova que ele |
+| "Atualizar tudo" na barra: servidor desta máquina primeiro, depois o app | implementado | só no nativo, de propósito: no web o botão da barra atualiza o servidor e a tela vem junto |
 
 ## Como rodar a prova
 
