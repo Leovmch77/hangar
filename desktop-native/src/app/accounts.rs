@@ -133,8 +133,8 @@ struct Row {
     plan: Option<String>,
     /// Dias até o login da conta Claude vencer, para o resumo do topo.
     login_days: Option<i64>,
-    /// Redefinições guardadas da conta Codex, para o resumo do topo.
-    resets: u64,
+    /// Redefinições guardadas da conta Codex, para o resumo do topo; `None` sem cota lida.
+    resets: Option<u64>,
     quota: QuotaView,
     /// Conta Codex: o id dela e se a ação da linha é herdar da padrão (senão, entrar).
     codex: Option<(String, bool)>,
@@ -387,7 +387,11 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     });
     let plan = c.login.as_ref().filter(|_| logged == Some(true)).and_then(|l| l.plan.as_deref()).filter(|p| !p.is_empty())
         .map(|p| { let mut chars = p.chars(); chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default() });
-    let resets = if c.kind == "codex" { c.quota.as_ref().and_then(|q| q.reset_credits.as_ref()).map_or(0, |r| r.available_count) } else { 0 };
+    // Codex sem cota lida não diz quantas guardou: `None`, não zero.
+    let resets = match c.kind.as_str() {
+        "codex" => c.read_windows().map(|_| c.quota.as_ref().and_then(|q| q.reset_credits.as_ref()).map_or(0, |r| r.available_count)),
+        _ => Some(0),
+    };
     Row {
         id: c.id.clone(), name: c.name.clone(), label: c.natural.clone(), natural: c.natural.clone(), alias: c.alias.clone().unwrap_or_default(),
         active: c.active, glyph, subtitle, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
@@ -425,7 +429,11 @@ struct Summary {
     week_full: Vec<(String, String)>,
     /// Menor prazo de login e as contas que vencem nele.
     login: Option<(i64, Vec<String>)>,
+    /// Alguma conta contada no limite vem de leitura antiga.
+    week_stale: bool,
     resets: u64,
+    /// Alguma conta Codex sem cota lida: o total pode ser maior.
+    resets_unread: bool,
 }
 
 fn build_summary(sections: &[Section]) -> Summary {
@@ -433,8 +441,9 @@ fn build_summary(sections: &[Section]) -> Summary {
     let mut full = Vec::new();
     for row in sections.iter().flat_map(|s| &s.rows) {
         if row.active { summary.in_use.push((row.glyph.0, row.name.clone())); }
-        if let QuotaView::Bars { bars, .. } = &row.quota && let Some(week) = bars.iter().find(|b| b.label == "7d" && b.pct >= 100.) {
+        if let QuotaView::Bars { bars, stale } = &row.quota && let Some(week) = bars.iter().find(|b| b.label == "7d" && b.pct >= 100.) {
             full.push((week.reset_at.unwrap_or(f64::MAX), row.name.clone(), week.reset.clone()));
+            summary.week_stale |= stale.is_some();
         }
         if let Some(days) = row.login_days {
             match &mut summary.login {
@@ -443,7 +452,7 @@ fn build_summary(sections: &[Section]) -> Summary {
                 _ => summary.login = Some((days, vec![row.name.clone()])),
             }
         }
-        summary.resets += row.resets;
+        match row.resets { Some(n) => summary.resets += n, None => summary.resets_unread = true }
     }
     full.sort_by(|a, b| a.0.total_cmp(&b.0));
     summary.week_full = full.into_iter().map(|(_, name, reset)| (name, reset)).collect();
@@ -728,7 +737,9 @@ impl Hangar {
         let week = match summary.week_full.first() {
             None => tile("accounts_summary_week_full").child(big(tr("accounts_summary_none"), theme::text())).child(small(tr("accounts_summary_week_free"))),
             Some((name, reset)) => tile("accounts_summary_week_full").child(big(accounts(summary.week_full.len()), theme::danger()))
-                .child(small(if reset.is_empty() { name.clone() } else { tr("accounts_summary_week_back").replace("{name}", name).replace("{n}", reset) })),
+                .child(small(if reset.is_empty() { name.clone() } else { tr("accounts_summary_week_back").replace("{name}", name).replace("{n}", reset) }))
+                .when(summary.week_stale, |el| el.child(div().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme::warning())
+                    .child(chrome::small_icon(IconName::Clock, 12., theme::warning())).child(tr("accounts_summary_week_stale")))),
         };
         let login = match &summary.login {
             None => tile("accounts_summary_login").child(big("—".into(), theme::muted())).child(small(tr("accounts_summary_login_none"))),
@@ -742,8 +753,10 @@ impl Hangar {
             }
         };
         let resets = tile("accounts_summary_resets")
-            .child(big(if summary.resets == 0 { tr("accounts_summary_none") } else { summary.resets.to_string() }, theme::text()))
-            .child(small(tr(if summary.resets == 0 { "accounts_summary_resets_none" } else { "accounts_summary_resets_rule" })));
+            .child(big(match (summary.resets, summary.resets_unread) { (0, true) => "—".into(), (0, false) => tr("accounts_summary_none"),
+                (n, _) => n.to_string() }, if summary.resets == 0 && summary.resets_unread { theme::muted() } else { theme::text() }))
+            .child(small(tr(match (summary.resets, summary.resets_unread) { (_, true) => "accounts_summary_resets_unread",
+                (0, false) => "accounts_summary_resets_none", _ => "accounts_summary_resets_rule" })));
         div().mt(px(20.)).flex().gap(px(12.)).child(in_use).child(week).child(login).child(resets)
     }
 
@@ -1070,7 +1083,9 @@ mod tests {
         assert_eq!(summary.week_full.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "a"]);
         assert_eq!(summary.login, Some((14, vec!["a".to_owned(), "c".to_owned()])));
         assert_eq!(summary.in_use, [("claude", "b".to_owned())]);
-        assert_eq!(summary.resets, 2);
+        assert!(summary.resets == 2 && !summary.resets_unread && !summary.week_stale);
+        let unread = credential(json!({"id": "codex:/d", "tipo": "codex", "nome": "d", "codex_account": "d", "auth_method": "oauth"}));
+        assert_eq!(build_row(&unread, &HashMap::new(), false, now).resets, None);
         assert_eq!(build_row(&list[0], &HashMap::new(), false, now).plan.as_deref(), Some("Max"));
     }
 
