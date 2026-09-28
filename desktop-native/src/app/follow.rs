@@ -207,6 +207,46 @@ impl Hangar {
         self.redraw(Area::Conversation, cx);
     }
 
+    /// As teclas de página valem só com a conversa na tela: sem página, busca ou diálogo por cima.
+    pub(super) fn chat_keys_apply(&self, window: &mut Window, cx: &mut App) -> bool {
+        let page_open = self.settings.is_some() && !self.settings_live() || self.costs.view.is_some();
+        !page_open && !self.search.open && !self.connection_dialog && self.selected.is_some() && !window.has_active_dialog(cx)
+    }
+
+    /// Page Up/Down rolam uma janela da conversa, mesmo com o cursor no compositor, que não usa essas teclas. Home e End
+    /// vão ao começo e ao fim só fora de campo de texto: dentro dele movem o cursor.
+    pub(super) fn chat_page_key(&mut self, key: &str, window: &Window, cx: &mut Context<Self>) -> bool {
+        let viewport = f32::from(self.list_state.viewport_bounds().size.height);
+        if viewport <= 0. { return false; }
+        let page = (viewport - 60.).max(viewport * 0.5);
+        match key {
+            "pageup" | "pagedown" => {
+                let up = key == "pageup";
+                if cx.reduce_motion() {
+                    if up { self.release(); self.unglue(0.); self.list_state.scroll_by(px(-page)); }
+                    else if self.distance_from_bottom() - page <= STICK_BAND { self.follow_engage(cx); return true; }
+                    else { self.list_state.scroll_by(px(page)); }
+                    self.follow.last_top = self.visible_top();
+                    self.redraw(Area::Conversation, cx);
+                } else {
+                    self.wheel_lines(if up { page } else { -page } / WHEEL_LINE_PX, cx);
+                }
+                true
+            }
+            "home" if !window.text_input_focused() => { self.jump_to_row(0, cx); true }
+            // Salta e cola: depois do Home as linhas de baixo ainda não têm medida, e a distância que a mola usaria sai curta.
+            "end" if !window.text_input_focused() => {
+                self.follow.pinned = true;
+                self.follow.wheel = 0.;
+                self.follow.spring = StickSpring::default();
+                self.list_state.scroll_to_end();
+                self.redraw(Area::Conversation, cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Camada sobre a lista que pega a roda antes dela; trackpad (pixels) segue direto para a lista.
     pub(super) fn wheel_layer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.weak_entity();

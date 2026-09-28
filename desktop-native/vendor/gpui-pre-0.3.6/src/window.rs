@@ -2871,6 +2871,11 @@ impl Window {
         self.active.get()
     }
 
+    /// Whether the focused element, as of the last frame, is a text input taking typed text.
+    pub fn text_input_focused(&self) -> bool {
+        self.focused_text_input_active
+    }
+
     /// Returns whether this window is considered to be the window
     /// that currently owns the mouse cursor.
     /// On mac, this is equivalent to `is_window_active`.

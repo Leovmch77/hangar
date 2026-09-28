@@ -4762,6 +4762,17 @@ impl Render for Hangar {
                 if let Some(text) = this.last_reply().filter(|_| !page_open) { cx.write_to_clipboard(ClipboardItem::new_string(text)); }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| if this.costs_page_key(event, window) { cx.stop_propagation() }))
+            // Fora de campo de texto a tecla chega aqui; dentro dele o atalho do campo a troca pela ação, pega na captura.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let m = &event.keystroke.modifiers;                if m.control || m.alt || m.platform || m.shift || !this.chat_keys_apply(window, cx) { return; }
+                if this.chat_page_key(&event.keystroke.key, window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_kit::base::input::MovePageUp, window, cx| {
+                if this.chat_keys_apply(window, cx) && this.chat_page_key("pageup", window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_kit::base::input::MovePageDown, window, cx| {
+                if this.chat_keys_apply(window, cx) && this.chat_page_key("pagedown", window, cx) { cx.stop_propagation(); }
+            }))
             // Esc fora do campo fecha o painel aberto sobre o compositor (o clique no botão tira o foco do campo).
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Com a confirmação aberta, o Esc é dela: fecha só o diálogo.
