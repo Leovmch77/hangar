@@ -171,6 +171,8 @@ export interface ChatEvent {
   desistiu?: boolean | null;     // só em bolhas "queued-" e "held-" (não em evento real): entrega
                                  // dada como perdida — a TUI engoliu as teclas ou o hook barrou o prompt
   hook_error?: string | null;    // só em bolha "held:": o que o hook escreveu ao barrar o prompt
+  /** Só em notice `skill_loaded`: a skill que o harness injetou como fala do usuário. */
+  skill?: { name: string; path?: string | null; body: string } | null;
 }
 
 export interface StateEvent {

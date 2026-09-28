@@ -64,26 +64,37 @@ pub fn toggle(item: &AskItem, pick: &Pick, index: usize) -> Pick {
 pub fn answer_body(ask: &Ask, picks: &[Pick]) -> Option<Value> {
     let questions = &ask.payload.questions;
     if questions.is_empty() || picks.len() != questions.len() { return None; }
-    let mut answers = Vec::with_capacity(questions.len());
-    for (item, pick) in questions.iter().zip(picks) {
-        let mut answer = match pick {
-            Pick::Options(chosen) if !chosen.is_empty() && chosen.iter().all(|&i| i < item.options.len()) => json!({
-                "kind": "option", "indices": chosen, "multi": item.multi_select,
-                "labels": chosen.iter().map(|&i| item.options[i].label.clone()).collect::<Vec<_>>(),
-            }),
-            Pick::Text(value) if !value.trim().is_empty() && ask.allows_text(item) => {
-                let value = value.trim();
-                json!({"kind": "text", "value": value, "type_index": item.options.len(), "labels": [value]})
-            }
-            Pick::Chat if ask.allows_chat() => json!({"kind": "chat", "chat_index": item.options.len() + 1}),
-            _ => return None,
-        };
-        if let Some(id) = &item.id { answer["question_id"] = json!(id); }
-        answers.push(answer);
-    }
+    let answers = questions.iter().zip(picks).map(|(item, pick)| answer(ask, item, pick)).collect::<Option<Vec<_>>>()?;
     let mut body = json!({"answers": answers});
     if let Some(id) = &ask.payload.request_id { body["request_id"] = id.clone(); }
     Some(body)
+}
+
+/// Resposta de uma pergunta; `None` enquanto a escolha não vale.
+pub fn answer(ask: &Ask, item: &AskItem, pick: &Pick) -> Option<Value> {
+    let mut answer = match pick {
+        Pick::Options(chosen) if !chosen.is_empty() && chosen.iter().all(|&i| i < item.options.len()) => json!({
+            "kind": "option", "indices": chosen, "multi": item.multi_select,
+            "labels": chosen.iter().map(|&i| item.options[i].label.clone()).collect::<Vec<_>>(),
+        }),
+        Pick::Text(value) if !value.trim().is_empty() && ask.allows_text(item) => {
+            let value = value.trim();
+            json!({"kind": "text", "value": value, "type_index": item.options.len(), "labels": [value]})
+        }
+        Pick::Chat if ask.allows_chat() => json!({"kind": "chat", "chat_index": item.options.len() + 1}),
+        _ => return None,
+    };
+    if let Some(id) = &item.id { answer["question_id"] = json!(id); }
+    Some(answer)
+}
+
+/// As linhas "Type something." e "Chat about this" só existem no seletor do AskUserQuestion: esse menu é do card nativo.
+pub fn ask_picker(options: &[String]) -> bool {
+    // Prefixo, não igualdade: o pane pode trazer a coluna da direita (prévia, diff) grudada na mesma linha.
+    options.iter().any(|option| {
+        let label = checkbox(option).map_or(option.as_str(), |(_, rest)| rest).trim_start();
+        label.starts_with("Type something") || label.starts_with("Chat about this")
+    })
 }
 
 /// O seletor de múltipla escolha do terminal só se revela pela caixinha no rótulo.
@@ -246,6 +257,15 @@ mod tests {
         assert_eq!(checkbox("[] Gama"), Some((false, "Gama")));
         assert_eq!(checkbox("Yes"), None);
         assert_eq!(checkbox("[abc] x"), None);
+    }
+
+    #[test]
+    fn ask_picker_is_recognized_by_the_tui_lines() {
+        let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(ask_picker(&owned(&["Alfa", "Beta", "Type something.", "Chat about this"])));
+        assert!(ask_picker(&owned(&["[ ] Alfa", "[ ] Type something."])));
+        assert!(ask_picker(&owned(&["Lint     91 +# diff", "Type something      94 +# do usuário"])));
+        assert!(!ask_picker(&owned(&["Yes", "Yes, and don't ask again", "No"])));
     }
 
     #[test]

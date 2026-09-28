@@ -29,7 +29,10 @@ _OPTION_RE = re.compile(r"^\s*[❯>]?\s*\d+\.\s+(.*\S)\s*$")
 # travessão —) cortava um label que o usasse no próprio texto: "Rodar tudo ─ inclusive os lentos"
 # virava "Rodar tudo" e aí o casamento por prefixo aprovava um label ERRADO. `│` e os cantos seguem
 # cortando sozinhos também: o box de `preview` de UMA coluna encosta no label sem o vão.
-_BOX_SPLIT_RE = re.compile(r"\s{2,}[│─╭╮╰╯┌┐└┘├┤┬┴┼]|[│╭╮╰╯┌┐└┘├┤┬┴┼]")
+# `\s{3,}`: a coluna da direita do AskUserQuestion nem sempre tem moldura (o diff da última edição
+# aparece solto ao lado da opção). Sem esse corte o label vinha "Postgres      +t como a", nenhuma
+# pergunta com preview casava e o app caía no seletor do terminal.
+_BOX_SPLIT_RE = re.compile(r"\s{2,}[│─╭╮╰╯┌┐└┘├┤┬┴┼]|[│╭╮╰╯┌┐└┘├┤┬┴┼]|\s{3,}")
 # Cursor do picker: ❯ e do Claude, ">" e do Pi (ascii), chevron de nerd font e do omp. Os dois
 # ultimos so valem com o rodape de navegacao NO FUNDO do pane (ver _menu_block) — sem essa trava,
 # um picker citado em prosa no scrollback viraria menu fantasma.

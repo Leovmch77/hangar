@@ -586,10 +586,18 @@ nele sozinho.
 - **Diferença deliberada** entre os dois também vai para `chat-parity.md`, com o motivo, para
   não ser "corrigida" depois como se fosse descuido.
 
-### Pendente: o nativo virar o padrão
+### Feito (28/09/2026): o nativo virou o padrão
 
-Hoje o Electron é o padrão e o nativo é experimental (`desktop-native/README.md`). Depois de mais
-testes de uso com o nativo, a decisão é trocar. A troca envolve:
+Decisão do usuário, depois dos testes de uso do dia. `install.sh`/`install.ps1` chamam
+`scripts/install-native.sh`/`.ps1`, que escolhem o pacote pela máquina (Linux x64, macOS Apple
+Silicon, Windows x64), conferem o sha256 do `native-latest.json`, instalam o app com o atalho
+"Hangar", gravam a conexão inicial com o token (só se o app ainda não tiver uma) e deixam a marca
+`~/.hangar/native/release.json`. Máquina sem build na release fica com o Electron. O Electron
+continua instalado como "Hangar (Electron)": o navegador embutido do `hangar-preview` mora nele.
+As máquinas já instaladas recebem a troca pelo passo `2026-09-28-app-nativo-padrao`. As linhas
+`pendente` de `chat-parity.md` seguem abertas; o usuário aceitou trocar com elas.
+
+O plano original da troca, mantido como registro:
 
 - `shell/hangar.desktop`: `Name=Hangar (Electron)`. O `install.sh` (linha que grava
   `$APPS_DIR/hangar.desktop`) regrava o lançador a partir desse arquivo, então editar só o

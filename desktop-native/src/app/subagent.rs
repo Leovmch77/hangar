@@ -273,7 +273,8 @@ impl SubConversation {
         }
         let failed = tool.tone == Tone::Warning;
         let running = tool.result.is_none() && tool.tone == Tone::Accent;
-        let ending = (failed || running).then(|| super::rows::chip_ending(event, tool.result.map(|i| &self.events[i]), running, count_lines));
+        let ending = if failed || running { Some(super::rows::chip_ending(event, tool.result.map(|i| &self.events[i]), running, count_lines)) }
+            else { super::edits::totals(event) };
         let line = super::rows::tree_call_line(id, event, ending, failed, cx).on_click(toggle);
         let body = open.then(|| self.tool_body(tool, cx).into_any_element());
         super::rows::tree_row(last, line, body).into_any_element()
@@ -283,11 +284,16 @@ impl SubConversation {
     fn tool_body(&mut self, tool: &ToolRow, cx: &mut Context<Self>) -> Div {
         let error = tool.tone == Tone::Warning;
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
-        if !tool.orphan {
+        // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
+        let diff = (!tool.orphan).then(|| super::edits::card(&self.events[tool.call], cx)).flatten();
+        let has_diff = diff.is_some();
+        if let Some(diff) = diff { body = body.child(diff); }
+        else if !tool.orphan {
             let input = conversation::pretty_input(self.events[tool.call].tool_input.as_ref());
             if !input.is_empty() { body = body.child(self.detail(format!("{}:input", tool.key), input, tr("tool_input"), false, cx)); }
         }
         body = match tool.result {
+            Some(_) if has_diff && !error => body,
             Some(i) => {
                 let output = self.events[i].result.clone().unwrap_or_default();
                 body.child(self.detail(format!("{}:result", tool.key), output, tr("tool_output"), error, cx))

@@ -1,6 +1,7 @@
 //! Criar sessão (`CreateSessionSheet.svelte` + `FolderScanner.svelte` do web, no desenho de duas colunas do desktop): a pasta à
 //! esquerda, o formulário à direita. As escolhas finas moram em `choices`; continuar uma conversa antiga, em `resume`.
 mod choices;
+mod folder_git;
 mod resume;
 
 use super::*;
@@ -129,6 +130,10 @@ pub(super) enum CreateReply {
     Preview(u64, Result<Value, Failure>),
     /// A amostra do resumo do bastão, em markdown.
     Baton(u64, Result<String, Failure>),
+    /// O estado git da pasta escolhida.
+    Git(u64, Result<Value, Failure>),
+    /// Fetch, pull, troca ou criação de branch: a ação, a branch dela e o estado que voltou.
+    GitDone(folder_git::GitAction, String, Result<Value, Failure>),
 }
 
 /// A regra do backend (`names.sanitize_session_name`): acento vira a letra sem ele, o que não for letra, número, `_` ou `-` vira `-`,
@@ -235,23 +240,25 @@ fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: 
 }
 
 /// A conexão da abertura. Guardada no diálogo porque as respostas chegam com o `Hangar` em atualização, e o pedido seguinte
-/// (a pasta da raiz que chegou) não pode passar por ele.
+/// (a pasta da raiz que chegou) não pode passar por ele. `api` é a máquina onde a sessão vai nascer: começa na ativa e troca
+/// no seletor de máquina sem mexer na conexão do app.
 struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
-    owner: WeakEntity<Hangar>, servers: Vec<ServerChoice>, servers_rev: u64 }
+    servers: Vec<ServerChoice>, servers_rev: u64 }
 
-/// Uma máquina da lista do app; `key` é o endereço normalizado.
+/// Uma máquina da lista do app; `key` é o endereço normalizado. `offline`: a lista dela falhou na abertura do diálogo.
 #[derive(Clone)]
-pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String }
+pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: String, pub(super) address: String, pub(super) token: String,
+    pub(super) offline: bool }
 
 /// Os menus da tela sem sessão, cada um preso à própria pílula.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::app) enum Menu { Machine, Folder, Model, Account, Branch }
+pub(in crate::app) enum Menu { Machine, Folder, Model, Account, Branch, Git }
 
 impl Menu {
     pub(in crate::app) fn anchor(self) -> &'static str {
         match self {
             Menu::Machine => "new-chat-machine", Menu::Folder => "new-chat-folder", Menu::Model => "new-chat-model",
-            Menu::Account => "new-chat-account", Menu::Branch => "new-chat-branch",
+            Menu::Account => "new-chat-account", Menu::Branch => "new-chat-branch", Menu::Git => "new-chat-git",
         }
     }
     /// Máquina e pasta ficam acima do compositor: o menu delas abre para cima, sem cobrir o campo.
@@ -279,6 +286,9 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     checkout: Remote<Option<Checkout>>,
     branch: String,
+    /// O gerenciador de git da pasta (tela sem sessão) e o nome da branch nova dele.
+    git: folder_git::GitPanel,
+    git_name: Entity<InputState>,
     sessions: Remote<Vec<SessionInfo>>,
     same_folder: bool,
     name: Entity<InputState>,
@@ -359,11 +369,17 @@ impl NewSession {
         let omp = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_omp_profile_hint")));
         let account_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_account_placeholder")));
         let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
+        let git_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("folder_git_name")));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
             cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&git_name, |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.git_create(cx),
+                _ => {}
+            }),
             cx.subscribe_in(&manual, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => cx.notify(),
                 InputEvent::PressEnter { .. } => this.use_typed(window, cx),
@@ -378,12 +394,12 @@ impl NewSession {
         Self {
             link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(),
+            checkout: Remote::default(), branch: String::new(), git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
-            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
+            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), effort: String::new(),
-            permission: String::new(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
+            permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -418,35 +434,82 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Escolher outra máquina troca o servidor ativo sem perguntar, como os chips do web.
+    /// Escolher outra máquina troca só o destino deste diálogo e relê o que é dela (raízes, pastas, contas, modelos); o app
+    /// continua na máquina ativa até a sessão nascer, como o `targetServer` do web.
     fn pick_machine(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         self.menu.set(None);
-        let owner = self.link.owner.clone();
-        window.defer(cx, move |window, cx| { let _ = owner.update(cx, |app, cx| app.pick_machine(key, window, cx)); });
+        if self.creating || self.account_busy || self.baton.is_some() { return; }
+        let Some(choice) = self.servers.ok().and_then(|list| list.iter().find(|c| c.key == key)).cloned() else { return };
+        match Api::new(&choice.address, &choice.token) {
+            Ok(api) => self.link.api = api,
+            Err(error) => { self.error = Some(Hangar::failure(&error)); cx.notify(); return; }
+        }
+        (self.root, self.picked, self.config, self.config_pick) = (None, None, None, None);
+        (self.same_folder, self.error, self.notice, self.created_path, self.asking, self.confirming) = (false, None, None, None, false, false);
+        self.dir.clear();
+        self.folders.clear();
+        self.branch.clear();
+        self.roots.reset();
+        self.scan.reset();
+        self.checkout.reset();
+        self.sessions.reset();
+        self.providers.reset();
+        self.configs.reset();
+        // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
+        self.models.reset();
+        self.before = None;
+        self.load_target(cx);
+        // O arquivo da pasta volta vazio até a pasta nova.
+        if !self.compact { self.load_archive(window, cx); }
         cx.notify();
     }
 
-    /// Chips de máquina no topo do diálogo, só com mais de uma máquina (os do `CreateSessionSheet`).
+    /// Chips de máquina no topo do diálogo (os do `CreateSessionSheet`): as ligadas e a atual mesmo fora do ar, com uma linha
+    /// contando as que sumiram, senão a pessoa não sabe se a máquina foi apagada ou está desligada. No bastão a máquina fica a da
+    /// origem: o resumo é arquivo de lá.
     fn render_machines(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let list = self.servers.ok().filter(|list| list.len() > 1)?;
-        Some(div().id("create-machines").role(Role::Group).aria_label(tr("new_chat_machine")).flex().flex_wrap().items_center().gap(px(6.))
-            .child(chrome::small_icon(IconName::Monitor, 14., theme::muted()))
-            .children(list.iter().map(|machine| {
-                let on = self.current_server(machine);
-                let key = machine.key.clone();
-                choice(SharedString::from(format!("create-machine-{}", machine.key)), on, cx).small().rounded_full()
-                    .label(machine.label.clone()).tooltip(machine.address.clone()).disabled(self.creating)
-                    .when(!on, |b| b.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
-            })).into_any_element())
+        let list = self.servers.ok()?;
+        let shown: Vec<&ServerChoice> = list.iter().filter(|m| !m.offline || self.current_server(m)).collect();
+        let hidden = list.len() - shown.len();
+        if shown.len() < 2 && hidden == 0 { return None; }
+        let locked = self.creating || self.account_busy || self.baton.is_some();
+        let hint = match hidden {
+            0 => None,
+            1 => Some(tr("create_servers_offline_one")),
+            n => Some(tr("create_servers_offline").replace("{n}", &n.to_string())),
+        };
+        Some(div().flex().flex_col().gap(px(6.))
+            .when(shown.len() > 1, |el| el.child(div().id("create-machines").role(Role::Group).aria_label(tr("new_chat_server"))
+                .flex().flex_wrap().items_center().gap(px(6.))
+                .child(div().text_sm().text_color(theme::muted()).child(tr("new_chat_server")))
+                .children(shown.iter().map(|machine| {
+                    let on = self.current_server(machine);
+                    let key = machine.key.clone();
+                    let tip = if machine.offline { tr("create_server_offline").replace("{label}", &machine.label) } else { machine.address.clone() };
+                    choice(SharedString::from(format!("create-machine-{}", machine.key)), on, cx).small().rounded_full()
+                        .when(machine.offline, |b| b.icon(IconName::TriangleAlert))
+                        .label(machine.label.clone()).tooltip(tip).disabled(!on && locked)
+                        .when(!on, |b| b.on_click(cx.listener(move |this, _, window, cx| this.pick_machine(key.clone(), window, cx))))
+                }))))
+            .children(hint.map(muted))
+            .when(self.baton.is_some() && shown.len() > 1, |el| el.child(muted(tr("create_baton_server_locked").replace("{s}", &self.server_label()))))
+            .into_any_element())
     }
 
-    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact { self.load_servers(window, cx); self.load_quotas(cx); }
+    /// O que é da máquina de destino. Contas Codex e o contexto delas só com o Codex escolhido.
+    fn load_target(&mut self, cx: &mut Context<Self>) {
+        if self.compact { self.load_quotas(cx); }
         self.load_roots(cx);
         self.load_providers(cx);
         self.load_configs(cx);
+        if self.provider == "codex" { self.load_codex(cx); self.load_context(cx); }
+        if !self.compact { self.load_extras(cx); }
+    }
+
+    fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_servers(window, cx);
+        self.load_target(cx);
         if self.compact { return; }
-        self.load_extras(cx);
         // A continuação trabalha na mesma árvore: a pasta da origem já vem escolhida. Sem pasta conhecida, o nome sai já e a
         // pasta fica por escolher.
         match self.baton.as_ref().map(|b| (b.cwd.clone().filter(|c| !c.is_empty()), b.name.clone())) {
@@ -491,7 +554,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
-        if self.compact { self.picked = Some(path.clone()); self.load_branches(cx); }
+        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -521,6 +584,7 @@ impl NewSession {
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
         if self.compact {
             self.menu.set(None);
+            self.reset_git();
             self.load_branches(cx);
             cx.notify();
             return;
@@ -557,11 +621,12 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Trocar de provider zera o modo e a permissão (o Codex nasce em "Full Access", como no web) e relê o que depende dele.
+    /// Trocar de provider volta modo e permissão ao padrão (sem terminal onde existe; Claude em bypass, Codex em
+    /// "Full Access") e relê o que depende dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if provider == self.provider || self.creating { return; }
-        (self.provider, self.headless, self.error) = (provider, false, None);
-        self.permission = if provider == "codex" { "Full Access".into() } else { String::new() };
+        (self.provider, self.headless, self.error) = (provider, true, None);
+        self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
         // A tela sem sessão não retoma conversa antiga: o arquivo da pasta não serve a ela.
@@ -596,6 +661,7 @@ impl NewSession {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;
         }));
+        self.load_git(cx);
         cx.notify();
     }
 
@@ -766,6 +832,7 @@ impl NewSession {
             reply @ (CreateReply::Models(..) | CreateReply::Engines(..) | CreateReply::Config(..) | CreateReply::Quotas(..)
                 | CreateReply::Context(..) | CreateReply::Account(..)) => self.receive_extra(reply, window, cx),
             reply @ (CreateReply::Archive(..) | CreateReply::Preview(..)) => self.receive_archive(reply, cx),
+            reply @ (CreateReply::Git(..) | CreateReply::GitDone(..)) => { if !self.compact { return None; } self.receive_git(reply, window, cx) }
             CreateReply::Baton(seq, result) => {
                 // "Não consegui ler" e "o resumo está vazio" são respostas diferentes: a falha nunca vira caixa vazia.
                 let view = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1230,6 +1297,7 @@ impl NewSession {
         self.menu.set(open.then_some(menu));
         if open && menu == Menu::Folder { self.query.update(cx, |input, cx| input.focus(window, cx)); }
         else if open { self.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
+        if open && menu == Menu::Git { self.git_opened(cx); }
         cx.notify();
     }
 
@@ -1300,6 +1368,7 @@ impl NewSession {
                 self.configs.loading || self.codex.loading, cx)))
             .children(branch.map(|label| quiet_pill(Menu::Branch, open == Some(Menu::Branch), IconName::GitBranch, label,
                 tr("create_checkout_branch"), self.checkout.loading, cx)))
+            .children(self.render_git_pill(open == Some(Menu::Git), cx))
     }
 
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
@@ -1332,6 +1401,7 @@ impl NewSession {
         let body = match menu {
             Menu::Folder => return self.render_compact_folders(cx).p_3().max_h(room).into_any_element(),
             Menu::Model => return self.render_model_menu(cx).into_any_element(),
+            Menu::Git => return self.render_git_menu(room, cx),
             Menu::Machine => match (&self.servers.value, self.servers.ok()) {
                 _ if self.servers.loading => popup::skeleton("new-chat-machines", 2).into_any_element(),
                 (Some(Err(error)), _) => Self::menu_failure("new-chat-machines-error", error.clone(), |this, window, cx| this.load_servers(window, cx), cx),
@@ -1470,7 +1540,7 @@ impl Hangar {
         };
         if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-                owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
+                servers: self.server_choices(), servers_rev: self.servers_rev };
             self.new_chat_folders.set(None);
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
@@ -1502,7 +1572,7 @@ impl Hangar {
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-            owner: cx.entity().downgrade(), servers: self.server_choices(), servers_rev: self.servers_rev };
+            servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
         dialog.update(cx, |d, cx| d.load(window, cx));
         self.new_session = Some(dialog.clone());
@@ -1535,7 +1605,17 @@ impl Hangar {
         };
         // A mensagem enviada da tela sem sessão segue na conversa da sessão nova; a chegada já começou no Enviar.
         let opening = if compact { self.opening.take() } else { None };
-        if let Some((_, text, result)) = &first
+        // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
+        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
+        // Nasceu em outra máquina: ela vira a ativa agora, uma vez, e o resto segue como se sempre tivesse sido ela.
+        let target = super::servers::norm(&entity.read(cx).link.api.identity());
+        if current && self.server.as_deref().map(super::servers::norm) != Some(target.clone()) {
+            self.activate_for_created(&target, &session, window, cx);
+        }
+        // Chaves e seleção valem só na máquina onde a sessão nasceu.
+        let here = self.server.as_deref().map(super::servers::norm) == Some(target);
+        let current = current && here;
+        if let Some((_, text, result)) = first.as_ref().filter(|_| here)
             && let Some(key) = self.server.as_deref().and_then(|server| SessionKey::new(server, &session)) {
             self.drafts.entry(key.clone()).or_insert_with(|| text.clone());
             if result.is_err() && self.selected_key().as_ref() == Some(&key) && self.composer.read(cx).value().is_empty() {
@@ -1550,8 +1630,6 @@ impl Hangar {
             None
         };
         let readable = session.readable();
-        // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
-        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
         let key = self.server.as_deref().and_then(|server| SessionKey::new(server, &session));
         if current { self.select(session, window, cx); }
         let sent = first.as_ref().is_some_and(|(_, _, result)| result.is_ok());
@@ -1579,7 +1657,9 @@ impl Hangar {
             Button::new(id).custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
                 .icon(chrome::small_icon(IconName::Plus, 16., theme::muted())).size(px(28.)).rounded(px(6.)).flex_shrink_0().tooltip(tr("create_title"))
         } else {
-            Button::new(id).outline().small().w_full().icon(IconName::Plus).label(tr("create_title"))
+            // O `.cta-new` do web: pílula cheia no destaque, com o rótulo curto; o nome inteiro fica no leitor de tela.
+            Button::new(id).primary().icon(IconName::Plus).label(super::costs::web("lista_nova_curto")).h(px(36.)).px(px(12.)).rounded_full()
+                .font_weight(FontWeight::SEMIBOLD).flex_shrink_0().tooltip(tr("create_title"))
         };
         FocusOnClick { id: id.into(), button: button.accessibility_label(tr("create_title")).disabled(self.api.is_none()), open: Rc::new(move |window, cx| {
             let _ = weak.update(cx, |this, cx| this.open_new_session(None, window, cx));

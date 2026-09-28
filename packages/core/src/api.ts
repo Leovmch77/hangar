@@ -1440,6 +1440,11 @@ export function reiniciarServidorEm(s: Server | null): Promise<{ ok: boolean; pi
   return s ? apiFetchForServer(s, '/api/atualizacao/reiniciar', { method: 'POST' }) : reiniciarServidor();
 }
 
+/** A mesma atualização, no servidor que a tela está editando (que pode não ser o ativo). */
+export function iniciarAtualizacaoEm(s: Server | null): Promise<{ ok: boolean; pid: number }> {
+  return s ? apiFetchForServer(s, '/api/atualizacao/iniciar', { method: 'POST' }) : iniciarAtualizacao();
+}
+
 /**
  * Resumo do pensamento em português, curto. Chamado quando a pessoa ABRE o bloco — nunca no
  * carregamento da conversa, porque a maioria dos pensamentos ninguém abre.

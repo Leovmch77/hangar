@@ -12,7 +12,7 @@
   import { alcanceDoServidor, type AlcanceDoServidor, type TipoEndereco } from '../../lib/alcance';
   import { cachedSyncStatus } from '../../lib/sync';
   import { onDestroy } from 'svelte';
-  import { getAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
+  import { getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
@@ -199,6 +199,8 @@
     // o erro) de reiniciar a anterior ficava à vista no detalhe da nova.
     reiniciando = false; reinicioErro = ''; reinicioFeito = false; reinicioRecusado = false; idSalvo = false;
     reinicioAguardando = false; reinicioHora = '';
+    confirmarAtualizacao = false; atualizando = false; atualizacaoAguardando = false;
+    atualizacaoEtapa = null; atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false;
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -469,6 +471,68 @@
       if (meu === geracao) reinicioErro = m.maquinas_servico_sem_confirmacao();
     } finally {
       if (meu === geracao) reinicioAguardando = false;
+    }
+  }
+
+  // Atualizar o servidor escolhido: mesmo caminho do reinício (o alvo com o token dele, o desfecho
+  // casado pelo pid que o POST devolveu), mas com teto de 10 min — etapas da atualização passam de 5.
+  let confirmarAtualizacao = $state(false);
+  let atualizando = $state(false);
+  let atualizacaoAguardando = $state(false);
+  let atualizacaoEtapa = $state<{ passo: number; total: number; texto: string } | null>(null);
+  let atualizacaoErro = $state('');
+  let atualizacaoHora = $state('');
+  let atualizacaoManual = $state(false);   // código novo no disco, reinício ainda por fazer
+  const servicoOcupado = $derived(reiniciando || reinicioAguardando || atualizando || atualizacaoAguardando);
+
+  async function atualizarServico() {
+    confirmarAtualizacao = false;
+    if (servicoOcupado) return;
+    const meu = geracao;
+    atualizando = true;
+    atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false; atualizacaoEtapa = null;
+    try {
+      const { pid } = await iniciarAtualizacaoEm(apiTarget);
+      if (meu !== geracao) return;
+      atualizacaoAguardando = true;
+      void acompanharAtualizacao(pid, meu);
+    } catch (e) {
+      if (meu !== geracao) return;
+      // 409 é recusa com motivo (branch, programa faltando, outra em andamento), já traduzido.
+      atualizacaoErro = (e as { status?: number }).status === 409 && e instanceof Error
+        ? e.message.replace(/^\d{3}:\s*/, '')
+        : msgErro(e);
+    } finally {
+      if (meu === geracao) atualizando = false;
+    }
+  }
+
+  async function acompanharAtualizacao(pid: number, meu: number) {
+    const limite = Date.now() + 600_000;
+    try {
+      while (Date.now() < limite) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (meu !== geracao) return;
+        let estado;
+        try {
+          estado = (await getAtualizacaoEm(apiTarget)).estado;
+        } catch {
+          continue;   // servidor caído no reinício do fim da atualização: pergunta de novo
+        }
+        if (meu !== geracao) return;
+        if (estado.fase === 'rodando') {
+          atualizacaoEtapa = { passo: estado.passo ?? 0, total: estado.total ?? 0, texto: estado.texto ?? '' };
+          continue;
+        }
+        if (estado.pid !== pid || estado.fase !== 'pronto') continue;
+        if (!estado.ok) atualizacaoErro = estado.erro || m.atualizar_falhou_titulo();
+        else if (estado.reiniciar_manual) atualizacaoManual = true;
+        else atualizacaoHora = new Date(estado.ts ?? Date.now()).toLocaleTimeString();
+        return;
+      }
+      if (meu === geracao) atualizacaoErro = m.maquinas_atualizar_sem_confirmacao();
+    } finally {
+      if (meu === geracao) { atualizacaoAguardando = false; atualizacaoEtapa = null; }
     }
   }
 
@@ -754,8 +818,11 @@
       <p class="ss-secao">{m.maquinas_servico()}</p>
       <p class="ss-legenda">{m.maquinas_servico_ajuda()}</p>
       <div class="id-acoes">
-        <button type="button" class="btn primario" onclick={reiniciarServico} disabled={reiniciando || reinicioAguardando}>
+        <button type="button" class="btn primario" onclick={reiniciarServico} disabled={servicoOcupado}>
           {reiniciando || reinicioAguardando ? m.maquinas_servico_reiniciando() : m.maquinas_servico_reiniciar()}
+        </button>
+        <button type="button" class="btn sv-atualizar" onclick={() => (confirmarAtualizacao = true)} disabled={servicoOcupado}>
+          {atualizando || atualizacaoAguardando ? m.atualizar_rodando_titulo() : m.atualizar_botao()}
         </button>
         {#if reinicioAguardando}<span class="id-ok" role="status">{m.maquinas_servico_aguardando()}</span>
         {:else if reinicioHora}<span class="id-ok" role="status">{m.maquinas_servico_reiniciado({ hora: reinicioHora })}</span>
@@ -770,6 +837,13 @@
           </div>
         {/if}
       {/if}
+      {#if atualizacaoAguardando}
+        <p class="id-ok sv-atualizacao" role="status">{atualizacaoEtapa && atualizacaoEtapa.total
+          ? m.maquinas_atualizar_etapa({ passo: atualizacaoEtapa.passo, total: atualizacaoEtapa.total, texto: atualizacaoEtapa.texto })
+          : m.atualizar_rodando_titulo()}</p>
+      {:else if atualizacaoHora}<p class="id-ok sv-atualizacao" role="status">{m.maquinas_atualizar_feito({ hora: atualizacaoHora })}</p>
+      {:else if atualizacaoManual}<p class="id-aviso sv-atualizacao" role="status">{m.atualizar_pronto_reiniciar()}</p>{/if}
+      {#if atualizacaoErro}<p class="id-erro sv-atualizacao" role="alert">{atualizacaoErro}</p>{/if}
     {/snippet}
     {#snippet avancado()}
       <!-- Origens do terminal: mora junto dos endereços porque a pergunta é "de qual endereço o
@@ -944,6 +1018,18 @@
          token dele no servidor) fica — senão parece que apagou tudo, ou que não apagou nada. -->
     <p class="ss-dialog-copy">{linhas.some((l) => l.peer && l.navegadores.length === 1 && l.navegador?.id === pendingRemoval?.id) ? m.config_servidores_token_removido_recado_fica() : m.config_servidores_token_removido()}</p>
     {#if servers.length === 1}<p class="ss-dialog-copy">{m.config_servidores_voltar()}</p>{/if}
+  </ConfirmDialog>
+{/if}
+
+{#if confirmarAtualizacao && resolvedServer}
+  <ConfirmDialog title={m.maquinas_atualizar_confirmar_titulo({ nome: resolvedServer.label })} aria={m.atualizar_botao()}
+    {fallbackFocus}
+    onClose={() => (confirmarAtualizacao = false)}
+    actions={[
+      { label: m.comum_cancelar(), onClick: () => (confirmarAtualizacao = false) },
+      { label: m.atualizar_botao(), kind: 'primary', onClick: () => void atualizarServico() },
+    ]}>
+    <p class="ss-dialog-copy">{m.maquinas_atualizar_confirmar_texto()}</p>
   </ConfirmDialog>
 {/if}
 

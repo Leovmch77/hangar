@@ -3,7 +3,7 @@
 //! As páginas de configuração usam a navegação lateral e mostram o conteúdo do servidor conectado.
 use super::*;
 use std::{cell::Cell, rc::Rc};
-use crate::appearance::{self, Appearance, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, SurfaceMaterial, Swatch,
+use crate::appearance::{self, Appearance, AskHighlight, Background, BackgroundScope, CodeFont, DesktopText, Font, Hex, Navigation, Palette, Panels, Reading, SidebarHeight, SurfaceMaterial, Swatch,
     ThemeMode, ThinkingTools, ToolLook, Wallpaper};
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState}, slider::{Slider, SliderEvent, SliderState}, tooltip::Tooltip,
@@ -46,7 +46,7 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 37] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 38] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")),
     ("settings_style", Some("settings_style_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
@@ -61,6 +61,7 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 37] = [
     ("settings_code_size", None), ("settings_terminal_font", Some("settings_terminal_font_desc")),
     ("settings_terminal_size", None), ("settings_line_height", None), ("settings_column", None),
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
+    ("settings_ask_highlight", Some("settings_ask_highlight_desc")),
     ("settings_collapsed_nav", None), ("settings_sidebar_density", Some("settings_sidebar_density_hint")), ("settings_sidebar_height", Some("settings_only_floating")),
 ];
 
@@ -549,7 +550,7 @@ impl Hangar {
         self.refresh_backdrop(window, cx);
         self.electron_offer = false;
         let before_servers = self.servers.len();
-        self.merge_servers(imported.servers);
+        self.merge_servers(imported.servers, cx);
         if self.servers.len() > before_servers {
             what.push(tr("electron_import_servers").replace("{n}", &(self.servers.len() - before_servers).to_string()));
         }
@@ -646,7 +647,7 @@ impl Hangar {
             .text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(label);
         let server = self.server_label(cx);
         let nav = div().w(px(284.)).flex_shrink_0().h_full().flex().flex_col().px(px(10.)).bg(theme::chrome())
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .child(div().h(px(44.)).flex_shrink_0().px(px(6.)).flex().items_center().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("settings")))
             // Setas escolhem o resultado antes do campo andar o cursor; Esc limpa ou fecha.

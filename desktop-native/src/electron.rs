@@ -56,9 +56,44 @@ pub fn load(base: Appearance) -> Result<Imported, Failure> {
         let Some(origin) = preferred.filter(|o| origins.contains_key(o))
             .or_else(|| origins.iter().max_by_key(|(_, keys)| keys.len()).map(|(o, _)| o.clone())) else { continue };
         let local = origins.remove(&origin).unwrap_or_default();
-        return Ok(map(&local, &origin, base));
+        let mut imported = map(&local, &origin, base);
+        prefer_loopback(&mut imported);
+        return Ok(imported);
     }
     Err(failure)
+}
+
+/// Onde o app conecta sem configuração: o backend desta máquina.
+const HERE: &str = "http://127.0.0.1:8765";
+
+/// O Electron pode ter aberto o servidor desta máquina pela tailnet. Esse entra pelo loopback: pelo endereço de fora o
+/// app dá a volta na rede e trata a própria máquina como remota. Mesma máquina é o backend local responder com o mesmo
+/// identificador; identificador vazio não prova nada. Bloqueante, como o `load`.
+fn prefer_loopback(imported: &mut Imported) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let mut moved: Vec<(String, String)> = Vec::new();
+    for entry in &mut imported.servers {
+        if runtime.block_on(same_machine(&entry.address, &entry.token)) {
+            moved.push((std::mem::replace(&mut entry.address, HERE.into()), entry.token.clone()));
+        }
+    }
+    if let Some((address, token)) = imported.server.as_mut()
+        && moved.iter().any(|(a, t)| a == address && t == token) {
+        *address = HERE.into();
+    }
+}
+
+async fn same_machine(address: &str, token: &str) -> bool {
+    let Some(here) = identifier(HERE, token).await else { return false };
+    identifier(address, token).await == Some(here)
+}
+
+/// Falha vai ao stderr: sem ela, o servidor desta máquina fica pelo endereço de fora e ninguém sabe por quê.
+async fn identifier(address: &str, token: &str) -> Option<String> {
+    let api = crate::api::Api::new(address, token).map_err(|e| eprintln!("importar do Electron: {address} inválido: {}", e.detail)).ok()?;
+    let value = api.server_read(&["peers", "identificador"], &[], 5).await
+        .map_err(|e| eprintln!("importar do Electron: identificador de {address} não veio: {}", e.detail)).ok()?;
+    value.get("identificador")?.as_str().filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
 /// Grava a imagem trazida como a do fundo Imagem, pelo mesmo caminho de validação da escolha de arquivo. Bloqueante.
@@ -155,6 +190,8 @@ fn map(local: &HashMap<String, String>, origin: &str, base: Appearance) -> Impor
         wallpaper: if on("cp_desktop_glass", "1") { Wallpaper::Glass } else { Wallpaper::Window },
         // Mesma conta do véu nos dois: 100 é a imagem crua.
         transparency: number("cp_bg_scrim", 0.0..=100.0, 11),
+        // "Solidez das caixas" do web; a tinta dos painéis anda com ela nos dois (`theme::panel_alpha`).
+        solidity: number("cp_surface_solid", 0.0..=100.0, 12),
         reading: match get("cp_read") { Some("glass") => Reading::None, Some("text") => Reading::Text, Some("solid") => Reading::Sheet, _ => Reading::Auto },
         sheet_solidity: number("cp_read_alpha", 0.0..=100.0, 92),
         text_contrast: number("cp_text_boost", 0.0..=100.0, 10),
@@ -216,7 +253,7 @@ pub fn changed(before: &Appearance, after: &Appearance, image: bool) -> Vec<&'st
         ("settings_theme", (b.theme, b.palette, b.desktop_text) != (a.theme, a.palette, a.desktop_text)),
         ("settings_panels", b.panels != a.panels),
         ("settings_color", (b.dark, b.light) != (a.dark, a.light)),
-        ("settings_background_group", image || (b.background, b.wallpaper, b.transparency) != (a.background, a.wallpaper, a.transparency)),
+        ("settings_background_group", image || (b.background, b.wallpaper, b.transparency, b.solidity) != (a.background, a.wallpaper, a.transparency, a.solidity)),
         ("settings_reading_group", (b.reading, b.sheet_solidity, b.text_contrast) != (a.reading, a.sheet_solidity, a.text_contrast)),
         ("settings_text_group", (b.font, b.text_size, b.line_height, b.column) != (a.font, a.text_size, a.line_height, a.column)),
         ("settings_conversation_group", (b.tool_look, b.task_list, b.thinking_tools, b.table_chart) != (a.tool_look, a.task_list, a.thinking_tools, a.table_chart)),
@@ -239,7 +276,7 @@ mod tests {
         assert_eq!(decode(1, b"desktop").as_deref(), Some("desktop"));
 
         let local: HashMap<String, String> = [
-            ("cp_theme", "desktop"), ("cp_bg", "desktop"), ("cp_desktop_glass", "1"), ("cp_bg_scrim", "30"),
+            ("cp_theme", "desktop"), ("cp_bg", "desktop"), ("cp_desktop_glass", "1"), ("cp_bg_scrim", "30"), ("cp_surface_solid", "24"),
             ("cp_cor_dark", r##"{"destaque":"#ff8800","tinta":null,"forca":100}"##), ("cp_text_size", "120"), ("cp_text_lh", "999"),
             ("cp_read", "solid"), ("cp_pensamento_tools", "tudo"), ("PARAGLIDE_LOCALE", "en"),
             ("cp_active", "b"), ("cp_servers", r#"[{"id":"a","baseUrl":"http://x:1","token":"t1"},{"id":"b","baseUrl":"","token":"t2"}]"#),
@@ -247,7 +284,7 @@ mod tests {
         let base = Appearance { text_size: 70, font: Font::Mono, ..Appearance::default() };
         let got = map(&local, "http://127.0.0.1:8765", base);
         let a = got.appearance;
-        assert_eq!((a.theme, a.background, a.wallpaper, a.transparency), (ThemeMode::Desktop, Background::Desktop, Wallpaper::Glass, 30));
+        assert_eq!((a.theme, a.background, a.wallpaper, a.transparency, a.solidity), (ThemeMode::Desktop, Background::Desktop, Wallpaper::Glass, 30, 24));
         assert_eq!((a.palette, a.panels), (Palette::Classic, Panels::Floating));
         assert_eq!((a.dark.accent, a.dark.tint, a.dark.tint_strength), (Swatch::Custom(Hex(0xff8800)), Swatch::Preset(0), 45));
         // Fora da faixa e ausente valem o padrão do web, não o que estava aqui.

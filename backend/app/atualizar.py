@@ -934,7 +934,9 @@ def iniciar(porta: int = 8765) -> dict:
     # disputa que prendeu a barra na etapa 4, só que estreita e autocorrigível. O `pid` sai daqui de
     # propósito: quem o registra é o próprio motor (`_executar`), com o pid dele; o do filho, que é
     # o que importa pra saber se a atualização morreu, mora no lock.
-    _escrever(fase="rodando", ok=None, erro=None,
+    # `pid=None`: `_escrever` mescla, e o pid da atualização ANTERIOR (morto) faria o
+    # `estado_para_tela` declarar esta recém-lançada como abandonada no primeiro poll.
+    _escrever(fase="rodando", ok=None, erro=None, pid=None,
               passo=0, total=len(ETAPAS), texto="Começando")
     proc = subprocess.Popen(
         args, cwd=str(REPO / "backend"),

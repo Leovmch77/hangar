@@ -73,6 +73,10 @@ impl Navigation {
     }
 }
 
+/// Limites do arrasto da borda da barra, os mesmos do web.
+pub const SIDEBAR_MIN: f32 = 200.;
+pub const SIDEBAR_MAX: f32 = 520.;
+
 /// Como a barra lateral agrupa as sessões (`cp_group_by` do web; "Servidor" não se aplica a um servidor só).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +134,11 @@ pub enum ToolLook { Classic, Chips, Tree }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingTools { None, Search, All }
+
+/// Cor da moldura do card em que o agente pergunta: a de destaque escolhida ou o âmbar de aviso.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskHighlight { Accent, Amber }
 
 /// Idioma da interface: Sistema segue `HANGAR_NATIVE_LANG`/`LANG`; os outros vencem as variáveis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +221,8 @@ pub struct Appearance {
     pub column: u16,
     pub sidebar_height: SidebarHeight,
     pub navigation: Navigation,
+    /// Largura arrastada da barra cheia (`cp_sidebar_w` do web), uma só para Barra lateral e Conversas; `None` usa a do modo.
+    pub sidebar_width: Option<f32>,
     pub sidebar_compact: bool,
     /// Caixa do "Ver ao vivo": distância da borda direita e da de baixo da janela, em px lógicos.
     pub live_corner: [f32; 2],
@@ -221,6 +232,7 @@ pub struct Appearance {
     pub thinking_tools: ThinkingTools,
     /// Botão Gráfico sobre as tabelas numéricas das respostas.
     pub table_chart: bool,
+    pub ask_highlight: AskHighlight,
     /// Geral: também deste computador, no mesmo arquivo; o "Voltar ao padrão" da Aparência não mexe nelas.
     pub language: Language,
     pub currency: Currency,
@@ -241,8 +253,8 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
-    navigation: Navigation::Sidebar, sidebar_compact: false, live_corner: [16., 16.],
-    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
+    navigation: Navigation::Sidebar, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
+    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
 
@@ -263,7 +275,7 @@ impl Appearance {
         Self { panels: self.panels, font: self.font, theme: self.theme, palette: self.palette, desktop_text: self.desktop_text,
             surface_material: self.surface_material,
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
-            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
+            thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             language: self.language, currency: self.currency, hands_free: self.hands_free, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
             code_font: self.code_font, terminal_font: self.terminal_font,
             ..Self::default() }
@@ -278,6 +290,15 @@ impl Appearance {
             Reading::Auto if self.busy_background() => Reading::Text,
             Reading::Auto => Reading::None,
             other => other,
+        }
+    }
+
+    /// Largura da barra cheia em vigor: com abas no topo não há barra; valor torto no arquivo volta para a escala.
+    pub fn full_sidebar_width(&self) -> f32 {
+        match (self.navigation, self.sidebar_width) {
+            (Navigation::Tabs, _) => 0.,
+            (_, Some(width)) if width.is_finite() => width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            (navigation, _) => navigation.sidebar_width(),
         }
     }
 
@@ -307,9 +328,12 @@ pub fn get() -> Appearance { *CURRENT.read().unwrap_or_else(|e| e.into_inner()) 
 
 pub fn set(value: Appearance) { *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = value.clamped(); }
 
-fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+/// Pasta das configurações deste app. No Windows não há `HOME`: sem o `APPDATA`, nada era gravado.
+pub(crate) fn dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    }?;
     Some(base.join("hangar-native"))
 }
 
@@ -532,6 +556,22 @@ mod tests {
         let custom = Appearance { background: Background::Image, wallpaper: Wallpaper::Glass, reading: Reading::Sheet, text_contrast: 90, ..Appearance::default() };
         let reset = custom.reset_keeping_choices();
         assert_eq!((reset.background, reset.wallpaper, reset.reading, reset.text_contrast), (Background::Image, Wallpaper::Glass, Reading::Auto, 30));
+    }
+
+    #[test]
+    fn dragged_sidebar_width_stays_in_scale_and_survives_reset() {
+        let width = |navigation, sidebar_width| Appearance { navigation, sidebar_width, ..Appearance::default() }.full_sidebar_width();
+        assert_eq!(width(Navigation::Sidebar, None), 284.);
+        assert_eq!(width(Navigation::Conversations, None), 256.);
+        assert_eq!(width(Navigation::Conversations, Some(330.)), 330.);
+        assert_eq!((width(Navigation::Sidebar, Some(90.)), width(Navigation::Sidebar, Some(900.))), (SIDEBAR_MIN, SIDEBAR_MAX));
+        assert_eq!(width(Navigation::Sidebar, Some(f32::NAN)), 284.);
+        assert_eq!(width(Navigation::Tabs, Some(330.)), 0.);
+        let custom = Appearance { sidebar_width: Some(330.), ..Appearance::default() };
+        assert_eq!(custom.reset_keeping_choices().sidebar_width, Some(330.));
+        // Arquivo de antes do campo continua abrindo.
+        let old: Appearance = serde_json::from_str(r#"{"navigation":"conversations"}"#).unwrap();
+        assert_eq!(old.sidebar_width, None);
     }
 
     #[test]

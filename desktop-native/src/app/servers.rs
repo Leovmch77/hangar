@@ -121,21 +121,33 @@ impl Hangar {
         if let Some(draft) = draft { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
     }
 
-    /// A máquina escolhida no diálogo Nova sessão: o diálogo reabre já ligado a ela.
-    pub(super) fn pick_machine(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.server_entry(&key).cloned() else { return };
-        let dialog = self.new_session.take().is_some();
-        if dialog { window.close_dialog(cx); }
+    /// A sessão criada em outra máquina: ela vira a ativa uma vez, já com a sessão nova na lista guardada, para a lista que
+    /// chega primeiro não fechá-la.
+    pub(super) fn activate_for_created(&mut self, key: &str, session: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.server_entry(key).cloned() else { return };
+        if let Some(list) = self.remote.get_mut(key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
+            list.sessions.push(session.clone());
+        }
         self.activate_server(entry, window, cx);
-        if dialog { self.open_new_session(None, window, cx); }
     }
 
     /// Servidores trazidos de fora (o app Electron): entram na lista, gravada junto da conexão.
-    pub(super) fn merge_servers(&mut self, incoming: Vec<ServerEntry>) {
+    pub(super) fn merge_servers(&mut self, incoming: Vec<ServerEntry>, cx: &mut Context<Self>) {
         for entry in incoming { upsert(&mut self.servers, entry); }
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
+        self.sync_updater(cx);
+    }
+
+    /// Dá ao atualizador o servidor ativo (aviso de desatualizado) e o desta máquina ("Atualizar tudo"), este só loopback:
+    /// sem o recuo para o servidor ativo do `desktop_api`, que atualizaria outra máquina com o rótulo "desta máquina".
+    pub(super) fn sync_updater(&self, cx: &mut Context<Self>) {
+        let local = self.api.as_ref().filter(|api| api.is_loopback()).cloned()
+            .or_else(|| self.servers.iter().filter(|s| !s.disabled).find_map(|s| Api::new(&s.address, &s.token).ok().filter(Api::is_loopback)));
+        let active = self.api.clone();
+        let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
+        updater.update(cx, |updater, cx| updater.set_servers(local, active, cx));
     }
 
     /// Só as máquinas do app Electron; a aparência é o Importar das configurações que traz.
@@ -147,7 +159,7 @@ impl Hangar {
             let result = result.await.unwrap_or_else(|_| Err(crate::electron::Failure::Read(tr("electron_import_stopped"))));
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(list) => this.merge_servers(list),
+                    Ok(list) => this.merge_servers(list, cx),
                     // Sem app Electron neste computador não há o que adotar.
                     Err(crate::electron::Failure::Missing) => {}
                     Err(crate::electron::Failure::Read(reason)) => window.push_notification(
@@ -172,8 +184,11 @@ impl Hangar {
 
     /// As máquinas ligadas, para os seletores de máquina da Nova sessão.
     pub(super) fn server_choices(&self) -> Vec<super::create::ServerChoice> {
-        self.servers.iter().filter(|s| !s.disabled).map(|s| super::create::ServerChoice {
-            key: norm(&s.address), label: s.label.clone(), address: s.address.clone() }).collect()
+        self.servers.iter().filter(|s| !s.disabled).map(|s| {
+            let key = norm(&s.address);
+            let offline = self.remote.get(&key).is_some_and(|l| l.error.is_some());
+            super::create::ServerChoice { key, label: s.label.clone(), address: s.address.clone(), token: s.token.clone(), offline }
+        }).collect()
     }
 
     /// Paleta e papel de parede são desta máquina, como no web (o Hangar da própria origem): com outra máquina ativa, pede ao
@@ -184,20 +199,20 @@ impl Hangar {
             .or_else(|| self.api.clone())
     }
 
-    /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto do estado, nome em caixa alta e a contagem. Clicar recolhe.
-    pub(super) fn render_server_header(&self, key: &str, label: &str, count: usize, online: bool, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+    /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto na cor da máquina, nome em caixa alta e a contagem numa
+    /// pílula. Clicar recolhe; a falha vem por extenso embaixo.
+    pub(super) fn render_server_header(&self, id: &str, key: &str, label: &str, count: usize, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let group = format!("server:{key}");
         let open = !self.sidebar.is_collapsed(&group);
-        let offline = !online || error.is_some();
         div().id(SharedString::from(format!("server-header-{key}"))).flex_shrink_0().mt(px(8.)).px(px(8.)).py(px(4.)).rounded(px(8.))
-            .flex().flex_col().gap(px(2.)).cursor_pointer().hover(|el| el.bg(theme::hover()))
+            .flex().flex_col().gap(px(2.)).cursor_pointer().text_color(theme::faint()).hover(|el| el.text_color(theme::muted()))
             .role(Role::Button).aria_expanded(open).aria_label(format!("{label} · {count}"))
-            .child(div().flex().items_center().gap(px(6.))
+            .child(div().flex().items_center().gap(px(8.))
                 .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme::faint()))
-                .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(if offline { theme::warning() } else { theme::accent() }))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
-                    .child(label.to_uppercase()))
-                .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string())))
+                .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::server_color(id)))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_weight(FontWeight::BOLD).child(label.to_uppercase()))
+                .when(count > 0, |el| el.child(div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(theme::inset())
+                    .flex().justify_center().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(count.to_string()))))
             .when_some(error, |el, text| el.child(div().pl(px(24.)).text_xs().text_color(theme::warning()).truncate().child(text)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(group.clone(), cx)))
             .into_any_element()

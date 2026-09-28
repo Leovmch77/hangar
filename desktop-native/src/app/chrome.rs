@@ -420,11 +420,14 @@ pub fn confirm_alert(window: &mut Window, cx: &mut App, title: String, descripti
     // tomasse deixaria o botão mudo. O nó não entra na ordem do Tab.
     let (cancel_from, ok_from, cancel_focus) = (cx.focus_handle(), cx.focus_handle(), cx.focus_handle());
     let initial_focus = cancel_focus.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let (act, confirm) = (act.clone(), pressed.clone());
         let (press, cancel_from, ok_from) = (pressed.clone(), cancel_from.clone(), ok_from.clone());
         let anchor = |from: &FocusHandle| div().absolute().size_0().track_focus(from);
-        super::popup::dialog(dialog).w(px(360.)).close_button(false)
+        // O kit põe o diálogo a um décimo do topo; a confirmação é curta e fica no meio da janela, pela altura típica dela.
+        let height = window.viewport_size().height;
+        let top = ((height - px(150.)) / 2.).max(height / 10.);
+        super::popup::dialog(dialog).w(px(360.)).close_button(false).margin_top(top)
             .title(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.clone()))
             .child(div().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().child(description.clone()))
             .footer(DialogFooter::new()
@@ -515,6 +518,11 @@ pub fn ring_text(pct: Option<f64>) -> Hsla {
 /// Marca do Hangar (dois arcos), tingida pela cor do estado.
 pub fn hangar_mark(size: f32, color: Hsla) -> Svg {
     svg().path(crate::HANGAR_MARK).size(px(size)).flex_shrink_0().text_color(color)
+}
+
+/// Sessão sem terminal: o desenho do `SessionSignals` do web (lucide não tem terminal cortado).
+pub fn no_terminal_mark(size: f32, color: Hsla) -> Svg {
+    svg().path(crate::NO_TERMINAL).size(px(size)).flex_shrink_0().text_color(color)
 }
 
 pub fn small_icon(icon: IconName, size: f32, color: Hsla) -> Icon {

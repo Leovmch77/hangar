@@ -93,7 +93,7 @@ fn repo(branches: &Value, files: &Value) -> Repo {
 // ── Diff ──
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind { Add, Del, Context, Meta }
+pub(super) enum Kind { Add, Del, Context, Meta }
 
 #[derive(Clone, Debug)]
 enum Body { Notice(SharedString), Hunk(SharedString), Line { kind: Kind, old: Option<u32>, new: Option<u32>, text: SharedString } }
@@ -200,23 +200,24 @@ fn notice_row(text: SharedString, color: Hsla) -> AnyElement {
     div().h(px(NOTICE_H)).w_full().flex_none().flex().items_center().px_4().text_size(px(11.)).text_color(color).child(text).into_any_element()
 }
 
-/// Linha do diff do Zeron: barra de cor, as duas calhas de número, o marcador e o código.
-fn line_row(kind: Kind, old: Option<u32>, new: Option<u32>, text: &SharedString) -> AnyElement {
-    if kind == Kind::Meta { return notice_row(text.clone(), theme::faint()); }
+/// Linha do diff do Zeron: barra de cor, as duas calhas de número, o marcador e o código. `wrap` quebra a linha
+/// longa (o diff das edições no chat); sem ele a altura é fixa, que é o que a lista virtualizada do Git mede.
+pub(super) fn line_row(kind: Kind, old: Option<u32>, new: Option<u32>, code: impl IntoElement, wrap: bool) -> AnyElement {
     let (marker, color) = match kind { Kind::Add => ("+", theme::success()), Kind::Del => ("−", theme::removed()), _ => ("·", theme::faint().opacity(0.5)) };
     let changed = matches!(kind, Kind::Add | Kind::Del);
     let gutter = |no: Option<u32>, lit: bool| div().w(px(GUTTER)).flex_none().flex().justify_end().pr(px(8.)).font_family(theme::MONO)
         .text_size(px(11.)).line_height(px(LINE_H)).text_color(if lit { color.opacity(0.9) } else { theme::faint().opacity(0.8) })
         .child(no.map(|n| n.to_string()).unwrap_or_default());
-    // ponytail: linha longa é cortada na borda; rolagem lateral por arquivo (como a do Zeron) quando fizer falta.
-    div().h(px(LINE_H)).w_full().flex_none().flex().when(changed, |el| el.bg(color.opacity(0.055)))
-        .child(div().w(px(ACCENT_BAR)).h_full().flex_none().when(changed, |el| el.bg(color.opacity(0.55))))
+    // ponytail: no Git a linha longa é cortada na borda; rolagem lateral por arquivo (como a do Zeron) quando fizer falta.
+    div().map(|el| if wrap { el.min_h(px(LINE_H)) } else { el.h(px(LINE_H)) }).w_full().flex_none().flex()
+        .when(changed, |el| el.bg(color.opacity(0.055)))
+        .child(div().w(px(ACCENT_BAR)).when(!wrap, |el| el.h_full()).flex_none().when(changed, |el| el.bg(color.opacity(0.55))))
         .child(gutter(old, kind == Kind::Del))
         .child(gutter(new, kind == Kind::Add))
         .child(div().w(px(MARKER)).flex_none().flex().justify_center().font_family(theme::MONO).text_size(px(12.)).line_height(px(LINE_H))
             .text_color(color).child(marker))
-        .child(div().flex_1().min_w_0().overflow_hidden().pl(px(12.)).whitespace_nowrap().font_family(theme::MONO).text_size(px(12.))
-            .line_height(px(LINE_H)).text_color(theme::text().opacity(0.92)).child(text.clone()))
+        .child(div().flex_1().min_w_0().pl(px(12.)).when(!wrap, |el| el.overflow_hidden().whitespace_nowrap()).font_family(theme::MONO)
+            .text_size(px(12.)).line_height(px(LINE_H)).text_color(theme::text().opacity(0.92)).child(code))
         .into_any_element()
 }
 
@@ -735,7 +736,8 @@ impl GitPanel {
             Row::Body(file, n) => match review.files[file].patch.ok().and_then(|p| p.body.get(n)) {
                 Some(Body::Notice(text)) => notice_row(text.clone(), theme::faint()),
                 Some(Body::Hunk(text)) => hunk_row(text),
-                Some(Body::Line { kind, old, new, text }) => line_row(*kind, *old, *new, text),
+                Some(Body::Line { kind: Kind::Meta, text, .. }) => notice_row(text.clone(), theme::faint()),
+                Some(Body::Line { kind, old, new, text }) => line_row(*kind, *old, *new, text.clone(), false),
                 None => div().into_any_element(),
             },
             Row::Status(file) => match &review.files[file].patch.value {

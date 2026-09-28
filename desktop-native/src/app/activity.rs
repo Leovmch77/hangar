@@ -929,15 +929,19 @@ impl Hangar {
         let current = self.act.active_tab.is_none().then(|| self.side_tab());
         let tab = |id: &'static str, label: String, which: SideTab, cx: &mut Context<Self>| {
             let selected = current == Some(which);
-            // As quatro cabem a partir de ~300 px; mais estreito, cada uma encolhe com reticências em vez de sumir da fileira.
-            div().h_full().min_w_0().flex().items_center().border_b_2().border_color(if selected { theme::accent() } else { transparent_black() })
+            // Desenho da `.aba` do web: texto pequeno, só a cor e o sublinhado marcam a escolhida (negrito mudaria a largura
+            // ao trocar). As quatro cabem a partir de ~300 px; mais estreito, cada uma encolhe com reticências, e o piso
+            // guarda "Git" inteiro em vez de virar só "…".
+            div().h_full().min_w(px(36.)).flex().items_center().border_b_2().border_color(if selected { theme::accent() } else { transparent_black() })
                 .child(Button::new(id).custom(ButtonCustomVariant::new(cx).color(transparent_black())
                         .foreground(if selected { theme::text() } else { theme::muted() }).hover(theme::hover()).active(theme::hover()))
-                    .min_w_0().h(px(28.)).px(px(6.)).rounded(px(6.)).text_size(px(13.)).when(selected, |b| b.font_weight(FontWeight::SEMIBOLD))
-                    .accessibility_label(label.clone()).child(div().min_w_0().truncate().child(label))
+                    // O Button não encolhe sozinho (flex_shrink_0 interno): acompanha a aba, que encolhe, e o rótulo
+                    // corta com reticências. O tamanho do texto vai no rótulo porque o do Button é sobrescrito.
+                    .w_full().h(px(28.)).px(px(8.)).rounded(px(6.))
+                    .accessibility_label(label.clone()).child(div().min_w_0().truncate().text_size(px(12.)).child(label))
                     .on_click(cx.listener(move |this, _, window, cx| this.choose_side_tab(which, window, cx))))
         };
-        div().id("side-tabs").h_full().min_w_0().flex().items_center().gap(px(2.)).ml(px(-6.)).overflow_hidden()
+        div().id("side-tabs").flex_1().h_full().min_w_0().flex().gap(px(2.)).overflow_hidden()
             .child(tab("side-tab-context", tr("side_context"), SideTab::Context, cx))
             .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, cx)))
             .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, cx)))

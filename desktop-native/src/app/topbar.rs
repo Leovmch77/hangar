@@ -87,6 +87,17 @@ impl Hangar {
                 if this.settings.is_some() && !this.settings_live() { this.close_settings(window, cx) }
                 else { this.open_settings(settings::Page::Appearance, window, cx) }
             }));
+        let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
+        let outdated = updater.as_ref().filter(|u| u.read(cx).server_outdated()).map(|u| {
+            let (running, app) = u.read(cx).outdated_versions();
+            let tip = tr("app_server_outdated_tip").replace("{server}", &self.server_label(cx)).replace("{running}", &running).replace("{app}", &app);
+            Button::new("topbar-server-outdated").ghost().small().h(px(26.)).px(px(10.)).rounded_full().border_1().border_color(theme::warning())
+                .child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
+                    .child(Icon::new(IconName::TriangleAlert).size(px(14.)).text_color(theme::warning()))
+                    .child(tr("app_server_outdated")))
+                .accessibility_label(tip.clone()).tooltip(tip)
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Servers, window, cx)))
+        });
         // Colada, a barra continua a lateral que está embaixo dela: a de conversas tem superfície própria.
         let page_open = settings_open || self.costs.view.is_some();
         let wall = if !page_open && appearance::get().navigation == appearance::Navigation::Conversations { theme::conversation_sidebar().0 }
@@ -114,7 +125,8 @@ impl Hangar {
                 let controls = div().flex().justify_end().gap(px(6.))
                     .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
                     .child(control(pill))
-                    .children(cx.try_global::<crate::update::Handle>().map(|updater| control(updater.0.clone())))
+                    .children(outdated.map(control))
+                    .children(updater.map(control))
                     .child(control(gear));
                 match beside {
                     // Com o painel direito aberto, a busca centra no chat e os controles ficam sobre o painel; mais largos que

@@ -268,11 +268,69 @@ fn claim(real: &ChatEvent, queued: &ChatEvent) -> Option<(u8, usize)> {
     None
 }
 
+/// Âncora do prazo do cache de prompt: hora do turno e janela em segundos.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LastCache { pub ts: f64, pub ttl: u64 }
+
+/// `lastCache` do Chat.svelte. A âncora é o último turno que tocou a cache (usar renova o prazo); o TTL só vem no turno
+/// que grava, então é buscado à parte. Sem um dos dois, nada: o prazo nunca é chutado.
+pub fn last_cache(events: &[ChatEvent]) -> Option<LastCache> {
+    let (mut ts, mut ttl) = (None, None);
+    for e in events.iter().rev().filter(|e| e.kind == "assistant_msg") {
+        let written = e.cache_ttl_s.filter(|t| *t > 0);
+        if ts.is_none() && (e.cache_read.unwrap_or(0) > 0 || written.is_some()) { ts = e.ts.filter(|t| *t > 0.); }
+        if ttl.is_none() { ttl = written; }
+        if ts.is_some() && ttl.is_some() { break; }
+    }
+    Some(LastCache { ts: ts?, ttl: ttl? })
+}
+
+/// `cachePrazo` do web: segundos que restam (nunca acima da janela, contra relógio adiantado), se está no último quinto
+/// do prazo e o rótulo ("59min", "1h00"); `None` no rótulo é expirado.
+pub fn cache_left(cache: LastCache, now_s: f64) -> (i64, bool, Option<String>) {
+    let rest = ((cache.ts + cache.ttl as f64 - now_s).round() as i64).min(cache.ttl as i64);
+    if rest <= 0 { return (rest, false, None); }
+    let ending = rest as f64 <= (cache.ttl as f64 * 0.2).max(60.);
+    let min = (rest + 59) / 60;
+    let label = if min >= 60 { format!("{}h{:02}", min / 60, min % 60) } else { format!("{min}min") };
+    (rest, ending, Some(label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    fn turn(id: &str, ts: f64, read: Option<u64>, ttl: Option<u64>) -> ChatEvent {
+        ChatEvent { kind: "assistant_msg".into(), id: id.into(), ts: Some(ts), cache_read: read, cache_ttl_s: ttl, ..Default::default() }
+    }
+
+    #[test]
+    fn cache_anchor_is_last_touch_and_ttl_comes_from_last_write() {
+        // O turno que só lê renova o prazo: a âncora é ele, com o TTL do turno que gravou antes.
+        let events = [turn("a", 100., None, Some(3600)), turn("b", 200., Some(5_000), None), turn("c", 300., None, None)];
+        assert_eq!(last_cache(&events), Some(LastCache { ts: 200., ttl: 3600 }));
+        // Sem TTL medido ou sem turno que tocou a cache: nada.
+        assert_eq!(last_cache(&[turn("a", 100., Some(5_000), None)]), None);
+        assert_eq!(last_cache(&[turn("a", 100., None, None)]), None);
+        assert_eq!(last_cache(&[event("user_msg", "u", "oi")]), None);
+    }
+
+    #[test]
+    fn cache_left_formats_and_flags_like_the_web() {
+        let hour = LastCache { ts: 1_000., ttl: 3600 };
+        assert_eq!(cache_left(hour, 1_000.), (3600, false, Some("1h00".into())));
+        assert_eq!(cache_left(hour, 1_061.), (3539, false, Some("59min".into())));
+        // Último quinto da janela de 1 h (12 min) fica em âmbar; a de 5 min só no último minuto.
+        assert_eq!(cache_left(hour, 1_000. + 3600. - 720.), (720, true, Some("12min".into())));
+        let five = LastCache { ts: 1_000., ttl: 300 };
+        assert_eq!(cache_left(five, 1_000.).1, false);
+        assert_eq!(cache_left(five, 1_240.), (60, true, Some("1min".into())));
+        assert_eq!(cache_left(five, 1_300.), (0, false, None));
+        // Relógio local atrasado não passa da janela.
+        assert_eq!(cache_left(five, 500.).0, 300);
+    }
 
     fn event(kind: &str, id: &str, text: &str) -> ChatEvent {
         ChatEvent { kind: kind.into(), id: id.into(), text: Some(text.into()), ..Default::default() }

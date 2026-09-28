@@ -21,6 +21,10 @@ const GRAIN_SIDE: f32 = 256.;
 // fundo é a imagem que está na tela.
 const FILE_IMAGE: u64 = 0;
 
+// Windows e macOS borram o que está atrás da janela (acrílico do DWM, NSVisualEffectView). No Linux o borrão é
+// do compositor, então o Vidro desenha a foto do papel de parede dentro da janela.
+const NATIVE_GLASS: bool = cfg!(any(windows, target_os = "macos"));
+
 fn signature(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -36,6 +40,11 @@ impl Hangar {
         let a = appearance::get();
         let tx = self.tx.clone();
         let connection = self.connection;
+        if NATIVE_GLASS {
+            window.set_background_appearance(if a.background == Background::Desktop && a.wallpaper == Wallpaper::Glass {
+                WindowBackgroundAppearance::Blurred
+            } else { WindowBackgroundAppearance::Transparent });
+        }
         // A imagem do outro fundo não fica na tela enquanto a nova carrega.
         let file_image = a.background == Background::Image;
         if self.backdrop.as_ref().is_some_and(|(sig, _)| (*sig == FILE_IMAGE) != file_image) { self.set_backdrop(None, window, cx); }
@@ -49,7 +58,7 @@ impl Hangar {
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Backdrop(seq, result) }).await;
                 });
             }
-            (Background::Desktop, Wallpaper::Glass) => {
+            (Background::Desktop, Wallpaper::Glass) if !NATIVE_GLASS => {
                 let Some(api) = self.desktop_api() else { return self.fail_backdrop(tr("settings_desktop_offline"), window, cx) };
                 // A mesma foto não é decodificada de novo: a releitura acontece a cada volta do foco.
                 let current = self.backdrop.as_ref().map(|(sig, _)| *sig);

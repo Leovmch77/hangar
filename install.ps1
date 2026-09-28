@@ -1245,9 +1245,10 @@ if (Test-Path "$shellDir\package.json") {
     # Reescreve os atalhos porque o checkout e o nivel de permissao podem mudar.
     $electronExe = "$shellDir\node_modules\electron\dist\electron.exe"
     if (Test-Path $electronExe) {
+        # "Hangar (Electron)": o "Hangar" e do app nativo, instalado logo abaixo.
         $shortcutPaths = @(
-            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hangar.lnk'),
-            (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Hangar.lnk')
+            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hangar (Electron).lnk'),
+            (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Hangar (Electron).lnk')
         )
         foreach ($lnk in $shortcutPaths) {
             try {
@@ -1268,6 +1269,23 @@ if (Test-Path "$shellDir\package.json") {
         }
     } else {
         Falta "electron.exe nao encontrado em $electronExe - atalho do Menu Iniciar nao criado"
+    }
+}
+
+# -- App nativo (desktop-native, release native-latest) ----------------------
+# E a janela padrao. O Electron continua instalado ao lado, como "Hangar (Electron)": o navegador
+# embutido do hangar-preview mora nele. Falhar aqui nao derruba a instalacao - a janela vira o Electron.
+$nativoExe = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
+if (-not $SoChecar) {
+    Titulo 'App nativo'
+    & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-native.ps1"
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $nativoExe)) {
+        Ok 'app nativo instalado (atalho "Hangar")'
+    } elseif ($LASTEXITCODE -eq 0) {
+        Nota 'sem app nativo para esta maquina; a janela segue sendo o Electron'
+    } else {
+        Falta 'o app nativo nao instalou - a janela segue sendo o Electron (rode scripts\install-native.ps1)'
+        Write-Host '##HANGAR-AVISO## o app nativo nao instalou; a janela segue sendo o Electron'
     }
 }
 
@@ -2373,7 +2391,17 @@ if ($vivo -and -not $Update) {
     # inicial de COCKPIT_URL, e a tela de login guarda o `?token=` igual ao QR.
     $electronExe = "$raiz\shell\node_modules\electron\dist\electron.exe"
     $abriuApp = $false
-    if (Test-Path $electronExe) {
+    # O app nativo primeiro: ele ja nasce conectado (o install-native.ps1 grava a conexao com o token).
+    $nativoExe = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
+    if (Test-Path $nativoExe) {
+        try {
+            $procApp = Start-Process -FilePath $nativoExe -PassThru
+            Start-Sleep 2
+            if ($procApp -and -not $procApp.HasExited) { $abriuApp = $true; Retoma-Log; Ok 'abri o app Hangar' }
+            else { Nota 'o app nativo fechou logo ao abrir; tentando o Electron' }
+        } catch { Nota "nao consegui abrir o app nativo: $($_.Exception.Message)" }
+    }
+    if (-not $abriuApp -and (Test-Path $electronExe)) {
         try {
             $env:COCKPIT_URL = $abrir
             $procApp = Start-Process -FilePath $electronExe -ArgumentList 'main.cjs' -WorkingDirectory "$raiz\shell" -PassThru

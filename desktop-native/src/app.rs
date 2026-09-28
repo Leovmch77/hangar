@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
-use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, tab::{Tab, TabBar}, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
@@ -14,14 +14,17 @@ mod activity;
 mod backdrop;
 mod baton;
 mod accounts;
-mod chrome;
+pub(crate) mod chrome;
 mod computer;
 mod controls;
 mod create;
 mod device;
 mod follow;
 mod landing;
+mod edits;
 mod git;
+mod grouping;
+mod group_sheet;
 mod harness;
 mod viewer;
 mod disk;
@@ -31,6 +34,7 @@ mod panes;
 mod popup;
 mod rail;
 mod rows;
+mod run;
 mod files;
 mod settings;
 mod mention;
@@ -195,6 +199,7 @@ enum Reply {
     Reload,
     PlanPreview(bool),
     PreSelect(String),
+    RunState,
 }
 
 pub struct Picked { name: String, bytes: Vec<u8> }
@@ -286,7 +291,7 @@ enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
-struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription> }
+struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
 
 #[derive(Clone, Copy)]
 enum Live { Thinking, Tool }
@@ -490,6 +495,18 @@ impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        // Prazo do cache de prompt no compositor: mostra minutos, então 20 s bastam; só a faixa de baixo redesenha.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(20)).await;
+            let alive = this.update(cx, |this, cx| {
+                if this.selected.is_some() && crate::chat::last_cache(&this.chat.events).is_some() { this.redraw(panes::Area::Bottom, cx); }
+            });
+            if alive.is_err() { break; }
+        }).detach();
+        // O aviso de servidor desatualizado mora na barra desta view e vem do estado do atualizador.
+        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+            cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+        }
         let saved = load_connection();
         // Primeira abertura com a lista: as máquinas do app Electron entram sozinhas, como a conexão dele já entrava.
         let (mut known_servers, adopt) = match load_servers() { Some(list) => (list, false), None => (Vec::new(), true) };
@@ -744,6 +761,7 @@ impl Hangar {
             self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error });
         }
         self.start_remote_lists();
+        self.sync_updater(cx);
         self.connection_dialog = false;
         self.root_focus.focus(window, cx);
         let tx = self.tx.clone();
@@ -892,6 +910,7 @@ impl Hangar {
         }
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
+        self.load_run_state();
         cx.notify();
     }
 
@@ -920,6 +939,13 @@ impl Hangar {
         }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
+    }
+
+    /// Mais 400 eventos para trás: pelo botão ou pela rolagem que chega ao topo.
+    pub(crate) fn load_older(&mut self, cx: &mut Context<Self>) {
+        self.history_limit = self.history_limit.saturating_add(400);
+        self.etag = None;
+        self.load_history(cx);
     }
 
     fn load_history(&mut self, cx: &mut Context<Self>) {
@@ -1017,6 +1043,7 @@ impl Hangar {
                     servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false });
                     // Disco fora da thread da janela; só a falha volta.
                     self.persist_servers();
+                    self.sync_updater(cx);
                 }
                 self.replace_sessions(sessions, window, cx);
                 if let Some(name) = self.pending_open.take()
@@ -1632,23 +1659,29 @@ impl Hangar {
         self.action_feedback.remove(&key);
         let known = self.known_user_ids();
         if attached { self.start_uploads(key, text, steer, known, cx); }
-        else { self.deliver(key, text.clone(), text, steer, known, cx); }
+        else { self.deliver(key, text.clone(), text, steer, known, true, cx); }
         let _ = window;
     }
 
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    /// `composed`: veio do campo, e com o "mandar pro grupo" ligado vai também aos membros.
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone().filter(|_| self.server.as_deref() == Some(key.server.as_str())) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
             cx.notify();
             return;
         };
+        let group = if composed && !steer { self.group_targets(&key, &text) } else { None };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = if steer { api.steer_text(&key.name, &text).await } else { api.send(&key.name, &text).await };
+            let result = match group {
+                Some(names) => api.broadcast(&names, &text).await.and_then(|results| group_sheet::group_delivery(&key.name, results)),
+                None if steer => api.steer_text(&key.name, &text).await,
+                None => api.send(&key.name, &text).await,
+            };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sent(key, text, draft, result) }).await;
         });
         self.follow_engage(cx);
@@ -1707,7 +1740,7 @@ impl Hangar {
             }
         }
         let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
-        self.deliver(key, message, draft, steer, known, cx);
+        self.deliver(key, message, draft, steer, known, true, cx);
     }
 
     fn add_attachment(&mut self, key: &SessionKey, name: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -1962,7 +1995,7 @@ impl Hangar {
         if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) { return; }
         let draft = if from_panel { String::new() } else { self.composer.read(cx).value().to_string() };
         let known = self.known_user_ids();
-        self.deliver(key, format!("/{}", command.name), draft, false, known, cx);
+        self.deliver(key, format!("/{}", command.name), draft, false, known, false, cx);
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
@@ -2022,12 +2055,16 @@ impl Hangar {
     fn answer_body(&self, cx: &Context<Self>) -> Option<Value> {
         let ask = self.chat.ask.as_ref()?;
         if self.ask_form.fingerprint != ask.fingerprint { return None; }
-        let picks: Vec<Pick> = self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
+        interaction::answer_body(ask, &self.ask_picks(cx))
+    }
+
+    /// Escolhas do formulário com o texto digitado no lugar de quem está digitando.
+    fn ask_picks(&self, cx: &Context<Self>) -> Vec<Pick> {
+        self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
             if self.ask_form.typing.get(i) == Some(&true) {
                 Pick::Text(self.ask_form.inputs.get(i).map(|input| input.read(cx).value().to_string()).unwrap_or_default())
             } else { pick.clone() }
-        }).collect();
-        interaction::answer_body(ask, &picks)
+        }).collect()
     }
 
     // O instantâneo é o pedido que a pessoa viu ao clicar; se o atual difere, nada sai.
@@ -2430,6 +2467,8 @@ impl Hangar {
         let (status, status_color) = self.tool_status(tool);
         let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
         let open = self.expanded.contains(&key);
+        // Edição pronta mostra "+5 −2" no lugar do "pronto"; rodando ou com erro, o estado vale mais.
+        let edit_totals = (!error && tool.result.is_some()).then(|| edits::totals(call)).flatten();
         let toggle_key = key.clone();
         // O cartão Agent abre a conversa dele na aba Atividade em vez de expandir: ↗ no lugar da seta de abrir, e a
         // marca animada enquanto o subagente roda.
@@ -2446,7 +2485,10 @@ impl Hangar {
             .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::text() }).child(name))
             .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(summary))
             .when(running, |el| el.child(self.working_mark_slot(panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())))
-            .child(div().flex_shrink_0().max_w(px(320.)).truncate().text_color(status_color).child(status))
+            .map(|el| match edit_totals {
+                Some(totals) => el.child(totals),
+                None => el.child(div().flex_shrink_0().max_w(px(320.)).truncate().text_color(status_color).child(status)),
+            })
             .when(agent.is_some(), |el| el.child(chrome::small_icon(IconName::ExternalLink, 14., theme::faint())))
             .on_click(cx.listener(move |this, _, _, cx| match &agent {
                 Some(request) => this.open_agent(request.clone(), cx),
@@ -2465,6 +2507,9 @@ impl Hangar {
         let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true));
         let input_key = format!("{key}:input");
         let input = self.prepared_detail(&input_key, || conversation::pretty_input(call.tool_input.as_ref()));
+        // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
+        let diff = edits::card(call, cx);
+        let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
         if call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("read")) {
@@ -2476,10 +2521,12 @@ impl Hangar {
             }).collect();
             if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
         }
-        if matches!(input, Prepared::Detail { total, .. } if total > 0) {
+        if let Some(diff) = diff { body = body.child(diff); }
+        else if matches!(input, Prepared::Detail { total, .. } if total > 0) {
             body = body.child(self.detail(row, &input_key, input, tr("tool_input"), tr("copy_input"), false, cx));
         }
         match tool.result {
+            Some(_) if has_diff && !error => body,
             Some(i) => {
                 let result_key = format!("{key}:result");
                 let result = self.prepared_detail(&result_key, || self.chat.events[i].result.clone().unwrap_or_default());
@@ -2705,8 +2752,23 @@ impl Hangar {
         let ask = self.chat.ask.clone()?;
         let fingerprint = ask.fingerprint.clone();
         let total = ask.payload.questions.len();
+        // Várias perguntas: uma por aba, com marca nas respondidas; uma só dispensa a faixa.
+        let tab = self.ask_form.tab.min(total.saturating_sub(1));
+        let tabs = (total > 1).then(|| {
+            let picks = self.ask_picks(cx);
+            let tabs = ask.payload.questions.iter().enumerate().map(|(qi, item)| {
+                let done = picks.get(qi).is_some_and(|pick| interaction::answer(&ask, item, pick).is_some());
+                let label = if item.header.is_empty() { tr("ask_tab").replace("{n}", &(qi + 1).to_string()) } else { item.header.clone() };
+                Tab::new().label(label).when(done, |tab| tab.prefix(chrome::small_icon(IconName::Check, 12., theme::success())))
+            }).collect::<Vec<_>>();
+            let fp = fingerprint.clone();
+            TabBar::new("ask-tabs").underline().small().selected_index(tab).children(tabs)
+                .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                    if this.ask_form.fingerprint == fp { this.ask_form.tab = *index; cx.notify(); }
+                }))
+        });
         let mut body = div().flex().flex_col().gap_4();
-        for (qi, item) in ask.payload.questions.iter().enumerate() {
+        for (qi, item) in ask.payload.questions.iter().enumerate().filter(|(qi, _)| *qi == tab) {
             let pick = self.ask_form.picks.get(qi).cloned().unwrap_or(Pick::Empty);
             let typing = self.ask_form.typing.get(qi) == Some(&true);
             let chosen = |i: usize| !typing && matches!(&pick, Pick::Options(list) if list.contains(&i));
@@ -2718,12 +2780,11 @@ impl Hangar {
                     this.set_pick(&fp, qi, Some(next), false, cx);
                 });
                 let id = SharedString::from(format!("ask-{qi}-{oi}"));
-                let control = if item.multi_select { Checkbox::new(id).label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick).into_any_element() }
-                    else { Radio::new(id).label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick).into_any_element() };
-                options = options.child(div().flex().flex_col().gap_1().child(control)
-                    .when(!option.description.is_empty(), |el| el.child(div().pl_6().text_xs().text_color(theme::muted()).child(option.description.clone())))
-                    .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().ml_6().p_2().rounded_md().bg(theme::raised())
-                        .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview))));
+                options = options.child(if item.multi_select {
+                    ask_option(Checkbox::new(id).accessibility_label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick), option, chosen(oi), busy).into_any_element()
+                } else {
+                    ask_option(Radio::new(id).accessibility_label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick), option, chosen(oi), busy).into_any_element()
+                });
             }
             let mut escapes = div().flex().flex_wrap().gap_2();
             if ask.allows_text(item) && !item.options.is_empty() {
@@ -2742,9 +2803,9 @@ impl Hangar {
             }
             let input = typing.then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
             body = body.child(div().flex().flex_col().gap_2()
-                .when(!item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
-                    .child(if total > 1 { format!("{} · {}/{}", item.header, qi + 1, total) } else { item.header.clone() })))
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
+                .when(total == 1 && !item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
+                    .child(item.header.clone())))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
                 .when(item.multi_select, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_multi"))))
                 .child(options)
                 .when_some(input, |el, input| el.child(Input::new(&input).disabled(busy)))
@@ -2754,12 +2815,21 @@ impl Hangar {
         let ready = self.answer_body(cx).is_some();
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
-        if self.ask_scroll.0 != fingerprint { self.ask_scroll = (fingerprint.clone(), ScrollHandle::new()); }
-        Some(self.interaction_card(tr("ask_title"), scrolled("ask-scroll", &self.ask_scroll.1, 360., body),
+        let scroll_key = format!("{fingerprint}#{tab}");
+        if self.ask_scroll.0 != scroll_key { self.ask_scroll = (scroll_key, ScrollHandle::new()); }
+        let body = div().flex().flex_col().gap_3().when_some(tabs, |el, tabs| el.child(tabs))
+            .child(scrolled("ask-scroll", &self.ask_scroll.1, 360., body)).into_any_element();
+        Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
-                .child(Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
-                    .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx))))
+                .child(if tab + 1 < total {
+                    // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
+                    Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| if this.ask_form.fingerprint == fp { this.ask_form.tab = tab + 1; cx.notify(); }))
+                } else {
+                    Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
+                        .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
+                })
                 .into_any_element()))
     }
 
@@ -2767,6 +2837,9 @@ impl Hangar {
         let state = &self.chat.state;
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
+        // Menu do AskUserQuestion no pane: quem responde é o card nativo, que chega pelo `ask_question` (antes dele e
+        // depois de enviar, este seletor piscava por cima).
+        if interaction::ask_picker(&options) { return None; }
         let snapshot = select_snapshot(state);
         let plan = state.claude_plan_pending.clone().filter(|p| !p.plan.trim().is_empty());
         let multi = options.iter().any(|o| interaction::checkbox(o).is_some());
@@ -2830,9 +2903,10 @@ impl Hangar {
     }
 
     fn interaction_card(&self, title: String, body: AnyElement, footer: AnyElement) -> AnyElement {
-        // Pedido que espera você: moldura âmbar suave, como `.ask` do mock.
-        in_column(div().p(px(14.)).rounded(px(14.)).border_1().border_color(theme::warning().opacity(0.35))
-                .bg(theme::warning().opacity(0.06)).flex().flex_col().gap(px(10.))
+        // Pedido que espera você: mesmo material do compositor (legível sobre papel de parede e vidro), com a
+        // moldura na cor escolhida em Aparência (destaque ou âmbar).
+        in_column(div().p(px(14.)).rounded(px(14.)).border_1().border_color(theme::ask_highlight().opacity(0.55))
+                .bg(theme::boxed()).shadow(theme::card_shadow()).flex().flex_col().gap(px(10.))
                 .child(div().font_weight(FontWeight::MEDIUM).child(title))
                 .child(body).child(footer)).py_2()
             .into_any_element()
@@ -3127,7 +3201,8 @@ impl Hangar {
             self.composer_placeholder = placeholder.clone();
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
         }
-        let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working";
+        let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
+            && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
         let blocked = if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
@@ -3163,7 +3238,8 @@ impl Hangar {
             .border_1().border_color(theme::border_strong()).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::List, 14., theme::faint())).child(chip));
         let session = self.selected.clone().filter(|_| readable);
-        let footer = (repo.is_some() || ctx_pct.is_some() || session.is_some()).then(|| {
+        let cache = crate::chat::last_cache(&self.chat.events).filter(|_| readable);
+        let footer = (repo.is_some() || ctx_pct.is_some() || session.is_some() || cache.is_some()).then(|| {
             let branch = status.as_ref().and_then(|s| s.branch.clone()).or_else(|| session.as_ref().and_then(|s| s.branch.clone())).unwrap_or_default();
             let dirty = status.as_ref().and_then(|s| s.dirty) == Some(true);
             let (added, removed) = session.as_ref().map(|s| (s.git_added.filter(|n| *n > 0), s.git_removed.filter(|n| *n > 0))).unwrap_or((None, None));
@@ -3200,6 +3276,7 @@ impl Hangar {
             } else { place.into_any_element() };
             // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
             let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
+                .when_some(cache, |el, cache| el.child(cache_chip(cache)))
                 .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
                 .child(popup::anchor(div(), "composer-account").child(ring("composer-account", tr("ring_account"), account, self.accounts.card)
@@ -3207,6 +3284,7 @@ impl Hangar {
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
             div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+                .children(session.as_ref().map(|s| self.render_group_chips(s, cx)))
                 .child(place)
                 .child(div().flex_1())
                 .child(usage)
@@ -3405,7 +3483,10 @@ impl Hangar {
             let label = match event.kind.as_str() {
                 "user_msg" => tr("you"), "assistant_msg" => tr("assistant"), "thinking" => tr("thinking"),
                 "tool_use" | "tool_result" => event.tool_name.clone().unwrap_or_else(|| tr("tool")),
-                "notice" => tr("notice"), _ => tr("unknown"),
+                "notice" => event.skill.as_ref()
+                    .and_then(|skill| crate::i18n::tr_web("notice_skill_loaded", &HashMap::from([("name".to_owned(), skill.name.clone())])))
+                    .unwrap_or_else(|| tr("notice")),
+                _ => tr("unknown"),
             };
             let mut notes = Vec::new();
             if event.desistiu == Some(true) || event.id.starts_with("held:") || event.hook_error.is_some() {
@@ -3448,9 +3529,15 @@ impl Hangar {
         let thumbs = self.render_thumbs(&id, images.into_iter().map(|(source, _, _)| source).collect(), cx);
         let files = (!refs.is_empty()).then(|| self.render_refs(&id, refs, cx));
         let more_key = format!("{id}#more");
-        let long = user && long_message(&markdown);
+        // Skill injetada: só o rótulo, e o SKILL.md inteiro no "mostrar mais" (como a linha recolhida do web).
+        let skill = match self.items.get(index) {
+            Some(Item::Event(i)) if id != PREVIEW => self.chat.events.get(*i).is_some_and(|e| e.skill.is_some()),
+            _ => false,
+        };
+        let long = skill || (user && long_message(&markdown));
         let open = self.expanded.contains(&more_key);
         let text: Vec<AnyElement> = match charted {
+            None if skill && !open => Vec::new(),
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
             None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
@@ -3658,6 +3745,20 @@ fn stream_motion(live: bool) -> gpui_kit::base::TextViewMotion {
 }
 
 // A barra fica no recuo à direita do conteúdo, sem cobrir controles; o modo Always mostra que há mais abaixo.
+/// A linha inteira da opção é o controle: rótulo, descrição e prévia recebem o clique e o foco do teclado dele.
+fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(control: E, option: &AskOption, selected: bool, busy: bool) -> E {
+    // Linha sem caixa em volta: só a escolhida ganha fundo e borda, o que a separa das outras de relance.
+    control.w_full().px_3().py_2().rounded_lg().border_1()
+        .border_color(if selected { theme::accent().opacity(0.6) } else { transparent_black() })
+        .when(selected, |el| el.bg(theme::accent_dim()))
+        .when(!busy, |el| el.cursor_pointer())
+        .when(!busy && !selected, |el| el.hover(|style| style.bg(theme::hover())))
+        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
+        .when(!option.description.is_empty(), |el| el.child(div().text_sm().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
+        .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().mt_1().p_2().rounded_md().bg(theme::raised())
+            .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
+}
+
 fn scrolled(id: &'static str, handle: &ScrollHandle, max: f32, content: impl IntoElement) -> AnyElement {
     div().relative()
         .child(div().id(id).max_h(px(max)).overflow_y_scroll().track_scroll(handle).pr_4().child(content))
@@ -3709,10 +3810,10 @@ fn release_image(image: Arc<Image>, window: &mut Window, cx: &mut App) {
 impl Hangar {
     /// Barra lateral na caixa dela: a lista cheia, o trilho, ou os dois se trocando enquanto a largura anda.
     fn render_sidebar(&self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let full = appearance::get().navigation.sidebar_width();
+        let full = appearance::get().full_sidebar_width();
         match self.rail_progress() {
-            None if self.rail() => self.nav_frame(sidebar::RAIL_WIDTH, false, self.render_nav_rail(selected_name, cx)),
-            None => self.nav_frame(full, true, self.render_sidebar_full(selected_name, window, cx)),
+            None if self.rail() => self.nav_frame(sidebar::RAIL_WIDTH, false, self.render_nav_rail(selected_name, cx), None),
+            None => self.nav_frame(full, true, self.render_sidebar_full(selected_name, window, cx), Some(self.nav_resize_handle(full, cx))),
             Some(p) => {
                 // A lista cheia sai nos primeiros 60% e o trilho entra nos últimos 60%, os dois presos à esquerda e cortados
                 // pela caixa que anda: a lista parece deslizar para baixo da borda, e o trilho, sair dela.
@@ -3722,14 +3823,14 @@ impl Hangar {
                 let both = div().size_full().relative().overflow_hidden()
                     .child(layer(full, out, self.render_sidebar_full(selected_name, window, cx)))
                     .child(layer(sidebar::RAIL_WIDTH, into, self.render_nav_rail(selected_name, cx)));
-                self.nav_frame(self.nav_width(), p < 0.5, both.into_any_element())
+                self.nav_frame(self.nav_width(), p < 0.5, both.into_any_element(), None)
             }
         }
     }
 
     /// A caixa da barra: fundo, borda, cantos e sombra do painel solto, na largura dada. `full` é a lista cheia, que no
     /// modo Conversas tem fundo e borda próprios.
-    fn nav_frame(&self, width: f32, full: bool, content: AnyElement) -> AnyElement {
+    fn nav_frame(&self, width: f32, full: bool, content: AnyElement, handle: Option<AnyElement>) -> AnyElement {
         let a = appearance::get();
         let conversations = full && a.navigation == appearance::Navigation::Conversations;
         let (surface, _, _, border) = theme::conversation_sidebar();
@@ -3739,11 +3840,13 @@ impl Hangar {
         let panel = chrome::glass_panel(div().w(px(width)).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
             // A linha da janela estica os filhos; "Só o conteúdo" solta a barra do fundo.
             .map(|el| if fit_content { el.max_h_full() } else { el.h_full() })
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .when(conversations, |el| el.border_color(border))
-            .child(content),
-            px(if floating { 18. } else { 0. }));
+            .relative()
+            .child(content)
+            .children(handle),
+            px(if floating { theme::PANEL_RADIUS } else { 0. }));
         // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
         if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
     }
@@ -3762,11 +3865,20 @@ impl Hangar {
         let mut children: Vec<AnyElement> = Vec::new();
         // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
         let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
-        let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
+        // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
+        let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
+            let session = match row {
+                grouping::ListRow::Header { gid, label, members } => {
+                    children.push(self.render_pair_header(&gid, &label, &members, remote, window, cx));
+                    continue;
+                }
+                grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
+                grouping::ListRow::Session(session) => session,
+            };
             let selected = remote.is_none() && selected_name == Some(session.name.as_str());
             let remote = remote.map(str::to_owned);
-            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, remote, window, cx) }
-                else { self.render_session_row((*session).clone(), selected, mixed, remote, window, cx) });
+            children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
+                else { self.render_session_row(session.clone(), selected, mixed, remote, window, cx) });
         };
         let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
             if !layout.waiting.is_empty() {
@@ -3793,7 +3905,7 @@ impl Hangar {
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
                 if key == active {
-                    children.push(self.render_server_header(&key, &entry.label, layout.total, self.list_online, self.list_error.clone(), cx));
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, layout.total, self.list_error.clone(), cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
                 } else if let Some(list) = self.remote.get(&key) {
                     let mut remote = sidebar::layout(&list.sessions, &query, by_project, &none);
@@ -3801,7 +3913,7 @@ impl Hangar {
                     for group in &mut remote.groups { group.key = format!("{key}::{}", group.key); }
                     total += remote.total;
                     remote_rows += remote.total;
-                    children.push(self.render_server_header(&key, &entry.label, remote.total, list.online, list.error.clone(), cx));
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, remote.total, list.error.clone(), cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&remote, Some(&key), &mut children, window, cx); }
                 }
             }
@@ -3816,14 +3928,15 @@ impl Hangar {
             .when(empty && self.list_error.is_none(), |el| el.child(div().p_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))))
             .when(layout.filter_empty(), |el| el.child(div().p_2().text_xs().text_color(theme::faint()).child(tr("sidebar_filter_empty"))))
-            .children(children);
+            .children(children)
+            .map(|el| self.drop_background(el, cx));
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
         div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
-                .child(chrome::hangar_mark(16., theme::accent()))
-                .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
+                .child(chrome::hangar_mark(20., theme::accent()))
+                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
@@ -3861,7 +3974,7 @@ impl Hangar {
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
             // O CTA do rodapé da barra do web, com o recolher ao lado.
             .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).flex().items_center().gap_2()
-                .child(div().flex_1().min_w_0().child(self.new_session_button(false, cx)))
+                .child(self.new_session_button(false, cx))
                 .child(self.fold_button(cx)))
             // A engrenagem mora na barra do app, acima de tudo; o rodapé fica com a conexão.
             .child(div().h(px(48.)).flex_shrink_0().px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(theme::border())
@@ -3939,7 +4052,7 @@ impl Hangar {
             .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
         chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .child(strip)
@@ -3955,7 +4068,7 @@ impl Hangar {
                     .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                     .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
                 .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))),
-            px(if floating { 18. } else { 0. }))
+            px(if floating { theme::PANEL_RADIUS } else { 0. }))
     }
 
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
@@ -4036,6 +4149,7 @@ impl Hangar {
                 this.select(open.clone(), window, cx);
                 cx.stop_propagation();
             }))
+            .map(|el| self.group_row(el, &session, remote.as_deref(), 8., cx))
             .map(|el| match remote {
                 Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
                     .into_any_element(),
@@ -4056,8 +4170,8 @@ impl Hangar {
     }
 
     /// Linha do web (Sidebar.svelte): a marca tingida pelo estado no lugar do avatar; nome com a conta e a hora da última
-    /// resposta; embaixo, a resposta com ◆, a pergunta ou o que está fazendo; por fim a pasta (só worktree), a branch fora
-    /// de main/master e o diff. Servidor não aparece: a lista é de um servidor só.
+    /// resposta; embaixo, a resposta com ◆, a pergunta ou o que está fazendo; por fim a pasta (lista por servidor ou
+    /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
     fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -4085,9 +4199,12 @@ impl Hangar {
         };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
-        let folder = folder_name(&session).filter(|_| session.worktree == Some(true));
+        // Como o web: a pasta só com a lista por servidor (por projeto o cabeçalho já a diz), e sempre na worktree.
+        let folder = folder_name(&session).filter(|_| session.worktree == Some(true) || (self.multi_server() && !Self::by_project()));
         let branch = shown_branch(&session);
         let (added, removed) = (session.git_added.filter(|n| *n > 0), session.git_removed.filter(|n| *n > 0));
+        let (ahead, behind) = (session.git_ahead.filter(|n| *n > 0), session.git_behind.filter(|n| *n > 0));
+        let sync_title = tr("git_sync_title").replace("{ahead}", &ahead.unwrap_or(0).to_string()).replace("{behind}", &behind.unwrap_or(0).to_string());
         let name = session.name.clone();
         let questions = session.pending_questions;
         let editing = self.sidebar.editing.as_ref().filter(|e| e.old == name).map(|e| e.input.clone());
@@ -4115,6 +4232,9 @@ impl Hangar {
                 .child(Input::new(&input).xsmall().aria_label(tr("sidebar_new_name"))).into_any_element(),
             None => div().flex_1().min_w_0().flex().items_center().gap_2()
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{name}"))).flex_shrink_0().flex().opacity(0.72)
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("create_mode_headless")).build(window, cx))
+                    .child(chrome::no_terminal_mark(12., theme::muted()))))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
@@ -4137,7 +4257,8 @@ impl Hangar {
                 this.select(key_open.clone(), window, cx);
                 cx.stop_propagation();
             }))
-            .role(Role::Button).aria_selected(selected).aria_label(format!("{name} · {state_label}"))
+            .role(Role::Button).aria_selected(selected)
+            .aria_label(if session.headless { format!("{name} · {} · {state_label}", tr("create_mode_headless")) } else { format!("{name} · {state_label}") })
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)
@@ -4152,16 +4273,23 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
                     .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
-            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint()).child(lane())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
                     .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(f)))
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(b)))
+                    // Zero não desenha: a ausência da seta é "em dia".
+                    .when(ahead.is_some() || behind.is_some(), |el| el.child(div().id(SharedString::from(format!("row-sync-{name}")))
+                        .flex_shrink_0().flex().gap(px(4.)).font_weight(FontWeight::SEMIBOLD)
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(sync_title.clone()).build(window, cx))
+                        .when_some(ahead, |el, n| el.child(div().text_color(theme::accent()).child(format!("↑{n}"))))
+                        .when_some(behind, |el, n| el.child(div().text_color(theme::warning()).child(format!("↓{n}"))))))
                     .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
                     .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)
+            .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
             .map(|el| match remote {
                 Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
                     .into_any_element(),
@@ -4251,9 +4379,7 @@ fn private_copy(name: &str) -> std::io::Result<PathBuf> {
 
 // A conexão que funcionou volta na próxima abertura, como o login do app web; só o dono lê o arquivo.
 fn saved_connection_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("hangar-native").join("connection.json"))
+    Some(appearance::dir()?.join("connection.json"))
 }
 
 /// Onde o diálogo de salvar abre: a pasta de downloads, ou a casa do usuário.
@@ -4296,7 +4422,8 @@ fn select_snapshot(state: &SessionState) -> String { json!([state.question, stat
 
 fn display_body(event: &ChatEvent) -> String {
     match event.kind.as_str() {
-        "notice" => tr(&event.body()),
+        // Skill injetada: o corpo é o SKILL.md, que a linha recolhida só mostra ao abrir.
+        "notice" => event.skill.as_ref().map(|skill| skill.body.clone()).unwrap_or_else(|| tr(&event.body())),
         "assistant_msg" => interaction::plan_display(&event.body()),
         // Anexos viram cartões próprios; o texto mostra só a legenda.
         "user_msg" => {
@@ -4321,6 +4448,30 @@ fn message_card(event: &ChatEvent) -> Option<cards::Card> {
 }
 
 /// Hora local "HH:MM" de um instante do transcript.
+/// Prazo do cache de prompt (o `cache-chip` do web): ponto verde e minutos em mono; âmbar no fim do prazo, ponto apagado
+/// ao expirar. Não é botão: não há o que fazer com ele além de saber.
+fn cache_chip(cache: crate::chat::LastCache) -> impl IntoElement {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+    let (_, ending, label) = crate::chat::cache_left(cache, now);
+    let web = |key: &str, params: &[(&str, String)]| crate::i18n::tr_web(key, &params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        .unwrap_or_else(|| key.to_owned());
+    let tip = match &label {
+        Some(label) => web("composer_cache_vale", &[("label", label.clone()),
+            ("janela", web(if cache.ttl >= 3600 { "composer_cache_1_hora" } else { "composer_cache_5_min" }, &[]))]),
+        None => web("composer_cache_expirou", &[]),
+    };
+    let (ink, dot) = match (&label, ending) {
+        (None, _) => (theme::muted(), theme::muted().opacity(0.5)),
+        (Some(_), true) => (theme::warning(), theme::warning()),
+        (Some(_), false) => (theme::muted(), theme::success()),
+    };
+    div().id("composer-cache").flex_shrink_0().h(px(22.)).px(px(6.)).flex().items_center().gap(px(4.))
+        .font_family(theme::MONO).text_xs().text_color(ink)
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .child(div().size(px(6.)).rounded_full().bg(dot))
+        .child(label.unwrap_or_else(|| web("composer_expirou", &[])))
+}
+
 fn clock(ts: Option<f64>) -> Option<String> {
     use chrono::{Local, TimeZone, Timelike};
     let at = Local.timestamp_opt(ts.filter(|ts| ts.is_finite() && *ts > 0.)? as i64, 0).single()?;
@@ -4520,7 +4671,7 @@ impl Hangar {
                 } else if self.has_older || self.loading {
                     content = content.child(in_column(div().py_2().flex().gap_2().items_center()
                         .when(self.has_older, |el| el.child(Button::new("older").small().outline().label(tr("older")).disabled(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| { this.history_limit = this.history_limit.saturating_add(400); this.etag = None; this.load_history(cx); }))))
+                            .on_click(cx.listener(|this, _, _, cx| this.load_older(cx)))))
                         .when(self.has_older, |el| el.child(div().text_xs().text_color(theme::muted()).child(format!("{} {}", tr("history_window"), self.history_limit))))
                         .when(self.loading, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("loading"))))));
                 }
@@ -4580,7 +4731,9 @@ impl Hangar {
         // Pergunta do transcript já respondida espera só o `tool_result`: não é pedido sem resposta.
         let answered = interaction::ask_from_events(&self.chat.events, self.provider().0)
             .and_then(|ask| ask.tool_use_id).is_some_and(|id| self.tool_answered(&id));
-        let pending = card.is_none() && !answered && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login == Some(true));
+        // Menu do AskUserQuestion sem o card ainda (ou já respondido): o card nativo é quem responde, sem aviso de terminal.
+        let ask_pane = self.chat.state.options.as_deref().is_some_and(interaction::ask_picker);
+        let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login == Some(true));
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content
             .when_some(card, |el, card| el.child(card))
@@ -4760,6 +4913,8 @@ impl Render for Hangar {
         let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
+            // Sessão solta fora da lista: nada acontece, só termina o arrasto.
+            .on_drop(cx.listener(|this, _: &grouping::SessionDrag, _, cx| this.end_session_drag(cx)))
             .bg(if !chat_background { theme::window_fill() }
                 else if cutout { transparent_black().into() }
                 else { theme::background().alpha(1.).into() })
@@ -4869,6 +5024,11 @@ impl Render for Hangar {
                     this.drag_side(f32::from(event.position.x), event.pressed_button == Some(MouseButton::Left), cx);
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx))))
+            .when(self.nav_resizing(), |el| el.cursor_col_resize()
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    this.drag_nav(f32::from(event.position.x), event.pressed_button == Some(MouseButton::Left), cx);
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| this.drag_nav(f32::from(event.position.x), false, cx))))
             .when(self.terminal_dragging(), |el| el.cursor_row_resize()
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                     this.drag_terminal(f32::from(event.position.y), event.pressed_button == Some(MouseButton::Left), window, cx);

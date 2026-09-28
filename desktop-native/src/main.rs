@@ -1,3 +1,5 @@
+// Sem isto o Windows abre um console preto junto da janela. O build de desenvolvimento fica com ele, para ver o stderr.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod api;
 mod app;
 mod appearance;
@@ -6,6 +8,7 @@ mod chat;
 mod composer;
 mod conversation;
 mod delivery;
+mod editdiff;
 mod fileicons;
 mod i18n;
 mod interaction;
@@ -31,12 +34,16 @@ gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, GitBranch, RotateCcwClock, 
     RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert]);
 
 pub const HANGAR_MARK: &str = "brand/hangar-mark.svg";
+pub const GROUP_GLYPH: &str = "brand/group-glyph.svg";
+pub const NO_TERMINAL: &str = "signals/no-terminal.svg";
 
 struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == HANGAR_MARK { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/hangar-mark.svg")))); }
+        if path == GROUP_GLYPH { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/group-glyph.svg")))); }
+        if path == NO_TERMINAL { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/signals/no-terminal.svg")))); }
         match path {
             "providers/claude.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/claude.svg")))),
             "providers/codex.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/codex.svg")))),
@@ -124,17 +131,15 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window_size(), cx))),
             app_id: Some("com.hangar.native".into()),
             titlebar: Some(TitlebarOptions { title: Some("Hangar".into()), ..Default::default() }),
-            window_background: if cfg!(target_os = "linux") { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
+            // A raiz pinta o fundo escolhido; o Vidro troca para Blurred no Windows e no macOS (`refresh_backdrop`).
+            window_background: WindowBackgroundAppearance::Transparent,
             // Resposta chegando com o foco no outro monitor anda no ritmo da tela, não a 30 quadros.
             inactive_frame_interval: None,
             ..Default::default()
         }, |window, cx| {
             ui_map::install(window);
             let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), window, cx));
-            cx.new(|cx| {
-                let root = Root::new(view, window, cx);
-                if cfg!(target_os = "linux") { root.bg(rgba(0x00000000)) } else { root }
-            })
+            cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
         }).expect("open native window");
         update::report_alive();
         cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();

@@ -201,8 +201,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   O nativo não importa `packages/core`; o que os dois compartilham é a API do backend e os
   `messages/*.json`. Mudança de tela ou comportamento na visão desktop do `frontend/` entra no
   nativo no mesmo trabalho, ou vira linha `pendente` com o motivo em
-  `desktop-native/docs/chat-parity.md` (e vice-versa). Electron segue padrão até o nativo passar
-  nos testes de uso; o que a troca exige está na entrada da decisão.
+  `desktop-native/docs/chat-parity.md` (e vice-versa). O nativo é o padrão: o instalador o baixa
+  da release `native-latest` no pacote da máquina (`scripts/install-native.sh`/`.ps1`) e o
+  Electron fica ao lado como "Hangar (Electron)", porque o navegador embutido mora nele.
 - **Two views: mobile & desktop (820px).** `Sidebar` (desktop) e `SessionList` (mobile) são
   arquivos separados: template e CSS mudam nos DOIS e se verifica nos DOIS. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma

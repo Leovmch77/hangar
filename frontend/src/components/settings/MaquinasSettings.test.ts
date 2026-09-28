@@ -1107,3 +1107,103 @@ describe('MaquinasSettings — ordem dos blocos', () => {
     unmount(comp as never);
   });
 });
+
+describe('MaquinasSettings — atualizar o servidor escolhido', () => {
+  const OUTRO = { id: 'srv-b', label: 'B', baseUrl: 'http://b', token: 'tb' } as Server;
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+  // Rede falsa por URL: o que interessa é o que chega no servidor B, com o token dele. Rota
+  // desconhecida responde 404 (não erro de rede) para não pôr o B de castigo no esfriamento.
+  function rede(iniciar: () => Response, estados: unknown[]) {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === 'http://b/api/atualizacao/iniciar') return iniciar();
+      if (url === 'http://b/api/atualizacao') return json({ estado: estados.length > 1 ? estados.shift() : estados[0] });
+      return json({}, 404);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  async function andar(ms: number) {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let i = 0; i < 5; i++) await vi.advanceTimersByTimeAsync(0);
+    await tick();
+  }
+
+  async function montarEClicar() {
+    authMock.listServers.mockReturnValue([SRV, OUTRO]);
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(MaquinasSettings, { target: el, props: {
+      resolvedServer: OUTRO, apiTarget: OUTRO, onLogout: vi.fn() } });
+    await andar(0);
+    el.querySelector<HTMLElement>('.sv-este')!.click();
+    await andar(0);
+    document.querySelector<HTMLButtonElement>('.sd-dialogo .sv-atualizar')!.click();
+    await andar(0);
+    expect(document.querySelector('.confirm-card')!.textContent).toContain(m.maquinas_atualizar_confirmar_texto());
+    document.querySelector<HTMLButtonElement>('.confirm-card .c-primary')!.click();
+    await andar(0);
+    return comp as never;
+  }
+
+  it('confirma, chama o iniciar do servidor escolhido com o token dele, mostra a etapa e o resultado', async () => {
+    vi.useFakeTimers();
+    const ts = '2026-09-28T10:00:00-03:00';
+    const fetchMock = rede(() => json({ ok: true, pid: 42 }), [
+      { fase: 'rodando', pid: 7, passo: 2, total: 5, texto: 'Instalando dependências' },
+      { fase: 'pronto', pid: 42, ok: true, ts },
+    ]);
+    const comp = await montarEClicar();
+    try {
+      const post = fetchMock.mock.calls.find(([url]) => url === 'http://b/api/atualizacao/iniciar');
+      expect(post).toBeDefined();
+      const init = (post as unknown as [string, RequestInit])[1];
+      expect(init.method).toBe('POST');
+      expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tb');
+
+      await andar(2000);
+      expect(document.querySelector('.sv-atualizacao')!.textContent)
+        .toContain(m.maquinas_atualizar_etapa({ passo: 2, total: 5, texto: 'Instalando dependências' }));
+
+      await andar(2000);
+      expect(document.querySelector('.sv-atualizacao')!.textContent)
+        .toContain(m.maquinas_atualizar_feito({ hora: new Date(ts).toLocaleTimeString() }));
+      expect(document.querySelector<HTMLButtonElement>('.sd-dialogo .sv-atualizar')!.disabled).toBe(false);
+    } finally {
+      unmount(comp);
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('código novo sem reinício automático avisa que falta reiniciar', async () => {
+    vi.useFakeTimers();
+    rede(() => json({ ok: true, pid: 42 }), [{ fase: 'pronto', pid: 42, ok: true, reiniciar_manual: true }]);
+    const comp = await montarEClicar();
+    try {
+      await andar(2000);
+      expect(document.querySelector('.sv-atualizacao')!.textContent).toContain(m.atualizar_pronto_reiniciar());
+    } finally {
+      unmount(comp);
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('recusa 409 mostra o motivo traduzido, sem o código HTTP', async () => {
+    vi.useFakeTimers();
+    rede(() => json({ detail: { code: 'erro_atualizacao_dependencia', params: { faltando: ['uv'] },
+                                msg: 'falta o que a atualizacao precisa: uv' } }, 409), [{}]);
+    const comp = await montarEClicar();
+    try {
+      const erro = document.querySelector('.sd-dialogo .sv-atualizacao[role="alert"]')!.textContent ?? '';
+      expect(erro).toContain(m.erro_atualizacao_dependencia({ faltando: 'uv' }));
+      expect(erro).not.toContain('409');
+    } finally {
+      unmount(comp);
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});

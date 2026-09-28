@@ -88,6 +88,21 @@ _PASTED_RE = re.compile(r'<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_conte
 # so o fold de atividade consome).
 _TASK_NOTIF_RE = re.compile(r"<task-id>([^<]+)</task-id>")
 
+# Relatório de subagente entregue pelo harness como msg "user" embrulhada, com `from` = agentId do
+# launch. É conversa entre agentes, não do usuário: o hand-back final fecha o Agent como a
+# <task-notification>; o resto fica fora do chat, como ela. Exige o embrulho inteiro, pra texto
+# do usuário que só CITE a tag continuar dele.
+_AGENT_MSG_RE = re.compile(r'<agent-message from="([^"]+)"[^>]*>(.*)</agent-message>', re.DOTALL)
+
+
+def _agent_msg(texto, id_: str) -> Optional[list[ChatEvent]]:
+    if not isinstance(texto, str) or not (m := _AGENT_MSG_RE.fullmatch(texto.strip())):
+        return None
+    if "[Subagent hand-back]" not in m.group(2):
+        return []   # ponytail: recado intermediário do subagente some; mostrar se fizer falta
+    return [ChatEvent(kind="tool_result", id=id_, tool_use_id=f"task:{m.group(1)}",
+                      result="task-notification")]
+
 
 # Recado NATIVO de outra sessao Claude (cross-session messaging, claude 2.1.224+). Medido em
 # 07/08/2026 num envio real: chega como type='user' com `isMeta: True` — ou seja, cairia no descarte
@@ -369,6 +384,10 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
 
     if etype == "queue-operation":
         queued = obj.get("content")
+        # id pelo conteúdo: enqueue e remove da mesma entrega deduplicam no front.
+        if (agente := _agent_msg(queued, "queued-agent:" + hashlib.md5(
+                str(queued).encode("utf-8", "replace")).hexdigest()[:8])) is not None:
+            return agente
         if isinstance(queued, str) and queued.lstrip().startswith("<task-notification>"):
             m = _TASK_NOTIF_RE.search(queued)
             if m:
@@ -454,6 +473,10 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             return [ChatEvent(kind="notice", id=uid, text="compacted")]
         if obj.get("isMeta") is True:
             return []
+        if (agente := _agent_msg(content if isinstance(content, str)
+                                 else (_first(content, "text") or {}).get("text")
+                                 if isinstance(content, list) else None, uid)) is not None:
+            return agente
         if isinstance(content, str):
             if content.lstrip().startswith("<task-notification>"):
                 m = _TASK_NOTIF_RE.search(content)

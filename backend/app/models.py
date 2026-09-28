@@ -201,6 +201,9 @@ class ChatEvent(BaseModel):
     # Só em bolha "held:": o que o hook escreveu ao barrar o prompt. Sem isto a pessoa vê "não
     # chegou" e não tem como saber que o motivo é um hook quebrado.
     hook_error: Optional[str] = None
+    # Só em notice `skill_loaded`: {name, path, body} da skill que o harness injetou como fala do
+    # usuário. O corpo vem inteiro pra interface abrir sob demanda.
+    skill: Optional[dict] = None
     # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
     queued_delivered: Optional[bool] = None
     # Só em bolha da fila: o relógio da ENTRADA (epoch), pra ordenar no front quando ela chega ao

@@ -6,7 +6,7 @@ use std::time::Duration;
 use reqwest::{Client, Response, StatusCode, header};
 use serde_json::{Value, json};
 use url::Url;
-use dto::{ChatEvent, CommandInfo, Delivery, SessionInfo, UploadFile, Uploaded};
+use dto::{ChatEvent, CommandInfo, Delivery, PairResult, SessionInfo, UploadFile, Uploaded};
 
 /// Só para medir a abertura de uma sessão: `HANGAR_NATIVE_OPEN_TRACE=1` escreve no stderr cada etapa, em ms desde o
 /// clique (`open_trace_start`). Sem a variável, nada é formatado nem escrito.
@@ -64,7 +64,7 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::String(message) => Some(message.clone()),
         Value::Object(fields) => fields.get("code").and_then(Value::as_str)
             // A busca depende de params.msg; sem transportar parâmetros, conserva a mensagem.
-            .filter(|code| code.starts_with("erro_arq_") && *code != "erro_arq_busca_falhou")
+            .filter(|code| (code.starts_with("erro_arq_") && *code != "erro_arq_busca_falhou") || code.starts_with("erro_git_folder_"))
             .or_else(|| fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty()))
             .or_else(|| fields.get("code").and_then(Value::as_str)).map(str::to_owned),
         // Recusa de validação (422): uma lista de `{msg}`, uma por campo.
@@ -242,6 +242,39 @@ impl Api {
         let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
         r.json().await.map_err(|_| Failure::transport(true))
+    }
+
+    /// Junta `name` e `peers` num grupo (funde os grupos de todos). 409 = o grupo já tem outra tarefa; `replace_task` troca.
+    pub async fn pair(&self, name: &str, peers: &[String], task: &str, replace_task: bool) -> Result<PairResult, Failure> {
+        let body = json!({"peers": peers, "task": task, "replace_task": replace_task});
+        self.act(name, &["pair"], Some(body), false, 60).await.map(|value| PairResult::from_value(&value))
+    }
+
+    /// `name` sai do grupo; os outros seguem juntos.
+    pub async fn unpair(&self, name: &str) -> Result<PairResult, Failure> {
+        self.act(name, &["pair"], None, true, 60).await.map(|value| PairResult::from_value(&value))
+    }
+
+    /// Tarefa sugerida pelo fim da conversa das sessões (422 quando nenhuma tem conversa).
+    pub async fn suggest_group_task(&self, sessions: &[String]) -> Result<String, Failure> {
+        let value = self.server_send(reqwest::Method::POST, &["pair", "task-suggestion"], Some(json!({"sessions": sessions})), 120).await?;
+        value.get("task").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| Failure::local("invalid_response"))
+    }
+
+    /// O mesmo prompt para várias sessões do servidor, pela esteira do `/input` de cada uma. Responde 200 com o resultado por
+    /// sessão, na ordem pedida: `(nome, entrega, motivo da falha)`.
+    pub async fn broadcast(&self, names: &[String], text: &str) -> Result<Vec<(String, Delivery, Option<String>)>, Failure> {
+        let value = self.server_send(reqwest::Method::POST, &["broadcast"], Some(json!({"names": names, "text": text})), 120).await?;
+        let results = value.get("results").and_then(Value::as_object).ok_or_else(|| Failure::transport(true))?;
+        Ok(names.iter().map(|name| {
+            let result = results.get(name);
+            let flag = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_bool) == Some(true);
+            let error = result.and_then(|r| r.get("error")).filter(|e| !e.is_null()).map(|e| match e {
+                Value::String(text) => text.clone(),
+                _ => e.get("msg").or_else(|| e.get("code")).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| e.to_string()),
+            });
+            (name.clone(), Delivery { ok: flag("ok"), delivered: flag("delivered") }, error)
+        }).collect())
     }
 
     // Leitura sem efeito colateral: queda é rede, nunca incerteza.

@@ -16,10 +16,15 @@ subir o app, mesmo motivo que mantem `engines.py` enxuto.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
+
+# Constante do modulo, e nao `os.name` na hora: o teste liga o ramo do Windows sem trocar o `os.name`
+# (que levaria o `pathlib` junto).
+_E_WINDOWS = os.name == "nt"
 
 
 def _caminho() -> Path:
@@ -122,10 +127,21 @@ def _caminho_wallpaper() -> Path:
     return Path.home() / ".local/state/quickshell/user/generated/wallpaper/path.txt"
 
 
+def _ler_ponteiro_wallpaper() -> str:
+    if _E_WINDOWS:
+        # No Windows o caminho mora no registro. Chave ou valor ausente levantam FileNotFoundError,
+        # o mesmo "sem papel de parede" do arquivo ausente no Linux.
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as chave:
+            valor, _tipo = winreg.QueryValueEx(chave, "WallPaper")
+        return str(valor)
+    return _caminho_wallpaper().read_text(encoding="utf-8", errors="replace")
+
+
 def wallpaper() -> Path | None:
     """Arquivo do papel de parede atual. Ausente, ilegivel ou apontando pra nada -> None."""
     try:
-        cru = _caminho_wallpaper().read_text(encoding="utf-8", errors="replace").strip()
+        cru = _ler_ponteiro_wallpaper().strip()
     except FileNotFoundError:
         return None
     except (OSError, RuntimeError) as e:

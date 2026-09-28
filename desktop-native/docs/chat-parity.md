@@ -34,7 +34,9 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Promover fila (`/steer` sem corpo) | conferido | Task 3, sem regressão |
 | Modelo, esforço, modo e permissão da sessão (fileira abaixo do campo) | conferido | ver "Controles da sessão" |
 | Chip de git, anel de contexto, estatísticas do turno | conferido | na barra direita, não no compositor |
-| Enviar ao par/grupo, voz, câmera, orquestrar, prévia, shells | pendente | módulos fora desta sequência |
+| Chip do grupo (glifo sem grupo; nome e estado do par único; "grupo (n)") e "mandar pro grupo" (⇄) | implementado | na faixa de baixo do cartão, à esquerda da pasta (o web o põe na faixa de cima); ligado, o envio do campo vai por `POST /api/broadcast` para ela e os membros, `/comando` vai só para ela, membro que não recebeu vira recusa com quem recebeu e quem não; grupo que muda desliga; atalhos de envio da barra direita não vão ao grupo; não exercitado na janela |
+| Prazo do cache de prompt (`cache-chip` + `cachePrazo` do web) | implementado | faixa de cima do compositor, antes do anel de contexto: ponto verde e "59min"/"1h00" em mono, âmbar no último quinto da janela (mínimo 60 s), ponto apagado e "expirou" depois; dica com as chaves `composer_cache_*` do web. Âncora = último `assistant_msg` com `cache_read`/`cache_ttl_s`, TTL = último `cache_ttl_s`; sem os dois não aparece. Relógio de 20 s redesenha só a faixa de baixo. Não exercitado na janela real |
+| Voz, câmera, orquestrar, prévia, shells | pendente | módulos fora desta sequência |
 
 ## Controles da sessão
 
@@ -64,12 +66,14 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Aviso de recarregar (Claude sem terminal) | conferido | só com a sessão parada, confirmação explícita; aviso some quando o backend limpa |
 | Projeto: repo, branch, sujo, +/− | conferido | Codex e sem terminal leem a branch da lista |
 | Arquivos alterados e diff | conferido | `git/files` e `git/diff` (leitura); carregando, vazio, erro; sem nenhuma operação Git |
-| Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo/rodar não aparecem |
+| Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo não aparecem |
 | Seção "Ações" em blocos iguais que quebram linha (colunas pela largura do painel, rótulo em até duas linhas) | implementado | o web passou a seguir o nativo: seção própria em grade, fora da fileira que rolava |
 | Exportar/importar atalhos sem credenciais (menu "⋯" de Ações e botões na página Atalhos) | implementado | diálogo de salvar/abrir do sistema; conferência com contagem e um campo mascarado por credencial; atalho com credencial em branco fica apagado e avisa em vez de rodar |
 | Terminal de cada atalho `shell` como aba do painel (rótulo, código de saída, ×), botão de terminal em sessão sem pane quando há atalho aberto | implementado | sempre pela rota `shortcut-shell`, também com a sessão nesta máquina; sem pane o painel mostra só as abas dos atalhos |
+| Atalho Rodar (`RunSheet`) | implementado | botão na grade de Ações (aceso com run vivo, lido ao abrir a sessão); diálogo roda o lembrado ao abrir ou lista personalizados e detectados, espelho do pane a cada 1 s, Trocar/Parar, CRUD de personalizados; parada recusada mantém o run na tela (o web o apaga) |
 | Fila da sessão | conferido | contagem no rodapé do painel |
 | Recolher e redimensionar | conferido | 240–480 px; some sozinho se a conversa ficaria abaixo de 540 px |
+| Fileira de abas (Contexto, Arquivos, Atividade, Git) no desenho da `.abas` do web | conferido | régua de ponta a ponta, sublinhado na escolhida, texto de 12 px; rótulo da primeira na margem de 16 px das seções; as quatro inteiras a 300 px, reticências a 240 px. Diferenças: o recolher mora na mesma fileira (o web o põe no cabeçalho com nome e estado, que aqui ficam no cabeçalho da conversa) e Git é aba, não o botão que abre a coluna do web |
 
 ## Ciclo e planos
 
@@ -96,6 +100,13 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Token fora de URL | conferido | leitura sempre com Bearer no cabeçalho |
 | Visualizador de imagem em tela cheia, vídeo e PDF embutidos | pendente | abrem no programa do sistema |
 | Perguntas, opções, planos, fila | conferido | Task 3; checagem de não regressão na fixture dela |
+| Pergunta do agente: a linha inteira da opção (rótulo, descrição, prévia) é clicável, com hover e cursor de mão | conferido | igual ao web (`.option-btn` do `AskQuestionStepper`); no nativo a linha é o próprio Radio/Checkbox, então o teclado segue o mesmo controle |
+| Pergunta do agente: rótulo com peso, descrição em `text_sm` legível e opção escolhida realçada (borda + fundo do destaque) | conferido | igual ao web (`.opt-desc` em `--text-secondary`, `.option-btn.selected` em `--accent`/`--accent-dim`) |
+| Pergunta do agente: moldura na cor de destaque, com opção "Destaque das perguntas: cor de destaque / âmbar" em Aparência | pendente | só no nativo; o card do web (`AskQuestionCard`) usa a borda neutra `--border-default` e não tem a opção. Motivo: pedido só para o nativo nesta rodada |
+| Pergunta do agente com várias perguntas: abas com o `header`, marca nas respondidas, avanço automático na escolha única, Enviar só com todas respondidas | pendente | o web usa o stepper (uma por vez, "n / total", Voltar, Próximo na múltipla); mesmo fluxo de avanço, sem faixa de abas nem marca. Motivo: pedido só para o nativo nesta rodada |
+| Menu do AskUserQuestion lido do pane (linhas "Type something." / "Chat about this") nunca aparece como seletor do terminal nem como aviso de pedido pendente | pendente | só no nativo (`interaction::ask_picker`); o web esconde o `OptionButtons` só enquanto `askActive`, então ele ainda pisca antes do `ask_question` e depois do envio. Motivo: pedido só para o nativo nesta rodada |
+| Skill injetada pelo Codex (notice `skill_loaded`) vira linha recolhida "Skill X carregada" que abre o SKILL.md | implementado | rótulo do aviso + "Mostrar mais"; não exercitado na janela real |
+| Diff das edições (Edit, MultiEdit, Write, `apply_patch` do Codex, `edit` do Pi) no lugar da entrada crua | implementado | `editdiff.rs` (Myers do `editdiff.ts`) + `app/edits.rs`; linha recolhida com "+N −M" pelo diff real nos três visuais; aberto, um cartão por edição com caminho, contagem, as linhas da aba Git (duas numerações do trecho, quebra de linha) e realce do tree-sitter; Resultado só quando falhou. Além do web: `apply_patch` com vários arquivos mostra o caminho de cada um, e Copiar leva o texto novo. Diferença: unificado sempre (o web vira lado a lado acima de 600 px); corta em 400 linhas com aviso; não abre sozinho (o web nasce aberto) |
 
 ## Configurações
 
@@ -108,6 +119,51 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Contas e modelos com resumo no topo (em uso, semana esgotada, login que vence primeiro, redefinições do Codex) e atalhos por seção com a contagem | pendente no web | nasceu no nativo (`accounts.rs`); o web segue com os títulos e as listas soltas |
 | Contas em cartões por seção, assinaturas separadas por provider e uma coluna por janela de cota, com a barra crescendo ao abrir | pendente no web | só com a janela larga (1320px); estreita, a linha empilha as barras como antes |
 | Plano da assinatura numa ficha ao lado do nome, também nas contas Claude | pendente no web | no web o plano aparece só no subtítulo do Codex |
+| "Atualizar" ao lado do "Reiniciar" na tela de servidores, com confirmação, etapas e resultado | implementado | nos dois; o nativo age sobre o servidor ativo, o web sobre o escolhido na aba |
+| Pílula "servidor desatualizado" na barra de cima e aviso no cartão do servidor | implementado | só no nativo, de propósito: a tela do web vem do próprio servidor e não fica mais nova que ele |
+| "Atualizar tudo" na barra: servidor desta máquina primeiro, depois o app | implementado | só no nativo, de propósito: no web o botão da barra atualiza o servidor e a tela vem junto |
+| Largura da barra lateral arrastada pela borda (200–520 px), lembrada neste computador | implementado | `sidebar_width` em `appearance.json` (o `cp_sidebar_w` do web); uma largura para Barra lateral e Conversas, sem alça no trilho nem com abas no topo |
+| Máquinas: uma linha por máquina, casando as guardadas neste aparelho com o registro do servidor pelo identificador que cada uma responde (sem ele, pelo host e caminho) | implementado | `machines.rs` (`join_lines`, porta de `unirMaquinas`); identificador lembrado só em memória, o web guarda no navegador; não exercitado na janela |
+| Máquinas: estado das sessões por linha e cartão dos recados com a volta medida pelo token guardado aqui | implementado | aparecem, token recusado, falta o token, desligada aqui/no servidor, não respondeu; não exercitado na janela |
+| Máquinas: "Mostrar as sessões dele" liga e desliga a entrada guardada; sem entrada, usa o token que o servidor guarda | implementado | sem o campo para digitar o token quando o do servidor falha |
+| Máquinas: token digitado, trocar nome/token de uma entrada, tirar endereço repetido (também do servidor conectado), escolher o endereço da volta, cadastrar de novo, ligar recados de máquina só deste aparelho, identificador de outra máquina | pendente | o cartão mostra a frase do web sem o botão; o interruptor de recados de máquina só deste aparelho fica desligado com "próxima versão" |
+
+## Barra lateral: grupos de sessões
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Blocos por `pair_gid` com cabeçalho (glifo, chave da tarefa em destaque e resto em cinza, quantas esperam, total) e membros recuados com a faixa do grupo | implementado | `grouping.rs`; nas duas listas (Normal e Conversas) e por máquina; recolher o bloco grava junto dos grupos de projeto; o trilho recolhido segue sem cabeçalho de bloco |
+| Arrastar sessão sobre outra ou sobre o cabeçalho do bloco abre o diálogo de agrupar; soltar no fundo da lista abre o de sair | implementado | mesmas recusas do `canPair` do web, com o motivo no cartão que acompanha o ponteiro; linha de outra máquina recusa; soltar sobre cabeçalho de seção/projeto conta como fundo (no web não) |
+| Diálogo de agrupar/sair: afetadas, tarefa herdada ou campo com Sugerir, 409 vira "Substituir a tarefa", aviso parcial vira título de feito | implementado | não fecha com a chamada em voo; relê a sessão viva antes de confirmar |
+| "Agrupar com…" e "Sair do grupo" no menu da sessão | pendente no web | nasceu no nativo; mesmas candidatas do arrastar e o mesmo diálogo |
+| Painel do grupo (`PairSheet`) pelo chip do compositor: membros com estado, abrir a conversa de um membro, adicionar sessões (várias marcadas), contrato compartilhado em markdown com o caminho, conversa do grupo (últimos 40 recados), sair do grupo | implementado | `group_sheet.rs`, modal; "abrir a conversa" troca para a sessão do membro (o web abre por cima, num modal); membro de outra máquina fica sem o botão; conversa lê a cauda de 1000 eventos de cada membro (o web lê o histórico inteiro); contrato vazio não aparece e a busca que falhou aparece; aviso parcial fica à vista; não exercitado na janela |
+| Painel sem grupo: marcar sessões vivas, tarefa opcional, "Parear com …" | implementado | mesmo pedido de criar e adicionar (o servidor une os grupos); não exercitado na janela |
+| "Ver em grade" e "Todas lado a lado" / lado a lado por membro no painel do grupo | pendente | o nativo não tem grade de comparação nem vista dividida para abrir |
+| Abrir o painel do grupo pelas ações da sessão e pelo painel de contexto | pendente | só o chip do compositor abre |
+
+## Barra lateral: caixa, cabeçalho e rodapé
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Tinta da barra, do painel de contexto e do compositor sobre a área de trabalho, no escuro: a do vidro líquido do Electron (`--glass-bg`, 0,22 + 0,70 × Solidez) | implementado | `theme::panel_alpha`; com Vidro desenhado pela janela segue a tinta própria (`glass_tint`) e no claro a Solidez crua, porque o web usa `--glass-panel` ali. O mesmo número de Solidez dá a mesma barra nos dois apps |
+| Importar do Electron traz a "Solidez das caixas" (`cp_surface_solid`, padrão 12 do web) | implementado | antes ficava a Solidez do nativo (padrão 70 = tinta 0,71, contra 0,39 do Electron com Solidez 24) |
+| Solidez padrão do nativo igual à do web (12) | pendente | o nativo nasce em 70; baixar muda a primeira impressão de quem nunca mexeu, incluindo o Vidro (0,16), e é escolha de produto |
+| Canto dos painéis soltos (barra, contexto, abas, Configurações, páginas) em 24 px, o `--radius-xl` | implementado | `theme::PANEL_RADIUS` |
+| Brilho de 1 px na borda de cima do painel solto (`inset 0 1px 1px --glass-specular` do `--elev-3`) | implementado | `theme::panel_shadow`; o compositor fica só com a sombra (`card_shadow`) |
+| Cabeçalho: marca de 20 px e "Hangar" em 16 px | implementado | as linhas "Nova conversa" e "Todas as sessões" seguem, desenho do nativo |
+| Seletor "Chat / Quadro / Canvas" e botão de busca abaixo do cabeçalho | pendente | Quadro e Canvas não existem no nativo; a busca mora na barra de cima (Ctrl K) |
+| Botão de modo seleção (enviar para várias) no cabeçalho e o aviãozinho "enviar p/ todas" no cabeçalho de cada máquina | pendente | o envio para várias sessões não existe no nativo |
+| Cabeçalho da máquina: ponto na cor fixa da máquina (`serverColor` do core), rótulo em caixa alta 11 px negrito apagado, contagem em pílula | implementado | a cor sai do id; importadas do Electron têm o mesmo id, cadastradas aqui ganham id próprio e podem cair noutra cor |
+| Cabeçalho da máquina focável pelo teclado, com o anel de foco do destaque | pendente | hoje só o clique alterna; precisa de um foco por máquina |
+| Contagem de quem espera (âmbar) no cabeçalho da máquina | pendente | o nativo mostra a seção "Aguardando você" no topo da lista |
+| Rodapé: pílula cheia no destaque "+ Nova" (36 px) e o recolher ao lado | implementado | rótulo curto do web; leitor de tela e dica dizem "Nova sessão". A linha da conexão embaixo é do nativo |
+
+## Nova conversa sem sessão: git da pasta
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Pílula "Git" ao lado da de branch (atrás/à frente, alterações ou "Atualizada") e painel com branch, remota, último fetch, Fetch, Pull só fast-forward, trocar branch (locais e remotas, com busca) e criar branch (base e "Trocar para ela") | implementado | `create/folder_git.rs` sobre `GET /api/fs/git` e `POST /api/fs/git/{fetch,pull,switch,branch}`; abrir o painel faz um fetch por pasta; pasta suja recusa pull e troca, divergida recusa pull, sessão viva no mesmo checkout pede "Trocar mesmo assim"; não exercitado na janela |
+| O mesmo gerenciador no web | pendente no web | o `CreateSessionSheet` do web não tem a pílula de branch/worktree da tela sem sessão, onde o painel mora; as rotas já servem os dois |
 
 ## Como rodar a prova
 

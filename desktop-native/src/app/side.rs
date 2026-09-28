@@ -18,12 +18,17 @@ pub(super) enum Shortcut {
     Send { label: String, text: String, direct: bool, confirm: bool, icon: Option<String> },
     Shell { label: String, command: String, confirm: bool, icon: Option<String> },
     Attach,
+    Run,
 }
 
 impl Shortcut {
     fn confirm(&self) -> bool { matches!(self, Shortcut::Send { confirm: true, .. } | Shortcut::Shell { confirm: true, .. }) }
     fn label(&self) -> String {
-        match self { Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(), Shortcut::Attach => tr("attach") }
+        match self {
+            Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(),
+            Shortcut::Attach => tr("attach"),
+            Shortcut::Run => tr("shortcuts_native_rodar"),
+        }
     }
 
     /// Credencial que a importação deixou em branco: o atalho não roda até alguém preencher.
@@ -31,17 +36,18 @@ impl Shortcut {
         match self {
             Shortcut::Send { text, .. } => super::shortcut_transfer::missing_secret(text),
             Shortcut::Shell { command, .. } => super::shortcut_transfer::missing_secret(command),
-            Shortcut::Attach => None,
+            Shortcut::Attach | Shortcut::Run => None,
         }
     }
 
-    /// O que o painel roda de um atalho da config; terminal, modo, navegador e rodar são módulos à parte aqui.
+    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui.
     fn from_item(item: &shortcuts::Item) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
             "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon }),
             "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
+            "internal" if item.action() == "rodar" => Some(Shortcut::Run),
             _ => None,
         }
     }
@@ -73,12 +79,14 @@ pub(super) struct Side {
     /// Aviso "rodando" do último atalho por sessão: (id do terminal, texto). Sai quando o terminal fecha ou morre.
     pub(super) shortcut_running: HashMap<String, (String, String)>,
     pub(super) shortcut_recheck: HashMap<String, std::time::Instant>,
+    /// Há um run vivo no projeto desta sessão (botão Rodar aceso).
+    pub(super) run: Option<(SessionKey, bool)>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         Self { open: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None,
+            files: None, diff: None, reloading: HashSet::new(), git: None, run: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
@@ -294,13 +302,14 @@ impl Hangar {
         }
         match shortcut {
             Shortcut::Attach => self.pick_files(cx),
+            Shortcut::Run => self.open_run(window, cx),
             Shortcut::Send { text, direct: false, .. } => self.prefill(&text, true, window, cx),
             Shortcut::Send { text, .. } => {
                 if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) {
                     self.action_feedback.insert(key, (tr("shortcut_busy"), true));
                 } else {
                     let known = self.known_user_ids();
-                    self.deliver(key, text, String::new(), false, known, cx);
+                    self.deliver(key, text, String::new(), false, known, false, cx);
                 }
             }
             // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira
@@ -392,6 +401,7 @@ impl Hangar {
                 };
                 self.action_feedback.insert(key, note);
             }
+            Reply::RunState => self.receive_run_state(key, result),
             Reply::Reload => {
                 self.side.reloading.remove(&key);
                 let note = match result { Ok(_) => (tr("reload_sent"), false), Err(error) => (Self::failure(&error), true) };
@@ -605,22 +615,31 @@ impl Hangar {
                 .child(tr("side_shortcuts_failed").replace("{reason}", reason)).into_any_element()),
         };
         if list.is_empty() { return None; }
-        let busy = self.selected_key().is_some_and(|key| self.uploading.contains_key(&key));
+        let key = self.selected_key();
+        let busy = key.as_ref().is_some_and(|key| self.uploading.contains_key(key));
+        let running = self.side.run.as_ref().is_some_and(|(owner, on)| *on && Some(owner) == key.as_ref());
         // "Ações" do mock: grade de blocos iguais, ícone em cima e rótulo embaixo. As colunas saem da largura do painel
-        // (mais colunas quando ele alarga), e cada bloco tem a largura exata da coluna: a grade fica no mesmo recuo do
-        // título, sem sobra desigual no fim da linha.
+        // (mais colunas quando ele alarga, no máximo cinco), e cada bloco tem a largura exata da coluna: a grade fica no
+        // mesmo recuo do título, sem sobra desigual no fim da linha.
         let (_, tile) = shortcut_grid(width - SIDE_PAD * 2.);
         let buttons: Vec<Button> = list.into_iter().enumerate().map(|(n, shortcut)| {
-            // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe.
+            // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe e Rodar vira parada acesa com o run vivo.
             let icon = match &shortcut {
                 Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 16., theme::muted()).into_any_element(),
+                Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 16., theme::accent()).into_any_element(),
+                Shortcut::Run => chrome::small_icon(IconName::Play, 16., theme::muted()).into_any_element(),
                 Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 16., theme::muted()),
             };
-            let label = shortcut.label();
+            let (label, tip) = match &shortcut {
+                Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
+                Shortcut::Run => (shortcut.label(), tr("run_project")),
+                _ => (shortcut.label(), shortcut.label()),
+            };
             let missing = shortcut.missing_secret();
-            let tip = missing.as_ref().map_or_else(|| label.clone(), |name| tr("shortcut_secret_missing").replace("{name}", name));
+            let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
             Button::new(SharedString::from(format!("shortcut-{n}")))
-                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
+                    .hover(theme::hover()).active(theme::hover()))
                 .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
@@ -675,14 +694,18 @@ impl Hangar {
         let tab = (!self.subagent_tab_open()).then(|| self.side_tab());
         self.show_tree(tab == Some(SideTab::Files), None, cx);
         let tab_in = self.side_tab_in(window, cx);
-        let header = div().flex_shrink_0().h(px(44.)).pl_4().pr(px(12.)).flex().items_center().justify_between().gap_1()
+        // Fileira de abas do web: régua de ponta a ponta com o sublinhado da escolhida por cima dela; o rótulo da
+        // primeira aba cai na mesma margem de 16 px das seções, e o recolher fica à parte, no canto. A altura casa o centro
+        // do recolher com os botões do cabeçalho da conversa.
+        let header = div().flex_shrink_0().h(px(44.)).relative().pl_2().pr_2().flex().items_center().gap_2()
+            .child(div().absolute().left_0().right_0().bottom_0().h(px(1.)).bg(theme::border()))
             .child(self.render_side_title(cx))
             .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx).flex_shrink_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))));
         let section = |body: AnyElement| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).child(body);
         let mut content = div().flex().flex_col();
         if detail.is_some() || self.loop_text().is_some() {
-            content = content.child(div().px_4().pb_2().flex().flex_col().gap(px(2.))
+            content = content.child(div().px_4().pt_3().pb_2().flex().flex_col().gap(px(2.))
                 .when_some(detail, |el, d| el.child(div().truncate().text_xs().text_color(theme::faint()).child(d)))
                 .when_some(self.loop_text(), |el, text| el.child(div().truncate().text_xs().text_color(theme::accent()).child(text))));
         }
@@ -715,7 +738,7 @@ impl Hangar {
         let floating = theme::is_floating();
         Some(div().w(px(width)).h_full().flex_shrink_0().relative()
             .child(chrome::glass_panel(div().size_full().flex().flex_col().bg(theme::chrome()).overflow_hidden()
-                .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+                .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                     else { el.border_l_1().border_color(theme::border()) })
                 .child(header)
                 .children(self.render_subagent_tabs(cx))
@@ -729,7 +752,7 @@ impl Hangar {
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))
                     .child(div().min_w_0().truncate().text_color(theme::faint()).child(format!("{} · {server}", agent_label(&session.provider))))
                     .when(queued > 0, |el| el.child(div().flex_shrink_0().text_color(theme::muted()).child(tr("side_queued").replace("{n}", &queued.to_string()))))),
-                px(if floating { 18. } else { 0. })))
+                px(if floating { theme::PANEL_RADIUS } else { 0. })))
             .child(handle)
             .into_any_element())
     }
@@ -757,8 +780,8 @@ mod tests {
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
-        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach]);
-        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach]);
+        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach, Shortcut::Run]);
+        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach, Shortcut::Run]);
         let raw = r#"[{"id":"a","type":"send_text","label":"Relatório","text":"/relatorio","send_direct":false,"confirm":true},
             {"id":"a","type":"shell","label":"dup","command":"x"},{"id":"b","type":"shell","label":"Build","command":"make"},
             {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
