@@ -292,6 +292,28 @@ Cada PC roda backend+vite+`tailscale serve` com o **mesmo** `CP_AUTH_TOKEN`. O a
 servidores** e troca entre eles (switcher) — útil pra dirigir o Claude de máquinas diferentes do
 mesmo celular.
 
+### Compartilhar sessão
+
+Manda UMA sessão para outra pessoa que também usa o Hangar. Ela vê a sessão na lista dela, dentro de
+um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e permissão, terminal.
+
+- **Quem entra pode tudo nesta máquina, como você.** A sessão roda comandos sem pedir permissão e o
+  terminal alcança suas outras sessões. Compartilhe só com quem você confia.
+- **Pré-requisitos, uma vez só:** `sudo tailscale set --operator=$USER` (o `install.sh` já roda) e o
+  Funnel liberado na política da tailnet (o próprio diálogo mostra o comando ou o link quando falta).
+- **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
+  `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
+- **Receber:** no app nativo, clique no link (ou "Entrar em sessão compartilhada" na página Máquinas
+  e cole). No web/PWA, "Adicionar máquina" → "Colar convite". No Linux, abrir o app pelo `hangar://`
+  depende da versão nativa nova (o `install-linux.sh` do pacote registra o esquema); no Windows o
+  registro vem do `.ps1` do repositório.
+- **Encerrar:** "Revogar" num aparelho, "Encerrar todos", ou fechar a sessão. Conexões abertas caem
+  em cerca de 5 s. Sem convite ativo o Funnel da porta 8443 desliga sozinho.
+- **O que o convidado não faz:** ele não conta como o seu app aberto (você segue recebendo as
+  notificações) e a lista dele não mostra o nome das suas outras sessões. Servidor de convite que
+  responde "encerrado" (ou 401) vira "compartilhamento encerrado"; erro 503 é passageiro (você trocando
+  o modo da sessão, tmux ou túnel fora) e ele tenta de novo, o código não foi gasto.
+
 ### Opções do Claude Code
 
 Em **Configurações → Harnesses → Claude Code → Opções**, a preferência **Atualizar barra de

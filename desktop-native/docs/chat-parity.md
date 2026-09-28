@@ -179,6 +179,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 |---|---|---|
 | Colar convite, servidor de convite, "compartilhamento encerrado" | implementado | sem exercício na janela real |
 | Vários convites do mesmo dono | pendente | o nativo chaveia servidores pelo endereço (o web, pelo id): o convite novo do mesmo dono substitui o anterior, e um endereço que já é servidor próprio recusa o resgate antes de chamar o backend |
+| Link `hangar://` abre o app já aberto | implementado (só nativo) | instância única por porta local com nonce; Linux `.desktop` (vem no `install-linux.sh` do pacote nativo), Windows `HKCU\Software\Classes\hangar` |
 
 ## Sessão compartilhada (dono)
 

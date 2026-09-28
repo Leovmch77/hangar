@@ -355,6 +355,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   vira marcador `⟦HOME⟧`/`⟦CLAUDE⟧`/`⟦CODEX⟧`/`⟦HANGAR⟧` (nunca `{HOME}`); quem envia vence;
   hooks e skills do Hangar, MCP `hangar`, credenciais e o login do `.claude.json` são sempre do
   destino. Regras e motivo em [plataforma.md](docs/decisoes/plataforma.md#configuração-compartilhada-leva-o-conteúdo-o-destino-resolve-caminho-e-programa).
+- **Compartilhar sessão: só a porta do convidado (8766, Funnel 8443) vai à internet, e ela recusa
+  o token do dono.** Confiança = usuário do sistema do dono. No servidor de convite, 410 e 401 são
+  "encerrado" (nunca apagar o servidor nem abrir login) e 503 é tentar de novo. Motivo em
+  [plataforma.md](docs/decisoes/plataforma.md#compartilhar-sessão-a-porta-do-convidado-é-a-única-na-internet).
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o

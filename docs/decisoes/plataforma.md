@@ -657,3 +657,27 @@ só resolve marcador em arquivo que a origem marcou. Criptografia extra do pacot
 o bearer que vai na mesma requisição abre a máquina inteira, e o Tailscale já cifra o caminho.
 Quem leva o pacote é o navegador (ele tem o token de todas as máquinas), então nenhuma máquina
 precisa conhecer a outra pelo `peers.json`.
+
+## Compartilhar sessão: a porta do convidado é a única na internet
+
+(28/09/2026, pedido do usuário.) O convidado tem Hangar e recebe a sessão como um servidor a mais
+("Convite · dono"). Dentro dela pode tudo, e isso equivale ao usuário do sistema do dono: a sessão
+roda em `bypassPermissions`, o terminal é um `tmux attach` completo (`switch-client` alcança as
+outras sessões) e `/file` lê o que a conversa citar. O filtro de rotas delimita a interface, não é
+fronteira de segurança.
+
+O Funnel expõe só `127.0.0.1:8766`, em `:8443` (a 443 é o `serve` da tailnet e a 10000 é a prévia
+de porta do `tunnel.py`; Funnel só aceita essas três). Nessa porta só vale o token do convidado
+(Bearer ou `?token=`); o token do dono e o cookie são recusados. Abrir `/convite/<código>` não
+gasta o código, porque prévias de link (WhatsApp) fazem GET.
+
+O dono responde 410 ao revogado, e no servidor de convite o 401 também vale como "encerrado":
+o dono apaga registros revogados depois de 30 dias e pode perder o `shares.json`. Em nenhum dos
+dois casos o app apaga o servidor nem abre a tela de login (401 comum é login perdido). O 503
+`erro_sessao_indisponivel` é tentar de novo: o dono trocando o modo da sessão, o tmux sem
+responder ou o túnel fora na hora do resgate (o código não é gasto).
+
+Revogar corta SSE e WebSocket abertos em cerca de 5 s (WebSocket fecha com 4410). O convidado
+nunca conta como o app aberto do dono (o dono continua recebendo push) e a lista dele esconde o
+nome das outras sessões (campos `pair`/`then`). O nativo guarda um convite por endereço de dono
+(o mais novo vence; endereço que já é servidor próprio recusa o resgate).
