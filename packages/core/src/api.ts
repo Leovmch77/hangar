@@ -2769,7 +2769,7 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
 export async function createShare(name: string): Promise<ShareCreated> {
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share`, { method: 'POST' });
   if (res.status === 409) {
-    const corpo = await res.clone().json().catch(() => null);
+    const corpo = (await res.clone().json().catch(() => null)) as { detail?: EnvelopeErro } | null;
     const d = corpo?.detail;
     if (d?.code === 'erro_compartilhar_pre_requisito') {
       throw new SharePrerequisiteError(

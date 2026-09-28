@@ -65,8 +65,19 @@ const APP_LINK = /^hangar:\/\/convite\/([^/\s?#]+)\/([A-Za-z0-9_-]+)\/?$/;
 export function parseInviteLink(text: string): { address: string; code: string } | null {
   const t = text.trim();
   const hit = HTTPS_LINK.exec(t) ?? APP_LINK.exec(t);
-  return hit ? { address: `https://${hit[1]}`, code: hit[2] } : null;
+  if (!hit) return null;
+  // O endereço vira baseUrl de servidor: `a@b` (credencial embutida) ou host torto não passam.
+  try {
+    const u = new URL(`https://${hit[1]}`);
+    if (u.username || u.password || u.pathname !== '/') return null;
+  } catch {
+    return null;
+  }
+  return { address: `https://${hit[1]}`, code: hit[2] };
 }
+
+// Forma mínima do corpo de erro do resgate: envelope `{detail:{params:{reason}}}` ou `{reason}` cru.
+interface InviteBody { detail?: InviteBody; reason?: string; params?: { reason?: string } }
 
 const REASONS: Record<string, InviteFailure> = { used: 'used', expired: 'expired', revoked: 'revoked' };
 
@@ -90,10 +101,10 @@ export async function redeemInvite(
     throw new InviteRedeemError('network');
   }
   if (res.status === 410) {
-    const corpo = await res.json().catch(() => null);
-    const d = corpo?.detail ?? corpo;
+    const corpo = (await res.json().catch(() => null)) as InviteBody | null;
+    const d = (corpo?.detail ?? corpo) as InviteBody | null;
     const reason = d?.params?.reason ?? d?.reason;
-    throw new InviteRedeemError(REASONS[reason] ?? 'unknown');
+    throw new InviteRedeemError((reason && REASONS[reason]) || 'unknown');
   }
   if (res.status === 503) throw new InviteRedeemError('unavailable');
   if (!res.ok) throw new InviteRedeemError('unknown');

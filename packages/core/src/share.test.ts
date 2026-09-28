@@ -38,6 +38,11 @@ describe('parseInviteLink', () => {
     expect(parseInviteLink('https://dono.ts.net:8443/convite/')).toBeNull();
     expect(parseInviteLink('K7P29QX4')).toBeNull();
   });
+  it('recusa credencial embutida no endereço', () => {
+    expect(parseInviteLink('https://a@b/convite/X')).toBeNull();
+    expect(parseInviteLink('https://a:p@b:8443/convite/X')).toBeNull();
+    expect(parseInviteLink('hangar://convite/a@b/X')).toBeNull();
+  });
 });
 
 describe('inviteAllows', () => {
