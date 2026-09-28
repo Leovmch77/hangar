@@ -14,5 +14,16 @@ def session_life(name: str) -> str | None:
     for meta in (headless_sessions.load(name), codex_sessions.load(name)):
         if meta and meta.get("key"):
             return f"k:{meta['key']}"
-    created = tmux.session_created(name)
-    return f"t:{created:.0f}" if created else None
+    created = _tmux_birth(name)
+    return f"t:{created}" if created else None
+
+
+def _tmux_birth(name: str) -> int | None:
+    # `-t =nome` sem os dois pontos imprime linha vazia com rc 0 no tmux 3.x; `=nome:` devolve a época.
+    cp = tmux._run(["tmux", "display-message", "-p", "-t", f"={name}:", "#{session_created}"])
+    if cp.returncode != 0:
+        return None
+    try:
+        return int(float(cp.stdout.strip()))
+    except ValueError:
+        return None

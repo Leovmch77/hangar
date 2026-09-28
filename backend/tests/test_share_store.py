@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import subprocess
 
 import pytest
 
@@ -119,10 +120,37 @@ def test_set_life():
 def test_session_life_prefere_chave_do_sidecar(monkeypatch):
     monkeypatch.setattr(share_life.headless_sessions, "load", lambda n: {"key": "abc"} if n == "h" else None)
     monkeypatch.setattr(share_life.codex_sessions, "load", lambda n: None)
-    monkeypatch.setattr(share_life.tmux, "session_created", lambda n: 1700000000.0 if n == "t" else 0.0)
+    monkeypatch.setattr(share_life, "_tmux_birth", lambda n: 1700000000 if n == "t" else None)
     assert share_life.session_life("h") == "k:abc"
     assert share_life.session_life("t") == "t:1700000000"
     assert share_life.session_life("nada") is None
+
+
+def _fake_run(monkeypatch, rc, out):
+    calls = []
+
+    def run(args, input=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, rc, out, "")
+
+    monkeypatch.setattr(share_life.tmux, "_run", run)
+    return calls
+
+
+def test_tmux_birth_usa_alvo_com_dois_pontos(monkeypatch):
+    monkeypatch.setattr(share_life.headless_sessions, "load", lambda n: None)
+    monkeypatch.setattr(share_life.codex_sessions, "load", lambda n: None)
+    calls = _fake_run(monkeypatch, 0, "1790624703\n")
+    assert share_life.session_life("proj") == "t:1790624703"
+    assert calls[0][calls[0].index("-t") + 1] == "=proj:"
+
+
+@pytest.mark.parametrize("rc,out", [(0, "\n"), (0, ""), (1, "1790624703\n"), (0, "abc\n")])
+def test_tmux_birth_vazio_erro_ou_lixo_e_none(monkeypatch, rc, out):
+    monkeypatch.setattr(share_life.headless_sessions, "load", lambda n: None)
+    monkeypatch.setattr(share_life.codex_sessions, "load", lambda n: None)
+    _fake_run(monkeypatch, rc, out)
+    assert share_life.session_life("proj") is None
 
 
 def test_sweep_pergunta_ao_tmux_sem_segurar_o_lock():
