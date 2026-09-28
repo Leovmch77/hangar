@@ -77,8 +77,8 @@ from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, s
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
-from app import share_api, share_store
-from app.share_gate import ShareGate
+from app import share_api, share_guest_api, share_store
+from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -604,6 +604,7 @@ app.include_router(peers_api.peers_router)
 app.include_router(plugin_bridge.plugin_router)
 app.include_router(config_sync_api.config_sync_router)
 app.include_router(share_api.router)
+app.include_router(share_guest_api.router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -1666,7 +1667,7 @@ async def whoami(request: Request):
 
 
 @app.get("/api/sessions", dependencies=[Depends(require_auth)], response_model=list[SessionInfo])
-async def list_sessions():
+async def list_sessions(request: Request):
     # list_with_state: resolucao otimizada (1 scan /proc + 1 chamada tmux em lote) + estado vivo por
     # sessao (working/idle/awaiting_input) classificado do pane. async pq captura os panes concorrente.
     # MuxIndisponivel nao e tratada aqui: o handler de `_mux_indisponivel` cobre esta rota e as
@@ -1689,6 +1690,9 @@ async def list_sessions():
     # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
     # lugar o que ja esta neles.
     snap = await asyncio.to_thread(_guardar_snap)
+    # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
+    if (guest := guest_of(request)) is not None:
+        snap = [i for i in snap if i.name == guest.session]
     return await registry.list_with_state([i.model_copy() for i in snap])
 
 
@@ -3173,9 +3177,10 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 
 
 @app.get("/api/sessions/events", dependencies=[Depends(require_auth)])
-async def sessions_events():
+async def sessions_events(request: Request):
     from app.sse import list_events
-    return EventSourceResponse(list_events(), send_timeout=30)
+    guest = guest_of(request)
+    return EventSourceResponse(list_events(only=guest.session if guest else None), send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])
@@ -3211,7 +3216,8 @@ async def events(name: str, request: Request):
     # estado, fonte do preview). Sem isto TODA sessao caia no default "claude" do merged_events e o
     # SSE do Codex nunca ligava (chat vazio, sem estado ao vivo).
     return EventSourceResponse(
-        merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset),
+        merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset,
+                      count_app=guest_of(request) is None),
         send_timeout=30)
 
 

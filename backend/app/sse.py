@@ -498,16 +498,20 @@ class _ListRefresher:
 _list_refresher = _ListRefresher()
 
 
-async def list_events(ping_secs: float = 8.0):
+async def list_events(ping_secs: float = 8.0, only: str | None = None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
-    segue e o front ve a lista velha (stale > desconectado)."""
+    segue e o front ve a lista velha (stale > desconectado).
+
+    `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
+    do dono (`nav`) e nao conta como app do dono aberto."""
     queue: asyncio.Queue = asyncio.Queue()
     cond = _list_refresher.acquire()
     started = time.monotonic()
     diag.registrar("sse.lista_abriu")
-    plugin_bridge.app_entrou()
+    if only is None:
+        plugin_bridge.app_entrou()
 
     async def reader():
         last_version = -1
@@ -520,6 +524,9 @@ async def list_events(ping_secs: float = 8.0):
             if errored:
                 await queue.put(("list_error", "{}"))   # falha do refresher — front distingue de offline
             elif data is not None:
+                if only is not None:
+                    data = json.dumps([x for x in json.loads(data) if x.get("name") == only],
+                                      ensure_ascii=False)
                 await queue.put(("sessions", data))
 
     async def ping_loop():
@@ -541,7 +548,9 @@ async def list_events(ping_secs: float = 8.0):
         except Exception:
             _log.exception("sse: nav_pump da lista morreu")
 
-    tasks = [asyncio.create_task(reader()), asyncio.create_task(ping_loop()), asyncio.create_task(nav_pump())]
+    tasks = [asyncio.create_task(reader()), asyncio.create_task(ping_loop())]
+    if only is None:
+        tasks.append(asyncio.create_task(nav_pump()))
     try:
         while True:
             event, data = await queue.get()
@@ -550,7 +559,8 @@ async def list_events(ping_secs: float = 8.0):
         for t in tasks:
             t.cancel()
         _list_refresher.release()
-        plugin_bridge.app_saiu()
+        if only is None:
+            plugin_bridge.app_saiu()
         diag.registrar("sse.lista_fechou", ms=int((time.monotonic() - started) * 1000))
 
 
@@ -566,7 +576,8 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
 
 
 async def merged_events(name: str, jsonl: str, provider: str = "claude",
-                        start_offset: int | None = None):
+                        start_offset: int | None = None, count_app: bool = True):
+    # count_app=False: conexao de convidado. Contar como app do dono aberto calaria as push dele.
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
     # (api.py so passa quando uma tarefa futura ligar o seletor de provider no endpoint).
     # Sessão Claude sem terminal: provider continua "claude" pro front, mas o adapter (monitor,
@@ -880,7 +891,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     _log.info("sse: abriu name=%s provider=%s jsonl=%s", name, provider, Path(jsonl).name if jsonl else None)
     diag.registrar("sse.abriu", sessao=name, provider=provider,
                    etapa="retomada" if start_offset is not None else "inicio")
-    plugin_bridge.app_entrou()
+    if count_app:
+        plugin_bridge.app_entrou()
     try:
         while True:
             # Só o tail_pump enfileira o 3o item (o offset -> `id:` do SSE); os demais produtores
@@ -1048,7 +1060,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            erro_tipo=type(exc).__name__)
         raise
     finally:
-        plugin_bridge.app_saiu()
+        if count_app:
+            plugin_bridge.app_saiu()
         diag.registrar("sse.fechou", "erro" if motivo_diag.startswith("falha_") else "ok",
                        sessao=name, provider=current_provider, detalhe=motivo_diag,
                        ms=int((time.monotonic() - _t0) * 1000), quantidade=sum(_sent.values()))
