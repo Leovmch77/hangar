@@ -380,7 +380,7 @@ impl NewSession {
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             checkout: Remote::default(), branch: String::new(),
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
-            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: false,
+            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), effort: String::new(),
             permission: String::new(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
@@ -557,10 +557,11 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Trocar de provider zera o modo e a permissão (o Codex nasce em "Full Access", como no web) e relê o que depende dele.
+    /// Trocar de provider volta o modo ao padrão (sem terminal onde existe) e zera a permissão (o Codex nasce em "Full Access",
+    /// como no web), e relê o que depende dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if provider == self.provider || self.creating { return; }
-        (self.provider, self.headless, self.error) = (provider, false, None);
+        (self.provider, self.headless, self.error) = (provider, true, None);
         self.permission = if provider == "codex" { "Full Access".into() } else { String::new() };
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
