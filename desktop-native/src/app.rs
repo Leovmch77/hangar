@@ -547,18 +547,23 @@ impl Hangar {
         });
         cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
         // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
-        cx.bind_keys([KeyBinding::new("ctrl-l", FocusComposer, Some("!Terminal")), KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")),
-            KeyBinding::new("ctrl-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("ctrl-f", FocusSettingsSearch, Some("!Terminal")),
+        // `secondary` é Ctrl no Linux e no Windows e Cmd no Mac. Ctrl+Espaço fica: no Mac, Cmd+Espaço é o Spotlight.
+        cx.bind_keys([KeyBinding::new("secondary-l", FocusComposer, Some("!Terminal")), KeyBinding::new("secondary-,", OpenSettings, Some("!Terminal")),
+            KeyBinding::new("secondary-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("secondary-f", FocusSettingsSearch, Some("!Terminal")),
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
             KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
-            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
+            KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
             KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
             KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
             KeyBinding::new("ctrl-c", NoAction, Some("Terminal"))]);
+        // No Mac Ctrl+C vai para o programa do terminal; copiar e colar são Cmd+C e Cmd+V.
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([KeyBinding::new("cmd-c", terminal::CopyTerminal, Some("Terminal")),
+            KeyBinding::new("cmd-v", terminal::PasteTerminal, Some("Terminal"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
@@ -1405,10 +1410,8 @@ impl Hangar {
                         if !prefs.suppressed(&session.name, chrono::Local::now().time()) {
                             let (title, body) = (format!("Hangar · {}", session.name), tr(message));
                             self.runtime.spawn_blocking(move || {
-                                match std::process::Command::new("notify-send").args(["--app-name=Hangar", "--", &title, &body]).status() {
-                                    Ok(status) if status.success() => {},
-                                    Ok(_) => eprintln!("notify-send: envio recusado"),
-                                    Err(error) => eprintln!("notify-send: {error}"),
+                                if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(&title).body(&body).show() {
+                                    eprintln!("notification: {error}");
                                 }
                             });
                         }
@@ -4396,9 +4399,10 @@ fn saved_connection_path() -> Option<PathBuf> {
 
 /// Onde o diálogo de salvar abre: a pasta de downloads, ou a casa do usuário.
 fn downloads_folder() -> PathBuf {
+    // `home_dir` e não `HOME`: o Windows não define `HOME`, e o diálogo abria no %TEMP%.
     std::env::var_os("XDG_DOWNLOAD_DIR").map(PathBuf::from).filter(|p| p.is_dir())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads")).filter(|p| p.is_dir()))
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(std::env::temp_dir)
+        .or_else(|| std::env::home_dir().map(|home| home.join("Downloads")).filter(|p| p.is_dir()))
+        .or_else(std::env::home_dir).unwrap_or_else(std::env::temp_dir)
 }
 
 fn load_connection() -> Option<(String, String)> {

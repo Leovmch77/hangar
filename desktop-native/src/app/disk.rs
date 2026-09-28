@@ -168,6 +168,8 @@ fn launch(command: &mut Command) -> std::io::Result<Value> {
     // Grupo próprio: fechar o app ou um Ctrl-C no terminal que o abriu não leva o programa junto.
     // ponytail: o backend usa setsid; grupo próprio basta sem terminal de controle. setsid via libc se precisar.
     #[cfg(unix)] { use std::os::unix::process::CommandExt; command.process_group(0); }
+    // Editor lançado por .cmd (o `code` do VS Code) abriria um console junto.
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
     // Quem espera é uma thread, senão o filho que termina fica zumbi até o app fechar.
     std::thread::spawn(move || { let _ = child.wait(); });

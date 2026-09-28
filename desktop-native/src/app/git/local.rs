@@ -22,7 +22,10 @@ impl Out {
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Result<Out, Refusal> {
-    let mut child = Command::new("git").arg("-C").arg(cwd).args(args)
+    let mut command = Command::new("git");
+    // App de janela no Windows: sem isto cada git abre um console piscando.
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
+    let mut child = command.arg("-C").arg(cwd).args(args)
         // Saída lida por código: sem tradução. Sem trava opcional do índice. Sem pergunta de senha, que prenderia até o teto.
         .env("LC_ALL", "C").env("LANGUAGE", "C").env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()

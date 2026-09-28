@@ -117,7 +117,7 @@ impl Files {
             KeyBinding::new("alt-w", CloseFile, Some("FileViewer")),
             KeyBinding::new("ctrl-pageup", PreviousFile, Some("FileViewer")),
             KeyBinding::new("ctrl-pagedown", NextFile, Some("FileViewer")),
-            KeyBinding::new("ctrl-s", SaveFile, Some("FileViewer")),
+            KeyBinding::new("secondary-s", SaveFile, Some("FileViewer")),
         ]);
         let focus = cx.focus_handle();
         let lost = cx.on_focus_lost(window, |this, window, cx| this.files_focus_lost(window, cx));

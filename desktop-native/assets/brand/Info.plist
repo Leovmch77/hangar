@@ -10,5 +10,6 @@
     <key>CFBundleIconFile</key><string>Hangar.icns</string>
     <key>CFBundleShortVersionString</key><string>__SHORT_VERSION__</string>
     <key>CFBundleVersion</key><string>__BUILD_NUMBER__</string>
+    <key>NSMicrophoneUsageDescription</key><string>Hangar usa o microfone para o ditado.</string>
 </dict>
 </plist>

@@ -1,5 +1,5 @@
 use super::*;
-use std::{io::Read, process::{Child, Command, Stdio}, sync::Mutex, thread};
+use std::{io::Read, sync::Mutex};
 
 const STYLES: [&str; 3] = ["limpar", "prosa", "briefing"];
 const PCM_LIMIT: usize = 16_000 * 2 * 180;
@@ -28,9 +28,40 @@ impl Vad {
     }
 }
 
+/// Junta os canais num só e reduz para 16 kHz pela média de cada janela: o formato que o backend transcreve.
+struct Downmix {
+    channels: usize,
+    step: f64,
+    phase: f64,
+    sum: f32,
+    count: u32,
+    last: f32,
+}
+
+impl Downmix {
+    fn new(channels: u16, rate: u32) -> Self {
+        Self { channels: channels.max(1) as usize, step: rate as f64 / 16_000., phase: 0., sum: 0., count: 0, last: 0. }
+    }
+
+    fn push<T: Copy>(&mut self, data: &[T], sample: impl Fn(T) -> f32, out: &mut Vec<u8>) {
+        for frame in data.chunks(self.channels) {
+            let mono = frame.iter().map(|value| sample(*value)).sum::<f32>() / frame.len() as f32;
+            self.sum += mono;
+            self.count += 1;
+            self.phase += 1.;
+            while self.phase >= self.step {
+                self.phase -= self.step;
+                if self.count > 0 { self.last = self.sum / self.count as f32; self.sum = 0.; self.count = 0; }
+                if out.len() + 2 > PCM_LIMIT { return; }
+                out.extend_from_slice(&((self.last.clamp(-1., 1.) * 32767.) as i16).to_le_bytes());
+            }
+        }
+    }
+}
+
 struct Recorder {
-    child: Option<Child>,
-    reader: Option<thread::JoinHandle<std::io::Result<()>>>,
+    stream: Option<cpal::Stream>,
+    failed: Arc<std::sync::atomic::AtomicBool>,
     pcm: Arc<Mutex<Vec<u8>>>,
     playback: Option<Instant>,
     sampled: usize,
@@ -38,19 +69,9 @@ struct Recorder {
     last_pcm_at: Option<Instant>,
 }
 
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            if let Err(error) = child.kill() { eprintln!("dictation stop: {error}"); }
-            if let Err(error) = child.wait() { eprintln!("dictation reap: {error}"); }
-        }
-        if let Some(reader) = self.reader.take() { let _ = reader.join(); }
-    }
-}
-
 impl Recorder {
     fn start() -> Result<Self, Failure> {
-        let mut recorder = Self { child: None, reader: None, pcm: Default::default(), playback: None,
+        let mut recorder = Self { stream: None, failed: Default::default(), pcm: Default::default(), playback: None,
             sampled: 0, last_signal: (0., 0.), last_pcm_at: None };
         if let Some(path) = std::env::var_os("HANGAR_NATIVE_DICTATION_WAV") {
             let mut bytes = Vec::new();
@@ -60,35 +81,59 @@ impl Recorder {
             recorder.playback = Some(Instant::now());
             return Ok(recorder);
         }
-        if !cfg!(target_os = "linux") { return Err(Failure::local("dictation_platform")); }
-        let mut command = Command::new("pw-record");
-        if let Some(target) = microphone()? { command.args(["--target", &target]); }
-        let mut child = command.args(["--raw", "--format", "s16", "--rate", "16000", "--channels", "1", "-"])
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-            .map_err(|error| Failure::local(if error.kind() == std::io::ErrorKind::NotFound {
-                "dictation_recorder_missing" } else { "dictation_recorder_error" }))?;
-        let mut stdout = child.stdout.take().expect("piped recorder stdout");
-        recorder.child = Some(child);
-        let pcm = recorder.pcm.clone();
-        recorder.reader = Some(thread::Builder::new().name("dictation-audio".into()).spawn(move || {
-            let mut chunk = [0u8; 4096];
-            loop {
-                let n = stdout.read(&mut chunk)?;
-                if n == 0 { return Ok(()); }
-                let mut bytes = pcm.lock().unwrap();
-                let n = n.min(PCM_LIMIT.saturating_sub(bytes.len()));
-                bytes.extend_from_slice(&chunk[..n]);
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let device = cpal::default_host().default_input_device().ok_or_else(|| Failure::local("dictation_no_microphone"))?;
+        let config = device.default_input_config().map_err(|error| {
+            eprintln!("dictation config: {error}");
+            Failure::local("dictation_recorder_error")
+        })?;
+        let (pcm, failed) = (recorder.pcm.clone(), recorder.failed.clone());
+        let mut mix = Downmix::new(config.channels(), config.sample_rate());
+        let on_error = move |error: cpal::Error| {
+            eprintln!("dictation stream: {error}");
+            // Estouro de buffer perde um pedaço e segue; o resto é microfone sumido ou captura parada.
+            if !matches!(error.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied) {
+                failed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-        }).map_err(|_| Failure::local("dictation_recorder_error"))?);
+        };
+        macro_rules! input {
+            ($t:ty, $to_f32:expr) => {
+                device.build_input_stream::<$t, _, _>(config.clone().into(),
+                    move |data, _| mix.push(data, $to_f32, &mut pcm.lock().unwrap()), on_error, None)
+            };
+        }
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => input!(f32, |v: f32| v),
+            cpal::SampleFormat::I16 => input!(i16, |v: i16| v as f32 / 32768.),
+            cpal::SampleFormat::I32 => input!(i32, |v: i32| v as f32 / 2_147_483_648.),
+            cpal::SampleFormat::U16 => input!(u16, |v: u16| (v as f32 - 32768.) / 32768.),
+            cpal::SampleFormat::U8 => input!(u8, |v: u8| (v as f32 - 128.) / 128.),
+            cpal::SampleFormat::I8 => input!(i8, |v: i8| v as f32 / 128.),
+            cpal::SampleFormat::F64 => input!(f64, |v: f64| v as f32),
+            other => {
+                eprintln!("dictation format: {other:?}");
+                return Err(Failure::local("dictation_recorder_error"));
+            }
+        }.map_err(|error| {
+            eprintln!("dictation open: {error}");
+            Failure::local("dictation_recorder_error")
+        })?;
+        stream.play().map_err(|error| {
+            eprintln!("dictation play: {error}");
+            Failure::local("dictation_recorder_error")
+        })?;
+        recorder.stream = Some(stream);
         Ok(recorder)
     }
+
+    fn failed(&self) -> bool { self.failed.load(std::sync::atomic::Ordering::Relaxed) }
 
     fn signal(&mut self) -> (f32, f32) {
         let bytes = self.pcm.lock().unwrap();
         let end = self.playback.map(|start| (start.elapsed().as_millis() as usize * 32).min(bytes.len())).unwrap_or(bytes.len()) & !1;
         let start = self.sampled.min(end);
         self.sampled = end;
-        // `pw-record` entrega blocos; um intervalo sem bloco ainda é áudio recente, mas uma captura travada não é fala eterna.
+        // O sistema entrega blocos; um intervalo sem bloco ainda é áudio recente, mas uma captura travada não é fala eterna.
         if start == end {
             return if self.last_pcm_at.is_some_and(|at| at.elapsed() < Duration::from_millis(4096 / 32 + 55)) {
                 self.last_signal
@@ -109,40 +154,12 @@ impl Recorder {
     }
 
     fn finish(mut self) -> Result<Vec<u8>, Failure> {
-        if let Some(mut child) = self.child.take() {
-            let kill = child.kill();
-            let wait = child.wait();
-            if kill.is_err() || wait.is_err() { return Err(Failure::local("dictation_recorder_error")); }
-        }
-        if let Some(reader) = self.reader.take() {
-            reader.join().map_err(|_| Failure::local("dictation_recorder_error"))?
-                .map_err(|_| Failure::local("dictation_recorder_error"))?;
-        }
+        drop(self.stream.take());
+        if self.failed() { return Err(Failure::local("dictation_recorder_error")); }
         let pcm = self.pcm.lock().unwrap();
         if pcm.len() < 2 { return Err(Failure::local("dictation_empty_audio")); }
         Ok(wav(&pcm[..pcm.len() & !1]))
     }
-}
-
-/// Sem fonte padrão o `pw-record` sai na hora com "no target node available"; aí grava do microfone que o PipeWire
-/// mais prioriza. Sem `pw-dump` legível segue como antes e deixa o `pw-record` decidir.
-fn microphone() -> Result<Option<String>, Failure> {
-    let Ok(output) = Command::new("pw-dump").stdin(Stdio::null()).stderr(Stdio::null()).output() else { return Ok(None); };
-    let Ok(Value::Array(objects)) = serde_json::from_slice(&output.stdout) else { return Ok(None); };
-    pick_microphone(&objects).ok_or_else(|| Failure::local("dictation_no_microphone"))
-}
-
-/// `Some(None)`: há fonte padrão. `Some(Some(nome))`: sem padrão, o microfone de maior prioridade. `None`: nenhum.
-fn pick_microphone(objects: &[Value]) -> Option<Option<String>> {
-    let has_default = objects.iter()
-        .filter(|object| object.pointer("/props/metadata.name").and_then(Value::as_str) == Some("default"))
-        .flat_map(|object| object["metadata"].as_array().into_iter().flatten())
-        .any(|entry| entry["key"] == "default.audio.source");
-    if has_default { return Some(None); }
-    objects.iter().filter_map(|object| object.pointer("/info/props"))
-        .filter(|props| props["media.class"].as_str().is_some_and(|class| class.starts_with("Audio/Source")))
-        .max_by_key(|props| props["priority.session"].as_i64().unwrap_or(0))
-        .and_then(|props| props["node.name"].as_str()).map(|name| Some(name.to_owned()))
 }
 
 fn wav(pcm: &[u8]) -> Vec<u8> {
@@ -328,7 +345,7 @@ impl Hangar {
                         let keep = this.update_in(cx, |this, window, cx| {
                             if this.dictation.seq != seq { return false; }
                             let Some(recorder) = &mut this.dictation.recorder else { return false; };
-                            let failed = recorder.child.as_mut().is_some_and(|child| !matches!(child.try_wait(), Ok(None)));
+                            let failed = recorder.failed();
                             if failed {
                                 this.dictation.cancel();
                                 window.push_notification(Notification::error(tr("dictation_recorder_error")), cx);
@@ -369,14 +386,15 @@ impl Hangar {
         let audio_cache = self.dictation.audio.clone();
         let style = self.dictation.style(self.connection);
         let (tx, connection, seq) = (self.tx.clone(), self.connection, self.dictation.seq);
+        // O fluxo de áudio não troca de thread; soltá-lo e montar o WAV é rápido o bastante para a tela.
+        let audio = recorder.finish();
         self.dictation.request = Some(self.runtime.spawn(async move {
-            let audio = tokio::task::spawn_blocking(move || recorder.finish()).await;
             let result = match audio {
-                Ok(Ok(bytes)) => {
+                Ok(bytes) => {
                     *audio_cache.lock().unwrap() = bytes.clone();
                     api.transcribe(&key.name, bytes, style).await
                 },
-                Ok(Err(error)) => Err(error), Err(_) => Err(Failure::local("dictation_recorder_error")),
+                Err(error) => Err(error),
             };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, result) }).await;
         }));
@@ -634,22 +652,18 @@ fn dictation_insert(value: &str, range: std::ops::Range<usize>, text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{dictation_insert, pick_microphone, wav, wav_pcm, Dictation, Recorder, Vad};
+    use super::{dictation_insert, wav, wav_pcm, Dictation, Downmix, Recorder, Vad};
     use std::time::{Duration, Instant};
     #[test]
-    fn microphone_uses_default_or_highest_priority_source() {
-        use serde_json::json;
-        let source = |name: &str, class: &str, priority: i64| json!({"type": "PipeWire:Interface:Node",
-            "info": {"props": {"media.class": class, "node.name": name, "priority.session": priority}}});
-        let default = |key: &str| json!({"type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"},
-            "metadata": [{"subject": 0, "key": key, "value": {"name": "x"}}]});
-        let nodes = vec![source("sink", "Audio/Sink", 3000), source("low", "Audio/Source", 1000),
-            source("mic", "Audio/Source", 2009), default("default.audio.sink")];
-        assert_eq!(pick_microphone(&nodes), Some(Some("mic".into())));
-        let mut with_default = nodes.clone();
-        with_default.push(default("default.audio.source"));
-        assert_eq!(pick_microphone(&with_default), Some(None));
-        assert_eq!(pick_microphone(&[source("sink", "Audio/Sink", 1)]), None);
+    fn downmix_turns_48k_stereo_into_16k_mono() {
+        let mut mix = Downmix::new(2, 48_000);
+        let mut out = Vec::new();
+        let frames: Vec<f32> = (0..480).flat_map(|_| [0.5, -0.5]).chain((0..480).flat_map(|_| [1., 1.])).collect();
+        mix.push(&frames, |v: f32| v, &mut out);
+        let samples: Vec<i16> = out.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(samples.len(), 320, "10 ms a 48 kHz viram 160 amostras a 16 kHz");
+        assert_eq!(samples[0], 0, "canais opostos se anulam");
+        assert_eq!(samples[319], 32767);
     }
     #[test]
     fn hands_free_waits_for_speech_and_two_seconds_of_silence() {
@@ -710,7 +724,7 @@ mod tests {
         assert!(state.owner.is_none());
         let mut pcm = vec![0; 3203];
         pcm[3201] = 128;
-        let mut recorder = Recorder { child: None, reader: None, pcm: std::sync::Arc::new(std::sync::Mutex::new(pcm)),
+        let mut recorder = Recorder { stream: None, failed: Default::default(), pcm: std::sync::Arc::new(std::sync::Mutex::new(pcm)),
             playback: None, sampled: 0, last_signal: (0., 0.), last_pcm_at: None };
         assert_eq!(recorder.signal().0, 1.);
         recorder.last_pcm_at = Some(Instant::now() - Duration::from_millis(200));

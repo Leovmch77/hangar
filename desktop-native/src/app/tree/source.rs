@@ -178,7 +178,10 @@ pub(crate) fn read_local(root: &Path, rel: &str) -> Result<Read, Failure> {
 }
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(root).args(["-c", "core.quotePath=false"]).args(args).output().ok()?;
+    let mut command = Command::new("git");
+    // App de janela no Windows: sem isto cada git abre um console piscando.
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
+    let out = command.arg("-C").arg(root).args(["-c", "core.quotePath=false"]).args(args).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -241,6 +244,7 @@ mod tests {
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
 
+    #[cfg(unix)]
     #[test]
     fn local_paths_stay_inside_the_root_and_out_of_git() {
         let base = std::env::temp_dir().join(format!("hangar-tree-guard-{}", std::process::id()));
