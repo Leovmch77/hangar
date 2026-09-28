@@ -22,6 +22,7 @@ mod device;
 mod follow;
 mod landing;
 mod git;
+mod grouping;
 mod harness;
 mod viewer;
 mod disk;
@@ -3768,11 +3769,20 @@ impl Hangar {
         let mut children: Vec<AnyElement> = Vec::new();
         // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
         let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
-        let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for session in list {
+        // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
+        let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
+            let session = match row {
+                grouping::ListRow::Header { gid, label, members } => {
+                    children.push(self.render_pair_header(&gid, &label, &members, remote, window, cx));
+                    continue;
+                }
+                grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
+                grouping::ListRow::Session(session) => session,
+            };
             let selected = remote.is_none() && selected_name == Some(session.name.as_str());
             let remote = remote.map(str::to_owned);
-            children.push(if conversations { self.render_conversation_row((*session).clone(), selected, remote, window, cx) }
-                else { self.render_session_row((*session).clone(), selected, mixed, remote, window, cx) });
+            children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
+                else { self.render_session_row(session.clone(), selected, mixed, remote, window, cx) });
         };
         let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
             if !layout.waiting.is_empty() {
@@ -3822,7 +3832,8 @@ impl Hangar {
             .when(empty && self.list_error.is_none(), |el| el.child(div().p_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))))
             .when(layout.filter_empty(), |el| el.child(div().p_2().text_xs().text_color(theme::faint()).child(tr("sidebar_filter_empty"))))
-            .children(children);
+            .children(children)
+            .map(|el| self.drop_background(el, cx));
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
@@ -4042,6 +4053,7 @@ impl Hangar {
                 this.select(open.clone(), window, cx);
                 cx.stop_propagation();
             }))
+            .map(|el| self.group_row(el, &session, remote.as_deref(), 8., cx))
             .map(|el| match remote {
                 Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
                     .into_any_element(),
@@ -4168,6 +4180,7 @@ impl Hangar {
                     .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
                     .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)
+            .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
             .map(|el| match remote {
                 Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
                     .into_any_element(),
@@ -4765,6 +4778,8 @@ impl Render for Hangar {
         let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
+            // Sessão solta fora da lista: nada acontece, só termina o arrasto.
+            .on_drop(cx.listener(|this, _: &grouping::SessionDrag, _, cx| this.end_session_drag(cx)))
             .bg(if !chat_background { theme::window_fill() }
                 else if cutout { transparent_black().into() }
                 else { theme::background().alpha(1.).into() })

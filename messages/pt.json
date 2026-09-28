@@ -5815,6 +5815,10 @@
   "native_sidebar_chained": "encadeado → {n}",
   "native_sidebar_chain_failed": "encadear: {n}",
   "native_sidebar_unlinked": "vínculo removido",
-  "native_sidebar_unlink_failed": "remover vínculo: {n}"
+  "native_sidebar_unlink_failed": "remover vínculo: {n}",
+  "native_group_with": "Agrupar com…",
+  "native_group_leave": "Sair do grupo",
+  "native_group_none": "Nenhuma outra sessão pode agrupar com esta",
+  "native_group_drop_leave": "Solte aqui para sair do grupo"
 
 }

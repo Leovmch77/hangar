@@ -114,6 +114,15 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Máquinas: "Mostrar as sessões dele" liga e desliga a entrada guardada; sem entrada, usa o token que o servidor guarda | implementado | sem o campo para digitar o token quando o do servidor falha |
 | Máquinas: token digitado, trocar nome/token de uma entrada, tirar endereço repetido (também do servidor conectado), escolher o endereço da volta, cadastrar de novo, ligar recados de máquina só deste aparelho, identificador de outra máquina | pendente | o cartão mostra a frase do web sem o botão; o interruptor de recados de máquina só deste aparelho fica desligado com "próxima versão" |
 
+## Barra lateral: grupos de sessões
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Blocos por `pair_gid` com cabeçalho (glifo, chave da tarefa em destaque e resto em cinza, quantas esperam, total) e membros recuados com a faixa do grupo | implementado | `grouping.rs`; nas duas listas (Normal e Conversas) e por máquina; recolher o bloco grava junto dos grupos de projeto; o trilho recolhido segue sem cabeçalho de bloco |
+| Arrastar sessão sobre outra ou sobre o cabeçalho do bloco abre o diálogo de agrupar; soltar no fundo da lista abre o de sair | implementado | mesmas recusas do `canPair` do web, com o motivo no cartão que acompanha o ponteiro; linha de outra máquina recusa; soltar sobre cabeçalho de seção/projeto conta como fundo (no web não) |
+| Diálogo de agrupar/sair: afetadas, tarefa herdada ou campo com Sugerir, 409 vira "Substituir a tarefa", aviso parcial vira título de feito | implementado | não fecha com a chamada em voo; relê a sessão viva antes de confirmar |
+| "Agrupar com…" e "Sair do grupo" no menu da sessão | pendente no web | nasceu no nativo; mesmas candidatas do arrastar e o mesmo diálogo |
+
 ## Como rodar a prova
 
 ```bash

@@ -6,7 +6,7 @@ use std::time::Duration;
 use reqwest::{Client, Response, StatusCode, header};
 use serde_json::{Value, json};
 use url::Url;
-use dto::{ChatEvent, CommandInfo, Delivery, SessionInfo, UploadFile, Uploaded};
+use dto::{ChatEvent, CommandInfo, Delivery, PairResult, SessionInfo, UploadFile, Uploaded};
 
 /// Só para medir a abertura de uma sessão: `HANGAR_NATIVE_OPEN_TRACE=1` escreve no stderr cada etapa, em ms desde o
 /// clique (`open_trace_start`). Sem a variável, nada é formatado nem escrito.
@@ -242,6 +242,23 @@ impl Api {
         let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
         r.json().await.map_err(|_| Failure::transport(true))
+    }
+
+    /// Junta `name` e `peers` num grupo (funde os grupos de todos). 409 = o grupo já tem outra tarefa; `replace_task` troca.
+    pub async fn pair(&self, name: &str, peers: &[String], task: &str, replace_task: bool) -> Result<PairResult, Failure> {
+        let body = json!({"peers": peers, "task": task, "replace_task": replace_task});
+        self.act(name, &["pair"], Some(body), false, 60).await.map(|value| PairResult::from_value(&value))
+    }
+
+    /// `name` sai do grupo; os outros seguem juntos.
+    pub async fn unpair(&self, name: &str) -> Result<PairResult, Failure> {
+        self.act(name, &["pair"], None, true, 60).await.map(|value| PairResult::from_value(&value))
+    }
+
+    /// Tarefa sugerida pelo fim da conversa das sessões (422 quando nenhuma tem conversa).
+    pub async fn suggest_group_task(&self, sessions: &[String]) -> Result<String, Failure> {
+        let value = self.server_send(reqwest::Method::POST, &["pair", "task-suggestion"], Some(json!({"sessions": sessions})), 120).await?;
+        value.get("task").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| Failure::local("invalid_response"))
     }
 
     // Leitura sem efeito colateral: queda é rede, nunca incerteza.

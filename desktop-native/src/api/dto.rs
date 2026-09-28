@@ -34,10 +34,31 @@ pub struct SessionInfo {
     pub last_reply: Option<String>,
     pub last_reply_at: Option<f64>,
     pub worktree: Option<bool>,
+    /// Membros do grupo de trabalho além dela; `srv::nome` é par de outro servidor.
+    pub pair_peers: Option<Vec<String>>,
+    /// Id estável do grupo: a lista junta num bloco quem tem o mesmo.
+    pub pair_gid: Option<String>,
+    /// Tarefa do grupo (ex: ABC-1234 …), o rótulo do cabeçalho do bloco.
+    pub pair_task: Option<String>,
 }
 
 impl SessionInfo {
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
+    pub fn peers(&self) -> &[String] { self.pair_peers.as_deref().unwrap_or_default() }
+}
+
+/// Resposta de juntar ou sair do grupo (`POST|DELETE …/pair`): o vínculo já mudou; `warning` diz quem não recebeu o aviso.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PairResult { pub warning: Option<String> }
+
+impl PairResult {
+    pub fn from_value(value: &Value) -> Self {
+        let warning = value.get("warning").filter(|w| !w.is_null()).map(|w| match w {
+            Value::String(text) => text.clone(),
+            _ => w.get("msg").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| w.to_string()),
+        });
+        Self { warning }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

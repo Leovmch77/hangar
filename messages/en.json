@@ -5815,6 +5815,10 @@
   "native_sidebar_chained": "chained → {n}",
   "native_sidebar_chain_failed": "chain: {n}",
   "native_sidebar_unlinked": "link removed",
-  "native_sidebar_unlink_failed": "remove link: {n}"
+  "native_sidebar_unlink_failed": "remove link: {n}",
+  "native_group_with": "Group with…",
+  "native_group_leave": "Leave the group",
+  "native_group_none": "No other session can join this one",
+  "native_group_drop_leave": "Drop here to leave the group"
 
 }

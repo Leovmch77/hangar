@@ -31,12 +31,14 @@ gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, GitBranch, RotateCcwClock, 
     RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert]);
 
 pub const HANGAR_MARK: &str = "brand/hangar-mark.svg";
+pub const GROUP_GLYPH: &str = "brand/group-glyph.svg";
 
 struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == HANGAR_MARK { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/hangar-mark.svg")))); }
+        if path == GROUP_GLYPH { return Ok(Some(Cow::Borrowed(include_bytes!("../assets/group-glyph.svg")))); }
         match path {
             "providers/claude.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/claude.svg")))),
             "providers/codex.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/codex.svg")))),

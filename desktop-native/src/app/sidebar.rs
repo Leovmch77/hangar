@@ -49,6 +49,8 @@ pub(super) enum SidebarReply {
     Note(String, NotificationType, String),
     Chained(String, u64, String, Result<Value, Failure>),
     NotSaved(String),
+    /// Resposta de agrupar, sair do grupo ou sugerir a tarefa, amarrada ao número do pedido.
+    Group(u64, super::grouping::GroupReply),
 }
 
 /// Uma notificação por sessão: o "git pull…" dá lugar ao resultado, como o `flash` único do web.
@@ -100,10 +102,10 @@ async fn git_result(api: &Api, name: &str, what: GitWrite) -> (NotificationType,
 pub(super) struct Chain { from: String, target: String, input: Entity<InputState>, status: Rc<RefCell<Pending>>, _events: Subscription }
 
 /// Leva a resposta de volta à janela, amarrada à conexão do pedido.
-struct Tell(async_channel::Sender<Envelope>, u64);
+pub(super) struct Tell(async_channel::Sender<Envelope>, u64);
 
 impl Tell {
-    async fn send(&self, reply: SidebarReply) {
+    pub(super) async fn send(&self, reply: SidebarReply) {
         let _ = self.0.send(Envelope { connection: self.1, selection: None, payload: Payload::Sidebar(reply) }).await;
     }
 }
@@ -151,6 +153,8 @@ pub(super) struct Sidebar {
     rail_anim: Option<(Instant, bool)>,
     /// Arrasto da borda em curso: onde o ponteiro desceu e a largura naquele instante.
     resize: Option<(f32, f32)>,
+    /// Arrastar sessão sobre sessão e o diálogo de agrupar/sair que ele abre.
+    pub(super) grouping: super::grouping::Grouping,
 }
 
 impl Sidebar {
@@ -159,7 +163,7 @@ impl Sidebar {
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None,
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
-            long_pressed: false, rail_anim: None, resize: None }
+            long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
     }
 
     /// Troca de servidor: o que é da conexão anterior sai; filtro e grupos recolhidos são deste computador e ficam.
@@ -168,6 +172,7 @@ impl Sidebar {
         self.renaming.clear();
         (self.editing, self.follow, self.lost, self.menu, self.button_menu, self.hover, self.preview) = (None, None, None, None, None, None, None);
         (self.focus_tab, self.chain) = (None, None);
+        self.grouping.reset();
         self.chain_seq += 1;
         self.cache.clear();
         self.menu_seq += 1;
@@ -288,7 +293,7 @@ fn save_collapsed(path: Option<PathBuf>, generation: u64, saved: &HashSet<String
 }
 
 impl Hangar {
-    fn sidebar_tell(&self) -> Tell { Tell(self.tx.clone(), self.connection) }
+    pub(super) fn sidebar_tell(&self) -> Tell { Tell(self.tx.clone(), self.connection) }
 
     pub(super) fn by_project() -> bool { appearance::get().sidebar_group == appearance::SidebarGroup::Project }
 
@@ -302,9 +307,14 @@ impl Hangar {
             return self.sessions.iter().filter(|s| !self.sidebar.deleting.contains(&s.name)).map(|s| s.name.clone()).collect();
         }
         let l = self.sidebar_layout(cx);
-        l.waiting.iter().map(|s| s.name.clone())
+        // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
+        let shown = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
+            super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, None) => Some(s.name.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        shown(&l.waiting).into_iter()
             .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key)))
-                .flat_map(|g| g.sessions.iter().map(|s| s.name.clone())))
+                .flat_map(|g| shown(&g.sessions)))
             .collect()
     }
 
@@ -345,6 +355,7 @@ impl Hangar {
     pub(super) fn sidebar_sessions_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let names: HashSet<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
         self.sidebar.deleting.retain(|n| names.contains(n));
+        self.refresh_group_ask();
         if self.sidebar.hover.as_ref().is_some_and(|n| !names.contains(n)) { self.hide_preview(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
         if let Some(new) = self.sidebar.focus_tab.clone().filter(|n| names.contains(n)) {
@@ -695,7 +706,7 @@ impl Hangar {
     }
 
     /// Foco na linha/aba de onde o menu saiu (o `menuOrigem` do web), para o diálogo devolvê-lo ao fechar.
-    fn focus_origin(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_origin(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_focus.get(name).unwrap_or(&self.root_focus).focus(window, cx);
     }
 
@@ -755,6 +766,7 @@ impl Hangar {
                 cx.notify();
             }
             SidebarReply::Note(name, kind, text) => window.push_notification(git_note(&name, kind, text), cx),
+            SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
             SidebarReply::Chained(from, seq, target, result) => {
                 // Só o diálogo que mandou este pedido recebe a resposta; fechado, ela vai à notificação.
                 let open = self.sidebar.chain.as_ref().filter(|c| c.status.borrow().sent == Some(seq));
@@ -922,7 +934,8 @@ pub(super) fn session_menu(hangar: WeakEntity<Hangar>, session: SessionInfo) -> 
         }).detach();
         let view = entity.read(cx).sidebar.menu_for(&session.name);
         let list = others(entity.read(cx), &session.name);
-        fill_menu(menu, &hangar, &session, view, list, window, cx)
+        let group = entity.read(cx).group_candidates(&session.name);
+        fill_menu(menu, &hangar, &session, view, list, group, window, cx)
     }
 }
 
@@ -940,7 +953,7 @@ fn mute_item(hangar: &WeakEntity<Hangar>, name: &str, mute: Option<Mute>) -> Pop
 }
 
 fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo, mute: Option<Mute>, others: Vec<String>,
-    window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let item = |label: String, act: fn(&mut Hangar, String, &mut Window, &mut Context<Hangar>)| {
         let (hangar, name) = (hangar.clone(), session.name.clone());
         PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, name.clone(), window, cx)); })
@@ -957,6 +970,7 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
         None => tr("sidebar_chain"),
     };
     let (weak, name, current) = (hangar.clone(), session.name.clone(), session.then_target.clone());
+    let (group_weak, group_name, leave) = (hangar.clone(), session.name.clone(), super::grouping::can_leave(session));
     // O diálogo de criar, aberto para continuar esta sessão.
     let baton = {
         let (hangar, name, cwd) = (hangar.clone(), session.name.clone(), session.cwd.clone());
@@ -990,6 +1004,9 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
         })
         .separator()
         .submenu(chain_label, window, cx, move |menu, _, _| fill_chain(menu, &weak, &name, current.clone(), &others))
+        // Mesmo diálogo do arrastar, para quem não arrasta (e o teclado).
+        .submenu(tr("group_with"), window, cx, move |menu, _, _| super::grouping::fill_group(menu, &group_weak, &group_name, &group))
+        .when(leave, |menu| menu.item(item(tr("group_leave"), |this, name, window, cx| this.request_leave(name, window, cx))))
         .separator()
         .when_some(mode, |menu, mode| menu.item(mode))
         .item(baton)
@@ -1037,7 +1054,7 @@ fn fill_branches(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, branc
 }
 
 /// Nome de branch ou de sessão em fonte mono, como o web; o atual com ✓ e na cor de destaque.
-fn mono_item(text: String, current: bool) -> PopupMenuItem {
+pub(super) fn mono_item(text: String, current: bool) -> PopupMenuItem {
     PopupMenuItem::element(move |_, _| div().font_family(theme::MONO).text_size(px(13.)).when(current, |el| el.text_color(theme::accent_text())).child(text.clone()))
         .checked(current)
 }
