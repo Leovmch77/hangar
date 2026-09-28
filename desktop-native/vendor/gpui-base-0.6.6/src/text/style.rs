@@ -29,6 +29,7 @@ pub struct TextViewStyle {
     is_dark: bool,
     // Modified for Hangar: both off by default, so every existing view keeps the kit's look.
     list_marker_width: Option<Pixels>,
+    list_marker_color: Option<Hsla>,
     code_language_band: Option<SharedString>,
     inline_code_font_family: Option<SharedString>,
 }
@@ -58,6 +59,7 @@ impl PartialEq for TextViewStyle {
             && self.inline_code == other.inline_code
             && self.is_dark == other.is_dark
             && self.list_marker_width == other.list_marker_width
+            && self.list_marker_color == other.list_marker_color
             && self.code_language_band == other.code_language_band
             && self.inline_code_font_family == other.inline_code_font_family
     }
@@ -104,6 +106,7 @@ impl TextViewStyle {
             },
             is_dark,
             list_marker_width: None,
+            list_marker_color: None,
             code_language_band: None,
             inline_code_font_family: None,
         }
@@ -239,6 +242,17 @@ impl TextViewStyle {
     pub fn with_list_marker_width(mut self, width: Option<Pixels>) -> Self {
         self.list_marker_width = width;
         self
+    }
+
+    /// Modified for Hangar: paints list numbers and bullets in this color.
+    /// `None` keeps them in the body-text color.
+    pub fn with_list_marker_color(mut self, color: Option<Hsla>) -> Self {
+        self.list_marker_color = color;
+        self
+    }
+
+    pub fn list_marker_color(&self) -> Option<Hsla> {
+        self.list_marker_color
     }
 
     /// Modified for Hangar: tops each fenced code block with a band holding

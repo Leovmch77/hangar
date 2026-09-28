@@ -2436,6 +2436,7 @@ impl BlockNode {
             .content_start()
             .when(!options.todo && checked.is_none(), |this| {
                 let mut prefix = list_item_prefix(ix, options.ordered, options.depth);
+                let color = style.list_marker_color();
                 // Modified for Hangar: the marker hangs right-aligned in its own
                 // column, so wrapped lines and nested lists line up with the text.
                 match style.list_marker_width() {
@@ -2447,9 +2448,13 @@ impl BlockNode {
                             .justify_end()
                             .w(width)
                             .pr(px(6.))
+                            .when_some(color, |el, color| el.text_color(color))
                             .child(prefix)
                     }),
-                    None => this.child(prefix),
+                    None => match color {
+                        Some(color) => this.child(div().flex_none().text_color(color).child(prefix)),
+                        None => this.child(prefix),
+                    },
                 }
             })
             .when_some(checked, |this, checked| {
