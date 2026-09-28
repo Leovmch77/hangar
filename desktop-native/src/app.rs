@@ -4136,6 +4136,9 @@ impl Hangar {
                 .child(Input::new(&input).xsmall().aria_label(tr("sidebar_new_name"))).into_any_element(),
             None => div().flex_1().min_w_0().flex().items_center().gap_2()
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{name}"))).flex_shrink_0().flex().opacity(0.72)
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("create_mode_headless")).build(window, cx))
+                    .child(chrome::no_terminal_mark(12., theme::muted()))))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
@@ -4158,7 +4161,8 @@ impl Hangar {
                 this.select(key_open.clone(), window, cx);
                 cx.stop_propagation();
             }))
-            .role(Role::Button).aria_selected(selected).aria_label(format!("{name} · {state_label}"))
+            .role(Role::Button).aria_selected(selected)
+            .aria_label(if session.headless { format!("{name} · {} · {state_label}", tr("create_mode_headless")) } else { format!("{name} · {state_label}") })
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)

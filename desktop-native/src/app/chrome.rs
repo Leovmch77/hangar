@@ -520,6 +520,11 @@ pub fn hangar_mark(size: f32, color: Hsla) -> Svg {
     svg().path(crate::HANGAR_MARK).size(px(size)).flex_shrink_0().text_color(color)
 }
 
+/// Sessão sem terminal: o desenho do `SessionSignals` do web (lucide não tem terminal cortado).
+pub fn no_terminal_mark(size: f32, color: Hsla) -> Svg {
+    svg().path(crate::NO_TERMINAL).size(px(size)).flex_shrink_0().text_color(color)
+}
+
 pub fn small_icon(icon: IconName, size: f32, color: Hsla) -> Icon {
     Icon::new(icon).size(px(size)).text_color(color)
 }
