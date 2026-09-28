@@ -10,6 +10,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     uploadFileForServer, transcribeFileForServer,
   } from '@hangar/core';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
+  import { keepWarmMic, takeWarmMic } from '../lib/warmMic';
   import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag } from '@hangar/core';
   import { parseStatusLine } from '@hangar/core';
   import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
@@ -238,13 +239,14 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     if (recState !== 'idle') return;
     let stream: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = takeWarmMic() ?? await navigator.mediaDevices.getUserMedia({ audio: true });
       recStream = stream;
       recChunks = [];
       recorder = new MediaRecorder(stream);
       recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
       recorder.onstop = async () => {
-        recStream?.getTracks().forEach((t) => t.stop());
+        // Card desmontado gravando já encerrou as tracks; senão o mic fica morno pra próxima gravação.
+        if (recStream?.getTracks().some((t) => t.readyState === 'live')) keepWarmMic(recStream);
         recStream = null;
         recState = 'busy';
         try {

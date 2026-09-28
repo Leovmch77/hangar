@@ -21,6 +21,7 @@
   import { novoEstadoVad, passoVad } from '@hangar/core';
   import type { EstadoVad } from '@hangar/core';
   import { lerMaosLivres } from '../lib/maosLivres';
+  import { keepWarmMic, stopWarmMic, takeWarmMic } from '../lib/warmMic';
   import { podeEnviarSozinho } from '@hangar/core';
   import type { MotivoFim } from '@hangar/core';
   import IconSend from './icons/IconSend.svelte';
@@ -1417,42 +1418,17 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // ── Gravar audio: toggle (tap grava, tap para) -> vira um anexo de audio ─────
-  // Mic "morno": o stream NAO e encerrado ao parar de gravar, so desabilitado (track.enabled=false
-  // -> silencio, nada vai pra lugar nenhum). No PWA do iPhone o WebKit volta a perguntar a
-  // permissao quando a captura fica parada ~1 minuto (bugs.webkit.org #215884, aberto ate o iOS
-  // 18.x) — sem isto, CADA ditado era um prompt novo. Com a captura viva a pergunta e UMA por
-  // sessao do app. Custo aceito: o indicador de microfone do iOS fica aceso com o app aberto.
-  // Troca de sessao desmonta o Composer e encerra de verdade (onDestroy, mais abaixo).
-  let micMorno: MediaStream | undefined;
+  // Mic morno compartilhado (lib/warmMic.ts): sobrevive a troca de sessao, que desmonta este Composer.
   let voiceBusy = $state(false);
 
   function prepareVoice() {
-    pararMicMorno();
+    stopWarmMic();
     ttsPlayer.close();
   }
 
-  // Devolve o stream morno pronto pra gravar (tracks reabilitadas), ou undefined se nao existe /
-  // morreu (o SO encerra a captura em background — a proxima gravacao cai no getUserMedia normal).
-  function retomarMicMorno(): MediaStream | undefined {
-    const s = micMorno;
-    micMorno = undefined;
-    if (!s) return undefined;
-    const vivas = s.getTracks().filter((t) => t.readyState === 'live');
-    if (!vivas.length) return undefined;
-    vivas.forEach((t) => { t.enabled = true; });
-    return s;
-  }
-
-  function pararMicMorno() {
-    micMorno?.getTracks().forEach((t) => t.stop());
-    micMorno = undefined;
-  }
-
   // Para a gravacao e zera o estado. Chamado no onstop, no onerror, em falha e no onDestroy
-  // (trocar de sessao com gravacao ativa desmonta o Composer -> sem isto o mic ficaria ligado).
-  // encerrarMic=false (o comum): o stream vira micMorno, desabilitado. =true (so onDestroy):
-  // encerra as tracks de vez.
-  function teardownRecording(encerrarMic = false) {
+  // (trocar de sessao com gravacao ativa desmonta o Composer). O stream vira o mic morno, desabilitado.
+  function teardownRecording() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     if (recTimer) { clearInterval(recTimer); recTimer = undefined; }
     // Maos-livres: o contexto foi destravado pelo toque no mic e ainda vai tocar os bipes depois da
@@ -1461,17 +1437,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       audioCtx?.close().catch((err) => console.warn(m.composer_audiocontext_close_falhou(), err));
       audioCtx = undefined;
     }
-    if (recStream) {
-      if (encerrarMic) {
-        recStream.getTracks().forEach((t) => t.stop());
-      } else {
-        // Vira o mic morno da proxima gravacao. Se ja havia um guardado (nao devia — um recStream
-        // por vez), o velho e encerrado pra nao vazar.
-        pararMicMorno();
-        recStream.getTracks().forEach((t) => { t.enabled = false; });
-        micMorno = recStream;
-      }
-    }
+    if (recStream) keepWarmMic(recStream);
     recStream = undefined;
     mediaRecorder = undefined;
     recording = false;
@@ -1673,7 +1639,7 @@ import { cachePrazo } from '../lib/cachePrazo';
 
     // Grava pelo mic e transcreve na Groq ao parar; waveform real do audio.
     // Reusa o mic morno quando ha um (sem prompt); senao pede o stream ao navegador.
-    const morno = retomarMicMorno();
+    const morno = takeWarmMic();
     let stream: MediaStream;
     if (morno) {
       stream = morno;
@@ -1728,7 +1694,12 @@ import { cachePrazo } from '../lib/cachePrazo';
     starting = false;
   }
 
-  onDestroy(() => { teardownRecording(true); pararMicMorno(); });   // encerra o mic de vez (o morno tambem)
+  onDestroy(() => {
+    // Gravando: encerrar as tracks e o que para o MediaRecorder. Parado, o mic vira morno e a proxima
+    // sessao grava sem novo prompt.
+    if (mediaRecorder?.state === 'recording') { recStream?.getTracks().forEach((t) => t.stop()); recStream = undefined; }
+    teardownRecording();
+  });
   onDestroy(() => { destroyed = true; });   // getUserMedia em voo se descarta ao resolver (toggleRecord)
   onDestroy(fecharDitado);   // troca de sessao desmonta o Composer -> revoga o objectURL do audio
   onDestroy(cancelarContagem);   // troca de sessao desmonta o Composer -> nao deixa o setInterval solto
