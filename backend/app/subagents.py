@@ -26,6 +26,9 @@ def _subagents_dir(jsonl: str) -> Path:
     return _session_dir(jsonl) / "subagents"
 
 
+_FORK_DIRETIVA = "\nYour directive: "
+
+
 def _text_of(content) -> str:
     """Texto de um message.content (string ou lista de blocos)."""
     if isinstance(content, str):
@@ -129,6 +132,10 @@ def _parse_agent(f: Path, tail: int) -> dict | None:
         if r.get("type") == "user" and prompt is None:
             t = _text_of(content)
             if t:
+                # Fork: o texto padrão vem na frente e o prompt que o pai mandou vem depois do
+                # marcador. Sem o corte, nada casava com o `prompt` do Agent e o título era o padrão.
+                if t.lstrip().startswith("<fork-boilerplate>") and _FORK_DIRETIVA in t:
+                    t = t.split(_FORK_DIRETIVA, 1)[1].strip()
                 prompt = t
         elif r.get("type") == "assistant" and isinstance(content, list):
             for b in content:
