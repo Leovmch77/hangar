@@ -14,12 +14,13 @@ pub(super) fn when_label(epoch: f64) -> String {
         .unwrap_or_default()
 }
 
-enum Created { Link(ShareCreated), Blocked { missing: String, fix: String } }
+enum Created { Link(ShareCreated), Blocked { missing: Vec<String>, fix: String } }
 
 pub(super) struct ShareDialog {
-    hangar: WeakEntity<Hangar>,
-    // Fixada na abertura: trocar de servidor com o diálogo aberto não pode mandar o pedido para outra máquina.
+    // Fixada na abertura: trocar de servidor com o diálogo aberto não pode mandar o pedido para outra máquina. O diálogo fala
+    // com a API sozinho: voltar ao `Hangar` daqui reentraria nele quando o clique do menu ainda o está atualizando.
     api: Api,
+    runtime: tokio::runtime::Handle,
     name: String,
     list: Remote<Vec<ShareEntry>>,
     created: Option<Result<Created, String>>,
@@ -31,33 +32,33 @@ pub(super) struct ShareDialog {
 impl ShareDialog {
     fn reload(&mut self, cx: &mut Context<Self>) {
         let seq = self.list.start();
-        let (me, name) = (cx.entity().downgrade(), self.name.clone());
-        let _ = self.hangar.update(cx, |this, cx| this.share_call(self.api.clone(), me, move |api| async move {
+        let name = self.name.clone();
+        self.call(move |api| async move {
             let result = api.shares(&name).await.map_err(|e| Hangar::failure(&e));
             move |d: &mut ShareDialog| { d.list.finish(seq, result); }
-        }, cx));
+        }, cx);
         cx.notify();
     }
 
     fn create(&mut self, cx: &mut Context<Self>) {
         if self.busy { return; }
         (self.busy, self.copied, self.created) = (true, false, None);
-        let (me, name) = (cx.entity().downgrade(), self.name.clone());
-        let _ = self.hangar.update(cx, |this, cx| this.share_call(self.api.clone(), me, move |api| async move {
+        let name = self.name.clone();
+        self.call(move |api| async move {
             let result = match api.share_create(&name).await {
                 Ok(link) => Ok(Created::Link(link)),
                 Err(ShareFailure::Blocked { missing, fix }) => Ok(Created::Blocked { missing, fix }),
                 Err(ShareFailure::Other(e)) => Err(Hangar::failure(&e)),
             };
             move |d: &mut ShareDialog| { d.busy = false; d.created = Some(result); }
-        }, cx));
+        }, cx);
         cx.notify();
     }
 
     fn revoke(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         self.revoke_error = None;
-        let (me, name) = (cx.entity().downgrade(), self.name.clone());
-        let _ = self.hangar.update(cx, |this, cx| this.share_call(self.api.clone(), me, move |api| async move {
+        let name = self.name.clone();
+        self.call(move |api| async move {
             let all = id.is_none();
             let result = api.share_revoke(&name, id.as_deref()).await.map_err(|e| Hangar::failure(&e));
             move |d: &mut ShareDialog| match result {
@@ -65,7 +66,24 @@ impl ShareDialog {
                 Ok(()) => if all { d.created = None; },
                 Err(e) => d.revoke_error = Some(e),
             }
-        }, cx));
+        }, cx);
+    }
+
+    /// Pedido no runtime do app; a resposta volta ao diálogo se ele ainda existir, e a lista se relê depois de mudar.
+    fn call<F, Fut, A>(&mut self, call: F, cx: &mut Context<Self>)
+    where F: FnOnce(Api) -> Fut + Send + 'static, Fut: std::future::Future<Output = A> + Send + 'static, A: FnOnce(&mut ShareDialog) + Send + 'static {
+        let (done, result) = tokio::sync::oneshot::channel();
+        let api = self.api.clone();
+        self.runtime.spawn(async move { let _ = done.send(call(api).await); });
+        cx.spawn(async move |this, cx| {
+            let Ok(apply) = result.await else { return };
+            let _ = this.update(cx, |d, cx| {
+                let reread = !d.list.loading;
+                apply(d);
+                if reread { d.reload(cx); }
+                cx.notify();
+            });
+        }).detach();
     }
 
     fn render_created(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -85,14 +103,18 @@ impl ShareDialog {
                     .into_any_element()
             }
             Ok(Created::Blocked { missing, fix }) => {
-                let reason = format!("{} {}", tr_shared("compartilhar_pre_requisito", &[]),
-                    tr_shared(if missing == "funnel" { "compartilhar_falta_funnel" } else { "compartilhar_falta_operador" }, &[]));
                 let (fix_copy, is_url) = (fix.clone(), fix.starts_with("https://"));
                 div().id("share-blocked").role(Role::Alert).flex().flex_col().gap_2()
-                    .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(reason))
-                    .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone()))
-                    .child(Button::new("share-fix").small().label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
-                        .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) }))
+                    .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(tr_shared("compartilhar_pre_requisito", &[])))
+                    .children(missing.iter().map(|item| div().text_sm().text_color(theme::warning()).whitespace_normal().child(match item.as_str() {
+                        "operator" => tr_shared("compartilhar_falta_operador", &[]),
+                        "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
+                        other => other.to_owned(),
+                    })))
+                    .when(!fix.is_empty(), |el| el
+                        .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone()))
+                        .child(Button::new("share-fix").small().label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
+                            .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) })))
                     .into_any_element()
             }
             Err(error) => div().id("share-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(error.clone()).into_any_element(),
@@ -147,39 +169,30 @@ impl Render for ShareDialog {
 impl Hangar {
     pub(super) fn open_share_dialog(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
-        let hangar = cx.entity().downgrade();
-        let dialog = cx.new(|_| ShareDialog { hangar, api, name: name.clone(), list: Remote::default(), created: None,
+        let runtime = self.runtime.handle().clone();
+        let dialog = cx.new(|_| ShareDialog { api, runtime, name: name.clone(), list: Remote::default(), created: None,
             revoke_error: None, copied: false, busy: false });
         dialog.update(cx, |d, cx| d.reload(cx));
         let title = tr_shared("compartilhar_titulo", &[("nome", &name)]);
         window.open_dialog(cx, move |d, _, _| popup::dialog(d).w(px(560.)).title(title.clone()).child(dialog.clone()));
-    }
-
-    /// Pedido do diálogo no runtime do app; a resposta volta ao diálogo se ele ainda existir, e a lista se relê depois de mudar.
-    fn share_call<F, Fut, A>(&mut self, api: Api, dialog: WeakEntity<ShareDialog>, call: F, cx: &mut Context<Self>)
-    where F: FnOnce(Api) -> Fut + Send + 'static, Fut: std::future::Future<Output = A> + Send + 'static, A: FnOnce(&mut ShareDialog) + Send + 'static {
-        let (done, result) = tokio::sync::oneshot::channel();
-        self.runtime.spawn(async move { let _ = done.send(call(api).await); });
-        cx.spawn(async move |_, cx| {
-            let Ok(apply) = result.await else { return };
-            let _ = dialog.update(cx, |d, cx| {
-                let reread = !d.list.loading;
-                apply(d);
-                if reread { d.reload(cx); }
-                cx.notify();
-            });
-        }).detach();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{whatsapp_url, when_label};
+    use crate::i18n::tr_shared;
     use core::prelude::v1::test;
 
     #[test]
     fn whatsapp_link_carries_the_invite_encoded() {
-        assert_eq!(whatsapp_url("https://h.ts.net:8443/convite/AB12"), "https://wa.me/?text=https%3A%2F%2Fh.ts.net%3A8443%2Fconvite%2FAB12");
+        // O texto sai no idioma da tela: confere a forma (mensagem inteira, link codificado), não a frase.
+        let text = tr_shared("compartilhar_whatsapp_texto", &[("link", "https://h.ts.net:8443/convite/AB12")]);
+        let url = whatsapp_url(&text);
+        let query = url.strip_prefix("https://wa.me/?text=").expect("wa.me prefix");
+        assert!(query.ends_with("https%3A%2F%2Fh.ts.net%3A8443%2Fconvite%2FAB12"), "{url}");
+        assert!(query.len() > "https%3A%2F%2Fh.ts.net%3A8443%2Fconvite%2FAB12".len(), "{url}");
+        assert!(!query.contains(['/', ':', ' ']), "{url}");
     }
 
     #[test]

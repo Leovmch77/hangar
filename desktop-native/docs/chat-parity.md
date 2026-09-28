@@ -180,6 +180,14 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Colar convite, servidor de convite, "compartilhamento encerrado" | implementado | sem exercício na janela real |
 | Vários convites do mesmo dono | pendente | o nativo chaveia servidores pelo endereço (o web, pelo id): o convite novo do mesmo dono substitui o anterior, e um endereço que já é servidor próprio recusa o resgate antes de chamar o backend |
 
+## Sessão compartilhada (dono)
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| "Compartilhar sessão" no menu da sessão (some em servidor de convite), diálogo com aviso de confiança, gerar link (aparece uma vez), copiar, WhatsApp, quem tem acesso, revogar um e encerrar todos, pré-requisito do Funnel com o comando de correção | implementado | `share.rs`; sem exercício na janela real; quando o diálogo abre só a lista é lida, o link nasce no botão |
+| 🔗 na linha da sessão compartilhada, com dica | implementado | `SessionInfo.shared`; o web marca a linha do mesmo jeito |
+| Botão "Abrir link" quando o `fix` do pré-requisito é uma URL | diferença deliberada | o web só mostra o texto do `fix`; no nativo a URL abre no navegador e um comando vira "Copiar" |
+| Campo do link selecionável e com seleção automática ao focar | pendente | o nativo mostra o link como texto (não selecionável), com "Copiar"; sem `Input` somente leitura no diálogo |
 ## Como rodar a prova
 
 ```bash

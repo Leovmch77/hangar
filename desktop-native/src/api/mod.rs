@@ -420,16 +420,17 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
 
-pub enum ShareFailure { Blocked { missing: String, fix: String }, Other(Failure) }
+pub enum ShareFailure { Blocked { missing: Vec<String>, fix: String }, Other(Failure) }
 
-/// O que falta na máquina para o Funnel subir (operador, liberação na tailnet) e como resolver.
-pub fn share_blocked(body: &Value) -> Option<(String, String)> {
+/// Tudo o que falta na máquina para o Funnel subir (operador, liberação na tailnet) e como resolver. Lista vazia ainda é
+/// pré-requisito: o `fix` diz o que fazer.
+pub fn share_blocked(body: &Value) -> Option<(Vec<String>, String)> {
     let detail = body.get("detail")?;
     if detail.get("code")?.as_str()? != "erro_compartilhar_pre_requisito" { return None; }
-    let params = detail.get("params")?;
-    // ponytail: mostra só o primeiro que falta; resolvido ele, o próximo clique mostra o seguinte.
-    let missing = params.get("missing")?.as_array()?.first()?.as_str()?.to_owned();
-    Some((missing, params.get("fix")?.as_str()?.to_owned()))
+    let params = detail.get("params");
+    let text = |key: &str| params.and_then(|p| p.get(key));
+    let missing = text("missing").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+    Some((missing, text("fix").and_then(Value::as_str).unwrap_or_default().to_owned()))
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -464,7 +465,9 @@ mod tests {
     fn share_prerequisite_is_read_from_the_409_body() {
         let body = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "msg": "x",
             "params": {"missing": ["operator", "funnel"], "fix": "sudo tailscale set --operator=$USER"}}});
-        assert_eq!(share_blocked(&body), Some(("operator".into(), "sudo tailscale set --operator=$USER".into())));
+        assert_eq!(share_blocked(&body), Some((vec!["operator".into(), "funnel".into()], "sudo tailscale set --operator=$USER".into())));
+        let empty = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "params": {"missing": [], "fix": "https://login.tailscale.com/admin"}}});
+        assert_eq!(share_blocked(&empty), Some((vec![], "https://login.tailscale.com/admin".into())));
         assert_eq!(share_blocked(&json!({"detail": {"code": "erro_outro", "params": {"missing": ["a"], "fix": "b"}}})), None);
         assert_eq!(share_blocked(&json!({"detail": "texto"})), None);
     }
