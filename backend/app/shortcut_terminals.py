@@ -20,6 +20,9 @@ _log = logging.getLogger(__name__)
 
 PREFIX = "shortcut-"
 _OWNER, _ID, _LABEL = "@cp_shortcut_owner", "@cp_shortcut_id", "@cp_shortcut_label"
+# Nanossegundos da criacao: o `session_created` do tmux e por segundo, e dois cliques no mesmo
+# segundo trocariam de ordem na barra de abas.
+_SEQ = "@cp_shortcut_seq"
 _ID_RE = re.compile(r"^[0-9a-f]{6}$")
 _LABEL_MAX = 80
 
@@ -48,7 +51,8 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str]) -
     # um comando que morre na hora ainda encontra o remain-on-exit ligado, e a lista de sessoes
     # nunca ve a sessao sem a marca de escondida.
     args += ["--", shell, "-c", command]
-    for opt, value in (("@cp_hidden", "1"), (_OWNER, owner), (_ID, ident), (_LABEL, label)):
+    for opt, value in (("@cp_hidden", "1"), (_OWNER, owner), (_ID, ident), (_SEQ, str(time.time_ns())),
+                       (_LABEL, label)):
         args += [";", "set-option", "-t", f"={target}:", opt, value]
     args += [";", "set-option", "-w", "-t", f"={target}:", "remain-on-exit", "on"]
     cp = tmux._run(args)
@@ -61,27 +65,28 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str]) -
 def _rows() -> list[dict]:
     cp = tmux._run(["tmux", "list-sessions", "-F",
                     f"#{{session_name}}\t#{{{_OWNER}}}\t#{{{_ID}}}\t#{{session_created}}"
-                    f"\t#{{pane_dead}}\t#{{pane_dead_status}}\t#{{pane_pid}}\t#{{{_LABEL}}}"])
+                    f"\t#{{pane_dead}}\t#{{pane_dead_status}}\t#{{pane_pid}}\t#{{{_SEQ}}}\t#{{{_LABEL}}}"])
     if cp.returncode != 0:
         return []
     out = []
     for line in cp.stdout.splitlines():
-        parts = line.split("\t", 7)
-        if len(parts) != 8 or not parts[0].startswith(PREFIX) or not _ID_RE.match(parts[2]):
+        parts = line.split("\t", 8)
+        if len(parts) != 9 or not parts[0].startswith(PREFIX) or not _ID_RE.match(parts[2]):
             continue
-        name, owner, ident, created, dead, status, pid, label = parts
+        name, owner, ident, created, dead, status, pid, seq, label = parts
         out.append({"tmux": name, "owner": owner, "id": ident,
                     "created": int(created) if created.isdigit() else 0,
                     "alive": dead != "1",
                     "exit_code": int(status) if dead == "1" and status.lstrip("-").isdigit() else None,
-                    "pid": int(pid) if pid.isdigit() else None, "label": label})
+                    "pid": int(pid) if pid.isdigit() else None, "label": label,
+                    "seq": int(seq) if seq.isdigit() else 0})
     return out
 
 
 def list_for(owner: str) -> list[dict]:
     """Terminais de atalho da sessao `owner`, do mais antigo pro mais novo."""
     rows = [r for r in _rows() if r["owner"] == owner]
-    rows.sort(key=lambda r: (r["created"], r["tmux"]))
+    rows.sort(key=lambda r: (r["created"], r["seq"], r["tmux"]))
     return [{k: r[k] for k in ("id", "label", "alive", "exit_code", "created")} for r in rows]
 
 

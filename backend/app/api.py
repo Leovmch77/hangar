@@ -6309,6 +6309,13 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
     command = body.command.strip()
     if not command:
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
+    # Atalho importado com a credencial em branco: rodar mandaria o marcador literal pro programa.
+    from app.shortcut_transfer import has_placeholder
+    missing = has_placeholder(command)
+    if missing:
+        raise HTTPException(422, detail=erro("erro_shortcut_segredo",
+                                             f"preencha a credencial {missing} antes de usar",
+                                             nome=missing))
     if os.name == "nt":
         return _shortcut_shell_detached(name, cwd, command)
     from app import shortcut_terminals
@@ -6385,6 +6392,31 @@ def shortcut_terminal_close(name: str, ident: str):
         raise HTTPException(500, detail=erro("erro_shortcut_terminal_fechar",
                                              "o terminal do atalho nao fechou"))
     return {"ok": True}
+
+
+class ShortcutImportBody(BaseModel):
+    # O conteudo do arquivo: `{"version": 1, "shortcuts": [...]}` ou a lista crua.
+    data: dict | list
+    apply: bool = False
+    # {id do atalho: {nome do marcador: valor}}. Nunca vai pro log.
+    secrets: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
+@app.get("/api/shortcuts/export", dependencies=[Depends(require_auth)])
+def shortcuts_export():
+    # Sem credencial: cada valor de segredo sai como marcador (app/shortcut_transfer.py).
+    from app import shortcut_transfer
+    return shortcut_transfer.export_payload()
+
+
+# POST: o import tem corpo e muda a config; o GET/POST e o par que o proxy da frente aceita.
+@app.post("/api/shortcuts/import", dependencies=[Depends(require_auth)])
+def shortcuts_import(body: ShortcutImportBody):
+    from app import shortcut_transfer
+    try:
+        return shortcut_transfer.import_shortcuts(body.data, apply=body.apply, secrets=body.secrets)
+    except ValueError as e:
+        raise HTTPException(400, detail=erro("erro_shortcut_import_invalido", str(e), motivo=str(e)))
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----
