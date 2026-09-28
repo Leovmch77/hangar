@@ -54,7 +54,8 @@ pub async fn run(api: Api, name: Option<String>, tx: Sender<Update>) {
         }.await;
         if tx.is_closed() { return; }
         let failure = match outcome { Ok(()) => return, Err(e) => e };
-        let stop = matches!(failure.status, Some(401 | 403));
+        // 410 é convite encerrado: tentar de novo não o traz de volta.
+        let stop = matches!(failure.status, Some(401 | 403 | 410));
         if connected_at.elapsed() >= Duration::from_secs(10) { attempt = 0; }
         let delay = failure.retry_after.map(|seconds| seconds.max(1))
             .unwrap_or_else(|| (1u64 << attempt.min(5)).min(30));

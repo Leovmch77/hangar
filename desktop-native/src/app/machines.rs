@@ -895,7 +895,7 @@ impl Hangar {
                 self.machines.adopting = None;
                 match result {
                     Ok(token) => {
-                        self.merge_servers(vec![ServerEntry { id: servers::new_id(), label: peer_id.clone(), address: url.clone(), token, disabled: false }], cx);
+                        self.merge_servers(vec![ServerEntry { id: servers::new_id(), label: peer_id.clone(), address: url.clone(), token, disabled: false, invite: false }], cx);
                         // O nome já foi conferido no teste: a linha casa com o registro sem esperar outra leitura.
                         if let Some(entry) = self.servers.iter().find(|s| servers::norm(&s.address) == servers::norm(&url)) {
                             self.machines.ids.insert(entry.id.clone(), Some(peer_id.clone()));
@@ -1062,9 +1062,16 @@ impl Hangar {
             .label(tr("machines_pair")).disabled(offline), open: Rc::new(move |window, cx| {
                 let _ = this.update(cx, |this, cx| this.open_pair(window, cx));
             }) };
+        let this = cx.entity().downgrade();
+        // Não depende da conexão ativa: quem recebe pode ainda não ter servidor próprio ligado.
+        let invite = FocusOnClick { id: "machines-invite".into(), button: Button::new("machines-invite").outline().small().icon(IconName::Link)
+            .label(crate::i18n::tr_shared("convite_colar_titulo", &[])), open: Rc::new(move |window, cx| {
+                let _ = this.update(cx, |this, cx| this.open_invite_dialog(None, window, cx));
+            }) };
         let top = div().flex().items_center().gap(px(8.))
             .child(div().flex_1().text_xl().font_weight(FontWeight::SEMIBOLD).child(Page::Servers.title()))
             .child(self.mark(div().rounded(px(8.)).child(add), "machines_search_tailscale"))
+            .child(invite)
             .child(pair);
         if self.api.is_none() {
             return div().flex().flex_col().child(top).child(div().mt_4().text_sm().text_color(theme::muted()).child(tr("settings_offline")))
@@ -1724,7 +1731,7 @@ mod tests {
     }
 
     fn entry(id: &str, address: &str, disabled: bool) -> ServerEntry {
-        ServerEntry { id: id.into(), label: id.into(), address: address.into(), token: "t".into(), disabled }
+        ServerEntry { id: id.into(), label: id.into(), address: address.into(), token: "t".into(), disabled, invite: false }
     }
     fn peer(id: &str, url: &str, enabled: bool) -> Peer { Peer { id: id.into(), url: url.into(), enabled } }
     fn check(going: &str, back: Option<Back>) -> Check {

@@ -33,3 +33,9 @@ pub fn tr_web(key: &str, params: &HashMap<String, String>) -> Option<String> {
     for (name, value) in params { text = text.replace(&format!("{{{name}}}"), value); }
     Some(text)
 }
+
+/// Texto que o web também mostra, pela chave dele: uma frase, um dicionário.
+pub fn tr_shared(key: &str, params: &[(&str, &str)]) -> String {
+    let params = params.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+    tr_web(key, &params).unwrap_or_else(|| key.to_owned())
+}

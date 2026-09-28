@@ -242,7 +242,9 @@ fn servers(list: Option<&str>, origin: &str) -> Vec<crate::app::ServerEntry> {
         let address = s.get("baseUrl").and_then(Value::as_str).filter(|a| !a.is_empty()).unwrap_or(origin).trim_end_matches('/').to_owned();
         let text = |key: &str| s.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned);
         Some(crate::app::ServerEntry { id: text("id").unwrap_or_else(crate::app::new_server_id), label: text("label").unwrap_or_default(),
-            address, token, disabled: s.get("disabled").and_then(Value::as_bool) == Some(true) })
+            address, token, disabled: s.get("disabled").and_then(Value::as_bool) == Some(true),
+            // O web marca o servidor de convite; sem a marca ele chamaria rotas do servidor inteiro e levaria 403.
+            invite: s.get("invite").and_then(Value::as_bool) == Some(true) })
     }).collect()
 }
 

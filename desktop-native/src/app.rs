@@ -5,7 +5,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
-    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::tr, theme,
+    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::{tr, tr_shared}, theme,
     interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
@@ -39,6 +39,7 @@ mod files;
 mod settings;
 mod mention;
 mod server_config;
+mod invite;
 mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
@@ -484,6 +485,8 @@ pub struct Hangar {
     remote_gen: u64,
     /// Sobe quando a lista de máquinas muda: a tela sem sessão refaz o seletor dela.
     servers_rev: u64,
+    /// Servidores de convite cujo compartilhamento acabou (chave `servers::norm`).
+    invite_ended: HashSet<String>,
     /// Sessão de outra máquina clicada na barra: abre quando a lista da máquina, agora ativa, chegar.
     pending_open: Option<String>,
     dictation: dictation::Dictation,
@@ -521,7 +524,7 @@ impl Hangar {
         if let Some((address, token)) = &saved
             && !known_servers.iter().any(|s| servers::norm(&s.address) == servers::norm(address)) {
             known_servers.insert(0, servers::ServerEntry { id: servers::new_id(), label: servers::default_label(address),
-                address: address.clone(), token: token.clone(), disabled: false });
+                address: address.clone(), token: token.clone(), disabled: false, invite: false });
         }
         let (saved_address, saved_token) = saved.clone().unwrap_or_else(|| ("http://127.0.0.1:8765".into(), String::new()));
         let address = cx.new(|cx| InputState::new(window, cx).default_value(saved_address).placeholder(tr("server")));
@@ -625,7 +628,7 @@ impl Hangar {
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
-            servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, pending_open: None,
+            servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -710,7 +713,7 @@ impl Hangar {
 
     fn failure(error: &Failure) -> String {
         match error.status {
-            Some(401 | 403) => tr("auth_error"), Some(429) => tr("rate_limited"),
+            Some(401 | 403) => tr("auth_error"), Some(410) => tr_shared("convite_encerrado", &[]), Some(429) => tr("rate_limited"),
             _ if error.uncertain => tr("delivery_uncertain"),
             _ => tr(&error.detail),
         }
@@ -781,20 +784,23 @@ impl Hangar {
         let ready_sessions = self.ready_sessions.take();
         self.list_task = Some(self.runtime.spawn(async move {
             let result = match ready_sessions { Some(sessions) => Ok(sessions), None => api.sessions().await };
-            let fatal = result.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403)));
+            let fatal = result.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403 | 410)));
             if tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await.is_err() || fatal { return; }
             forward_stream(api, None, connection, None, tx).await;
         }));
         self.reset_device(cx);
-        self.costs_reconnected(cx);
-        self.search_reconnected(cx);
-        self.refresh_default_account(cx);
-        self.schedule_account_refresh(cx);
-        // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
-        self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
-        // Página do servidor aberta na troca: relê do servidor novo.
-        if let Some(page) = self.settings { self.settings_opened(page, cx); }
-        self.load_notification_preferences();
+        // Convite só enxerga a própria sessão: custos, contas, busca, configuração e avisos do servidor responderiam 403.
+        if !self.active_invite() {
+            self.costs_reconnected(cx);
+            self.search_reconnected(cx);
+            self.refresh_default_account(cx);
+            self.schedule_account_refresh(cx);
+            // O rascunho é deste servidor: na troca ele morre, no "Reconectar" ao mesmo ele fica.
+            self.server_config.reconnected(format!("{}\n{}", self.server.as_deref().unwrap_or(""), self.token.read(cx).value()));
+            // Página do servidor aberta na troca: relê do servidor novo.
+            if let Some(page) = self.settings { self.settings_opened(page, cx); }
+            self.load_notification_preferences();
+        }
         self.refresh_desktop_palette(cx);
         let a = appearance::get();
         if a.background == appearance::Background::Desktop && a.wallpaper == appearance::Wallpaper::Glass { self.refresh_backdrop(window, cx); }
@@ -1022,7 +1028,8 @@ impl Hangar {
                 return;
             }
             Payload::Reply(key, reply, result) => {
-                if matches!(result, Err(Failure { status: Some(401 | 403), .. })) && self.selected_key().as_ref() == Some(&key)
+                let lost = self.selected_key().as_ref() == Some(&key) && result.as_ref().err().is_some_and(|e| self.auth_lost(e));
+                if lost
                     && !matches!(reply, Reply::Diff(_)) { self.open_connection(window, cx); }
                 self.receive_reply(key, reply, result, window, cx);
                 cx.notify();
@@ -1052,7 +1059,7 @@ impl Hangar {
                 if let Some((address, token)) = self.unsaved_connection.take() {
                     let known = self.servers.iter().any(|s| servers::norm(&s.address) == servers::norm(&address));
                     let label = if known { String::new() } else { servers::default_label(&address) };
-                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false });
+                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false, invite: false });
                     // Disco fora da thread da janela; só a falha volta.
                     self.persist_servers();
                     self.sync_updater(cx);
@@ -1065,7 +1072,7 @@ impl Hangar {
             }
             Payload::Sessions(Err(error)) => {
                 self.pending_open = None;
-                if matches!(error.status, Some(401 | 403)) {
+                if self.auth_lost(&error) {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
                 }
@@ -1082,7 +1089,7 @@ impl Hangar {
                 } else { self.list_online = true; }
             }
             Payload::Stream(Update::Offline(error)) => {
-                if matches!(error.status, Some(401 | 403)) {
+                if self.auth_lost(&error) {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
                 }
@@ -1267,7 +1274,7 @@ impl Hangar {
             }
         } else {
             if !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
-            if current && result.as_ref().err().is_some_and(|error| matches!(error.status, Some(401 | 403))) {
+            if current && result.as_ref().err().is_some_and(|e| self.auth_lost(e)) {
                 self.open_connection(window, cx);
             }
         }
@@ -2110,7 +2117,7 @@ impl Hangar {
         let current = self.selected_key().as_ref() == Some(&key);
         let note = match result {
             Err(error) => {
-                if current && matches!(error.status, Some(401 | 403)) { self.open_connection(window, cx); }
+                if current && self.auth_lost(&error) { self.open_connection(window, cx); }
                 // 5xx pode ter agido lá: mostra o motivo do servidor e a incerteza juntos.
                 let text = match (error.uncertain, error.status) {
                     (true, Some(_)) => format!("{} {}", tr(&error.detail), tr("action_uncertain")),
@@ -3920,7 +3927,8 @@ impl Hangar {
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
                 if key == active {
-                    children.push(self.render_server_header(&entry.id, &key, &entry.label, layout.total, self.list_error.clone(), cx));
+                    let error = self.invite_ended.contains(&key).then(|| tr_shared("convite_encerrado", &[])).or(self.list_error.clone());
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, layout.total, entry.invite, error, cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
                 } else if let Some(list) = self.remote.get(&key) {
                     let mut remote = sidebar::layout(&list.sessions, &query, by_project, &none);
@@ -3928,7 +3936,7 @@ impl Hangar {
                     for group in &mut remote.groups { group.key = format!("{key}::{}", group.key); }
                     total += remote.total;
                     remote_rows += remote.total;
-                    children.push(self.render_server_header(&entry.id, &key, &entry.label, remote.total, list.error.clone(), cx));
+                    children.push(self.render_server_header(&entry.id, &key, &entry.label, remote.total, entry.invite, list.error.clone(), cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&remote, Some(&key), &mut children, window, cx); }
                 }
             }

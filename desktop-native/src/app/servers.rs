@@ -11,6 +11,9 @@ pub(crate) struct ServerEntry {
     pub token: String,
     #[serde(default)]
     pub disabled: bool,
+    /// Servidor que só existe por um convite: nenhuma chamada geral do servidor, e 410 é "compartilhamento encerrado".
+    #[serde(default)]
+    pub invite: bool,
 }
 
 pub(crate) enum RemoteUpdate { Sessions(Result<Vec<SessionInfo>, Failure>), Stream(Update) }
@@ -35,6 +38,8 @@ pub(crate) fn upsert(list: &mut Vec<ServerEntry>, entry: ServerEntry) {
             if !entry.label.is_empty() { found.label = entry.label; }
             found.token = entry.token;
             found.disabled = entry.disabled;
+            // O upsert da primeira conexão chega sem a marca; ela só entra, nunca sai por aqui.
+            found.invite |= entry.invite;
         }
         None => list.push(entry),
     }
@@ -48,7 +53,7 @@ pub(crate) fn new_id() -> String {
 async fn run_list(api: Api, key: String, generation: u64, tx: async_channel::Sender<Envelope>) {
     let send = |update| Envelope { connection: 0, selection: None, payload: Payload::Remote(generation, key.clone(), update) };
     let first = api.sessions().await;
-    let fatal = first.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403)));
+    let fatal = first.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403 | 410)));
     if tx.send(send(RemoteUpdate::Sessions(first))).await.is_err() || fatal { return; }
     let (updates, rx) = async_channel::bounded(128);
     let producer = async { api::sse::run(api, None, updates.clone()).await; updates.close(); };
@@ -80,12 +85,27 @@ impl Hangar {
 
     pub(super) fn receive_remote(&mut self, generation: u64, key: String, update: RemoteUpdate, cx: &mut Context<Self>) {
         if generation != self.remote_gen { return; }
+        let invite = self.server_entry(&key).is_some_and(|s| s.invite);
+        // 401 só é "encerrado" num convite; nos outros continua sendo login perdido.
+        let ended = |error: &Failure| error.status == Some(410) || (invite && error.status == Some(401));
         let Some(list) = self.remote.get_mut(&key) else { return };
         match update {
             RemoteUpdate::Sessions(Ok(sessions)) => { list.sessions = sessions; list.loaded = true; list.error = None; }
+            RemoteUpdate::Sessions(Err(error)) if ended(&error) => {
+                self.invite_ended.insert(key.clone());
+                list.sessions.clear();
+                list.error = Some(tr_shared("convite_encerrado", &[]));
+            }
             RemoteUpdate::Sessions(Err(error)) => list.error = Some(Self::failure(&error)),
             RemoteUpdate::Stream(Update::Online) => list.online = true,
-            RemoteUpdate::Stream(Update::Offline(error)) => { list.online = false; list.error = Some(Self::failure(&error)); }
+            RemoteUpdate::Stream(Update::Offline(error)) => {
+                list.online = false;
+                list.error = Some(if ended(&error) {
+                    self.invite_ended.insert(key.clone());
+                    list.sessions.clear();
+                    tr_shared("convite_encerrado", &[])
+                } else { Self::failure(&error) });
+            }
             RemoteUpdate::Stream(Update::Frame(frame)) => {
                 let applied = match frame.event.as_str() {
                     "sessions" => match serde_json::from_value(frame.data) {
@@ -145,7 +165,7 @@ impl Hangar {
     pub(super) fn sync_updater(&self, cx: &mut Context<Self>) {
         let local = self.api.as_ref().filter(|api| api.is_loopback()).cloned()
             .or_else(|| self.servers.iter().filter(|s| !s.disabled).find_map(|s| Api::new(&s.address, &s.token).ok().filter(Api::is_loopback)));
-        let active = self.api.clone();
+        let active = self.api.clone().filter(|_| !self.active_invite());
         let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
         updater.update(cx, |updater, cx| updater.set_servers(local, active, cx));
     }
@@ -201,7 +221,7 @@ impl Hangar {
 
     /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto na cor da máquina, nome em caixa alta e a contagem numa
     /// pílula. Clicar recolhe; a falha vem por extenso embaixo.
-    pub(super) fn render_server_header(&self, id: &str, key: &str, label: &str, count: usize, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_server_header(&self, id: &str, key: &str, label: &str, count: usize, invite: bool, error: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let group = format!("server:{key}");
         let open = !self.sidebar.is_collapsed(&group);
         div().id(SharedString::from(format!("server-header-{key}"))).flex_shrink_0().mt(px(8.)).px(px(8.)).py(px(4.)).rounded(px(8.))
@@ -211,6 +231,8 @@ impl Hangar {
                 .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 12., theme::faint()))
                 .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::server_color(id)))
                 .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).font_weight(FontWeight::BOLD).child(label.to_uppercase()))
+                .when(invite, |el| el.child(div().flex_shrink_0().px(px(6.)).rounded_full().bg(theme::accent_dim())
+                    .text_size(px(10.5)).text_color(theme::accent_text()).child(tr("invite_badge"))))
                 .when(count > 0, |el| el.child(div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(theme::inset())
                     .flex().justify_center().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(count.to_string()))))
             .when_some(error, |el, text| el.child(div().pl(px(24.)).text_xs().text_color(theme::warning()).truncate().child(text)))
@@ -230,12 +252,24 @@ mod tests {
 
     #[test]
     fn upsert_matches_same_machine_and_keeps_label() {
-        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false };
+        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite: false };
         let mut list = vec![entry("PC", "http://127.0.0.1:8765", "a")];
         upsert(&mut list, entry("", "http://127.0.0.1:8765/", "b"));
         upsert(&mut list, entry("notebook", "https://notebook.ts.net", "c"));
         assert_eq!(list.len(), 2);
         assert_eq!((list[0].label.as_str(), list[0].token.as_str()), ("PC", "b"));
         assert_eq!(default_label("https://notebook-jefferson.tailcac351.ts.net"), "notebook-jefferson");
+    }
+
+    #[test]
+    fn invite_flag_survives_the_plain_upsert_of_the_first_connection() {
+        let mut list = vec![ServerEntry { id: "i".into(), label: "Convite · Jefferson".into(), address: "https://h:8443".into(),
+            token: "g".into(), disabled: false, invite: true }];
+        // O `Sessions(Ok)` da conexão faz upsert sem a marca: ela não pode cair.
+        upsert(&mut list, ServerEntry { id: "x".into(), label: String::new(), address: "https://h:8443/".into(),
+            token: "g".into(), disabled: false, invite: false });
+        assert!(list[0].invite);
+        let old: ServerEntry = serde_json::from_str(r#"{"id":"a","label":"PC","address":"http://127.0.0.1:8765","token":"t"}"#).unwrap();
+        assert!(!old.invite);
     }
 }
