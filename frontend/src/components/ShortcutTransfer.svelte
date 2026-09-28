@@ -104,7 +104,10 @@
 
 <input bind:this={input} type="file" accept="application/json,.json" class="sr-only" onchange={onFile} tabindex="-1" aria-hidden="true" />
 
-<svelte:window onpointerdown={closeMenuOutside} onkeydown={(e) => { if (menuOpen && e.key === 'Escape') menuOpen = false; }} />
+<!-- Captura: o BottomSheet engole o Esc na bolha; aqui ele fecha só o menu, não a sheet. -->
+<svelte:window onpointerdown={closeMenuOutside} onkeydowncapture={(e) => {
+  if (menuOpen && e.key === 'Escape') { e.stopImmediatePropagation(); e.preventDefault(); menuOpen = false; }
+}} />
 
 {#if compact}
   <span class="tr-menu" bind:this={menuEl}>
