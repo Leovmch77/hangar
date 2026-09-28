@@ -113,6 +113,39 @@ def test_shell_runs_in_session_cwd_without_waiting(client, monkeypatch, tmp_path
     assert proof.read_text().strip() == str(tmp_path)
 
 
+def test_shell_runs_under_user_shell_not_sh(client, monkeypatch, tmp_path):
+    # funcao do fish (delphi-vm) so existe no shell do usuario: o atalho tem que usar $SHELL
+    from app import api
+    fake = tmp_path / "meushell"
+    fake.write_text('#!/bin/sh\necho "via-meushell $2" > "$PWD/prova.txt"\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fake))
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    r = client.post("/api/sessions/s/shortcut-shell", json={"command": "delphi-vm"},
+                    headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 202
+    proof = tmp_path / "prova.txt"
+    for _ in range(50):
+        if proof.exists() and proof.read_text().strip():
+            break
+        time.sleep(0.1)
+    assert proof.read_text().strip() == "via-meushell delphi-vm"
+
+
+def test_shortcut_env_fills_display_from_systemd(monkeypatch):
+    from app import api
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":9")
+
+    class _R:
+        stdout = "DISPLAY=:1\nWAYLAND_DISPLAY=wayland-1\nOUTRA=x\n"
+    monkeypatch.setattr(api.subprocess, "run", lambda *a, **k: _R())
+    env = api._shortcut_env()
+    assert env["WAYLAND_DISPLAY"] == "wayland-1"
+    assert env["DISPLAY"] == ":9"          # o que o processo ja tem vence
+    assert "OUTRA" not in env or env["OUTRA"] != "x"
+
+
 def test_shell_empty_command_returns_400(client, monkeypatch, tmp_path):
     from app import api
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))

@@ -6260,6 +6260,30 @@ def runner_pane(name: str):
     return {"pane": runner.run_pane(_session_cwd(name))}
 
 
+_DISPLAY_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "HYPRLAND_INSTANCE_SIGNATURE")
+
+
+def _shortcut_env() -> dict[str, str]:
+    """Ambiente do atalho com as variaveis de tela do gerenciador systemd do usuario.
+
+    A unit do backend sobe antes do compositor exportar DISPLAY/WAYLAND_DISPLAY, entao o
+    ambiente herdado nao tem tela e programa grafico (xfreerdp3, editor) morre sem abrir janela.
+    O que o processo ja tiver vence; systemctl ausente (Windows, container) = ambiente herdado."""
+    env = os.environ.copy()
+    if os.name == "nt":
+        return env
+    try:
+        out = subprocess.run(["systemctl", "--user", "show-environment"],
+                             capture_output=True, text=True, errors="replace", timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return env
+    for line in (out or "").splitlines():
+        key, _, value = line.partition("=")
+        if key in _DISPLAY_VARS and key not in env:
+            env[key] = value
+    return env
+
+
 @app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
           status_code=202)
 def shortcut_shell(name: str, body: ShortcutShellBody):
@@ -6274,8 +6298,15 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
     detach = ({"creationflags": 0x00000200 | 0x08000000} if os.name == "nt"
               else {"start_new_session": True})
+    # No POSIX o comando roda no shell do usuario ($SHELL -c), nao no /bin/sh: atalho tem que
+    # fazer o mesmo que digitar no terminal, e funcao/alias do fish (ex.: `delphi-vm`) nao
+    # existe pro sh — dava 127 calado, com a saida no DEVNULL.
+    if os.name == "nt":
+        argv, use_shell = command, True
+    else:
+        argv, use_shell = [os.environ.get("SHELL") or "/bin/sh", "-c", command], False
     try:
-        proc = subprocess.Popen(command, shell=True, cwd=cwd,
+        proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, env=_shortcut_env(),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, **detach)
     except OSError as e:
