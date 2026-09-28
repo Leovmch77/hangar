@@ -19,6 +19,8 @@ install -Dm644 "$icon" "$data_dir/icons/hicolor/512x512/apps/com.hangar.native.p
 # Um icon-theme.cache antigo nessa pasta esconde o ícone novo: o menu mostra o de "não encontrado".
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f -t "$data_dir/icons/hicolor" >/dev/null 2>&1 || echo 'aviso: o cache de ícones não foi atualizado; o menu pode mostrar o ícone antigo' >&2; fi
 mkdir -p "$(dirname "$desktop_target")"
-printf '[Desktop Entry]\nType=Application\nName=Hangar\nExec="%s"\nIcon=com.hangar.native\nTerminal=false\nCategories=Development;\nStartupWMClass=com.hangar.native\n' "$binary_target" > "$desktop_target"
+printf '[Desktop Entry]\nType=Application\nName=Hangar\nExec="%s" %%u\nIcon=com.hangar.native\nTerminal=false\nCategories=Development;\nMimeType=x-scheme-handler/hangar;\nStartupWMClass=com.hangar.native\n' "$binary_target" > "$desktop_target"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$data_dir/applications"; fi
+# Link hangar:// (convite de sessão compartilhada) abre este app.
+if command -v xdg-mime >/dev/null 2>&1; then xdg-mime default com.hangar.native.desktop x-scheme-handler/hangar || true; fi
 echo "$desktop_target"

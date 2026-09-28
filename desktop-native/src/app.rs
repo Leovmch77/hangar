@@ -503,9 +503,20 @@ impl Drop for Hangar {
 }
 
 impl Hangar {
-    pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
+        // por um update novo, nunca de dentro de outro update do Hangar (reentrar dá pânico no GPUI).
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(link) = links.recv().await {
+                let alive = this.update_in(cx, |this, window, cx| {
+                    window.activate_window();
+                    if !link.is_empty() { this.open_invite_dialog(Some(link), window, cx); }
+                });
+                if alive.is_err() { break; }
+            }
+        }).detach();
         // Prazo do cache de prompt no compositor: mostra minutos, então 20 s bastam; só a faixa de baixo redesenha.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(20)).await;

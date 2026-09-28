@@ -75,6 +75,13 @@ try {
         $atalho.Save()
     }
 
+    # Link hangar:// (convite de sessao compartilhada) abre este app. HKCU: sem administrador.
+    $classe = 'HKCU:\Software\Classes\hangar'
+    New-Item -Path "$classe\shell\open\command" -Force | Out-Null
+    Set-ItemProperty -Path $classe -Name '(default)' -Value 'URL:Hangar'
+    Set-ItemProperty -Path $classe -Name 'URL Protocol' -Value ''
+    Set-ItemProperty -Path "$classe\shell\open\command" -Name '(default)' -Value ('"{0}" "%1"' -f $app)
+
     # Primeira abertura ja conectada ao backend desta maquina. So quando o app ainda nao tem conexao:
     # a que a pessoa escolheu depois nunca e sobrescrita.
     $cfg = Join-Path $env:APPDATA 'hangar-native'

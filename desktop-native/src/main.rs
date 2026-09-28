@@ -17,6 +17,7 @@ mod effects;
 mod electron;
 mod mend;
 mod motion;
+mod single_instance;
 mod term_view;
 mod status;
 mod tables;
@@ -113,11 +114,18 @@ fn log_panics() {
 
 fn main() {
     log_panics();
+    let (url_tx, links) = match single_instance::claim(single_instance::invite_arg(std::env::args())) {
+        single_instance::Claim::Forwarded => return,
+        single_instance::Claim::Primary(tx, rx) => (tx, rx),
+    };
     let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime"));
     // Lida antes da primeira janela: o tema já nasce na escolha salva. Falha de leitura abre no padrão e aparece na tela.
     let appearance_error = match appearance::load() { Ok(value) => { appearance::set(value); None } Err(e) => Some(e) };
     i18n::set_language(appearance::get().language);
-    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(AppAssets);
+    // macOS entrega o link por aqui; Linux e Windows, pela linha de comando (acima).
+    app.on_open_urls(move |urls| for url in urls.into_iter().filter(|u| u.starts_with("hangar://")) { let _ = url_tx.try_send(url); });
+    app.run(move |cx| {
         gpui_kit::init(cx);
         // Só para provar: HANGAR_NATIVE_REDUCE_MOTION=1 liga o movimento reduzido onde o sistema não informa.
         if std::env::var_os("HANGAR_NATIVE_REDUCE_MOTION").is_some() { cx.set_reduce_motion(true); }
@@ -138,7 +146,7 @@ fn main() {
             ..Default::default()
         }, |window, cx| {
             ui_map::install(window);
-            let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), window, cx));
+            let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), links.clone(), window, cx));
             cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
         }).expect("open native window");
         update::report_alive();
