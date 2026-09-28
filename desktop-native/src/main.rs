@@ -130,17 +130,15 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window_size(), cx))),
             app_id: Some("com.hangar.native".into()),
             titlebar: Some(TitlebarOptions { title: Some("Hangar".into()), ..Default::default() }),
-            window_background: if cfg!(target_os = "linux") { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
+            // A raiz pinta o fundo escolhido; o Vidro troca para Blurred no Windows e no macOS (`refresh_backdrop`).
+            window_background: WindowBackgroundAppearance::Transparent,
             // Resposta chegando com o foco no outro monitor anda no ritmo da tela, não a 30 quadros.
             inactive_frame_interval: None,
             ..Default::default()
         }, |window, cx| {
             ui_map::install(window);
             let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), window, cx));
-            cx.new(|cx| {
-                let root = Root::new(view, window, cx);
-                if cfg!(target_os = "linux") { root.bg(rgba(0x00000000)) } else { root }
-            })
+            cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
         }).expect("open native window");
         update::report_alive();
         cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();

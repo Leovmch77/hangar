@@ -1,6 +1,7 @@
 """Paleta Material You que o desktop (quickshell/end-4) gera do papel de parede."""
 import logging
 import os
+import sys
 
 import pytest
 
@@ -199,4 +200,40 @@ def test_wallpaper_recusa_o_que_nao_e_imagem(tmp_path, monkeypatch):
     ponteiro = tmp_path / "path.txt"
     ponteiro.write_text(str(alvo), encoding="utf-8")
     monkeypatch.setattr(desktop_palette, "_caminho_wallpaper", lambda: ponteiro)
+    assert desktop_palette.wallpaper() is None
+
+
+def _winreg_falso(valor):
+    """`winreg` de mentira: `valor` None = valor ausente no registro (o real levanta FileNotFoundError)."""
+    import contextlib
+    import types
+
+    def consultar(_chave, nome):
+        assert nome == "WallPaper"
+        if valor is None:
+            raise FileNotFoundError(2, "O sistema não pode encontrar o arquivo especificado")
+        return valor, 1
+
+    return types.SimpleNamespace(
+        HKEY_CURRENT_USER=object(),
+        OpenKey=lambda _raiz, caminho: contextlib.nullcontext(caminho),
+        QueryValueEx=consultar,
+    )
+
+
+def test_wallpaper_no_windows_vem_do_registro(tmp_path, monkeypatch):
+    # O ramo do Windows roda no Linux trocando a constante do modulo, nunca `os.name` (leva o pathlib).
+    foto = tmp_path / "img0.jpg"
+    foto.write_bytes(b"\xff\xd8 fingindo ser jpeg")
+    monkeypatch.setattr(desktop_palette, "_E_WINDOWS", True)
+    monkeypatch.setattr(desktop_palette, "_caminho_wallpaper", lambda: pytest.fail("no Windows nao ha path.txt"))
+    monkeypatch.setitem(sys.modules, "winreg", _winreg_falso(str(foto)))
+    assert desktop_palette.wallpaper() == foto
+
+
+@pytest.mark.parametrize("valor", [None, ""])
+def test_wallpaper_no_windows_sem_valor_devolve_nada(monkeypatch, valor):
+    # Cor sólida ou apresentação deixam o valor vazio; perfil novo pode nem ter o valor.
+    monkeypatch.setattr(desktop_palette, "_E_WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "winreg", _winreg_falso(valor))
     assert desktop_palette.wallpaper() is None
