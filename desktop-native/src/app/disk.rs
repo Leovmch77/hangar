@@ -158,11 +158,16 @@ fn prune(project: &Path, days: i64) {
     }
 }
 
-/// `shortcut-shell`: o comando pelo shell, no cwd da sessão, desprendido e sem saída.
+/// `shortcut-shell`: o comando pelo shell do usuário, no cwd da sessão, desprendido e sem saída.
+/// `$SHELL` e não `/bin/sh`, igual ao backend: função/alias do fish (`delphi-vm`) não existe pro sh.
 fn shell(cwd: &Path, command: &str) -> Result<Value, Failure> {
     let command = command.trim();
     if command.is_empty() { return Err(refusal(400, "comando vazio")); }
-    launch(Command::new("/bin/sh").arg("-c").arg(command).current_dir(cwd)).map_err(|error| refusal(500, error.to_string()))
+    launch(Command::new(user_shell()).arg("-c").arg(command).current_dir(cwd)).map_err(|error| refusal(500, error.to_string()))
+}
+
+fn user_shell() -> String {
+    std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
 
 /// `open-editor`: o binário da configuração do servidor com a pasta como único argumento, sem shell.
