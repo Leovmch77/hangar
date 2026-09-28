@@ -5,7 +5,7 @@ import * as m from '../paraglide/messages';
   import AssistantBubble from '../components/AssistantBubble.svelte';
   import type { EventSourceLike } from '@hangar/core';
 import { openEventStreamForServer, getHistoryTailForServer } from '@hangar/core';
-  import { listServers, serverColor } from '../lib/auth';
+  import { listOwnServers, serverColor } from '../lib/auth';
   import type { Server } from '../lib/auth';
   import type { ChatEvent, StateEvent } from '@hangar/core';
   import { rotuloEstado, stateColors, latestAssistantEvent, type CompareId } from '@hangar/core';
@@ -94,7 +94,7 @@ import { openEventStreamForServer, getHistoryTailForServer } from '@hangar/core'
   }
 
   onMount(() => {
-    const servers = listServers();
+    const servers = listOwnServers();
     cards = ids.map((id) => {
       const srv = servers.find((s) => s.id === id.serverId);
       return {

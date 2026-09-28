@@ -4,7 +4,7 @@
 
 import { normalizeBaseUrl } from './url';
 import * as m from '../paraglide/messages';
-import { type Server, serverColor, registrarDiag } from '@hangar/core';
+import { type Server, type InviteRedeemResult, serverColor, registrarDiag } from '@hangar/core';
 export { serverColor };
 export type { Server };
 
@@ -64,11 +64,13 @@ export function mergeServers(remote: Server[], local: Server[]): Server[] {
 
 // Sobrescreve a lista inteira (hidratacao a partir do vault decifrado). Mantem o ativo se ainda
 // existir, senao cai pro primeiro. NAO dispara notifyChanged (veio do hub, nao re-empurrar).
+// Convite nunca vem do cofre (o token vale só no aparelho que resgatou): os daqui ficam.
 export function setServers(list: Server[]): void {
-  writeServers(list);
+  const merged = [...list.filter((s) => !s.invite), ...readServers().filter((s) => s.invite)];
+  writeServers(merged);
   const active = localStorage.getItem(ACTIVE_KEY);
-  if (!active || !list.some((s) => s.id === active)) {
-    if (list[0]) localStorage.setItem(ACTIVE_KEY, list[0].id);
+  if (!active || !merged.some((s) => s.id === active)) {
+    if (merged[0]) localStorage.setItem(ACTIVE_KEY, merged[0].id);
     else localStorage.removeItem(ACTIVE_KEY);
   }
 }
@@ -165,6 +167,37 @@ export function listAllServers(): Server[] {
   return readServers();
 }
 
+// As máquinas desta pessoa: sem os convites. Toda tela que fala com o servidor inteiro (custos,
+// uso, arquivo, configuração, criar sessão, push) usa esta.
+export function listOwnServers(): Server[] {
+  return listServers().filter((s) => !s.invite);
+}
+
+export function isActiveInvite(): boolean {
+  return activeServer()?.invite === true;
+}
+
+// Sempre uma entrada nova: dois convites do mesmo dono têm o mesmo endereço e tokens diferentes.
+export function addInviteServer(r: InviteRedeemResult): string {
+  const id = makeId();
+  writeServers([...readServers(), {
+    id, label: m.convite_rotulo({ dono: r.owner }), baseUrl: normalizeBaseUrl(r.address), token: r.token, invite: true,
+  }]);
+  if (!localStorage.getItem(ACTIVE_KEY)) localStorage.setItem(ACTIVE_KEY, id);
+  notifyChanged();
+  return id;
+}
+
+export function markInviteEnded(id: string | null): void {
+  if (!id) return;
+  const list = readServers();
+  const i = list.findIndex((s) => s.id === id && s.invite);
+  if (i < 0 || list[i].inviteEnded) return;
+  list[i] = { ...list[i], inviteEnded: true };
+  writeServers(list);
+  notifyChanged();
+}
+
 export function setServerDisabled(id: string, disabled: boolean): boolean {
   const list = readServers();
   const i = list.findIndex((s) => s.id === id);
@@ -205,7 +238,7 @@ export function addServer(
   baseUrl = normalizeBaseUrl(baseUrl);
   const norm = (u: string) => u.replace(/\/+$/, '');
   const list = readServers();
-  const i = list.findIndex((s) => norm(s.baseUrl) === norm(baseUrl));
+  const i = list.findIndex((s) => !s.invite && norm(s.baseUrl) === norm(baseUrl));
   let id: string;
   let existed: boolean;
   if (i >= 0) {

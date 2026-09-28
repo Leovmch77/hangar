@@ -4,7 +4,7 @@ import App from './App.svelte';
 import { applyTheme, getThemePref, getTextoDoDesktop } from './lib/theme';
 import { buscarPaleta, aplicarPaleta, ligarAtualizacaoAoFocar } from './lib/desktopTheme';
 import { applyBg, applyAppearance, applyLiquid } from './lib/background';
-import { ensureCookie, getBaseUrl, getToken, dropActiveServer } from './lib/auth';
+import { ensureCookie, getBaseUrl, getToken, dropActiveServer, isActiveInvite, markInviteEnded, getActiveId } from './lib/auth';
 import { localeAtual } from './lib/locale';
 import { configureApi, configureLocale, configureDiag } from '@hangar/core';
 import { registrar as registrarDiag, novoReq } from './lib/diag';
@@ -20,6 +20,8 @@ configureApi({
   origin: window.location.origin,
   createEventSource: (url, { withCredentials }) =>
     new EventSource(url, { withCredentials }) as unknown as import('@hangar/core').EventSourceLike,
+  isInvite: isActiveInvite,
+  onInviteEnded: (id) => markInviteEnded(id ?? getActiveId()),
 });
 
 // Pedaco que nao existe mais no servidor -> recarrega. A aba aberta ANTES de um deploy guarda um

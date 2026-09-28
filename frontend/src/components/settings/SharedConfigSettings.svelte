@@ -7,7 +7,7 @@
     type ConfigSyncDiff, type ConfigSyncGroup, type ConfigSyncItem, type ConfigSyncItemResult,
     type ConfigSyncManifest, type ConfigSyncReport, type ConfigSyncRow,
   } from '@hangar/core';
-  import { listServers, onServersChanged, type Server } from '../../lib/auth';
+  import { listOwnServers, onServersChanged, type Server } from '../../lib/auth';
   import ConfirmSheet from '../ConfirmSheet.svelte';
   import { localeAtual } from '../../lib/locale';
   import * as m from '../../paraglide/messages';
@@ -20,7 +20,7 @@
   $effect(() => onServersChanged(() => serverVersion++));
   const servers = $derived.by(() => {
     serverVersion;   // listServers() não é reativo
-    return listServers();
+    return listOwnServers();
   });
 
   // Só o valor inicial: trocar o servidor do modal remonta a tela pelo `{#key}`.

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as m from '../paraglide/messages';
 import type { Server } from './auth';
 import { configureDiag } from '@hangar/core';
@@ -432,5 +432,66 @@ describe('addServerWithRollback', () => {
     expect(listServers().find((s) => s.id === vps.id)!.token).toBe('tok-vps-novo');
     expect(listServers().find((s) => s.baseUrl === 'http://casa:8765')!.token).toBe('tok-casa');
     expect(getActiveId()).toBe(vps.id);
+  });
+});
+
+const convite = await import('./auth');
+
+describe('servidor de convite', () => {
+  const R = { token: 'tg', session: 's1', owner: 'Jefferson', address: 'https://dono.ts.net:8443' };
+  beforeEach(() => { store.clear(); });
+
+  it('entra na lista sem virar ativo e fica fora dos servidores próprios', () => {
+    store.set('cp_servers', JSON.stringify([S('a', 'http://casa:8765')]));
+    store.set('cp_active', 'a');
+    const id = convite.addInviteServer(R);
+    expect(convite.getActiveId()).toBe('a');
+    expect(convite.listAllServers().find((s) => s.id === id)).toMatchObject({
+      invite: true, token: 'tg', baseUrl: 'https://dono.ts.net:8443', label: m.convite_rotulo({ dono: 'Jefferson' }),
+    });
+    expect(convite.listOwnServers().map((s) => s.id)).toEqual(['a']);
+  });
+
+  it('dois convites do mesmo dono viram duas entradas', () => {
+    const a = convite.addInviteServer(R);
+    const b = convite.addInviteServer({ ...R, token: 'tg2', session: 's2' });
+    expect(a).not.toBe(b);
+    expect(convite.listAllServers().filter((s) => s.invite).map((s) => s.token)).toEqual(['tg', 'tg2']);
+  });
+
+  it('addServer no mesmo endereço não sobrescreve o token do convite', () => {
+    convite.addInviteServer(R);
+    addServer('https://dono.ts.net:8443', 'token-do-dono');
+    const lista = convite.listAllServers();
+    expect(lista.find((s) => s.invite)?.token).toBe('tg');
+    expect(lista.find((s) => !s.invite)?.token).toBe('token-do-dono');
+  });
+
+  it('setServers (hidratação do cofre) preserva os convites deste aparelho', () => {
+    const id = convite.addInviteServer(R);
+    convite.setServers([S('a', 'http://casa:8765')]);
+    expect(convite.listAllServers().map((s) => s.id)).toEqual(['a', id]);
+  });
+
+  it('isActiveInvite segue o ativo', () => {
+    const id = convite.addInviteServer(R);
+    expect(convite.isActiveInvite()).toBe(true);   // único servidor: virou o ativo
+    store.set('cp_servers', JSON.stringify([...convite.listAllServers(), S('a', 'http://casa:8765')]));
+    convite.selectServer('a');
+    expect(convite.isActiveInvite()).toBe(false);
+    convite.selectServer(id);
+    expect(convite.isActiveInvite()).toBe(true);
+  });
+
+  it('markInviteEnded marca só convite e avisa uma vez', () => {
+    const id = convite.addInviteServer(R);
+    const cb = vi.fn();
+    const off = onServersChanged(cb);
+    convite.markInviteEnded(id);
+    convite.markInviteEnded(id);
+    convite.markInviteEnded(null);
+    off();
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(convite.listAllServers().find((s) => s.id === id)?.inviteEnded).toBe(true);
   });
 });

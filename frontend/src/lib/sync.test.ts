@@ -33,6 +33,13 @@ afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
 describe('sync crypto', () => {
+  it('convite nunca vai para o cofre', async () => {
+    const { encKey } = await deriveKeys('hunter2', btoa('0123456789abcdef'), 1000);
+    const proprio = { id: 'a', label: 'casa', baseUrl: 'http://h:1', token: 't1' };
+    const convite = { id: 'c', label: 'Convite · J', baseUrl: 'https://d:8443', token: 'g', invite: true };
+    expect(await decryptList(encKey, await encryptList(encKey, [proprio, convite]))).toEqual([proprio]);
+  });
+
   it('round-trips a server list through derive/encrypt/decrypt', async () => {
     const salt = btoa('0123456789abcdef');
     const { authHash, encKey } = await deriveKeys('hunter2', salt, 600000);

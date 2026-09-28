@@ -15,7 +15,7 @@ const state = vi.hoisted(() => {
 });
 
 vi.mock('../../lib/auth', () => ({
-  listServers: () => state.servers,
+  listOwnServers: () => state.servers,
   onServersChanged: () => () => {},
 }));
 vi.mock('@hangar/core', async (importOriginal) => ({

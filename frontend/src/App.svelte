@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { isAuthenticated, setServers, listServers, listAllServers, mergeServers, onServersChanged, clearCredentials, selectServer, getActiveId, serverIdentidade, type Server } from './lib/auth';
+  import { isAuthenticated, setServers, listOwnServers, listAllServers, mergeServers, onServersChanged, clearCredentials, selectServer, getActiveId, serverIdentidade, type Server } from './lib/auth';
   import { logoutLocal } from './lib/logout';
   import { getVault, decryptList, encryptList, putVault, logout as syncLogout, syncStatus, cachedSyncStatus, isSyncUnauthorized, stashKey, loadKey, clearKey } from './lib/sync';
   import * as m from './paraglide/messages';
@@ -198,13 +198,14 @@
   // entao um id desconhecido devolveria O PRIMEIRO SERVIDOR DA LISTA, silenciosamente.
   const alvoConfig = $derived.by(() => {
     versaoServidores;                                   // dependencia explicita, ver acima
-    if (cfg?.srv) return listServers().find((s) => s.id === cfg.srv) ?? null;
+    if (cfg?.srv) return listOwnServers().find((s) => s.id === cfg.srv) ?? null;
     // SEM `?srv=` o alvo e o ATIVO — que ja e o servidor da sessao aberta (applyRouteServer o troca
     // a cada rota). Devolver null aqui abria a tela Servidores com NADA escolhido e "Servidor
     // indisponivel" nas horas silenciosas mesmo havendo servidor cadastrado. `null` fica reservado
     // pro caso que ele realmente descreve: um `?srv=` que NAO resolve (removido, link velho, id
     // re-pareado) — e ai as telas de servidor continuam caindo na Aparencia, como antes.
-    return listServers().find((s) => s.id === getActiveId()) ?? null;
+    // Sessão de convite aberta: configurar é sempre de uma máquina própria.
+    return listOwnServers().find((s) => s.id === getActiveId()) ?? listOwnServers()[0] ?? null;
   });
 
   // Alvo que nao resolve (servidor removido, link velho, id re-pareado) NAO abre tela de servidor: cai
@@ -229,7 +230,7 @@
   // base/token/label diferentes (rotação de token, re-parear), que um `alvo?.id` não pegaria.
   const identidadeConfig = $derived.by(() => {
     versaoServidores;
-    const s = alvoConfig ?? listServers().find((x) => x.id === getActiveId()) ?? null;
+    const s = alvoConfig ?? listOwnServers().find((x) => x.id === getActiveId()) ?? null;
     return serverIdentidade(s);
   });
 
@@ -455,7 +456,7 @@
       // de dentro os dois casos são indistinguíveis. Avisa, em vez de sumir calado.
       const norm = (u: string) => u.replace(/\/+$/, '');
       const noHub = new Set(remote.map((s) => norm(s.baseUrl)));
-      const descartados = listAllServers().filter((s) => !noHub.has(norm(s.baseUrl))).length;
+      const descartados = listAllServers().filter((s) => !s.invite && !noHub.has(norm(s.baseUrl))).length;
       setServers(remote);
       if (descartados > 0) vaultPush.descartou(descartados);
     } else {

@@ -7,7 +7,7 @@
 // consumidor ficar permanentemente montado, considerar um keep-alive com delay no release.
 import * as m from '../paraglide/messages';
 import type { EventSourceLike } from '@hangar/core';
-import { openSessionsStream, registrarDiag, novoReqDiag } from '@hangar/core';
+import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer } from '@hangar/core';
 import { getActiveId, listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
 import { getIdentificador } from './peers';
@@ -132,6 +132,14 @@ function createSessionsStore() {
     }
     for (const s of list) {
       if (onlyId !== undefined && s.id !== onlyId) continue;
+      if (s.inviteEnded) {
+        streams.get(s.id)?.close(); streams.delete(s.id);
+        clearTimeout(retryTimers.get(s.id)); retryTimers.delete(s.id);
+        clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
+        clearTimeout(primeiros.get(s.id)); primeiros.delete(s.id);
+        slots.set(s.id, { sessions: [], error: m.convite_encerrado() });
+        continue;
+      }
       if (streams.has(s.id)) continue;
       if (intocavel(s.id) && estaDesligado(s.id)) retentarAgora(s.id);
       if (retryAfterMs(s.id) > 0) {
@@ -149,6 +157,7 @@ function createSessionsStore() {
       let identityRetryAt = 0;
       let identityNeeded = false;
       const loadIdentity = () => {
+        if (s.invite) return;   // servidor de convite não responde /api/peers/identificador
         if (!isCurrent() || !identityNeeded || identityRequested || Date.now() < identityRetryAt) return;
         identityRequested = true;
         void getIdentificador(s).then(({ identificador }) => {
@@ -327,6 +336,8 @@ function createSessionsStore() {
         clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
         cancelarPrazo();   // o stream falhou; NÃO mede — falhar rápido não é ser rápido
         scheduleRetry(s.id);
+        // EventSource não mostra o status: um 410 de convite só aparece perguntando de novo.
+        if (s.invite) void checkInviteForServer(s).catch(() => {});
       };
     }
     recompute();

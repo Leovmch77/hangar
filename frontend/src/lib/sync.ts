@@ -65,7 +65,8 @@ export function clearKey(): void {
 export async function encryptList(encKey: CryptoKey, servers: Server[]): Promise<{ iv: string; data: string }> {
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
-  const pt = enc.encode(JSON.stringify(servers));
+  // Convite fica só no aparelho que resgatou: o token dele não pode chegar aos outros.
+  const pt = enc.encode(JSON.stringify(servers.filter((s) => !s.invite)));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encKey, pt); // ct includes the GCM tag
   return { iv: b64(iv.buffer), data: b64(ct) };
 }

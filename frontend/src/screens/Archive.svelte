@@ -10,7 +10,7 @@ import { intlLocale } from '../lib/locale';
   } from '@hangar/core';
   import { arquivo, clienteQuery } from '../lib/queries';
   import type { ChatEvent } from '@hangar/core';
-  import { selectServer, listServers, getActiveId, serverColor } from '../lib/auth';
+  import { selectServer, listOwnServers, getActiveId, serverColor } from '../lib/auth';
   import ProviderGlyph from '../components/icons/ProviderGlyph.svelte';
   import { basename, providerName } from '@hangar/core';
 
@@ -47,7 +47,7 @@ import { intlLocale } from '../lib/locale';
 
   // Servidor DE ONDE navegar o arquivo: apiFetch usa o servidor ATIVO, entao sem um seletor o arquivo
   // so mostrava o servidor ativo e nao dava pra saber/escolher de qual servidor abrir (multi-servidor).
-  const servers = listServers();
+  const servers = listOwnServers();
   let activeServerId = $state(getActiveId());
   function pickServer(id: string) {
     if (id === activeServerId) return;

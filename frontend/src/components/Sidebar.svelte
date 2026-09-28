@@ -893,7 +893,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                   <span class="name-row">
                     <span class="name-and-signals">
                       <span class="sess-name">{s.name}</span>
-                      <SessionSignals browser={rowKey in navegadorPanel.abertos} headless={s.headless === true} />
+                      <SessionSignals browser={rowKey in navegadorPanel.abertos} headless={s.headless === true}
+                                      shared={s.shared === true} guest={s.serverInvite === true} />
                     </span>
                     {#if pendingQuestions > 0}
                       <span class="sess-badge pending-questions" title={questionLabel} aria-label={questionLabel}>? {pendingQuestions}</span>

@@ -1,10 +1,11 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
 
-  let { browser = false, headless = false }: { browser?: boolean; headless?: boolean } = $props();
+  let { browser = false, headless = false, shared = false, guest = false }:
+    { browser?: boolean; headless?: boolean; shared?: boolean; guest?: boolean } = $props();
 </script>
 
-{#if browser || headless}
+{#if browser || headless || shared || guest}
   <span class="session-signals">
     {#if browser}
       <span class="session-signal session-signal--browser" role="img" aria-label={m.nav_remoto_titulo()} title={m.nav_remoto_titulo()}>
@@ -20,13 +21,29 @@
         </svg>
       </span>
     {/if}
+    {#if shared}
+      <span class="session-signal session-signal--shared" role="img" aria-label={m.sessao_compartilhada()} title={m.sessao_compartilhada()}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+          <path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>
+        </svg>
+      </span>
+    {/if}
+    {#if guest}
+      <span class="session-signal session-signal--guest" role="img" aria-label={m.sessao_convidado()} title={m.sessao_convidado()}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+          <circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/>
+        </svg>
+      </span>
+    {/if}
   </span>
 {/if}
 
 <style>
   .session-signals { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; }
   .session-signal { display: inline-flex; color: var(--text-muted); opacity: .72; }
-  .session-signal--browser { color: var(--accent); opacity: .82; }
+  .session-signal--browser,
+  .session-signal--shared,
+  .session-signal--guest { color: var(--accent); opacity: .82; }
   .session-signal svg {
     width: 11px; height: 11px; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
   }

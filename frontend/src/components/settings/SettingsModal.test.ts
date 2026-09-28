@@ -52,6 +52,7 @@ vi.mock('../../lib/auth', async () => {
   listServers,
   // Sem desligadas nestes testes: a lista inteira é a mesma das ligadas.
   listAllServers: (...a: unknown[]) => listServers(...a),
+  listOwnServers: (...a: unknown[]) => listServers(...a),
   getActiveId: vi.fn(),
   selectServer: vi.fn(),
   renameServer: vi.fn(),

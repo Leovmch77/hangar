@@ -3,7 +3,7 @@
   import * as m from '../paraglide/messages';
   import NavBar from '../components/NavBar.svelte';
   import Select from '../components/Select.svelte';
-  import { listServers, onServersChanged, type Server } from '../lib/auth';
+  import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
   import { clienteQuery, uso } from '../lib/queries';
   import {
     mergeUso, agruparPorPlugin, Aquecendo, projectLabel,
@@ -40,8 +40,8 @@
       return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
     } catch { return []; }
   }
-  let servidores = $state<Server[]>(listServers());
-  $effect(() => onServersChanged(() => { servidores = listServers(); }));
+  let servidores = $state<Server[]>(listOwnServers());
+  $effect(() => onServersChanged(() => { servidores = listOwnServers(); }));
   let servidoresOff = $state<Set<string>>(new Set(lerServidoresOff()));
   const marcados = $derived(servidores.filter((s) => !servidoresOff.has(s.id)));
   const servidoresAtivos = $derived(marcados.length ? marcados : servidores);

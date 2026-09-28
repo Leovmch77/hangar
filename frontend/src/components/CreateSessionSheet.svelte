@@ -20,7 +20,7 @@
   import { segredos } from '../lib/segredos.svelte';
   import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
   import type { ChatEvent } from '@hangar/core';
-  import { selectServer, getActiveId, serverColor, serverIdentidade } from '../lib/auth';
+  import { selectServer, getActiveId, listOwnServers, serverColor, serverIdentidade } from '../lib/auth';
   import type { Server } from '../lib/auth';
   import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
   import { criarSeletorNativo } from '../lib/pastaNativa.svelte';
@@ -61,7 +61,10 @@
 
   // Servidor-alvo da nova sessão. Como o scanner/dedupe/criação leem o servidor ATIVO, escolher
   // aqui = selectServer(id): todas as chamadas seguintes do sheet caem nesse backend.
-  let targetServer = $state(getActiveId() ?? '');
+  const ativoInicial = getActiveId();
+  let targetServer = $state(
+    listOwnServers().some((s) => s.id === ativoInicial) ? ativoInicial! : (listOwnServers()[0]?.id ?? ''),
+  );
   const codexServer = $derived(servers.find((s) => s.id === targetServer) ?? null);
   const codexIdentity = $derived(serverIdentidade(codexServer));
   let codexAccounts = $state<CodexAccount[]>([]);
@@ -106,12 +109,13 @@
 
   // Criar sessão em máquina desligada não funciona, então ela não é oferecida. O alvo atual fica
   // visível mesmo offline: sumir com o chip selecionado deixaria a folha sem seleção nenhuma.
+  const proprios = $derived(servers.filter((s) => !s.invite));   // convite nunca é alvo de sessão nova
   const serversVisiveis = $derived(
-    servers.filter((s) => !offline.has(s.id) || s.id === targetServer),
+    proprios.filter((s) => !offline.has(s.id) || s.id === targetServer),
   );
   // Quantas sumiram. Esconder calado vira "cadê minha máquina?" — a pessoa não tem como saber se
   // ela foi apagada, se o app perdeu, ou se está só desligada. Uma linha resolve.
-  const ocultas = $derived(servers.length - serversVisiveis.length);
+  const ocultas = $derived(proprios.length - serversVisiveis.length);
   // A rota mais rápida ENTRE AS VISÍVEIS. Só marca com 2+ medidas: com uma só, "a mais rápida" é
   // a única, e a coroa não informa nada. Empate fica com a primeira, que é a ordem do cadastro.
   const maisRapido = $derived.by(() => {
@@ -647,7 +651,7 @@
       // máquina — criar no servidor B daria uma sessão apontando pra um caminho que não existe lá.
       const target = b && servers.some((s) => s.id === b.serverId)
         ? b.serverId
-        : (servers.find((s) => s.id === cur) ? cur! : servers[0]?.id ?? '');
+        : (proprios.find((s) => s.id === cur) ? cur! : proprios[0]?.id ?? '');
       if (target) pickTarget(target);      // pickTarget ja carrega configs, motores e providers do alvo
       else {
         loadConfigs();

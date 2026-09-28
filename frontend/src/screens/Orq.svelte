@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { listServers, onServersChanged, type Server } from '../lib/auth';
+  import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
   import { getOrqConductorForServer, getOrqForServer } from '@hangar/core';
   import { clienteQuery, orqDetalhe } from '../lib/queries';
   import type { OrqConductor as OrqConductorData, OrqExecucao, OrqFicha } from '@hangar/core';
@@ -21,8 +21,8 @@
   // malha pode ter duas execuções de mesmo id em servidores diferentes.
   interface ExecComServidor { exec: OrqExecucao; servidor: Server }
 
-  let servidores = $state<Server[]>(listServers());
-  $effect(() => onServersChanged(() => { servidores = listServers(); }));
+  let servidores = $state<Server[]>(listOwnServers());
+  $effect(() => onServersChanged(() => { servidores = listOwnServers(); }));
 
   let carregando = $state(true);
   // O spinner de tela inteira é só da primeira carga: na revalidação ele desmontava o detalhe e o

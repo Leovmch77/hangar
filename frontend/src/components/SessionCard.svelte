@@ -342,7 +342,8 @@ import { textoProblema } from '../lib/problema';
           />
         {:else}
           <span class="session-name">{title}</span>
-          <SessionSignals browser={browserOpen} headless={session.headless === true} />
+          <SessionSignals browser={browserOpen} headless={session.headless === true}
+                          shared={session.shared === true} guest={(session as AggSession).serverInvite === true} />
           <!-- Marca do agente junto dos outros sinais do nome, não numa fila de chips própria: cada
                agente tem marca colorida, o nome ao lado repetia o desenho e segue no title. -->
           {#if showProvider}

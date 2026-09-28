@@ -3,7 +3,7 @@
   import * as m from '../paraglide/messages';
   import NavBar from '../components/NavBar.svelte';
   import Select from '../components/Select.svelte';
-  import { listServers, onServersChanged, type Server } from '../lib/auth';
+  import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
   import { clienteQuery, custos, uso } from '../lib/queries';
   import {
     mergeReports, fillDayGaps, tarifasPorModelo, custoDesconhecido, precoParcial, partirOcultos,
@@ -133,8 +133,8 @@
   // `listServers()` lê localStorage e NÃO é reativo: a hidratação do vault chega depois do mount
   // (App.svelte mantém um contador só por causa disso, e `setServers` nem dispara o aviso). Um
   // snapshot no init deixaria os chips com a lista velha. Assinar é uma linha.
-  let servidores = $state<Server[]>(listServers());
-  $effect(() => onServersChanged(() => { servidores = listServers(); }));
+  let servidores = $state<Server[]>(listOwnServers());
+  $effect(() => onServersChanged(() => { servidores = listOwnServers(); }));
 
   let servidoresOff = $state<Set<string>>(new Set(lerServidoresOff()));
   const marcados = $derived(servidores.filter((s) => !servidoresOff.has(s.id)));

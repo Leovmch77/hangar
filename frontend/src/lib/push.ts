@@ -2,7 +2,7 @@
 // compartilhada serve TODOS os servidores (single-user controla os 3). Registra a inscricao em cada
 // servidor com o label/id locais, pra notif mostrar "Casa · sessao" e linkar certo.
 import * as m from '../paraglide/messages';
-import { listServers } from './auth';
+import { listOwnServers } from './auth';
 import { getVapidKey, subscribePush } from '@hangar/core';
 
 function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
@@ -30,7 +30,7 @@ export async function enablePush(): Promise<number> {
   const perm = await Notification.requestPermission();
   if (perm !== 'granted') throw new Error(m.push_permissao_negada());
 
-  const servers = listServers();
+  const servers = listOwnServers();
   if (servers.length === 0) throw new Error(m.push_sem_servidor());
 
   // VAPID compartilhada: pega do 1o servidor que responder com chave. Servidor offline -> tenta o proximo.

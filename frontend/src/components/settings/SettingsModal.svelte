@@ -23,7 +23,7 @@
   import { cubicOut } from 'svelte/easing';
   import OrquestracaoContas from '../OrquestracaoContas.svelte';
   import * as m from '../../paraglide/messages';
-  import { listServers, onServersChanged, type Server } from '../../lib/auth';
+  import { listOwnServers, onServersChanged, type Server } from '../../lib/auth';
 
   interface Props {
     tela: TelaConfig;
@@ -56,7 +56,7 @@
   $effect(() => onServersChanged(() => versaoServidores++));
   const servidores = $derived.by(() => {
     versaoServidores;
-    return listServers();
+    return listOwnServers();
   });
   // O alvo corrente é o resolvedServer: o App já resolve pro ATIVO quando não há ?srv=
   // (App.svelte, alvoConfig), então null aqui é só "alvo que não resolveu" — e nesse caso nem

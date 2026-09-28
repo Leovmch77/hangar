@@ -14,6 +14,7 @@
   import { onDestroy } from 'svelte';
   import { getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
+  import ColarConvite from './ColarConvite.svelte';
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
   import ServerEditSheet from '../ServerEditSheet.svelte';
@@ -61,8 +62,14 @@
   $effect(() => onServersChanged(() => serverVersion++));
   const servers = $derived.by(() => {
     serverVersion;   // dependência explícita do contador (listAllServers não é reativo)
-    return listAllServers();
+    return listAllServers().filter((s) => !s.invite);
   });
+  // Convites moram fora das máquinas: não têm identificador, peer, alcance nem atualização.
+  const convites = $derived.by(() => {
+    serverVersion;
+    return listAllServers().filter((s) => s.invite);
+  });
+  let colarAberto = $state(false);
   function rename(id: string, label: string) {
     renameServer(id, label);
     sessionsStore.refreshServers();
@@ -87,7 +94,7 @@
   let avisoRemocao = $state('');
   function abrirRemocao(id: string) {
     if (logoutInFlight) return;   // logout andando: portas de saída bloqueadas
-    const s = servers.find((x) => x.id === id);
+    const s = listAllServers().find((x) => x.id === id);   // lista inteira: convite também é removível
     const snap = snapshotRemocao(s, serverVersion);
     if (!snap) return;
     pendingRemoval = { ...snap, label: s!.label };
@@ -899,6 +906,7 @@
 <div class="sv-topo">
   <button type="button" class="sv-btn" onclick={() => (showAdd = true)}>+ {sincronizada ? m.servidores_adicionar_lista() : m.servidores_adicionar_aparelho()}</button>
   <button type="button" class="sv-btn primario" onclick={() => (parearAberto = true)} disabled={!resolvedServer}>{m.servidores_parear()}</button>
+  <button type="button" class="sv-btn" onclick={() => (colarAberto = true)}>{m.convite_colar()}</button>
 </div>
 {#if avisoRemocao}<p class="ss-aviso" role="status">{avisoRemocao}</p>{/if}
 {#if logoutMsg}<p class="ss-aviso" role="status">{logoutMsg}</p>{/if}
@@ -963,6 +971,23 @@
   onRemover={(l) => (removerLinha = l)} />
 {#if peersErro}<p class="id-erro" role="status">{peersErro}</p>{/if}
 {#if removerLadoDeLaFalhou}<p class="ss-aviso" role="status">{m.maquinas_remover_peer_lado_de_la_falhou()}</p>{/if}
+{#if convites.length}
+  <p class="ss-secao">{m.convite_secao()}</p>
+  <ul class="sv-convites">
+    {#each convites as c (c.id)}
+      <li class="sv-convite">
+        <span class="sv-txt">
+          <span class="sv-nome">{c.label}</span>
+          <span class="sv-estado" class:aviso={c.inviteEnded}>{c.inviteEnded ? m.convite_encerrado() : m.convite_ativo()}</span>
+        </span>
+        <button type="button" class="sv-remover-este" onclick={() => abrirRemocao(c.id)} disabled={logoutInFlight}>{m.servidores_tirar()}</button>
+      </li>
+    {/each}
+  </ul>
+{/if}
+{#if colarAberto}
+  <ColarConvite {fallbackFocus} onFechar={() => (colarAberto = false)} />
+{/if}
 <div class="ss-acoes">
   <button class="ss-btn" onclick={() => sessionsStore.reconnect()} disabled={logoutInFlight}>{m.maquinas_reconectar()}</button>
   <button class="ss-btn ss-danger" onclick={() => (confirmLogout = true)} disabled={logoutInFlight}>{m.sessao_sair_curto()}</button>
@@ -1064,6 +1089,9 @@
   .sv-btn:hover { background: var(--bg-hover); }
   .sv-btn.primario { background: var(--accent); border-color: var(--accent); color: #fff; }
   .sv-btn:disabled { opacity: 0.45; }
+  .sv-convites { list-style: none; margin: 0 0 var(--space-3); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+  .sv-convite { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2); background: transparent; border-radius: var(--radius-sm); }
+  .sv-convite .sv-txt { flex: 1; min-width: 0; }
 
   /* Painel largo: lista fixa à esquerda, detalhe à direita. Estreito: uma coluna só, como o
      celular sempre foi — as duas regras moram aqui porque é a MESMA tela nos dois tamanhos. */
