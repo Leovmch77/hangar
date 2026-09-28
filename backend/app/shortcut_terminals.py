@@ -4,8 +4,8 @@ O tmux e a unica fonte de verdade: dono, id e rotulo moram em opcoes de usuario 
 (`@cp_shortcut_*`), entao a lista sobrevive a restart do backend sem arquivo de estado. A marca
 `@cp_hidden` e a mesma do shell do painel (`tmux.new_hidden_shell`): sem ela a sessao viraria card.
 
-`remain-on-exit` mantem o pane depois que o comando sai, com a saida e o "Pane is dead (status N)"
-na tela — e o que deixa a pessoa conferir o que o atalho fez e fechar quando quiser.
+`remain-on-exit` mantem o pane depois que o comando sai, com a saida na tela (o codigo de saida vai
+na aba) — e o que deixa a pessoa conferir o que o atalho fez e fechar quando quiser.
 """
 import logging
 import os
@@ -55,6 +55,11 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str]) -
                        (_LABEL, label)):
         args += [";", "set-option", "-t", f"={target}:", opt, value]
     args += [";", "set-option", "-w", "-t", f"={target}:", "remain-on-exit", "on"]
+    # Linha "Pane is dead" vazia: com texto o tmux a escreve no rodape e rola a tela uma linha,
+    # levando a primeira linha da saida pro historico. A aba ja diz "saiu com N".
+    args += [";", "set-option", "-w", "-t", f"={target}:", "remain-on-exit-format", ""]
+    # Sem a barra de status do tmux: o painel e so a saida do comando.
+    args += [";", "set-option", "-t", f"={target}:", "status", "off"]
     cp = tmux._run(args)
     if cp.returncode != 0 and not tmux.has_session(target):
         _log.warning("shortcut: tmux recusou criar %r: %s", target, (cp.stderr or "").strip()[:200])
