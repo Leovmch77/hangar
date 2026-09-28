@@ -555,6 +555,9 @@ publica_tailscale() { # grava CP_PUBLIC_URL com o https do tailnet; o serve prec
     grep -q '^CP_PUBLIC_URL=' backend/.env 2>/dev/null && sed -i.bak '/^CP_PUBLIC_URL=/d' backend/.env && rm -f backend/.env.bak
     printf 'CP_PUBLIC_URL=https://%s\n' "$nome" >> backend/.env
     ok "publicado no Tailscale: https://$nome"
+    # Compartilhar sessão liga o Funnel pelo backend, que roda como este usuário: sem operador o tailscaled recusa.
+    if sudo tailscale set --operator="$USER" >/dev/null 2>&1; then ok "Tailscale: $USER pode ligar o Funnel (compartilhar sessão)"
+    else anota_problema "tailscale set --operator falhou — compartilhar sessão vai pedir: sudo tailscale set --operator=\$USER"; fi
   else
     anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo"
     return 1
