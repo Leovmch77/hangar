@@ -81,6 +81,9 @@ try {
     Set-ItemProperty -Path $classe -Name '(default)' -Value 'URL:Hangar'
     Set-ItemProperty -Path $classe -Name 'URL Protocol' -Value ''
     Set-ItemProperty -Path "$classe\shell\open\command" -Name '(default)' -Value ('"{0}" "%1"' -f $app)
+    # A marca e a prova do passo de atualizacao: so existe depois da chave gravada.
+    New-Item -ItemType Directory -Force -Path $marcaDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $marcaDir 'scheme-hangar'), '')
 
     # Primeira abertura ja conectada ao backend desta maquina. So quando o app ainda nao tem conexao:
     # a que a pessoa escolheu depois nunca e sobrescrita.

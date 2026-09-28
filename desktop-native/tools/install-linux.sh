@@ -22,5 +22,10 @@ mkdir -p "$(dirname "$desktop_target")"
 printf '[Desktop Entry]\nType=Application\nName=Hangar\nExec="%s" %%u\nIcon=com.hangar.native\nTerminal=false\nCategories=Development;\nMimeType=x-scheme-handler/hangar;\nStartupWMClass=com.hangar.native\n' "$binary_target" > "$desktop_target"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$data_dir/applications"; fi
 # Link hangar:// (convite de sessão compartilhada) abre este app.
-if command -v xdg-mime >/dev/null 2>&1; then xdg-mime default com.hangar.native.desktop x-scheme-handler/hangar || true; fi
+# A marca é a prova do passo de atualização: só existe depois do registro dar certo.
+scheme_ok=1
+if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default com.hangar.native.desktop x-scheme-handler/hangar || { scheme_ok=0; echo 'aviso: não consegui registrar hangar:// com o xdg-mime; o link de convite não abre o app' >&2; }
+fi
+if [[ $scheme_ok = 1 ]]; then mkdir -p "$HOME/.hangar/native" && : > "$HOME/.hangar/native/scheme-hangar"; fi
 echo "$desktop_target"

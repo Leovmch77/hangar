@@ -5,11 +5,7 @@ pub enum Claim { Forwarded, Primary(async_channel::Sender<String>, async_channel
 
 pub fn invite_arg(args: impl Iterator<Item = String>) -> Option<String> { args.skip(1).find(|a| a.starts_with("hangar://")) }
 
-fn port_file() -> Option<PathBuf> {
-    let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) }
-        else { std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))) };
-    base.map(|b| b.join("hangar-native").join("instance"))
-}
+fn port_file() -> Option<PathBuf> { Some(crate::appearance::dir()?.join("instance")) }
 
 pub fn claim(link: Option<String>) -> Claim {
     match port_file() {
@@ -47,14 +43,17 @@ pub fn claim_at(file: &Path, link: Option<String>) -> Claim {
     if let Ok(mut f) = options.open(file) { let _ = write!(f, "{port}\n{nonce}"); }
     std::thread::Builder::new().name("single-instance".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
-            // Quem conecta e não fala não pode travar a fila: prazo de leitura e teto de tamanho.
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut reader = BufReader::new((&stream).take(8192));
-            let (mut got, mut link) = (String::new(), String::new());
-            if reader.read_line(&mut got).is_err() || got.trim() != nonce { continue; }
-            let _ = reader.read_line(&mut link);
-            let _ = (&stream).write_all(b"ok\n");
-            if thread_tx.send_blocking(link.trim().to_owned()).is_err() { break; }
+            // Uma conexão por thread: quem conecta e não fala (ou pinga devagar) não segura o próximo link.
+            let (nonce, tx) = (nonce.clone(), thread_tx.clone());
+            let _ = std::thread::Builder::new().name("single-instance-conn".into()).spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut reader = BufReader::new((&stream).take(8192));
+                let (mut got, mut link) = (String::new(), String::new());
+                if reader.read_line(&mut got).is_err() || got.trim() != nonce { return; }
+                let _ = reader.read_line(&mut link);
+                let _ = (&stream).write_all(b"ok\n");
+                let _ = tx.send_blocking(link.trim().to_owned());
+            });
         }
     }).ok();
     Claim::Primary(tx, rx)
