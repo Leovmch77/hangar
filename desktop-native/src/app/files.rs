@@ -79,7 +79,7 @@ fn file_failure(error: &Failure) -> String {
     }
 }
 
-fn file_language(path: &str) -> &'static str {
+pub(super) fn file_language(path: &str) -> &'static str {
     let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     match extension.as_str() {
         "rs" => "rust",

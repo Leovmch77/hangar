@@ -98,6 +98,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Visualizador de imagem em tela cheia, vídeo e PDF embutidos | pendente | abrem no programa do sistema |
 | Perguntas, opções, planos, fila | conferido | Task 3; checagem de não regressão na fixture dela |
 | Skill injetada pelo Codex (notice `skill_loaded`) vira linha recolhida "Skill X carregada" que abre o SKILL.md | implementado | rótulo do aviso + "Mostrar mais"; não exercitado na janela real |
+| Diff das edições (Edit, MultiEdit, Write, `apply_patch` do Codex, `edit` do Pi) no lugar da entrada crua | implementado | `editdiff.rs` (Myers do `editdiff.ts`) + `app/edits.rs`; linha recolhida com "+N −M" pelo diff real nos três visuais; aberto, um cartão por edição com caminho, contagem, as linhas da aba Git (duas numerações do trecho, quebra de linha) e realce do tree-sitter; Resultado só quando falhou. Além do web: `apply_patch` com vários arquivos mostra o caminho de cada um, e Copiar leva o texto novo. Diferença: unificado sempre (o web vira lado a lado acima de 600 px); corta em 400 linhas com aviso; não abre sozinho (o web nasce aberto) |
 
 ## Configurações
 

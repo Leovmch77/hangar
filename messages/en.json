@@ -4100,6 +4100,8 @@
   "native_thinking_search": "1 search",
   "native_thinking_searches": "{n} searches",
   "native_clipped": "Showing {shown} of {total} characters. Copy takes the full text.",
+  "native_diff_clipped": "Showing {shown} of {total} diff lines. Copy takes the whole new text.",
+  "native_copy_new_text": "Copy new text",
   "native_ask_title": "The agent is asking",
   "native_ask_multi": "Check one or more options.",
   "native_ask_type": "Type an answer",

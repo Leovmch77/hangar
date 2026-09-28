@@ -54,12 +54,7 @@ pub(super) fn chip_ending(call: &ChatEvent, result: Option<&ChatEvent>, running:
         let first = raw.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| conversation::one_line(l, 72)).unwrap_or_else(|| tr("tool_failed"));
         return warning_ending(first);
     }
-    if let Some((added, removed)) = conversation::edit_counts(name, call.tool_input.as_ref()) {
-        return div().flex_shrink_0().flex().gap(px(6.)).font_family(theme::MONO).text_size(px(12.))
-            .child(div().text_color(theme::success()).child(format!("+{added}")))
-            .when(removed > 0, |el| el.child(div().text_color(theme::removed()).child(format!("−{removed}"))))
-            .into_any_element();
-    }
+    if let Some(totals) = super::edits::totals(call) { return totals; }
     let lines = lines(result);
     let outcome = match (raw.is_empty(), conversation::family(name)) {
         (true, _) => tr("chip_done"),
@@ -303,7 +298,9 @@ impl Hangar {
         }
         let failed = tool.result.is_some_and(|i| events[i].is_error == Some(true));
         let running = tool.result.is_none() && self.running(tool.call);
-        let ending = (failed || running).then(|| chip_ending(event, tool.result.map(|i| &events[i]), running, |result| self.result_lines(result)));
+        // Pronta, a linha fica sem fim, menos a edição: o "+5 −2" diz o tamanho antes de abrir.
+        let ending = if failed || running { Some(chip_ending(event, tool.result.map(|i| &events[i]), running, |result| self.result_lines(result))) }
+            else { super::edits::totals(event) };
         let line = tree_call_line(format!("tree-{key}"), event, ending, failed, cx).on_click(toggle);
         let body = open.then(|| self.tool_body(tool, row, cx).into_any_element());
         tree_row(last, line, body).into_any_element()

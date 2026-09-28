@@ -464,20 +464,6 @@ pub fn tool_display_name(name: &str) -> String {
     format!("{} · {}", parts[1].trim_start_matches("hangar-"), parts[2..].join("__"))
 }
 
-/// Linhas que a edição põe e tira, contadas pelo texto novo e o antigo da chamada.
-// ponytail: conta linhas inteiras, não um diff; um diff de verdade entra se a contagem enganar.
-pub fn edit_counts(name: Option<&str>, input: Option<&Value>) -> Option<(usize, usize)> {
-    let input = input?;
-    let lines = |v: Option<&Value>| v.and_then(Value::as_str).map_or(0, |s| s.lines().count());
-    match name? {
-        "Edit" => Some((lines(input.get("new_string")), lines(input.get("old_string")))),
-        "MultiEdit" => Some(input.get("edits")?.as_array()?.iter()
-            .fold((0, 0), |(a, r), e| (a + lines(e.get("new_string")), r + lines(e.get("old_string"))))),
-        "Write" => Some((lines(input.get("content")), 0)),
-        _ => None,
-    }
-}
-
 const SUMMARY_MAX: usize = 96;
 
 pub fn one_line(text: &str, max: usize) -> String {
@@ -626,7 +612,6 @@ mod tests {
             with_input(call("d", "2", "TaskUpdate"), json!({"taskId": "7", "status": "deleted"}))];
         assert!(fold_tasks(&events, &pair_results(&events).0).is_empty());
         assert!(!super::build(&events, View { tasks: true, ..View::default() }, &HashSet::new()).iter().any(|i| matches!(i, Item::Tasks { .. })));
-        assert_eq!(edit_counts(Some("Edit"), Some(&json!({"old_string": "a\nb", "new_string": "a\nb\nc"}))), Some((3, 2)));
         assert_eq!(tool_display_name("mcp__hangar-computer-control__objetivo"), "computer-control · objetivo");
         assert_eq!(family(Some("Glob")), Family::Search);
     }

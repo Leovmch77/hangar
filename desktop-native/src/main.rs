@@ -8,6 +8,7 @@ mod chat;
 mod composer;
 mod conversation;
 mod delivery;
+mod editdiff;
 mod fileicons;
 mod i18n;
 mod interaction;

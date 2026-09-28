@@ -21,6 +21,7 @@ mod create;
 mod device;
 mod follow;
 mod landing;
+mod edits;
 mod git;
 mod grouping;
 mod group_sheet;
@@ -2453,6 +2454,8 @@ impl Hangar {
         let (status, status_color) = self.tool_status(tool);
         let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true)) || self.agent_failed(tool.call);
         let open = self.expanded.contains(&key);
+        // Edição pronta mostra "+5 −2" no lugar do "pronto"; rodando ou com erro, o estado vale mais.
+        let edit_totals = (!error && tool.result.is_some()).then(|| edits::totals(call)).flatten();
         let toggle_key = key.clone();
         // O cartão Agent abre a conversa dele na aba Atividade em vez de expandir: ↗ no lugar da seta de abrir, e a
         // marca animada enquanto o subagente roda.
@@ -2469,7 +2472,10 @@ impl Hangar {
             .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(if error { theme::warning() } else { theme::text() }).child(name))
             .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(summary))
             .when(running, |el| el.child(self.working_mark_slot(panes::Area::Conversation, format!("agent-{key}"), 12., theme::accent())))
-            .child(div().flex_shrink_0().max_w(px(320.)).truncate().text_color(status_color).child(status))
+            .map(|el| match edit_totals {
+                Some(totals) => el.child(totals),
+                None => el.child(div().flex_shrink_0().max_w(px(320.)).truncate().text_color(status_color).child(status)),
+            })
             .when(agent.is_some(), |el| el.child(chrome::small_icon(IconName::ExternalLink, 14., theme::faint())))
             .on_click(cx.listener(move |this, _, _, cx| match &agent {
                 Some(request) => this.open_agent(request.clone(), cx),
@@ -2488,6 +2494,9 @@ impl Hangar {
         let error = tool.result.is_some_and(|i| self.chat.events[i].is_error == Some(true));
         let input_key = format!("{key}:input");
         let input = self.prepared_detail(&input_key, || conversation::pretty_input(call.tool_input.as_ref()));
+        // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
+        let diff = edits::card(call, cx);
+        let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
         if call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("read")) {
@@ -2499,10 +2508,12 @@ impl Hangar {
             }).collect();
             if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
         }
-        if matches!(input, Prepared::Detail { total, .. } if total > 0) {
+        if let Some(diff) = diff { body = body.child(diff); }
+        else if matches!(input, Prepared::Detail { total, .. } if total > 0) {
             body = body.child(self.detail(row, &input_key, input, tr("tool_input"), tr("copy_input"), false, cx));
         }
         match tool.result {
+            Some(_) if has_diff && !error => body,
             Some(i) => {
                 let result_key = format!("{key}:result");
                 let result = self.prepared_detail(&result_key, || self.chat.events[i].result.clone().unwrap_or_default());
