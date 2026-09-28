@@ -1,5 +1,10 @@
 // `disabled`: guardado neste aparelho (com o token) mas fora da lista de sessões.
-export interface Server { id: string; label: string; baseUrl: string; token: string; disabled?: boolean }
+// `invite`: existe porque alguém compartilhou UMA sessão com este aparelho; o token é de convidado.
+// `inviteEnded`: o dono revogou ou a sessão acabou (410); a entrada fica até a pessoa remover.
+export interface Server {
+  id: string; label: string; baseUrl: string; token: string;
+  disabled?: boolean; invite?: boolean; inviteEnded?: boolean;
+}
 export const SERVER_COLORS = ['#7c6af7', '#3ba55d', '#e0a23b', '#e0563b', '#3b9fe0', '#c43be0'];
 export function serverColor(id: string): string {
   let h = 0;

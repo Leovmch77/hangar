@@ -12,6 +12,10 @@ export interface ApiEnv {
   onUnauthorized(): void;
   origin: string | null;
   createEventSource(url: string, opts: { withCredentials: boolean; headers?: Record<string, string> }): EventSourceLike;
+  /** O servidor ATIVO é de convite (token de convidado). Ausente = nunca. */
+  isInvite?(): boolean;
+  /** Um servidor de convite respondeu 410: o dono revogou ou a sessão acabou. */
+  onInviteEnded?(serverId: string | null): void;
 }
 let _env: ApiEnv | null = null;
 export function configureApi(env: ApiEnv): void { _env = env; }

@@ -26,7 +26,7 @@ export interface Aggregate {
 // Sem isto, todo evento recriava {...s} pra TODAS as rows -> o keyed each das 4 views via prop nova
 // em 50+ cards e re-renderizava tudo ~3-4x/s com 5 servidores ativos. WeakMap: o array velho morre,
 // a entrada vai junto. label/color validados porque o usuário pode editar o servidor sem o slot mudar.
-const _rowCache = new WeakMap<object, { label: string; color: string; byKey: Map<string, AggSession> }>();
+const _rowCache = new WeakMap<object, { label: string; color: string; invite: boolean; byKey: Map<string, AggSession> }>();
 
 // `hidden` = exclusão OTIMISTA: chaves `serverId::name` marcadas pelo doDelete das views somem da
 // lista na hora, sem esperar o SSE re-emitir (~1-2s). Se o delete falhar, a view desmarca e a linha
@@ -52,9 +52,10 @@ export function aggregateSessions(
     };
     if (slot?.sessions && slot.error !== 'offline') {
       const color = serverColor(srv.id);
+      const invite = srv.invite === true;
       let cache = _rowCache.get(slot.sessions);
-      if (!cache || cache.label !== srv.label || cache.color !== color) {
-        cache = { label: srv.label, color, byKey: new Map() };
+      if (!cache || cache.label !== srv.label || cache.color !== color || cache.invite !== invite) {
+        cache = { label: srv.label, color, invite, byKey: new Map() };
         _rowCache.set(slot.sessions, cache);
       }
       for (const s of slot.sessions) {
@@ -64,7 +65,7 @@ export function aggregateSessions(
         seen.add(key);
         let row = cache.byKey.get(key);
         if (!row) {
-          row = { ...s, serverId: srv.id, serverLabel: srv.label, serverColor: color };
+          row = { ...s, serverId: srv.id, serverLabel: srv.label, serverColor: color, serverInvite: invite };
           cache.byKey.set(key, row);
         }
         bucket.sessions.push(row);

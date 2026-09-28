@@ -93,6 +93,22 @@ describe('aggregateSessions', () => {
     );
     expect(a.rows.map((r) => `${r.serverId}:${r.name}`)).toEqual(['b:x']);
   });
+
+  it('marca as linhas de servidor de convite', () => {
+    const convite: Server = { ...srv('c'), invite: true };
+    const a = aggregateSessions([srv('a'), convite], slots({
+      a: { sessions: [sess('x')], error: null },
+      c: { sessions: [sess('y')], error: null },
+    }));
+    expect(a.rows.map((r) => [r.name, r.serverInvite])).toEqual([['x', false], ['y', true]]);
+  });
+
+  it('a marca de convite vale mesmo com a lista do servidor reaproveitada', () => {
+    const lista = [sess('y')];
+    const s = slots({ c: { sessions: lista, error: null } });
+    expect(aggregateSessions([srv('c')], s).rows[0].serverInvite).toBe(false);
+    expect(aggregateSessions([{ ...srv('c'), invite: true }], s).rows[0].serverInvite).toBe(true);
+  });
 });
 
 describe('epocasDeRecriacao', () => {

@@ -110,6 +110,8 @@ export interface SessionInfo {
   // Conta da sessão como ID do /api/cotas ("claude:<dir>", "chave:<motor>") — a pílula de cota do
   // topo mostra o uso da conta da sessão ATIVA. null = não dá pra saber (kimi/pi sem motor).
   conta?: string | null;
+  // Há convite ativo desta sessão para outra pessoa: selo nas duas listas.
+  shared?: boolean;
 }
 
 // Detalhe do plano (GET /api/sessions/{name}/plan, Task 5): granularidade de Task/Step que o
@@ -132,6 +134,8 @@ export interface AggSession extends SessionInfo {
   serverId: string;
   serverLabel: string;
   serverColor: string;
+  // A linha veio de um servidor de convite: é a sessão de outra pessoa, compartilhada com você.
+  serverInvite?: boolean;
 }
 
 // Candidato de resume: um transcript <uuid>.jsonl do cwd que a sessão "sem id" poderia retomar.

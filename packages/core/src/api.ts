@@ -7,6 +7,9 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
 import { retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
+import {
+  inviteAllows, SharePrerequisiteError, type ShareCreated, type ShareInfo,
+} from './share';
 import type { CotaContaResumo } from './cotaResumo';
 import type { UsoFiltros, UsoReport } from './uso';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncReport } from './configSync';
@@ -224,6 +227,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
 async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false): Promise<Response> {
   const base = server?.baseUrl ?? apiEnv().getBaseUrl();
+  // Servidor de convite só atende a sessão compartilhada e as rotas do chat: o resto nem sai
+  // daqui, senão cada tela aberta enche a rede e o diário de 403.
+  const convite = server ? server.invite === true : apiEnv().isInvite?.() === true;
+  if (convite && !inviteAllows(path)) {
+    throw Object.assign(new Error(m.erro_fora_do_convite()), { status: 403, code: 'erro_fora_do_convite' });
+  }
   const url = `${base}${path}`;
   const t0 = Date.now();
   // Id do pedido: vai no cabeçalho e na linha do diário dos DOIS lados, pra quem analisa seguir a
@@ -273,6 +282,9 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   }
   // Respondeu — inclusive com erro HTTP: a máquina está de pé, e é isso que o esfriamento mede.
   if (server) registrarSucesso(server.id);
+  // Só o 410 encerra: o 503 (erro_sessao_indisponivel) é a trava do dono numa troca de modo ou
+  // com o tmux mudo, e passa sozinho.
+  if (convite && res.status === 410) apiEnv().onInviteEnded?.(server?.id ?? null);
   {
     const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
     if (_semRede.delete(`${base}|${rota}`)) {
@@ -2751,4 +2763,42 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
   }, s);
   if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
   return res.json() as Promise<ConfigSyncReport>;
+}
+
+// Compartilhar sessão (dono). Todas no servidor ATIVO: a Sidebar usa `withServer`.
+export async function createShare(name: string): Promise<ShareCreated> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share`, { method: 'POST' });
+  if (res.status === 409) {
+    const corpo = await res.clone().json().catch(() => null);
+    const d = corpo?.detail;
+    if (d?.code === 'erro_compartilhar_pre_requisito') {
+      throw new SharePrerequisiteError(
+        Array.isArray(d.params?.missing) ? d.params.missing : [],
+        typeof d.params?.fix === 'string' ? d.params.fix : '',
+        formataErro(d) ?? m.erro_compartilhar_pre_requisito(),
+      );
+    }
+  }
+  await ensureOk(res);
+  return res.json() as Promise<ShareCreated>;
+}
+
+export function listShares(name: string): Promise<{ shares: ShareInfo[] }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/share`);
+}
+
+export function revokeShare(name: string, id: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/share/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function revokeAllShares(name: string): Promise<{ ok: boolean; revoked: number }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/share`, { method: 'DELETE' });
+}
+
+// Stream da lista de um convite caiu: 410 aqui é o dono ter encerrado, e o gancho do `apiFetchRes`
+// já avisou. 503 devolve false (indisponível por instantes, não encerrado). `probe`: a queda acabou
+// de esfriar o servidor, e esta pergunta não pode esperar o prazo.
+export async function checkInviteForServer(s: Server): Promise<boolean> {
+  const res = await apiFetchRes('/api/sessions', { signal: AbortSignal.timeout(4000) }, s, true);
+  return res.status === 410;
 }
