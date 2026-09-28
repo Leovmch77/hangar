@@ -88,8 +88,11 @@ async fn same_machine(address: &str, token: &str) -> bool {
     identifier(address, token).await == Some(here)
 }
 
+/// Falha vai ao stderr: sem ela, o servidor desta máquina fica pelo endereço de fora e ninguém sabe por quê.
 async fn identifier(address: &str, token: &str) -> Option<String> {
-    let value = crate::api::Api::new(address, token).ok()?.server_read(&["peers", "identificador"], &[], 5).await.ok()?;
+    let api = crate::api::Api::new(address, token).map_err(|e| eprintln!("importar do Electron: {address} inválido: {}", e.detail)).ok()?;
+    let value = api.server_read(&["peers", "identificador"], &[], 5).await
+        .map_err(|e| eprintln!("importar do Electron: identificador de {address} não veio: {}", e.detail)).ok()?;
     value.get("identificador")?.as_str().filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
