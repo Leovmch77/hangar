@@ -44,7 +44,8 @@ def texto_grupo(me: str, others: list[str], task: str, contrato: str | None,
     linhas = [
         f"{PREFIXO} Você, '{me}', está num grupo de trabalho{_tarefa(task)}. Quem está nele: {ver}.",
         f"- Precisou de algo de outro membro? Recado 1:1 {_como_mandar(provider, others[0])} Aviso de "
-        "grupo só pra marco (\"terminei minha parte\", \"contrato atualizado\").",
+        "grupo só pra marco (\"terminei minha parte\", \"contrato atualizado\"). Recado é só a "
+        "informação ou o pedido, sem saudação nem apresentação: quem recebe paga o texto como prompt.",
         "- Chega como [de: <membro>] (1:1) ou [grupo: <membro>] (aviso). NUNCA responda um [grupo: ...] "
         "com outro aviso de grupo; responder, só 1:1 e se necessário.",
     ]

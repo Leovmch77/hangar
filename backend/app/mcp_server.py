@@ -105,7 +105,8 @@ async def sessions(ctx: Context) -> list[dict[str, Any]]:
 @mcp.tool(description="Manda um recado 1:1 pra outra sessão, como `hangar-send <sessao> <msg>`: "
                       "chega lá como `[de: <você>] texto`. `alvo` aceita `servidor::sessao` "
                       "pra outro servidor. O backend escolhe o transporte (socket nativo, plugin, "
-                      "tmux ou fila) e diz se entregou.")
+                      "tmux ou fila) e diz se entregou. O texto vira prompt pago lá: só a informação "
+                      "ou o pedido, sem saudação nem apresentação (o cabeçalho já diz quem manda).")
 async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
@@ -137,7 +138,8 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
 
 @mcp.tool(description="Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: "
                       "chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um "
-                      "`[grupo: …]` com isto. O backend escolhe o transporte pra cada membro.")
+                      "`[grupo: …]` com isto. O backend escolhe o transporte pra cada membro. Uma "
+                      "frase direta, sem saudação: cada membro paga o texto como prompt.")
 async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)
