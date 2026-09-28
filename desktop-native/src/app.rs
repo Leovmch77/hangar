@@ -4803,7 +4803,7 @@ impl Render for Hangar {
                 let m = &event.keystroke.modifiers;
                 // "/" fora de campo de texto leva ao campo de mensagem, sem digitar a barra, como o web.
                 if event.keystroke.key_char.as_deref() == Some("/") && !m.control && !m.alt && !m.platform && !window.text_input_focused()
-                    && !window.has_active_dialog(cx) {
+                    && !this.connection_dialog && !window.has_active_dialog(cx) {
                     window.dispatch_action(Box::new(FocusComposer), cx);
                     cx.stop_propagation();
                     return;

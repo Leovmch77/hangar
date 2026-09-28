@@ -207,10 +207,12 @@ impl Hangar {
         self.redraw(Area::Conversation, cx);
     }
 
-    /// As teclas de página valem só com a conversa na tela: sem página, busca ou diálogo por cima.
+    /// As teclas de página valem só com a conversa na tela: sem página, busca, seletor ou diálogo por cima. O seletor de
+    /// modelo tem lista longa própria, que precisa delas.
     pub(super) fn chat_keys_apply(&self, window: &mut Window, cx: &mut App) -> bool {
         let page_open = self.settings.is_some() && !self.settings_live() || self.costs.view.is_some();
-        !page_open && !self.search.open && !self.connection_dialog && self.selected.is_some() && !window.has_active_dialog(cx)
+        !page_open && !self.search.open && !self.connection_dialog && !self.controls.picker_open() && self.selected.is_some()
+            && !window.has_active_dialog(cx)
     }
 
     /// Page Up/Down rolam uma janela da conversa, mesmo com o cursor no compositor, que não usa essas teclas. Home e End

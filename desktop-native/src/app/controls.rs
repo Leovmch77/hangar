@@ -63,6 +63,7 @@ pub(super) struct Controls {
 impl Controls {
     pub fn on_select(&mut self) { self.open = None; self.plan = None; }
     pub fn clear_plan_preview(&mut self) { self.plan = None; }
+    pub fn picker_open(&self) -> bool { self.open.is_some() }
 }
 
 // Modo conhecido aparece traduzido; valor que o backend inventar depois aparece cru.
