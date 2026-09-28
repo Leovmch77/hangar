@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+from app.mensagens import erro
+
 _log = logging.getLogger("hangar.git_ops")
 
 # Git pela sessao (cwd da sessao tmux). Tudo via argv list -> nunca string de shell (sem injecao).
@@ -330,18 +332,23 @@ def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path) -> tup
         if branch in info["branches"]:
             args = ("worktree", "add", str(target), branch)
         else:
-            r = _run(cwd, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
-            if r.returncode != 0:
-                raise GitError(409, "não consegui consultar as branches remotas")
-            matches = [ref for ref in r.stdout.splitlines()
-                       if "/" in ref and ref.split("/", 1)[1] == branch]
-            if len(matches) != 1:
-                raise GitError(409, "branch remota ambígua")
-            args = ("worktree", "add", "--track", "-b", branch, str(target), matches[0])
+            args = ("worktree", "add", "--track", "-b", branch, str(target), _remote_ref(cwd, branch))
         created = _run(cwd, *args)
         if created.returncode != 0:
             raise GitError(409, _scrub(created.stderr.strip()) or "não consegui criar a worktree")
         return str(target), True
+
+
+def _remote_ref(cwd: str, branch: str) -> str:
+    """`origin/<branch>` de um nome curto de remota; dois remotes com o mesmo nome é ambíguo."""
+    r = _run(cwd, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+    if r.returncode != 0:
+        raise GitError(409, "não consegui consultar as branches remotas")
+    matches = [ref for ref in r.stdout.splitlines()
+               if "/" in ref and ref.split("/", 1)[1] == branch]
+    if len(matches) != 1:
+        raise GitError(409, "branch remota ambígua")
+    return matches[0]
 
 
 def remove_worktree(cwd: str, path: str) -> None:
@@ -969,6 +976,117 @@ def _validate_new_ref(cwd: str, kind: str, name: str) -> None:
     lst = _run(cwd, "branch" if kind == "heads" else "tag", "--format=%(refname:short)")
     if name in {l.strip() for l in lst.stdout.splitlines()}:
         raise GitError(400, f"{label} ja existe: {name}")
+
+
+# ── Git da pasta (tela de nova conversa): sem sessão, a pasta vem validada pela raiz do fs. ──
+# Nada aqui descarta trabalho: pasta suja recusa pull e troca (sem stash, sem reset), pull só
+# avança (ff-only) e troca com sessões vivas no mesmo checkout exige confirmação explícita.
+_FETCH_TIMEOUT = 120
+
+
+def folder_status(cwd: str) -> dict:
+    """Branch, upstream, ahead/behind (do último fetch), arquivos sujos e hora do último fetch.
+    Pasta fora de repositório -> {"repo": False}, não erro."""
+    p = _run(cwd, "status", "--porcelain=v1", "--branch")
+    if p.returncode != 0:
+        if "not a git repository" in p.stderr:
+            return {"repo": False}
+        raise GitError(409, _scrub(p.stderr.strip()) or "git status falhou")
+    parsed = _parse_status_branch(p.stdout) or {"dirty": 0, "ahead": None, "behind": None}
+    head = _run(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+    up = _run(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    top = _run(cwd, "rev-parse", "--show-toplevel")
+    fetch_head = _run(cwd, "rev-parse", "--git-path", "FETCH_HEAD")
+    last_fetch = None
+    if fetch_head.returncode == 0:
+        try:
+            last_fetch = Path(cwd, fetch_head.stdout.strip()).stat().st_mtime
+        except OSError:
+            pass    # nunca buscou
+    return {
+        "repo": True,
+        "current": head.stdout.strip() or None if head.returncode == 0 else None,
+        "upstream": up.stdout.strip() or None if up.returncode == 0 else None,
+        "toplevel": os.path.realpath(top.stdout.strip()) if top.returncode == 0 else None,
+        "dirty": parsed["dirty"], "ahead": parsed["ahead"], "behind": parsed["behind"],
+        "last_fetch": last_fetch,
+    }
+
+
+def _refuse_unsafe(status: dict, sessions: list[str], confirm_sessions: bool, *, check_sessions: bool) -> None:
+    if not status.get("repo"):
+        raise GitError(409, erro("erro_git_folder_not_repo", "a pasta não é um repositório Git"))
+    if status["dirty"]:
+        n = status["dirty"]
+        raise GitError(409, erro("erro_git_folder_dirty",
+                                 f"{n} arquivo(s) com alteração não commitada: nada foi feito. "
+                                 "Commite ou guarde essas alterações antes; o Hangar não descarta trabalho.", n=n))
+    if check_sessions and sessions and not confirm_sessions:
+        raise GitError(409, erro("erro_git_folder_sessions",
+                                 f"sessões abertas nesta pasta: {', '.join(sessions)}. Os arquivos delas mudariam; "
+                                 "confirme para trocar.", sessoes=", ".join(sessions)))
+
+
+def folder_fetch(cwd: str) -> dict:
+    p = _run(cwd, "fetch", "--all", "--prune", timeout=_FETCH_TIMEOUT)
+    if p.returncode != 0:
+        raise GitError(409, _scrub(p.stderr.strip()) or "fetch falhou")
+    return folder_status(cwd)
+
+
+def folder_pull(cwd: str) -> dict:
+    """Só avança (fast-forward). Pasta suja, sem upstream ou divergida: recusa, nunca merge/rebase."""
+    _refuse_unsafe(folder_status(cwd), [], False, check_sessions=False)
+    p = _run(cwd, "fetch", "--prune", timeout=_FETCH_TIMEOUT)
+    if p.returncode != 0:
+        raise GitError(409, _scrub(p.stderr.strip()) or "fetch falhou")
+    st = folder_status(cwd)
+    if not st["upstream"]:
+        raise GitError(409, erro("erro_git_folder_no_upstream",
+                                 "a branch atual não acompanha nenhuma branch remota"))
+    if st["ahead"] and st["behind"]:
+        raise GitError(409, erro("erro_git_folder_diverged",
+                                 f"a branch divergiu de {st['upstream']} ({st['ahead']} à frente, "
+                                 f"{st['behind']} atrás): pull só avança, resolva no terminal.",
+                                 ahead=st["ahead"], behind=st["behind"], upstream=st["upstream"]))
+    if not st["behind"]:
+        return st
+    m = _run(cwd, "merge", "--ff-only", "@{upstream}")
+    if m.returncode != 0:
+        raise GitError(409, _scrub(m.stderr.strip()) or "pull falhou")
+    return folder_status(cwd)
+
+
+def folder_switch(cwd: str, branch: str, sessions: list[str], confirm_sessions: bool) -> dict:
+    _refuse_unsafe(folder_status(cwd), sessions, confirm_sessions, check_sessions=True)
+    switch_branch(cwd, branch)
+    return folder_status(cwd)
+
+
+def folder_create_branch(cwd: str, name: str, base: str | None, checkout: bool,
+                         sessions: list[str], confirm_sessions: bool) -> dict:
+    """Cria `name` a partir da atual (base None) ou de uma branch existente, local ou remota.
+    Trocar para ela segue a regra da troca: pasta limpa e sessões confirmadas."""
+    st = folder_status(cwd)
+    if checkout:
+        _refuse_unsafe(st, sessions, confirm_sessions, check_sessions=True)
+    elif not st.get("repo"):
+        _refuse_unsafe(st, [], False, check_sessions=False)
+    sha = None
+    if base:
+        info = list_branches(cwd)
+        if base in info["branches"]:
+            ref = f"refs/heads/{base}"
+        elif base in info["remotes"]:
+            ref = _remote_ref(cwd, base)
+        else:
+            raise GitError(400, "branch inexistente")
+        r = _run(cwd, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
+        if r.returncode != 0:
+            raise GitError(409, "não consegui ler a branch base")
+        sha = r.stdout.strip()
+    create_branch_at(cwd, name, sha, checkout)
+    return folder_status(cwd)
 
 
 def last_commit_message(cwd: str) -> dict:

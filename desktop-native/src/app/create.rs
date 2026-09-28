@@ -1,6 +1,7 @@
 //! Criar sessão (`CreateSessionSheet.svelte` + `FolderScanner.svelte` do web, no desenho de duas colunas do desktop): a pasta à
 //! esquerda, o formulário à direita. As escolhas finas moram em `choices`; continuar uma conversa antiga, em `resume`.
 mod choices;
+mod folder_git;
 mod resume;
 
 use super::*;
@@ -129,6 +130,10 @@ pub(super) enum CreateReply {
     Preview(u64, Result<Value, Failure>),
     /// A amostra do resumo do bastão, em markdown.
     Baton(u64, Result<String, Failure>),
+    /// O estado git da pasta escolhida.
+    Git(u64, Result<Value, Failure>),
+    /// Fetch, pull, troca ou criação de branch: a ação, a branch dela e o estado que voltou.
+    GitDone(folder_git::GitAction, String, Result<Value, Failure>),
 }
 
 /// A regra do backend (`names.sanitize_session_name`): acento vira a letra sem ele, o que não for letra, número, `_` ou `-` vira `-`,
@@ -247,13 +252,13 @@ pub(super) struct ServerChoice { pub(super) key: String, pub(super) label: Strin
 
 /// Os menus da tela sem sessão, cada um preso à própria pílula.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::app) enum Menu { Machine, Folder, Model, Account, Branch }
+pub(in crate::app) enum Menu { Machine, Folder, Model, Account, Branch, Git }
 
 impl Menu {
     pub(in crate::app) fn anchor(self) -> &'static str {
         match self {
             Menu::Machine => "new-chat-machine", Menu::Folder => "new-chat-folder", Menu::Model => "new-chat-model",
-            Menu::Account => "new-chat-account", Menu::Branch => "new-chat-branch",
+            Menu::Account => "new-chat-account", Menu::Branch => "new-chat-branch", Menu::Git => "new-chat-git",
         }
     }
     /// Máquina e pasta ficam acima do compositor: o menu delas abre para cima, sem cobrir o campo.
@@ -281,6 +286,9 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     checkout: Remote<Option<Checkout>>,
     branch: String,
+    /// O gerenciador de git da pasta (tela sem sessão) e o nome da branch nova dele.
+    git: folder_git::GitPanel,
+    git_name: Entity<InputState>,
     sessions: Remote<Vec<SessionInfo>>,
     same_folder: bool,
     name: Entity<InputState>,
@@ -361,11 +369,17 @@ impl NewSession {
         let omp = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_omp_profile_hint")));
         let account_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_account_placeholder")));
         let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
+        let git_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("folder_git_name")));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
             cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&git_name, |this: &mut Self, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => cx.notify(),
+                InputEvent::PressEnter { .. } => this.git_create(cx),
+                _ => {}
+            }),
             cx.subscribe_in(&manual, window, |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => cx.notify(),
                 InputEvent::PressEnter { .. } => this.use_typed(window, cx),
@@ -380,7 +394,7 @@ impl NewSession {
         Self {
             link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(),
+            checkout: Remote::default(), branch: String::new(), git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -540,7 +554,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
-        if self.compact { self.picked = Some(path.clone()); self.load_branches(cx); }
+        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -570,6 +584,7 @@ impl NewSession {
         (self.picked, self.error, self.same_folder) = (Some(path), None, false);
         if self.compact {
             self.menu.set(None);
+            self.reset_git();
             self.load_branches(cx);
             cx.notify();
             return;
@@ -646,6 +661,7 @@ impl NewSession {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;
         }));
+        self.load_git(cx);
         cx.notify();
     }
 
@@ -816,6 +832,7 @@ impl NewSession {
             reply @ (CreateReply::Models(..) | CreateReply::Engines(..) | CreateReply::Config(..) | CreateReply::Quotas(..)
                 | CreateReply::Context(..) | CreateReply::Account(..)) => self.receive_extra(reply, window, cx),
             reply @ (CreateReply::Archive(..) | CreateReply::Preview(..)) => self.receive_archive(reply, cx),
+            reply @ (CreateReply::Git(..) | CreateReply::GitDone(..)) => { if !self.compact { return None; } self.receive_git(reply, window, cx) }
             CreateReply::Baton(seq, result) => {
                 // "Não consegui ler" e "o resumo está vazio" são respostas diferentes: a falha nunca vira caixa vazia.
                 let view = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1280,6 +1297,7 @@ impl NewSession {
         self.menu.set(open.then_some(menu));
         if open && menu == Menu::Folder { self.query.update(cx, |input, cx| input.focus(window, cx)); }
         else if open { self.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
+        if open && menu == Menu::Git { self.git_opened(cx); }
         cx.notify();
     }
 
@@ -1350,6 +1368,7 @@ impl NewSession {
                 self.configs.loading || self.codex.loading, cx)))
             .children(branch.map(|label| quiet_pill(Menu::Branch, open == Some(Menu::Branch), IconName::GitBranch, label,
                 tr("create_checkout_branch"), self.checkout.loading, cx)))
+            .children(self.render_git_pill(open == Some(Menu::Git), cx))
     }
 
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
@@ -1382,6 +1401,7 @@ impl NewSession {
         let body = match menu {
             Menu::Folder => return self.render_compact_folders(cx).p_3().max_h(room).into_any_element(),
             Menu::Model => return self.render_model_menu(cx).into_any_element(),
+            Menu::Git => return self.render_git_menu(room, cx),
             Menu::Machine => match (&self.servers.value, self.servers.ok()) {
                 _ if self.servers.loading => popup::skeleton("new-chat-machines", 2).into_any_element(),
                 (Some(Err(error)), _) => Self::menu_failure("new-chat-machines-error", error.clone(), |this, window, cx| this.load_servers(window, cx), cx),

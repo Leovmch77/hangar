@@ -150,6 +150,13 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Contagem de quem espera (âmbar) no cabeçalho da máquina | pendente | o nativo mostra a seção "Aguardando você" no topo da lista |
 | Rodapé: pílula cheia no destaque "+ Nova" (36 px) e o recolher ao lado | implementado | rótulo curto do web; leitor de tela e dica dizem "Nova sessão". A linha da conexão embaixo é do nativo |
 
+## Nova conversa sem sessão: git da pasta
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Pílula "Git" ao lado da de branch (atrás/à frente, alterações ou "Atualizada") e painel com branch, remota, último fetch, Fetch, Pull só fast-forward, trocar branch (locais e remotas, com busca) e criar branch (base e "Trocar para ela") | implementado | `create/folder_git.rs` sobre `GET /api/fs/git` e `POST /api/fs/git/{fetch,pull,switch,branch}`; abrir o painel faz um fetch por pasta; pasta suja recusa pull e troca, divergida recusa pull, sessão viva no mesmo checkout pede "Trocar mesmo assim"; não exercitado na janela |
+| O mesmo gerenciador no web | pendente no web | o `CreateSessionSheet` do web não tem a pílula de branch/worktree da tela sem sessão, onde o painel mora; as rotas já servem os dois |
+
 ## Como rodar a prova
 
 ```bash

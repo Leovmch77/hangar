@@ -85,6 +85,7 @@ from app.costs import report as costs_report, usd_brl as _usd_brl, PERIODOS as _
 from app import costs_sources, pricing
 from app.git_ops import (
     list_branches, switch_branch, create_worktree, remove_worktree, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
+    folder_status, folder_fetch, folder_pull, folder_switch, folder_create_branch,
 )
 from app import loop as loop_mod
 from app.transcript import last_assistant_text
@@ -7937,6 +7938,94 @@ def fs_branches(root: str, path: str | None = None):
         return list_branches(str(Path(os.path.realpath(os.path.expanduser(path or root)))))
     except (FsError, GitError) as exc:
         raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
+
+
+# Git da pasta escolhida na tela de nova conversa: a mesma fronteira do seletor de pastas
+# (`scan_dir`), e o git sempre fora do laço de eventos.
+class FolderGitBody(_StrictBody):
+    root: str
+    path: str | None = None
+
+
+class FolderSwitchBody(FolderGitBody):
+    branch: str = Field(min_length=1)
+    confirm_sessions: bool = False
+
+
+class FolderBranchBody(FolderGitBody):
+    name: str = Field(min_length=1)
+    base: str | None = None
+    checkout: bool = False
+    confirm_sessions: bool = False
+
+
+def _folder_cwd(root: str, path: str | None) -> str:
+    scan_dir(root, path)
+    return str(Path(os.path.realpath(os.path.expanduser(path or root))))
+
+
+def _sessions_in(toplevel: str | None) -> list[str]:
+    """Sessões vivas no mesmo checkout: trocar a branch dele muda os arquivos delas."""
+    if not toplevel:
+        return []
+    top = Path(toplevel)
+    return sorted(s.name for s in _guardar_snap()
+                  if s.cwd and Path(os.path.realpath(s.cwd)).is_relative_to(top))
+
+
+def _folder_git_sync(root: str, path: str | None, op: str, body=None) -> dict:
+    try:
+        cwd = _folder_cwd(root, path)
+        if op == "status":
+            st = folder_status(cwd)
+        else:
+            # Pasta dentro da raiz mas repositório acima dela (ex.: um repo na home): escrever nele
+            # mexeria em arquivos fora da raiz liberada.
+            top = folder_status(cwd).get("toplevel")
+            if top and not Path(top).is_relative_to(Path(os.path.realpath(os.path.expanduser(root)))):
+                raise GitError(400, "repositório fora da raiz autorizada")
+            sessions = _sessions_in(top)
+        if op == "fetch":
+            st = folder_fetch(cwd)
+        elif op == "pull":
+            st = folder_pull(cwd)
+        elif op != "status":
+            if op == "switch":
+                st = folder_switch(cwd, body.branch, sessions, body.confirm_sessions)
+            else:
+                st = folder_create_branch(cwd, body.name, body.base, body.checkout, sessions, body.confirm_sessions)
+    except FsError as exc:
+        raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
+    except GitError as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    if st.get("repo"):
+        st["sessions"] = _sessions_in(st.get("toplevel"))
+    return st
+
+
+@app.get("/api/fs/git", dependencies=[Depends(require_auth)])
+async def fs_git_status(root: str, path: str | None = None):
+    return await asyncio.to_thread(_folder_git_sync, root, path, "status")
+
+
+@app.post("/api/fs/git/fetch", dependencies=[Depends(require_auth)])
+async def fs_git_fetch(body: FolderGitBody):
+    return await asyncio.to_thread(_folder_git_sync, body.root, body.path, "fetch")
+
+
+@app.post("/api/fs/git/pull", dependencies=[Depends(require_auth)])
+async def fs_git_pull(body: FolderGitBody):
+    return await asyncio.to_thread(_folder_git_sync, body.root, body.path, "pull")
+
+
+@app.post("/api/fs/git/switch", dependencies=[Depends(require_auth)])
+async def fs_git_switch(body: FolderSwitchBody):
+    return await asyncio.to_thread(_folder_git_sync, body.root, body.path, "switch", body)
+
+
+@app.post("/api/fs/git/branch", dependencies=[Depends(require_auth)])
+async def fs_git_branch(body: FolderBranchBody):
+    return await asyncio.to_thread(_folder_git_sync, body.root, body.path, "branch", body)
 
 
 # ── Preview: expoe um projeto local (porta) via tailscale serve, pro app ver num iframe ──
