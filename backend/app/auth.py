@@ -116,7 +116,7 @@ def require_auth(request: Request) -> None:
     from app.share_gate import guest_of
     if guest_of(request) is not None:
         return
-    auth =request.headers.get("Authorization", "")
+    auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:]
         mecanismo = "bearer"

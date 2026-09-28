@@ -162,7 +162,26 @@ class ShareGate:
             await self.app(scope, receive, send)
 
     async def _watched(self, scope, receive, send, token: str) -> None:
-        task = asyncio.create_task(self.app(scope, receive, send))
+        ended = False
+        started = finished = closed = False
+
+        async def wrapped(message):
+            nonlocal started, finished, closed
+            kind = message["type"]
+            if kind == "websocket.close":
+                closed = True
+            if kind == "websocket.close" and ended:
+                # 4410 = "compartilhamento encerrado" (espelho do HTTP 410) pro cliente não
+                # tratar como queda de rede e ficar reconectando. O cancel faz o handler fechar
+                # com 1000 no `finally`, então a troca do código tem que ser aqui.
+                message = {**message, "code": 4410}
+            elif kind == "http.response.start":
+                started = True
+            elif kind == "http.response.body" and not message.get("more_body"):
+                finished = True
+            await send(message)
+
+        task = asyncio.create_task(self.app(scope, receive, wrapped))
         try:
             while True:
                 done, _ = await asyncio.wait({task}, timeout=WATCH_INTERVAL)
@@ -171,14 +190,18 @@ class ShareGate:
                     return
                 if not await asyncio.to_thread(_still_valid, token):
                     break
+            ended = True                         # ANTES do cancel: o `finally` do handler já lê isto
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-            if scope["type"] == "websocket":
-                # 4410 = "compartilhamento encerrado" (espelho do HTTP 410) pro cliente não
-                # tratar como queda de rede e ficar reconectando.
+            if scope["type"] == "websocket" and not closed:
+                # Handler cancelado sem passar por close (ex.: parado num receive).
                 with contextlib.suppress(Exception):
                     await send({"type": "websocket.close", "code": 4410})
+            if scope["type"] == "http" and started and not finished:
+                # Sem fechar a resposta o uvicorn acusa "returned without completing response".
+                with contextlib.suppress(Exception):
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
         finally:
             if not task.done():
                 task.cancel()

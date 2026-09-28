@@ -204,7 +204,10 @@ def main():
     # Um Server com dois sockets: um lifespan só (dois Server rodariam watchers e hooks em dobro).
     config = uvicorn.Config("app.api:app", **kw)
     guest = _guest_socket()
-    uvicorn.Server(config).run(sockets=[config.bind_socket()] + ([guest] if guest else []))
+    server = uvicorn.Server(config)
+    server.run(sockets=[config.bind_socket()] + ([guest] if guest else []))
+    if not server.started:
+        sys.exit(3)                              # mesmo código do uvicorn.run: o systemd reinicia
 
 
 if __name__ == "__main__":

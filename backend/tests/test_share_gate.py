@@ -35,7 +35,7 @@ def _life(name):
 
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch):
-    settings.auth_token = "secret"
+    monkeypatch.setattr(settings, "auth_token", "secret")
     STATE["revoked"] = False
     STATE["unsure"] = False
     share_gate._life_cache.clear()
@@ -43,6 +43,8 @@ def _fakes(monkeypatch):
     monkeypatch.setattr(share_store, "lookup_token", _lookup)
     monkeypatch.setattr(share_gate, "session_life", _life)
     monkeypatch.setattr(share_api, "confirmed_absent", lambda name: False)
+    yield
+    share_api.changing_mode.discard("cc")
 
 
 def _app():
@@ -69,13 +71,25 @@ def _app():
                 await asyncio.sleep(0.02)
         return StreamingResponse(corpo(), media_type="text/event-stream")
 
+    # Todo handler de WebSocket tem teto de 3 s: se o vigia falhar, o teste acusa em vez de travar.
     @a.websocket("/api/sessions/{name}/term-hold")
     async def terminal_aberto(ws: WebSocket, name: str):
         # Terminal que fica aberto: só o vigia do porteiro fecha.
         await ws.accept()
         await ws.send_text("aberto")
         STATE["revoked"] = True
-        await ws.receive_text()
+        await asyncio.wait_for(ws.receive_text(), 3)
+
+    @a.websocket("/api/sessions/{name}/term-hold-finally")
+    async def terminal_com_finally(ws: WebSocket, name: str):
+        # Como termsock/navsock/codex_voice: o cancelamento cai num `finally` que fecha com 1000.
+        await ws.accept()
+        await ws.send_text("aberto")
+        STATE["revoked"] = True
+        try:
+            await asyncio.wait_for(ws.receive_text(), 3)
+        finally:
+            await ws.close()
 
     @a.websocket("/api/sessions/{name}/term")
     async def term(ws: WebSocket, name: str):
@@ -167,9 +181,15 @@ def test_stream_aberto_termina_quando_o_acesso_e_revogado(monkeypatch):
     assert 1 <= len(pedacos) < 500
 
 
-def test_websocket_aberto_fecha_com_4410_quando_o_acesso_e_revogado(monkeypatch):
+# websocket_connect junta a URL com `ws://testserver` e ignora o base_url do client: só URL
+# absoluta faz o scope chegar com a porta 8766 e passar pelo porteiro.
+GUEST_WS = "ws://127.0.0.1:8766"
+
+
+@pytest.mark.parametrize("rota", ["term-hold", "term-hold-finally"])
+def test_websocket_aberto_fecha_com_4410_quando_o_acesso_e_revogado(monkeypatch, rota):
     monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
-    with _guest_client().websocket_connect("/api/sessions/cc/term-hold?token=g") as ws:
+    with _guest_client().websocket_connect(f"{GUEST_WS}/api/sessions/cc/{rota}?token=g") as ws:
         assert ws.receive_text() == "aberto"
         with pytest.raises(WebSocketDisconnect) as e:
             ws.receive_text()
@@ -233,7 +253,7 @@ def test_terminal_do_convidado_com_origem_estrangeira(monkeypatch):
     monkeypatch.setattr(tmux, "has_session", lambda name: name in ("cc", "term-cc"))
     c = _guest_client()
     for alvo in ("cc", "term-cc"):
-        with c.websocket_connect(f"/api/sessions/{alvo}/term?token=g",
+        with c.websocket_connect(f"{GUEST_WS}/api/sessions/{alvo}/term?token=g",
                                  headers={"origin": "https://app-do-convidado.example"}) as ws:
             assert ws.receive_text() == f"ok {alvo}"
 
@@ -241,7 +261,7 @@ def test_terminal_do_convidado_com_origem_estrangeira(monkeypatch):
 def test_terminal_de_outra_sessao_recusado(monkeypatch):
     monkeypatch.setattr(tmux, "has_session", lambda name: True)
     with pytest.raises(WebSocketDisconnect):
-        with _guest_client().websocket_connect("/api/sessions/outra/term?token=g") as ws:
+        with _guest_client().websocket_connect(f"{GUEST_WS}/api/sessions/outra/term?token=g") as ws:
             ws.receive_text()
 
 
