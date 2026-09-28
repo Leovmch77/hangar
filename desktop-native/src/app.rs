@@ -42,6 +42,7 @@ mod server_config;
 mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
+mod shortcut_transfer;
 mod side;
 mod terminal;
 mod sidebar;
@@ -905,6 +906,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
+        self.refresh_shortcut_terms(&session.name);
         if session.readable() {
             if let Some(api) = self.api.clone() {
                 let tx = self.tx.clone();
@@ -1193,7 +1195,7 @@ impl Hangar {
             Payload::Device(reply) => { self.receive_device(reply, cx); return; }
             Payload::Accounts(reply) => { self.receive_accounts(reply, window, cx); return; }
             Payload::Orchestration(reply) => { self.receive_orchestration(reply, cx); return; }
-            Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, cx); return; }
+            Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }
             Payload::Harness(reply) => { self.receive_harness(reply, cx); return; }
             Payload::ServerConfig(reply) => {
                 if matches!(&reply, server_config::ServerConfigReply::QuietSaved(..) | server_config::ServerConfigReply::Saved(..)) {
@@ -4840,7 +4842,8 @@ impl Render for Hangar {
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
                     .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))))
-                .when(self.selected.is_some(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
+                // Sessão sem pane só tem terminal quando um atalho abriu um.
+                .when(self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
                         tr("term_toggle"), cx).selected(self.terminal.is_some())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).

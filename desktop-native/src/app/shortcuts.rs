@@ -198,6 +198,9 @@ pub(in crate::app) struct Shortcuts {
     suggesting: bool,
     /// Linha que começou o arrasto em curso; só vale enquanto a GPUI tem um arrasto ativo.
     dragging: Option<String>,
+    /// Aviso do último exportar/importar (texto, é erro) e a importação esperando confirmação.
+    pub(super) transfer_note: Option<(String, bool)>,
+    pub(super) import: Option<super::shortcut_transfer::ImportDraft>,
 }
 
 pub(super) enum ShortcutsReply {
@@ -205,10 +208,17 @@ pub(super) enum ShortcutsReply {
     /// Número do pedido e a lista gravada (`None` = restaurar padrão).
     Saved(u64, Option<Vec<Item>>, Result<Value, Failure>),
     Commands(Result<Vec<CommandInfo>, Failure>),
+    /// Exportar/importar (`shortcut_transfer.rs`): arquivo gravado e quantas credenciais saíram; conferência; gravação.
+    Exported(Result<(PathBuf, u64), String>),
+    Previewed(Value, Result<Value, String>),
+    Imported(Result<Value, String>),
 }
 
 impl Hangar {
-    fn shortcuts_send_later(&self) -> impl Fn(ShortcutsReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
+    /// Relê a lista gravada (depois de importar): a página e o painel lateral mostram o resultado.
+    pub(super) fn reload_shortcuts(&mut self, cx: &mut Context<Self>) { self.load_shortcuts(cx); }
+
+    pub(super) fn shortcuts_send_later(&self) -> impl Fn(ShortcutsReply) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static {
         let (tx, connection) = (self.tx.clone(), self.connection);
         move |reply| {
             let tx = tx.clone();
@@ -258,7 +268,11 @@ impl Hangar {
         self.runtime.spawn(async move { done(ShortcutsReply::Commands(api.commands(&name).await)).await });
     }
 
-    pub(super) fn receive_shortcuts(&mut self, reply: ShortcutsReply, cx: &mut Context<Self>) {
+    pub(super) fn receive_shortcuts(&mut self, reply: ShortcutsReply, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(reply, ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_)) {
+            self.receive_transfer(reply, window, cx);
+            return;
+        }
         let s = &mut self.shortcuts;
         match reply {
             ShortcutsReply::Loaded(seq, result) => {
@@ -298,6 +312,7 @@ impl Hangar {
                     s.suggestions = commands.into_iter().map(|c| if c.display.is_empty() { format!("/{}", c.name) } else { c.display }).collect();
                 }
             }
+            ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_) => {}
         }
         cx.notify();
     }
@@ -430,13 +445,21 @@ impl Hangar {
             (None, Some(_)) => Some(div().text_color(theme::success()).child(tr("shortcuts_saved"))),
             _ => None,
         };
+        // Importar grava direto no servidor: com edição pendente, o Salvar seguinte apagaria o que veio.
+        let transfer = div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(8.))
+            .child(Button::new("shortcuts-import").outline().small().icon(IconName::Upload).label(tr("shortcuts_import"))
+                .disabled(saving || s.dirty || s.import.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
+            .child(Button::new("shortcuts-export").outline().small().icon(IconName::Download).label(tr("shortcuts_export"))
+                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
+            .children(self.transfer_note_element());
+        let draft = self.render_import_draft(cx);
         let footer = self.mark(div().mt(px(24.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))
             .child(Button::new("shortcuts-restore").outline().small().label(tr("shortcuts_restore")).tooltip(tr("shortcuts_restore_help"))
                 .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(true, cx))))
             .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback))
             .child(Button::new("shortcuts-save").primary().small().label(tr("shortcuts_save")).loading(saving).disabled(!s.dirty || saving)
                 .on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(false, cx))));
-        page.child(list).children(restore_natives).child(form).child(footer).into_any_element()
+        page.child(list).children(restore_natives).child(form).child(transfer).children(draft).child(footer).into_any_element()
     }
 
     fn render_shortcut_row(&self, item: &Item, n: usize, count: usize, saving: bool, cx: &mut Context<Self>) -> Stateful<Div> {

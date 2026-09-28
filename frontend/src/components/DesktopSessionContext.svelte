@@ -27,7 +27,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields, Shortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type SessionCostEstimate } from '@hangar/core';
-  import ShortcutIcon from './icons/ShortcutIcon.svelte';
+  import ShortcutTiles from './ShortcutTiles.svelte';
+  import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { listServers } from '../lib/auth';
   import { money2 } from '../lib/fmt';
   import { moeda } from '../lib/moeda.svelte';
@@ -153,8 +154,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
   // Só o que dá pra renderizar: interno cujo handler o Chat não passou (headless sem terminal,
   // por exemplo) sai da lista — a config diz a ordem, o gate diz a existência.
+  // A fileira do topo leva só os internos; os customizados moram na seção "Ações" (ShortcutTiles).
   const visibleShortcuts = $derived((shortcuts ?? defaultShortcuts()).filter((s) => {
-    if (s.type !== 'internal') return true;
+    if (s.type !== 'internal') return false;
     switch (s.action) {
       case 'terminal': return !!onOpenTerminal;
       case 'modo': return !!onTrocarModo;
@@ -164,6 +166,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     }
   }));
   const hasActions = $derived(visibleShortcuts.length > 0);
+  const customShortcuts = $derived((shortcuts ?? []).filter(
+    (s): s is ShortcutSendText | ShortcutShell => s.type !== 'internal'));
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
@@ -516,11 +520,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             </svg>
             <span>{runRunning ? m.ctx_rodando() : m.ctx_rodar()}</span>
           </button>
-        {:else if s.type === 'send_text' || s.type === 'shell'}
-          <button class="ctx-action" onclick={() => onShortcut?.(s)} aria-label={s.label} title={s.type === 'shell' ? s.command : s.text}>
-            <ShortcutIcon icon={s.icon} />
-            <span>{s.label}</span>
-          </button>
         {/if}
       {/each}
     </div>
@@ -742,6 +741,15 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
         {/each}
       </ul>
     {/if}
+  </section>
+  {/if}
+
+  <!-- AÇÕES: os atalhos customizados, seção própria em blocos que quebram linha (sem rolar). -->
+  {#if customShortcuts.length && onShortcut}
+  <section class="sec-break">
+    <ShortcutTiles shortcuts={customShortcuts} onShortcut={onShortcut} onAdd={onEditShortcuts}>
+      {#snippet extra()}<ShortcutTransfer compact />{/snippet}
+    </ShortcutTiles>
   </section>
   {/if}
 
@@ -1007,13 +1015,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   /* Barra de acoes: uma linha so, um bloco por acao (icone em cima, rotulo curto embaixo), dentro
      de uma unica superficie — le como toolbar do painel, nao como quatro cards. Quantas couberem
      (o Atividade so existe as vezes): auto-fit divide a linha por igual. */
-  /* Flex, não grid de colunas iguais: o divisor antes do Rodar é um item de 1px, e num
-     `repeat(auto-fit, 1fr)` ele ganharia a largura de um botão. */
-  /* A lista é configurável e sem teto: quando não cabe, a fileira ROLA na horizontal (decisão da
-     sessão de grilling — sem limite artificial, sem menu "mais"). Com poucas, cada botão cresce e
-     divide a linha como antes. */
+  /* Grade que quebra linha, no máximo cinco por linha (pedido do dono: fileira única cortava os
+     rótulos). O piso de cada coluna é o maior entre 72px e um quinto da linha, então com espaço
+     sobrando a grade para em cinco e os blocos crescem; sem espaço, desce para a linha de baixo. O
+     divisor antes do Rodar sai da grade: numa grade ele ocuparia a célula de um botão. */
   .ctx-actions {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(max(72px, calc((100% - 8px) / 5)), 1fr));
     align-items: stretch;
     gap: 2px;
     margin: 0 var(--space-4) var(--space-3);
@@ -1021,12 +1029,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     background: var(--surface-inset);
-    overflow-x: auto;
-    scrollbar-width: thin;
   }
   /* min-width é o PISO: poucas ações dividem a linha por igual (ellipsis no rótulo, como sempre);
      muitas param de encolher no piso e a fileira rola. */
-  .ctx-actions > .ctx-action { flex: 1 1 0; min-width: 44px; }
+  .ctx-actions > .acao-divisor { display: none; }
   .acao-divisor {
     flex: 0 0 1px;
     align-self: center;
@@ -1059,12 +1065,16 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .ctx-action:active { background: var(--bg-hover); }
   .ctx-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .ctx-action svg { flex-shrink: 0; width: 18px; height: 18px; }
+  /* Rótulo inteiro em até duas linhas; só corta palavra que sozinha não cabe. */
   .ctx-action span {
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    line-height: 1;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    text-align: center;
+    line-height: 1.2;
   }
 
   .animated-icon { display: inline-flex; flex-shrink: 0; }
@@ -1207,9 +1217,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .agora-linha span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   @container (max-width: 380px) {
-    .ctx-actions { flex-wrap: wrap; }
-    .ctx-actions > .ctx-action { flex: 1 1 calc(50% - 2px); }
-    .acao-divisor { display: none; }
 
     .agora-topo {
       display: grid;

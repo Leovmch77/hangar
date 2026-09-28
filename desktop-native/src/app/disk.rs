@@ -1,5 +1,6 @@
-//! Servidor nesta máquina: anexos, atalhos de programa e o editor vão direto ao disco e ao processo, com as regras de
-//! `backend/app/uploads.py` e das rotas `upload`, `shortcut-shell` e `open-editor` de `backend/app/api.py`. Servidor
+//! Servidor nesta máquina: anexos e o editor vão direto ao disco e ao processo, com as regras de
+//! `backend/app/uploads.py` e das rotas `upload` e `open-editor` de `backend/app/api.py`. Atalho shell vai sempre ao
+//! backend: é ele quem cria o terminal escondido que vira aba do painel. Servidor
 //! remoto, pasta que não existe aqui ou vídeo (quadros e fala saem do backend) seguem pelo backend.
 use super::*;
 use crate::api::MAX_BYTES;
@@ -158,13 +159,6 @@ fn prune(project: &Path, days: i64) {
     }
 }
 
-/// `shortcut-shell`: o comando pelo shell, no cwd da sessão, desprendido e sem saída.
-fn shell(cwd: &Path, command: &str) -> Result<Value, Failure> {
-    let command = command.trim();
-    if command.is_empty() { return Err(refusal(400, "comando vazio")); }
-    launch(Command::new("/bin/sh").arg("-c").arg(command).current_dir(cwd)).map_err(|error| refusal(500, error.to_string()))
-}
-
 /// `open-editor`: o binário da configuração do servidor com a pasta como único argumento, sem shell.
 fn editor(binary: &str, cwd: &str) -> Result<Value, Failure> {
     launch(Command::new(binary).arg(cwd)).map_err(|error| refusal(500, format!("editor '{binary}' falhou: {error}")))
@@ -264,12 +258,6 @@ impl Hangar {
             Some(Uploads::Local { dir, cwd: real, jsonl: PathBuf::from(&key.jsonl) })
         });
         local.unwrap_or(Uploads::Remote)
-    }
-
-    /// `shortcut-shell` local quando a sessão é desta máquina; `None` manda ao backend.
-    pub(super) fn local_shell(&self, name: &str, command: String) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
-        let (_, real) = self.local_cwd(name)?;
-        Some(blocking(move || shell(&real, &command)))
     }
 
     /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor.
