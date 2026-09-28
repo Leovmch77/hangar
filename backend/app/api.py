@@ -78,6 +78,7 @@ from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, s
                         automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
 from app import share_api, share_guest_api, share_store
+from app.share_guest_api import guest_safe
 from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
@@ -1691,9 +1692,12 @@ async def list_sessions(request: Request):
     # lugar o que ja esta neles.
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
-    if (guest := guest_of(request)) is not None:
+    guest = guest_of(request)
+    if guest is not None:
         snap = [i for i in snap if i.name == guest.session]
-    return await registry.list_with_state([i.model_copy() for i in snap])
+    decorated = await registry.list_with_state([i.model_copy() for i in snap])
+    # O pareamento e o encadeamento são decorados acima e citam outras sessões do dono.
+    return decorated if guest is None else [guest_safe(i) for i in decorated]
 
 
 @app.post("/api/diag", dependencies=[Depends(require_auth)])

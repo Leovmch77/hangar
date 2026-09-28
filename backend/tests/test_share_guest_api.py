@@ -39,6 +39,24 @@ def test_pagina_do_convite_nao_gasta_o_codigo(guest_client, monkeypatch):
     assert chamadas == []
 
 
+def test_pagina_com_tunel_fora_responde_503(guest_client, monkeypatch):
+    def sem_tunel():
+        raise share_tunnel.TunnelError([], "sem tailscale")
+    monkeypatch.setattr(share_store, "peek", lambda code: SHARED)
+    monkeypatch.setattr(share_tunnel, "host", sem_tunel)
+    r = guest_client.get("/convite/ABCD")
+    assert r.status_code == 503
+    assert "indisponível por instantes" in r.text
+    assert "hangar://" not in r.text
+
+
+def test_link_do_app_escapa_o_codigo(guest_client, monkeypatch):
+    monkeypatch.setattr(share_store, "peek", lambda code: SHARED)
+    r = guest_client.get("/convite/a%22b")
+    assert "convite/maq.tail.ts.net:8443/a%22b" in r.text
+    assert 'a"b' not in r.text
+
+
 @pytest.mark.parametrize("reason,texto", [
     ("used", "já foi usado"), ("expired", "venceu"), ("revoked", "cancelado"),
     ("unknown", "não encontrado")])
@@ -101,6 +119,24 @@ def test_lista_do_convidado_so_tem_a_sessao_dele(guest_client, monkeypatch):
     assert [s["name"] for s in r.json()] == ["cc"]
 
 
+def test_lista_do_convidado_nao_cita_outras_sessoes(guest_client, monkeypatch):
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    infos = [SessionInfo(name="cc", cwd="/p", pair_peers=["outra"], pair_task="PM-1",
+                         pair_gid="g1", then_target="outra")]
+
+    async def with_state(lst):
+        return lst
+
+    with patch("app.api.registry.list", return_value=infos), \
+            patch("app.api.registry.list_with_state", with_state):
+        r = guest_client.get("/api/sessions", headers={"Authorization": "Bearer g"})
+    row = r.json()[0]
+    assert row["name"] == "cc"
+    assert row["pair_peers"] is None and row["then_target"] is None
+    assert row["pair_task"] is None and row["pair_gid"] is None
+    assert "outra" not in r.text
+
+
 class _FakeRefresher:
     def __init__(self, data):
         self.version, self.errored, self.data = 1, False, data
@@ -124,6 +160,18 @@ async def test_stream_da_lista_filtrado_e_sem_contar_app(monkeypatch):
     assert ev["event"] == "sessions"
     assert [s["name"] for s in json.loads(ev["data"])] == ["cc"]
     assert entrou == []
+
+
+async def test_stream_da_lista_nao_cita_outras_sessoes(monkeypatch):
+    row = {"name": "cc", "pair_peers": ["outra"], "pair_task": "PM-1", "pair_gid": "g1",
+           "then_target": "outra"}
+    monkeypatch.setattr(sse, "_list_refresher", _FakeRefresher(json.dumps([row])))
+    gen = sse.list_events(ping_secs=60, only="cc")
+    ev = await asyncio.wait_for(gen.__anext__(), 2)
+    await gen.aclose()
+    assert "outra" not in ev["data"]
+    got = json.loads(ev["data"])[0]
+    assert got["pair_peers"] is None and got["then_target"] is None
 
 
 def test_stream_da_sessao_do_convidado_nao_conta_como_app_do_dono(guest_client, monkeypatch):

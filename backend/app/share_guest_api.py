@@ -1,6 +1,7 @@
 """Rotas que o convidado alcança sem token: a página do link e o resgate do código."""
 import html
 import socket
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
@@ -30,6 +31,17 @@ text-align:center;border:1px solid #888;background:transparent;color:inherit;tex
 .p{{background:#3b6ef5;color:#fff;border-color:#3b6ef5}}</style></head><body>{corpo}</body></html>"""
 
 
+# Campos da lista que citam OUTRAS sessões do dono (pareamento e encadeamento).
+_OTHER_SESSIONS = {"pair_peers": None, "pair_task": None, "pair_gid": None, "then_target": None}
+
+
+def guest_safe(info):
+    """Cópia da linha da lista sem os nomes de outras sessões; aceita SessionInfo ou dict do SSE."""
+    if isinstance(info, dict):
+        return {**info, **_OTHER_SESSIONS}
+    return info.model_copy(update=_OTHER_SESSIONS)
+
+
 def _owner() -> str:
     return settings.server_id or socket.gethostname()
 
@@ -47,8 +59,14 @@ def invite_page(code: str):
     except share_store.ShareError as e:
         corpo = f"<h1>Convite indisponível</h1><p>{html.escape(_REASONS[e.reason][1])}.</p>"
     else:
-        host = share_tunnel.host()
-        app_link = f"hangar://convite/{host}:{share_tunnel.FUNNEL_PORT}/{code}"
+        try:
+            host = share_tunnel.host()
+        except share_tunnel.TunnelError:
+            return HTMLResponse(
+                _PAGE.format(corpo="<h1>Convite indisponível</h1>"
+                                   "<p>O convite está indisponível por instantes. Tente de novo.</p>"),
+                status_code=503, headers={"Cache-Control": "no-store"})
+        app_link = f"hangar://convite/{host}:{share_tunnel.FUNNEL_PORT}/{quote(code, safe='')}"
         corpo = (
             f"<h1>{html.escape(_owner())} compartilhou uma sessão</h1>"
             f"<p>Sessão <b>{html.escape(share.session)}</b>. Abra no teu Hangar para ela "

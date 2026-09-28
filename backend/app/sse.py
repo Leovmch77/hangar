@@ -17,6 +17,7 @@ from app.preview import PreviewBroker, _norm
 from app.models import PreviewEvent, session_key
 from app.stats import Accumulator as StatsAccumulator
 from app.registry import SessionRegistry
+from app.share_guest_api import guest_safe
 from app.askquestion import read_pending_askq
 
 
@@ -525,8 +526,8 @@ async def list_events(ping_secs: float = 8.0, only: str | None = None):
                 await queue.put(("list_error", "{}"))   # falha do refresher — front distingue de offline
             elif data is not None:
                 if only is not None:
-                    data = json.dumps([x for x in json.loads(data) if x.get("name") == only],
-                                      ensure_ascii=False)
+                    data = json.dumps([guest_safe(x) for x in json.loads(data)
+                                       if x.get("name") == only], ensure_ascii=False)
                 await queue.put(("sessions", data))
 
     async def ping_loop():
