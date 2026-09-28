@@ -51,6 +51,8 @@ pub(super) enum SidebarReply {
     NotSaved(String),
     /// Resposta de agrupar, sair do grupo ou sugerir a tarefa, amarrada ao número do pedido.
     Group(u64, super::grouping::GroupReply),
+    /// Resposta de um pedido do painel do grupo.
+    Sheet(super::group_sheet::SheetReply),
 }
 
 /// Uma notificação por sessão: o "git pull…" dá lugar ao resultado, como o `flash` único do web.
@@ -354,6 +356,7 @@ impl Hangar {
         let names: HashSet<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
         self.sidebar.deleting.retain(|n| names.contains(n));
         self.refresh_group_ask();
+        self.refresh_group_sheet(window, cx);
         if self.sidebar.hover.as_ref().is_some_and(|n| !names.contains(n)) { self.hide_preview(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
         if let Some(new) = self.sidebar.focus_tab.clone().filter(|n| names.contains(n)) {
@@ -765,6 +768,7 @@ impl Hangar {
             }
             SidebarReply::Note(name, kind, text) => window.push_notification(git_note(&name, kind, text), cx),
             SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
+            SidebarReply::Sheet(reply) => self.receive_sheet(reply, window, cx),
             SidebarReply::Chained(from, seq, target, result) => {
                 // Só o diálogo que mandou este pedido recebe a resposta; fechado, ela vai à notificação.
                 let open = self.sidebar.chain.as_ref().filter(|c| c.status.borrow().sent == Some(seq));

@@ -23,6 +23,7 @@ mod follow;
 mod landing;
 mod git;
 mod grouping;
+mod group_sheet;
 mod harness;
 mod viewer;
 mod disk;
@@ -1640,23 +1641,29 @@ impl Hangar {
         self.action_feedback.remove(&key);
         let known = self.known_user_ids();
         if attached { self.start_uploads(key, text, steer, known, cx); }
-        else { self.deliver(key, text.clone(), text, steer, known, cx); }
+        else { self.deliver(key, text.clone(), text, steer, known, true, cx); }
         let _ = window;
     }
 
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    /// `composed`: veio do campo, e com o "mandar pro grupo" ligado vai também aos membros.
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone().filter(|_| self.server.as_deref() == Some(key.server.as_str())) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
             cx.notify();
             return;
         };
+        let group = if composed && !steer { self.group_targets(&key, &text) } else { None };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = if steer { api.steer_text(&key.name, &text).await } else { api.send(&key.name, &text).await };
+            let result = match group {
+                Some(names) => api.broadcast(&names, &text).await.and_then(|results| group_sheet::group_delivery(&key.name, results)),
+                None if steer => api.steer_text(&key.name, &text).await,
+                None => api.send(&key.name, &text).await,
+            };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sent(key, text, draft, result) }).await;
         });
         self.follow_engage(cx);
@@ -1715,7 +1722,7 @@ impl Hangar {
             }
         }
         let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
-        self.deliver(key, message, draft, steer, known, cx);
+        self.deliver(key, message, draft, steer, known, true, cx);
     }
 
     fn add_attachment(&mut self, key: &SessionKey, name: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -1970,7 +1977,7 @@ impl Hangar {
         if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) { return; }
         let draft = if from_panel { String::new() } else { self.composer.read(cx).value().to_string() };
         let known = self.known_user_ids();
-        self.deliver(key, format!("/{}", command.name), draft, false, known, cx);
+        self.deliver(key, format!("/{}", command.name), draft, false, known, false, cx);
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
@@ -3135,7 +3142,8 @@ impl Hangar {
             self.composer_placeholder = placeholder.clone();
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
         }
-        let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working";
+        let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
+            && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
         let blocked = if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
@@ -3215,6 +3223,7 @@ impl Hangar {
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
             div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+                .children(session.as_ref().map(|s| self.render_group_chips(s, cx)))
                 .child(place)
                 .child(div().flex_1())
                 .child(usage)

@@ -284,7 +284,7 @@ impl Hangar {
                     self.action_feedback.insert(key, (tr("shortcut_busy"), true));
                 } else {
                     let known = self.known_user_ids();
-                    self.deliver(key, text, String::new(), false, known, cx);
+                    self.deliver(key, text, String::new(), false, known, false, cx);
                 }
             }
             Shortcut::Shell { label, command, .. } => {

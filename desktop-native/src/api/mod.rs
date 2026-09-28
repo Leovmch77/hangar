@@ -261,6 +261,22 @@ impl Api {
         value.get("task").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| Failure::local("invalid_response"))
     }
 
+    /// O mesmo prompt para várias sessões do servidor, pela esteira do `/input` de cada uma. Responde 200 com o resultado por
+    /// sessão, na ordem pedida: `(nome, entrega, motivo da falha)`.
+    pub async fn broadcast(&self, names: &[String], text: &str) -> Result<Vec<(String, Delivery, Option<String>)>, Failure> {
+        let value = self.server_send(reqwest::Method::POST, &["broadcast"], Some(json!({"names": names, "text": text})), 120).await?;
+        let results = value.get("results").and_then(Value::as_object).ok_or_else(|| Failure::transport(true))?;
+        Ok(names.iter().map(|name| {
+            let result = results.get(name);
+            let flag = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_bool) == Some(true);
+            let error = result.and_then(|r| r.get("error")).filter(|e| !e.is_null()).map(|e| match e {
+                Value::String(text) => text.clone(),
+                _ => e.get("msg").or_else(|| e.get("code")).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| e.to_string()),
+            });
+            (name.clone(), Delivery { ok: flag("ok"), delivered: flag("delivered") }, error)
+        }).collect())
+    }
+
     // Leitura sem efeito colateral: queda é rede, nunca incerteza.
     pub async fn read(&self, name: &str, path: &[&str], query: &[(&str, &str)], seconds: u64) -> Result<Value, Failure> {
         let mut url = self.endpoint(Some(name), None);

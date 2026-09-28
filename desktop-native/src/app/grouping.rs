@@ -124,7 +124,11 @@ pub(super) struct Grouping {
     /// Ponteiro dentro da área visível da lista: linha rolada para fora ainda tem caixa, e só isto a separa da visível.
     in_list: bool,
     ask: Option<GroupAsk>,
-    seq: u64,
+    pub(super) seq: u64,
+    /// Painel do grupo aberto pelo chip do compositor.
+    pub(super) sheet: Option<super::group_sheet::Sheet>,
+    /// "Mandar pro grupo" ligado nesta sessão, com os membros de quando ligou: grupo que muda desliga, como no web.
+    pub(super) send_to_group: Option<(SessionKey, String)>,
 }
 
 impl Grouping {
@@ -149,9 +153,9 @@ impl Render for DragChip {
     }
 }
 
-fn glyph(size: f32, color: Hsla) -> Svg { svg().path(crate::GROUP_GLYPH).size(px(size)).flex_shrink_0().text_color(color) }
+pub(super) fn glyph(size: f32, color: Hsla) -> Svg { svg().path(crate::GROUP_GLYPH).size(px(size)).flex_shrink_0().text_color(color) }
 
-fn web_with(key: &str, name: &str, value: &str) -> String {
+pub(super) fn web_with(key: &str, name: &str, value: &str) -> String {
     crate::i18n::tr_web(key, &HashMap::from([(name.to_owned(), value.to_owned())])).unwrap_or_else(|| key.to_owned())
 }
 
@@ -524,7 +528,7 @@ impl Hangar {
 }
 
 /// Motivo do servidor; sem ele, a frase do web.
-fn failed(error: &Failure, fallback: &str) -> String {
+pub(super) fn failed(error: &Failure, fallback: &str) -> String {
     let text = Hangar::fetch_failure(error);
     if text.trim().is_empty() { web(fallback) } else { text }
 }

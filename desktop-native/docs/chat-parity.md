@@ -34,7 +34,8 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Promover fila (`/steer` sem corpo) | conferido | Task 3, sem regressão |
 | Modelo, esforço, modo e permissão da sessão (fileira abaixo do campo) | conferido | ver "Controles da sessão" |
 | Chip de git, anel de contexto, estatísticas do turno | conferido | na barra direita, não no compositor |
-| Enviar ao par/grupo, voz, câmera, orquestrar, prévia, shells | pendente | módulos fora desta sequência |
+| Chip do grupo (glifo sem grupo; nome e estado do par único; "grupo (n)") e "mandar pro grupo" (⇄) | implementado | na faixa de baixo do cartão, à esquerda da pasta (o web o põe na faixa de cima); ligado, o envio do campo vai por `POST /api/broadcast` para ela e os membros, `/comando` vai só para ela, membro que não recebeu vira recusa com quem recebeu e quem não; grupo que muda desliga; atalhos de envio da barra direita não vão ao grupo; não exercitado na janela |
+| Voz, câmera, orquestrar, prévia, shells | pendente | módulos fora desta sequência |
 
 ## Controles da sessão
 
@@ -124,6 +125,10 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Arrastar sessão sobre outra ou sobre o cabeçalho do bloco abre o diálogo de agrupar; soltar no fundo da lista abre o de sair | implementado | mesmas recusas do `canPair` do web, com o motivo no cartão que acompanha o ponteiro; linha de outra máquina recusa; soltar sobre cabeçalho de seção/projeto conta como fundo (no web não) |
 | Diálogo de agrupar/sair: afetadas, tarefa herdada ou campo com Sugerir, 409 vira "Substituir a tarefa", aviso parcial vira título de feito | implementado | não fecha com a chamada em voo; relê a sessão viva antes de confirmar |
 | "Agrupar com…" e "Sair do grupo" no menu da sessão | pendente no web | nasceu no nativo; mesmas candidatas do arrastar e o mesmo diálogo |
+| Painel do grupo (`PairSheet`) pelo chip do compositor: membros com estado, abrir a conversa de um membro, adicionar sessões (várias marcadas), contrato compartilhado em markdown com o caminho, conversa do grupo (últimos 40 recados), sair do grupo | implementado | `group_sheet.rs`, modal; "abrir a conversa" troca para a sessão do membro (o web abre por cima, num modal); membro de outra máquina fica sem o botão; conversa lê a cauda de 1000 eventos de cada membro (o web lê o histórico inteiro); contrato vazio não aparece e a busca que falhou aparece; aviso parcial fica à vista; não exercitado na janela |
+| Painel sem grupo: marcar sessões vivas, tarefa opcional, "Parear com …" | implementado | mesmo pedido de criar e adicionar (o servidor une os grupos); não exercitado na janela |
+| "Ver em grade" e "Todas lado a lado" / lado a lado por membro no painel do grupo | pendente | o nativo não tem grade de comparação nem vista dividida para abrir |
+| Abrir o painel do grupo pelas ações da sessão e pelo painel de contexto | pendente | só o chip do compositor abre |
 
 ## Como rodar a prova
 
