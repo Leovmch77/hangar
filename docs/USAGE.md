@@ -304,7 +304,7 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
 - **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
   `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
 - **Receber:** no app nativo, clique no link (ou "Entrar em sessão compartilhada" na página Máquinas
-  e cole). No web/PWA, "Adicionar máquina" → "Colar convite". No Linux, abrir o app pelo `hangar://`
+  e cole). No web/PWA, Configurações → Máquinas → "Colar convite". No Linux, abrir o app pelo `hangar://`
   depende da versão nativa nova (o `install-linux.sh` do pacote registra o esquema); no Windows o
   registro vem do `.ps1` do repositório.
 - **Encerrar:** "Revogar" num aparelho, "Encerrar todos", ou fechar a sessão. Conexões abertas caem
