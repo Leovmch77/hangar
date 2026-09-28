@@ -32,6 +32,7 @@ mod panes;
 mod popup;
 mod rail;
 mod rows;
+mod run;
 mod files;
 mod settings;
 mod mention;
@@ -195,6 +196,7 @@ enum Reply {
     Reload,
     PlanPreview(bool),
     PreSelect(String),
+    RunState,
 }
 
 pub struct Picked { name: String, bytes: Vec<u8> }
@@ -896,6 +898,7 @@ impl Hangar {
         }
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
+        self.load_run_state();
         cx.notify();
     }
 

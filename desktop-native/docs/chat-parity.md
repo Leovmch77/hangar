@@ -64,7 +64,8 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Aviso de recarregar (Claude sem terminal) | conferido | só com a sessão parada, confirmação explícita; aviso some quando o backend limpa |
 | Projeto: repo, branch, sujo, +/− | conferido | Codex e sem terminal leem a branch da lista |
 | Arquivos alterados e diff | conferido | `git/files` e `git/diff` (leitura); carregando, vazio, erro; sem nenhuma operação Git |
-| Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo/rodar não aparecem |
+| Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo não aparecem |
+| Atalho Rodar (`RunSheet`) | implementado | botão na grade de Ações (aceso com run vivo, lido ao abrir a sessão); diálogo roda o lembrado ao abrir ou lista personalizados e detectados, espelho do pane a cada 1 s, Trocar/Parar, CRUD de personalizados; parada recusada mantém o run na tela (o web o apaga) |
 | Fila da sessão | conferido | contagem no rodapé do painel |
 | Recolher e redimensionar | conferido | 240–480 px; some sozinho se a conversa ficaria abaixo de 540 px |
 | Fileira de abas (Contexto, Arquivos, Atividade, Git) no desenho da `.abas` do web | conferido | régua de ponta a ponta, sublinhado na escolhida, texto de 12 px; rótulo da primeira na margem de 16 px das seções; as quatro inteiras a 300 px, reticências a 240 px. Diferenças: o recolher mora na mesma fileira (o web o põe no cabeçalho com nome e estado, que aqui ficam no cabeçalho da conversa) e Git é aba, não o botão que abre a coluna do web |

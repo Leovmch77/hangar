@@ -18,21 +18,27 @@ pub(super) enum Shortcut {
     Send { label: String, text: String, direct: bool, confirm: bool, icon: Option<String> },
     Shell { label: String, command: String, confirm: bool, icon: Option<String> },
     Attach,
+    Run,
 }
 
 impl Shortcut {
     fn confirm(&self) -> bool { matches!(self, Shortcut::Send { confirm: true, .. } | Shortcut::Shell { confirm: true, .. }) }
     fn label(&self) -> String {
-        match self { Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(), Shortcut::Attach => tr("attach") }
+        match self {
+            Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(),
+            Shortcut::Attach => tr("attach"),
+            Shortcut::Run => tr("shortcuts_native_rodar"),
+        }
     }
 
-    /// O que o painel roda de um atalho da config; terminal, modo, navegador e rodar são módulos à parte aqui.
+    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui.
     fn from_item(item: &shortcuts::Item) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
             "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon }),
             "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
+            "internal" if item.action() == "rodar" => Some(Shortcut::Run),
             _ => None,
         }
     }
@@ -58,12 +64,14 @@ pub(super) struct Side {
     reloading: HashSet<SessionKey>,
     /// A aba Git da sessão aberta (dono = `session_owner`).
     pub(super) git: Option<((u64, String), Entity<super::git::GitPanel>)>,
+    /// Há um run vivo no projeto desta sessão (botão Rodar aceso).
+    pub(super) run: Option<(SessionKey, bool)>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         Self { open: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None }
+            files: None, diff: None, reloading: HashSet::new(), git: None, run: None }
     }
 }
 
@@ -269,6 +277,7 @@ impl Hangar {
         }
         match shortcut {
             Shortcut::Attach => self.pick_files(cx),
+            Shortcut::Run => self.open_run(window, cx),
             Shortcut::Send { text, direct: false, .. } => self.prefill(&text, true, window, cx),
             Shortcut::Send { text, .. } => {
                 if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) {
@@ -360,6 +369,7 @@ impl Hangar {
                 };
                 self.action_feedback.insert(key, note);
             }
+            Reply::RunState => self.receive_run_state(key, result),
             Reply::Reload => {
                 self.side.reloading.remove(&key);
                 let note = match result { Ok(_) => (tr("reload_sent"), false), Err(error) => (Self::failure(&error), true) };
@@ -573,19 +583,28 @@ impl Hangar {
                 .child(tr("side_shortcuts_failed").replace("{reason}", reason)).into_any_element()),
         };
         if list.is_empty() { return None; }
-        let busy = self.selected_key().is_some_and(|key| self.uploading.contains_key(&key));
+        let key = self.selected_key();
+        let busy = key.as_ref().is_some_and(|key| self.uploading.contains_key(key));
+        let running = self.side.run.as_ref().is_some_and(|(owner, on)| *on && Some(owner) == key.as_ref());
         // "Ações" do mock: grade de quatro por linha, cada atalho com borda, ícone em cima e rótulo embaixo.
         let buttons: Vec<Button> = list.into_iter().enumerate().map(|(n, shortcut)| {
-            // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe.
+            // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe e Rodar vira parada acesa com o run vivo.
             let icon = match &shortcut {
                 Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 16., theme::muted()).into_any_element(),
+                Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 16., theme::accent()).into_any_element(),
+                Shortcut::Run => chrome::small_icon(IconName::Play, 16., theme::muted()).into_any_element(),
                 Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 16., theme::muted()),
             };
-            let label = shortcut.label();
+            let (label, tip) = match &shortcut {
+                Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
+                Shortcut::Run => (shortcut.label(), tr("run_project")),
+                _ => (shortcut.label(), shortcut.label()),
+            };
             Button::new(SharedString::from(format!("shortcut-{n}")))
-                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
+                    .hover(theme::hover()).active(theme::hover()))
                 .flex_1().min_w_0().h_auto().py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
-                .tooltip(label.clone()).accessibility_label(label.clone()).disabled(!readable || busy)
+                .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
                 .child(div().w_full().flex().flex_col().items_center().gap(px(4.))
                     .child(icon)
                     .child(div().max_w_full().truncate().text_size(px(11.5)).child(label)))
@@ -712,8 +731,8 @@ mod tests {
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
-        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach]);
-        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach]);
+        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach, Shortcut::Run]);
+        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach, Shortcut::Run]);
         let raw = r#"[{"id":"a","type":"send_text","label":"Relatório","text":"/relatorio","send_direct":false,"confirm":true},
             {"id":"a","type":"shell","label":"dup","command":"x"},{"id":"b","type":"shell","label":"Build","command":"make"},
             {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
