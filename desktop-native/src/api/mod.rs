@@ -256,6 +256,28 @@ impl Api {
         self.act(name, &["pair"], None, true, 60).await.map(|value| PairResult::from_value(&value))
     }
 
+    pub async fn share_create(&self, name: &str) -> Result<ShareCreated, ShareFailure> {
+        let r = self.client.post(self.endpoint(Some(name), Some("share"))).timeout(Duration::from_secs(60)).send().await
+            .map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
+        if r.status() == StatusCode::CONFLICT {
+            let body = r.json::<Value>().await.unwrap_or(Value::Null);
+            if let Some((missing, fix)) = share_blocked(&body) { return Err(ShareFailure::Blocked { missing, fix }); }
+            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false }));
+        }
+        Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
+    }
+
+    pub async fn shares(&self, name: &str) -> Result<Vec<ShareEntry>, Failure> {
+        let value = self.read(name, &["share"], &[], 15).await?;
+        serde_json::from_value(value.get("shares").cloned().unwrap_or(Value::Null)).map_err(|_| Failure::local("invalid_response"))
+    }
+
+    /// `id` revoga um aparelho; `None` encerra todos os convites da sessão.
+    pub async fn share_revoke(&self, name: &str, id: Option<&str>) -> Result<(), Failure> {
+        let path: Vec<&str> = std::iter::once("share").chain(id).collect();
+        self.act(name, &path, None, true, 20).await.map(|_| ())
+    }
+
     /// Tarefa sugerida pelo fim da conversa das sessões (422 quando nenhuma tem conversa).
     pub async fn suggest_group_task(&self, sessions: &[String]) -> Result<String, Failure> {
         let value = self.server_send(reqwest::Method::POST, &["pair", "task-suggestion"], Some(json!({"sessions": sessions})), 120).await?;
@@ -393,6 +415,24 @@ impl Api {
 pub struct History { pub events: Option<Vec<ChatEvent>>, pub etag: Option<String> }
 
 #[derive(Clone, Debug, serde::Deserialize)]
+pub struct ShareCreated { pub link: String, pub expires_at: f64 }
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
+
+pub enum ShareFailure { Blocked { missing: String, fix: String }, Other(Failure) }
+
+/// O que falta na máquina para o Funnel subir (operador, liberação na tailnet) e como resolver.
+pub fn share_blocked(body: &Value) -> Option<(String, String)> {
+    let detail = body.get("detail")?;
+    if detail.get("code")?.as_str()? != "erro_compartilhar_pre_requisito" { return None; }
+    let params = detail.get("params")?;
+    // ponytail: mostra só o primeiro que falta; resolvido ele, o próximo clique mostra o seguinte.
+    let missing = params.get("missing")?.as_array()?.first()?.as_str()?.to_owned();
+    Some((missing, params.get("fix")?.as_str()?.to_owned()))
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct Redeemed { pub token: String, pub session: String, pub owner: String, pub address: String }
 
 /// Resgate do convite: sem token (quem chega ainda não tem um) e sem seguir redirecionamento.
@@ -418,6 +458,15 @@ mod tests {
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}, "msg": "Nenhum turno ativo"}})), 409), "Nenhum turno ativo");
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}}})), 409), "turn_missing");
         assert_eq!(failure_detail(Some(json!({"detail": [{"msg": "at most 40 characters"}]})), 422), "at most 40 characters");
+    }
+
+    #[test]
+    fn share_prerequisite_is_read_from_the_409_body() {
+        let body = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "msg": "x",
+            "params": {"missing": ["operator", "funnel"], "fix": "sudo tailscale set --operator=$USER"}}});
+        assert_eq!(share_blocked(&body), Some(("operator".into(), "sudo tailscale set --operator=$USER".into())));
+        assert_eq!(share_blocked(&json!({"detail": {"code": "erro_outro", "params": {"missing": ["a"], "fix": "b"}}})), None);
+        assert_eq!(share_blocked(&json!({"detail": "texto"})), None);
     }
 
     #[test]

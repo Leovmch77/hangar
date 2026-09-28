@@ -5920,6 +5920,7 @@
   "native_group_drop_leave": "Drop here to leave the group",
   "native_invite_badge": "guest",
   "native_invite_own_server": "This address is already one of your own machines. Open the session through it; the invite was not used.",
+  "native_share_open_link": "Open link",
   "erro_compartilhar_pre_requisito": "Sharing is not set up on this machine yet.",
   "erro_compartilhamento_inexistente": "That access no longer exists.",
   "convite_erro_rede": "Could not reach the invite's machine.",

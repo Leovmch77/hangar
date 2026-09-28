@@ -35,6 +35,7 @@ mod popup;
 mod rail;
 mod rows;
 mod run;
+mod share;
 mod files;
 mod settings;
 mod mention;
@@ -4258,6 +4259,9 @@ impl Hangar {
                 .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{name}"))).flex_shrink_0().flex().opacity(0.72)
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("create_mode_headless")).build(window, cx))
                     .child(chrome::no_terminal_mark(12., theme::muted()))))
+                .when(session.shared, |el| el.child(div().id(SharedString::from(format!("row-shared-{name}"))).flex_shrink_0().flex()
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr_shared("sessao_compartilhada", &[])).build(window, cx))
+                    .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };

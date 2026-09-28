@@ -960,6 +960,7 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
         let (hangar, name) = (hangar.clone(), session.name.clone());
         PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, name.clone(), window, cx)); })
     };
+    let invite = hangar.upgrade().is_some_and(|h| h.read(cx).active_invite());
     let cwd = session.cwd.clone().filter(|c| !c.is_empty());
     let close = {
         let (hangar, name) = (hangar.clone(), session.name.clone());
@@ -994,6 +995,8 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
         .item(item(tr("sidebar_rename"), |this, name, window, cx| this.start_session_rename(name, window, cx)))
         .item(mute_item(hangar, &session.name, mute))
+        // Convidado não compartilha a sessão de outro dono.
+        .when(!invite, |menu| menu.item(item(tr_shared("compartilhar_menu", &[]), |this, name, window, cx| this.open_share_dialog(name, window, cx))))
         .when_some(cwd, |menu, cwd| menu
             .item(PopupMenuItem::new(tr("sidebar_copy_cwd")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))))
             .item(item(tr("sidebar_open_editor"), |this, name, _, cx| this.write(name, Write::Editor, cx))))
