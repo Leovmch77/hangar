@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import BottomSheet from './BottomSheet.svelte';
-  import ShortcutIcon from './icons/ShortcutIcon.svelte';
+  import ShortcutTiles from './ShortcutTiles.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
 
@@ -50,17 +50,13 @@
   <div class="more">
     <h2 class="more-title">{m.navbar_mais_acoes()}</h2>
 
-    {#each shortcuts as s (s.id)}
-      <button class="item" onclick={() => onShortcut && pick(() => onShortcut(s))}>
-        <span class="ico" aria-hidden="true"><ShortcutIcon icon={s.icon} size={20} /></span>
-        <span class="txt">
-          <span class="label">{s.label}</span>
-          <!-- O conteúdo é a melhor legenda: diz exatamente o que o toque dispara. -->
-          <span class="sub">{s.type === 'shell' ? s.command : s.text}</span>
-        </span>
-        <span class="chev" aria-hidden="true">›</span>
-      </button>
-    {/each}
+    <!-- Atalhos customizados em seção própria, em blocos que quebram linha: separados das ações
+         fixas abaixo, como no painel do desktop e no app nativo. -->
+    {#if shortcuts.length && onShortcut}
+      <div class="more-acoes">
+        <ShortcutTiles {shortcuts} onShortcut={(s) => pick(() => onShortcut?.(s))} />
+      </div>
+    {/if}
 
     <button class="item" onclick={() => pick(onRun)}>
       <span class="ico" class:on={runRunning} aria-hidden="true">
@@ -154,6 +150,7 @@
 </BottomSheet>
 
 <style>
+  .more-acoes { padding: var(--space-1) 0 var(--space-3); margin-bottom: var(--space-2); border-bottom: 1px solid var(--border-subtle); }
   .more {
     display: flex;
     flex-direction: column;

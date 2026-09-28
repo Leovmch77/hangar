@@ -354,6 +354,7 @@
   "lista_atalhos": "Shortcuts",
   "atalhos_sub": "Buttons on the session panel row. The order here is the on-screen order; on phones custom ones live in the \"⋯\" menu.",
   "atalhos_add": "Add shortcut",
+  "ctx_acoes": "Actions",
   "atalhos_restaurar": "Restore defaults",
   "atalhos_restaurar_ajuda": "Goes back to the native set and deletes custom ones.",
   "atalhos_tipo": "Type",

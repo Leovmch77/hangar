@@ -27,7 +27,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields, Shortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type SessionCostEstimate } from '@hangar/core';
-  import ShortcutIcon from './icons/ShortcutIcon.svelte';
+  import ShortcutTiles from './ShortcutTiles.svelte';
   import { listServers } from '../lib/auth';
   import { money2 } from '../lib/fmt';
   import { moeda } from '../lib/moeda.svelte';
@@ -153,8 +153,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
   // Só o que dá pra renderizar: interno cujo handler o Chat não passou (headless sem terminal,
   // por exemplo) sai da lista — a config diz a ordem, o gate diz a existência.
+  // A fileira do topo leva só os internos; os customizados moram na seção "Ações" (ShortcutTiles).
   const visibleShortcuts = $derived((shortcuts ?? defaultShortcuts()).filter((s) => {
-    if (s.type !== 'internal') return true;
+    if (s.type !== 'internal') return false;
     switch (s.action) {
       case 'terminal': return !!onOpenTerminal;
       case 'modo': return !!onTrocarModo;
@@ -164,6 +165,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     }
   }));
   const hasActions = $derived(visibleShortcuts.length > 0);
+  const customShortcuts = $derived((shortcuts ?? []).filter(
+    (s): s is ShortcutSendText | ShortcutShell => s.type !== 'internal'));
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
@@ -516,11 +519,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             </svg>
             <span>{runRunning ? m.ctx_rodando() : m.ctx_rodar()}</span>
           </button>
-        {:else if s.type === 'send_text' || s.type === 'shell'}
-          <button class="ctx-action" onclick={() => onShortcut?.(s)} aria-label={s.label} title={s.type === 'shell' ? s.command : s.text}>
-            <ShortcutIcon icon={s.icon} />
-            <span>{s.label}</span>
-          </button>
         {/if}
       {/each}
     </div>
@@ -742,6 +740,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
         {/each}
       </ul>
     {/if}
+  </section>
+  {/if}
+
+  <!-- AÇÕES: os atalhos customizados, seção própria em blocos que quebram linha (sem rolar). -->
+  {#if customShortcuts.length && onShortcut}
+  <section class="sec-break">
+    <ShortcutTiles shortcuts={customShortcuts} onShortcut={onShortcut} onAdd={onEditShortcuts} />
   </section>
   {/if}
 
@@ -1009,9 +1014,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
      (o Atividade so existe as vezes): auto-fit divide a linha por igual. */
   /* Flex, não grid de colunas iguais: o divisor antes do Rodar é um item de 1px, e num
      `repeat(auto-fit, 1fr)` ele ganharia a largura de um botão. */
-  /* A lista é configurável e sem teto: quando não cabe, a fileira ROLA na horizontal (decisão da
-     sessão de grilling — sem limite artificial, sem menu "mais"). Com poucas, cada botão cresce e
-     divide a linha como antes. */
+  /* Só os internos (no máximo cinco): os customizados foram para a seção "Ações", que quebra linha.
+     O overflow fica como rede, caso a fileira não caiba numa largura extrema. */
   .ctx-actions {
     display: flex;
     align-items: stretch;

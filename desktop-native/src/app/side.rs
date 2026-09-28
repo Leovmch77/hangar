@@ -574,7 +574,7 @@ impl Hangar {
         Some(body.into_any_element())
     }
 
-    fn render_shortcuts(&self, readable: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_shortcuts(&self, readable: bool, width: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         // "Anexar" já é o clipe do compositor: sozinho na grade, o bloco não oferece nada novo.
         let list = match self.side.shortcuts.as_ref()? {
             Ok(list) => list.iter().filter(|s| **s != Shortcut::Attach).cloned().collect::<Vec<_>>(),
@@ -583,7 +583,10 @@ impl Hangar {
         };
         if list.is_empty() { return None; }
         let busy = self.selected_key().is_some_and(|key| self.uploading.contains_key(&key));
-        // "Ações" do mock: grade de quatro por linha, cada atalho com borda, ícone em cima e rótulo embaixo.
+        // "Ações" do mock: grade de blocos iguais, ícone em cima e rótulo embaixo. As colunas saem da largura do painel
+        // (mais colunas quando ele alarga), e cada bloco tem a largura exata da coluna: a grade fica no mesmo recuo do
+        // título, sem sobra desigual no fim da linha.
+        let (_, tile) = shortcut_grid(width - SIDE_PAD * 2.);
         let buttons: Vec<Button> = list.into_iter().enumerate().map(|(n, shortcut)| {
             // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe.
             let icon = match &shortcut {
@@ -593,20 +596,15 @@ impl Hangar {
             let label = shortcut.label();
             Button::new(SharedString::from(format!("shortcut-{n}")))
                 .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
-                .flex_1().min_w_0().h_auto().py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
+                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .tooltip(label.clone()).accessibility_label(label.clone()).disabled(!readable || busy)
                 .child(div().w_full().flex().flex_col().items_center().gap(px(4.))
                     .child(icon)
-                    .child(div().max_w_full().truncate().text_size(px(11.5)).child(label)))
+                    // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
+                    .child(div().w_full().text_center().line_clamp(2).text_ellipsis().text_size(px(11.5)).line_height(px(14.)).child(label)))
                 .on_click(cx.listener(move |this, _, window, cx| this.run_shortcut(shortcut.clone(), false, window, cx)))
         }).collect();
-        let mut grid = div().flex().flex_col().gap(px(6.));
-        let mut rest = buttons.into_iter().peekable();
-        while rest.peek().is_some() {
-            let row: Vec<AnyElement> = rest.by_ref().take(4).map(IntoElement::into_any_element).collect();
-            let pad = 4 - row.len();
-            grid = grid.child(div().flex().gap(px(6.)).children(row).children((0..pad).map(|_| div().flex_1())));
-        }
+        let grid = div().flex().flex_wrap().gap(px(SHORTCUT_GAP)).children(buttons);
         let add = Button::new("side-shortcut-add").ghost().xsmall().icon(IconName::Plus).tooltip(tr("shortcuts_add"))
             .accessibility_label(tr("shortcuts_add"))
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(super::settings::Page::Shortcuts, window, cx)));
@@ -675,7 +673,7 @@ impl Hangar {
             content = content.child(section(self.render_context(status.as_ref(), width, cx)))
                 .when(!notices.is_empty(), |el| el.child(div().px_4().py_3().border_b_1().border_color(theme::border()).flex().flex_col().gap_2().children(notices)));
             if let Some(project) = self.render_project(status.as_ref(), cx) { content = content.child(section(project)); }
-            if let Some(actions) = self.render_shortcuts(readable, cx) { content = content.child(div().px_4().py(px(14.)).child(actions)); }
+            if let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
         }
         let queued = if readable { self.queued_count() } else { 0 };
         let handle = div().id("side-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
@@ -709,10 +707,24 @@ impl Hangar {
     }
 }
 
+/// Recuo lateral das seções do painel (`px_4`) e espaço entre blocos de atalho.
+const SIDE_PAD: f32 = 16.;
+const SHORTCUT_GAP: f32 = 6.;
+const SHORTCUT_MIN: f32 = 76.;
+
+/// Colunas e largura de cada bloco de atalho para a largura útil `inner`: o máximo de colunas com bloco de pelo menos
+/// `SHORTCUT_MIN`, entre 2 e 8, e os blocos dividindo a linha inteira.
+fn shortcut_grid(inner: f32) -> (usize, f32) {
+    let inner = inner.max(SHORTCUT_MIN);
+    let columns = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 8);
+    let tile = ((inner - SHORTCUT_GAP * (columns - 1) as f32) / columns as f32).floor();
+    (columns, tile)
+}
+
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Shortcut, Side, duration, parse_shortcuts, tokens};
+    use super::{SHORTCUT_GAP, Shortcut, Side, duration, parse_shortcuts, shortcut_grid, tokens};
     use crate::appearance;
 
     #[test]
@@ -751,5 +763,16 @@ mod tests {
         assert_eq!(side.fitted(1036., false, conversations), Some(240.));
         assert_eq!(side.fitted(1035., false, conversations), None);
         assert_eq!(side.fitted(1092., true, conversations), Some(256.));
+    }
+
+    #[test]
+    fn shortcut_grid_fills_the_row_and_grows_columns_with_the_panel() {
+        for inner in [150., 268., 400., 700., 2000.] {
+            let (columns, tile) = shortcut_grid(inner);
+            assert!((2..=8).contains(&columns));
+            let used = tile * columns as f32 + SHORTCUT_GAP * (columns - 1) as f32;
+            assert!(used <= inner && inner - used < columns as f32, "{inner}: {columns}x{tile}");
+        }
+        assert!(shortcut_grid(268.).0 < shortcut_grid(700.).0);
     }
 }

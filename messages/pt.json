@@ -354,6 +354,7 @@
   "lista_atalhos": "Atalhos",
   "atalhos_sub": "Botões da fileira do painel da sessão. A ordem aqui é a ordem na tela; no celular os customizados moram no menu \"⋯\".",
   "atalhos_add": "Adicionar atalho",
+  "ctx_acoes": "Ações",
   "atalhos_restaurar": "Restaurar padrão",
   "atalhos_restaurar_ajuda": "Volta ao conjunto nativo e apaga os customizados.",
   "atalhos_tipo": "Tipo",
