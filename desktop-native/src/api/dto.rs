@@ -83,6 +83,9 @@ pub struct ChatEvent {
     pub image_count: Option<u32>,
     /// Só em notice `skill_loaded`: a skill que o harness injetou como fala do usuário.
     pub skill: Option<SkillLoaded>,
+    /// Cache de prompt do turno (só `assistant_msg`): tokens lidos dele e a janela medida em segundos (3600 ou 300).
+    pub cache_read: Option<u64>,
+    pub cache_ttl_s: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

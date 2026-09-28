@@ -493,6 +493,14 @@ impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        // Prazo do cache de prompt no compositor: mostra minutos, então 20 s bastam; só a faixa de baixo redesenha.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(20)).await;
+            let alive = this.update(cx, |this, cx| {
+                if this.selected.is_some() && crate::chat::last_cache(&this.chat.events).is_some() { this.redraw(panes::Area::Bottom, cx); }
+            });
+            if alive.is_err() { break; }
+        }).detach();
         // O aviso de servidor desatualizado mora na barra desta view e vem do estado do atualizador.
         if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
             cx.observe(&updater, |_, _, cx| cx.notify()).detach();
@@ -3179,7 +3187,8 @@ impl Hangar {
             .border_1().border_color(theme::border_strong()).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::List, 14., theme::faint())).child(chip));
         let session = self.selected.clone().filter(|_| readable);
-        let footer = (repo.is_some() || ctx_pct.is_some() || session.is_some()).then(|| {
+        let cache = crate::chat::last_cache(&self.chat.events).filter(|_| readable);
+        let footer = (repo.is_some() || ctx_pct.is_some() || session.is_some() || cache.is_some()).then(|| {
             let branch = status.as_ref().and_then(|s| s.branch.clone()).or_else(|| session.as_ref().and_then(|s| s.branch.clone())).unwrap_or_default();
             let dirty = status.as_ref().and_then(|s| s.dirty) == Some(true);
             let (added, removed) = session.as_ref().map(|s| (s.git_added.filter(|n| *n > 0), s.git_removed.filter(|n| *n > 0))).unwrap_or((None, None));
@@ -3216,6 +3225,7 @@ impl Hangar {
             } else { place.into_any_element() };
             // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
             let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
+                .when_some(cache, |el, cache| el.child(cache_chip(cache)))
                 .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
                 .child(popup::anchor(div(), "composer-account").child(ring("composer-account", tr("ring_account"), account, self.accounts.card)
@@ -4373,6 +4383,30 @@ fn message_card(event: &ChatEvent) -> Option<cards::Card> {
 }
 
 /// Hora local "HH:MM" de um instante do transcript.
+/// Prazo do cache de prompt (o `cache-chip` do web): ponto verde e minutos em mono; âmbar no fim do prazo, ponto apagado
+/// ao expirar. Não é botão: não há o que fazer com ele além de saber.
+fn cache_chip(cache: crate::chat::LastCache) -> impl IntoElement {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
+    let (_, ending, label) = crate::chat::cache_left(cache, now);
+    let web = |key: &str, params: &[(&str, String)]| crate::i18n::tr_web(key, &params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        .unwrap_or_else(|| key.to_owned());
+    let tip = match &label {
+        Some(label) => web("composer_cache_vale", &[("label", label.clone()),
+            ("janela", web(if cache.ttl >= 3600 { "composer_cache_1_hora" } else { "composer_cache_5_min" }, &[]))]),
+        None => web("composer_cache_expirou", &[]),
+    };
+    let (ink, dot) = match (&label, ending) {
+        (None, _) => (theme::muted(), theme::muted().opacity(0.5)),
+        (Some(_), true) => (theme::warning(), theme::warning()),
+        (Some(_), false) => (theme::muted(), theme::success()),
+    };
+    div().id("composer-cache").flex_shrink_0().h(px(22.)).px(px(6.)).flex().items_center().gap(px(4.))
+        .font_family(theme::MONO).text_xs().text_color(ink)
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .child(div().size(px(6.)).rounded_full().bg(dot))
+        .child(label.unwrap_or_else(|| web("composer_expirou", &[])))
+}
+
 fn clock(ts: Option<f64>) -> Option<String> {
     use chrono::{Local, TimeZone, Timelike};
     let at = Local.timestamp_opt(ts.filter(|ts| ts.is_finite() && *ts > 0.)? as i64, 0).single()?;

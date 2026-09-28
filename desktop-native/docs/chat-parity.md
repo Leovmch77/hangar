@@ -35,6 +35,7 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Modelo, esforço, modo e permissão da sessão (fileira abaixo do campo) | conferido | ver "Controles da sessão" |
 | Chip de git, anel de contexto, estatísticas do turno | conferido | na barra direita, não no compositor |
 | Chip do grupo (glifo sem grupo; nome e estado do par único; "grupo (n)") e "mandar pro grupo" (⇄) | implementado | na faixa de baixo do cartão, à esquerda da pasta (o web o põe na faixa de cima); ligado, o envio do campo vai por `POST /api/broadcast` para ela e os membros, `/comando` vai só para ela, membro que não recebeu vira recusa com quem recebeu e quem não; grupo que muda desliga; atalhos de envio da barra direita não vão ao grupo; não exercitado na janela |
+| Prazo do cache de prompt (`cache-chip` + `cachePrazo` do web) | implementado | faixa de cima do compositor, antes do anel de contexto: ponto verde e "59min"/"1h00" em mono, âmbar no último quinto da janela (mínimo 60 s), ponto apagado e "expirou" depois; dica com as chaves `composer_cache_*` do web. Âncora = último `assistant_msg` com `cache_read`/`cache_ttl_s`, TTL = último `cache_ttl_s`; sem os dois não aparece. Relógio de 20 s redesenha só a faixa de baixo. Não exercitado na janela real |
 | Voz, câmera, orquestrar, prévia, shells | pendente | módulos fora desta sequência |
 
 ## Controles da sessão
