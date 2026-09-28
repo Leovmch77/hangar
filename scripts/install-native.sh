@@ -18,11 +18,13 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 marca() { mkdir -p "$MARCA_DIR"; printf '%s\n' "$1" > "$MARCA"; }
+# Prova do passo do link hangar://: aqui (sem build, macOS) não há o que registrar, então a marca só diz "passo feito nesta máquina".
+marca_esquema() { mkdir -p "$MARCA_DIR"; : > "$MARCA_DIR/scheme-hangar"; }
 versao_de() { grep -o '"version": *"[^"]*"' "$1" 2>/dev/null | grep -o '[0-9][0-9.]*' || true; }
 
 if [ -z "$PACOTE" ]; then
   echo "app nativo: a release não tem build para $(uname -s) $(uname -m); a janela segue sendo o Electron"
-  marca '{"sem_build": true}'
+  marca '{"sem_build": true}'; marca_esquema
   exit 0
 fi
 
@@ -58,6 +60,7 @@ case "$PACOTE" in
     [ -d "$TMP/app/Hangar.app" ] || { echo "app nativo: o pacote não trouxe Hangar.app; nada foi instalado" >&2; exit 1; }
     rm -rf "$APP.old"; [ -e "$APP" ] && mv "$APP" "$APP.old"
     if mv "$TMP/app/Hangar.app" "$APP"; then rm -rf "$APP.old"; else [ -e "$APP.old" ] && mv "$APP.old" "$APP"; exit 1; fi
+    marca_esquema
     ;;
 esac
 # A marca é a prova do passo de atualização: só existe se o app ficou de fato no lugar.

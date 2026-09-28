@@ -26,6 +26,9 @@ if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-datab
 scheme_ok=1
 if command -v xdg-mime >/dev/null 2>&1; then
     xdg-mime default com.hangar.native.desktop x-scheme-handler/hangar || { scheme_ok=0; echo 'aviso: não consegui registrar hangar:// com o xdg-mime; o link de convite não abre o app' >&2; }
+else
+    # Sem xdg-mime o .desktop (com MimeType) é tudo que dá para deixar; a marca sai mesmo assim para o passo não repetir à toa.
+    echo 'aviso: xdg-mime ausente; nenhum programa padrão para hangar:// foi definido' >&2
 fi
 if [[ $scheme_ok = 1 ]]; then mkdir -p "$HOME/.hangar/native" && : > "$HOME/.hangar/native/scheme-hangar"; fi
 echo "$desktop_target"

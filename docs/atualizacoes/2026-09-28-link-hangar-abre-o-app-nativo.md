@@ -13,3 +13,5 @@ entrar sozinho: a entrada só acontece no seu clique. Se o app já estiver abert
 No Linux quem registra o link é o instalador que vem dentro do pacote baixado da release: antes de a release
 nativa com esta mudança ser publicada, o passo baixa o pacote antigo, não registra nada e volta a tentar na
 próxima atualização.
+
+No macOS e em máquina sem versão nativa publicada não há o que registrar: o passo só deixa a marca e não volta a rodar.

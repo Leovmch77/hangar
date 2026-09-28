@@ -22,6 +22,8 @@ $arq = "$env:PROCESSOR_ARCHITEW6432$env:PROCESSOR_ARCHITECTURE"
 if ($arq -notmatch 'AMD64') {
     Write-Host "app nativo: a release nao tem build para Windows $arq; a janela segue sendo o Electron"
     Marca '{"sem_build": true}'
+    # Sem build nao ha o que registrar: a marca do passo do link hangar:// so diz "passo feito nesta maquina".
+    [IO.File]::WriteAllText((Join-Path $marcaDir 'scheme-hangar'), '')
     exit 0
 }
 $pacote = 'Hangar-windows-x86_64.zip'
