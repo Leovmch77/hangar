@@ -6261,6 +6261,14 @@ def runner_pane(name: str):
 
 
 _DISPLAY_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "HYPRLAND_INSTANCE_SIGNATURE")
+_SHORTCUT_FAIL_WINDOW = 2.0
+
+
+def _shortcut_output_tail(raw: bytes, lines: int = 5, chars: int = 400) -> str:
+    """Ultimas linhas da saida do atalho, curtas o bastante pra caber no aviso da tela."""
+    text = raw.decode("utf-8", errors="replace")
+    tail = " | ".join(l.strip() for l in text.strip().splitlines()[-lines:] if l.strip())
+    return tail if len(tail) <= chars else "…" + tail[-chars:]
 
 
 def _shortcut_env() -> dict[str, str]:
@@ -6305,15 +6313,30 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
         argv, use_shell = command, True
     else:
         argv, use_shell = [os.environ.get("SHELL") or "/bin/sh", "-c", command], False
-    try:
-        proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, env=_shortcut_env(),
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, **detach)
-    except OSError as e:
-        raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
-    # Sem o texto do comando: ele pode carregar credencial.
-    _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
-    return {"ok": True}
+    # Saida num arquivo anonimo: so e lida se o comando morrer com erro na janela abaixo, e some
+    # sozinha quando o ultimo dono fecha (o programa longo segue escrevendo nela sem ninguem ler).
+    with tempfile.TemporaryFile() as out:
+        try:
+            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, env=_shortcut_env(),
+                                    stdin=subprocess.DEVNULL, stdout=out,
+                                    stderr=subprocess.STDOUT, **detach)
+        except OSError as e:
+            raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
+        # Sem o texto do comando: ele pode carregar credencial.
+        _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
+        # Quem clicou precisa saber que falhou. Comando que erra (nao existe, sintaxe, VPN fora)
+        # morre em segundos; o que ainda roda depois da janela e programa longo e conta como ok.
+        try:
+            code = proc.wait(timeout=_SHORTCUT_FAIL_WINDOW)
+        except subprocess.TimeoutExpired:
+            return {"ok": True}
+        if code == 0:
+            return {"ok": True}
+        out.seek(0)
+        tail = _shortcut_output_tail(out.read())
+    _log.info("shortcut-shell: sessao=%s pid=%s saiu com %s", name, proc.pid, code)
+    msg = f"o comando saiu com o código {code}" + (f": {tail}" if tail else "")
+    raise HTTPException(422, detail=erro("erro_shortcut_falhou", msg, codigo=code, saida=tail))
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----

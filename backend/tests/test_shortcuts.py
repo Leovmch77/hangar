@@ -2,7 +2,7 @@
 
 O que esta suíte trava: config quebrada é recusada na GRAVAÇÃO com o item apontado (o resolve do
 front é tolerante e cairia no conjunto nativo, calado), e o endpoint shell roda no cwd da sessão
-sem esperar o comando terminar.
+sem esperar o comando terminar — só avisa quando ele falha logo de cara.
 """
 import json
 import time
@@ -161,3 +161,28 @@ def test_shell_oversized_command_is_rejected_before_running(client, monkeypatch,
     r = client.post("/api/sessions/s/shortcut-shell", json={"command": "x" * 200_001},
                     headers={"Authorization": "Bearer secret"})
     assert r.status_code == 422
+
+
+def test_shell_command_failing_within_window_returns_422_with_output(client, monkeypatch, tmp_path):
+    # quem clicou tem que ver que falhou: codigo de saida e o fim da saida voltam no aviso
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    r = client.post("/api/sessions/s/shortcut-shell", json={"command": "echo boom >&2; exit 3"},
+                    headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert detail["code"] == "erro_shortcut_falhou"
+    assert "3" in detail["msg"] and "boom" in detail["msg"]
+
+
+def test_shell_command_still_running_after_window_is_ok(client, monkeypatch, tmp_path):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    started = time.monotonic()
+    r = client.post("/api/sessions/s/shortcut-shell", json={"command": "sleep 5"},
+                    headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 202 and r.json() == {"ok": True}
+    assert time.monotonic() - started < 3

@@ -2440,8 +2440,9 @@ export function getRunPane(name: string): Promise<{ pane: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/pane`);
 }
 
-/** Atalho "shell" da fileira: dispara-e-esquece no cwd da sessão. O 202 só diz que o processo
- * nasceu — falha depois disso não volta por aqui (comando com saída que interessa vai no run). */
+/** Atalho "shell" da fileira: dispara-e-esquece no cwd da sessão. Se o comando sai com erro nos
+ * primeiros 2 s, volta 422 com o código e o fim da saída; o 202 só diz que ele não falhou nessa
+ * janela — falha depois disso não volta por aqui (comando com saída que interessa vai no run). */
 export function runShortcutShell(name: string, command: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
     method: 'POST',

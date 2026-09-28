@@ -163,7 +163,53 @@ fn prune(project: &Path, days: i64) {
 fn shell(cwd: &Path, command: &str) -> Result<Value, Failure> {
     let command = command.trim();
     if command.is_empty() { return Err(refusal(400, "comando vazio")); }
-    launch(Command::new(user_shell()).arg("-c").arg(command).current_dir(cwd)).map_err(|error| refusal(500, error.to_string()))
+    // Saída num arquivo temporário: só é lida se o comando morrer com erro na janela abaixo.
+    let path = std::env::temp_dir().join(format!("hangar-shortcut-{}-{}", std::process::id(), SHORTCUT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let file = std::fs::File::create(&path).map_err(|error| refusal(500, error.to_string()))?;
+    let err = file.try_clone().map_err(|error| refusal(500, error.to_string()))?;
+    let mut cmd = Command::new(user_shell());
+    cmd.arg("-c").arg(command).current_dir(cwd).stdout(file).stderr(err);
+    #[cfg(unix)] { use std::os::unix::process::CommandExt; cmd.process_group(0); }
+    let mut child = match cmd.stdin(Stdio::null()).spawn() {
+        Ok(child) => child,
+        Err(error) => { let _ = std::fs::remove_file(&path); return Err(refusal(500, error.to_string())); }
+    };
+    // Quem clicou precisa saber que falhou, igual ao backend: comando que erra morre em segundos;
+    // o que ainda roda depois da janela é programa longo e conta como ok.
+    let deadline = std::time::Instant::now() + SHORTCUT_FAIL_WINDOW;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => break None,
+        }
+    };
+    let failed = status.filter(|s| !s.success());
+    let tail = failed.map(|_| output_tail(&std::fs::read(&path).unwrap_or_default()));
+    // No Unix o arquivo some do disco já; o programa longo segue escrevendo nele sem ninguém ler.
+    let _ = std::fs::remove_file(&path);
+    if status.is_none() { std::thread::spawn(move || { let _ = child.wait(); }); }
+    match (failed, tail) {
+        (Some(status), Some(tail)) => {
+            let code = status.code().map_or_else(|| "sinal".to_owned(), |c| c.to_string());
+            let mut msg = format!("o comando saiu com o código {code}");
+            if !tail.is_empty() { msg.push_str(": "); msg.push_str(&tail); }
+            Err(refusal(422, msg))
+        }
+        _ => Ok(json!({"ok": true})),
+    }
+}
+
+const SHORTCUT_FAIL_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+static SHORTCUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `_shortcut_output_tail` do backend: últimas linhas, curtas o bastante pro aviso da tela.
+fn output_tail(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(5)..].join(" | ");
+    let count = tail.chars().count();
+    if count <= 400 { tail } else { format!("…{}", tail.chars().skip(count - 400).collect::<String>()) }
 }
 
 fn user_shell() -> String {
@@ -292,8 +338,17 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{cited, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
+    use super::{cited, output_tail, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
     use std::path::Path;
+
+    #[test]
+    fn output_tail_keeps_last_five_lines_and_caps_length() {
+        assert_eq!(output_tail(b"a\n\n  b  \nc\nd\ne\nf\n"), "b | c | d | e | f");
+        assert_eq!(output_tail(b""), "");
+        let long = output_tail("x".repeat(500).as_bytes());
+        assert!(long.starts_with('\u{2026}'));
+        assert_eq!(long.chars().count(), 401);
+    }
 
     #[cfg(unix)]
     #[test]
