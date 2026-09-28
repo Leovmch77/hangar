@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
-use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+use gpui_kit::{component::{button::*, checkbox::Checkbox, radio::Radio, tab::{Tab, TabBar}, scroll::{Scrollbar, ScrollbarMode}, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     input::{Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea, TextareaState}, text::{TextView, TextViewState}, *}, *};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
@@ -290,7 +290,7 @@ enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
-struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription> }
+struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
 
 #[derive(Clone, Copy)]
 enum Live { Thinking, Tool }
@@ -2046,12 +2046,16 @@ impl Hangar {
     fn answer_body(&self, cx: &Context<Self>) -> Option<Value> {
         let ask = self.chat.ask.as_ref()?;
         if self.ask_form.fingerprint != ask.fingerprint { return None; }
-        let picks: Vec<Pick> = self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
+        interaction::answer_body(ask, &self.ask_picks(cx))
+    }
+
+    /// Escolhas do formulário com o texto digitado no lugar de quem está digitando.
+    fn ask_picks(&self, cx: &Context<Self>) -> Vec<Pick> {
+        self.ask_form.picks.iter().enumerate().map(|(i, pick)| {
             if self.ask_form.typing.get(i) == Some(&true) {
                 Pick::Text(self.ask_form.inputs.get(i).map(|input| input.read(cx).value().to_string()).unwrap_or_default())
             } else { pick.clone() }
-        }).collect();
-        interaction::answer_body(ask, &picks)
+        }).collect()
     }
 
     // O instantâneo é o pedido que a pessoa viu ao clicar; se o atual difere, nada sai.
@@ -2739,8 +2743,23 @@ impl Hangar {
         let ask = self.chat.ask.clone()?;
         let fingerprint = ask.fingerprint.clone();
         let total = ask.payload.questions.len();
+        // Várias perguntas: uma por aba, com marca nas respondidas; uma só dispensa a faixa.
+        let tab = self.ask_form.tab.min(total.saturating_sub(1));
+        let tabs = (total > 1).then(|| {
+            let picks = self.ask_picks(cx);
+            let tabs = ask.payload.questions.iter().enumerate().map(|(qi, item)| {
+                let done = picks.get(qi).is_some_and(|pick| interaction::answer(&ask, item, pick).is_some());
+                let label = if item.header.is_empty() { tr("ask_tab").replace("{n}", &(qi + 1).to_string()) } else { item.header.clone() };
+                Tab::new().label(label).when(done, |tab| tab.prefix(chrome::small_icon(IconName::Check, 12., theme::success())))
+            }).collect::<Vec<_>>();
+            let fp = fingerprint.clone();
+            TabBar::new("ask-tabs").underline().small().selected_index(tab).children(tabs)
+                .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                    if this.ask_form.fingerprint == fp { this.ask_form.tab = *index; cx.notify(); }
+                }))
+        });
         let mut body = div().flex().flex_col().gap_4();
-        for (qi, item) in ask.payload.questions.iter().enumerate() {
+        for (qi, item) in ask.payload.questions.iter().enumerate().filter(|(qi, _)| *qi == tab) {
             let pick = self.ask_form.picks.get(qi).cloned().unwrap_or(Pick::Empty);
             let typing = self.ask_form.typing.get(qi) == Some(&true);
             let chosen = |i: usize| !typing && matches!(&pick, Pick::Options(list) if list.contains(&i));
@@ -2752,12 +2771,11 @@ impl Hangar {
                     this.set_pick(&fp, qi, Some(next), false, cx);
                 });
                 let id = SharedString::from(format!("ask-{qi}-{oi}"));
-                let control = if item.multi_select { Checkbox::new(id).label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick).into_any_element() }
-                    else { Radio::new(id).label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick).into_any_element() };
-                options = options.child(div().flex().flex_col().gap_1().child(control)
-                    .when(!option.description.is_empty(), |el| el.child(div().pl_6().text_xs().text_color(theme::muted()).child(option.description.clone())))
-                    .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().ml_6().p_2().rounded_md().bg(theme::raised())
-                        .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview))));
+                options = options.child(if item.multi_select {
+                    ask_option(Checkbox::new(id).accessibility_label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick), option, chosen(oi), busy).into_any_element()
+                } else {
+                    ask_option(Radio::new(id).accessibility_label(option.label.clone()).checked(chosen(oi)).disabled(busy).on_click(on_pick), option, chosen(oi), busy).into_any_element()
+                });
             }
             let mut escapes = div().flex().flex_wrap().gap_2();
             if ask.allows_text(item) && !item.options.is_empty() {
@@ -2776,9 +2794,9 @@ impl Hangar {
             }
             let input = typing.then(|| self.ask_form.inputs.get(qi).cloned()).flatten();
             body = body.child(div().flex().flex_col().gap_2()
-                .when(!item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
-                    .child(if total > 1 { format!("{} · {}/{}", item.header, qi + 1, total) } else { item.header.clone() })))
-                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
+                .when(total == 1 && !item.header.is_empty(), |el| el.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted())
+                    .child(item.header.clone())))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(item.question.clone()))
                 .when(item.multi_select, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_multi"))))
                 .child(options)
                 .when_some(input, |el, input| el.child(Input::new(&input).disabled(busy)))
@@ -2788,12 +2806,21 @@ impl Hangar {
         let ready = self.answer_body(cx).is_some();
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
-        if self.ask_scroll.0 != fingerprint { self.ask_scroll = (fingerprint.clone(), ScrollHandle::new()); }
-        Some(self.interaction_card(tr("ask_title"), scrolled("ask-scroll", &self.ask_scroll.1, 360., body),
+        let scroll_key = format!("{fingerprint}#{tab}");
+        if self.ask_scroll.0 != scroll_key { self.ask_scroll = (scroll_key, ScrollHandle::new()); }
+        let body = div().flex().flex_col().gap_3().when_some(tabs, |el, tabs| el.child(tabs))
+            .child(scrolled("ask-scroll", &self.ask_scroll.1, 360., body)).into_any_element();
+        Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
-                .child(Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
-                    .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx))))
+                .child(if tab + 1 < total {
+                    // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
+                    Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| if this.ask_form.fingerprint == fp { this.ask_form.tab = tab + 1; cx.notify(); }))
+                } else {
+                    Button::new("ask-send").primary().label(tr(if sending { "sending" } else { "ask_send" })).disabled(busy || !ready)
+                        .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Answer, fp.clone(), cx)))
+                })
                 .into_any_element()))
     }
 
@@ -2801,6 +2828,9 @@ impl Hangar {
         let state = &self.chat.state;
         if self.chat.ask.is_some() || state.state != "awaiting_input" { return None; }
         let (question, options) = (state.question.clone()?, state.options.clone().filter(|o| !o.is_empty())?);
+        // Menu do AskUserQuestion no pane: quem responde é o card nativo, que chega pelo `ask_question` (antes dele e
+        // depois de enviar, este seletor piscava por cima).
+        if interaction::ask_picker(&options) { return None; }
         let snapshot = select_snapshot(state);
         let plan = state.claude_plan_pending.clone().filter(|p| !p.plan.trim().is_empty());
         let multi = options.iter().any(|o| interaction::checkbox(o).is_some());
@@ -2864,9 +2894,10 @@ impl Hangar {
     }
 
     fn interaction_card(&self, title: String, body: AnyElement, footer: AnyElement) -> AnyElement {
-        // Pedido que espera você: moldura âmbar suave, como `.ask` do mock.
-        in_column(div().p(px(14.)).rounded(px(14.)).border_1().border_color(theme::warning().opacity(0.35))
-                .bg(theme::warning().opacity(0.06)).flex().flex_col().gap(px(10.))
+        // Pedido que espera você: mesmo material do compositor (legível sobre papel de parede e vidro), com a
+        // moldura na cor escolhida em Aparência (destaque ou âmbar).
+        in_column(div().p(px(14.)).rounded(px(14.)).border_1().border_color(theme::ask_highlight().opacity(0.55))
+                .bg(theme::boxed()).shadow(theme::card_shadow()).flex().flex_col().gap(px(10.))
                 .child(div().font_weight(FontWeight::MEDIUM).child(title))
                 .child(body).child(footer)).py_2()
             .into_any_element()
@@ -3705,6 +3736,20 @@ fn stream_motion(live: bool) -> gpui_kit::base::TextViewMotion {
 }
 
 // A barra fica no recuo à direita do conteúdo, sem cobrir controles; o modo Always mostra que há mais abaixo.
+/// A linha inteira da opção é o controle: rótulo, descrição e prévia recebem o clique e o foco do teclado dele.
+fn ask_option<E: Styled + InteractiveElement + ParentElement + IntoElement>(control: E, option: &AskOption, selected: bool, busy: bool) -> E {
+    // Linha sem caixa em volta: só a escolhida ganha fundo e borda, o que a separa das outras de relance.
+    control.w_full().px_3().py_2().rounded_lg().border_1()
+        .border_color(if selected { theme::accent().opacity(0.6) } else { transparent_black() })
+        .when(selected, |el| el.bg(theme::accent_dim()))
+        .when(!busy, |el| el.cursor_pointer())
+        .when(!busy && !selected, |el| el.hover(|style| style.bg(theme::hover())))
+        .child(div().font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(option.label.clone()))
+        .when(!option.description.is_empty(), |el| el.child(div().text_sm().text_color(theme::text().opacity(0.78)).child(option.description.clone())))
+        .when_some(option.preview.clone().filter(|p| !p.is_empty()), |el, preview| el.child(div().mt_1().p_2().rounded_md().bg(theme::raised())
+            .font_family(crate::theme::MONO).text_xs().whitespace_nowrap().overflow_x_hidden().child(preview)))
+}
+
 fn scrolled(id: &'static str, handle: &ScrollHandle, max: f32, content: impl IntoElement) -> AnyElement {
     div().relative()
         .child(div().id(id).max_h(px(max)).overflow_y_scroll().track_scroll(handle).pr_4().child(content))
@@ -4677,7 +4722,9 @@ impl Hangar {
         // Pergunta do transcript já respondida espera só o `tool_result`: não é pedido sem resposta.
         let answered = interaction::ask_from_events(&self.chat.events, self.provider().0)
             .and_then(|ask| ask.tool_use_id).is_some_and(|id| self.tool_answered(&id));
-        let pending = card.is_none() && !answered && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login == Some(true));
+        // Menu do AskUserQuestion sem o card ainda (ou já respondido): o card nativo é quem responde, sem aviso de terminal.
+        let ask_pane = self.chat.state.options.as_deref().is_some_and(interaction::ask_picker);
+        let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login == Some(true));
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content
             .when_some(card, |el, card| el.child(card))

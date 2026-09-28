@@ -135,6 +135,11 @@ pub enum ToolLook { Classic, Chips, Tree }
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingTools { None, Search, All }
 
+/// Cor da moldura do card em que o agente pergunta: a de destaque escolhida ou o âmbar de aviso.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskHighlight { Accent, Amber }
+
 /// Idioma da interface: Sistema segue `HANGAR_NATIVE_LANG`/`LANG`; os outros vencem as variáveis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +232,7 @@ pub struct Appearance {
     pub thinking_tools: ThinkingTools,
     /// Botão Gráfico sobre as tabelas numéricas das respostas.
     pub table_chart: bool,
+    pub ask_highlight: AskHighlight,
     /// Geral: também deste computador, no mesmo arquivo; o "Voltar ao padrão" da Aparência não mexe nelas.
     pub language: Language,
     pub currency: Currency,
@@ -248,7 +254,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
-    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false,
+    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
 

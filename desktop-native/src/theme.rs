@@ -226,10 +226,17 @@ fn panel_alpha() -> f32 {
     if colors().dark { 0.22 + 0.70 * s } else { s }
 }
 
-/// Fundo da janela. Colados é opaco; na caixa solta a Transparência diz quanto do fundo do sistema aparece.
+/// Alfa do fundo da janela: a Transparência só vale com Imagem ou Desktop atrás; Liso, Textura e Luz são
+/// opacos, senão o papel de parede do sistema vazaria por um fundo que a pessoa escolheu liso.
+fn window_alpha() -> f32 {
+    let a = appearance::get();
+    if floating() && a.busy_background() { 1. - a.transparency as f32 / 100. } else { 1. }
+}
+
+/// Fundo da janela. Colados é opaco; na caixa solta a Transparência diz quanto da imagem ou do desktop aparece.
 pub fn background() -> Hsla {
     let c = colors();
-    if floating() { tinted(c.float_bg, 1. - appearance::get().transparency as f32 / 100.) } else { tinted(c.bg, 1.) }
+    tinted(if floating() { c.float_bg } else { c.bg }, window_alpha())
 }
 
 /// Pintura da raiz: a cor do Liso, o gradiente da Textura e da Luz, ou nada quando a camada de fundo desenha
@@ -243,7 +250,7 @@ pub fn window_fill() -> Background {
         Backdrop::Image | Backdrop::Desktop => transparent_black().into(),
         Backdrop::Texture | Backdrop::Light => {
             let c = colors();
-            let alpha = if floating() { 1. - a.transparency as f32 / 100. } else { 1. };
+            let alpha = window_alpha();
             let base = if floating() { c.float_bg } else { c.bg };
             // Um degrau mais fundo em cima e um toque do destaque embaixo, como o gradiente da Textura do web.
             let top = mix(base, if c.dark { 0x000000 } else { 0x6b5f55 }, if c.dark { 0.22 } else { 0.03 });
@@ -373,6 +380,10 @@ pub fn glass_border() -> Hsla { border_strong() }
 pub fn success() -> Hsla { rgb(if colors().dark { 0x34c759 } else { 0x1d8a3e }).into() }
 pub fn warning() -> Hsla { rgb(if colors().dark { 0xff9f0a } else { 0xb25e00 }).into() }
 pub fn danger() -> Hsla { rgb(if colors().dark { 0xff453a } else { 0xd12c21 }).into() }
+/// Moldura do pedido que espera a pessoa (pergunta do agente, seletor do terminal).
+pub fn ask_highlight() -> Hsla {
+    match appearance::get().ask_highlight { appearance::AskHighlight::Accent => accent(), appearance::AskHighlight::Amber => warning() }
+}
 /// Vermelho das remoções no diff, mais claro que o de erro para ler em texto pequeno.
 pub fn removed() -> Hsla { rgb(if colors().dark { 0xff6b61 } else { 0xc0392b }).into() }
 /// Texto sobre o destaque cheio; um destaque claro (amarelo, cor livre) pede texto escuro.

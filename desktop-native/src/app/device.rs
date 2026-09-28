@@ -513,9 +513,27 @@ impl Hangar {
         let mono = |text: String| div().font_family(theme::MONO).text_size(px(12.5)).child(text);
         let with_local = |text: String, local: bool| div().flex().flex_col().gap(px(2.)).child(mono(text))
             .when(local, |el| el.child(div().child(tr("settings_about_local"))));
+        let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
+        let (check, updating) = updater.as_ref().map(|u| (u.read(cx).app_check(), u.read(cx).is_busy())).unwrap_or((crate::update::AppCheck::Never, false));
+        let (check_text, check_color) = match &check {
+            crate::update::AppCheck::Never => (None, theme::muted()),
+            crate::update::AppCheck::Checking => (Some(tr("settings_about_searching")), theme::muted()),
+            crate::update::AppCheck::UpToDate => (Some(tr("settings_about_app_up_to_date")), theme::muted()),
+            crate::update::AppCheck::Available(version) => (Some(tr("app_update_available").replace("{version}", version)), theme::text()),
+            crate::update::AppCheck::Failed(reason) => (Some(tr("settings_about_failed").replace("{reason}", reason)), theme::danger()),
+        };
+        let app_control = updater.map(|updater| match &check {
+            crate::update::AppCheck::Available(_) => Button::new("app-update-start").primary().small().label(tr("app_update_now")).disabled(updating)
+                .on_click(move |_, window, cx| updater.update(cx, |u, cx| u.start_update(window, cx))),
+            _ => Button::new("app-update-search").outline().small().icon(IconName::RefreshCw)
+                .label(tr(if matches!(check, crate::update::AppCheck::Checking) { "settings_about_searching_short" } else { "settings_about_search" }))
+                .disabled(matches!(check, crate::update::AppCheck::Checking) || updating)
+                .on_click(move |_, _, cx| updater.update(cx, |u, cx| u.check_app(cx))),
+        }.into_any_element()).unwrap_or_else(|| div().into_any_element());
         let app_row = self.row_with(IconName::Monitor, "settings_about_app",
-            with_local(format!("{} ({app_version}) · {}", env!("HANGAR_NATIVE_RELEASE"), tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local),
-            true, div().into_any_element());
+            with_local(format!("{} ({app_version}) · {}", env!("HANGAR_NATIVE_RELEASE"), tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local)
+                .when_some(check_text, |el, text| el.child(div().text_color(check_color).whitespace_normal().child(text))),
+            true, app_control);
 
         let about = &self.device.about;
         let server_desc = match (&self.api, &about.value, about.loading) {

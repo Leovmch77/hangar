@@ -264,7 +264,13 @@ pub struct Updater {
     active_state: Option<Value>,
     active_seq: u64,
     run: Run,
+    /// Procura do app em andamento e o desfecho da última, para a página Sobre.
+    checking: bool,
+    checked: Option<Result<(), String>>,
 }
+
+/// O que a página Sobre mostra na linha do app.
+pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String) }
 
 pub struct Handle(pub Entity<Updater>);
 impl Global for Handle {}
@@ -274,24 +280,14 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle });
+        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
-        let Ok(task) = weak.update(cx, |this, cx| {
+        let Ok(()) = weak.update(cx, |this, cx| {
             this.refresh_server(cx);
             this.refresh_active(cx);
-            let client = this.client.clone();
-            this.runtime.spawn(async move { check(&client).await })
+            this.check_app(cx);
         }) else { return };
-        // Falha de rede ou limite do GitHub não vira aviso na tela: vai para o stderr e a próxima volta tenta de novo.
-        match task.await {
-            Ok(Ok(found)) => { let _ = weak.update(cx, |this, cx| if matches!(this.run, Run::Idle) {
-                this.offer = found;
-                cx.notify();
-            }); }
-            Ok(Err(error)) => eprintln!("procura de atualização do app falhou: {error}"),
-            Err(error) => eprintln!("procura de atualização do app interrompida: {error}"),
-        }
         cx.background_executor().timer(EVERY).await;
     }).detach();
     cx.set_global(Handle(entity));
@@ -310,6 +306,47 @@ impl Updater {
         self.refresh_server(cx);
         self.refresh_active(cx);
     }
+
+    /// Procura versão nova do app agora. Falha não vira aviso na tela: fica no stderr e na linha da página Sobre.
+    pub fn check_app(&mut self, cx: &mut Context<Self>) {
+        if self.checking { return; }
+        self.checking = true;
+        cx.notify();
+        let client = self.client.clone();
+        let task = self.runtime.spawn(async move { check(&client).await });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.checking = false;
+                match result {
+                    Ok(found) => {
+                        if matches!(this.run, Run::Idle) { this.offer = found; }
+                        this.checked = Some(Ok(()));
+                    }
+                    Err(error) => {
+                        eprintln!("procura de atualização do app falhou: {error}");
+                        this.checked = Some(Err(error));
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    pub fn app_check(&self) -> AppCheck {
+        match (&self.offer, self.checking, &self.checked) {
+            (Some(offer), false, _) => AppCheck::Available(offer.version.clone()),
+            (_, true, _) => AppCheck::Checking,
+            (None, _, Some(Ok(()))) => AppCheck::UpToDate,
+            (None, _, Some(Err(error))) => AppCheck::Failed(error.clone()),
+            (None, _, None) => AppCheck::Never,
+        }
+    }
+
+    /// Mesma ação do botão do topo: atualiza o servidor desta máquina se estiver atrás e depois o app.
+    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.run(window, cx) }
+
+    pub fn is_busy(&self) -> bool { self.busy() }
 
     pub fn server_outdated(&self) -> bool { self.active_state.as_ref().is_some_and(|state| outdated(state, CURRENT)) }
 

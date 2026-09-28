@@ -474,8 +474,8 @@ impl Hangar {
                 this.apply_appearance(next, true, cx);
                 this.refresh_backdrop(window, cx);
             }, cx);
-        // Com imagem ou área de trabalho atrás, a Transparência é o véu e vale também nos painéis colados.
-        let see_through = floating || a.busy_background();
+        // A Transparência só deixa ver Imagem ou Desktop; com fundo Liso, Textura ou Luz a janela é opaca.
+        let see_through = a.busy_background();
         // Colados só ficam translúcidos com o fundo ocupado atrás da janela inteira; no Vidro a Solidez também dá a tinta dos menus.
         let panels_see_through = floating || a.busy_background() && a.background_scope == BackgroundScope::Everywhere
             || a.surface_material == SurfaceMaterial::Glass;
@@ -581,6 +581,14 @@ impl Hangar {
             .child(self.line("settings_table_chart", None, true,
                 segmented("table-chart", &[tr("settings_table_chart_hide"), tr("settings_table_chart_show")], a.table_chart as usize, true,
                     |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.table_chart = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                false))
+            .child(self.line("settings_ask_highlight", Some(tr("settings_ask_highlight_desc")), true,
+                segmented("ask-highlight", &[tr("settings_ask_highlight_accent"), tr("settings_ask_highlight_amber")], (a.ask_highlight == AskHighlight::Amber) as usize, true,
+                    |this: &mut Hangar, index, _: &mut Window, cx| {
+                        let mut next = appearance::get();
+                        next.ask_highlight = if index == 1 { AskHighlight::Amber } else { AskHighlight::Accent };
+                        this.apply_appearance(next, true, cx);
+                    }, cx),
                 false));
 
         const NAVIGATION: [Navigation; 3] = [Navigation::Sidebar, Navigation::Tabs, Navigation::Conversations];

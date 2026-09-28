@@ -3,6 +3,39 @@
 Captured from live testing (phone, real session). Deferred by the user to the polish
 phase — not blockers. Newest first.
 
+## App nativo: pergunta do agente, atualizar o app, relatório de subagente como bolha (2026-09-28)
+
+Visto testando todos os formatos de AskUserQuestion no `desktop-native` (build `0.1.0.3345`).
+**Feito em 2026-09-28** (os três). Pendências que sobraram: paridade do web em
+`desktop-native/docs/chat-parity.md`; e o item 1.5 decide pelo texto "Type something." /
+"Chat about this" do menu — se o backend não casar a pergunta com o card, nada aparece na tela.
+
+**1. Card da pergunta (`render_ask` / `interaction_card` em `desktop-native/src/app.rs`)**
+- Só a bolinha/caixa recebe o clique; a linha inteira da opção (rótulo + descrição) tem de ser clicável.
+- Opções apagadas demais: descrição em `muted` + `text_xs` e rótulo sem peso. Subir o contraste.
+- Moldura amarelada = `theme::warning()` a 35% na borda e 6% no fundo, fixa no código. Tirar de
+  um token do tema e deixar configurável na aparência.
+- Várias perguntas numa chamada viram lista rolável; trocar por abas (uma por pergunta, com
+  marca de respondida) e o Enviar só no fim.
+- Antes do card nativo aparece o seletor lido do terminal (`render_options`: "Escolha uma opção",
+  "Type something", "Chat about this") e depois é trocado. Com AskUserQuestion pendente no
+  terminal, esse seletor não pode aparecer, nem por um quadro.
+- Conferir paridade com o web (`frontend/`) e registrar em `desktop-native/docs/chat-parity.md`.
+
+**2. Atualizar o próprio app pela tela Sobre**
+- `desktop-native/src/update.rs` só confere a release `native-latest` ao abrir e a cada 6 h, e
+  oferece por notificação. O "Procurar atualização" da Sobre olha só o servidor. Caso real: app
+  em `0.1.0.3345` com `0.1.0.3369` publicado e nenhum botão à vista. A Sobre tem de mostrar a
+  versão publicada e um botão para procurar/atualizar o app.
+
+**3. Relatório de subagente aparecendo como bolha do usuário**
+- A conversa mostrou uma bolha de usuário começando por `<agent-message from="…"> [Subagent
+  hand-back] …`, logo abaixo do card "Agent · Revisar W5 spec+qualidade". Nenhum transcript
+  Claude desta máquina (`~/.claude*/projects`) grava esse envelope: no Claude o relatório vem
+  como `tool_result` e já é tratado. Falta saber de qual sessão/harness veio (Codex, Pi, omp,
+  Kimi ou outro servidor) para filtrar o envelope no parser dele, como `transcript.py` já faz
+  com `<task-notification>` e `<pasted_content>`.
+
 ## A tela do subagente mostra o PEDIDO, não o trabalho (2026-08-18)
 
 Pedido do usuário depois de a lista de subagentes voltar a funcionar. O que está errado hoje,
