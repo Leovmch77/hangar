@@ -627,10 +627,14 @@ impl Hangar {
             let use_button = Button::new(SharedString::from(format!("accounts-reset-{}", row.id))).outline().small().label(tr("accounts_reset_use"))
                 .disabled(held || offer.blocked.is_some() || asking.is_some())
                 .on_click(cx.listener(move |this, _, _, cx| this.open_reset(id.clone(), cx)));
-            block = block.child(div().flex().items_center().gap(px(12.)).flex_wrap()
-                .child(div().flex().flex_col().gap(px(2.)).child(div().text_size(px(13.)).child(offer.count.clone())).children(offer.expires.clone().map(small)))
-                .child(use_button)
-                .children(offer.blocked.clone().map(small)));
+            block = block.child(div().px(px(12.)).py(px(10.)).rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
+                .flex().items_center().gap(px(12.))
+                .child(div().size(px(26.)).flex_shrink_0().rounded(px(7.)).bg(theme::accent_dim()).flex().items_center().justify_center()
+                    .child(chrome::small_icon(IconName::RotateCcw, 14., theme::accent_text())))
+                .child(div().flex_shrink_0().flex().flex_col().gap(px(2.)).child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
+                    .child(offer.count.clone())).children(offer.expires.clone().map(small)))
+                .child(div().flex_1().min_w_0().children(offer.blocked.clone().map(small)))
+                .child(div().flex_shrink_0().child(use_button)));
         }
         if let Some(r) = asking {
             // Com o resultado desconhecido não há Cancelar: o que resta é repetir com a mesma chave até o servidor responder.

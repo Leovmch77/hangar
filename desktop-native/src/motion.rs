@@ -63,7 +63,7 @@ pub const PULSE: Duration = Duration::from_millis(2400);
 impl Spec {
     const fn new(ms: u64, curve: [f32; 4]) -> Self { Self { ms, delay: 0, curve } }
 
-    const fn after(mut self, delay: u64) -> Self { self.delay = delay; self }
+    pub const fn after(mut self, delay: u64) -> Self { self.delay = delay; self }
 
     pub const fn duration(self) -> Duration { Duration::from_millis(self.ms) }
 

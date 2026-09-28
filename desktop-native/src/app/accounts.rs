@@ -129,6 +129,12 @@ struct Row {
     /// Tipo, login e o resto, separados por " · "; os trechos de aviso levam a cor deles.
     subtitle: (String, Vec<(std::ops::Range<usize>, Tone)>),
     chips: Vec<String>,
+    /// Plano da assinatura ("Max", "Pro"), numa ficha ao lado do nome.
+    plan: Option<String>,
+    /// Dias até o login da conta Claude vencer, para o resumo do topo.
+    login_days: Option<i64>,
+    /// Redefinições guardadas da conta Codex, para o resumo do topo.
+    resets: u64,
     quota: QuotaView,
     /// Conta Codex: o id dela e se a ação da linha é herdar da padrão (senão, entrar).
     codex: Option<(String, bool)>,
@@ -305,7 +311,6 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
             };
             if !auth.is_empty() { subtitle.push(muted(auth)); }
             if let Some(login) = c.login.as_ref().filter(|_| logged == Some(true)) {
-                subtitle.extend(login.plan.clone().map(muted));
                 subtitle.extend(login.email.clone().map(muted));
             } else if logged == Some(false) {
                 subtitle.push(muted(tr("accounts_not_connected")));
@@ -380,9 +385,12 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
         (_, "codex") => (vec!["codex-contas".into(), c.codex_account.clone().unwrap_or_default()], 120, "accounts_remove_desc_codex"),
         _ => (vec!["claude-configs".into(), c.natural.clone()], 60, "accounts_remove_desc_claude"),
     });
+    let plan = c.login.as_ref().filter(|_| logged == Some(true)).and_then(|l| l.plan.as_deref()).filter(|p| !p.is_empty())
+        .map(|p| { let mut chars = p.chars(); chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default() });
+    let resets = if c.kind == "codex" { c.quota.as_ref().and_then(|q| q.reset_credits.as_ref()).map_or(0, |r| r.available_count) } else { 0 };
     Row {
         id: c.id.clone(), name: c.name.clone(), label: c.natural.clone(), natural: c.natural.clone(), alias: c.alias.clone().unwrap_or_default(),
-        active: c.active, glyph, subtitle, chips, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
+        active: c.active, glyph, subtitle, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
         can_sign_out: c.kind == "claude" && c.managed != Some(false) && logged == Some(true) && !c.expired(),
         remove,
     }
@@ -406,6 +414,40 @@ fn build_sections(list: &[Credential], engines: &HashMap<String, Engine>, now: f
         labels.sort_by_key(|l| window_order(l));
         Section { group, rows, labels }
     }).collect()
+}
+
+/// O resumo do topo, tirado das próprias linhas.
+#[derive(Default)]
+struct Summary {
+    /// Provider e nome de cada conta em uso.
+    in_use: Vec<(&'static str, String)>,
+    /// Contas com a semana em 100%: nome e reinício, a que volta primeiro na frente.
+    week_full: Vec<(String, String)>,
+    /// Menor prazo de login e as contas que vencem nele.
+    login: Option<(i64, Vec<String>)>,
+    resets: u64,
+}
+
+fn build_summary(sections: &[Section]) -> Summary {
+    let mut summary = Summary::default();
+    let mut full = Vec::new();
+    for row in sections.iter().flat_map(|s| &s.rows) {
+        if row.active { summary.in_use.push((row.glyph.0, row.name.clone())); }
+        if let QuotaView::Bars { bars, .. } = &row.quota && let Some(week) = bars.iter().find(|b| b.label == "7d" && b.pct >= 100.) {
+            full.push((week.reset_at.unwrap_or(f64::MAX), row.name.clone(), week.reset.clone()));
+        }
+        if let Some(days) = row.login_days {
+            match &mut summary.login {
+                Some((least, names)) if days == *least => names.push(row.name.clone()),
+                Some((least, _)) if days > *least => {}
+                _ => summary.login = Some((days, vec![row.name.clone()])),
+            }
+        }
+        summary.resets += row.resets;
+    }
+    full.sort_by(|a, b| a.0.total_cmp(&b.0));
+    summary.week_full = full.into_iter().map(|(_, name, reset)| (name, reset)).collect();
+    summary
 }
 
 fn parse_engines(value: &Value) -> Result<Engines, String> {
@@ -577,40 +619,46 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn render_accounts(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// `wide`: a janela tem largura para uma coluna por janela de cota; sem ela, a linha empilha as barras como antes.
+    pub(super) fn render_accounts(&mut self, wide: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let server = self.server_label(cx);
         let chip = div().mt(px(12.)).flex().child(div().h(px(24.)).px(px(9.)).flex().items_center().gap(px(6.)).rounded_full().border_1()
             .border_color(theme::border_strong()).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::Server, 13., theme::muted())).child(tr("accounts_this_server").replace("{server}", &server)));
-        let page = div().flex().flex_col().child(self.page_top("settings_page_accounts", tr("accounts_lead"))).child(chip);
-        let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
+        let intro = div().flex_1().min_w(px(280.)).flex().flex_col().child(self.page_top("settings_page_accounts", tr("accounts_lead"))).child(chip);
+        let top = |tools: Option<Div>| div().flex().flex_wrap().items_end().gap(px(16.)).child(intro).children(tools);
         let accounts = &self.accounts;
         if self.api.is_none() {
-            return page.child(self.heading("accounts_subscriptions")).child(settings_box().child(note(tr("settings_offline"), theme::muted()))).into_any_element();
+            return div().flex().flex_col().child(top(None)).child(self.heading("accounts_subscriptions"))
+                .child(settings_box().child(div().px_4().py(px(18.)).text_size(px(13.)).text_color(theme::muted()).child(tr("settings_offline"))))
+                .into_any_element();
         }
-        if let Some(panel) = self.render_sign_in(cx) { return page.child(panel).into_any_element(); }
-        if let Some(panel) = self.render_engine_form(cx) { return page.child(panel).into_any_element(); }
-        if let Some(panel) = self.render_codex(cx) { return page.child(panel).into_any_element(); }
+        let page = div().flex().flex_col();
+        if let Some(panel) = self.render_sign_in(cx) { return page.child(top(None)).child(panel).into_any_element(); }
+        if let Some(panel) = self.render_engine_form(cx) { return page.child(top(None)).child(panel).into_any_element(); }
+        if let Some(panel) = self.render_codex(cx) { return page.child(top(None)).child(panel).into_any_element(); }
         match (&accounts.list.value, accounts.list.loading) {
-            (None, _) => return page.child(self.heading("accounts_subscriptions"))
-                .child(settings_box().child(note(tr("accounts_loading"), theme::muted()))).into_any_element(),
+            (None, _) => return page.child(top(None)).child(settings_box().mt(px(20.))
+                .child(div().px_4().py(px(18.)).flex().items_center().gap(px(10.)).text_size(px(13.)).text_color(theme::muted())
+                    .child(chrome::Spinner::new("accounts-loading", IconName::LoaderCircle, px(15.), theme::accent())).child(tr("accounts_loading"))))
+                .into_any_element(),
             (Some(Err(error)), loading) => {
                 let retry = Button::new("accounts-retry").outline().small().icon(IconName::RefreshCw)
                     .label(tr(if loading { "accounts_loading_short" } else { "accounts_retry" })).disabled(loading)
                     .on_click(cx.listener(|this, _, _, cx| this.load_accounts(false, cx)));
-                return page.child(self.heading("accounts_subscriptions"))
-                    .child(settings_box().child(note(tr("accounts_failed").replace("{reason}", error), theme::danger()))
-                        .child(div().px_4().pb(px(16.)).flex().child(retry)))
+                return page.child(top(None))
+                    .child(banner(theme::danger(), IconName::CircleAlert, tr("accounts_failed").replace("{reason}", error)).mt(px(20.))
+                        .child(div().flex_shrink_0().child(retry)))
                     .into_any_element();
             }
             _ => {}
         }
-        let mut page = page;
-        if let Some((text, error)) = &accounts.outcome {
-            page = page.child(div().mt(px(16.)).text_size(px(13.)).whitespace_normal()
-                .child(div().text_color(if *error { theme::danger() } else { theme::success() }).child(text.clone())));
-        }
         let compact = appearance::get().accounts_compact;
+        let mut page = page.child(top(Some(self.accounts_tools(compact, cx))));
+        if let Some((text, error)) = &accounts.outcome {
+            let (color, icon) = if *error { (theme::danger(), IconName::CircleAlert) } else { (theme::success(), IconName::CircleCheck) };
+            page = page.child(banner(color, icon, text.clone()).mt(px(16.)));
+        }
         // Arquivo dos modelos ilegível não é "nenhum modelo": pode estar escondendo modelos de verdade.
         let engines_problem = match &accounts.engines.value {
             Some(Ok(Engines { broken_file: Some(path), .. })) => Some(tr("accounts_engines_broken").replace("{path}", path)),
@@ -618,37 +666,22 @@ impl Hangar {
             // Releitura que falhou com os modelos anteriores na tela.
             _ => accounts.engines_notice.as_ref().map(|error| tr("accounts_refresh_failed").replace("{reason}", error)),
         };
+        page = page.child(self.accounts_summary(&build_summary(&accounts.sections))).child(self.accounts_tabs(cx));
+        let mut order = 0;
         for section in &accounts.sections {
-            let (title, empty) = match section.group {
-                Group::Subscriptions => ("accounts_subscriptions", "accounts_subscriptions_empty"),
-                Group::Models => ("accounts_models", "accounts_models_empty"),
-                Group::Others => ("accounts_others", "accounts_others_empty"),
+            let problem = match section.group {
+                Group::Subscriptions => accounts.notice.as_ref().map(|notice| tr("accounts_refresh_failed").replace("{reason}", notice)),
+                Group::Models => engines_problem.clone(),
+                Group::Others => None,
             };
-            let tools = match section.group {
-                Group::Subscriptions => div().flex().items_center().gap(px(8.)).child(self.accounts_tools(compact, cx))
-                    .child(Button::new("accounts-add-account").outline().small().icon(IconName::Plus).label(tr("accounts_add_account"))
-                        .disabled(self.accounts_busy()).on_click(cx.listener(|this, _, window, cx| this.open_add_account(window, cx))))
-                    .into_any_element(),
-                Group::Models => Button::new("accounts-add-model").outline().small().icon(IconName::Plus).label(tr("accounts_add_model"))
-                    .disabled(self.accounts_busy())
-                    .on_click(cx.listener(|this, _, window, cx| this.open_add_account_at(AddStep::Catalog(true), window, cx))).into_any_element(),
-                Group::Others => div().into_any_element(),
-            };
-            page = page.child(div().flex().items_end().gap(px(12.)).child(div().flex_1().child(self.heading(title))).child(div().mb(px(8.)).child(tools)));
-            if section.group == Group::Subscriptions && let Some(notice) = &accounts.notice {
-                page = page.child(div().mb(px(10.)).text_size(px(13.)).text_color(theme::danger()).child(tr("accounts_refresh_failed").replace("{reason}", notice)));
-            }
-            if section.group == Group::Models && let Some(problem) = &engines_problem {
-                page = page.child(div().mb(px(10.)).text_size(px(13.)).text_color(theme::danger()).whitespace_normal().child(problem.clone()));
-            }
-            let body = if section.rows.is_empty() { settings_box().child(note(tr(empty), theme::muted())) }
-                else { settings_box().children(section.rows.iter().map(|row| self.render_account_row(row, &section.labels, compact, cx))) };
-            page = page.child(body);
+            page = page.child(self.render_accounts_section(section, problem, wide, compact, &mut order, window, cx));
         }
-        page.child(div().mt(px(14.)).text_size(px(13.)).text_color(theme::muted()).child(tr("accounts_menu_note"))).into_any_element()
+        page.child(div().mt(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme::muted())
+            .child(chrome::small_icon(IconName::Ellipsis, 14., theme::faint())).child(tr("accounts_menu_note")))
+            .into_any_element()
     }
 
-    /// Completa × Compacta e o Atualizar com a idade da leitura.
+    /// Atualizar com a idade da leitura, Completa × Compacta e Adicionar conta, no topo da página.
     fn accounts_tools(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         let density = segments("accounts-density", &[tr("accounts_full"), tr("accounts_compact")], compact as usize, 2, false, String::new(),
             |this: &mut Hangar, index, _: &mut Window, cx| {
@@ -659,15 +692,130 @@ impl Hangar {
         let loading = self.accounts.list.loading;
         let label = if loading { tr("accounts_refreshing") }
             else { self.accounts.read_at.map(|at| tr("accounts_read_ago").replace("{n}", &age(at.elapsed().as_secs_f64()))).unwrap_or_else(|| tr("accounts_refresh")) };
-        let refresh = Button::new("accounts-refresh").ghost().small().icon(IconName::RefreshCw).label(label).disabled(loading)
+        let refresh = Button::new("accounts-refresh").ghost().small().disabled(loading)
+            .map(|el| if loading {
+                el.child(div().flex().items_center().gap(px(6.))
+                    .child(chrome::Spinner::new("accounts-refresh-spin", IconName::RefreshCw, px(14.), theme::muted())).child(label))
+            } else { el.icon(IconName::RefreshCw).label(label) })
             .tooltip(tr("accounts_refresh")).accessibility_label(tr("accounts_refresh"))
             .on_click(cx.listener(|this, _, _, cx| this.refresh_accounts(cx)));
+        let add = Button::new("accounts-add-account").primary().small().icon(IconName::Plus).label(tr("accounts_add_account"))
+            .disabled(self.accounts_busy()).on_click(cx.listener(|this, _, window, cx| this.open_add_account(window, cx)));
         div().flex().items_center().gap(px(8.))
-            .child(self.mark(div().child(density), "accounts_density"))
             .child(self.mark(div().child(refresh), "accounts_refresh"))
+            .child(self.mark(div().child(density), "accounts_density"))
+            .child(add)
     }
 
-    fn render_account_row(&self, row: &Row, labels: &[String], compact: bool, cx: &mut Context<Self>) -> Div {
+    /// Quatro números tirados da própria lista: o que está em uso, o que esgotou a semana, o login que vence primeiro e
+    /// as redefinições guardadas do Codex.
+    fn accounts_summary(&self, summary: &Summary) -> Div {
+        let tile = |key: &str| div().flex_1().min_w_0().p(px(14.)).flex().flex_col().gap(px(6.)).rounded(px(12.)).border_1()
+            .border_color(theme::border()).bg(theme::boxed()).child(div().text_size(px(12.)).text_color(theme::muted()).child(tr(key)));
+        let big = |text: String, color: Hsla| div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(color).truncate().child(text);
+        let small = |text: String| div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text);
+        let in_use = if summary.in_use.is_empty() { tile("accounts_summary_in_use").child(small(tr("accounts_summary_in_use_none"))) } else {
+            tile("accounts_summary_in_use").children(summary.in_use.iter().map(|(provider, name)| {
+                let (color, letter) = theme::provider(provider);
+                let logo = div().size(px(20.)).flex_shrink_0().rounded(px(6.)).bg(color.opacity(0.16)).flex().items_center().justify_center()
+                    .text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color);
+                div().flex().items_center().gap(px(8.)).min_w_0().text_size(px(13.5))
+                    .child(match chrome::provider_logo(provider, 12., color) { Some(svg) => logo.child(svg), None => logo.child(letter) })
+                    .child(div().min_w_0().truncate().child(name.clone()))
+            }))
+        };
+        let accounts = |n: usize| if n == 1 { tr("accounts_summary_one_account") } else { tr("accounts_summary_accounts").replace("{n}", &n.to_string()) };
+        let week = match summary.week_full.first() {
+            None => tile("accounts_summary_week_full").child(big(tr("accounts_summary_none"), theme::text())).child(small(tr("accounts_summary_week_free"))),
+            Some((name, reset)) => tile("accounts_summary_week_full").child(big(accounts(summary.week_full.len()), theme::danger()))
+                .child(small(if reset.is_empty() { name.clone() } else { tr("accounts_summary_week_back").replace("{name}", name).replace("{n}", reset) })),
+        };
+        let login = match &summary.login {
+            None => tile("accounts_summary_login").child(big("—".into(), theme::muted())).child(small(tr("accounts_summary_login_none"))),
+            Some((days, names)) => {
+                let (text, color) = match *days {
+                    ..=0 => (tr("accounts_summary_login_expired"), theme::danger()),
+                    1 => (tr("accounts_summary_one_day"), theme::warning()),
+                    n => (tr("accounts_summary_days").replace("{n}", &n.to_string()), if n <= RENEW_DAYS { theme::warning() } else { theme::text() }),
+                };
+                tile("accounts_summary_login").child(big(text, color)).child(small(names.join(" · ")))
+            }
+        };
+        let resets = tile("accounts_summary_resets")
+            .child(big(if summary.resets == 0 { tr("accounts_summary_none") } else { summary.resets.to_string() }, theme::text()))
+            .child(small(tr(if summary.resets == 0 { "accounts_summary_resets_none" } else { "accounts_summary_resets_rule" })));
+        div().mt(px(20.)).flex().gap(px(12.)).child(in_use).child(week).child(login).child(resets)
+    }
+
+    /// Atalhos para as três seções, com quantas linhas cada uma tem: com muitas assinaturas, os modelos ficam lá embaixo.
+    fn accounts_tabs(&self, cx: &mut Context<Self>) -> Div {
+        let current = self.jumped();
+        div().mt(px(16.)).flex().child(div().flex().gap(px(4.)).p(px(3.)).rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
+            .children(self.accounts.sections.iter().map(|section| {
+                let key = section.group.text().0;
+                let on = current == Some(key);
+                Button::new(SharedString::from(format!("accounts-jump-{key}")))
+                    .custom(ButtonCustomVariant::new(cx).color(if on { theme::accent_dim() } else { transparent_black() })
+                        .foreground(if on { theme::accent_text() } else { theme::muted() }).hover(theme::hover()).active(theme::hover()))
+                    .small().h(px(28.)).px(px(11.)).rounded(px(7.)).when(on, |el| el.bg(theme::accent_dim()))
+                    .child(div().flex().items_center().gap(px(7.)).child(tr(key))
+                        .child(div().px(px(6.)).rounded(px(5.)).bg(theme::hover()).text_size(px(11.5))
+                            .text_color(if on { theme::accent_text() } else { theme::faint() }).child(section.rows.len().to_string())))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.jump_to(key); cx.notify(); }))
+            })))
+    }
+
+    /// Cartão de uma seção: cabeça com ícone e o que ela guarda, avisos dela, e as linhas. As assinaturas se separam por
+    /// provider; na página larga, cada bloco nomeia as colunas de cota.
+    #[allow(clippy::too_many_arguments)]
+    fn render_accounts_section(&self, section: &Section, problem: Option<String>, wide: bool, compact: bool, order: &mut usize,
+        window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let (title, empty, lead, icon) = section.group.text();
+        let extra = match section.group {
+            Group::Subscriptions if !section.labels.is_empty() => Some(legend()),
+            Group::Models => Some(div().child(Button::new("accounts-add-model").outline().small().icon(IconName::Plus).label(tr("accounts_add_model"))
+                .disabled(self.accounts_busy())
+                .on_click(cx.listener(|this, _, window, cx| this.open_add_account_at(AddStep::Catalog(true), window, cx))))),
+            _ => None,
+        };
+        let head = div().flex().items_center().gap(px(12.)).px_4().py(px(14.))
+            .child(div().size(px(32.)).flex_shrink_0().rounded(px(9.)).bg(theme::accent_dim()).flex().items_center().justify_center()
+                .child(chrome::small_icon(icon, 17., theme::accent_text())))
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr(title)))
+                .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(tr(lead))))
+            .children(extra.map(|el| el.flex_shrink_0()));
+        let mut card = settings_box().mt(px(16.)).child(self.mark(head, title))
+            .children(problem.map(|text| div().px_4().pb(px(12.)).child(banner(theme::danger(), IconName::TriangleAlert, text))));
+        if section.rows.is_empty() {
+            return card.child(div().mx_4().mb(px(16.)).py(px(24.)).px(px(20.)).rounded(px(12.)).border_1().border_dashed().border_color(theme::border_strong())
+                .flex().flex_col().items_center().gap(px(10.))
+                .child(div().size(px(36.)).rounded(px(10.)).bg(theme::inset()).flex().items_center().justify_center()
+                    .child(chrome::small_icon(icon, 18., theme::faint())))
+                .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr(empty))));
+        }
+        let mut blocks: Vec<(&str, Vec<&Row>)> = Vec::new();
+        for row in &section.rows {
+            let provider = if section.group == Group::Subscriptions { row.glyph.0 } else { "" };
+            match blocks.iter_mut().find(|(p, _)| *p == provider) {
+                Some((_, rows)) => rows.push(row),
+                None => blocks.push((provider, vec![row])),
+            }
+        }
+        for (provider, rows) in blocks {
+            let title = match provider { "claude" => Some("Claude"), "codex" => Some("Codex"), _ => None };
+            if wide && (title.is_some() || !section.labels.is_empty()) { card = card.child(column_head(title, &rows, &section.labels)); }
+            for row in rows {
+                card = card.child(self.render_account_row(row, &section.labels, wide, compact, *order, window, cx));
+                *order += 1;
+            }
+        }
+        card
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_account_row(&self, row: &Row, labels: &[String], wide: bool, compact: bool, order: usize, window: &mut Window,
+        cx: &mut Context<Self>) -> Div {
         let (color, _) = theme::provider(row.glyph.0);
         let size = if compact { 28. } else { 36. };
         let avatar = div().size(px(size)).flex_shrink_0().rounded(px(if compact { 8. } else { 10. })).bg(color.opacity(0.16)).flex().items_center().justify_center()
@@ -681,7 +829,10 @@ impl Hangar {
             Some(rename) => self.render_rename(rename, &row.name, cx),
             None => div().flex().items_center().gap(px(8.)).min_w_0()
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(row.name.clone()))
-                .when(row.active, |el| el.child(div().flex_shrink_0().flex().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme::muted())
+                .children(row.plan.clone().filter(|_| !compact).map(|plan| div().flex_shrink_0().h(px(18.)).px(px(6.)).flex().items_center()
+                    .rounded(px(5.)).border_1().border_color(theme::border_strong()).text_size(px(11.)).text_color(theme::muted()).child(plan)))
+                .when(row.active, |el| el.child(div().flex_shrink_0().h(px(20.)).px(px(8.)).flex().items_center().gap(px(5.)).rounded_full()
+                    .bg(theme::success().alpha(0.12)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(theme::success())
                     .child(div().size(px(6.)).rounded_full().bg(theme::success())).child(tr("accounts_in_use")))),
         };
         // Um texto só, com a cor de aviso por trecho: corta no fim com reticências, sem pedaço solto.
@@ -696,11 +847,19 @@ impl Hangar {
         let identity = div().flex_1().min_w_0().flex().flex_col().gap(px(3.)).child(name_line)
             .when(renaming.is_none() && !compact, |el| el.when(!row.subtitle.0.is_empty(),|el| el.child(subtitle))
                 .when(!row.chips.is_empty(), |el| el.child(chips)));
-        let quota = div().w(px(206.)).flex_shrink_0().flex().flex_col().gap(px(if compact { 2. } else { 8. }))
+        let quota = div().w(px(if wide { columns_width(labels.len()) } else { 206. })).flex_shrink_0().flex().flex_col()
+            .gap(px(if compact || wide { 4. } else { 8. }))
             .map(|el| match &row.quota {
                 QuotaView::Bars { bars, stale } => el.when(stale.is_some(), |el| el.opacity(0.6))
-                    .map(|el| if compact { el.child(mini_quota(bars, labels)) } else { el.children(bars.iter().map(quota_bar)) })
-                    .children(stale.clone().map(|text| div().text_size(px(11.5)).text_color(theme::muted()).child(text))),
+                    .map(|el| if wide {
+                        el.child(div().flex().gap(px(COLUMN_GAP)).children(labels.iter().enumerate().map(|(n, label)| {
+                            let key = SharedString::from(format!("accounts-bar-{}-{label}", row.id));
+                            let grow = motion::enter(key, motion::FADE_IN.after(120 + 35 * (order.min(12) + n) as u64), window, cx);
+                            quota_column(bars.iter().find(|b| &b.label == label), compact, grow)
+                        })))
+                    } else if compact { el.child(mini_quota(bars, labels)) } else { el.children(bars.iter().map(quota_bar)) })
+                    .children(stale.clone().map(|text| div().flex().items_center().gap(px(5.)).text_size(px(11.5)).text_color(theme::muted())
+                        .child(chrome::small_icon(IconName::Clock, 12., theme::muted())).child(text))),
                 QuotaView::Note(text) => el.child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(text.clone())),
                 QuotaView::Nothing => el,
             });
@@ -754,7 +913,7 @@ impl Hangar {
                 .when(inherit, |el| el.tooltip(tr("accounts_inherit")).accessibility_label(tr("accounts_inherit")))
                 .on_click(cx.listener(move |this, _, window, cx| this.start_codex(Some(account.clone()), inherit, window, cx)))
         });
-        let actions = div().w(px(160.)).flex_shrink_0().flex().items_center().justify_end().gap(px(6.))
+        let actions = div().w(px(ACTIONS)).flex_shrink_0().flex().items_center().justify_end().gap(px(6.))
             .children(changing.map(|text| div().text_size(px(12.5)).text_color(theme::muted()).child(text)))
             .children(sign_in)
             .children(codex)
@@ -763,6 +922,8 @@ impl Hangar {
             .child(menu);
         let line = div().mt(px(-1.)).border_t_1().border_color(theme::border()).flex().items_center().gap(px(12.)).px_4()
             .py(px(if compact { 8. } else { 14. }))
+            .when(row.active, |el| el.bg(theme::success().alpha(0.035)))
+            .hover(|el| el.bg(theme::hover()))
             .child(avatar).child(identity).child(quota).child(actions);
         let line = match renaming.and_then(|r| r.error.clone()) {
             // A cor mora num filho: a caixa pinta o texto de cinza por cima.
@@ -774,10 +935,13 @@ impl Hangar {
             (None, false) => line,
             (offer, _) => div().child(line).child(self.render_reset(row, offer.as_ref(), size, cx)),
         };
-        match self.accounts.cookie.as_ref().filter(|c| c.id == row.id) {
+        let block = match self.accounts.cookie.as_ref().filter(|c| c.id == row.id) {
             Some(form) => div().child(line).child(self.render_cookie(form, size, cx)),
             None => line,
-        }
+        };
+        // As linhas chegam uma depois da outra ao abrir a página; depois disso o relógio de meio minuto não as refaz.
+        let shown = motion::enter(SharedString::from(format!("accounts-row-{}", row.id)), motion::FADE_IN.after(35 * order.min(12) as u64), window, cx);
+        motion::fade_in(block, shown)
     }
 
     /// Campo do apelido no lugar do nome: Enter salva, Esc desiste.
@@ -793,6 +957,72 @@ impl Hangar {
                 .child(Button::new("accounts-rename-cancel").ghost().small().label(tr("cancel")).disabled(saving)
                     .on_click(cx.listener(|this, _, window, cx| this.cancel_rename(window, cx)))))
     }
+}
+
+/// Página larga: largura de cada coluna de cota, o vão entre elas e a coluna das ações.
+const COLUMN: f32 = 140.;
+const COLUMN_GAP: f32 = 16.;
+const ACTIONS: f32 = 160.;
+
+/// Seção sem janela nenhuma ainda guarda o espaço de duas: a nota da cota não espreme o nome.
+fn columns_width(count: usize) -> f32 {
+    let count = count.max(2) as f32;
+    count * COLUMN + (count - 1.) * COLUMN_GAP
+}
+
+impl Group {
+    /// Título, texto de vazio, o que a seção guarda e o ícone dela.
+    fn text(self) -> (&'static str, &'static str, &'static str, IconName) {
+        match self {
+            Group::Subscriptions => ("accounts_subscriptions", "accounts_subscriptions_empty", "accounts_subscriptions_desc", IconName::Users),
+            Group::Models => ("accounts_models", "accounts_models_empty", "accounts_models_desc", IconName::Cpu),
+            Group::Others => ("accounts_others", "accounts_others_empty", "accounts_others_desc", IconName::Key),
+        }
+    }
+}
+
+/// Aviso numa faixa tingida pela cor do tipo (falha, feito).
+fn banner(color: Hsla, icon: IconName, text: String) -> Div {
+    div().w_full().px(px(12.)).py(px(10.)).flex().items_center().gap(px(10.)).rounded(px(10.)).border_1()
+        .border_color(color.alpha(0.3)).bg(color.alpha(0.08)).text_size(px(13.))
+        .child(chrome::small_icon(icon, 15., color))
+        .child(div().flex_1().min_w_0().whitespace_normal().child(text))
+}
+
+/// O que cada cor da barra quer dizer.
+fn legend() -> Div {
+    let item = |color: Hsla, key: &str| div().flex().items_center().gap(px(6.))
+        .child(div().w(px(10.)).h(px(4.)).rounded(px(2.)).bg(color)).child(tr(key));
+    div().flex().items_center().gap(px(14.)).text_size(px(12.)).text_color(theme::muted())
+        .child(item(theme::accent(), "accounts_legend_ok")).child(item(theme::warning(), "accounts_legend_warn"))
+        .child(item(theme::danger(), "accounts_legend_danger"))
+}
+
+/// Cabeça de um bloco na página larga: provider e quantas contas, e o nome de cada coluna que alguma linha do bloco usa.
+fn column_head(title: Option<&str>, rows: &[&Row], labels: &[String]) -> Div {
+    let used = |label: &String| rows.iter().any(|r| matches!(&r.quota, QuotaView::Bars { bars, .. } if bars.iter().any(|b| &b.label == label)));
+    div().mt(px(-1.)).border_t_1().border_color(theme::border()).bg(theme::inset()).flex().items_center().gap(px(12.)).px_4().py(px(8.))
+        .text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::faint())
+        .child(div().flex_1().min_w_0().flex().items_center().gap(px(8.))
+            .children(title.map(|t| div().child(t.to_owned())))
+            .when(title.is_some(), |el| el.child(div().font_weight(FontWeight::NORMAL).child(rows.len().to_string()))))
+        .child(div().w(px(columns_width(labels.len()))).flex_shrink_0().flex().gap(px(COLUMN_GAP))
+            .children(labels.iter().map(|label| div().w(px(COLUMN)).flex_shrink_0().truncate()
+                .child(if used(label) { window_label(label) } else { String::new() }))))
+        .child(div().w(px(ACTIONS)).flex_shrink_0())
+}
+
+/// Uma janela na coluna dela: o %, a barra que cresce ao abrir (`grow` de 0 a 1) e quando reinicia. Na Compacta, só o %.
+fn quota_column(bar: Option<&Bar>, compact: bool, grow: f32) -> Div {
+    let cell = div().w(px(COLUMN)).flex_shrink_0().flex().flex_col().gap(px(5.));
+    let Some(bar) = bar else { return cell.child(div().text_size(px(13.)).text_color(theme::faint()).child("—")) };
+    cell.child(div().text_size(px(if compact { 13. } else { 15. })).font_weight(FontWeight::SEMIBOLD)
+            .text_color(if bar.pct > 80. { level(bar.pct) } else { theme::text() }).child(format!("{}%", bar.pct.round())))
+        .when(!compact, |el| el
+            .child(div().h(px(5.)).w_full().rounded_full().bg(theme::raised())
+                .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative(grow * (bar.pct.clamp(0., 100.) / 100.) as f32))))
+            .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme::faint())
+                .child(if bar.reset.is_empty() { String::new() } else { tr("accounts_resets").replace("{n}", &bar.reset) })))
 }
 
 /// Janela de cota na linha completa: nome, reinício e % acima da barra.
@@ -820,12 +1050,29 @@ fn mini_quota(bars: &[Bar], labels: &[String]) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Credential, Engine, Group, QuotaView, Tone, age, build_row, group_of, model_names, reset_text};
+    use super::{Credential, Engine, Group, QuotaView, Tone, age, build_row, build_sections, build_summary, group_of, model_names, reset_text};
     use crate::i18n::tr;
     use serde_json::{Value, json};
     use std::collections::HashMap;
 
     fn credential(value: Value) -> Credential { serde_json::from_value(value).expect("synthetic credential") }
+
+    #[test]
+    fn summary_counts_full_weeks_nearest_login_and_saved_resets() {
+        let now = 1_000_000.;
+        let claude = |name: &str, week: f64, reset: f64, days: f64, active: bool| credential(json!({"id": format!("claude:/{name}"), "tipo": "claude",
+            "nome": name, "ativa": active, "login": {"estado": "ok", "loggedIn": true, "plano": "max", "refreshExpiresAt": now + days * 86_400.},
+            "cota": {"estado": "lida", "janelas": [{"rotulo": "7d", "pct": week, "reset_ts": now + reset}]}}));
+        let codex = credential(json!({"id": "codex:/c", "tipo": "codex", "nome": "c", "codex_account": "c", "auth_method": "oauth",
+            "cota": {"estado": "lida", "janelas": [{"rotulo": "7d", "pct": 60}], "reset_credits": {"available_count": 2}}}));
+        let list = [claude("a", 100., 7200., 14., false), claude("b", 100., 600., 20., true), claude("c", 40., 600., 14., false), codex];
+        let summary = build_summary(&build_sections(&list, &HashMap::new(), now));
+        assert_eq!(summary.week_full.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+        assert_eq!(summary.login, Some((14, vec!["a".to_owned(), "c".to_owned()])));
+        assert_eq!(summary.in_use, [("claude", "b".to_owned())]);
+        assert_eq!(summary.resets, 2);
+        assert_eq!(build_row(&list[0], &HashMap::new(), false, now).plan.as_deref(), Some("Max"));
+    }
 
     #[test]
     fn groups_follow_the_web() {

@@ -674,12 +674,14 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx)))));
         // Com espaço para a coluna da prévia ao lado do conteúdo de 720px; a caixa ao vivo nunca tem.
         let wide = page == Page::Appearance && !self.settings_ui.live && window.viewport_size().width >= px(1400.);
+        // Contas cabe em colunas (uma por janela de cota) quando sobra largura ao lado da navegação.
+        let accounts_wide = page == Page::Accounts && window.viewport_size().width >= px(1320.);
         let body = match page {
             Page::Appearance => self.render_appearance(wide, cx),
             Page::General => self.render_general(cx),
             Page::Diary => self.render_diary(cx),
             Page::About => self.render_about(cx),
-            Page::Accounts => self.render_accounts(cx),
+            Page::Accounts => self.render_accounts(accounts_wide, window, cx),
             Page::Orchestration => self.render_orchestration(cx),
             Page::Shortcuts => self.render_shortcuts_page(cx),
             Page::Harnesses => self.render_harness(cx),
@@ -689,7 +691,7 @@ impl Hangar {
             Page::Windows => self.render_computer(cx),
         };
         let scroll = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
-            .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(720.)).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
+            .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(if accounts_wide { 1040. } else { 720. })).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
         let tabs = (page == Page::Appearance).then(|| div().w_full().flex_shrink_0().flex().justify_center().px_4().pt(px(14.)).pb(px(6.))
             .child(div().w(px(720.)).max_w_full().child(self.section_tabs(cx))));
         let content = div().flex_1().min_w_0().h_full().flex().flex_col().children(tabs).child(scroll).children(self.server_config_footer(page, cx));
@@ -721,6 +723,15 @@ impl Hangar {
     }
 
     pub(super) fn search_hit(&self, key: &str) -> bool { self.settings_ui.hit == Some(key) }
+
+    /// Atalho de seção de outras páginas: rola até a linha marcada com `key`.
+    pub(super) fn jump_to(&mut self, key: &'static str) {
+        self.settings_ui.hit = None;
+        self.settings_ui.jump = Some(key);
+        self.settings_ui.reveal.set(true);
+    }
+
+    pub(super) fn jumped(&self) -> Option<&'static str> { self.settings_ui.jump }
 
     /// Destaque da linha levada pela busca, e a rolagem até ela quando o desenho já sabe onde ela está.
     pub(super) fn mark(&self, el: Div, key: &str) -> Div {

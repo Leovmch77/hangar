@@ -102,6 +102,9 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Fundo, Leitura, Chamadas de ferramenta e Navegação recolhida escolhidos por miniatura | pendente no web | no web são botões de texto |
 | Ajuste dependente recuado sob o de cima (Força, Papel de parede, Solidez da folha, Contraste, O que entra no pensamento, Densidade) | pendente no web | no web cada um é uma linha solta |
 | Prévia ao lado que segue a seção mexida (chamadas no estilo escolhido, tarefas, tabela, leitura, navegação) | pendente no web | só com a janela larga (1400px); estreita ou ao vivo, a prévia de conversa fica no corpo como antes |
+| Contas e modelos com resumo no topo (em uso, semana esgotada, login que vence primeiro, redefinições do Codex) e atalhos por seção com a contagem | pendente no web | nasceu no nativo (`accounts.rs`); o web segue com os títulos e as listas soltas |
+| Contas em cartões por seção, assinaturas separadas por provider e uma coluna por janela de cota, com a barra crescendo ao abrir | pendente no web | só com a janela larga (1320px); estreita, a linha empilha as barras como antes |
+| Plano da assinatura numa ficha ao lado do nome, também nas contas Claude | pendente no web | no web o plano aparece só no subtítulo do Codex |
 
 ## Como rodar a prova
 
