@@ -18,6 +18,7 @@
   import { implementCodexPlan as requestCodexPlanImplementation } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
+import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import ConfirmSheet from '../components/ConfirmSheet.svelte';
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
   import CodexLimitsSheet from '../components/CodexLimitsSheet.svelte';
@@ -78,7 +79,7 @@
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
-  import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer } from '../lib/auth';
+  import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer, isActiveInvite } from '../lib/auth';
   import { getIdentificador } from '../lib/peers';
   import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
@@ -552,6 +553,7 @@
   let activityOpen = $state(false);
   // Menu "⋯" do celular: Rodar/Atividade saíram da NavBar pra sobrar largura pro nome da sessão.
   let moreOpen = $state(false);
+  let shareOpen = $state(false);
   // Galeria de anexos: "⋯" no celular, botao inline no desktop.
   let anexosOpen = $state(false);
   let limitsOpen = $state(false);  // Task B: sheet de limites de uso Codex (badge da NavBar)
@@ -3322,12 +3324,14 @@
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
              onBastao={passarBastaoDaqui}
+             onShare={isActiveInvite() ? undefined : () => (shareOpen = true)}
              onTrocarModo={modoTrocavel ? trocarModo : undefined}
              modoDestinoTerminal={sessionHeadless}
              modoBloqueado={!modoLivre || trocandoModo}
              onRecarregar={recarregavel ? recarregar : undefined}
              recarregarBloqueado={currentState !== 'idle' || recarregando}
              {activityRunning} {activityBadge} />
+  <ShareSessionSheet open={shareOpen} name={sessionName} serverId={getActiveId() ?? ''} onClose={() => (shareOpen = false)} />
   <ConfirmSheet open={confirmaModo}
                 title={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
                 message={sessionHeadless ? m.modo_confirmar_terminal_msg() : m.modo_confirmar_sem_terminal_msg()}

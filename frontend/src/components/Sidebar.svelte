@@ -11,6 +11,7 @@ import * as m from '../paraglide/messages';
   import { abrirConfig } from '../lib/configNav';
   import CreateSessionSheet from './CreateSessionSheet.svelte';
   import SessionContextMenu from './SessionContextMenu.svelte';
+import ShareSessionSheet from './ShareSessionSheet.svelte';
   import Git from './Git.svelte';
 import ConfirmDialog from './ConfirmDialog.svelte';
   import SessionSwitcherSheet from './SessionSwitcherSheet.svelte';
@@ -165,6 +166,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   // do `showCreate` e é sempre zerado por `abrirCriar()` — a folha só lê o alvo na transição de
   // abertura, então limpar no fechamento faria a tela piscar em modo normal enquanto ela sai.
   let bastaoAlvo = $state<{ name: string; cwd: string; serverId: string } | null>(null);
+  let shareAlvo = $state<{ name: string; serverId: string } | null>(null);
   function abrirCriar() { bastaoAlvo = null; showCreate = true; }
   // Fallback de foco dos diálogos: a engrenagem é o controle que SEMPRE sobra acessível.
   let acctBtnEl = $state<HTMLElement | null>(null);
@@ -434,6 +436,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     if (!menu) return;
     bastaoAlvo = { name: menu.name, cwd: menu.cwd, serverId: menu.serverId };
     showCreate = true;
+    closeMenu();
+  }
+  function menuShare() {
+    if (!menu) return;
+    shareAlvo = { name: menu.name, serverId: menu.serverId };
     closeMenu();
   }
   async function doCheckout(name: string, serverId: string, branch: string) {
@@ -1201,12 +1208,15 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     chainCandidates={chainCandidates(m.serverId, m.name)}
     onClose={closeMenu}
     onRename={menuRename} onDelete={menuDelete} onGit={menuGit} onBastao={menuBastao}
+    invite={servers.find((x) => x.id === m.serverId)?.invite === true} onShare={menuShare}
     onPickBranch={(branch, dirty) => {
       if (dirty) confirmBranch = { name: m.name, serverId: m.serverId, branch };
       else doCheckout(m.name, m.serverId, branch);
     }}
     onFlash={flash} />
 {/if}
+<ShareSessionSheet open={shareAlvo !== null} name={shareAlvo?.name ?? ''} serverId={shareAlvo?.serverId ?? ''}
+                   onClose={() => (shareAlvo = null)} />
 {#if menuMsg}
   <!-- "rótulo: corpo" vira duas linhas: o rótulo (o que foi tentado) em texto de interface e o
        corpo (saída do git/servidor) em mono. Clique fecha; erro fica mais tempo que aviso. -->

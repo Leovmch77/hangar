@@ -15,10 +15,13 @@
     onDelete: () => void;
     onGit: () => void;
     onBastao: () => void;
+    /** Sessão de servidor de convite: só rotas da própria sessão; itens de servidor inteiro somem. */
+    invite?: boolean;
+    onShare?: () => void;
     onPickBranch: (branch: string, dirty: boolean) => void;
     onFlash: (msg: string) => void;
   }
-  let { x, y, name, serverId, cwd, branch, thenTarget, chainCandidates, onClose, onRename, onDelete, onGit, onBastao, onPickBranch, onFlash }: Props = $props();
+  let { x, y, name, serverId, cwd, branch, thenTarget, chainCandidates, onClose, onRename, onDelete, onGit, onBastao, invite = false, onShare, onPickBranch, onFlash }: Props = $props();
 
   const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -31,6 +34,7 @@
 
   let menuMuted = $state<boolean | null>(null);
   onMount(() => {
+    if (invite) return;
     withServer(serverId, () => getPushSettings())
       .then((p) => { menuMuted = p.muted.includes(name); })
       .catch(() => { menuMuted = false; });
@@ -142,11 +146,21 @@
       {/snippet}
     </DropdownMenu.Item>
 
-    <DropdownMenu.Item onSelect={toggleMute}>
-      {#snippet child({ props })}
-        <button {...props}>{menuMuted ? m.ctx_reativar_notif() : m.ctx_silenciar_notif()}</button>
-      {/snippet}
-    </DropdownMenu.Item>
+    {#if onShare && !invite}
+      <DropdownMenu.Item onSelect={onShare}>
+        {#snippet child({ props })}
+          <button {...props}>{m.compartilhar_menu()}</button>
+        {/snippet}
+      </DropdownMenu.Item>
+    {/if}
+
+    {#if !invite}
+      <DropdownMenu.Item onSelect={toggleMute}>
+        {#snippet child({ props })}
+          <button {...props}>{menuMuted ? m.ctx_reativar_notif() : m.ctx_silenciar_notif()}</button>
+        {/snippet}
+      </DropdownMenu.Item>
+    {/if}
 
     {#if cwd}
       <DropdownMenu.Item onSelect={copyCwd}>
@@ -154,11 +168,13 @@
           <button {...props}>{m.ctx_copiar_cwd()}</button>
         {/snippet}
       </DropdownMenu.Item>
-      <DropdownMenu.Item onSelect={doOpenEditor}>
-        {#snippet child({ props })}
-          <button {...props}>{m.ctx_abrir_editor()}</button>
-        {/snippet}
-      </DropdownMenu.Item>
+      {#if !invite}
+        <DropdownMenu.Item onSelect={doOpenEditor}>
+          {#snippet child({ props })}
+            <button {...props}>{m.ctx_abrir_editor()}</button>
+          {/snippet}
+        </DropdownMenu.Item>
+      {/if}
       {#if branch != null}
       <!-- Sem repositório (branch null) os itens de git nem aparecem: abri-los só devolvia
            "fatal: not a git repository" como se fosse erro do app. -->
@@ -206,6 +222,7 @@
       {/if}
     {/if}
 
+    {#if !invite}
     <DropdownMenu.Separator class="ctx-sep" />
 
     <!-- Quando terminar, enviar p/... como Sub -->
@@ -269,6 +286,7 @@
         <button {...props}>{m.bastao_menu()}<span class="ctx-more">›</span></button>
       {/snippet}
     </DropdownMenu.Item>
+    {/if}
 
     <DropdownMenu.Separator class="ctx-sep" />
     <DropdownMenu.Item onSelect={onDelete}>

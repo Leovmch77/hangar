@@ -24,6 +24,8 @@
     /** Passagem de bastão. Mora AQUI porque no celular a lista de sessões não tem menu por sessão
      *  (as ações dela são swipe no SessionCard) — o "⋯" do chat aberto é a única entrada. */
     onBastao: () => void;
+    /** Compartilhar a sessão. Ausente = sessão de convite (não se recompartilha). */
+    onShare?: () => void;
     /** Troca terminal ⇄ sem terminal (só Claude): rótulo é o destino, bloqueado fora de ociosa. */
     onTrocarModo?: () => void;
     modoDestinoTerminal?: boolean;
@@ -37,7 +39,7 @@
   let {
     open, onClose, onRun, runRunning = false,
     shortcuts = [], onShortcut = undefined, onEditShortcuts = undefined,
-    onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao,
+    onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao, onShare,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
   }: Props = $props();
@@ -120,6 +122,21 @@
       </span>
       <span class="chev" aria-hidden="true">›</span>
     </button>
+
+    {#if onShare}
+      <button class="item" onclick={() => onShare && pick(onShare)}>
+        <span class="ico" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>
+          </svg>
+        </span>
+        <span class="txt">
+          <span class="label">{m.compartilhar_menu()}</span>
+          <span class="sub">{m.compartilhar_sub()}</span>
+        </span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+    {/if}
 
     {#if onTrocarModo}
       <button class="item" onclick={() => pick(onTrocarModo)} disabled={modoBloqueado}>
