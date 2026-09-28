@@ -6,7 +6,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import share_store, share_tunnel
+from app import share_store, share_tunnel, tmux
+from app.adapters.claude_headless import sessions as headless_sessions
+from app.adapters.codex import sessions as codex_sessions
 from app.auth import require_auth
 from app.mensagens import erro
 from app.share_life import session_life
@@ -15,6 +17,10 @@ _log = logging.getLogger(__name__)
 router = APIRouter()
 
 _SWEEP_INTERVAL = 60.0
+
+# Sessões no meio da troca terminal <-> sem terminal: a identidade muda no meio e só depois o
+# convite é atualizado, então a varredura (e o portão do convidado) precisam ignorá-las.
+changing_mode: set[str] = set()
 
 
 def sync_tunnel() -> None:
@@ -26,8 +32,24 @@ def sync_tunnel() -> None:
         _log.warning("[share] sincronizar funnel falhou: %s", e.fix)
 
 
+def _confirmed_absent(name: str) -> bool:
+    # `session_life` devolve None também quando o tmux falha; só vale como "morreu" com a
+    # ausência confirmada (tmux respondeu que não há a sessão e não sobrou sidecar).
+    return (tmux.sessao_existe(name) is False
+            and not headless_sessions.exists(name) and not codex_sessions.exists(name))
+
+
+def _alive(session: str, life: str) -> bool:
+    if session in changing_mode:
+        return True
+    atual = session_life(session)
+    if atual is None:
+        return not _confirmed_absent(session)
+    return atual == life
+
+
 def _sweep_once() -> None:
-    share_store.sweep(lambda session, life: session_life(session) == life)
+    share_store.sweep(_alive)
     sync_tunnel()
 
 

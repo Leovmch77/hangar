@@ -105,3 +105,79 @@ def test_sweep_once_revoga_sessao_renascida(syncs, monkeypatch):
     share_api._sweep_once()
     assert share_store.has_active() is False
     assert syncs[-1] is False
+
+
+def _sem_sidecar(monkeypatch):
+    monkeypatch.setattr(share_api.headless_sessions, "exists", lambda n: False)
+    monkeypatch.setattr(share_api.codex_sessions, "exists", lambda n: False)
+
+
+def test_sweep_ausencia_nao_confirmada_nao_revoga(syncs, monkeypatch):
+    # tmux com erro/timeout: session_life volta None, mas sessao_existe responde "nao sei".
+    share_store.create("proj", "t:1")
+    _sem_sidecar(monkeypatch)
+    monkeypatch.setattr(share_api, "session_life", lambda n: None)
+    monkeypatch.setattr(share_api.tmux, "sessao_existe", lambda n: None)
+    share_api._sweep_once()
+    assert share_store.has_active() is True
+
+
+def test_sweep_tmux_vivo_com_vida_ilegivel_nao_revoga(syncs, monkeypatch):
+    share_store.create("proj", "t:1")
+    _sem_sidecar(monkeypatch)
+    monkeypatch.setattr(share_api, "session_life", lambda n: None)
+    monkeypatch.setattr(share_api.tmux, "sessao_existe", lambda n: True)
+    share_api._sweep_once()
+    assert share_store.has_active() is True
+
+
+def test_sweep_sidecar_sobrando_nao_revoga(syncs, monkeypatch):
+    share_store.create("proj", "t:1")
+    monkeypatch.setattr(share_api.headless_sessions, "exists", lambda n: True)
+    monkeypatch.setattr(share_api.codex_sessions, "exists", lambda n: False)
+    monkeypatch.setattr(share_api, "session_life", lambda n: None)
+    monkeypatch.setattr(share_api.tmux, "sessao_existe", lambda n: False)
+    share_api._sweep_once()
+    assert share_store.has_active() is True
+
+
+def test_sweep_ausencia_confirmada_revoga(syncs, monkeypatch):
+    share_store.create("proj", "t:1")
+    _sem_sidecar(monkeypatch)
+    monkeypatch.setattr(share_api, "session_life", lambda n: None)
+    monkeypatch.setattr(share_api.tmux, "sessao_existe", lambda n: False)
+    share_api._sweep_once()
+    assert share_store.has_active() is False
+    assert syncs[-1] is False
+
+
+def test_sweep_pula_sessao_em_troca_de_modo(syncs, monkeypatch):
+    share_store.create("proj", "t:1")
+    monkeypatch.setattr(share_api, "session_life", lambda n: "k:novo")
+    share_api.changing_mode.add("proj")
+    try:
+        share_api._sweep_once()
+        assert share_store.has_active() is True
+    finally:
+        share_api.changing_mode.discard("proj")
+    share_api._sweep_once()
+    assert share_store.has_active() is False
+
+
+def test_modo_execucao_marca_e_atualiza_a_vida(cli, syncs, monkeypatch):
+    share_store.create("proj", "t:1")
+    visto = {}
+
+    async def troca(name, body):
+        visto["durante"] = name in share_api.changing_mode
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "_trocar_modo", troca)
+    monkeypatch.setattr(api, "session_life", lambda n: "k:novo")
+    r = cli.post("/api/sessions/proj/modo-execucao", json={"terminal": False}, headers=AUTH)
+    assert r.status_code == 200
+    assert visto["durante"] is True
+    assert "proj" not in share_api.changing_mode
+    monkeypatch.setattr(share_api, "session_life", lambda n: "k:novo")
+    share_api._sweep_once()
+    assert share_store.has_active() is True

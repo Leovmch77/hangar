@@ -2371,11 +2371,17 @@ async def recarregar_sessao(name: str):
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
-    r = await _trocar_modo(name, body)
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
-    # revogaria o convite de uma sessão que continua viva.
-    await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
-    return r
+    # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
+    share_api.changing_mode.add(name)
+    try:
+        return await _trocar_modo(name, body)
+    finally:
+        # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
+        try:
+            await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
+        finally:
+            share_api.changing_mode.discard(name)
 
 
 async def _trocar_modo(name: str, body: ModoExecucaoBody):
