@@ -177,6 +177,8 @@ pub(super) struct Dictation {
     request: Option<JoinHandle<()>>,
     started: Option<Instant>,
     level: f32,
+    /// Nível de cada passo da gravação, o mais novo no fim: vira a onda que desliza, como no web.
+    bars: std::collections::VecDeque<f32>,
     result: Option<Value>,
     style: Option<(u64, &'static str)>,
     style_writes: u64,
@@ -213,6 +215,7 @@ impl Dictation {
         if let Some(task) = self.request.take() { task.abort(); }
         self.started = None;
         self.level = 0.;
+        self.bars.clear();
         self.result = None;
         self.audio = Default::default();
         self.versions.clear();
@@ -334,6 +337,10 @@ impl Hangar {
                             }
                             let (level, rms) = recorder.signal();
                             this.dictation.level = level;
+                            // Teto de 320, o mesmo do web: cobre a faixa inteira numa janela larga.
+                            if this.dictation.bars.len() >= 320 { this.dictation.bars.pop_front(); }
+                            // RMS ×5 como no web: voz normal fica em 0,05–0,2 e sem ganho a onda mal sai do chão.
+                            this.dictation.bars.push_back((rms * 5.).min(1.));
                             if this.dictation.hands_free && this.dictation.vad.step(rms, Instant::now()) {
                                 this.stop_dictation(true, false, cx);
                                 this.redraw(panes::Area::Bottom, cx);
@@ -455,6 +462,7 @@ impl Hangar {
         self.dictation.request = None;
         self.dictation.started = None;
         self.dictation.level = 0.;
+        self.dictation.bars.clear();
         self.dictation.cleaning = false;
         self.dictation.error = None;
         match result {
@@ -560,11 +568,15 @@ impl Hangar {
                 .child(div().id("dictation-status").role(Role::Status).aria_label(label.clone()).child(label))
                 .when(recording, |el| el
                     .child(div().font_family(theme::MONO).child(format!("{}:{:02}", seconds / 60, seconds % 60)))
+                    // Onda: cresce da esquerda até encher a faixa; cheia, a mais nova fica na ponta direita e as velhas
+                    // saem pela esquerda (a de dentro encolhe até a largura da de fora e alinha as barras à direita).
                     .child(div().id("dictation-level").role(Role::Meter).aria_label(tr("dictation_level"))
                         .aria_min_numeric_value(0.).aria_max_numeric_value(100.).aria_numeric_value((self.dictation.level * 100.) as f64)
-                        .w_16().h_1().rounded_full().bg(theme::raised())
-                        .child(div().h_full().w(relative(self.dictation.level)).rounded_full().bg(theme::accent()))))
-                .child(div().flex_1())
+                        .flex_1().min_w_0().h(px(64.)).flex().items_center().overflow_hidden()
+                        .child(div().min_w_0().h_full().flex().items_center().justify_end().gap(px(2.)).overflow_hidden()
+                            .children(self.dictation.bars.iter().map(|level| div().flex_shrink_0().w(px(3.)).rounded(px(3.))
+                                .h(px(8. + level.clamp(0., 1.) * 56.)).bg(theme::accent()))))))
+                .when(!recording, |el| el.child(div().flex_1()))
                 .child(Button::new("dictation-cancel").ghost().small().label(tr("dictation_cancel"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.dictation.cancel();

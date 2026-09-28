@@ -17,6 +17,8 @@ const MAX_STEP: f32 = 20.;
 /// Parada há mais que isso, a mola esquece a velocidade do texto que chegava.
 const SETTLE_GRACE: Duration = Duration::from_millis(500);
 const AT_BOTTOM: f32 = 2.;
+/// Distância do topo, em px, em que a rolagem para cima já busca o histórico anterior.
+const OLDER_BAND: f32 = 300.;
 /// Descendo por gesto a menos disso do fim, a lista volta a acompanhar.
 const STICK_BAND: f32 = 70.;
 /// Distância do fim a partir da qual a pílula "Ir para o fim" aparece, a do Zeron.
@@ -193,6 +195,8 @@ impl Hangar {
             self.follow.pinned = true;
             self.follow.kick = true;
         }
+        // Chegou perto do topo e o servidor tem mais: busca sozinho, como o web, sem esperar o botão.
+        if top < OLDER_BAND && top < previous && self.has_older && !self.loading { self.load_older(cx); }
         self.redraw(Area::Conversation, cx);
     }
 

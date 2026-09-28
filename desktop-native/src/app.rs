@@ -939,6 +939,13 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Mais 400 eventos para trás: pelo botão ou pela rolagem que chega ao topo.
+    pub(crate) fn load_older(&mut self, cx: &mut Context<Self>) {
+        self.history_limit = self.history_limit.saturating_add(400);
+        self.etag = None;
+        self.load_history(cx);
+    }
+
     fn load_history(&mut self, cx: &mut Context<Self>) {
         let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return; };
         if self.history_task.as_ref().is_some_and(|task| !task.is_finished()) { return; }
@@ -4662,7 +4669,7 @@ impl Hangar {
                 } else if self.has_older || self.loading {
                     content = content.child(in_column(div().py_2().flex().gap_2().items_center()
                         .when(self.has_older, |el| el.child(Button::new("older").small().outline().label(tr("older")).disabled(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| { this.history_limit = this.history_limit.saturating_add(400); this.etag = None; this.load_history(cx); }))))
+                            .on_click(cx.listener(|this, _, _, cx| this.load_older(cx)))))
                         .when(self.has_older, |el| el.child(div().text_xs().text_color(theme::muted()).child(format!("{} {}", tr("history_window"), self.history_limit))))
                         .when(self.loading, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("loading"))))));
                 }
