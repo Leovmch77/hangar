@@ -109,6 +109,10 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Pílula "servidor desatualizado" na barra de cima e aviso no cartão do servidor | implementado | só no nativo, de propósito: a tela do web vem do próprio servidor e não fica mais nova que ele |
 | "Atualizar tudo" na barra: servidor desta máquina primeiro, depois o app | implementado | só no nativo, de propósito: no web o botão da barra atualiza o servidor e a tela vem junto |
 | Largura da barra lateral arrastada pela borda (200–520 px), lembrada neste computador | implementado | `sidebar_width` em `appearance.json` (o `cp_sidebar_w` do web); uma largura para Barra lateral e Conversas, sem alça no trilho nem com abas no topo |
+| Máquinas: uma linha por máquina, casando as guardadas neste aparelho com o registro do servidor pelo identificador que cada uma responde (sem ele, pelo host e caminho) | implementado | `machines.rs` (`join_lines`, porta de `unirMaquinas`); identificador lembrado só em memória, o web guarda no navegador; não exercitado na janela |
+| Máquinas: estado das sessões por linha e cartão dos recados com a volta medida pelo token guardado aqui | implementado | aparecem, token recusado, falta o token, desligada aqui/no servidor, não respondeu; não exercitado na janela |
+| Máquinas: "Mostrar as sessões dele" liga e desliga a entrada guardada; sem entrada, usa o token que o servidor guarda | implementado | sem o campo para digitar o token quando o do servidor falha |
+| Máquinas: token digitado, trocar nome/token de uma entrada, tirar endereço repetido (também do servidor conectado), escolher o endereço da volta, cadastrar de novo, ligar recados de máquina só deste aparelho, identificador de outra máquina | pendente | o cartão mostra a frase do web sem o botão; o interruptor de recados de máquina só deste aparelho fica desligado com "próxima versão" |
 
 ## Como rodar a prova
 

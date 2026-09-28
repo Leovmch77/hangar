@@ -134,7 +134,7 @@ async fn own_address(here: &Api) -> String {
         .min_by_key(|a| a.ms.unwrap_or(0)).map_or(base, |a| a.url)
 }
 
-async fn check(api: &Api, url: &str, id: &str) -> Going {
+pub(super) async fn check(api: &Api, url: &str, id: &str) -> Going {
     match api.server_read(&["peers", "check"], &[("url", url), ("id", id)], 30).await {
         Ok(value) => parse_going(&value),
         Err(error) => Going { way: Way::Failed, answered_as: String::new(), ms: None, error: Some(Hangar::fetch_failure(&error)) },
