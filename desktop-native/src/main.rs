@@ -1,3 +1,5 @@
+// Sem isto o Windows abre um console preto junto da janela. O build de desenvolvimento fica com ele, para ver o stderr.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod api;
 mod app;
 mod appearance;

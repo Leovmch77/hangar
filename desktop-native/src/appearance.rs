@@ -322,9 +322,12 @@ pub fn get() -> Appearance { *CURRENT.read().unwrap_or_else(|e| e.into_inner()) 
 
 pub fn set(value: Appearance) { *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = value.clamped(); }
 
-fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+/// Pasta das configurações deste app. No Windows não há `HOME`: sem o `APPDATA`, nada era gravado.
+pub(crate) fn dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    }?;
     Some(base.join("hangar-native"))
 }
 

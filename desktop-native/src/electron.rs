@@ -56,9 +56,41 @@ pub fn load(base: Appearance) -> Result<Imported, Failure> {
         let Some(origin) = preferred.filter(|o| origins.contains_key(o))
             .or_else(|| origins.iter().max_by_key(|(_, keys)| keys.len()).map(|(o, _)| o.clone())) else { continue };
         let local = origins.remove(&origin).unwrap_or_default();
-        return Ok(map(&local, &origin, base));
+        let mut imported = map(&local, &origin, base);
+        prefer_loopback(&mut imported);
+        return Ok(imported);
     }
     Err(failure)
+}
+
+/// Onde o app conecta sem configuração: o backend desta máquina.
+const HERE: &str = "http://127.0.0.1:8765";
+
+/// O Electron pode ter aberto o servidor desta máquina pela tailnet. Esse entra pelo loopback: pelo endereço de fora o
+/// app dá a volta na rede e trata a própria máquina como remota. Mesma máquina é o backend local responder com o mesmo
+/// identificador; identificador vazio não prova nada. Bloqueante, como o `load`.
+fn prefer_loopback(imported: &mut Imported) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let mut moved: Vec<(String, String)> = Vec::new();
+    for entry in &mut imported.servers {
+        if runtime.block_on(same_machine(&entry.address, &entry.token)) {
+            moved.push((std::mem::replace(&mut entry.address, HERE.into()), entry.token.clone()));
+        }
+    }
+    if let Some((address, token)) = imported.server.as_mut()
+        && moved.iter().any(|(a, t)| a == address && t == token) {
+        *address = HERE.into();
+    }
+}
+
+async fn same_machine(address: &str, token: &str) -> bool {
+    let Some(here) = identifier(HERE, token).await else { return false };
+    identifier(address, token).await == Some(here)
+}
+
+async fn identifier(address: &str, token: &str) -> Option<String> {
+    let value = crate::api::Api::new(address, token).ok()?.server_read(&["peers", "identificador"], &[], 5).await.ok()?;
+    value.get("identificador")?.as_str().filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
 /// Grava a imagem trazida como a do fundo Imagem, pelo mesmo caminho de validação da escolha de arquivo. Bloqueante.

@@ -262,9 +262,7 @@ pub(super) fn layout<'a>(sessions: &'a [SessionInfo], query: &str, by_project: b
 }
 
 fn collapsed_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("hangar-native").join("sidebar-collapsed.json"))
+    Some(crate::appearance::dir()?.join("sidebar-collapsed.json"))
 }
 
 /// Arquivo ausente é a primeira abertura; ilegível vai ao log em vez de reabrir os grupos sem explicação.

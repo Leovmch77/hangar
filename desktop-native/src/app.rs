@@ -4270,9 +4270,7 @@ fn private_copy(name: &str) -> std::io::Result<PathBuf> {
 
 // A conexão que funcionou volta na próxima abertura, como o login do app web; só o dono lê o arquivo.
 fn saved_connection_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("hangar-native").join("connection.json"))
+    Some(appearance::dir()?.join("connection.json"))
 }
 
 /// Onde o diálogo de salvar abre: a pasta de downloads, ou a casa do usuário.
