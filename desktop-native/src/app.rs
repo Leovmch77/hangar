@@ -3713,10 +3713,10 @@ fn release_image(image: Arc<Image>, window: &mut Window, cx: &mut App) {
 impl Hangar {
     /// Barra lateral na caixa dela: a lista cheia, o trilho, ou os dois se trocando enquanto a largura anda.
     fn render_sidebar(&self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let full = appearance::get().navigation.sidebar_width();
+        let full = appearance::get().full_sidebar_width();
         match self.rail_progress() {
-            None if self.rail() => self.nav_frame(sidebar::RAIL_WIDTH, false, self.render_nav_rail(selected_name, cx)),
-            None => self.nav_frame(full, true, self.render_sidebar_full(selected_name, window, cx)),
+            None if self.rail() => self.nav_frame(sidebar::RAIL_WIDTH, false, self.render_nav_rail(selected_name, cx), None),
+            None => self.nav_frame(full, true, self.render_sidebar_full(selected_name, window, cx), Some(self.nav_resize_handle(full, cx))),
             Some(p) => {
                 // A lista cheia sai nos primeiros 60% e o trilho entra nos últimos 60%, os dois presos à esquerda e cortados
                 // pela caixa que anda: a lista parece deslizar para baixo da borda, e o trilho, sair dela.
@@ -3726,14 +3726,14 @@ impl Hangar {
                 let both = div().size_full().relative().overflow_hidden()
                     .child(layer(full, out, self.render_sidebar_full(selected_name, window, cx)))
                     .child(layer(sidebar::RAIL_WIDTH, into, self.render_nav_rail(selected_name, cx)));
-                self.nav_frame(self.nav_width(), p < 0.5, both.into_any_element())
+                self.nav_frame(self.nav_width(), p < 0.5, both.into_any_element(), None)
             }
         }
     }
 
     /// A caixa da barra: fundo, borda, cantos e sombra do painel solto, na largura dada. `full` é a lista cheia, que no
     /// modo Conversas tem fundo e borda próprios.
-    fn nav_frame(&self, width: f32, full: bool, content: AnyElement) -> AnyElement {
+    fn nav_frame(&self, width: f32, full: bool, content: AnyElement, handle: Option<AnyElement>) -> AnyElement {
         let a = appearance::get();
         let conversations = full && a.navigation == appearance::Navigation::Conversations;
         let (surface, _, _, border) = theme::conversation_sidebar();
@@ -3746,7 +3746,9 @@ impl Hangar {
             .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .when(conversations, |el| el.border_color(border))
-            .child(content),
+            .relative()
+            .child(content)
+            .children(handle),
             px(if floating { 18. } else { 0. }));
         // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
         if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
@@ -4872,6 +4874,11 @@ impl Render for Hangar {
                     this.drag_side(f32::from(event.position.x), event.pressed_button == Some(MouseButton::Left), cx);
                 }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx))))
+            .when(self.nav_resizing(), |el| el.cursor_col_resize()
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                    this.drag_nav(f32::from(event.position.x), event.pressed_button == Some(MouseButton::Left), cx);
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, cx| this.drag_nav(f32::from(event.position.x), false, cx))))
             .when(self.terminal_dragging(), |el| el.cursor_row_resize()
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                     this.drag_terminal(f32::from(event.position.y), event.pressed_button == Some(MouseButton::Left), window, cx);

@@ -149,6 +149,8 @@ pub(super) struct Sidebar {
     long_pressed: bool,
     /// A troca entre a lista e o trilho em andamento: quando começou e se vai para o trilho.
     rail_anim: Option<(Instant, bool)>,
+    /// Arrasto da borda em curso: onde o ponteiro desceu e a largura naquele instante.
+    resize: Option<(f32, f32)>,
 }
 
 impl Sidebar {
@@ -157,7 +159,7 @@ impl Sidebar {
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None,
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
-            long_pressed: false, rail_anim: None }
+            long_pressed: false, rail_anim: None, resize: None }
     }
 
     /// Troca de servidor: o que é da conexão anterior sai; filtro e grupos recolhidos são deste computador e ficam.
@@ -1079,12 +1081,35 @@ impl Hangar {
     }
 
     pub(super) fn nav_width(&self) -> f32 {
-        let full = appearance::get().navigation.sidebar_width();
+        let full = appearance::get().full_sidebar_width();
         match self.rail_progress() {
             Some(p) => full + (RAIL_WIDTH - full) * p,
             None if self.rail() => RAIL_WIDTH,
             None => full,
         }
+    }
+
+    /// Alça na borda direita da barra cheia, como a do web: a largura segue o ponteiro e fica gravada ao soltar.
+    pub(super) fn nav_resize_handle(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        div().id("nav-resize").role(Role::Splitter).aria_label(tr("sidebar_resize"))
+            .absolute().right_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
+            .hover(|el| el.bg(theme::accent_dim()))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                this.sidebar.resize = Some((f32::from(event.position.x), width));
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    pub(super) fn nav_resizing(&self) -> bool { self.sidebar.resize.is_some() }
+
+    pub(super) fn drag_nav(&mut self, x: f32, pressed: bool, cx: &mut Context<Self>) {
+        let Some((start_x, start_width)) = self.sidebar.resize else { return };
+        let mut next = appearance::get();
+        next.sidebar_width = Some((start_width + x - start_x).clamp(appearance::SIDEBAR_MIN, appearance::SIDEBAR_MAX));
+        if !pressed { self.sidebar.resize = None; }
+        self.apply_appearance(next, !pressed, cx);
     }
 
     /// A marca de "trabalhando" de uma linha da barra. Durante a troca com o trilho ela fica parada dentro da linha: a

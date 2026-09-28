@@ -5717,6 +5717,7 @@
   "native_create_quota_stopped": "— abra uma sessão nela",
   "native_create_quota_resets": "reseta {quando}",
   "native_sidebar_filter": "Filtrar sessões",
+  "native_sidebar_resize": "Redimensionar barra lateral",
   "native_sidebar_filter_empty": "Nenhuma sessão corresponde ao filtro.",
   "native_sidebar_no_project": "sem projeto",
   "native_sidebar_group_by": "Agrupar por",

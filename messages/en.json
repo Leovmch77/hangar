@@ -5717,6 +5717,7 @@
   "native_create_quota_stopped": "— open a session in it",
   "native_create_quota_resets": "resets {quando}",
   "native_sidebar_filter": "Filter sessions",
+  "native_sidebar_resize": "Resize sidebar",
   "native_sidebar_filter_empty": "No sessions match the filter.",
   "native_sidebar_no_project": "no project",
   "native_sidebar_group_by": "Group by",
