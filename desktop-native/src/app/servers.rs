@@ -216,7 +216,8 @@ impl Hangar {
     pub(super) fn desktop_api(&self) -> Option<Api> {
         if let Some(api) = self.api.as_ref().filter(|api| api.is_loopback()) { return Some(api.clone()); }
         self.servers.iter().filter(|s| !s.disabled).find_map(|s| Api::new(&s.address, &s.token).ok().filter(Api::is_loopback))
-            .or_else(|| self.api.clone())
+            // Nunca cai num servidor de convite: paleta e papel de parede são rotas do servidor inteiro.
+            .or_else(|| self.api.clone().filter(|_| !self.active_invite()))
     }
 
     /// Cabeçalho do bloco de uma máquina, como o do web: seta, ponto na cor da máquina, nome em caixa alta e a contagem numa

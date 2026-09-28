@@ -178,7 +178,8 @@ impl Hangar {
     }
 
     fn load_rate(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        // `cotacao` é rota do servidor inteiro: o convite a recusa com 403.
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
         let seq = self.device.rate.start();
         let done = self.device_send_later();
         self.runtime.spawn(async move { done(DeviceReply::Rate(seq, api.server_read(&["cotacao"], &[], 15).await)).await });

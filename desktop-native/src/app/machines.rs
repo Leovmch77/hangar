@@ -473,9 +473,10 @@ impl Hangar {
     /// já agrupada.
     fn load_saved_ids(&mut self, cx: &mut Context<Self>) {
         self.machines.ids_gen += 1;
-        self.machines.ids_pending = self.servers.len();
+        // Servidor de convite não tem `/api/peers`: perguntar levaria 403.
+        self.machines.ids_pending = self.servers.iter().filter(|s| !s.invite).count();
         let generation = self.machines.ids_gen;
-        for entry in &self.servers {
+        for entry in self.servers.iter().filter(|s| !s.invite) {
             let (id, address, token, done) = (entry.id.clone(), entry.address.clone(), entry.token.clone(), self.machines_send_later());
             self.runtime.spawn(async move {
                 let result = match Api::new(&address, &token) { Ok(api) => api.server_read(&["peers", "identificador"], &[], 15).await, Err(e) => Err(e) };
@@ -538,7 +539,7 @@ impl Hangar {
     }
 
     fn load_peers(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
         let seq = self.machines.peers.start();
         let done = self.machines_send_later();
         self.runtime.spawn(async move { done(MachinesReply::Peers(seq, api.server_read(&["peers"], &[], 15).await)).await });
@@ -648,7 +649,7 @@ impl Hangar {
     }
 
     fn load_reach(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
         let seq = self.machines.reach.start();
         let done = self.machines_send_later();
         // O servidor testa cada endereço antes de responder.
@@ -657,7 +658,7 @@ impl Hangar {
     }
 
     fn load_machine_id(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
         let seq = self.machines.id.start();
         self.machines.id_error = None;
         let done = self.machines_send_later();

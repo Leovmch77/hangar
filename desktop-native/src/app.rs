@@ -1076,7 +1076,7 @@ impl Hangar {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
                 }
-                self.list_error = Some(Self::failure(&error));
+                self.list_error = Some(self.active_failure(&error));
             }
             Payload::Stream(Update::Online) => {
                 if is_chat {
@@ -1093,8 +1093,8 @@ impl Hangar {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
                 }
-                if is_chat { self.chat_online = false; self.error = Some(Self::failure(&error)); }
-                else { self.list_online = false; self.list_error = Some(Self::failure(&error)); }
+                if is_chat { self.chat_online = false; self.error = Some(self.active_failure(&error)); }
+                else { self.list_online = false; self.list_error = Some(self.active_failure(&error)); }
             }
             Payload::Stream(Update::Frame(frame)) => {
                 let applied = if is_chat {

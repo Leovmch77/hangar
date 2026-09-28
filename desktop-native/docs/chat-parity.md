@@ -173,6 +173,13 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Pílula "Git" ao lado da de branch (atrás/à frente, alterações ou "Atualizada") e painel com branch, remota, último fetch, Fetch, Pull só fast-forward, trocar branch (locais e remotas, com busca) e criar branch (base e "Trocar para ela") | implementado | `create/folder_git.rs` sobre `GET /api/fs/git` e `POST /api/fs/git/{fetch,pull,switch,branch}`; abrir o painel faz um fetch por pasta; pasta suja recusa pull e troca, divergida recusa pull, sessão viva no mesmo checkout pede "Trocar mesmo assim"; não exercitado na janela |
 | O mesmo gerenciador no web | pendente no web | o `CreateSessionSheet` do web não tem a pílula de branch/worktree da tela sem sessão, onde o painel mora; as rotas já servem os dois |
 
+## Sessão compartilhada (convidado)
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Colar convite, servidor de convite, "compartilhamento encerrado" | implementado | sem exercício na janela real |
+| Vários convites do mesmo dono | pendente | o nativo chaveia servidores pelo endereço (o web, pelo id): o convite novo do mesmo dono substitui o anterior, e um endereço que já é servidor próprio recusa o resgate antes de chamar o backend |
+
 ## Como rodar a prova
 
 ```bash

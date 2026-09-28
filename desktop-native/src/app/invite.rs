@@ -30,14 +30,28 @@ pub(super) fn device_label() -> String {
     name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| "Hangar".into())
 }
 
+/// Este endereço já é um servidor do próprio usuário (não convite): o resgate nem sai, para não gastar o código, e a entrada
+/// dele nunca é tocada.
+fn own_server_at(list: &[servers::ServerEntry], address: &str) -> bool {
+    list.iter().any(|s| !s.invite && servers::norm(&s.address) == servers::norm(address))
+}
+
+/// Coloca o convite na lista. Já existindo um convite no endereço (mesmo dono), o mais novo vence: troca token e rótulo.
+/// Falso quando o endereço é de um servidor próprio, que fica como está.
+fn place_invite(list: &mut Vec<servers::ServerEntry>, entry: servers::ServerEntry) -> bool {
+    if own_server_at(list, &entry.address) { return false; }
+    servers::upsert(list, entry);
+    true
+}
+
 /// 404, 410 e 503 têm frase própria: código errado, convite gasto e túnel do dono fora do ar pedem coisas diferentes de quem
 /// recebeu (só o último vale tentar de novo, com o mesmo código).
 fn redeem_failure(error: &Failure) -> String {
     match error.status {
+        // O servidor manda o código (usado, vencido, revogado, inexistente) e o texto sai no idioma da tela, como no web.
+        Some(404 | 410) if error.detail.starts_with("erro_convite_") => tr_shared(&error.detail, &[]),
         Some(404) => tr_shared("erro_convite_inexistente", &[]),
-        // O `msg` do 410 já diz qual dos três (usado, vencido, revogado), igual ao web.
-        Some(410) if !error.detail.is_empty() && !error.detail.starts_with("erro_") => error.detail.clone(),
-        Some(410) => tr("invite_gone"),
+        Some(410) => tr_shared("erro_convite_encerrado", &[]),
         Some(503) => tr_shared("erro_sessao_indisponivel", &[]),
         None if matches!(error.detail.as_str(), "network_error" | "delivery_uncertain") => tr_shared("convite_erro_rede", &[]),
         _ => Hangar::failure(error),
@@ -54,6 +68,11 @@ impl InviteDialog {
             cx.notify();
             return;
         };
+        if self.hangar.read_with(cx, |hangar, _| own_server_at(&hangar.servers, &address)).unwrap_or(false) {
+            self.error = Some(tr("invite_own_server"));
+            cx.notify();
+            return;
+        }
         (self.busy, self.error) = (true, None);
         let me = cx.entity().downgrade();
         let _ = self.hangar.update(cx, |this, cx| this.redeem_invite(me, address, code, window, cx));
@@ -110,8 +129,13 @@ impl Hangar {
     fn add_invite_server(&mut self, redeemed: api::Redeemed, window: &mut Window, cx: &mut Context<Self>) {
         let key = servers::norm(&redeemed.address);
         self.invite_ended.remove(&key);
-        servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label: tr_shared("convite_rotulo", &[("dono", &redeemed.owner)]),
-            address: redeemed.address, token: redeemed.token, disabled: false, invite: true });
+        let entry = servers::ServerEntry { id: servers::new_id(), label: tr_shared("convite_rotulo", &[("dono", &redeemed.owner)]),
+            address: redeemed.address, token: redeemed.token, disabled: false, invite: true };
+        // Um servidor próprio pode ter entrado na lista enquanto o resgate corria: ele fica intacto.
+        if !place_invite(&mut self.servers, entry) {
+            window.push_notification(Notification::warning(tr("invite_own_server")), cx);
+            return;
+        }
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
@@ -128,15 +152,53 @@ impl Hangar {
         if !self.active_invite() { return matches!(error.status, Some(401 | 403)); }
         if matches!(error.status, Some(401 | 410)) && let Some(address) = self.server.as_deref() {
             self.invite_ended.insert(servers::norm(address));
+            self.sessions.clear();
         }
         false
+    }
+
+    /// Texto da falha na conexão ativa: num convite, 401/410 é o compartilhamento que acabou, não login perdido.
+    pub(super) fn active_failure(&self, error: &Failure) -> String {
+        if self.active_invite() && matches!(error.status, Some(401 | 410)) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_invite_link;
+    use super::*;
     use core::prelude::v1::test;
+
+    fn entry(id: &str, label: &str, address: &str, token: &str, invite: bool) -> servers::ServerEntry {
+        servers::ServerEntry { id: id.into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite }
+    }
+
+    #[test]
+    fn an_own_server_at_the_address_blocks_the_invite_and_keeps_its_token() {
+        let mut list = vec![entry("a", "PC", "https://h:8443", "own-token", false)];
+        assert!(own_server_at(&list, "https://H:8443/"));
+        assert!(!own_server_at(&list, "https://outro:8443"));
+        assert!(!place_invite(&mut list, entry("i", "Convite · Ana", "https://h:8443/", "guest", true)));
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].token.as_str(), list[0].invite), ("own-token", false));
+    }
+
+    #[test]
+    fn a_newer_invite_from_the_same_owner_replaces_token_and_label() {
+        let mut list = vec![entry("i", "Convite · Ana", "https://h:8443", "old", true), entry("a", "PC", "http://127.0.0.1:8765", "own", false)];
+        assert!(!own_server_at(&list, "https://h:8443"));
+        assert!(place_invite(&mut list, entry("j", "Convite · Ana B", "https://h:8443/", "new", true)));
+        assert_eq!(list.len(), 2);
+        assert_eq!((list[0].id.as_str(), list[0].token.as_str(), list[0].label.as_str(), list[0].invite), ("i", "new", "Convite · Ana B", true));
+    }
+
+    #[test]
+    fn redeem_codes_use_the_web_texts_by_key() {
+        let failure = |status, detail: &str| Failure { status: Some(status), detail: detail.into(), retry_after: None, uncertain: false };
+        assert_eq!(redeem_failure(&failure(410, "erro_convite_usado")), tr_shared("erro_convite_usado", &[]));
+        assert_eq!(redeem_failure(&failure(404, "erro_convite_inexistente")), tr_shared("erro_convite_inexistente", &[]));
+        assert_eq!(redeem_failure(&failure(410, "HTTP 410")), tr_shared("erro_convite_encerrado", &[]));
+        assert_eq!(redeem_failure(&failure(503, "erro_sessao_indisponivel")), tr_shared("erro_sessao_indisponivel", &[]));
+    }
 
     #[test]
     fn https_and_deep_link_give_the_same_address_and_code() {

@@ -5919,7 +5919,7 @@
   "native_group_none": "Nenhuma outra sessão pode agrupar com esta",
   "native_group_drop_leave": "Solte aqui para sair do grupo",
   "native_invite_badge": "convidado",
-  "native_invite_gone": "Este convite já foi usado, venceu ou foi revogado. Peça um novo a quem compartilhou.",
+  "native_invite_own_server": "Este endereço já é uma máquina sua na lista. Abra a sessão por ela; o convite não foi usado.",
   "erro_compartilhar_pre_requisito": "Falta configurar o compartilhamento nesta máquina.",
   "erro_compartilhamento_inexistente": "Esse acesso não existe mais.",
   "convite_erro_rede": "Não deu para falar com a máquina do convite.",
