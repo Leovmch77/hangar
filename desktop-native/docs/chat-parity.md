@@ -65,6 +65,8 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Projeto: repo, branch, sujo, +/− | conferido | Codex e sem terminal leem a branch da lista |
 | Arquivos alterados e diff | conferido | `git/files` e `git/diff` (leitura); carregando, vazio, erro; sem nenhuma operação Git |
 | Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo/rodar não aparecem |
+| Seção "Ações" em blocos iguais que quebram linha (colunas pela largura do painel, rótulo em até duas linhas) | implementado | o web passou a seguir o nativo: seção própria em grade, fora da fileira que rolava |
+| Exportar/importar atalhos sem credenciais (menu "⋯" de Ações e botões na página Atalhos) | implementado | diálogo de salvar/abrir do sistema; conferência com contagem e um campo mascarado por credencial; atalho com credencial em branco fica apagado e avisa em vez de rodar |
 | Terminal de cada atalho `shell` como aba do painel (rótulo, código de saída, ×), botão de terminal em sessão sem pane quando há atalho aberto | implementado | sempre pela rota `shortcut-shell`, também com a sessão nesta máquina; sem pane o painel mostra só as abas dos atalhos |
 | Fila da sessão | conferido | contagem no rodapé do painel |
 | Recolher e redimensionar | conferido | 240–480 px; some sozinho se a conversa ficaria abaixo de 540 px |

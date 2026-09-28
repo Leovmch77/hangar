@@ -38,6 +38,7 @@ mod server_config;
 mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
+mod shortcut_transfer;
 mod side;
 mod terminal;
 mod sidebar;
@@ -1160,7 +1161,7 @@ impl Hangar {
             Payload::Device(reply) => { self.receive_device(reply, cx); return; }
             Payload::Accounts(reply) => { self.receive_accounts(reply, window, cx); return; }
             Payload::Orchestration(reply) => { self.receive_orchestration(reply, cx); return; }
-            Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, cx); return; }
+            Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }
             Payload::Harness(reply) => { self.receive_harness(reply, cx); return; }
             Payload::ServerConfig(reply) => {
                 if matches!(&reply, server_config::ServerConfigReply::QuietSaved(..) | server_config::ServerConfigReply::Saved(..)) {

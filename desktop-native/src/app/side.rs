@@ -26,6 +26,15 @@ impl Shortcut {
         match self { Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(), Shortcut::Attach => tr("attach") }
     }
 
+    /// Credencial que a importação deixou em branco: o atalho não roda até alguém preencher.
+    fn missing_secret(&self) -> Option<String> {
+        match self {
+            Shortcut::Send { text, .. } => super::shortcut_transfer::missing_secret(text),
+            Shortcut::Shell { command, .. } => super::shortcut_transfer::missing_secret(command),
+            Shortcut::Attach => None,
+        }
+    }
+
     /// O que o painel roda de um atalho da config; terminal, modo, navegador e rodar são módulos à parte aqui.
     fn from_item(item: &shortcuts::Item) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
@@ -268,6 +277,11 @@ impl Hangar {
 
     pub(super) fn run_shortcut(&mut self, shortcut: Shortcut, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.selected_key() else { return; };
+        if let Some(name) = shortcut.missing_secret() {
+            self.action_feedback.insert(key, (tr("shortcut_secret_missing").replace("{name}", &name), true));
+            cx.notify();
+            return;
+        }
         if shortcut.confirm() && !confirmed {
             self.confirm = Some(Confirm::Shortcut(shortcut.label(), shortcut));
             cx.notify();
@@ -594,10 +608,14 @@ impl Hangar {
                 Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 16., theme::muted()),
             };
             let label = shortcut.label();
+            let missing = shortcut.missing_secret();
+            let tip = missing.as_ref().map_or_else(|| label.clone(), |name| tr("shortcut_secret_missing").replace("{name}", name));
             Button::new(SharedString::from(format!("shortcut-{n}")))
                 .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
                 .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
-                .tooltip(label.clone()).accessibility_label(label.clone()).disabled(!readable || busy)
+                .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
+                // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
+                .when(missing.is_some(), |el| el.opacity(0.55))
                 .child(div().w_full().flex().flex_col().items_center().gap(px(4.))
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
@@ -609,8 +627,9 @@ impl Hangar {
             .accessibility_label(tr("shortcuts_add"))
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(super::settings::Page::Shortcuts, window, cx)));
         Some(div().flex().flex_col().gap(px(10.))
-            .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions"))).child(add))
-            .child(grid).into_any_element())
+            .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions")))
+                .child(div().flex().items_center().gap(px(2.)).child(self.transfer_menu_button(cx)).child(add)))
+            .child(grid).children(self.transfer_note_element()).into_any_element())
     }
 
     /// O painel está à vista: aberto, com sessão e com largura para ele.
