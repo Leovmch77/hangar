@@ -124,7 +124,7 @@ if __name__ == "__main__":
         json.dump({"address": address, "token": server.token}, output)
     with wave.open(str(args.config_dir / "sample.wav"), "wb") as audio:
         audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-        audio.writeframes(b"\0\0" * 16000)
+        audio.writeframes(b"\x00\x20\x00\xe0" * 8000)
     print(address, flush=True)
     try:
         server.serve_forever()

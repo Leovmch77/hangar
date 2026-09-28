@@ -87,6 +87,8 @@ impl Recorder {
             eprintln!("dictation config: {error}");
             Failure::local("dictation_recorder_error")
         })?;
+        // Reserva os 180 s de uma vez: crescer o Vec dentro da função de áudio copiaria megabytes em tempo real.
+        *recorder.pcm.lock().unwrap() = Vec::with_capacity(PCM_LIMIT);
         let (pcm, failed) = (recorder.pcm.clone(), recorder.failed.clone());
         let mut mix = Downmix::new(config.channels(), config.sample_rate());
         let on_error = move |error: cpal::Error| {
@@ -155,9 +157,9 @@ impl Recorder {
 
     fn finish(mut self) -> Result<Vec<u8>, Failure> {
         drop(self.stream.take());
-        if self.failed() { return Err(Failure::local("dictation_recorder_error")); }
         let pcm = self.pcm.lock().unwrap();
-        if pcm.len() < 2 { return Err(Failure::local("dictation_empty_audio")); }
+        // Só zeros é captura muda (permissão negada no macOS entrega silêncio): o Whisper inventaria texto.
+        if pcm.len() < 2 || pcm.iter().all(|byte| *byte == 0) { return Err(Failure::local("dictation_empty_audio")); }
         Ok(wav(&pcm[..pcm.len() & !1]))
     }
 }
@@ -345,10 +347,14 @@ impl Hangar {
                         let keep = this.update_in(cx, |this, window, cx| {
                             if this.dictation.seq != seq { return false; }
                             let Some(recorder) = &mut this.dictation.recorder else { return false; };
-                            let failed = recorder.failed();
-                            if failed {
-                                this.dictation.cancel();
-                                window.push_notification(Notification::error(tr("dictation_recorder_error")), cx);
+                            if recorder.failed() {
+                                // Microfone caiu no meio (headset trocado): transcreve o que já foi gravado.
+                                if recorder.pcm.lock().unwrap().len() >= 2 {
+                                    this.stop_dictation(false, false, cx);
+                                } else {
+                                    this.dictation.cancel();
+                                    window.push_notification(Notification::error(tr("dictation_recorder_error")), cx);
+                                }
                                 this.redraw(panes::Area::Bottom, cx);
                                 return false;
                             }
