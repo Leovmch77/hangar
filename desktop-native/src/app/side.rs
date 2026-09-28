@@ -608,7 +608,7 @@ impl Hangar {
 
     /// O painel está à vista: aberto, com sessão e com largura para ele.
     pub(super) fn side_shown(&self, window: &Window) -> bool {
-        let sidebar = appearance::get().navigation.sidebar_width();
+        let sidebar = self.nav_width();
         self.side.open && self.selected.is_some()
             && self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), sidebar).is_some()
     }
@@ -616,7 +616,7 @@ impl Hangar {
     /// Largura do painel aberto nesta janela; `None` quando está fechado ou não cabe.
     pub(super) fn side_width(&self, window: &Window) -> Option<f32> {
         let viewport = f32::from(window.viewport_size().width);
-        let sidebar = appearance::get().navigation.sidebar_width();
+        let sidebar = self.nav_width();
         self.side.fitted(viewport, theme::is_floating(), sidebar).filter(|_| self.side.open && self.selected.is_some())
     }
 

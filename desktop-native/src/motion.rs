@@ -55,6 +55,8 @@ pub const RESIZE: Spec = Spec::new(200, EASE_OUT);
 pub const SPLASH_OUT: Spec = Spec::new(500, EASE).after(150);
 /// A linha "trabalhando" e a marca dela entrando (tempo e curva do web).
 pub const WORKING: Spec = Spec::new(200, EASE_OUT_WEB);
+/// A barra de sessões recolhendo ao trilho e voltando: o `transition: width 160ms var(--ease-out)` do web.
+pub const NAV_FOLD: Spec = Spec::new(160, EASE_OUT_WEB);
 /// `zeron-pulse`: período dos esqueletos de carregando.
 pub const PULSE: Duration = Duration::from_millis(2400);
 

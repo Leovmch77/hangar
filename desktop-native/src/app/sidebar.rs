@@ -147,6 +147,8 @@ pub(super) struct Sidebar {
     cache: HashMap<String, (String, Instant)>,
     press_seq: u64,
     long_pressed: bool,
+    /// A troca entre a lista e o trilho em andamento: quando começou e se vai para o trilho.
+    rail_anim: Option<(Instant, bool)>,
 }
 
 impl Sidebar {
@@ -155,7 +157,7 @@ impl Sidebar {
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None,
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
-            long_pressed: false }
+            long_pressed: false, rail_anim: None }
     }
 
     /// Troca de servidor: o que é da conexão anterior sai; filtro e grupos recolhidos são deste computador e ficam.
@@ -1054,10 +1056,202 @@ fn fill_chain(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, current:
         .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.git_write(name.clone(), GitWrite::Unlink, window, cx)); })))
 }
 
+/// A barra recolhida mora no mesmo arquivo dos grupos recolhidos: é mais uma coisa recolhida.
+const RAIL_KEY: &str = "sidebar:rail";
+pub(super) const RAIL_WIDTH: f32 = 56.;
+/// Caracteres de cada linha do nome no trilho, como o `RAIL_MAX` do web.
+const RAIL_MAX: usize = 8;
+
+/// O `railLabel` do web: o nome partido nos separadores, a primeira palavra em cima e o resto embaixo, oito caracteres cada.
+fn rail_label(name: &str) -> (String, String) {
+    let parts: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|p| !p.is_empty()).collect();
+    let cut = |s: &str| s.chars().take(RAIL_MAX).collect::<String>();
+    match parts.split_first() {
+        None => (if name.is_empty() { "?".into() } else { cut(name) }, String::new()),
+        Some((first, rest)) => (cut(first), cut(&rest.join("-"))),
+    }
+}
+
+impl Hangar {
+    /// A lista recolhida no trilho, como o Ctrl+B do web. Com abas no topo não há barra para recolher.
+    pub(super) fn rail(&self) -> bool {
+        appearance::get().navigation != appearance::Navigation::Tabs && self.sidebar.is_collapsed(RAIL_KEY)
+    }
+
+    pub(super) fn nav_width(&self) -> f32 {
+        let full = appearance::get().navigation.sidebar_width();
+        match self.rail_progress() {
+            Some(p) => full + (RAIL_WIDTH - full) * p,
+            None if self.rail() => RAIL_WIDTH,
+            None => full,
+        }
+    }
+
+    /// A marca de "trabalhando" de uma linha da barra. Durante a troca com o trilho ela fica parada dentro da linha: a
+    /// animada é pintada fora da lista e não acompanharia a camada que some.
+    pub(super) fn nav_mark(&self, key: String, size: f32, color: Hsla, badge: Option<SharedString>) -> AnyElement {
+        if self.rail_progress().is_some() {
+            return div().relative().size(px(size)).flex_shrink_0().child(chrome::hangar_mark(size, color))
+                .children(badge.map(|provider| chrome::provider_badge(&provider))).into_any_element();
+        }
+        match badge {
+            Some(provider) => self.badged_mark_slot(panes::Area::Nav, key, size, color, provider),
+            None => self.working_mark_slot(panes::Area::Nav, key, size, color),
+        }
+    }
+
+    /// Quanto a troca andou rumo ao trilho, de 0 (lista cheia) a 1 (trilho); `None` parada.
+    pub(super) fn rail_progress(&self) -> Option<f32> {
+        let (start, to_rail) = self.sidebar.rail_anim?;
+        if start.elapsed() >= motion::NAV_FOLD.total() { return None; }
+        let t = motion::NAV_FOLD.ease(motion::NAV_FOLD.raw(start));
+        Some(if to_rail { t } else { 1. - t })
+    }
+
+    /// Chamado no desenho da raiz: enquanto a troca anda, pede o quadro seguinte para a própria raiz, que dá a largura à
+    /// área da barra e acorda as áreas; terminada, solta o relógio e não pede mais nada.
+    pub(super) fn rail_frame(&mut self, window: &mut Window) {
+        if self.sidebar.rail_anim.is_none() { return; }
+        if self.rail_progress().is_none() { self.sidebar.rail_anim = None; return; }
+        window.request_animation_frame();
+    }
+
+    pub(super) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        if appearance::get().navigation == appearance::Navigation::Tabs { return; }
+        self.hide_preview();
+        // Movimento reduzido troca direto; senão a largura anda de onde estiver agora.
+        self.sidebar.rail_anim = (!cx.reduce_motion()).then(|| (Instant::now(), !self.rail()));
+        self.toggle_group(RAIL_KEY.into(), cx);
+    }
+
+    /// Recolher/expandir, a última peça do rodapé nas duas formas da barra.
+    pub(super) fn fold_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail = self.rail();
+        Button::new("sidebar-fold").ghost().icon(chrome::small_icon(IconName::PanelLeft, 18., theme::muted()))
+            .h(px(36.)).w(px(if rail { 40. } else { 36. })).flex_shrink_0().rounded(px(8.))
+            .accessibility_label(web(if rail { "sessao_expandir_barra" } else { "sessao_recolher_barra" }))
+            .tooltip(web(if rail { "sessao_expandir_atalho" } else { "sessao_recolher_atalho" }))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_rail(cx)))
+    }
+
+    /// O trilho de 56 px do web: a marca em cima, cada sessão como estado em cima e o nome em duas linhas mono embaixo,
+    /// e no rodapé a nova sessão, o recolher e a conexão. Os cabeçalhos somem e nenhum grupo fica recolhido.
+    pub(super) fn render_nav_rail(&self, selected_name: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let a = appearance::get();
+        let fit_content = a.panels == appearance::Panels::Floating && a.sidebar_height == appearance::SidebarHeight::Content;
+        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
+        let local = self.sidebar_layout(cx);
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let place = |layout: &Layout, remote: Option<&str>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
+            for session in layout.waiting.iter().chain(layout.groups.iter().flat_map(|g| g.sessions.iter())) {
+                let selected = remote.is_none() && selected_name == Some(session.name.as_str());
+                rows.push(self.render_rail_row((*session).clone(), selected, mixed, remote.map(str::to_owned), cx));
+            }
+        };
+        if self.multi_server() {
+            let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
+            let (query, by_project, none) = (self.sidebar.filter.read(cx).value().to_string(), Self::by_project(), HashSet::new());
+            for entry in self.servers.iter().filter(|s| !s.disabled) {
+                let key = servers::norm(&entry.address);
+                if key == active { place(&local, None, &mut rows, cx); }
+                else if let Some(list) = self.remote.get(&key) { place(&layout(&list.sessions, &query, by_project, &none), Some(&key), &mut rows, cx); }
+            }
+        } else {
+            place(&local, None, &mut rows, cx);
+        }
+        let host = self.server_label(cx);
+        let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+        div().w_full().min_h_0().flex().flex_col().items_center().when(!fit_content, |el| el.h_full())
+            .child(div().h(px(44.)).flex_shrink_0().flex().items_center().justify_center().child(chrome::hangar_mark(20., theme::accent())))
+            // A tela sem sessão da barra aberta, só com o ícone.
+            .child(div().id("rail-new-chat").flex_shrink_0().size(px(36.)).mb(px(4.)).flex().items_center().justify_center().rounded(px(8.))
+                .role(Role::Button).aria_selected(on).aria_label(tr("new_chat_title"))
+                .when(on, |el| el.bg(theme::selected_row()))
+                .when(!enabled, |el| el.opacity(0.5))
+                .when(enabled && !on, |el| el.cursor_pointer().hover(|el| el.bg(theme::hover())))
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("new_chat_title")).build(window, cx))
+                .child(chrome::small_icon(IconName::SquarePen, 16., theme::muted()))
+                .when(enabled, |el| el.on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx)))))
+            .child(div().id("session-list").min_h_0().w_full().overflow_y_scroll().px(px(3.)).flex().flex_col().gap(px(4.))
+                .when(!fit_content, |el| el.flex_1())
+                .children(rows))
+            .child(div().w_full().flex_shrink_0().pt(px(8.)).pb(px(8.)).mt(px(4.)).border_t_1().border_color(theme::border())
+                .flex().flex_col().items_center().gap(px(4.))
+                // O CTA do web no trilho: o botão cheio de destaque, só com o +.
+                .child(Button::new("rail-new-session").custom(ButtonCustomVariant::new(cx).color(theme::accent()).foreground(theme::on_accent())
+                        .hover(theme::accent().opacity(0.85)).active(theme::accent().opacity(0.75)))
+                    .icon(chrome::small_icon(IconName::Plus, 16., theme::on_accent())).w(px(44.)).h(px(36.)).rounded(px(8.))
+                    .tooltip(tr("create_title")).accessibility_label(tr("create_title")).disabled(self.api.is_none())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_new_session(None, window, cx))))
+                .child(self.fold_button(cx))
+                .child(Button::new("connection").ghost().size(px(36.)).rounded(px(8.)).tooltip(host).accessibility_label(tr("connection"))
+                    .child(div().size(px(7.)).rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))))
+            .into_any_element()
+    }
+
+    fn render_rail_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+        let state = session.state.as_str();
+        let limited = session.limited == Some(true);
+        let awaiting = state == "awaiting_input";
+        let color = if limited { theme::limited() } else { theme::status(state) };
+        let (top, bottom) = rail_label(&session.name);
+        let row_key = match &remote { Some(key) => format!("{key}::{}", session.name), None => session.name.clone() };
+        let host = match &remote { Some(key) => self.servers.iter().find(|s| servers::norm(&s.address) == *key).map_or(key.clone(), |s| s.label.clone()),
+            None => self.server_label(cx) };
+        let questions = session.pending_questions;
+        let mut tip = format!("{} · {host} · {}", session.name, tr(&format!("chip_{}", if limited { "limited" } else { state })));
+        if questions > 0 { tip.push_str(&format!(" · ? {questions}")); }
+        // Trabalhando é a marca animada da lista aberta, pintada fora da lista guardada; os outros estados são um ponto na cor
+        // deles, e quem espera resposta ganha o halo (parado: pulsar redesenharia a janela o tempo todo).
+        let status = if state == "working" && !limited {
+            self.nav_mark(format!("rail-mark-{row_key}"), 12., color, None)
+        } else {
+            div().size(px(11.)).flex().items_center().justify_center().rounded_full().when(awaiting, |el| el.bg(color.opacity(0.55)))
+                .child(div().size(px(7.)).rounded_full().bg(color)).into_any_element()
+        };
+        let tip_text = tip.clone();
+        let el = div().id(SharedString::from(format!("rail-{row_key}"))).relative().flex_shrink_0().w_full().min_h(px(44.)).pt(px(3.))
+            .flex().flex_col().items_center().gap(px(2.)).rounded(px(8.)).cursor_pointer()
+            .when(selected, |el| el.bg(theme::accent_dim()).child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(theme::accent())))
+            .when(!selected, |el| el.hover(|el| el.bg(theme::hover())))
+            .role(Role::Button).aria_selected(selected).aria_label(tip)
+            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip_text.clone()).build(window, cx))
+            .child(div().h(px(11.)).flex().items_center().justify_center().child(status))
+            .child(div().flex().flex_col().items_center().font_family(theme::MONO).text_size(px(9.)).line_height(px(10.)).whitespace_nowrap()
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(if awaiting { theme::warning() } else { theme::text() }).child(top))
+                .child(div().min_h(px(10.)).text_color(theme::faint()).child(bottom)))
+            .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
+            .when(mixed, |el| el.child(chrome::provider_badge(&session.provider)));
+        match remote {
+            Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx))).into_any_element(),
+            None => {
+                let (weak, menu_session, menu_name) = (cx.entity().downgrade(), session.clone(), session.name.clone());
+                el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.hide_preview();
+                        this.select(session.clone(), window, cx);
+                        if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                    }))
+                    .context_menu(session_menu(weak, menu_session))
+                    .into_any_element()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, save_collapsed};
+    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
+
+    #[test]
+    fn rail_label_splits_like_the_web() {
+        assert_eq!(rail_label("hangar-2"), ("hangar".into(), "2".into()));
+        assert_eq!(rail_label("análise-app"), ("análise".into(), "app".into()), "acento é letra, não separador");
+        assert_eq!(rail_label("storefront-web-admin"), ("storefro".into(), "web-admi".into()));
+        assert_eq!(rail_label("---"), ("---".into(), String::new()));
+    }
 
     #[test]
     fn git_items_need_a_repository_and_the_first_output_line_is_the_result() {

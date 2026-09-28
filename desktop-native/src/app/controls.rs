@@ -56,6 +56,8 @@ pub(super) struct Controls {
     focus: Option<(FocusHandle, Subscription)>,
     // A lista rola até a linha destacada uma vez por abertura, no primeiro desenho com ela.
     revealed: std::cell::Cell<bool>,
+    // O atalho de permissão pediu o ciclo que ainda não conhecia: a leitura que chegar aplica o próximo modo.
+    cycle_after_read: Option<SessionKey>,
 }
 
 impl Controls {
@@ -247,6 +249,50 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Alt+Shift+P e Shift+Tab no campo do Claude, como o web: o próximo modo do ciclo que a sessão aceita. Ciclo ainda
+    /// não lido é lido com a sonda, como a pílula, e o modo é aplicado quando a leitura chega.
+    pub(super) fn cycle_permission(&mut self, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        if self.provider().0 != "claude" || self.controls.busy.contains_key(&key) || self.controls.cycle_after_read.is_some() { return; }
+        let known = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned();
+        if known.as_ref().is_some_and(|v| v.get("modes").and_then(Value::as_array).is_some_and(|m| !m.is_empty())) {
+            self.apply_next_mode(key, cx);
+            return;
+        }
+        self.controls.cycle_after_read = Some(key.clone());
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.read(&key.name, &["permission-modes"], &[("sondar", "1")], 60).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Catalog(Ctl::Mode), result) }).await;
+        });
+        cx.notify();
+    }
+
+    fn apply_next_mode(&mut self, key: SessionKey, cx: &mut Context<Self>) {
+        let catalog = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned().unwrap_or(Value::Null);
+        // O servidor diz quando o ciclo não dá para ler; sem ele, o atalho avisa em vez de morrer calado.
+        if catalog.get("sondavel").and_then(Value::as_bool) == Some(false) {
+            self.action_feedback.insert(key, (super::activity::web("permissao_sem_ciclo"), true));
+            cx.notify();
+            return;
+        }
+        let modes: Vec<String> = catalog.get("modes").and_then(Value::as_array).map(|m| m.iter().filter_map(|m| m.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        if modes.is_empty() { return; }
+        let current = self.ctl_label(Ctl::Mode);
+        let at = current.as_ref().and_then(|c| modes.iter().position(|m| m == c));
+        let next = modes[at.map_or(0, |i| (i + 1) % modes.len())].clone();
+        if current.as_deref() == Some(next.as_str()) { return; }
+        self.apply_ctl(Ctl::Mode, vec!["permission-mode"], json!({"mode": next}), next, cx);
+    }
+
+    /// Shift+Tab no campo do Codex, como o web: alterna entre o modo padrão e o de plano.
+    pub(super) fn toggle_codex_mode(&mut self, cx: &mut Context<Self>) {
+        if self.provider().0 != "codex" { return; }
+        let next = if self.ctl_label(Ctl::Mode).as_deref() == Some("plan") { "default" } else { "plan" };
+        self.apply_ctl(Ctl::Mode, vec!["codex", "mode"], json!({"mode": next}), next.into(), cx);
+    }
+
     fn choices(&self, ctl: Ctl, catalog: &Value) -> Vec<Choice> {
         let key = self.selected_key();
         let (provider, _) = self.provider();
@@ -376,6 +422,16 @@ impl Hangar {
                     if value.get("restaurado").and_then(Value::as_bool) == Some(false) {
                         self.action_feedback.insert(key.clone(), (tr("mode_probe_not_restored"), true));
                     }
+                }
+                if ctl == Ctl::Mode && self.controls.cycle_after_read.as_ref() == Some(&key) {
+                    self.controls.cycle_after_read = None;
+                    match &result {
+                        // Outra sessão na tela: o modo calculado pelo ciclo desta não se aplica àquela.
+                        Ok(_) if self.selected_key().as_ref() == Some(&key) => self.apply_next_mode(key.clone(), cx),
+                        Ok(_) => {}
+                        Err(error) => { self.action_feedback.insert(key.clone(), (Self::failure(error), true)); }
+                    }
+                    cx.notify();
                 }
                 let Some(open) = self.controls.open.as_mut().filter(|o| o.key == key && o.ctl == ctl) else { return; };
                 open.catalog = Some(result.map_err(|error| Self::failure(&error)));

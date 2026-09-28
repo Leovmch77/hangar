@@ -50,7 +50,8 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch]);
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
+    ToggleSidebar, CyclePermission]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -526,7 +527,8 @@ impl Hangar {
             KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
             KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
-            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal"))]);
+            KeyBinding::new("ctrl-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
+            KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -3703,11 +3705,51 @@ fn release_image(image: Arc<Image>, window: &mut Window, cx: &mut App) {
 }
 
 impl Hangar {
-    /// Barra lateral do mock: marca, escopo, seções "Aguardando você" e "Sessões", rodapé com o servidor e a engrenagem.
+    /// Barra lateral na caixa dela: a lista cheia, o trilho, ou os dois se trocando enquanto a largura anda.
     fn render_sidebar(&self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let full = appearance::get().navigation.sidebar_width();
+        match self.rail_progress() {
+            None if self.rail() => self.nav_frame(sidebar::RAIL_WIDTH, false, self.render_nav_rail(selected_name, cx)),
+            None => self.nav_frame(full, true, self.render_sidebar_full(selected_name, window, cx)),
+            Some(p) => {
+                // A lista cheia sai nos primeiros 60% e o trilho entra nos últimos 60%, os dois presos à esquerda e cortados
+                // pela caixa que anda: a lista parece deslizar para baixo da borda, e o trilho, sair dela.
+                let (out, into) = (1. - (p / 0.6).min(1.), ((p - 0.4) / 0.6).clamp(0., 1.));
+                let layer = |width: f32, opacity: f32, content: AnyElement| div().absolute().top_0().left_0().h_full().w(px(width))
+                    .flex().flex_col().opacity(opacity).child(content);
+                let both = div().size_full().relative().overflow_hidden()
+                    .child(layer(full, out, self.render_sidebar_full(selected_name, window, cx)))
+                    .child(layer(sidebar::RAIL_WIDTH, into, self.render_nav_rail(selected_name, cx)));
+                self.nav_frame(self.nav_width(), p < 0.5, both.into_any_element())
+            }
+        }
+    }
+
+    /// A caixa da barra: fundo, borda, cantos e sombra do painel solto, na largura dada. `full` é a lista cheia, que no
+    /// modo Conversas tem fundo e borda próprios.
+    fn nav_frame(&self, width: f32, full: bool, content: AnyElement) -> AnyElement {
+        let a = appearance::get();
+        let conversations = full && a.navigation == appearance::Navigation::Conversations;
+        let (surface, _, _, border) = theme::conversation_sidebar();
+        let floating = a.panels == appearance::Panels::Floating;
+        // Durante a troca as duas formas são camadas soltas, que não dão altura: a caixa ocupa a coluna inteira.
+        let fit_content = floating && a.sidebar_height == appearance::SidebarHeight::Content && self.rail_progress().is_none();
+        let panel = chrome::glass_panel(div().w(px(width)).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
+            // A linha da janela estica os filhos; "Só o conteúdo" solta a barra do fundo.
+            .map(|el| if fit_content { el.max_h_full() } else { el.h_full() })
+            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
+                else { el.border_r_1().border_color(theme::border()) })
+            .when(conversations, |el| el.border_color(border))
+            .child(content),
+            px(if floating { 18. } else { 0. }));
+        // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
+        if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
+    }
+
+    /// A lista cheia: marca, nova conversa, escopo, seções "Aguardando você" e "Sessões", rodapé com a conexão.
+    fn render_sidebar_full(&self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let a = crate::appearance::get();
         let conversations = a.navigation == appearance::Navigation::Conversations;
-        let (surface, _, _, border) = theme::conversation_sidebar();
         let floating = a.panels == crate::appearance::Panels::Floating;
         let fit_content = floating && a.sidebar_height == crate::appearance::SidebarHeight::Content;
         let host = self.server_label(cx);
@@ -3776,12 +3818,7 @@ impl Hangar {
         let filter = layout.show_filter().then(|| div().flex_shrink_0().px(px(8.)).pb(px(4.))
             .child(Input::new(&self.sidebar.filter).small().cleanable(true).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))
                 .aria_label(tr("sidebar_filter"))));
-        let panel = chrome::glass_panel(div().w(px(a.navigation.sidebar_width())).flex_shrink_0().flex().flex_col().bg(if conversations { surface } else { theme::chrome() })
-            // A linha da janela estica os filhos; "Só o conteúdo" solta a barra do fundo.
-            .map(|el| if fit_content { el.max_h_full() } else { el.h_full() })
-            .map(|el| if floating { el.rounded(px(18.)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
-                else { el.border_r_1().border_color(theme::border()) })
-            .when(conversations, |el| el.border_color(border))
+        div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(16., theme::accent()))
                 .child(div().flex_1().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
@@ -3820,8 +3857,10 @@ impl Hangar {
             .when_some(self.list_error.clone(), |el, text| el.child(div().px_4().py_1().flex().items_center().gap_2().text_xs().text_color(theme::warning())
                 .child(div().flex_1().min_w_0().child(text))
                 .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
-            // O CTA do rodapé da barra do web.
-            .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).child(self.new_session_button(false, cx)))
+            // O CTA do rodapé da barra do web, com o recolher ao lado.
+            .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().child(self.new_session_button(false, cx)))
+                .child(self.fold_button(cx)))
             // A engrenagem mora na barra do app, acima de tudo; o rodapé fica com a conexão.
             .child(div().h(px(48.)).flex_shrink_0().px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(theme::border())
                 .child(Button::new("connection").ghost().flex_1().min_w_0().h(px(32.)).px(px(6.))
@@ -3829,10 +3868,8 @@ impl Hangar {
                     .child(div().w_full().min_w_0().flex().items_center().gap_2()
                         .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                         .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx))))),
-            px(if floating { 18. } else { 0. }));
-        // A view guardada não é flex: quem centra a barra "só o conteúdo" na altura é esta coluna, como o `align-self: center` do web.
-        if fit_content { div().size_full().flex().flex_col().justify_center().child(panel).into_any_element() } else { panel }
+                    .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))))
+            .into_any_element()
     }
 
     /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor e a conexão que moravam
@@ -3942,7 +3979,7 @@ impl Hangar {
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
         let glyph = if state == "working" {
-            self.working_mark_slot(panes::Area::Nav, format!("conversation-mark-{name}"), 13., color)
+            self.nav_mark(format!("conversation-mark-{name}"), 13., color, None)
         } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
         let status = div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph);
         let weak = cx.weak_entity();
@@ -4029,12 +4066,9 @@ impl Hangar {
         let mark_color = if limited { theme::limited() } else { theme::status(state) };
         // Trabalhando, a marca (e o selo, que fica por cima dela) é pintada fora da lista guardada: a batida não redesenha a lista.
         let working = state == "working" && !limited;
-        let mark = match (working, mixed) {
-            (true, true) => self.badged_mark_slot(panes::Area::Nav, format!("row-mark-{}", session.name), 18., mark_color,
-                session.provider.clone().into()),
-            (true, false) => self.working_mark_slot(panes::Area::Nav, format!("row-mark-{}", session.name), 18., mark_color),
-            (false, _) => chrome::hangar_mark(18., mark_color).into_any_element(),
-        };
+        let mark = if working {
+            self.nav_mark(format!("row-mark-{}", session.name), 18., mark_color, mixed.then(|| session.provider.clone().into()))
+        } else { chrome::hangar_mark(18., mark_color).into_any_element() };
         let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
             .when(mixed && !working, |el| el.child(chrome::provider_badge(&session.provider)));
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
@@ -4584,6 +4618,7 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rail_frame(window);
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
         let floating = theme::is_floating();
         let chat_background = appearance::get().background_scope == appearance::BackgroundScope::Chat;
@@ -4653,7 +4688,7 @@ impl Render for Hangar {
         let nav = if page.is_some() || costs_page || files_expanded { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
-            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(appearance::get().navigation.sidebar_width())).h_full().flex_shrink_0()
+            else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
@@ -4756,6 +4791,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();
@@ -4764,7 +4800,15 @@ impl Render for Hangar {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| if this.costs_page_key(event, window) { cx.stop_propagation() }))
             // Fora de campo de texto a tecla chega aqui; dentro dele o atalho do campo a troca pela ação, pega na captura.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let m = &event.keystroke.modifiers;                if m.control || m.alt || m.platform || m.shift || !this.chat_keys_apply(window, cx) { return; }
+                let m = &event.keystroke.modifiers;
+                // "/" fora de campo de texto leva ao campo de mensagem, sem digitar a barra, como o web.
+                if event.keystroke.key_char.as_deref() == Some("/") && !m.control && !m.alt && !m.platform && !window.text_input_focused()
+                    && !window.has_active_dialog(cx) {
+                    window.dispatch_action(Box::new(FocusComposer), cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if m.control || m.alt || m.platform || m.shift || !this.chat_keys_apply(window, cx) { return; }
                 if this.chat_page_key(&event.keystroke.key, window, cx) { cx.stop_propagation(); }
             }))
             .capture_action(cx.listener(|this, _: &gpui_kit::base::input::MovePageUp, window, cx| {
@@ -4772,6 +4816,19 @@ impl Render for Hangar {
             }))
             .capture_action(cx.listener(|this, _: &gpui_kit::base::input::MovePageDown, window, cx| {
                 if this.chat_keys_apply(window, cx) && this.chat_page_key("pagedown", window, cx) { cx.stop_propagation(); }
+            }))
+            // Shift+Tab no campo de mensagem é a tecla do terminal do Claude e do Codex; nos outros campos segue recuando.
+            .capture_action(cx.listener(|this, _: &gpui_kit::base::input::OutdentInline, window, cx| {
+                if this.connection_dialog || !this.composer.read(cx).focus_handle(cx).is_focused(window) { return; }
+                match this.provider().0 {
+                    "claude" => this.cycle_permission(cx),
+                    "codex" => this.toggle_codex_mode(cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .on_action(cx.listener(|this, _: &CyclePermission, window, cx| {
+                if !this.connection_dialog && !window.has_active_dialog(cx) { this.cycle_permission(cx); }
             }))
             // Esc fora do campo fecha o painel aberto sobre o compositor (o clique no botão tira o foco do campo).
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
