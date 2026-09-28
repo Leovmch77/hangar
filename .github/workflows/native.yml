@@ -179,10 +179,11 @@ jobs:
           done
           gh release view native-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create native-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-                 --title 'Hangar desktop (topo da main)' \
+                 --title "Hangar desktop v$version" \
                  --notes "$notes"
           cd out
           gh release upload native-latest Hangar-* --repo "$GITHUB_REPOSITORY" --clobber
-          gh release edit native-latest --repo "$GITHUB_REPOSITORY" --notes "$notes"
+          # A tag fica fixa (o atualizador do app lê `native-latest`); o título mostra a versão publicada.
+          gh release edit native-latest --repo "$GITHUB_REPOSITORY" --title "Hangar desktop v$version" --notes "$notes"
           gh release upload native-latest native-latest.json --repo "$GITHUB_REPOSITORY" --clobber
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/native-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
