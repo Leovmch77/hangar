@@ -74,6 +74,7 @@
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
   import { runShortcutShell, sendsDirect } from '@hangar/core';
+  import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals, focusShortcutTerminal } from '../lib/shortcutTerminals.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
@@ -108,7 +109,7 @@
     onOpenSplit?: (name: string) => void; // desktop: abre o chat do PAR lado a lado (split view)
     // Painel de terminal real (xterm.js) na faixa do DesktopShell. So o DesktopShell sabe montar o
     // painel (e qual dos 3 <Chat> pediu); no celular fica undefined e abrirTerminalReal cai no espelho.
-    onOpenTerminalPanel?: () => void;
+    onOpenTerminalPanel?: (headless?: boolean) => void;
     // True quando ESTA sessao ja tem o painel de terminal REAL aberto (o DesktopShell so sabe qual
     // dos 3 <Chat> e o dono). abrirTerminalReal, no desktop, nao mexe em mirrorOpen -- sem isto a
     // pilula "toque pra abrir" e o pulso do botao continuavam ativos com o painel ja aberto embaixo.
@@ -1374,11 +1375,21 @@
   // a capacidade (Windows: `pty` e POSIX-only, o painel abriria morto). NAO reusar isto no onFallback
   // do AskUserQuestion: o fallback existe pra destravar picker, e o painel bloqueia o /answer (Task 3).
   function abrirTerminalReal() {
-    if (sessionHeadless) return;   // sem pane não há terminal, painel nem espelho a abrir
-    if (desktop && onOpenTerminalPanel && terminalPanelDisponivel) onOpenTerminalPanel();
+    // Sem pane só há o que os atalhos abriram: painel/terminal com as abas deles, nunca o espelho.
+    if (sessionHeadless && !temTerminalDeAtalho) return;
+    if (desktop && onOpenTerminalPanel && terminalPanelDisponivel) onOpenTerminalPanel(sessionHeadless);
     else if (!desktop && terminalCapazMobile) xtermOpen = true;
-    else mirrorOpen = true;
+    else if (!sessionHeadless) mirrorOpen = true;
   }
+  // Terminais dos atalhos "shell" desta sessão (lib/shortcutTerminals.svelte.ts). Sessão sem pane
+  // ganha o botão de terminal quando existe pelo menos um.
+  const atalhoKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
+  const temTerminalDeAtalho = $derived(shortcutTerminalsOf(atalhoKey).length > 0);
+  const botaoTerminal = $derived(!sessionHeadless || temTerminalDeAtalho);
+  $effect(() => {
+    const key = atalhoKey;
+    refreshShortcutTerminals(key).catch(() => { /* servidor sem a rota ou fora: sem botão extra */ });
+  });
   // Statusline crua -> campos tipados (modelo, contexto, custo, tempo de sessao).
   const status = $derived(parseStatusLine(stateEvent?.status_line ?? null,
     allSessions.find((s) => s.name === sessionName)));
@@ -1494,7 +1505,7 @@
       action('git', m.sessao_git(), () => (gitOpen = true)),
       action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
       action('run', m.chat_executar_workflow(), () => (runOpen = true)),
-      ...(sessionHeadless ? [] : [action('terminal', m.ctx_terminal(), abrirTerminalReal)]),
+      ...(botaoTerminal ? [action('terminal', m.ctx_terminal(), abrirTerminalReal)] : []),
       ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
       ...(recarregavel ? [action('recarregar', m.recarregar_sessao(), recarregar)] : []),
       action('navegador', m.ctx_navegador(), alternarNavegador),
@@ -2698,11 +2709,25 @@
     void runShortcut(s);
   }
 
+  // Cada execução vira uma aba no painel de terminal. O painel não abre sozinho: a aba só vai pra
+  // frente, e fica listada (inclusive a que falhou, com a saída inteira) até alguém fechar.
+  async function rodarAtalhoShell(s: ShortcutShell) {
+    const key = atalhoKey;
+    try {
+      const r = await runShortcutShell(sessionName, s.command, s.label);
+      if (r.terminal) focusShortcutTerminal(key, r.terminal.id);
+    } finally {
+      const lista = await refreshShortcutTerminals(key).catch(() => null);
+      const ultimo = lista?.at(-1);
+      if (ultimo && !shortcutTerminals.focus[key]) focusShortcutTerminal(key, ultimo.id);
+    }
+  }
+
   async function runShortcut(s: ShortcutSendText | ShortcutShell) {
     // O 202 do shell é só "o processo nasceu", e o handleSend lança pro Composer mostrar — aqui
     // não há Composer no meio, então sem este aviso o clique falho não faz NADA em silêncio.
     try {
-      if (s.type === 'shell') await runShortcutShell(sessionName, s.command);
+      if (s.type === 'shell') await rodarAtalhoShell(s);
       else if (sendsDirect(s)) await handleSend(s.text);
       else await composerRef?.prefillText(s.text);
     } catch (err) {
@@ -2858,7 +2883,7 @@
   {/if}
   <div class="navbar-mount" bind:this={navEl}>
     {#if !splitTab}
-    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={sessionHeadless ? undefined : abrirTerminalReal} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
+    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
     {/if}
   </div>
 
@@ -2890,7 +2915,7 @@
       serverId={getActiveId() ?? ''}
       {sessionName}
       {events} {histGap} cwd={planSession?.cwd ?? null}
-      onOpenTerminal={sessionHeadless ? undefined : abrirTerminalReal}
+      onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined}
       onTrocarModo={modoTrocavel ? trocarModo : undefined}
       modoDestinoTerminal={sessionHeadless}
       modoBloqueado={!modoLivre || trocandoModo}
@@ -3320,7 +3345,7 @@
     showPlan={!desktop} session={planSession} {planDetail} {planLoading} {planError} processos={shellsVivos} />
 
   <TerminalMirror open={mirrorOpen} {sessionName} onClose={closeMirror} />
-  <TerminalMobile open={xtermOpen} {sessionName} onClose={() => (xtermOpen = false)} />
+  <TerminalMobile open={xtermOpen} {sessionName} headless={sessionHeadless} onClose={() => (xtermOpen = false)} />
 
   {#if !isWide}
     <AskQuestionSheet

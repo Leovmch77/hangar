@@ -25,9 +25,12 @@ export async function sessionExistsOnServer(s: Server, name: string): Promise<bo
 // outro servidor (o defeito que esta Task conserta). `location.origin` quando o baseUrl e VAZIO: o
 // servidor da mesma origem (front servido pelo proprio backend, o PWA da VPS) guarda baseUrl vazio e
 // `new WebSocket('/api/...')` sozinho levanta SyntaxError — mesmo fallback do termUrl antigo.
-export function termUrlForServer(s: Server, name: string, cols: number, rows: number): string {
+// `shortcut`: terminal de atalho da sessao `name` — o backend resolve o alvo tmux pelo dono.
+export function termUrlForServer(s: Server, name: string, cols: number, rows: number,
+                                 extra?: { shortcut?: string }): string {
   const base = (s.baseUrl || location.origin).replace(/^http/, 'ws');
   const qs = new URLSearchParams({ token: s.token, cols: String(cols), rows: String(rows) });
+  if (extra?.shortcut) qs.set('shortcut', extra.shortcut);
   return `${base}/api/sessions/${encodeURIComponent(name)}/term?${qs}`;
 }
 

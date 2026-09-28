@@ -77,9 +77,12 @@ import * as m from '../paraglide/messages';
   // efeito do TerminalPanel, e o socket ficava falando pro servidor VELHO (termUrl usa o servidor
   // ATIVO no momento da conexao, e so a troca do servidor nao muda `sessionName`).
   let terminalKey = $state('');
-  function abrirTerminal(nome: string, serverId: string) {
+  // Sessao sem pane (sem terminal): o painel so mostra as abas dos atalhos, que sao tmux proprio.
+  let terminalHeadless = $state(false);
+  function abrirTerminal(nome: string, serverId: string, headless = false) {
     terminalSession = nome;
     terminalKey = workspaceSessionKey({ serverId, name: nome });
+    terminalHeadless = headless;
     terminalOpen = true;
   }
   // Maximizado o painel cobre o chat mas continua translucido (mesmo veu do encaixado, ver
@@ -577,7 +580,7 @@ import * as m from '../paraglide/messages';
               desktop={true}
               onBack={onCloseOverlay}
               onNavigateToChat={onNavigateToChat}
-              onOpenTerminalPanel={() => abrirTerminal(overlayName, overlaySession.serverId)}
+              onOpenTerminalPanel={(headless) => abrirTerminal(overlayName, overlaySession.serverId, headless)}
               terminalPanelOpen={terminalOpen && terminalKey === workspaceSessionKey(overlaySession)}
               terminalPanelDisponivel={terminalCapaz}
               topInset={hasAttention ? 52 : 0}
@@ -603,7 +606,7 @@ import * as m from '../paraglide/messages';
             onBack={() => onNavigateToChat('')}
             onNavigateToChat={onNavigateToChat}
             onOpenSplit={openSplit}
-            onOpenTerminalPanel={() => abrirTerminal(cur, serverIdPrincipal)}
+            onOpenTerminalPanel={(headless) => abrirTerminal(cur, serverIdPrincipal, headless)}
             terminalPanelOpen={terminalOpen && terminalKey === workspaceSessionKey({ serverId: serverIdPrincipal, name: cur })}
             terminalPanelDisponivel={terminalCapaz}
             topInset={hasAttention ? 52 : 0}
@@ -627,7 +630,7 @@ import * as m from '../paraglide/messages';
             onCloseSplit={() => (splitSessions = splitSessions.filter((s) => s !== split))}
             onBack={() => (splitSessions = splitSessions.filter((s) => s !== split))}
             onNavigateToChat={onNavigateToChat}
-            onOpenTerminalPanel={() => abrirTerminal(split, getActiveId() ?? '')}
+            onOpenTerminalPanel={(headless) => abrirTerminal(split, getActiveId() ?? '', headless)}
             terminalPanelOpen={terminalOpen && terminalKey === workspaceSessionKey({ serverId: getActiveId() ?? '', name: split })}
             terminalPanelDisponivel={terminalCapaz}
             topInset={hasAttention ? 52 : 0}
@@ -650,7 +653,7 @@ import * as m from '../paraglide/messages';
       </div>
     {/if}
   </main>
-  <TerminalPanel sessionName={terminalSession} connKey={terminalKey} open={terminalOpen}
+  <TerminalPanel sessionName={terminalSession} connKey={terminalKey} open={terminalOpen} headless={terminalHeadless}
                  onClose={() => (terminalOpen = false)}
                  onMaximizar={(v) => (terminalMaximizado = v)} />
   </div>

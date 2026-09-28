@@ -2440,14 +2440,39 @@ export function getRunPane(name: string): Promise<{ pane: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/pane`);
 }
 
-/** Atalho "shell" da fileira: dispara-e-esquece no cwd da sessão. Se o comando sai com erro nos
- * primeiros 2 s, volta 422 com o código e o fim da saída; o 202 só diz que ele não falhou nessa
- * janela — falha depois disso não volta por aqui (comando com saída que interessa vai no run). */
-export function runShortcutShell(name: string, command: string): Promise<{ ok: boolean }> {
+/** Terminal escondido de um atalho "shell": uma aba no painel de terminal da sessão. O pane fica
+ * depois que o comando sai (`alive: false`), com a saída e o código na tela até alguém fechar. */
+export interface ShortcutTerminal {
+  id: string;
+  label: string;
+  alive: boolean;
+  exit_code: number | null;
+  created?: number;
+}
+
+/** Atalho "shell" da fileira, no cwd da sessão. No servidor POSIX cada execução ganha um
+ * terminal próprio (`terminal` na resposta). Se o comando sai com erro nos primeiros 2 s, volta
+ * 422 com o código e o fim da saída — o terminal continua listado pra ver a saída inteira. */
+export function runShortcutShell(name: string, command: string, label?: string):
+    Promise<{ ok: boolean; terminal?: ShortcutTerminal }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
     method: 'POST',
-    body: JSON.stringify({ command }),
+    body: JSON.stringify(label ? { command, label } : { command }),
   });
+}
+
+/** Terminais de atalho da sessão no servidor dono dela (`srv`), do mais antigo pro mais novo. */
+export async function listShortcutTerminals(srv: Server, name: string): Promise<ShortcutTerminal[]> {
+  const r = await apiFetchForServer<{ terminals: ShortcutTerminal[] }>(
+    srv, `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals`);
+  return r.terminals ?? [];
+}
+
+/** Fecha o terminal de atalho: o backend derruba o processo e a sessão tmux escondida. */
+export function closeShortcutTerminal(srv: Server, name: string, id: string): Promise<{ ok: true }> {
+  return apiFetchForServer<{ ok: true }>(
+    srv, `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals/${encodeURIComponent(id)}/close`,
+    { method: 'POST' });
 }
 
 // Limites de uso da conta Codex (Task B) — so sessoes Codex; o back devolve 400 pra Claude.

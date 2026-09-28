@@ -18,13 +18,50 @@
   import type { Terminal } from '@xterm/xterm';
   import type { FitAddon } from '@xterm/addon-fit';
   import * as m from '../paraglide/messages';
+  import { untrack } from 'svelte';
+  import { closeShortcutTerminal } from '@hangar/core';
+  import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals } from '../lib/shortcutTerminals.svelte';
 
   interface Props {
     open: boolean;
     sessionName: string;
     onClose: () => void;
+    // Sessao sem pane: so os terminais dos atalhos, sem a aba da sessao.
+    headless?: boolean;
   }
-  let { open, sessionName, onClose }: Props = $props();
+  let { open, sessionName, onClose, headless = false }: Props = $props();
+
+  // Alvo do cano: '' = a sessao; senao o id do terminal de atalho (um socket so, troca = reconecta).
+  let alvoAtalho = $state('');
+  let scErro = $state<string | null>(null);
+  const scKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
+  const scLista = $derived(shortcutTerminalsOf(scKey));
+
+  $effect(() => {
+    const key = scKey;
+    if (!open) return;
+    scErro = null;
+    refreshShortcutTerminals(key).catch((e) => { scErro = e instanceof Error ? e.message : String(e); });
+  });
+  // Atalho recem-clicado vai pra frente; aba que sumiu cai na sessao (ou no primeiro atalho).
+  $effect(() => {
+    const pedido = shortcutTerminals.focus[scKey];
+    const ids = scLista.map((t) => t.id);
+    if (!open) return;
+    untrack(() => {
+      if (pedido && ids.includes(pedido)) { alvoAtalho = pedido; delete shortcutTerminals.focus[scKey]; return; }
+      if (alvoAtalho && !ids.includes(alvoAtalho)) alvoAtalho = headless ? (ids[0] ?? '') : '';
+      else if (!alvoAtalho && headless && ids.length) alvoAtalho = ids[0];
+    });
+  });
+  async function fecharAtalho(id: string) {
+    const srv = servidorAtivo();
+    if (!srv) return;
+    scErro = null;
+    try { await closeShortcutTerminal(srv, sessionName, id); }
+    catch (e) { scErro = m.term_atalho_erro_fechar({ msg: e instanceof Error ? e.message : String(e) }); }
+    await refreshShortcutTerminals(scKey).catch(() => {});
+  }
 
   let host = $state<HTMLDivElement | null>(null);
   let caiu = $state(false);
@@ -118,8 +155,11 @@
 
   $effect(() => {
     const alvo = sessionName;
+    const atalho = alvoAtalho;
     void geracao;
     if (!open || !host) return;
+    // Sem pane e sem terminal de atalho escolhido nao ha o que anexar.
+    if (headless && !atalho) return;
     const hostEl = host;
     let vivo = true;
     caiu = false;
@@ -139,7 +179,8 @@
       // a mesma frase. Servidor fora do ar NAO e "sessao nao encontrada": deixa a conexao tentar.
       let existe = true;
       try {
-        existe = await sessionExistsOnServer(srv, alvo);
+        // Terminal de atalho nao esta na lista de sessoes: quem confere o dono e o backend.
+        if (!atalho) existe = await sessionExistsOnServer(srv, alvo);
       } catch {
         existe = true;
       }
@@ -168,7 +209,7 @@
       mo = new MutationObserver(() => { t.options.theme = temaDe(hostEl); });
       mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows), {
+      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows, atalho ? { shortcut: atalho } : undefined), {
         data: (b) => { t.write(b); agendarBuscaDeUrl(); },
         open: () => { if (vivo) pronto = true; },
         // `vivo`, nao incondicional: o close() dispara onclose ASSINCRONO, e sem a guarda o "caiu"
@@ -335,6 +376,32 @@
       </div>
     </header>
 
+    {#if scLista.length > 0 || headless}
+      <div class="tx-abas" role="tablist">
+        {#if !headless}
+          <button class="tx-aba" class:sel={!alvoAtalho} role="tab" aria-selected={!alvoAtalho}
+                  onclick={() => (alvoAtalho = '')}>{sessionName}</button>
+        {/if}
+        {#each scLista as t (t.id)}
+          <span class="tx-aba" class:sel={alvoAtalho === t.id} class:morto={!t.alive}>
+            <button class="tx-aba-rotulo" role="tab" aria-selected={alvoAtalho === t.id}
+                    onclick={() => (alvoAtalho = t.id)}>
+              {t.label}{#if !t.alive}<span class="tx-aba-saida">{t.exit_code == null
+                ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
+            </button>
+            <button class="tx-aba-x" onclick={() => fecharAtalho(t.id)}
+                    aria-label={m.term_atalho_fechar({ label: t.label })}>✕</button>
+          </span>
+        {/each}
+        {#if headless && scLista.length === 0}
+          <span class="tx-aba-vazio" role="status">{m.term_atalho_vazio()}</span>
+        {/if}
+      </div>
+    {/if}
+    {#if scErro}
+      <div class="tx-caiu" role="alert"><span>⚠ {scErro}</span></div>
+    {/if}
+
     <div class="tx-screen" bind:this={host}></div>
 
     {#if caiu}
@@ -352,7 +419,7 @@
           <button class="tx-key" onclick={() => geracao++}>{m.term_reconectar_btn()}</button>
         {/if}
       </div>
-    {:else if !pronto}
+    {:else if !pronto && !(headless && !alvoAtalho)}
       <!-- Janela do handshake: sem isto a barra de teclas parecia funcionar e nao mandava nada. -->
       <div class="tx-conectando" role="status">{m.comum_carregando()}</div>
     {/if}
@@ -419,6 +486,19 @@
   .tx-screen { flex: 1; min-height: 0; overflow: hidden; background: var(--surface-inset); padding: var(--space-1); }
   .tx-screen :global(.xterm) { height: 100%; }
 
+  /* Abas quebram linha em vez de rolar: no celular a faixa inteira tem que caber no dedo. */
+  .tx-abas { flex-shrink: 0; display: flex; flex-wrap: wrap; gap: var(--space-1);
+    padding: var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+  .tx-aba { display: inline-flex; align-items: center; gap: 2px; min-height: 32px; max-width: 100%;
+    padding: 0 var(--space-2); border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);
+    background: transparent; color: var(--text-muted); font-size: var(--text-xs); }
+  .tx-aba.sel { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+  .tx-aba.morto { opacity: 0.75; }
+  .tx-aba-rotulo { border: 0; background: transparent; color: inherit; font: inherit; padding: 0;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tx-aba-saida { margin-left: var(--space-1); color: var(--text-muted); }
+  .tx-aba-x { border: 0; background: transparent; color: var(--text-muted); min-width: 28px; min-height: 28px; }
+  .tx-aba-vazio { font-size: var(--text-xs); color: var(--text-muted); padding: var(--space-1) 0; }
   .tx-caiu {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
     padding: var(--space-2) var(--space-3);

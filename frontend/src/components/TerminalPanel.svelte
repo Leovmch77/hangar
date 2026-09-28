@@ -1,7 +1,10 @@
 <script lang="ts">
   import { TermSocket, termUrlForServer, sessionExistsOnServer } from '../lib/term';
   import { motivoDeOrigemRecusada } from '../lib/termOrigem';
-  import { openShell, openNativeTerminal } from '@hangar/core';
+  import { openShell, openNativeTerminal, closeShortcutTerminal } from '@hangar/core';
+  import { untrack } from 'svelte';
+  import ShortcutTerminalTab from './ShortcutTerminalTab.svelte';
+  import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals } from '../lib/shortcutTerminals.svelte';
   import { listServers, onServersChanged } from '../lib/auth';
   import type { Server } from '../lib/auth';
   // `import type`: some no build (nao vira require), entao NAO desfaz o import dinamico logo abaixo
@@ -14,8 +17,10 @@
   interface Props {
     sessionName: string; connKey: string; open: boolean; onClose: () => void;
     onMaximizar?: (v: boolean) => void;
+    // Sessao sem pane: sem aba da sessao nem Shell, so os terminais dos atalhos.
+    headless?: boolean;
   }
-  let { sessionName, connKey, open, onClose, onMaximizar }: Props = $props();
+  let { sessionName, connKey, open, onClose, onMaximizar, headless = false }: Props = $props();
 
   let host = $state<HTMLDivElement | null>(null);
   let secEl = $state<HTMLElement | null>(null);
@@ -75,7 +80,8 @@
   // A sessao tmux e a mesma que o backend cria/reata em POST /shell (separada e ESCONDIDA das tres
   // views do app -- so o painel e o terminal nativo alcancam). So entra depois do primeiro clique na
   // aba, pra nao gastar POST+fork de tmux em quem nunca abre o shell.
-  let abaAtiva = $state<'attach' | 'shell'>('attach');
+  // 'attach' | 'shell' | `sc:<id>` (terminal de atalho).
+  let abaAtiva = $state<string>('attach');
   let shellVisitada = false;                     // trava contra reclique repetindo o POST /shell
   let shellNome = $state<string | null>(null);   // "term-<nome>" devolvido pelo backend -- e o ALVO
   // BLOQUEADOR 1: servidor capturado no clique da aba (antes do await do POST /shell). O efeito do
@@ -153,7 +159,7 @@
   // a MESMA sessao tmux) -- quem preserva a tela e o tmux, nao este estado.
   $effect(() => {
     void sessionName; void connKey; void open;
-    abaAtiva = 'attach';
+    abaAtiva = untrack(() => headless) ? '' : 'attach';
     shellVisitada = false;
     shellNome = null;
     shellErro = null;
@@ -174,7 +180,10 @@
   // dentro pra digitar depois de trocar. So dispara na troca -- nao precisa ler `term`/`termShell`
   // como dependencia (nao sao $state; o valor lido AQUI, no disparo, ja e o atual). Clique explicito
   // na aba, sem guarda: e um gesto deliberado, o foco tem que ir junto.
-  $effect(() => { (abaAtiva === 'attach' ? term : termShell)?.focus(); });
+  $effect(() => {
+    if (abaAtiva === 'attach') term?.focus();
+    else if (abaAtiva === 'shell') termShell?.focus();
+  });
 
   // Guarda do foco TARDIO (achado da revisao, Q2): so usada pelos dois efeitos de montagem abaixo,
   // cujo `.focus()` roda depois de um POST + import dinamico do xterm -- tempo de sobra pro usuario
@@ -254,7 +263,7 @@
     // recomeca com o registro atual. Se o servidor sumiu, `srv` vira null e o erro nomeado aparece.
     void servidoresVersao;
     void geracao;
-    if (!open || !host) return;
+    if (!open || !host || headless) return;
     let vivo = true;
     caiu = false;
     motivo = null;
@@ -460,6 +469,55 @@
       if (!term) { mo?.disconnect(); mo = null; }   // compartilhado: ver o cleanup do attach
     };
   });
+
+  // ── Terminais dos atalhos "shell" ──────────────────────────────────────────────────────────────
+  // Um tmux escondido por execucao (backend/app/shortcut_terminals.py). A lista e compartilhada com
+  // o Chat (lib/shortcutTerminals.svelte.ts): quem roda o atalho la acrescenta, o × aqui tira.
+  const scLista = $derived(shortcutTerminalsOf(connKey));
+  const scServidor = $derived.by(() => { void servidoresVersao; return servidorDe(connKey); });
+  let scCarregando = $state(false);
+  let scErro = $state<string | null>(null);
+
+  // Relê ao abrir: o atalho pode ter rodado noutro aparelho, ou o terminal pode ter saido.
+  $effect(() => {
+    const key = connKey;
+    if (!open || !key) return;
+    let vivo = true;
+    scCarregando = true;
+    scErro = null;
+    refreshShortcutTerminals(key)
+      .catch((e) => { if (vivo) scErro = e instanceof Error ? e.message : String(e); })
+      .finally(() => { if (vivo) scCarregando = false; });
+    return () => { vivo = false; };
+  });
+
+  // Atalho recem-clicado: a aba dele vira a da frente (sem abrir o painel por conta propria).
+  $effect(() => {
+    const id = shortcutTerminals.focus[connKey];
+    if (!open || !id || !scLista.some((t) => t.id === id)) return;
+    untrack(() => { abaAtiva = `sc:${id}`; delete shortcutTerminals.focus[connKey]; });
+  });
+
+  // Aba de atalho que sumiu (fechada aqui ou noutro aparelho) ou sessao sem pane ainda sem aba:
+  // cai no primeiro terminal que existe; sem nenhum, na aba da sessao (ou no vazio, sem pane).
+  $effect(() => {
+    const ids = scLista.map((t) => `sc:${t.id}`);
+    const atual = abaAtiva;
+    if (atual === 'attach' || atual === 'shell' || ids.includes(atual)) return;
+    untrack(() => { abaAtiva = ids[0] ?? (headless ? '' : 'attach'); });
+  });
+
+  async function fecharAtalho(id: string) {
+    const srv = scServidor;
+    if (!srv) { scErro = m.servidor_nao_existe(); return; }
+    scErro = null;
+    try {
+      await closeShortcutTerminal(srv, sessionName, id);
+    } catch (e) {
+      scErro = m.term_atalho_erro_fechar({ msg: e instanceof Error ? e.message : String(e) });
+    }
+    await refreshShortcutTerminals(connKey).catch(() => {});
+  }
 </script>
 
 {#if open}
@@ -488,12 +546,29 @@
          role="separator" aria-label={m.term_redimensionar()} aria-orientation="horizontal"></div>
     <header class="tp-bar">
       <div class="tp-abas" role="tablist">
-        <button class="tp-aba" class:sel={abaAtiva === 'attach'} role="tab" aria-selected={abaAtiva === 'attach'}
-                onclick={() => (abaAtiva = 'attach')}>{sessionName}</button>
-        <button class="tp-aba" class:sel={abaAtiva === 'shell'} role="tab" aria-selected={abaAtiva === 'shell'}
-                onclick={abrirAbaShell}>Shell</button>
+        {#if !headless}
+          <button class="tp-aba" class:sel={abaAtiva === 'attach'} role="tab" aria-selected={abaAtiva === 'attach'}
+                  onclick={() => (abaAtiva = 'attach')}>{sessionName}</button>
+          <button class="tp-aba" class:sel={abaAtiva === 'shell'} role="tab" aria-selected={abaAtiva === 'shell'}
+                  onclick={abrirAbaShell}>Shell</button>
+        {/if}
+        {#each scLista as t (t.id)}
+          {@const sel = abaAtiva === `sc:${t.id}`}
+          <span class="tp-aba tp-aba-sc" class:sel class:morto={!t.alive}>
+            <button class="tp-aba-rotulo" role="tab" aria-selected={sel} title={t.label}
+                    onclick={() => (abaAtiva = `sc:${t.id}`)}>
+              {t.label}{#if !t.alive}<span class="tp-aba-saida">{t.exit_code == null
+                ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
+            </button>
+            <button class="tp-aba-x" onclick={() => fecharAtalho(t.id)}
+                    aria-label={m.term_atalho_fechar({ label: t.label })} title={m.term_atalho_fechar({ label: t.label })}>✕</button>
+          </span>
+        {/each}
       </div>
-      {#if (abaAtiva === 'attach' ? caiu : caiuShell)}
+      {#if scErro}
+        <span class="tp-sc-erro" role="alert" title={scErro}>{scErro}</span>
+      {/if}
+      {#if (abaAtiva === 'attach' && caiu) || (abaAtiva === 'shell' && caiuShell)}
         <!-- Motivo quando o backend (ou a falha de carregamento) deu um; "desconectado" cru quando
              nao ha — o caso da queda de rede e o do handshake recusado, que o navegador entrega sem
              reason nenhum. `title` com o texto inteiro porque o rotulo trunca. -->
@@ -503,8 +578,10 @@
           {motivoDaAba ?? m.term_desconectado()} {m.term_reconectar()}
         </button>
       {/if}
-      <button onclick={abrirTerminalNativo} aria-label={m.term_abrir_nativo()}
-              title={m.term_abrir_nativo_titulo()}>↗</button>
+      {#if abaAtiva === 'attach' || abaAtiva === 'shell'}
+        <button onclick={abrirTerminalNativo} aria-label={m.term_abrir_nativo()}
+                title={m.term_abrir_nativo_titulo()}>↗</button>
+      {/if}
       <button onclick={toggleMax} aria-label={m.term_maximizar()}>⤢</button>
       <button onclick={onClose} aria-label={m.sessao_fechar()}>✕</button>
     </header>
@@ -534,6 +611,16 @@
       {:else if shellCarregando}
         <div class="tp-screen tp-status" class:hidden={abaAtiva !== 'shell'}>
           <p class="tp-msg">{m.term_abrindo_shell()}</p>
+        </div>
+      {/if}
+      {#if scServidor}
+        {#each scLista as t (t.id)}
+          <ShortcutTerminalTab srv={scServidor} {sessionName} id={t.id} visible={abaAtiva === `sc:${t.id}`} />
+        {/each}
+      {/if}
+      {#if headless && scLista.length === 0}
+        <div class="tp-screen tp-status" role="status">
+          <p class="tp-msg">{scCarregando ? m.comum_carregando() : m.term_atalho_vazio()}</p>
         </div>
       {/if}
     </div>
@@ -591,6 +678,21 @@
      longa (mensagem de import quebrado) — sem o teto ela espremia as abas ate sumir. */
   .tp-recon { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tp-aba.sel { background: var(--accent-dim); color: var(--accent); }
+  /* Aba de atalho: rotulo + ✕ na mesma pilula; encerrado fica apagado com o codigo ao lado. */
+  .tp-aba-sc { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; }
+  .tp-aba-sc.morto { opacity: 0.75; }
+  .tp-aba-rotulo {
+    border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tp-aba-saida { margin-left: var(--space-1); color: var(--text-muted); }
+  .tp-aba-x {
+    border: 0; background: transparent; color: var(--text-muted); cursor: pointer;
+    padding: 0 2px; font-size: 10px; line-height: 1; border-radius: var(--radius-sm);
+  }
+  .tp-aba-x:hover { color: var(--text-primary); background: var(--bg-hover); }
+  .tp-sc-erro { max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: var(--text-xs); color: var(--error); }
   /* Posicionamento relativo: as duas telas se empilham em cima uma da outra (position:absolute) e a
      visivel e escolhida por `visibility`, nao `display:none` -- display:none zeraria a caixa e o
      ResizeObserver/fit() da aba escondida mediriam 0x0 na proxima vez que ficasse visivel. */
