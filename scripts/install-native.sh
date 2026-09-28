@@ -54,9 +54,14 @@ case "$PACOTE" in
   *.zip)
     mkdir -p "$TMP/app" "$HOME/Applications"
     unzip -q "$TMP/$PACOTE" -d "$TMP/app"
-    rm -rf "$APP" && mv "$TMP/app/Hangar.app" "$APP"
+    # O anterior só sai depois que o novo entrou: se o pacote vier sem Hangar.app, o app de antes fica.
+    [ -d "$TMP/app/Hangar.app" ] || { echo "app nativo: o pacote não trouxe Hangar.app; nada foi instalado" >&2; exit 1; }
+    rm -rf "$APP.old"; [ -e "$APP" ] && mv "$APP" "$APP.old"
+    if mv "$TMP/app/Hangar.app" "$APP"; then rm -rf "$APP.old"; else [ -e "$APP.old" ] && mv "$APP.old" "$APP"; exit 1; fi
     ;;
 esac
+# A marca é a prova do passo de atualização: só existe se o app ficou de fato no lugar.
+[ -x "$APP" ] || [ -d "$APP" ] || { echo "app nativo: $APP não ficou no lugar; nada foi marcado" >&2; exit 1; }
 
 # Primeira abertura já conectada ao backend desta máquina. Só quando o app ainda não tem conexão:
 # a que a pessoa escolheu depois nunca é sobrescrita.

@@ -98,6 +98,9 @@ _AGENT_MSG_RE = re.compile(r'<agent-message from="([^"]+)"[^>]*>(.*)</agent-mess
 def _agent_msg(texto, id_: str) -> Optional[list[ChatEvent]]:
     if not isinstance(texto, str) or not (m := _AGENT_MSG_RE.fullmatch(texto.strip())):
         return None
+    # Dois envelopes colados casariam inteiros no `.*` e o segundo agente sumiria com o id do primeiro.
+    if "<agent-message" in m.group(2) or "</agent-message>" in m.group(2):
+        return None
     if "[Subagent hand-back]" not in m.group(2):
         return []   # ponytail: recado intermediário do subagente some; mostrar se fizer falta
     return [ChatEvent(kind="tool_result", id=id_, tool_use_id=f"task:{m.group(1)}",

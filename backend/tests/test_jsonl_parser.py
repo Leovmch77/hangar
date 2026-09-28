@@ -442,6 +442,37 @@ def test_task_notification_enfileirada_vira_tool_result_sintetico():
     assert evs[0].tool_use_id == "task:a4e4f68c8a3c46749"   # e o que o fold do painel casa
 
 
+_HAND_BACK = ('<agent-message from="abd7854a2736546e7">\n[Subagent hand-back] The text below is the final '
+              'report.\n  relatorio\n</agent-message>')
+
+
+def _user(content) -> str:
+    return json.dumps({"type": "user", "uuid": "u1", "message": {"role": "user", "content": content}})
+
+
+def test_hand_back_de_subagente_fecha_o_agent_e_nao_vira_bolha():
+    for content in (_HAND_BACK, [{"type": "text", "text": _HAND_BACK}]):
+        evs = parse_line(_user(content))
+        assert [(e.kind, e.tool_use_id) for e in evs] == [("tool_result", "task:abd7854a2736546e7")]
+    enfileirado = parse_line(json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": "t",
+                                         "content": _HAND_BACK}))
+    assert [e.tool_use_id for e in enfileirado] == ["task:abd7854a2736546e7"]
+
+
+def test_agent_message_intermediario_fica_fora_do_chat():
+    assert parse_line(_user('<agent-message from="x">\nprogresso\n</agent-message>')) == []
+
+
+def test_texto_que_so_cita_agent_message_continua_do_usuario():
+    evs = parse_line(_user('olha esse <agent-message from="x">oi</agent-message> no codigo'))
+    assert [e.kind for e in evs] == ["user_msg"]
+
+
+def test_dois_agent_message_colados_nao_viram_um_so():
+    evs = parse_line(_user(_HAND_BACK + _HAND_BACK.replace("abd7854a2736546e7", "bbb")))
+    assert not any(e.tool_use_id == "task:abd7854a2736546e7" for e in evs)
+
+
 def test_queue_operation_enqueue_nao_renderiza():
     # enqueue NAO vira bubble: a msg sai no `remove` (consumo mid-turn), pra nao duplicar a que
     # eventualmente vira turno real via `dequeue`. Ver test_queued_removed_message_vira_user_bubble.

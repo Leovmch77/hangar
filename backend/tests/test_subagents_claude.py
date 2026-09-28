@@ -111,6 +111,18 @@ def test_ilegivel_nao_afirma_falha(tmp_path):
     assert "failed" not in ags[0]
 
 
+def test_fork_devolve_a_diretiva_como_prompt(tmp_path):
+    # O fork grava o texto padrão na frente; o casamento com o Agent do pai e o título dependem do prompt real.
+    main = _sessao(tmp_path, [])
+    texto = ("<fork-boilerplate>\nYou are a worker fork.\n</fork-boilerplate>\n\n"
+             "Your directive: Compare as duas telas.")
+    (tmp_path / "s" / "subagents" / "agent-f1.jsonl").write_text(json.dumps(
+        {"type": "user", "timestamp": "2026-09-28T17:00:00Z", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_x", "content": "Fork started"},
+            {"type": "text", "text": texto}]}}) + "\n", encoding="utf-8")
+    assert list_subagents(main)[0]["prompt"] == "Compare as duas telas."
+
+
 def test_pasta_subagents_sumida_devolve_lista_vazia(tmp_path):
     jsonl = tmp_path / "s.jsonl"
     jsonl.write_text("", encoding="utf-8")

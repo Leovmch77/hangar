@@ -59,7 +59,10 @@ try {
         Remove-Item "$app.old" -Force -ErrorAction SilentlyContinue
         Rename-Item $app "$app.old"
     }
-    Copy-Item (Join-Path $tmp 'app\Hangar.exe') $app -Force
+    # Copia falhou (disco, antivirus): o exe anterior volta pro lugar, senao os atalhos apontariam pro nada.
+    try { Copy-Item (Join-Path $tmp 'app\Hangar.exe') $app -Force }
+    catch { if (Test-Path "$app.old") { Rename-Item "$app.old" $app -Force }; throw }
+    if (-not (Test-Path $app)) { Write-Host "app nativo: $app nao ficou no lugar; nada foi marcado"; exit 1 }
 
     $ws = New-Object -ComObject WScript.Shell
     foreach ($pasta in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('DesktopDirectory'))) {
