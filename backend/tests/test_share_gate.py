@@ -331,3 +331,12 @@ def test_socket_principal_ocupado_levanta_oserror():
             main._tcp_socket("127.0.0.1", ocupada.getsockname()[1])
     finally:
         ocupada.close()
+
+
+def test_socket_principal_nao_e_herdado_por_processos_filhos():
+    from app import main
+    s = main._tcp_socket("127.0.0.1", 0)
+    try:
+        assert s.get_inheritable() is False
+    finally:
+        s.close()

@@ -137,7 +137,7 @@ def _tcp_socket(host: str, port: int) -> socket.socket:
     except OSError:
         s.close()
         raise
-    s.set_inheritable(True)
+    # Sem set_inheritable: é um worker só, e filho herdeiro (git, codex, claude headless) segurava a porta em LISTEN.
     return s
 
 
