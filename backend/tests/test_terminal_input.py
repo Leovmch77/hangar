@@ -1232,6 +1232,43 @@ def test_drain_requeue_partial_end_a_end_sem_tocar_na_flag(tmp_queue, monkeypatc
     assert int(q.load()[0]["attempts"]) == 1               # bump_attempts rodou (so roda com limpou=True)
 
 
+def test_send_prompt_tui_recem_aberta_lenta_entrega_sem_falso_partial(monkeypatch):
+    """Primeira mensagem logo apos criar a sessao: o rodape de pronto ja apareceu, mas a TUI ainda
+    carrega e desenha o texto ~3s depois de digitado, e so limpa o composer ~1.4s depois do Enter.
+    Isso e entrega normal: "sent", sem C-u depois do Enter (o C-u "limpava" um composer que o Enter
+    atrasado ja tinha submetido, e a rota dizia "NAO foi enviada")."""
+    clock = [1000.0]
+    monkeypatch.setattr(terminal_input.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(terminal_input.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(terminal_input, "deliverable", lambda name: True)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda name, provider="claude": True)
+
+    texto = "analisa ai pq meu pc esta lento, oque esta consumindo agora"
+    eventos = {"digitado": None, "enter": None}
+    teclas = []
+
+    def capture(name):
+        t = clock[0]
+        if eventos["enter"] is not None and t >= eventos["enter"] + 1.4:
+            return _pane_claude(["❯ "])
+        if eventos["digitado"] is not None and t >= eventos["digitado"] + 3.2:
+            return _pane_claude([f"❯ {texto}"])
+        return _pane_claude(["❯ "])
+
+    def fake_send_keys(name, keys, literal=False):
+        teclas.append(keys)
+        if literal:
+            eventos["digitado"] = clock[0]
+        elif keys == "Enter":
+            eventos["enter"] = clock[0]
+        return True
+
+    with patch.object(terminal_input, "_capture", side_effect=capture), \
+         patch.object(terminal_input, "send_keys", side_effect=fake_send_keys):
+        assert TerminalInput().send_prompt("cc", texto) == "sent"
+    assert teclas == [texto, "Enter"]
+
+
 # --- Windows: multi-linha pelo clipboard (Alt+V) -----------------------------------------------
 #
 # Medido na winboat, 08/08/2026 (docs/medicoes-2026-08-08-windows.md): o caminho de hoje entrega 309

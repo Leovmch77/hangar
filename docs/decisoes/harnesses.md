@@ -168,6 +168,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `merged_history` lê só o relógio dele (`transcript.silent_attachment_timestamp`). Ramo novo de
   anexo no `parse_obj` entra também em `_ATTACHMENT_EVENT_TYPES`, senão some calado. Ver
   [anexos no /history](#history-de-transcript-grande-anexos-sem-bolha).
+- **A prova de entrega pela tela espera a TUI recém-aberta, não só a aquecida.** O prazo de
+  `_entrou_no_composer`/`_submeteu` (`_SUBMIT_CHECK_PRAZO`) cobre a primeira mensagem logo após
+  criar a sessão; o caminho que dá certo sai na primeira leitura, só a falha paga o prazo. Ver
+  [primeira mensagem na TUI recém-aberta](#primeira-mensagem-na-tui-recém-aberta).
+
+## Primeira mensagem na TUI recém-aberta
+
+Em 28/09/2026 a "Nova conversa" do app nativo (cria a sessão e manda o texto em seguida) dava
+"envio incompleto: o composer foi limpo e a mensagem NÃO foi enviada" toda vez, com a mensagem
+chegando e o Claude trabalhando nela. Log: `etapa=linha.submeter` — o texto seguia no composer
+1,0 s depois do Enter. Medido em sessões `cx-*` (Claude Code 2.1.283), tempo depois do rodapé de
+pronto aparecer: texto digitado leva 0,94 / 1,36 / 1,59 / 3,23 s para ser desenhado, e o composer
+leva 0,35 / 0,45 / 0,74 / 1,34 s para limpar depois do Enter. Na mesma sessão já aquecida: 0,04 s
+e 0,15–0,19 s. Com prazo de 1,0 s o envio virava `partial`; a limpeza (`_limpar_composer`) mandava
+C-u e a leitura seguinte via o composer vazio porque o Enter atrasado tinha sido processado, então
+`limpou=True` afirmava "NÃO enviada" (e o `drain` reenfileiraria, duplicando). Pela rota
+`/input`, 1 de 3 sessões novas falhou já na prova antes do Enter. Com prazo de 6,0 s (≈2× o pico),
+4 de 4 sessões novas voltaram `sent` com a mensagem entregue.
 
 ## /history de transcript grande: anexos sem bolha
 

@@ -55,14 +55,14 @@ _MULTILINE_SUBMIT_SETTLE = 0.5
 # reenvia, e o reenvio digita em cima do residuo.
 # Insistindo, o caminho que DEU CERTO sai na primeira leitura limpa (~0.15s) e so quem realmente nao
 # submeteu paga o orcamento inteiro antes de ser acusado.
-# O teto de 1.0s tem folga de ~3x sobre o pico medido de ingestao multi-linha (0.29s, os numeros estao
-# em _MULTILINE_SUBMIT_SETTLE acima). Nao e medicao do redraw pos-Enter — essa falta, e o par no
-# Windows vai medir; ate lá o prazo cobre o pior caso conhecido do vizinho.
-# ponytail: constante com folga, nao malha fechada. Se aparecer maquina lenta o suficiente pra estourar
-# 1.0s, o upgrade e ler o transcript (fonte de verdade) em vez da tela — o que o _confirm_and_drain
-# ja faz 8s depois; esta checagem existe pra ANTECIPAR o sinal, nao pra substituir aquele.
+# O prazo cobre a TUI recem-aberta, nao so a aquecida: logo depois do rodape de pronto ela ainda
+# carrega e demora segundos pra desenhar o texto e pra limpar o composer depois do Enter. Prazo
+# curto ali vira "partial" de um envio que chega, e a limpeza que vem depois ve o composer vazio
+# pelo Enter atrasado e afirma "NAO enviada". Medicao em docs/decisoes/harnesses.md.
+# ponytail: constante com folga, nao malha fechada. Se estourar de novo, o upgrade e ler o transcript
+# (fonte de verdade) em vez da tela — o que o _confirm_and_drain ja faz 8s depois.
 _SUBMIT_CHECK_INTERVALO = 0.15
-_SUBMIT_CHECK_PRAZO = 1.0
+_SUBMIT_CHECK_PRAZO = 6.0
 # Prazo da prova da colagem por clipboard (Windows). NAO herda o _SUBMIT_CHECK_PRAZO (1.0s): aquele
 # saiu do paste-buffer do tmux no Linux, e o comentario dele avisava que a medicao no Windows
 # faltava. Ela existe agora (docs/medicoes-2026-08-08-windows.md): 5 colagens de 600 linhas ate o
