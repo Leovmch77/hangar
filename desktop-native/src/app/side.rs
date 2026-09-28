@@ -741,10 +741,10 @@ const SHORTCUT_GAP: f32 = 6.;
 const SHORTCUT_MIN: f32 = 76.;
 
 /// Colunas e largura de cada bloco de atalho para a largura útil `inner`: o máximo de colunas com bloco de pelo menos
-/// `SHORTCUT_MIN`, entre 2 e 8, e os blocos dividindo a linha inteira.
+/// `SHORTCUT_MIN`, entre 2 e 5 (mais que cinco por linha fica miúdo), e os blocos dividindo a linha inteira.
 fn shortcut_grid(inner: f32) -> (usize, f32) {
     let inner = inner.max(SHORTCUT_MIN);
-    let columns = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 8);
+    let columns = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 5);
     let tile = ((inner - SHORTCUT_GAP * (columns - 1) as f32) / columns as f32).floor();
     (columns, tile)
 }
@@ -797,7 +797,7 @@ mod tests {
     fn shortcut_grid_fills_the_row_and_grows_columns_with_the_panel() {
         for inner in [150., 268., 400., 700., 2000.] {
             let (columns, tile) = shortcut_grid(inner);
-            assert!((2..=8).contains(&columns));
+            assert!((2..=5).contains(&columns));
             let used = tile * columns as f32 + SHORTCUT_GAP * (columns - 1) as f32;
             assert!(used <= inner && inner - used < columns as f32, "{inner}: {columns}x{tile}");
         }

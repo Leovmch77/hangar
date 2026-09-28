@@ -61,7 +61,8 @@
   /* auto-fit + minmax: as colunas saem da largura e as vazias somem, então poucos blocos dividem a
      linha inteira em vez de ficarem encostados à esquerda. */
   .acoes { container-type: inline-size; }
-  .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 6px; }
+  /* No máximo cinco por linha: o piso da coluna é o maior entre 88px e um quinto da linha. */
+  .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(max(88px, calc((100% - 24px) / 5)), 1fr)); gap: 6px; }
   @container (max-width: 200px) { .acoes-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .acao-bloco {
     min-width: 0; min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;

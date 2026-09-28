@@ -1015,12 +1015,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   /* Barra de acoes: uma linha so, um bloco por acao (icone em cima, rotulo curto embaixo), dentro
      de uma unica superficie — le como toolbar do painel, nao como quatro cards. Quantas couberem
      (o Atividade so existe as vezes): auto-fit divide a linha por igual. */
-  /* Flex, não grid de colunas iguais: o divisor antes do Rodar é um item de 1px, e num
-     `repeat(auto-fit, 1fr)` ele ganharia a largura de um botão. */
-  /* Só os internos (no máximo cinco): os customizados foram para a seção "Ações", que quebra linha.
-     O overflow fica como rede, caso a fileira não caiba numa largura extrema. */
+  /* Grade que quebra linha, no máximo cinco por linha (pedido do dono: fileira única cortava os
+     rótulos). O piso de cada coluna é o maior entre 72px e um quinto da linha, então com espaço
+     sobrando a grade para em cinco e os blocos crescem; sem espaço, desce para a linha de baixo. O
+     divisor antes do Rodar sai da grade: numa grade ele ocuparia a célula de um botão. */
   .ctx-actions {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(max(72px, calc((100% - 8px) / 5)), 1fr));
     align-items: stretch;
     gap: 2px;
     margin: 0 var(--space-4) var(--space-3);
@@ -1028,12 +1029,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     background: var(--surface-inset);
-    overflow-x: auto;
-    scrollbar-width: thin;
   }
   /* min-width é o PISO: poucas ações dividem a linha por igual (ellipsis no rótulo, como sempre);
      muitas param de encolher no piso e a fileira rola. */
-  .ctx-actions > .ctx-action { flex: 1 1 0; min-width: 44px; }
+  .ctx-actions > .acao-divisor { display: none; }
   .acao-divisor {
     flex: 0 0 1px;
     align-self: center;
@@ -1066,12 +1065,16 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .ctx-action:active { background: var(--bg-hover); }
   .ctx-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .ctx-action svg { flex-shrink: 0; width: 18px; height: 18px; }
+  /* Rótulo inteiro em até duas linhas; só corta palavra que sozinha não cabe. */
   .ctx-action span {
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    line-height: 1;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    text-align: center;
+    line-height: 1.2;
   }
 
   .animated-icon { display: inline-flex; flex-shrink: 0; }
@@ -1214,9 +1217,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .agora-linha span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   @container (max-width: 380px) {
-    .ctx-actions { flex-wrap: wrap; }
-    .ctx-actions > .ctx-action { flex: 1 1 calc(50% - 2px); }
-    .acao-divisor { display: none; }
 
     .agora-topo {
       display: grid;
