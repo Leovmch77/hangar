@@ -4333,7 +4333,7 @@
   "native_shortcut_run": "Rodar",
   "native_shortcut_busy": "O atalho espera o envio atual terminar.",
   "native_shortcut_started": "Rodando \"{label}\"…",
-  "native_shortcut_launched": "\"{label}\" está rodando numa aba do terminal da sessão.",
+  "native_shortcut_launched": "\"{label}\" está rodando.",
   "native_shortcut_shell_unsupported": "Este servidor não roda atalhos de shell.",
   "native_shortcuts_transfer": "Importar ou exportar atalhos",
   "native_shortcuts_import": "Importar",

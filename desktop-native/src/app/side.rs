@@ -70,13 +70,16 @@ pub(super) struct Side {
     /// Terminais dos atalhos shell por nome de sessão, e a aba que o painel deve trazer pra frente.
     pub(super) shortcut_terms: HashMap<String, Vec<super::terminal::ShortcutTerm>>,
     pub(super) shortcut_focus: HashMap<String, String>,
+    /// Aviso "rodando" do último atalho por sessão: (id do terminal, texto). Sai quando o terminal fecha ou morre.
+    pub(super) shortcut_running: HashMap<String, (String, String)>,
+    pub(super) shortcut_recheck: HashMap<String, std::time::Instant>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         Self { open: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
             files: None, diff: None, reloading: HashSet::new(), git: None,
-            shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new() }
+            shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
 
@@ -89,6 +92,8 @@ impl Side {
         self.reloading.clear();
         self.shortcut_terms.clear();
         self.shortcut_focus.clear();
+        self.shortcut_running.clear();
+        self.shortcut_recheck.clear();
     }
 
     pub fn on_select(&mut self) {
@@ -373,11 +378,15 @@ impl Hangar {
             }
             Reply::Shell(label) => {
                 // A aba do terminal vai pra frente (sem abrir o painel); a que falhou também, com a saída inteira.
-                let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str);
-                self.side.shortcut_focus.insert(key.name.clone(), terminal.map(str::to_owned).unwrap_or_default());
+                let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str).map(str::to_owned);
+                self.side.shortcut_focus.insert(key.name.clone(), terminal.clone().unwrap_or_default());
                 self.refresh_shortcut_terms(&key.name);
                 let note = match result {
-                    Ok(_) => (tr("shortcut_launched").replace("{label}", &label), false),
+                    Ok(_) => {
+                        let text = tr("shortcut_launched").replace("{label}", &label);
+                        if let Some(id) = terminal { self.side.shortcut_running.insert(key.name.clone(), (id, text.clone())); }
+                        (text, false)
+                    }
                     Err(error) if matches!(error.status, Some(404 | 405)) => (tr("shortcut_shell_unsupported"), true),
                     Err(error) => (format!("{label}: {}", Self::failure(&error)), true),
                 };

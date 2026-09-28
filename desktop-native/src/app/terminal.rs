@@ -167,6 +167,20 @@ impl Hangar {
         });
     }
 
+    /// Releitura adiada da lista, no máximo uma a cada 5 s por sessão.
+    fn recheck_shortcut_terms(&mut self, name: &str) {
+        let now = std::time::Instant::now();
+        if self.side.shortcut_recheck.get(name).is_some_and(|at| now.duration_since(*at) < std::time::Duration::from_secs(5)) { return; }
+        self.side.shortcut_recheck.insert(name.to_owned(), now);
+        let Some(api) = self.api.clone() else { return; };
+        let (connection, tx, name) = (self.connection, self.tx.clone(), name.to_owned());
+        self.runtime.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let result = api.read(&name, &["shortcut-terminals"], &[], 10).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Terminal(Reply::List(name, result)) }).await;
+        });
+    }
+
     /// Sessão aberta tem terminal de atalho? É o que mostra o botão de terminal numa sessão sem pane.
     pub(super) fn has_shortcut_terms(&self) -> bool {
         self.selected.as_ref().and_then(|s| self.side.shortcut_terms.get(&s.name)).is_some_and(|list| !list.is_empty())
@@ -315,7 +329,18 @@ impl Hangar {
             Reply::List(name, result) => {
                 // Falha de leitura mantém a lista anterior: o botão não some por um GET perdido.
                 let Ok(value) = result else { return; };
-                self.side.shortcut_terms.insert(name.clone(), parse_shortcut_terms(&value));
+                let terms = parse_shortcut_terms(&value);
+                // Terminal do atalho fechado ou morto: o aviso "rodando" dele deixa de ser verdade.
+                if let Some((id, text)) = self.side.shortcut_running.get(&name).cloned() {
+                    if !terms.iter().any(|t| t.id == id && t.alive) {
+                        self.side.shortcut_running.remove(&name);
+                        self.action_feedback.retain(|key, note| !(key.name == name && note.0 == text));
+                    } else {
+                        // O programa pode fechar sozinho (a janela do RDP): relê a lista enquanto o aviso estiver na tela.
+                        self.recheck_shortcut_terms(&name);
+                    }
+                }
+                self.side.shortcut_terms.insert(name.clone(), terms);
                 if self.terminal.as_ref().is_some_and(|panel| panel.session == name) { self.sync_shortcut_tabs(); }
             }
             Reply::Closed(name, result) => {

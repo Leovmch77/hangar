@@ -4333,7 +4333,7 @@
   "native_shortcut_run": "Run",
   "native_shortcut_busy": "The shortcut waits for the current send to finish.",
   "native_shortcut_started": "Running \"{label}\"…",
-  "native_shortcut_launched": "\"{label}\" is running in a tab of the session terminal.",
+  "native_shortcut_launched": "\"{label}\" is running.",
   "native_shortcut_shell_unsupported": "This server does not run shell shortcuts.",
   "native_shortcuts_transfer": "Import or export shortcuts",
   "native_shortcuts_import": "Import",
