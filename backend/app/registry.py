@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
-from app import atomico, diag, tmux
+from app import atomico, diag, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
@@ -2208,6 +2208,7 @@ class SessionRegistry:
             PromptQueue(old).rename(new)
             ThenLink(old).rename(new)
             rename_pair(old, new)
+            shortcut_terminals.rename_owner(old, new)
             return
         if codex_sessions.exists(old):
             from app.adapters import get_adapter
@@ -2260,6 +2261,8 @@ class SessionRegistry:
         # seria sequestrado pelo rename. `is_hidden` mira `={nome}:` (exato), entao o rename so
         # roda quando a sessao existe de verdade -- sem risco do prefix-match do tmux pegar
         # `term-<velho>-2`.
+        # Terminais de atalho seguem a conversa pelo dono gravado neles (nao pelo nome tmux).
+        shortcut_terminals.rename_owner(old, new)
         alvo = f"term-{old}"
         if tmux.is_hidden(alvo) and not tmux.rename_session(alvo, f"term-{new}"):
             _log.info("rename: %r nao pode virar %r (nome ja ocupado?) — matando o shell escondido",
@@ -2298,6 +2301,7 @@ class SessionRegistry:
             except Exception:
                 headless_sessions.restaurar(meta, preserve_process=True)
                 raise
+            shortcut_terminals.close_all(name)
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()
@@ -2314,6 +2318,7 @@ class SessionRegistry:
                 raise KillFailed(name)
             get_adapter("codex").close_sync(name)
             self._kill_hidden_shell(name)
+            shortcut_terminals.close_all(name)
             codex_sessions.delete(name)
             self._forget(name)
             PromptQueue(name).clear()
@@ -2334,6 +2339,7 @@ class SessionRegistry:
         if not tmux.kill_session(name):
             raise KillFailed(name)
         self._kill_hidden_shell(name)
+        shortcut_terminals.close_all(name)
         self._forget(name)  # cache invalido: nome pode ser reusado por outra sessao depois
         # Sessao morta nao deixa fila pra tras: senao acumula orfaos e uma futura sessao de mesmo
         # nome herdaria essas entradas como bubble-fantasma (mesmo motivo do clear no create()).

@@ -737,7 +737,14 @@ async def term_ws_route(ws: WebSocket, name: str):
     # Sem a trava de loopback do /api/pi/inbox: aquela existe porque quem liga la e uma extensao
     # LOCAL. Aqui o celular vai precisar entrar de fora na fase 2.
     from app import termsock
-    await termsock.term_ws(ws, name)
+    # `?shortcut=<id>`: terminal de atalho DESTA sessao. O alvo tmux sai do dono conferido no
+    # servidor, nunca da query — o id sozinho nao alcanca terminal de outra conversa.
+    ident = ws.query_params.get("shortcut")
+    resolve = None
+    if ident is not None:
+        from app import shortcut_terminals
+        resolve = lambda: shortcut_terminals.find(name, ident)   # noqa: E731
+    await termsock.term_ws(ws, name, resolve)
 
 
 @app.websocket("/api/sessions/{name}/nav-remoto")
@@ -6295,37 +6302,55 @@ def _shortcut_env() -> dict[str, str]:
 @app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
           status_code=202)
 def shortcut_shell(name: str, body: ShortcutShellBody):
-    # Atalho "abrir programa" da fileira: dispara-e-esquece no cwd da sessao. Sem pane, sem
-    # captura de saida — comando cuja saida interessa tem casa melhor (o run ou o terminal).
-    # Filho desprendido pra matar/reiniciar o backend nao levar o programa junto. start_new_session
-    # so existe no POSIX (no Windows e ignorado calado); la vale grupo proprio e sem console,
-    # em valor literal porque subprocess.CREATE_* so existe no Windows.
+    # Atalho "shell" da fileira, no cwd da sessao. No POSIX cada execucao ganha um terminal
+    # escondido proprio (app/shortcut_terminals.py): a pessoa ve a saida numa aba do painel e fecha
+    # quando quiser. O tmux sobrevive a restart do backend, entao o programa tambem.
     cwd = _session_cwd(name)
     command = body.command.strip()
     if not command:
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
-    detach = ({"creationflags": 0x00000200 | 0x08000000} if os.name == "nt"
-              else {"start_new_session": True})
-    # No POSIX o comando roda no shell do usuario ($SHELL -c), nao no /bin/sh: atalho tem que
-    # fazer o mesmo que digitar no terminal, e funcao/alias do fish (ex.: `delphi-vm`) nao
-    # existe pro sh — dava 127 calado, com a saida no DEVNULL.
     if os.name == "nt":
-        argv, use_shell = command, True
-    else:
-        argv, use_shell = [os.environ.get("SHELL") or "/bin/sh", "-c", command], False
-    # Saida num arquivo anonimo: so e lida se o comando morrer com erro na janela abaixo, e some
-    # sozinha quando o ultimo dono fecha (o programa longo segue escrevendo nela sem ninguem ler).
+        return _shortcut_shell_detached(name, cwd, command)
+    from app import shortcut_terminals
+    env = {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
+    term = shortcut_terminals.start(name, cwd, command, body.label or "", env)
+    if term is None:
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", "tmux recusou criar o terminal"))
+    # Sem o texto do comando: ele pode carregar credencial.
+    _log.info("shortcut-shell: sessao=%s terminal=%s", name, term["tmux"])
+    public = {"id": term["id"], "label": term["label"]}
+    # Quem clicou precisa saber que falhou. Comando que erra (nao existe, sintaxe, VPN fora)
+    # morre em segundos; o que ainda roda depois da janela e programa longo e conta como ok.
+    limit = time.monotonic() + _SHORTCUT_FAIL_WINDOW
+    alive, code = True, None
+    while True:
+        alive, code = shortcut_terminals.status(term["tmux"])
+        if not alive or time.monotonic() >= limit:
+            break
+        time.sleep(0.1)
+    if alive or code == 0:
+        return {"ok": True, "terminal": {**public, "alive": alive, "exit_code": code}}
+    tail = _shortcut_output_tail(shortcut_terminals.output(term["tmux"]).encode())
+    _log.info("shortcut-shell: sessao=%s terminal=%s saiu com %s", name, term["tmux"], code)
+    msg = f"o comando saiu com o código {code}" + (f": {tail}" if tail else "")
+    # O terminal fica: a aba mostra a saida inteira que o aviso resume.
+    raise HTTPException(422, detail=erro("erro_shortcut_falhou", msg, codigo=code, saida=tail,
+                                         terminal={**public, "alive": False, "exit_code": code}))
+
+
+def _shortcut_shell_detached(name: str, cwd: str, command: str):
+    # Windows: sem tmux de verdade (psmux), o atalho segue dispara-e-esquece, desprendido do
+    # backend (grupo proprio e sem console, em valor literal porque subprocess.CREATE_* so existe
+    # la). Saida num arquivo anonimo, lida so se o comando morrer com erro na janela abaixo.
+    detach = {"creationflags": 0x00000200 | 0x08000000}
     with tempfile.TemporaryFile() as out:
         try:
-            proc = subprocess.Popen(argv, shell=use_shell, cwd=cwd, env=_shortcut_env(),
+            proc = subprocess.Popen(command, shell=True, cwd=cwd, env=_shortcut_env(),
                                     stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, **detach)
         except OSError as e:
             raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
-        # Sem o texto do comando: ele pode carregar credencial.
         _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
-        # Quem clicou precisa saber que falhou. Comando que erra (nao existe, sintaxe, VPN fora)
-        # morre em segundos; o que ainda roda depois da janela e programa longo e conta como ok.
         try:
             code = proc.wait(timeout=_SHORTCUT_FAIL_WINDOW)
         except subprocess.TimeoutExpired:
@@ -6337,6 +6362,29 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
     _log.info("shortcut-shell: sessao=%s pid=%s saiu com %s", name, proc.pid, code)
     msg = f"o comando saiu com o código {code}" + (f": {tail}" if tail else "")
     raise HTTPException(422, detail=erro("erro_shortcut_falhou", msg, codigo=code, saida=tail))
+
+
+@app.get("/api/sessions/{name}/shortcut-terminals", dependencies=[Depends(require_auth)])
+def shortcut_terminals_list(name: str):
+    # Lista vazia no Windows: la o atalho nao cria terminal (ver _shortcut_shell_detached).
+    if os.name == "nt":
+        return {"terminals": []}
+    from app import shortcut_terminals
+    return {"terminals": shortcut_terminals.list_for(name)}
+
+
+# POST, nao DELETE: o proxy da frente so deixa passar GET/POST.
+@app.post("/api/sessions/{name}/shortcut-terminals/{ident}/close", dependencies=[Depends(require_auth)])
+def shortcut_terminal_close(name: str, ident: str):
+    from app import shortcut_terminals
+    closed = None if os.name == "nt" else shortcut_terminals.close(name, ident)
+    if closed is None:
+        raise HTTPException(404, detail=erro("erro_shortcut_terminal_inexistente",
+                                             "terminal do atalho nao encontrado"))
+    if not closed:
+        raise HTTPException(500, detail=erro("erro_shortcut_terminal_fechar",
+                                             "o terminal do atalho nao fechou"))
+    return {"ok": True}
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----

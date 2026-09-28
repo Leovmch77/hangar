@@ -611,3 +611,5 @@ class CustomRunnersBody(BaseModel):
 
 class ShortcutShellBody(BaseModel):
     command: str = Field(max_length=200_000)
+    # Rotulo da aba do terminal do atalho; vazio cai no proprio comando.
+    label: str = Field(default="", max_length=200)

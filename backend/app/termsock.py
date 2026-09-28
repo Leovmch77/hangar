@@ -333,7 +333,7 @@ def _desmontar(s: "Sessao") -> None:
     tmux._run(["tmux", "setw", "-t", f"={s.name}", "window-size", "latest"])
 
 
-async def term_ws(ws: WebSocket, name: str) -> None:
+async def term_ws(ws: WebSocket, name: str, resolve=None) -> None:
     """Porta de entrada compartilhada -> motor da plataforma.
 
     DOIS MOTORES, nao um compartilhado. O que muda entre os sistemas nao e detalhe de chamada: no
@@ -344,18 +344,19 @@ async def term_ws(ws: WebSocket, name: str) -> None:
     O que e MESMO nos dois — autenticacao, Origin, sessao existe, clamp de cols/rows — fica aqui em
     cima, uma vez so: e o caminho que abre um shell completo, e duplica-lo seria duplicar a trava.
     """
-    prep = await _porta_de_entrada(ws, name)
+    prep = await _porta_de_entrada(ws, name, resolve)
     if prep is None:
         return                                   # ja fechou o ws com o codigo certo
-    cols, rows = prep
+    cols, rows, name = prep
     if _PTY_POSIX:
         await _motor_posix(ws, name, cols, rows)
     else:
         await _motor_windows(ws, name, cols, rows)
 
 
-async def _porta_de_entrada(ws: WebSocket, name: str) -> Optional[tuple[int, int]]:
-    """Trava e validacao, iguais nos dois motores. Devolve (cols, rows) ou None se ja recusou."""
+async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[tuple[int, int, str]]:
+    """Trava e validacao, iguais nos dois motores. Devolve (cols, rows, alvo tmux) ou None se ja
+    recusou. `resolve` troca o alvo (terminal de atalho da sessao) e so roda depois do token."""
     host = ws.client.host if ws.client else ""
     agora = time.time()
     tok = ws.query_params.get("token", "")
@@ -381,6 +382,11 @@ async def _porta_de_entrada(ws: WebSocket, name: str) -> Optional[tuple[int, int
                      origem, ws.headers.get("host"), settings.public_url)
         await ws.close(code=1008)
         return
+    if resolve is not None:
+        name = await asyncio.to_thread(resolve)
+        if not name:
+            await ws.close(code=1008, reason="terminal nao existe")
+            return None
     if not await asyncio.to_thread(tmux.has_session, name):
         await ws.close(code=1008, reason="sessao nao existe")
         return
@@ -391,7 +397,7 @@ async def _porta_de_entrada(ws: WebSocket, name: str) -> Optional[tuple[int, int
     except ValueError:
         await ws.close(code=1008, reason="cols/rows invalidos")
         return None
-    return cols, rows
+    return cols, rows, name
 
 
 async def _motor_posix(ws: WebSocket, name: str, cols: int, rows: int) -> None:
