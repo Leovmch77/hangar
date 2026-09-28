@@ -65,7 +65,7 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::Object(fields) => fields.get("code").and_then(Value::as_str)
             // A busca depende de params.msg; sem transportar parâmetros, conserva a mensagem.
             .filter(|code| (code.starts_with("erro_arq_") && *code != "erro_arq_busca_falhou") || code.starts_with("erro_git_folder_")
-                || code.starts_with("erro_convite_"))
+                || code.starts_with("erro_convite_") || *code == "erro_fora_do_convite")
             .or_else(|| fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty()))
             .or_else(|| fields.get("code").and_then(Value::as_str)).map(str::to_owned),
         // Recusa de validação (422): uma lista de `{msg}`, uma por campo.
@@ -470,6 +470,12 @@ mod tests {
         assert_eq!(share_blocked(&empty), Some((vec![], "https://login.tailscale.com/admin".into())));
         assert_eq!(share_blocked(&json!({"detail": {"code": "erro_outro", "params": {"missing": ["a"], "fix": "b"}}})), None);
         assert_eq!(share_blocked(&json!({"detail": "texto"})), None);
+    }
+
+    #[test]
+    fn guest_out_of_scope_keeps_its_code() {
+        let body = json!({"detail": {"code": "erro_fora_do_convite", "params": {}, "msg": "fora da sessao compartilhada"}});
+        assert_eq!(failure_detail(Some(body), 403), "erro_fora_do_convite");
     }
 
     #[test]

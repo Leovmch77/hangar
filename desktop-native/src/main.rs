@@ -115,7 +115,10 @@ fn log_panics() {
 fn main() {
     log_panics();
     let (url_tx, links) = match single_instance::claim(single_instance::invite_arg(std::env::args())) {
-        single_instance::Claim::Forwarded => return,
+        single_instance::Claim::Forwarded => {
+            eprintln!("Hangar já está aberto; o pedido foi entregue à janela existente.");
+            return;
+        }
         single_instance::Claim::Primary(tx, rx) => (tx, rx),
     };
     let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime"));

@@ -725,6 +725,8 @@ impl Hangar {
 
     fn failure(error: &Failure) -> String {
         match error.status {
+            // Rota fora da sessão do convite não é login perdido: o convidado segue autenticado.
+            Some(403) if error.detail == "erro_fora_do_convite" => tr_shared("erro_fora_do_convite", &[]),
             Some(401 | 403) => tr("auth_error"), Some(410) => tr_shared("convite_encerrado", &[]), Some(429) => tr("rate_limited"),
             _ if error.uncertain => tr("delivery_uncertain"),
             _ => tr(&error.detail),
