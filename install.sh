@@ -463,6 +463,22 @@ if [ -d shell ] && [ -f shell/package.json ]; then
   fi
 fi
 
+# ── App nativo (desktop-native, release native-latest) ───────────────────────
+# É a janela padrão. O Electron continua instalado ao lado, como "Hangar (Electron)": o navegador
+# embutido do hangar-preview mora nele. Falhar aqui não derruba a instalação — a janela vira o Electron.
+say "App nativo"
+if ./scripts/install-native.sh; then
+  if [ -x "$HOME/.local/bin/hangar-native" ]; then
+    ok "app nativo instalado (lançador \"Hangar\")"
+    if [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
+      ABRIR_NATIVO=1
+    fi
+  fi
+else
+  falta "o app nativo não instalou — a janela segue sendo o Electron (tente: ./scripts/install-native.sh)"
+  echo "##HANGAR-AVISO## o app nativo nao instalou; a janela segue sendo o Electron"
+fi
+
 # ── 5/8 Wrappers do claude e do codex ────────────────────────────────────────
 # Sem eles um `claude` que VOCÊ abre no terminal é invisível pro app: sem --session-id o backend
 # não sabe qual transcript é daquela sessão, e fora do tmux não há pane pra ler estado nem
@@ -721,7 +737,7 @@ if [ ${#PROBLEMAS[@]} -gt 0 ]; then
 else
   say "Pronto"
 fi
-if [ "${ABRIR_SHELL:-0}" = 1 ]; then
+if [ "${ABRIR_NATIVO:-0}" = 1 ] || [ "${ABRIR_SHELL:-0}" = 1 ]; then
   # O passo 7/8 acabou de reiniciar o backend; abrir antes da porta voltar mostra a tela de
   # "não consegui carregar a interface" (medido: serviço active às :53, janela aberta no mesmo
   # segundo, porta ainda fechada). Espera até 20s; sem serviço a porta nunca abre e aí a janela
@@ -731,7 +747,11 @@ if [ "${ABRIR_SHELL:-0}" = 1 ]; then
     sleep 0.5
   done
   # Destacado do instalador (setsid + sem stdio): fechar o terminal não leva a janela junto.
-  (cd shell && setsid ./node_modules/electron/dist/electron main.cjs </dev/null >/dev/null 2>&1 &)
+  if [ "${ABRIR_NATIVO:-0}" = 1 ]; then
+    setsid "$HOME/.local/bin/hangar-native" </dev/null >/dev/null 2>&1 &
+  else
+    (cd shell && setsid ./node_modules/electron/dist/electron main.cjs </dev/null >/dev/null 2>&1 &)
+  fi
   ok "janela do Hangar aberta"
 fi
 URL_FIM=$(grep '^CP_PUBLIC_URL=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)

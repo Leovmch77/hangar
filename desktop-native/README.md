@@ -1,6 +1,6 @@
-# Hangar Native (experimental)
+# Hangar Native
 
-Cliente desktop em Rust/GPUI para o backend Hangar **já em execução**. Mostra a lista de sessões, histórico e conversa ao vivo; permite enviar texto e interromper a geração na sessão escolhida. Não substitui o aplicativo Electron padrão. Perguntas e aprovações pendentes ainda são respondidas no Electron.
+Cliente desktop em Rust/GPUI para o backend Hangar **já em execução**. É a janela padrão do Hangar: o `install.sh`/`install.ps1` o baixam da release `native-latest` no pacote da máquina (`scripts/install-native.sh` ou `scripts/install-native.ps1`, que também servem sozinhos) e ele se atualiza pelo botão do topo ou pela página Sobre. O app Electron continua instalado ao lado, como "Hangar (Electron)", porque o navegador embutido do `hangar-preview` mora nele.
 
 ## Compilar e abrir
 
