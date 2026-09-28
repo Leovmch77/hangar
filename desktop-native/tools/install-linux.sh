@@ -16,6 +16,8 @@ binary_target="$HOME/.local/bin/hangar-native"
 desktop_target="$data_dir/applications/com.hangar.native.desktop"
 install -Dm755 "$binary" "$binary_target"
 install -Dm644 "$icon" "$data_dir/icons/hicolor/512x512/apps/com.hangar.native.png"
+# Um icon-theme.cache antigo nessa pasta esconde o ícone novo: o menu mostra o de "não encontrado".
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -f -t "$data_dir/icons/hicolor" >/dev/null 2>&1 || true; fi
 mkdir -p "$(dirname "$desktop_target")"
 printf '[Desktop Entry]\nType=Application\nName=Hangar\nExec="%s"\nIcon=com.hangar.native\nTerminal=false\nCategories=Development;\nStartupWMClass=com.hangar.native\n' "$binary_target" > "$desktop_target"
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$data_dir/applications"; fi
