@@ -123,3 +123,41 @@ def test_session_life_prefere_chave_do_sidecar(monkeypatch):
     assert share_life.session_life("h") == "k:abc"
     assert share_life.session_life("t") == "t:1700000000"
     assert share_life.session_life("nada") is None
+
+
+def test_sweep_pergunta_ao_tmux_sem_segurar_o_lock():
+    import threading
+    share_store.create("a", "t:1", now=1000.0)
+    livres = []
+
+    def alive(session, life):
+        # RLock: só outra thread prova que o lock está solto (a mesma reentraria).
+        def tenta():
+            ok = share_store._lock.acquire(blocking=False)
+            livres.append(ok)
+            if ok:
+                share_store._lock.release()
+        t = threading.Thread(target=tenta)
+        t.start()
+        t.join()
+        return True
+
+    share_store.sweep(alive, now=1001.0)
+    assert livres == [True]
+
+
+def test_sweep_nao_revoga_convite_que_mudou_durante_a_consulta():
+    s, _ = share_store.create("a", "t:1", now=1000.0)
+
+    def alive(session, life):
+        share_store.set_life("a", "t:2")     # troca de modo terminou no meio da consulta
+        return False
+
+    assert share_store.sweep(alive, now=1001.0) == 0
+    assert share_store._load()[s.id].revoked_at is None
+
+
+def test_has_any():
+    assert share_store.has_any() is False
+    share_store.create("a", "t:1", now=1000.0)
+    assert share_store.has_any() is True

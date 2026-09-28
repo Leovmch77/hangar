@@ -189,3 +189,20 @@ def test_stream_da_sessao_do_convidado_nao_conta_como_app_do_dono(guest_client, 
     with patch("app.api.registry.list", return_value=infos):
         guest_client.get("/api/sessions/cc/events", headers={"Authorization": "Bearer g"})
     assert chamadas == [False]
+
+
+async def test_stream_da_lista_acompanha_a_sessao_renomeada(monkeypatch):
+    # rename() muda o registro em memória; o stream aberto lê o nome a cada envio.
+    fake = _FakeRefresher(json.dumps([{"name": "cc"}, {"name": "novo"}]))
+    monkeypatch.setattr(sse, "_list_refresher", fake)
+    share = dataclasses.replace(REDEEMED)
+    gen = sse.list_events(ping_secs=60, only=share)
+    ev = await asyncio.wait_for(gen.__anext__(), 2)
+    assert [s["name"] for s in json.loads(ev["data"])] == ["cc"]
+    share.session = "novo"
+    async with fake._cond:
+        fake.version += 1
+        fake._cond.notify_all()
+    ev = await asyncio.wait_for(gen.__anext__(), 2)
+    await gen.aclose()
+    assert [s["name"] for s in json.loads(ev["data"])] == ["novo"]

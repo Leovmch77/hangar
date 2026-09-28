@@ -213,6 +213,13 @@ def set_life(session: str, life: str | None) -> None:
             _save()
 
 
+def has_any() -> bool:
+    # Revogado fica guardado por dias, então "tem registro" cobre o funnel a desligar depois do
+    # último revoke; quem nunca compartilhou não tem nenhum.
+    with _lock:
+        return bool(_load())
+
+
 def has_active(now: float | None = None) -> bool:
     now = time.time() if now is None else now
     with _lock:
@@ -228,11 +235,18 @@ def active_sessions(now: float | None = None) -> set[str]:
 def sweep(alive: Callable[[str, str], bool], now: float | None = None) -> int:
     """Revoga convites de sessão que acabou ou renasceu com o mesmo nome; apaga os velhos."""
     now = time.time() if now is None else now
+    # `alive` chama o tmux (segundos por convite): fora do lock, que o loop de eventos também toma.
+    with _lock:
+        candidatos = {x.id: (x.session, x.life) for x in _load().values()
+                      if x.revoked_at is None and x.active(now)}
+    mortos = {k for k, (session, life) in candidatos.items() if not alive(session, life)}
     with _lock:
         estado = _load()
         revogados = 0
-        for x in estado.values():
-            if x.revoked_at is None and x.active(now) and not alive(x.session, x.life):
+        for k in mortos:
+            x = estado.get(k)
+            # Mudou no meio (trocou de modo, foi revogado): a leitura de fora do lock não vale.
+            if x is not None and x.revoked_at is None and (x.session, x.life) == candidatos[k]:
                 x.revoked_at = now
                 revogados += 1
         velhos = [k for k, x in estado.items()

@@ -275,3 +275,59 @@ def test_porta_do_convite_ocupada_nao_derruba_o_boot(monkeypatch):
         assert main._guest_socket() is None
     finally:
         ocupada.close()
+
+
+def test_vida_em_cache_de_antes_da_troca_de_modo_nao_da_410():
+    # O pedido do próprio convidado deixou a vida ANTIGA no cache; a troca terminou e o convite
+    # já aponta para a nova. Comparar cache velho com registro novo não pode encerrar o convite.
+    import time
+    share_gate._life_cache["cc"] = (time.monotonic(), "L0")
+    r = _guest_client().get("/api/sessions/cc/history", headers=GUEST)
+    assert r.status_code == 200
+
+
+def test_vida_diferente_de_verdade_continua_dando_410(monkeypatch):
+    import time
+    share_gate._life_cache["cc"] = (time.monotonic(), "L0")
+    monkeypatch.setattr(share_gate, "session_life", lambda name: "OUTRA-VIDA")
+    assert _guest_client().get("/api/sessions/cc/history", headers=GUEST).status_code == 410
+
+
+@pytest.mark.parametrize("nome,reuse", [("nt", False), ("posix", True)])
+def test_socket_principal_so_reusa_endereco_fora_do_windows(monkeypatch, nome, reuse):
+    # Windows: SO_REUSEADDR deixaria um segundo backend abrir a 8765 ao lado do primeiro.
+    # `main.os` trocado inteiro: patchar `os.name` levaria o pathlib junto.
+    import types
+    from app import main
+    opts = []
+
+    class Fake:
+        def __init__(self, *a):
+            pass
+
+        def setsockopt(self, *a):
+            opts.append(a)
+
+        def bind(self, addr):
+            pass
+
+        def set_inheritable(self, v):
+            pass
+
+    monkeypatch.setattr(main, "os", types.SimpleNamespace(name=nome))
+    monkeypatch.setattr(main, "socket", types.SimpleNamespace(
+        socket=Fake, AF_INET=2, AF_INET6=10, SOCK_STREAM=1, SOL_SOCKET=1, SO_REUSEADDR=2))
+    main._tcp_socket("127.0.0.1", 8765)
+    assert bool(opts) is reuse
+
+
+def test_socket_principal_ocupado_levanta_oserror():
+    from app import main
+    ocupada = socket.socket()
+    ocupada.bind(("127.0.0.1", 0))
+    ocupada.listen()
+    try:
+        with pytest.raises(OSError):
+            main._tcp_socket("127.0.0.1", ocupada.getsockname()[1])
+    finally:
+        ocupada.close()

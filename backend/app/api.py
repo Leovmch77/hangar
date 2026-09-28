@@ -3184,7 +3184,7 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
-    return EventSourceResponse(list_events(only=guest.session if guest else None), send_timeout=30)
+    return EventSourceResponse(list_events(only=guest), send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])

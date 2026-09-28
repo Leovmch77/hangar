@@ -181,3 +181,11 @@ def test_modo_execucao_marca_e_atualiza_a_vida(cli, syncs, monkeypatch):
     monkeypatch.setattr(share_api, "session_life", lambda n: "k:novo")
     share_api._sweep_once()
     assert share_store.has_active() is True
+
+
+def test_sync_do_tunel_nao_toca_o_tailscale_de_quem_nunca_compartilhou(syncs):
+    share_api.sync_tunnel()
+    assert syncs == []
+    share_store.create("proj", "t:1")
+    share_api.sync_tunnel()
+    assert syncs == [True]

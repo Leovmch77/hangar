@@ -25,7 +25,10 @@ changing_mode: set[str] = set()
 
 def sync_tunnel() -> None:
     # Revogar nunca pode falhar por causa do túnel: o registro já saiu, e o laço periódico
-    # tenta de novo em um minuto.
+    # tenta de novo em um minuto. Quem nunca compartilhou não passa pelo tailscale: o funnel
+    # da 8443 pode ser dele.
+    if not share_store.has_any():
+        return
     try:
         share_tunnel.sync(share_store.has_active())
     except share_tunnel.TunnelError as e:

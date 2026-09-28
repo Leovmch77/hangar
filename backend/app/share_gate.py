@@ -66,10 +66,10 @@ def guest_allowed(method: str, path: str, session: str) -> bool:
     return not rest or rest[0] not in _BLOCKED
 
 
-def _life(name: str) -> str | None:
+def _life(name: str, fresh: bool = False) -> str | None:
     now = time.monotonic()
     hit = _life_cache.get(name)
-    if hit and now - hit[0] < _LIFE_TTL:
+    if hit and not fresh and now - hit[0] < _LIFE_TTL:
         return hit[1]
     life = session_life(name)
     _life_cache[name] = (now, life)
@@ -84,6 +84,10 @@ def _verdict(share) -> str:
     if share.session in share_api.changing_mode:
         return _UNSURE
     life = _life(share.session)
+    if life is not None and life != share.life:
+        # O cache pode ser de antes de a troca de modo mover o convite para a vida nova: só
+        # encerra depois de reler sem cache, senão quem trocou o modo leva 410.
+        life = _life(share.session, fresh=True)
     if life is None:
         return _ENDED if share_api.confirmed_absent(share.session) else _UNSURE
     return _OK if life == share.life else _ENDED

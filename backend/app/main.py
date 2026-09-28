@@ -126,21 +126,30 @@ def _passos_pendentes_da_versao() -> None:
         print(f"[hangar] AVISO: passo de atualizacao falhou ({e}); o app segue subindo")
 
 
-def _guest_socket() -> socket.socket | None:
-    # Só loopback: quem expõe é o Funnel. Porta ocupada (outra instância nesta máquina) não
-    # derruba o boot; só este backend fica sem compartilhar sessão.
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def _tcp_socket(host: str, port: int) -> socket.socket:
+    # No Windows SO_REUSEADDR deixa um segundo processo abrir a MESMA porta ao lado do primeiro
+    # (o `bind_socket` do uvicorn o liga sempre), então só o POSIX o recebe.
+    s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
     try:
         if os.name != "nt":
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("127.0.0.1", GUEST_PORT))
-    except OSError as e:
+        s.bind((host, port))
+    except OSError:
         s.close()
+        raise
+    s.set_inheritable(True)
+    return s
+
+
+def _guest_socket() -> socket.socket | None:
+    # Só loopback: quem expõe é o Funnel. Porta ocupada (outra instância nesta máquina) não
+    # derruba o boot; só este backend fica sem compartilhar sessão.
+    try:
+        return _tcp_socket("127.0.0.1", GUEST_PORT)
+    except OSError as e:
         print(f"[hangar] AVISO: porta do convite {GUEST_PORT} indisponível ({e}); "
               "compartilhar sessão fica desligado")
         return None
-    s.set_inheritable(True)
-    return s
 
 
 def main():
@@ -203,9 +212,14 @@ def main():
         return
     # Um Server com dois sockets: um lifespan só (dois Server rodariam watchers e hooks em dobro).
     config = uvicorn.Config("app.api:app", **kw)
+    try:
+        main_sock = _tcp_socket(bind, settings.port)
+    except OSError as e:
+        print(f"[hangar] ERRO: porta {settings.port} indisponível ({e})", file=sys.stderr)
+        sys.exit(1)
     guest = _guest_socket()
     server = uvicorn.Server(config)
-    server.run(sockets=[config.bind_socket()] + ([guest] if guest else []))
+    server.run(sockets=[main_sock] + ([guest] if guest else []))
     if not server.started:
         sys.exit(3)                              # mesmo código do uvicorn.run: o systemd reinicia
 

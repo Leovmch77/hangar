@@ -499,14 +499,15 @@ class _ListRefresher:
 _list_refresher = _ListRefresher()
 
 
-async def list_events(ping_secs: float = 8.0, only: str | None = None):
+async def list_events(ping_secs: float = 8.0, only=None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
     segue e o front ve a lista velha (stale > desconectado).
 
     `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
-    do dono (`nav`) e nao conta como app do dono aberto."""
+    do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o registro do convite
+    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar."""
     queue: asyncio.Queue = asyncio.Queue()
     cond = _list_refresher.acquire()
     started = time.monotonic()
@@ -527,7 +528,8 @@ async def list_events(ping_secs: float = 8.0, only: str | None = None):
             elif data is not None:
                 if only is not None:
                     data = json.dumps([guest_safe(x) for x in json.loads(data)
-                                       if x.get("name") == only], ensure_ascii=False)
+                                       if x.get("name") == (only if isinstance(only, str)
+                                                            else only.session)], ensure_ascii=False)
                 await queue.put(("sessions", data))
 
     async def ping_loop():
