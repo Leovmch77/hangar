@@ -21,9 +21,9 @@ Then, specific to this skill:
    the launch waits.
 2. The orchestration plan is stamped (`orq plan-check <plan> --repo <repo> --stamp`) and states
    `Paralelo:`, `Integração:`, the additive files and the a-priori estimate.
-3. Triage mode, from the user's word only: `--jev on` and `--regex on` when the user turned them
-   on; otherwise both stay `shadow` (the timeline records `would_drop` and the arbiter wakes
-   anyway).
+3. Triage mode: `--jev on --regex shadow`, unless the user said otherwise. The Jev was measured
+   with zero wrong drops; the regex drops only after the user checks its `would_drop` lines in
+   the first run and turns it on (`--regex on`).
 
 Done when the baseline is recorded, the table has the rows above, and the triage mode is chosen.
 
@@ -55,7 +55,7 @@ Done when your sidecar carries the `gid` and the `orq` mark.
 3. Init and start:
 
    ```bash
-   orq init --auto --jev <shadow|on> --regex <shadow|on> --arbiter <you> --repo <repo> \
+   orq init --auto --jev on --regex shadow --arbiter <you> --repo <repo> \
      --contract <regras path> --plan <user plan dir>/<user plan stem>.orq.md --untouchable <glob>…
    orq event execucao_inicio --plano <plan> --branch <branch> --gid <gid>
    orq advance
@@ -94,6 +94,6 @@ Done when the first wave's executors hold the ball. From here on, `arbitro.md`.
 
 ## Integration held by a conflict
 
-The orchestrator stops integrating a Task whose merge conflicted outside the additive files.
-Once you resolved it (`arbitro.md`, conflict row) and the Task's commit is merged on the branch,
-unblock it by hand: `orq event integrada --task <N> --commit <HEAD>`, then `orq advance`.
+The orchestrator stops integrating a Task whose merge conflicted outside the additive files, and
+the arbiter opens its correction round (`arbitro.md`, conflict row). The round's `orq commit`
+reopens the integration by itself: never merge nor record `integrada` by hand.

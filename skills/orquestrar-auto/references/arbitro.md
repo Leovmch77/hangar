@@ -29,7 +29,7 @@ you, or the user holds a decision.
 |---|---|
 | `[painel: orquestrador <gid>]` a step with no rule (`regra sem saída`) | read the named Task's journal; decide as `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table, the closest row; unforeseen → ask the user, decision ready |
 | a session's message the triage kept (Jev asked, the regex did not drop it, or triage is in `shadow`) | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table. The timeline shows it `would_drop` and it needed you → `orq log "triage: would_drop needed the arbiter — <why>"` |
-| merge conflict in a file the plan did not declare additive (`T<a> conflitou com T<b> em <file>`) | `~/.claude/skills/orquestrar/references/paralelo-worktree.md`, "Integration": the losing Task gets a correction round on the merged base, same executor. New worktree from the merged tip, `orq event task_inicio` again for that Task, replacement kick-off (below) with the approved diff's path as reference. Its new commit merged → `orq event integrada --task <N> --commit <HEAD>` (`lancamento.md`, "Integration held by a conflict") |
+| merge conflict in a file the plan did not declare additive (`T<a> conflitou com T<b> em <file>`) | `~/.claude/skills/orquestrar/references/paralelo-worktree.md`, "Integration": the losing Task gets a correction round on the merged base, same executor. Its worktree `<repo>-<gid>-t<N>` and branch `<branch>-<gid>-t<N>` already exist: the round's worktree is `<repo>-<gid>-t<N>-r2` on branch `<branch>-<gid>-t<N>-r2`, from the merged tip. Then `orq event task_inicio` again for that Task and the replacement kick-off (below), with the old branch's commit as the approved diff. The round's `orq commit` reopens the integration by itself: never merge nor record `integrada` by hand |
 | DEVOLVIDO | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4, first row; wake the user only by `~/.claude/skills/orquestrar/references/arbitro-vigia.md`, "Deciding vs waking the user" |
 | a Task past 2× its estimate (time or code rounds) | stop and ask the user: continue, replan (`~/.claude/skills/orquestrar/references/replanejar.md`) or cut. The rest of the run goes on |
 | red base: the plan's checks red on the branch with no Task to return it to | the user decides: fix first (a fix Task through the gate) or record a known failure the review ignores |
@@ -61,8 +61,14 @@ there.
 write each into the orchestration plan, stamp it again (`orq plan-check … --stamp`), then
 `orq advance` releases them.
 
-Done when the branch is in the user's hands, the retrospective delivered,
-`orq event execucao_fim --resultado <result>` logged and the watchdog disarmed.
+Before `execucao_fim`, each Task worktree of the run (`git worktree list`, `<repo>-<gid>-t*`):
+trail check first — `grep -rl "<worktree path>" ~/.local/bin <agent config dirs> <service unit
+dir>` — then `git worktree remove <path>`. A hit in the trail → the user, not the remove. The
+`<branch>-<gid>-t*` branches stay: deleting a branch is the user's call; list them in the closing
+line.
+
+Done when the branch is in the user's hands, the retrospective delivered, no worktree of the run
+left, `orq event execucao_fim --resultado <result>` logged and the watchdog disarmed.
 
 ## Succession
 
