@@ -1524,8 +1524,33 @@ Publica-Tailscale
 
 # -- 6/8 Acesso pelo celular -------------------------------------------------
 Titulo '6/8 Acesso pelo celular'
+# Escutar em todas as interfaces e o que deixa os clientes usarem a rede local antes do Tailscale.
+# 0.0.0.0 e nunca 'auto': 'auto' tira o loopback, e o `tailscale serve` fala com localhost. IP
+# escolhido a mao fica; so o padrao so-local e trocado. Vale no -Update.
+if (-not $SoChecar) {
+    $bindAtual = ''
+    if (Test-Path $envFile) {
+        $linhaBind = Select-String -Path $envFile -Pattern '^CP_LAN_BIND_IP=(.*)$' | Select-Object -Last 1
+        if ($linhaBind) { $bindAtual = ($linhaBind.Matches[0].Groups[1].Value -split '#')[0].Trim().Trim('"', "'") }
+    }
+    if ($bindAtual -in @('', '127.0.0.1', 'localhost', '::1')) {
+        Set-EnvKey -Chave 'CP_LAN_BIND_IP' -Valor '0.0.0.0'
+        Ok 'CP_LAN_BIND_IP=0.0.0.0 gravado - a rede local alcanca o backend (o token continua exigido)'
+    }
+}
 if ($Update) {
-    Ok 'pulado no -Update (firewall e Tailscale pedem elevacao; nada aqui muda com git pull)'
+    Ok 'Tailscale pulado no -Update (pede elevacao; nada aqui muda com git pull)'
+    # Sem terminal nao ha quem aceite UAC: so cria a regra se ja estiver como admin.
+    if (Get-NetFirewallRule -DisplayName 'hangar 8765' -ErrorAction SilentlyContinue) {
+        Ok 'porta 8765 ja liberada no firewall'
+    } elseif (EhAdmin) {
+        New-NetFirewallRule -DisplayName 'hangar 8765' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private -ErrorAction SilentlyContinue | Out-Null
+        if (Get-NetFirewallRule -DisplayName 'hangar 8765' -ErrorAction SilentlyContinue) { Ok 'porta 8765 liberada (perfil Private)' }
+        else { Falta 'nao consegui liberar a porta 8765 no firewall' }
+    } else {
+        Falta 'porta 8765 fechada no firewall - a rede local nao alcanca esta maquina. Num PowerShell como admin:'
+        Nota 'New-NetFirewallRule -DisplayName "hangar 8765" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private'
+    }
 } else {
 Write-Host '  Duas formas, e elas nao competem:'
 Write-Host '    LAN      - celular no mesmo Wi-Fi. Precisa liberar as portas no firewall.'
@@ -1545,10 +1570,6 @@ $regras = @($portasFw | ForEach-Object {
 })
 if ($regras.Count -eq $portasFw.Count) {
     Ok "porta(s) $listaFw ja liberada(s) no firewall"
-} elseif ($script:cpPublicUrl -and -not $Avancado) {
-    # Com Tailscale publicado o celular entra pelo tunel e o serve entrega em localhost: o firewall
-    # nao ve porta nenhuma. Perguntar aqui era o que empurrava a pessoa pro instalador como admin.
-    Ok 'firewall nao precisa: o acesso e pelo Tailscale (so a LAN sem Tailscale precisa da porta aberta)'
 } elseif (Pergunte "  Liberar a(s) porta(s) $listaFw no firewall pra rede LOCAL?") {
     # Profile Private: rede de casa. Em rede Publica (cafe, aeroporto) segue fechado,
     # que e o comportamento que se quer sem precisar lembrar de desligar nada.
@@ -1614,6 +1635,7 @@ if (-not $script:cpPublicUrl) {
         }
         Nota 'O token do .env vira a UNICA tranca: quem estiver no Wi-Fi e souber o token roda comando como voce.'
     } else {
+        Set-EnvKey -Chave 'CP_LAN_BIND_IP' -Valor '127.0.0.1'
         Ok 'ficando so em 127.0.0.1'
     }
 }

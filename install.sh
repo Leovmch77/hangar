@@ -503,6 +503,18 @@ fi
 
 # ── 6/8 Acesso pelo celular ──────────────────────────────────────────────────
 say "6/8 Acesso pelo celular"
+# Escutar em todas as interfaces é o que deixa os clientes usarem a rede local antes do Tailscale.
+# 0.0.0.0 e nunca 'auto': 'auto' tira o loopback, e o `tailscale serve` fala com localhost. Valor
+# escolhido à mão (um IP específico) fica; só o padrão só-local é trocado. Vale no --update.
+BIND_ATUAL=$(grep -E '^CP_LAN_BIND_IP=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- | cut -d'#' -f1 | tr -d " \"'" || true)
+if [ "$CHECK" = 0 ] && { [ -z "$BIND_ATUAL" ] || [ "$BIND_ATUAL" = 127.0.0.1 ] || [ "$BIND_ATUAL" = localhost ] || [ "$BIND_ATUAL" = ::1 ]; }; then
+  grep -q '^CP_LAN_BIND_IP=' backend/.env 2>/dev/null && sed -i.bak '/^CP_LAN_BIND_IP=/d' backend/.env && rm -f backend/.env.bak
+  [ -n "$(tail -c1 backend/.env 2>/dev/null)" ] && echo >> backend/.env   # .env sem quebra no fim
+  printf 'CP_LAN_BIND_IP=0.0.0.0\n' >> backend/.env
+  ok "CP_LAN_BIND_IP=0.0.0.0 gravado — a rede local alcança o backend (o token continua exigido)"
+fi
+grep -qE '^CP_LAN_BIND_IP=' backend/.env 2>/dev/null || [ "$CHECK" = 1 ] \
+  || fail "CP_LAN_BIND_IP não foi gravado em backend/.env"
 if [ "$UPDATE" = 1 ]; then
   ok "pulado no --update (firewall e Tailscale pedem senha; nada aqui muda com git pull)"
 else
