@@ -6,6 +6,9 @@ use crate::appearance::SideTab;
 
 const MIN_WIDTH: f32 = 240.;
 const MAX_WIDTH: f32 = 480.;
+// Navegador, como no web: abaixo de 400 uma página não serve, e nasce com 42% da janela.
+const BROWSER_MIN: f32 = 400.;
+const BROWSER_SHARE: f32 = 0.42;
 // Caixa solta com o painel aberto: 10 de margem em cada lado da janela e os dois vãos de 10 entre as três caixas.
 const FLOATING_GAPS: f32 = 40.;
 // Largura que a conversa mantém; abaixo disso o painel sai de cena em vez de espremer o texto.
@@ -64,7 +67,10 @@ pub(super) struct Side {
     /// Painel aberto e nenhuma aba escolhida desde então: o corpo mostra o menu de ferramentas.
     pub(super) menu: bool,
     width: f32,
-    drag: Option<(f32, f32)>,
+    /// A aba Navegador tem largura própria, como no web: nasce larga e cresce além do teto das outras abas.
+    browser_width: Option<f32>,
+    /// (x do início, largura do início, espaço que sobra para o painel).
+    drag: Option<(f32, f32, f32)>,
     shortcuts: Option<Result<Vec<Shortcut>, String>>,
     // Custo do Codex: o último valor fica visível quando uma leitura falha; o erro vai junto.
     cost: Option<(SessionKey, Option<Cost>, Option<String>)>,
@@ -89,7 +95,7 @@ pub(super) struct Side {
 
 impl Default for Side {
     fn default() -> Self {
-        Self { open: true, menu: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
+        Self { open: true, menu: true, width: 300., browser_width: None, drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
             files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
@@ -131,9 +137,17 @@ impl Side {
 
     // Largura efetiva: nunca tira da conversa menos que CHAT_MIN; sem espaço, o painel não aparece.
     // Com as abas no topo não há barra lateral ocupando a esquerda.
-    pub(super) fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32) -> Option<f32> {
-        let room = viewport - sidebar_width - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. };
-        (room >= MIN_WIDTH).then(|| self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room))
+    pub(super) fn fitted(&self, viewport: f32, floating: bool, sidebar_width: f32, browser: bool) -> Option<f32> {
+        let room = Self::room(viewport, floating, sidebar_width);
+        (room >= MIN_WIDTH).then(|| if browser {
+            self.browser_width.unwrap_or((viewport * BROWSER_SHARE).round()).max(BROWSER_MIN).min(room)
+        } else {
+            self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room)
+        })
+    }
+
+    fn room(viewport: f32, floating: bool, sidebar_width: f32) -> f32 {
+        viewport - sidebar_width - CHAT_MIN - if floating { FLOATING_GAPS } else { 0. }
     }
 }
 
@@ -225,9 +239,12 @@ impl Hangar {
     }
 
     pub(super) fn drag_side(&mut self, x: f32, pressed: bool, cx: &mut Context<Self>) {
-        let Some((start_x, start_width)) = self.side.drag else { return; };
+        let Some((start_x, start_width, room)) = self.side.drag else { return; };
         if !pressed { self.side.drag = None; cx.notify(); return; }
-        self.side.width = (start_width + start_x - x).clamp(MIN_WIDTH, MAX_WIDTH);
+        let wanted = start_width + start_x - x;
+        // Preso ao espaço de agora: arrastar além dele não acumula largura que depois teria de ser desfeita.
+        if self.side_browser() { self.side.browser_width = Some(wanted.clamp(BROWSER_MIN.min(room), room.max(MIN_WIDTH))); }
+        else { self.side.width = wanted.clamp(MIN_WIDTH, MAX_WIDTH); }
         cx.notify();
     }
 
@@ -716,14 +733,19 @@ impl Hangar {
     pub(super) fn side_shown(&self, window: &Window) -> bool {
         let sidebar = self.nav_width();
         self.side.open && self.selected.is_some()
-            && self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), sidebar).is_some()
+            && self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), sidebar, self.side_browser()).is_some()
+    }
+
+    /// A aba Navegador está no corpo do painel (e ele usa a largura própria dela).
+    pub(super) fn side_browser(&self) -> bool {
+        !self.side_menu_shown() && !self.subagent_tab_open() && self.side_tab() == SideTab::Browser
     }
 
     /// Largura do painel aberto nesta janela; `None` quando está fechado ou não cabe.
     pub(super) fn side_width(&self, window: &Window) -> Option<f32> {
         let viewport = f32::from(window.viewport_size().width);
         let sidebar = self.nav_width();
-        self.side.fitted(viewport, theme::is_floating(), sidebar).filter(|_| self.side.open && self.selected.is_some())
+        self.side.fitted(viewport, theme::is_floating(), sidebar, self.side_browser()).filter(|_| self.side.open && self.selected.is_some())
     }
 
     /// A leitura de custo acompanha o painel visível; roda no desenho da janela, que acontece mesmo com o painel fechado.
@@ -782,8 +804,9 @@ impl Hangar {
         let queued = if readable { self.queued_count() } else { 0 };
         let handle = div().id("side-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
             .hover(|el| el.bg(theme::accent_dim()))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                this.side.drag = Some((f32::from(event.position.x), width));
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                let room = Side::room(f32::from(window.viewport_size().width), theme::is_floating(), this.nav_width());
+                this.side.drag = Some((f32::from(event.position.x), width, room));
                 cx.stop_propagation();
                 cx.notify();
             }));
@@ -856,19 +879,24 @@ mod tests {
     fn panel_never_squeezes_the_chat() {
         let side = Side::default();
         let sidebar = appearance::Navigation::Sidebar.sidebar_width();
-        assert_eq!(side.fitted(1180., false, sidebar), Some(300.));
-        assert_eq!(side.fitted(1000., false, sidebar), None);
-        assert_eq!(side.fitted(1080., false, sidebar), Some(256.));
+        assert_eq!(side.fitted(1180., false, sidebar, false), Some(300.));
+        assert_eq!(side.fitted(1000., false, sidebar, false), None);
+        assert_eq!(side.fitted(1080., false, sidebar, false), Some(256.));
         // Na caixa solta as margens também saem da conversa.
-        assert_eq!(side.fitted(1080., true, sidebar), None);
-        assert_eq!(side.fitted(1120., true, sidebar), Some(256.));
+        assert_eq!(side.fitted(1080., true, sidebar, false), None);
+        assert_eq!(side.fitted(1120., true, sidebar, false), Some(256.));
         // Com as abas no topo a largura da barra lateral volta para a conversa e o painel.
-        assert_eq!(side.fitted(1000., false, appearance::Navigation::Tabs.sidebar_width()), Some(300.));
+        assert_eq!(side.fitted(1000., false, appearance::Navigation::Tabs.sidebar_width(), false), Some(300.));
         let conversations = appearance::Navigation::Conversations.sidebar_width();
-        assert_eq!(side.fitted(1052., false, conversations), Some(256.));
-        assert_eq!(side.fitted(1036., false, conversations), Some(240.));
-        assert_eq!(side.fitted(1035., false, conversations), None);
-        assert_eq!(side.fitted(1092., true, conversations), Some(256.));
+        assert_eq!(side.fitted(1052., false, conversations, false), Some(256.));
+        assert_eq!(side.fitted(1036., false, conversations, false), Some(240.));
+        assert_eq!(side.fitted(1035., false, conversations, false), None);
+        assert_eq!(side.fitted(1092., true, conversations, false), Some(256.));
+        // Navegador: nasce com 42% da janela e passa do teto das outras abas, sem tirar da conversa o mínimo dela.
+        let tabs = appearance::Navigation::Tabs.sidebar_width();
+        assert_eq!(side.fitted(1920., false, tabs, true), Some(806.));
+        assert_eq!(side.fitted(1000., false, tabs, true), Some(420.));
+        assert_eq!(side.fitted(1100., false, sidebar, true), Some(276.));
     }
 
     #[test]

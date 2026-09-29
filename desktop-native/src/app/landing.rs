@@ -114,7 +114,7 @@ impl Hangar {
     /// sessão abre.
     pub(super) fn opening_side_width(&self, window: &Window) -> Option<f32> {
         if self.opening.is_none() || self.selected.is_some() || !self.side.open { return None; }
-        self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), self.nav_width())
+        self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), self.nav_width(), false)
     }
 
     /// O painel ainda sem a sessão: o cabeçalho dele e linhas carregando.
