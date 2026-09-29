@@ -794,10 +794,10 @@ export async function postOrqPapeis(
 }
 
 /**
- * Põe a PRÓPRIA sessão pra tocar a orquestração como árbitra (quem planejou vira árbitro — é o que
- * a skill manda). 409 com motivo legível quando falta grupo, papéis ou plano.
+ * Põe a PRÓPRIA sessão pra tocar a orquestração, a partir do passo que falta (`fase`: planner,
+ * prepare, launch ou arbiter). 409 só quando o recado não chega à sessão.
  */
-export async function comecarOrq(name: string): Promise<{ ok: boolean; entregue: boolean; plano: string }> {
+export async function comecarOrq(name: string): Promise<{ ok: boolean; entregue: boolean; fase: string; plano: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/orq/comecar`, { method: 'POST', body: JSON.stringify({}) });
 }
 
