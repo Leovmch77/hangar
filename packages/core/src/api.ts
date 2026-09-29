@@ -246,6 +246,8 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   let res: Response;
   try {
     res = await fetch(url, {
+      // O navegador guarda o 410 do convite antigo e o devolveria ao convite novo do mesmo dono.
+      ...(convite ? { cache: 'no-store' as const } : {}),
       ...init,
       headers: {
         'Content-Type': 'application/json',

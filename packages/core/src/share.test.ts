@@ -128,6 +128,12 @@ describe('trava do servidor de convite em apiFetchRes', () => {
     await checkInviteForServer({ ...CONVITE, invite: false });
     expect(onInviteEnded).not.toHaveBeenCalled();
   });
+  it('pergunta ao convite nunca aceita resposta guardada pelo navegador', async () => {
+    ambiente({});
+    const f = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, []));
+    await checkInviteForServer(CONVITE);
+    expect(f).toHaveBeenCalledWith('https://dono.ts.net:8443/api/sessions', expect.objectContaining({ cache: 'no-store' }));
+  });
   it('503 de um servidor de convite NÃO encerra: é indisponibilidade passageira', async () => {
     const onInviteEnded = vi.fn();
     ambiente({ onInviteEnded });
