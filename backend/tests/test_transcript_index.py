@@ -1,5 +1,8 @@
 """Índice FTS5 dos transcripts: escape da consulta, ingestão incremental e paridade do Arquivo."""
 import json
+import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -50,10 +53,66 @@ def _achar(idx, q):
 
 
 def test_fts_query_trata_texto_como_literal():
-    assert ti.fts_query(["foo"]) == '"foo"*'
-    assert ti.fts_query(['a"b', "or"]) == '"a""b"* AND "or"*'
-    assert ti.fts_query(["-", "..."]) is None
-    assert ti.fts_query(["near(", "x"]) == '"near("* AND "x"*'
+    assert ti.fts_query(["foo"]) == '"foo"'
+    assert ti.fts_query(['a"bc', "and"]) == '"a""bc" AND "and"'
+    assert ti.fts_query(["near(", "xyz"]) == '"near(" AND "xyz"'
+    # Menos de 3 caracteres não forma trigrama: quem chama usa o rg.
+    assert ti.fts_query(["tk", "40213"]) is None
+    assert ti.fts_query([]) is None
+
+
+def test_acha_substring_no_meio_da_palavra(base, idx):
+    _escrever(base, _linha("deu Error no TKT-40213abc", "u1"))
+    idx.update(providers=False)
+    for q in ("rror", "40213", "t-402"):
+        assert [h.event_id for h in _achar(idx, q)] == ["u1"], q
+
+
+def test_termo_curto_cai_no_rg(base, idx, monkeypatch):
+    chamado = []
+    monkeypatch.setattr(search, "_search_rg", lambda t, live, limit: chamado.append(t) or [])
+    idx.update(providers=False)
+    _achar(idx, "tk 40213")
+    assert chamado == [["tk", "40213"]]
+
+
+def test_erro_de_sqlite_no_meio_nao_deixa_linhas_parciais(base, idx, monkeypatch):
+    # Linhas já inseridas e o UPDATE do offset falha: nada pode sobrar para um commit posterior.
+    _escrever(base, *[_linha(f"agulha {i}", f"u{i}") for i in range(3)])
+    real = idx._conn
+
+    class Quebra:
+        def __getattr__(self, k):
+            return getattr(real, k)
+
+        def __enter__(self):
+            return real.__enter__()
+
+        def __exit__(self, *a):
+            return real.__exit__(*a)
+
+        def execute(self, sql, *a):
+            if sql.startswith("UPDATE files SET size"):
+                raise sqlite3.OperationalError("disco cheio")
+            return real.execute(sql, *a)
+
+    idx._conn = Quebra()
+    idx.update(providers=False)
+    idx._conn = real
+    assert real.execute("SELECT count(*) FROM msg").fetchone()[0] == 0
+    idx.update(providers=False)
+    assert sorted(h.event_id for h in _achar(idx, "agulha")) == ["u0", "u1", "u2"]
+
+
+def test_busca_nao_espera_passada_do_indice(base, idx, monkeypatch):
+    idx.update(providers=False)
+    idx.last_pass = 0.0
+    solta = threading.Event()
+    monkeypatch.setattr(idx, "_update", lambda providers: solta.wait(5))
+    t0 = time.monotonic()
+    search.search("agulha", {})
+    assert time.monotonic() - t0 < 1
+    solta.set()
 
 
 @pytest.mark.parametrize("q", ['"', 'AND', 'OR NOT', 'foo*', 'NEAR(a b)', 'col:x', '^a', '(', "'"])

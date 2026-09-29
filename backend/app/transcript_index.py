@@ -10,7 +10,6 @@ Pi/Kimi/Codex, que é o que o Arquivo relia a cada listagem."""
 import json
 import logging
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -22,7 +21,7 @@ from app.transcript import parse_obj
 
 _log = logging.getLogger("hangar.transcript_index")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # Mesmo teto do `rg -M` da busca antiga: linha maior é saída de ferramenta ou contexto injetado.
 _MAX_LINE_BYTES = 40000
 _HEAD_LINES = 60        # o que archive._head_info lê
@@ -31,8 +30,12 @@ _PER_FILE = 3
 _INTERVAL = 45.0
 # Boot já paga sondas de CLI e a coleta de custos; a construção entra depois, e a busca usa o rg até lá.
 _START_DELAY = 90.0
-# Busca com índice mais velho que isto roda uma passada antes: a conversa de agora tem de aparecer.
+# Busca com índice mais velho que isto dispara uma passada em segundo plano: a conversa de agora
+# aparece na busca seguinte, e a desta tecla não espera o glob de todas as contas.
 _STALE_ON_SEARCH = 5.0
+# Mensagens casadas mais novas consideradas antes do teto por arquivo: termo comum não ordena tudo.
+# ponytail: conversa com milhares de ocorrências ocupa o lote todo e sobram poucas conversas.
+_CANDIDATES = 2000
 
 _SCHEMA = """
 CREATE TABLE files(
@@ -60,7 +63,7 @@ CREATE TABLE msg(
 );
 CREATE INDEX msg_file ON msg(file_id);
 CREATE VIRTUAL TABLE msg_fts USING fts5(
-    text, content='msg', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+    text, content='msg', content_rowid='id', tokenize='trigram remove_diacritics 1');
 CREATE TRIGGER msg_ai AFTER INSERT ON msg BEGIN
     INSERT INTO msg_fts(rowid, text) VALUES (new.id, new.text);
 END;
@@ -79,10 +82,12 @@ def default_path() -> Optional[Path]:
 
 
 def fts_query(terms: list[str]) -> Optional[str]:
-    """Cada termo vira uma frase com prefixo (`"pm 17785"*`): o texto do usuário nunca é sintaxe do
-    FTS5. Termo sem letra nem dígito não gera token e sai; sem nenhum, None (quem chama usa o rg)."""
-    parts = ['"' + t.replace('"', '""') + '"*' for t in terms if re.search(r"[^\W_]", t)]
-    return " AND ".join(parts) or None
+    """Cada termo vira uma frase (`"rror"`), que no trigram casa como substring, igual ao rg: o
+    texto do usuário nunca é sintaxe do FTS5. Termo com menos de 3 caracteres não forma trigrama;
+    aí None e quem chama usa o rg."""
+    if not terms or any(len(t) < 3 for t in terms):
+        return None
+    return " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -137,8 +142,14 @@ class Index:
             self._update(providers)
 
     def update_if_stale(self) -> None:
-        # Não espera a passada em segundo plano: se ela está rodando, o índice já está quase em dia.
-        if time.monotonic() - self.last_pass < _STALE_ON_SEARCH or not self._lock.acquire(blocking=False):
+        """Nunca bloqueia quem busca: dispara uma passada numa thread e volta na hora. Uma por vez:
+        a thread que não pega a trava sai sem fazer nada."""
+        if time.monotonic() - self.last_pass < _STALE_ON_SEARCH or self._lock.locked():
+            return
+        threading.Thread(target=self._stale_pass, name="transcript-index-search", daemon=True).start()
+
+    def _stale_pass(self) -> None:
+        if not self._lock.acquire(blocking=False):
             return
         try:
             self._update(providers=False)
@@ -173,16 +184,22 @@ class Index:
             conn.execute("DELETE FROM files WHERE id=?", (fid,))
         conn.commit()
         prefixos = _internal_prefixes()
-        # Mais recente primeiro: numa construção interrompida, o que falta é o mais velho.
-        for p, (proj, sid, st) in sorted(atuais.items(), key=lambda kv: kv[1][2].st_mtime_ns, reverse=True):
+        # Mais velho primeiro: o id da mensagem acompanha a recência e a busca pega as mais novas
+        # pelo rowid, sem ordenar todas as casadas. Até a construção terminar a busca usa o rg.
+        for p, (proj, sid, st) in sorted(atuais.items(), key=lambda kv: kv[1][2].st_mtime_ns):
             antigo = conhecidos.get(p)
             if antigo and (antigo[1], antigo[2], antigo[3]) == (st.st_size, st.st_mtime_ns, st.st_ino):
                 continue
+            # Um arquivo = uma transação: linhas e offset entram juntos ou nenhum entra; sobra
+            # parcial com offset velho viraria mensagem duplicada na passada seguinte.
             try:
-                self._ingest(p, proj, sid, st, antigo, prefixos)
+                with conn:
+                    self._ingest(p, proj, sid, st, antigo, prefixos)
             except OSError:
-                conn.rollback()
                 _log.debug("índice: não consegui ler %s", p, exc_info=True)
+            except Exception:
+                _log.warning("índice: ingestão de %s falhou; fica para a próxima passada", p,
+                             exc_info=True)
         if not self.ready:
             conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('built', ?)", (str(time.time()),))
             conn.commit()
@@ -249,7 +266,6 @@ class Index:
         conn.execute("UPDATE files SET size=?, mtime_ns=?, offset=?, lines=?, cwd=?, preview=?, "
                      "head_done=?, internal=? WHERE id=?",
                      (st.st_size, st.st_mtime_ns, offset, lines, cwd, preview, head_done, internal, fid))
-        conn.commit()
         time.sleep(0)   # cede o GIL entre arquivos durante a construção
 
     # ── leitura ──────────────────────────────────────────────────────────────────
@@ -267,16 +283,21 @@ class Index:
         self.update_if_stale()
         conn = self._reader()
         try:
+            # O lote `c` sai do FTS em rowid decrescente e para no LIMIT: o teto por arquivo e a
+            # ordem final rodam sobre ele, não sobre todas as mensagens que casam.
             return conn.execute("""
-                WITH h AS (
-                    SELECT m.id, f.mtime_ns,
-                           ROW_NUMBER() OVER (PARTITION BY m.file_id ORDER BY m.id) AS rn
+                WITH c AS (
+                    SELECT m.id, m.file_id, f.mtime_ns
                     FROM msg_fts JOIN msg m ON m.id = msg_fts.rowid JOIN files f ON f.id = m.file_id
-                    WHERE msg_fts MATCH ? AND COALESCE(f.internal, 0) = 0)
+                    WHERE msg_fts MATCH ? AND COALESCE(f.internal, 0) = 0
+                    ORDER BY msg_fts.rowid DESC LIMIT ?),
+                h AS (
+                    SELECT id, mtime_ns, ROW_NUMBER() OVER (PARTITION BY file_id ORDER BY id) AS rn
+                    FROM c)
                 SELECT f.path, f.project, f.session_id, f.cwd, m.text, m.role, m.event_id, m.ts
                 FROM h JOIN msg m ON m.id = h.id JOIN files f ON f.id = m.file_id
                 WHERE h.rn <= ? ORDER BY h.mtime_ns DESC, m.id LIMIT ?""",
-                (q, _PER_FILE, limit)).fetchall()
+                (q, _CANDIDATES, _PER_FILE, limit)).fetchall()
         finally:
             conn.close()
 
