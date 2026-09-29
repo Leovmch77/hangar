@@ -169,6 +169,13 @@ def test_feed_classifica_pelos_prefixos_e_pula_linha_torta(tmp_path):
     assert len({i["id"] for i in r["feed"]}) == len(r["feed"])
 
 
+def test_feed_mostra_o_descarte_da_regex_como_descartado(tmp_path):
+    _registro(tmp_path, (AGORA, "(regex: no action) T4 rodada 2 entregue ao revisor"))
+    r = orq_conductor.feed(tmp_path)
+    assert [(i["kind"], i["text"], i["task"]) for i in r["feed"]] == [
+        ("dropped", "T4 rodada 2 entregue ao revisor", 4)]
+
+
 def _sombra(d: Path, *linhas) -> None:
     with (d / "jev-shadow.jsonl").open("a", encoding="utf-8") as f:
         for l in linhas:

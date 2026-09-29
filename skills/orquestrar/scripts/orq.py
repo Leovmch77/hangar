@@ -41,6 +41,7 @@ PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova":
                 "paralelo": "Paralelo", "correcao": "Correção pelo revisor", "revisao": "Revisão"}
 SUBAGENT = "subagente"   # `--par` of a Task reviewed by a subagent: a name, never a session
 CHECK_TIMEOUT_S = 900
+TIMELINE_KINDS = ("advance", "woke", "dropped", "would_drop", "failed", "notice")
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
                     "de", "para", "plano", "branch", "gid", "fase", "patch")
@@ -134,6 +135,31 @@ def journal_append(d: Path, text: str) -> None:
                      encoding="utf-8")
     with j.open("a", encoding="utf-8") as f:
         f.write(line)
+
+
+def is_auto(d: Path) -> bool:
+    """An orquestrar-auto run; any unreadable orq.json is a plain run."""
+    try:
+        cfg = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and cfg.get("auto") is True
+
+
+def timeline(d: Path, kind: str, text: str, task: int | None = None) -> None:
+    """One pt-BR line of what the orchestrator did, shown by Hangar's orq row. Auto runs only;
+    the file name carries the run so two runs never share an SSE id."""
+    if kind not in TIMELINE_KINDS:
+        raise ValueError(f"unknown timeline kind: {kind}")
+    if not is_auto(d):
+        return
+    line = json.dumps({"ts": now(), "kind": kind, "text": text, "task": task}, ensure_ascii=False)
+    try:
+        with (d / f"timeline-{d.resolve().name}.jsonl").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        # A view of the run: losing a line never costs the arbiter a message.
+        print(f"orq: timeline not written: {e}", file=sys.stderr)
 
 
 def _validator():
@@ -538,6 +564,12 @@ def cmd_init(a) -> int:
         raise OrqError(too_big)
     cfg = {"arbiter": a.arbiter, "repo": str(Path(a.repo).expanduser().resolve()),
            "contract": str(contract), "untouchables": a.untouchable}
+    if a.auto:
+        if not a.plan:
+            raise OrqError("--auto needs --plan: the orchestrator reads the Tasks from it")
+        cfg.update(auto=True, jev=a.jev or AUTO_JEV_DEFAULT, regex=a.regex or "shadow")
+    elif a.jev or a.regex:
+        raise OrqError("--jev and --regex only apply with --auto")
     if a.plan:
         plan = Path(a.plan).expanduser().resolve()
         ptext = plan_text(plan)
@@ -559,7 +591,8 @@ def cmd_init(a) -> int:
             raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
                            "started without a plan re-inits without one")
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}")
+    journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
+                      + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if a.auto else ""))
     print("ok")
     return 0
 
@@ -1141,7 +1174,7 @@ def jev_config(auto: bool = False) -> dict:
 
 
 def jev_ask(text: str, auto: bool = False) -> dict:
-    """{'choice', 'p', 'veto'} or {'error'}; never raises — any failure wakes the arbiter."""
+    """{'choice', 'p', 'veto'} or {'error'}; never raises — an error never lets the Jev drop a message."""
     c = jev_config(auto)
     if not c["key"]:
         return {"error": "no key"}
@@ -1169,17 +1202,47 @@ def triage(d: Path, text: str, alarm: bool) -> str:
     mode = os.environ.get("ORQ_JEV", "shadow")
     if mode == "off" or alarm:
         return "wake"
-    r = jev_ask(text)
-    would_drop = ("error" not in r and r["choice"] == "nothing" and r["p"] >= DISCARD_P
-                  and all(v <= VETO_P for v in r["veto"].values()))  # NaN never drops
+    r = _jev_record(d, text, mode)
+    return "drop" if mode == "on" and r["would_drop"] else "wake"
+
+
+def _jev_record(d: Path, text: str, mode: str, auto: bool = False) -> dict:
+    """Asks the Jev and appends the answer to jev-shadow.jsonl; the answer gains `would_drop`."""
+    r = jev_ask(text, auto)
+    r["would_drop"] = ("error" not in r and r["choice"] == "nothing" and r["p"] >= DISCARD_P
+                       and all(v <= VETO_P for v in r["veto"].values()))  # NaN never drops
     try:
         with (d / "jev-shadow.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": now(), "mode": mode, "alarm": alarm, "text": text[:500], **r,
-                                "would_drop": would_drop}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"ts": now(), "mode": mode, "alarm": False, "text": text[:500], **r},
+                               ensure_ascii=False) + "\n")
     except OSError as e:
         # Losing the shadow record never costs the arbiter the message.
         print(f"orq: jev-shadow.jsonl not written: {e}", file=sys.stderr)
-    return "drop" if mode == "on" and would_drop else "wake"
+    return r
+
+
+def _regex():
+    spec = importlib.util.spec_from_file_location("orq_triage", HERE / "orq_triage.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def triage_auto(d: Path, cfg: dict, text: str) -> tuple[str, str, str]:
+    """Auto runs: the Jev decides when it has a key and answers; without a key or on an error the
+    measured regex does. Returns (verdict, source, why): verdict "drop", "would_drop" (the mode
+    only records) or "wake"; source "jev" or "regex"; why names the regex category."""
+    if os.environ.get("ORQ_JEV") != "off" and jev_config(auto=True)["key"]:
+        mode = cfg.get("jev", "shadow")
+        r = _jev_record(d, text, mode, auto=True)
+        if "error" not in r:
+            if not r["would_drop"]:
+                return "wake", "jev", "jev"
+            return ("drop" if mode == "on" else "would_drop"), "jev", "jev"
+    verdict, category = _regex().decide(text)
+    if verdict == "wake":
+        return "wake", "regex", "regex"
+    return ("drop" if cfg.get("regex", "shadow") == "on" else "would_drop"), "regex", f"regex: {category}"
 
 
 def cmd_notify(a) -> int:
@@ -1189,7 +1252,17 @@ def cmd_notify(a) -> int:
         journal_append(d, f"aviso: {a.text}")
         print("journal")
         return 0
-    if not m and triage(d, a.text, a.alarm) == "drop":
+    kind, line = "woke", f"acordou o árbitro: {a.text}"
+    if not m and not a.alarm and is_auto(d):
+        verdict, source, why = triage_auto(d, config(d), a.text)
+        if verdict == "drop":
+            journal_append(d, f"({source}: no action) {a.text}")
+            timeline(d, "dropped", f"recado registrado sem acordar o árbitro ({why}): {a.text}")
+            print(f"journal ({source})")
+            return 0
+        if verdict == "would_drop":
+            kind, line = "would_drop", f"teria descartado ({why}); acordou o árbitro: {a.text}"
+    elif not m and triage(d, a.text, a.alarm) == "drop":
         journal_append(d, f"(jev: no action) {a.text}")
         print("journal (jev)")
         return 0
@@ -1200,7 +1273,9 @@ def cmd_notify(a) -> int:
         send(state(d)["arbiter"], a.text, tmux=a.alarm)
     except OrqError as e:
         journal_append(d, f"notify FAILED: {e}")
+        timeline(d, "failed", f"recado ao árbitro não entregue ({e}): {a.text}")
         raise
+    timeline(d, kind, line)
     print("arbiter woken")
     return 0
 
@@ -1222,6 +1297,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--contract", required=True)
     s.add_argument("--untouchable", action="append", default=[])
     s.add_argument("--plan", help="required, except to re-init a run started without a plan")
+    s.add_argument("--auto", action="store_true", help="an orquestrar-auto run: the orchestrator does the routine")
+    s.add_argument("--jev", choices=["on", "shadow"], help="with --auto: Jev drops (on) or only records (shadow)")
+    s.add_argument("--regex", choices=["on", "shadow"], help="with --auto and no Jev key: same, for the regex")
     s = sub.add_parser("plan-check", help="check the orchestration plan's structure; --stamp marks it prepared")
     s.add_argument("plan")
     s.add_argument("--repo", required=True)

@@ -33,6 +33,7 @@ JEV_VETO_P = 0.40
 _PREFIXES = (
     ("notify → arbiter: ", "woke", True),
     ("(jev: no action) ", "dropped", True),
+    ("(regex: no action) ", "dropped", True),
     ("aviso: ", "notice", True),
     ("alarm: ", "alarm", True),
     ("notify FAILED: ", "alarm", False),
