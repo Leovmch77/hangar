@@ -140,7 +140,7 @@ try {
     Assert ($linhaVbs -match '^WScript\.Quit .*\.Run\(.*0, True\)$') 'Lancador nao acompanha o filho ou nao propaga seu codigo de saida'
     function New-ScheduledTaskSettingsSet {
         param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries,
-            $ExecutionTimeLimit, $MultipleInstances, $RestartCount, $RestartInterval)
+            $ExecutionTimeLimit, $MultipleInstances, $RestartCount, $RestartInterval, $Priority)
         return $PSBoundParameters
     }
     $assignment = $ast.Find({ param($node)
@@ -148,6 +148,7 @@ try {
     }, $true)
     . ([scriptblock]::Create($assignment.Extent.Text))
     Assert ($cfg.MultipleInstances -eq 'IgnoreNew' -and $cfg.RestartCount -eq 3 -and $cfg.RestartInterval.TotalMinutes -eq 1) 'Agendador perdeu protecao de instancia ou recuperacao'
+    Assert ($cfg.Priority -eq 4) 'Tarefa voltou a prioridade padrao do Agendador (7, abaixo do normal)'
     $outerTry = $ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] } | Select-Object -First 1
     Reset-State
     # O pause/restore de verdade passa por Export-/Register-ScheduledTask e so o Agendador real

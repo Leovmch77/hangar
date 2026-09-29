@@ -28,6 +28,49 @@ def _porta_responde(porta: int) -> bool:
         return False
 
 
+def _tempo_resposta(porta: int) -> float | None:
+    """Segundos até a primeira resposta HTTP; None = aceita conexão mas não responde em 10 s."""
+    import time
+    import urllib.error
+    import urllib.request
+    inicio = time.monotonic()
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{porta}/", timeout=10).close()
+    except urllib.error.HTTPError:
+        pass  # 401/404 também é resposta: o processo está atendendo
+    except OSError:
+        return None
+    return time.monotonic() - inicio
+
+
+def _reinicios_automaticos(dias: int = 7) -> list[str] | None:
+    """Carimbo de cada reinício feito pelo vigia no período; None = fonte ilegível."""
+    import datetime as dt
+    if _WIN:
+        # A vigia do Windows (scripts/windows-tasks.ps1) escreve "<data ISO> vigia: ... sem resposta HTTP".
+        from app.log_paths import base
+        try:
+            texto = (base() / "privado" / "hangar-vigia.log").read_text(encoding="utf-8-sig", errors="replace")
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return None
+        corte = (dt.datetime.now() - dt.timedelta(days=dias)).isoformat(timespec="seconds")
+        return [l.split(" ", 1)[0] for l in texto.splitlines()
+                if "hangar-backend sem resposta HTTP" in l and l[:19] >= corte]
+    import subprocess
+    try:
+        r = subprocess.run(["journalctl", "--user", "-u", "hangar-backend", "--since", f"-{dias}d",
+                            "-o", "short-iso", "--no-pager", "-q"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    # O systemd só escreve esta frase quando o Restart=on-failure reergue o processo.
+    return [l.split(" ", 1)[0] for l in r.stdout.splitlines() if "Scheduled restart job" in l]
+
+
 def _claude_logado() -> bool:
     import app.conta_estado as ce
     try:
@@ -69,10 +112,30 @@ def diagnosticar(s) -> list[Linha]:
     else:
         linhas.append(Linha("ok", "token de acesso definido", ""))
 
-    if _porta_responde(s.port):
-        linhas.append(Linha("ok", f"Hangar respondendo em http://127.0.0.1:{s.port}", ""))
-    else:
+    if not _porta_responde(s.port):
         linhas.append(Linha("erro", f"Hangar não responde na porta {s.port}", _conserto_backend()))
+    else:
+        t = _tempo_resposta(s.port)
+        if t is None:
+            linhas.append(Linha("erro", f"Hangar travado: a porta {s.port} aceita conexão mas não responde em 10 s",
+                                _conserto_backend()))
+        elif t > 3:
+            # 3 s é o limite da vigia do Windows: acima disso ela derruba o backend como se tivesse caído.
+            linhas.append(Linha("aviso", f"Hangar lento: respondeu em {t:.1f} s na porta {s.port}",
+                                "máquina sobrecarregada? veja CPU/memória; no Windows a vigia reinicia acima de 3 s"))
+        else:
+            linhas.append(Linha("ok", f"Hangar respondendo em http://127.0.0.1:{s.port} ({t * 1000:.0f} ms)", ""))
+
+    reinicios = _reinicios_automaticos()
+    if reinicios is None:
+        linhas.append(Linha("aviso", "não deu para ler os reinícios automáticos do backend", ""))
+    elif not reinicios:
+        linhas.append(Linha("ok", "nenhum reinício automático do backend nos últimos 7 dias", ""))
+    else:
+        onde = (r"%LOCALAPPDATA%\hangar\logs\privado\hangar-vigia.log" if _WIN
+                else "journalctl --user -u hangar-backend --since -7d")
+        linhas.append(Linha("aviso", f"o vigia reiniciou o backend {len(reinicios)} vez(es) nos últimos 7 dias"
+                                     f" (última: {reinicios[-1]})", f"detalhes: {onde}"))
 
     if _binario("tmux"):
         linhas.append(Linha("ok", "multiplexador de terminal (tmux) no PATH", ""))

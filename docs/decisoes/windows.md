@@ -39,6 +39,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A tarefa Windows acompanha o processo até ele terminar.** Reinício controlado não encerra
   a árvore inteira: sessões e atualizador sobrevivem. A vigia confirma falha HTTP, respeita
   instalação/atualização e só inicia outra instância após confirmar a parada da anterior.
+- **Tarefa do backend/front nasce com `-Priority 4` (normal).** O padrão do Agendador é 7
+  (abaixo do normal) e passa para os filhos: backend e sessões perdiam a CPU para qualquer
+  programa, passavam dos 3 s da vigia e eram derrubados.
 - **`ln -sf` do Git Bash COPIA e devolve 0**; confira com `test -L` depois. Script sem extensão é
   invisível para o PowerShell, e a falha é muda.
 - **O navegador embutido precisa da sessão gráfica ATIVA**: com a janela ocluída o teclado entrega
@@ -54,6 +57,16 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   processo e depois lê a saída sem prazo; o `git.exe` de `Git\cmd` é um lançador cujo filho segura
   o pipe, e a thread fica presa até o git real terminar. `git_ops._run` usa `Popen`, mata os
   filhos pelo `psutil` e drena com prazo.
+
+## Tarefa agendada rodava o backend abaixo do normal
+
+(29/09/2026, VM `delphi-02`.) `Get-ScheduledTask hangar-backend` devolveu `Settings.Priority = 7`
+e o `python.exe` do `app.main` e os quatro `claude.exe` abertos por ele estavam em `BelowNormal`:
+o `New-ScheduledTaskSettingsSet` sem `-Priority` usa 7, e processo abaixo do normal passa a classe
+aos filhos. Com a CPU cheia o backend demorava mais que os 3 s do `Test-HangarHttp` e a vigia o
+reiniciava como se tivesse caído. Correção: `-Priority 4` no registro, conferido depois do
+`Register-ScheduledTask`. Instalações existentes corrigem no próximo `install.ps1`/atualização,
+que re-registra a tarefa com `-Force`.
 
 ## Timeout do git não liberava a thread no Windows
 

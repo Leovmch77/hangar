@@ -10,6 +10,8 @@ def _settings(**kw):
 
 def _tudo_ok(monkeypatch):
     monkeypatch.setattr(doctor, "_porta_responde", lambda porta: True)
+    monkeypatch.setattr(doctor, "_tempo_resposta", lambda porta: 0.01)
+    monkeypatch.setattr(doctor, "_reinicios_automaticos", lambda dias=7: [])
     monkeypatch.setattr(doctor, "_binario", lambda nome: "/usr/bin/x")
     monkeypatch.setattr(doctor, "_claude_logado", lambda: True)
     monkeypatch.setattr(doctor, "_tailscale", lambda: ("instalado", "logado"))
@@ -104,3 +106,34 @@ def test_qr_sem_terminal_devolve_2_e_so_a_url(monkeypatch, capsys):
     saida = capsys.readouterr().out
     assert "https://pc.tail.ts.net/?token=segredo-forte" in saida
     assert "█" not in saida
+
+
+def test_porta_aberta_sem_resposta_e_travado(monkeypatch):
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_tempo_resposta", lambda porta: None)
+    linha = next(l for l in doctor.diagnosticar(_settings()) if "travado" in l.titulo)
+    assert linha.nivel == "erro"
+
+
+def test_resposta_acima_de_3s_e_aviso_de_lento(monkeypatch):
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_tempo_resposta", lambda porta: 4.2)
+    linha = next(l for l in doctor.diagnosticar(_settings()) if "lento" in l.titulo)
+    assert linha.nivel == "aviso" and "4.2 s" in linha.titulo
+
+
+def test_reinicios_da_vigia_do_windows_contam_so_o_periodo(monkeypatch, tmp_path):
+    import datetime as dt
+    import app.log_paths as log_paths
+    (tmp_path / "privado").mkdir()
+    agora = dt.datetime.now()
+    velho = (agora - dt.timedelta(days=30)).isoformat(timespec="seconds")
+    novo = (agora - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+    (tmp_path / "privado" / "hangar-vigia.log").write_text(
+        f"\ufeff{velho} vigia: hangar-backend sem resposta HTTP; recuperando a instancia identificada\n"
+        f"{novo} vigia: hangar-frontend sem resposta HTTP; recuperando a instancia identificada\n"
+        f"{novo} vigia: hangar-backend sem resposta HTTP; recuperando a instancia identificada\n",
+        encoding="utf-8")
+    monkeypatch.setattr(doctor, "_WIN", True)
+    monkeypatch.setattr(log_paths, "base", lambda: tmp_path)
+    assert doctor._reinicios_automaticos() == [novo]

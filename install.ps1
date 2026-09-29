@@ -1735,9 +1735,12 @@ if ($registrou) {
             $acao = New-ScheduledTaskAction -Execute 'wscript.exe' `
                 -Argument "`"$vbs`"" -WorkingDirectory $t.Dir
             $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            # -Priority 4 = normal. Sem ele o Agendador usa 7 (abaixo do normal), herdado pelos
+            # filhos: com a CPU cheia o backend demora mais que o limite da vigia e ela o derruba.
             $cfg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
                         -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) `
-                        -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+                        -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+                        -Priority 4
             # Instalacoes comuns antigas podem ter tarefas com dono Administradores.
             # So elas admitem reparo/reuso; no modo elevado, falha de registro interrompe.
             $reaproveitou = $false
@@ -1785,6 +1788,9 @@ if ($registrou) {
                 }
                 if ($registered.Settings.MultipleInstances -ne 'IgnoreNew' -or $registered.Settings.RestartCount -ne 3) {
                     throw "A tarefa $($t.Nome) nao manteve a protecao contra duplicacao e os reinicios automaticos"
+                }
+                if ($registered.Settings.Priority -ne 4) {
+                    Falta "a tarefa $($t.Nome) ficou com prioridade $($registered.Settings.Priority), nao 4 (normal)"
                 }
             }
             # Registrar NAO inicia: o gatilho e "no logon", entao sem isto nada sobe ate o
