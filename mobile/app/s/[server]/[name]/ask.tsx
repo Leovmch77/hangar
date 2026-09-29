@@ -5,7 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
 import { AskStepper } from '../../../../src/features/ask/AskStepper';
-import { answerQuestions } from '@hangar/core';
+import { answerQuestions, skipQuestion } from '@hangar/core';
 import type { AnswerItem } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -46,6 +46,16 @@ export default function AskSheet() {
     );
   }
 
+  // Cancelar explícito, não o gesto de voltar: pergunta assíncrona do Codex só some pelo backend.
+  const handleCancel = () => {
+    const id = payload.request_id;
+    if (!payload.is_async || typeof id !== 'string') { chat.closeAsk(); return; }
+    setRouteError('');
+    skipQuestion(sessionName, id)
+      .then(() => chat.closeAsk())
+      .catch((e) => setRouteError(e instanceof Error ? e.message : m.askq_erro_envio()));
+  };
+
   const handleSubmit = async (answers: AnswerItem[]) => {
     setRouteError('');
     const requestId = payload.request_id;
@@ -71,7 +81,7 @@ export default function AskSheet() {
   return (
     <KeyboardAvoidingView behavior="padding" style={styles.root}>
       <View style={styles.inner}>
-        <AskStepper key={`${typeof payload.request_id}:${payload.request_id}`} payload={payload} onSubmit={handleSubmit} onClose={() => chat.closeAsk()} />
+        <AskStepper key={`${typeof payload.request_id}:${payload.request_id}`} payload={payload} onSubmit={handleSubmit} onClose={handleCancel} />
         {routeError ? (
           <Text style={styles.error} accessibilityRole="alert">
             {routeError}

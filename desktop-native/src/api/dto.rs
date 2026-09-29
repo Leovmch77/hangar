@@ -195,6 +195,7 @@ pub struct AskPayload {
     pub provider: Option<String>,
     // Valor cru: o Codex recusa id com outro tipo JSON (número × texto).
     pub request_id: Option<Value>,
+    #[serde(default)] pub is_async: bool,
     #[serde(default)] pub questions: Vec<AskItem>,
 }
 

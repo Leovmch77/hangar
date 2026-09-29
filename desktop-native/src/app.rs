@@ -2081,7 +2081,7 @@ impl Hangar {
 
     fn current_snapshot(&self, action: &Action) -> Option<String> {
         match action {
-            Action::Answer => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
+            Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
             Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
             Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}") && e.desistiu == Some(true)).then(|| id.clone()),
@@ -2115,6 +2115,8 @@ impl Hangar {
         }
         let body = match &action {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
+            Action::Skip => match self.chat.ask.as_ref().and_then(|ask| ask.payload.request_id.clone()) {
+                Some(id) => Some(json!({"request_id": id})), None => return },
             Action::Select(option) => Some(json!({"option": option})),
             _ => None,
         };
@@ -2155,6 +2157,13 @@ impl Hangar {
                         self.ask_form = AskForm::default();
                     }
                     (tr(if value.get("fallback").and_then(Value::as_bool) == Some(true) { "ask_fallback" } else { "ask_sent" }), false)
+                }
+                Action::Skip => {
+                    if current && self.chat.ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot) {
+                        self.chat.ask = None;
+                        self.ask_form = AskForm::default();
+                    }
+                    (tr("ask_skipped"), false)
                 }
                 Action::Select(_) | Action::Submit => (tr("option_sent"), false),
                 Action::Cancel => (tr("stop_requested"), false),
@@ -2855,6 +2864,11 @@ impl Hangar {
                 .child(escapes));
         }
         let ready = self.answer_body(cx).is_some();
+        let skip = ask.payload.is_async.then(|| {
+            let fp = fingerprint.clone();
+            Button::new("ask-skip").ghost().label(tr("ask_skip")).disabled(busy)
+                .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Skip, fp.clone(), cx)))
+        });
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
         let scroll_key = format!("{fingerprint}#{tab}");
@@ -2864,6 +2878,7 @@ impl Hangar {
         Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
+                .children(skip)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
                     Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)

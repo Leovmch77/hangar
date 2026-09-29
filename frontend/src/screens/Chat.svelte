@@ -61,6 +61,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     getWorkflows,
     getSubagents,
     answerQuestions,
+    skipQuestion,
     getRunners,
     isAbortError,
     isTimeoutError,
@@ -1371,6 +1372,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   function closeAsk() {
     if (askPiId) askPiDismissed = askPiId;
     askOpen = false;
+    // Pergunta assíncrona do Codex não tem descarte nativo: sem isto ela volta a cada recarga.
+    const id = askPayload?.request_id;
+    if (askPayload?.is_async && typeof id === 'string') {
+      skipQuestion(sessionName, id).catch((err) => { askOpen = true; mostrarAviso(err); });
+    }
   }
   function openMirror() { mirrorOpen = true; }
   // "Voltar ao chat" = SO esconde o espelho. NAO manda Escape -> a TUI fica como esta (nao fecha o

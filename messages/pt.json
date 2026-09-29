@@ -4154,6 +4154,8 @@
   "native_ask_send": "Enviar respostas",
   "native_ask_next": "Próxima",
   "native_ask_sent": "Respostas enviadas.",
+  "native_ask_skip": "Pular",
+  "native_ask_skipped": "Pergunta dispensada. O Codex não é avisado.",
   "native_ask_fallback": "O seletor não respondeu; as respostas foram entregues como mensagem de texto.",
   "native_options_title": "Escolha uma opção",
   "native_options_submit": "Enviar marcadas ({n})",

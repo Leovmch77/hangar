@@ -7138,6 +7138,25 @@ def _pi_answer_fallback_text(a: dict) -> str:
     return f"Respondendo à pergunta: {resp}"
 
 
+class SkipQuestionBody(_StrictBody):
+    request_id: str
+
+
+@app.post("/api/sessions/{name}/question/skip", dependencies=[Depends(require_auth)])
+def skip_question(name: str, body: SkipQuestionBody):
+    if getattr(_cached_info_sync(name), "provider", "claude") != "codex":
+        raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente."))
+    if _loop_servidor is None or not _loop_servidor.is_running():
+        raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex."))
+    future = asyncio.run_coroutine_threadsafe(
+        get_adapter("codex").skip_question(name, body.request_id), _loop_servidor)
+    try:
+        future.result(timeout=10)
+    except ValueError as exc:
+        raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
+    return {"ok": True}
+
+
 @app.post("/api/sessions/{name}/answer", dependencies=[Depends(require_auth)])
 def answer(name: str, body: AnswerBody):
     # Dirige o AskUserQuestion tabbed: reproduz as teclas (nav em malha fechada), confere o Review e

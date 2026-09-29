@@ -87,3 +87,22 @@ def test_contagem_invalida_cache_da_lista_mesmo_com_mesma_pergunta():
     before = _list_sig([session])
     session.pending_questions = 2
     assert _list_sig([session]) != before
+
+
+def test_pergunta_pulada_nao_volta_pelo_historico_nem_na_reabertura():
+    state = AsyncQuestions("thread")
+    state.observe(question())
+    skipped = state.pending()["request_id"]
+    state.skip(skipped)
+    assert state.pending()["questions"][0]["question"] == "Qual tamanho?"
+    state.hydrate({"turns": [{"items": [question()]}]})
+    assert state.count == 1
+    restored = AsyncQuestions("thread", state.skipped)
+    restored.hydrate({"turns": [{"items": [question()]}]})
+    assert restored.pending() == state.pending()
+    try:
+        state.skip(skipped)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pular de novo deveria recusar")

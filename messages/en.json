@@ -4154,6 +4154,8 @@
   "native_ask_send": "Send answers",
   "native_ask_next": "Next",
   "native_ask_sent": "Answers sent.",
+  "native_ask_skip": "Skip",
+  "native_ask_skipped": "Question dismissed. Codex is not notified.",
   "native_ask_fallback": "The picker did not respond; the answers were delivered as a text message.",
   "native_options_title": "Choose an option",
   "native_options_submit": "Send checked ({n})",

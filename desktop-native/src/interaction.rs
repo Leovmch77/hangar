@@ -50,7 +50,7 @@ pub fn ask_from_events(events: &[ChatEvent], provider: &str) -> Option<Ask> {
     let questions: Vec<AskItem> = questions.into_iter().filter(|q| !q.question.is_empty() && !q.options.is_empty()).collect();
     if questions.is_empty() { return None; }
     let id = event.tool_use_id.clone()?;
-    Some(Ask { fingerprint: format!("tool:{id}:{input}"), payload: AskPayload { provider: None, request_id: None, questions }, tool_use_id: Some(id) })
+    Some(Ask { fingerprint: format!("tool:{id}:{input}"), payload: AskPayload { provider: None, request_id: None, is_async: false, questions }, tool_use_id: Some(id) })
 }
 
 pub fn toggle(item: &AskItem, pick: &Pick, index: usize) -> Pick {
@@ -145,12 +145,12 @@ fn plan_markers(text: &str) -> Vec<(usize, usize, bool)> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Action { Answer, Select(usize), Submit, Cancel, Steer, Discard(String), Implement }
+pub enum Action { Answer, Skip, Select(usize), Submit, Cancel, Steer, Discard(String), Implement }
 
 impl Action {
     pub fn path(&self) -> Vec<&str> {
         match self {
-            Action::Answer => vec!["answer"], Action::Select(_) => vec!["select"], Action::Submit => vec!["select", "submit"],
+            Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) => vec!["select"], Action::Submit => vec!["select", "submit"],
             Action::Cancel => vec!["interrupt"], Action::Steer => vec!["steer"], Action::Discard(id) => vec!["queue", id],
             Action::Implement => vec!["codex", "plan", "implement"],
         }
@@ -189,7 +189,7 @@ mod tests {
             options: labels.iter().map(|l| AskOption { label: (*l).into(), ..Default::default() }).collect() }
     }
     fn ask(provider: Option<&str>, request_id: Option<Value>, questions: Vec<AskItem>) -> Ask {
-        let payload = AskPayload { provider: provider.map(str::to_owned), request_id, questions };
+        let payload = AskPayload { provider: provider.map(str::to_owned), request_id, is_async: false, questions };
         Ask { fingerprint: "f".into(), payload, tool_use_id: None }
     }
 
