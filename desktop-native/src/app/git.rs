@@ -69,7 +69,7 @@ impl Source {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Pane { #[default] Changes, History, Commit }
+pub(super) enum Pane { #[default] Changes, History, Commit }
 
 #[derive(Clone, Debug, Default)]
 struct Repo { files: Vec<(String, String)>, current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
@@ -404,7 +404,7 @@ impl GitPanel {
         self.load_log(window, cx);
     }
 
-    fn set_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         self.pane = pane;
         if pane == Pane::History && self.log.value.is_none() && !self.log.loading { self.load_log(window, cx); }
         cx.notify();
