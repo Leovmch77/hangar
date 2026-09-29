@@ -1,10 +1,9 @@
 """Cota da conta do Codex no painel (app/cotas.py, fonte `codex`).
 
-Por que a fonte não é HTTP como as outras: a credencial do Codex é um par OAuth do ChatGPT em
-`~/.codex/auth.json`, e o endpoint que a traduz em cota não é público. Quem sabe fazer essa conta é
-o próprio binário — e ele responde `account/rateLimits/read` num app-server efêmero em stdio, sem
-sessão viva e sem pane (medido em 30/08/2026, codex-cli 0.151.0, 1,2s). É o mesmo mecanismo do
-catálogo de modelos, então a I/O trocada aqui é o `codex_appserver.perguntar`.
+A leitura tenta primeiro `/wham/usage` do backend do ChatGPT (a rota que o próprio binário chama
+com o token da conta) e cai no `account/rateLimits/read` de um app-server efêmero quando ela não
+serve. Os testes antigos usam token que não é JWT, então caem direto no app-server, e a I/O
+trocada neles continua sendo o `codex_appserver.perguntar`.
 """
 import io
 import json
@@ -338,3 +337,131 @@ def test_cota_codex_le_roots_com_mesma_assinatura(monkeypatch, tmp_path):
     assert {f"{home}" for home in vistos} == {
         str(codex_contas.default_home()), str(work.home),
     }
+
+
+# ------------------------------------------------------------------ rota HTTP (/wham/usage)
+
+import base64
+import time
+import urllib.error
+
+# Recorte real de `/wham/usage` e `/wham/rate-limit-reset-credits` (29/09/2026, codex-cli
+# 0.159.0), com o que o `account/rateLimits/read` devolveu para a MESMA conta ao lado.
+_USO = {
+    "plan_type": "pro",
+    "rate_limit": {"allowed": True, "limit_reached": False,
+                   "primary_window": {"used_percent": 79, "limit_window_seconds": 604800,
+                                      "reset_after_seconds": 324219, "reset_at": 1791046696},
+                   "secondary_window": None},
+    "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+    "rate_limit_reset_credits": {"available_count": 1, "applicable_available_count": 0},
+}
+_LISTA = {"available_count": 1, "credits": [{
+    "id": "RateLimitResetCredit_7e23", "reset_type": "codex_rate_limits", "status": "available",
+    "granted_at": "2026-09-22T20:31:55.904160Z", "expires_at": "2026-10-22T20:31:55.904160Z",
+    "title": "Full reset", "description": "Thanks for using Codex!"}]}
+_APP_SERVER = {
+    "rateLimits": {"primary": {"usedPercent": 79, "windowDurationMins": 10080,
+                               "resetsAt": 1791046696}, "secondary": None},
+    "rateLimitResetCredits": {"availableCount": 1, "credits": [{
+        "id": "RateLimitResetCredit_7e23", "resetType": "codexRateLimits", "status": "available",
+        "expiresAt": 1792701115, "title": "Full reset", "description": "Thanks for using Codex!"}]},
+}
+
+
+def _jwt(exp):
+    corpo = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+    return f"h.{corpo}.s"
+
+
+def _auth_jwt(home, exp):
+    d = home / ".codex"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "access_token": _jwt(exp), "refresh_token": "rt", "account_id": "acc-1"}}),
+        encoding="utf-8")
+
+
+class _Resp(io.BytesIO):
+    status = 200
+
+
+def _backend(monkeypatch, rotas):
+    """`rotas`: caminho -> dict (200) ou int (erro HTTP). Guarda o que foi pedido."""
+    pedidos = []
+
+    def urlopen(req, timeout):
+        pedidos.append(req)
+        caminho = req.full_url.removeprefix("https://chatgpt.com/backend-api")
+        r = rotas[caminho]
+        if isinstance(r, int):
+            raise urllib.error.HTTPError(req.full_url, r, "x", {}, None)
+        return _Resp(json.dumps(r).encode())
+    monkeypatch.setattr(codex_appserver.urllib.request, "urlopen", urlopen)
+    return pedidos
+
+
+@pytest.fixture
+def com_jwt(monkeypatch, tmp_path):
+    _auth_jwt(tmp_path, time.time() + 3600)
+    _home(monkeypatch, tmp_path)
+    return tmp_path
+
+
+def _sem_app_server(monkeypatch):
+    def perguntar(m, **kw):
+        raise AssertionError("app-server não devia ser chamado")
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar", perguntar)
+
+
+def test_http_da_o_mesmo_resultado_que_o_app_server(monkeypatch, com_jwt):
+    _sem_app_server(monkeypatch)
+    pedidos = _backend(monkeypatch, {"/wham/usage": _USO, "/wham/rate-limit-reset-credits": _LISTA})
+    pelo_http = cotas._ler_codex_detalhada()
+
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar", lambda m, **kw: _APP_SERVER)
+    monkeypatch.setattr(cotas, "_rate_limits_http_codex", lambda raiz: None)
+    assert pelo_http == cotas._ler_codex_detalhada()
+    assert pelo_http[0] == "lida" and pelo_http[1][0].rotulo == "7d"
+    assert pelo_http[3].credits[0].expires_at == 1792701115
+    cab = {k.lower(): v for k, v in pedidos[0].header_items()}
+    assert cab["chatgpt-account-id"] == "acc-1" and cab["authorization"].startswith("Bearer h.")
+    assert cab["user-agent"] == "codex-cli"
+
+
+def test_sem_redefinicao_a_lista_que_falha_nao_derruba(monkeypatch, com_jwt):
+    _sem_app_server(monkeypatch)
+    uso = {**_USO, "rate_limit_reset_credits": {"available_count": 0}}
+    _backend(monkeypatch, {"/wham/usage": uso, "/wham/rate-limit-reset-credits": 500})
+    estado, _janelas, _motivo, redefinicoes = cotas._ler_codex_detalhada()
+    assert estado == "lida" and redefinicoes.available_count == 0
+
+
+@pytest.mark.parametrize("caso", ["vencido", "401", "403", "formato", "rede", "lista-falha"])
+def test_http_que_nao_serve_cai_no_app_server(monkeypatch, tmp_path, caso):
+    _auth_jwt(tmp_path, time.time() - 10 if caso == "vencido" else time.time() + 3600)
+    _home(monkeypatch, tmp_path)
+    rotas = {"/wham/usage": _USO, "/wham/rate-limit-reset-credits": _LISTA}
+    if caso in ("401", "403"):
+        rotas["/wham/usage"] = int(caso)
+    elif caso == "formato":
+        rotas["/wham/usage"] = {"rate_limit": {"primary_window": None, "secondary_window": None}}
+    elif caso == "lista-falha":
+        rotas["/wham/rate-limit-reset-credits"] = 500
+    pedidos = _backend(monkeypatch, rotas)
+    if caso == "rede":
+        def sem_rede(req, timeout):
+            raise urllib.error.URLError("offline")
+        monkeypatch.setattr(codex_appserver.urllib.request, "urlopen", sem_rede)
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar", lambda m, **kw: _RATE_LIMITS)
+    estado, janelas, motivo, _ = cotas._ler_codex_detalhada()
+    assert (estado, motivo, [j.rotulo for j in janelas]) == ("lida", None, ["5h", "7d"])
+    if caso == "vencido":
+        assert pedidos == []   # token vencido nem sai: renovar é do CLI
+
+
+def test_429_nao_cai_no_app_server_e_espera(monkeypatch, com_jwt):
+    """O app-server bate no mesmo backend com o mesmo token: cair nele só renovaria o 429."""
+    _sem_app_server(monkeypatch)
+    _backend(monkeypatch, {"/wham/usage": 429, "/wham/rate-limit-reset-credits": _LISTA})
+    assert cotas._ler_codex_detalhada() == ("indisponivel", [], "http-429", None)

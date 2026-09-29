@@ -550,13 +550,81 @@ def codex_reset_credits(resposta: object) -> ResetCredits | None:
     return ResetCredits(available_count=quantidade, credits=creditos)
 
 
-def _ler_codex_detalhada(home: Path | str | None = None) -> _LeituraDetalhada:
-    """Cota da conta do Codex, pelo `account/rateLimits/read` de um app-server efêmero.
+def _janela_http_codex(o: object) -> dict | None:
+    if not isinstance(o, dict):
+        return None
+    segundos = o.get("limit_window_seconds")
+    return {"usedPercent": o.get("used_percent"), "resetsAt": o.get("reset_at"),
+            "windowDurationMins": segundos // 60 if isinstance(segundos, int) else None}
 
-    Não é HTTP como as outras porque a credencial é um par OAuth do ChatGPT e o endpoint que a
-    traduz em cota não é público — quem sabe fazer essa conta é o próprio binário. Medido em
-    30/08/2026 (codex-cli 0.151.0): o método responde sem thread aberta, sem pane e sem sessão
-    viva, em 1,2s. É por credencial, que é exatamente o que este painel pede.
+
+class _Http429Codex(Exception):
+    pass
+
+
+def _rate_limits_http_codex(raiz: Path) -> dict | str | None:
+    """`/wham/usage` (+ a lista de redefinições) no formato do `account/rateLimits/read`.
+
+    None = este caminho não serve agora e o app-server responde no lugar; "http-429" = o backend
+    pediu pra parar, e o app-server bate no MESMO backend com o MESMO token — cair nele só
+    renovaria o 429, então a espera de `_ESPERA_429_S` vale para as duas rotas.
+    """
+    def get(caminho: str) -> object:
+        status, corpo = codex_appserver.backend_get(caminho, codex_home=raiz, timeout=_HTTP_TIMEOUT)
+        if status == 429:
+            raise _Http429Codex
+        if status != 200 or not isinstance(corpo, dict):
+            raise codex_appserver.CodexIndisponivel(f"http {status}")
+        return corpo
+
+    # As duas rotas em paralelo: em série a leitura passava do app-server em tempo de parede.
+    ex = ThreadPoolExecutor(max_workers=2)
+    pedido_lista = ex.submit(get, "/wham/rate-limit-reset-credits")
+    try:
+        uso = get("/wham/usage")
+        limites = uso.get("rate_limit")
+        if not isinstance(limites, dict):
+            raise codex_appserver.CodexIndisponivel("formato-desconhecido")
+        r: dict = {"rateLimits": {"primary": _janela_http_codex(limites.get("primary_window")),
+                                  "secondary": _janela_http_codex(limites.get("secondary_window"))}}
+        if not any(_janela_codex(j) for j in r["rateLimits"].values()):
+            raise codex_appserver.CodexIndisponivel("formato-desconhecido")
+        resumo = uso.get("rate_limit_reset_credits")
+        quantidade = resumo.get("available_count") if isinstance(resumo, dict) else None
+        if isinstance(quantidade, int) and quantidade > 0:
+            # A tela lista validade e estado de cada redefinição, e isso só vem nesta outra rota.
+            # Sem redefinição, falha nela não derruba a leitura.
+            lista = pedido_lista.result()
+            creditos = lista.get("credits")
+            if not isinstance(creditos, list):
+                raise codex_appserver.CodexIndisponivel("formato-desconhecido")
+            r["rateLimitResetCredits"] = {
+                "availableCount": lista.get("available_count", quantidade),
+                "credits": [{**c, "expiresAt": int(t) if (t := _iso_ts(c.get("expires_at"))) else None}
+                            for c in creditos if isinstance(c, dict)],
+            }
+        elif isinstance(quantidade, int):
+            r["rateLimitResetCredits"] = {"availableCount": quantidade}
+    except _Http429Codex:
+        return "http-429"
+    except codex_appserver.CodexIndisponivel as e:
+        # info e não debug: cair calado no app-server é a regressão que ninguém veria.
+        _log.info("cota: codex %s pelo app-server (http: %s)", raiz, e)
+        return None
+    finally:
+        ex.shutdown(wait=False)
+    _log.debug("cota: codex %s por http", raiz)
+    return r
+
+
+def _ler_codex_detalhada(home: Path | str | None = None) -> _LeituraDetalhada:
+    """Cota da conta do Codex: `/wham/usage` do backend do ChatGPT, com o app-server efêmero
+    (`account/rateLimits/read`) de reserva.
+
+    A rota HTTP é a que o próprio binário chama com o token da conta; ela devolve o mesmo dado
+    em ~0,5s, sem subir processo. O app-server continua para quando ela não serve: token vencido
+    (quem renova é o CLI), credencial no keyring, resposta fora do formato. Ver "Cota e catálogo
+    do Codex por HTTP" em docs/decisoes/harnesses.md.
 
     Nada aqui levanta, mesma regra do `_get_json`: um provedor que não responde não pode derrubar a
     lista das outras contas.
@@ -567,17 +635,21 @@ def _ler_codex_detalhada(home: Path | str | None = None) -> _LeituraDetalhada:
     raiz = _codex_home(home)
     if not _tem_credencial_codex(raiz):
         return "sem_credencial", [], None, None
-    try:
-        # Mesmo teto das fontes HTTP: `_atualizar` espera TODAS as leituras juntas, então uma fonte
-        # com teto maior que as outras vira o tempo de resposta do `/api/cotas` inteiro.
-        kwargs = {"codex_home": raiz} if home is not None else {}
-        r = codex_appserver.perguntar("account/rateLimits/read", timeout=_HTTP_TIMEOUT,
-                                      **kwargs)
-    except codex_appserver.CodexAusente:
-        return "indisponivel", [], "codex-ausente", None
-    except (RuntimeError, OSError) as e:
-        _log.debug("cota: codex nao respondeu: %r", e)
-        return "indisponivel", [], "sem-resposta", None
+    r = _rate_limits_http_codex(raiz)
+    if r == "http-429":
+        return "indisponivel", [], "http-429", None
+    if r is None:
+        try:
+            # Mesmo teto das fontes HTTP: `_atualizar` espera TODAS as leituras juntas, então uma
+            # fonte com teto maior que as outras vira o tempo de resposta do `/api/cotas` inteiro.
+            kwargs = {"codex_home": raiz} if home is not None else {}
+            r = codex_appserver.perguntar("account/rateLimits/read", timeout=_HTTP_TIMEOUT,
+                                          **kwargs)
+        except codex_appserver.CodexAusente:
+            return "indisponivel", [], "codex-ausente", None
+        except (RuntimeError, OSError) as e:
+            _log.debug("cota: codex nao respondeu: %r", e)
+            return "indisponivel", [], "sem-resposta", None
     limites = r.get("rateLimits")
     limites = limites if isinstance(limites, dict) else {}
     janelas = [j for j in (_janela_codex(limites.get("primary")),

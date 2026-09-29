@@ -184,6 +184,42 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [Provider `orq`](#provider-orq-a-linha-do-orquestrador-não-tem-pane).
 - **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
   Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
+- **Cota e catálogo do Codex vão por HTTP primeiro, com o app-server efêmero de reserva.** A rota
+  é a do próprio binário (`chatgpt.com/backend-api/wham/usage`, `/wham/rate-limit-reset-credits`,
+  `/codex/models?client_version=<codex --version>`), com o token do `auth.json` da conta. Token
+  vencido ou fora do arquivo, resposta que não é 200, formato estranho ou rede fora → app-server,
+  com linha `info` no log. O Hangar nunca renova o token. 429 na cota NÃO cai no app-server: ele
+  bateria no mesmo backend. Ver [Cota e catálogo do Codex por HTTP](#cota-e-catálogo-do-codex-por-http).
+
+## Cota e catálogo do Codex por HTTP
+
+Em 29/09/2026 (codex-cli 0.159.0) o binário traz as rotas do `backend-client`: com base
+`https://chatgpt.com/backend-api` ele usa o estilo `/wham/...` (`/wham/usage`,
+`/wham/rate-limit-reset-credits`); o catálogo sai de `https://chatgpt.com/backend-api/codex` +
+`/models?client_version=`. Cabeçalhos: `Authorization: Bearer <access_token>`,
+`ChatGPT-Account-Id: <tokens.account_id>`, `User-Agent: codex-cli`. A leitura antiga dizia que
+o endpoint "não é público"; ele é o mesmo que o CLI chama, com a mesma credencial.
+
+- **Mapeamento da cota**: `rate_limit.primary_window`/`secondary_window` →
+  `usedPercent = used_percent`, `windowDurationMins = limit_window_seconds / 60`,
+  `resetsAt = reset_at`. A lista de redefinições (validade, estado, título) só vem na segunda
+  rota, com `expires_at` em ISO (vira epoch truncado, igual ao app-server). As duas saem em
+  paralelo; sem redefinição disponível, falha da segunda não conta.
+- **Paridade medida** nas duas contas desta máquina: janelas, percentuais, resets e redefinições
+  idênticos ao `account/rateLimits/read`; catálogo idêntico ao `model/list` depois do `parse`
+  (id, nome, descrição, esforços por modelo, esforço padrão; `visibility != "list"` =
+  `hidden`; ordem por `priority`). `client_version` muda a lista: `0.151.0` devolve 6 modelos,
+  `0.159.0` devolve 10, sem ele é 400 — por isso a versão sai do `codex --version` do mesmo
+  binário (~10 ms).
+- **Tempo** (mediana de 5, por conta): cota por HTTP 0,56–0,62 s contra 0,83–0,91 s do
+  app-server; em série as duas rotas davam 0,9–1,0 s, igual ao app-server. O ganho maior é de
+  recurso: o app-server gasta ~0,41 s de CPU e ~200 MB de pico por leitura de cota; o HTTP,
+  ~0,02 s de CPU dentro do backend. Catálogo: HTTP 0,45 s (picos de 1,5–2 s) contra 0,22 s do
+  app-server, que responde do `models_cache.json` local — mais lento em tempo de parede, mas sem
+  processo (0,26 s de CPU a menos por leitura), e a lista tem cache de 10 min.
+- **O que NÃO se faz**: renovar o token. O refresh é do CLI, e girar o refresh token por fora
+  deslogaria o CLI. Token a menos de 60 s de vencer já vai pro app-server, que usa a credencial pelo
+  próprio CLI.
 
 ## Temporários `git-*` no `.tmp` do Codex
 
