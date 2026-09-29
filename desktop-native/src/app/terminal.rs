@@ -157,6 +157,13 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Abre o terminal da sessão; já aberto, só leva o foco para ele em vez de fechar.
+    pub(super) fn show_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = self.terminal.as_ref() else { return self.toggle_terminal(window, cx); };
+        panel.focus.focus(window, cx);
+        cx.notify();
+    }
+
     /// Terminais de atalho da sessão `name`, lidos do backend. A resposta atualiza a lista e as abas do painel.
     pub(super) fn refresh_shortcut_terms(&mut self, name: &str) {
         let Some(api) = self.api.clone() else { return; };

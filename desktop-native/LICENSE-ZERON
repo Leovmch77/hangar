@@ -7,6 +7,8 @@ Parts of the native app are adapted from Zeron (https://github.com/zeronsh/zeron
 - src/app/rows.rs (`render_agent_card`, the tree connector draw) and src/motion.rs (`connector_parts`,
   `connector_continuation`, `shimmer_amount`): the subagent chip, tool-tree connector timing and group-title shimmer
   (crates/ui/src/transcript.rs).
+- src/app/side.rs (`render_side_menu`): the tool menu of the empty side panel (crates/ui/src/shell.rs, the empty
+  surface cards).
 
 MIT License
 

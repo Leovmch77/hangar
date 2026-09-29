@@ -660,7 +660,7 @@ impl Hangar {
     }
 
     pub(super) fn activity_tab(&self) -> bool {
-        self.act.active_tab.is_none() && self.side_tab() == SideTab::Activity
+        self.act.active_tab.is_none() && !self.side_menu_shown() && self.side_tab() == SideTab::Activity
     }
 
     pub(super) fn subagent_tab_open(&self) -> bool { self.act.active_tab.is_some() }
@@ -684,7 +684,7 @@ impl Hangar {
     pub(super) fn sync_activity(&mut self, cx: &mut Context<Self>) {
         let key = self.selected_key();
         if !self.side.open { self.act.pending_tab = None; }
-        let target = key.filter(|_| self.side.open && self.side_tab() == SideTab::Activity).zip(self.activity_link());
+        let target = key.filter(|_| self.side.open && !self.side_menu_shown() && self.side_tab() == SideTab::Activity).zip(self.activity_link());
         let (activity, processes) = (&self.activity, &self.chat.state.shells);
         self.act.view.update(cx, |view, cx| { view.set_data(activity, processes, cx); view.show(target, cx); });
         for tab in &self.act.tabs { tab.view.update(cx, |view, cx| view.set_data(activity, processes, cx)); }
@@ -693,6 +693,7 @@ impl Hangar {
     /// Clique numa aba do painel: fecha a aba de subagente aberta e grava a escolha como as outras preferências de tela.
     pub(super) fn choose_side_tab(&mut self, tab: SideTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_none() { return };
+        self.side.menu = false;
         self.act.active_tab = None;
         self.act.pending_tab = None;
         self.act.tab_error = None;
@@ -912,6 +913,7 @@ impl Hangar {
     /// a cada quadro da troca: a cópia guardada ficaria na opacidade do primeiro quadro.
     pub(super) fn side_tab_in(&self, window: &mut Window, cx: &App) -> f32 {
         let key = match self.act.active_tab { Some(id) => SharedString::from(format!("side-tab-in-{id}")),
+            None if self.side_menu_shown() => SharedString::from("side-tab-in-menu"),
             None => SharedString::from(format!("side-tab-in-{:?}", self.side_tab())) };
         let shown = crate::motion::enter(key, crate::motion::FADE_QUICK, window, cx);
         if shown < 1. && (self.act.active_tab.is_some() || self.activity_tab()) {
@@ -938,7 +940,7 @@ impl Hangar {
     pub(super) fn render_side_title(&self, cx: &mut Context<Self>) -> AnyElement {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         let git = readable && self.selected.as_ref().is_some_and(super::sidebar::has_git);
-        let current = self.act.active_tab.is_none().then(|| self.side_tab());
+        let current = (self.act.active_tab.is_none() && !self.side_menu_shown()).then(|| self.side_tab());
         let tab = |id: &'static str, label: String, which: SideTab, cx: &mut Context<Self>| {
             let selected = current == Some(which);
             // Desenho da `.aba` do web: texto pequeno, só a cor e o sublinhado marcam a escolhida (negrito mudaria a largura

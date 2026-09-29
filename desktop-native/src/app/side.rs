@@ -61,6 +61,8 @@ struct Cost { usd: Option<f64>, has_usage: bool, missing: Vec<String> }
 
 pub(super) struct Side {
     pub open: bool,
+    /// Painel aberto e nenhuma aba escolhida desde então: o corpo mostra o menu de ferramentas.
+    pub(super) menu: bool,
     width: f32,
     drag: Option<(f32, f32)>,
     shortcuts: Option<Result<Vec<Shortcut>, String>>,
@@ -85,7 +87,7 @@ pub(super) struct Side {
 
 impl Default for Side {
     fn default() -> Self {
-        Self { open: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
+        Self { open: true, menu: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
             files: None, diff: None, reloading: HashSet::new(), git: None, run: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
@@ -215,7 +217,7 @@ pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
 impl Hangar {
     pub(super) fn toggle_side(&mut self, cx: &mut Context<Self>) {
         self.side.open = !self.side.open;
-        if !self.side.open { self.side.stop_cost(); }
+        if self.side.open { self.side.menu = true; } else { self.side.stop_cost(); }
         self.sync_activity(cx);
         cx.notify();
     }
@@ -664,6 +666,39 @@ impl Hangar {
             .child(grid).children(self.transfer_note_element()).into_any_element())
     }
 
+    // Mesma regra do botão de terminal do cabeçalho.
+    fn side_menu_terminal(&self) -> bool { self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms() }
+
+    // Mesma regra da aba Git.
+    fn side_menu_git(&self) -> bool { self.selected.as_ref().is_some_and(|s| s.readable() && super::sidebar::has_git(s)) }
+
+    /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
+    pub(super) fn side_menu_shown(&self) -> bool {
+        self.side.menu && !self.subagent_tab_open() && (self.side_menu_terminal() || self.side_menu_git())
+    }
+
+    /// Menu da superfície vazia do Zeron: uma linha por ferramenta, no meio do painel.
+    fn render_side_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (terminal, git) = (self.side_menu_terminal(), self.side_menu_git());
+        let row = |id: &'static str, icon: IconName, label: String, cx: &mut Context<Self>| Button::new(id)
+            .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
+            .w_full().h(px(44.)).px(px(14.)).rounded(px(10.)).border_1().border_color(theme::border()).accessibility_label(label.clone())
+            // O Button centraliza o conteúdo: a fileira de largura cheia devolve o alinhamento à esquerda.
+            .child(div().w_full().flex().items_center().justify_start().gap(px(10.))
+                .child(chrome::small_icon(icon, 15., theme::muted()))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(label)));
+        div().id("side-menu").flex_1().min_h_0().flex().items_center().justify_center().p(px(16.))
+            .child(div().w_full().max_w(px(280.)).flex().flex_col().gap(px(8.))
+                .when(terminal, |el| el.child(row("side-menu-terminal", IconName::SquareTerminal, tr("shortcuts_native_terminal"), cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.show_terminal(window, cx)))))
+                .when(git, |el| el
+                    .child(row("side-menu-diffs", IconName::List, tr("git_changes"), cx)
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_side_tab(SideTab::Git, window, cx))))
+                    .child(row("side-menu-history", IconName::GitBranch, tr("git_history"), cx)
+                        .on_click(cx.listener(|this, _, window, cx| this.open_git_history(window, cx))))))
+            .into_any_element()
+    }
+
     /// O painel está à vista: aberto, com sessão e com largura para ele.
     pub(super) fn side_shown(&self, window: &Window) -> bool {
         let sidebar = self.nav_width();
@@ -695,7 +730,8 @@ impl Hangar {
         // o detalhe do estado e o loop descem para a primeira seção.
         let _ = state;
         // Aba de subagente aberta vence a aba escolhida; a árvore só vigia o disco com a aba Arquivos à vista.
-        let tab = (!self.subagent_tab_open()).then(|| self.side_tab());
+        let menu = self.side_menu_shown();
+        let tab = (!self.subagent_tab_open() && !menu).then(|| self.side_tab());
         self.show_tree(tab == Some(SideTab::Files), None, cx);
         let tab_in = self.side_tab_in(window, cx);
         // Fileira de abas do web: régua de ponta a ponta com o sublinhado da escolhida por cima dela; o rótulo da
@@ -747,6 +783,7 @@ impl Hangar {
                 .child(header)
                 .children(self.render_subagent_tabs(cx))
                 .child(div().flex_1().min_h_0().flex().flex_col().opacity(tab_in).child(match tab {
+                    None if menu => self.render_side_menu(cx),
                     None => div().flex_1().min_h_0().children(self.subagent_tab_view()).into_any_element(),
                     Some(SideTab::Files) => div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element(),
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
