@@ -1,7 +1,7 @@
 ---
 id: 2026-09-29-lancador-electron-renomeado
 titulo: No menu de apps, a janela Electron passa a se chamar "Hangar (Electron)"
-comando_posix: f="${XDG_DATA_HOME:-$HOME/.local/share}/applications/hangar.desktop"; [ ! -f "$f" ] || sed -i 's/^Name=Hangar$/Name=Hangar (Electron)/' "$f"; mkdir -p ~/.hangar/native && touch ~/.hangar/native/lancador-electron-renomeado
+comando_posix: f="${XDG_DATA_HOME:-$HOME/.local/share}/applications/hangar.desktop"; [ ! -f "$f" ] || { sed -i 's/^Name=Hangar\r\?$/Name=Hangar (Electron)/' "$f" && ! tr -d '\r' < "$f" | grep -qx 'Name=Hangar'; } && mkdir -p ~/.hangar/native && touch ~/.hangar/native/lancador-electron-renomeado
 prova: ~/.hangar/native/lancador-electron-renomeado
 destrutivo: false
 ---
