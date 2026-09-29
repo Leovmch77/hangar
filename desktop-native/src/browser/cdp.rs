@@ -45,12 +45,19 @@ impl Cdp {
         let name = CoTaskMemPWSTR::from(event);
         // SAFETY: mesma thread da interface.
         let receiver = unsafe { self.view.GetDevToolsProtocolEventReceiver(*name.as_ref().as_pcwstr()) }.map_err(|e| e.message().to_string())?;
+        let event = event.to_owned();
         let handler = DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_, args| {
             if let Some(args) = args {
                 let mut json = PWSTR::null();
                 // SAFETY: o WebView2 aloca a string; `take_pwstr` a libera.
-                unsafe { args.ParameterObjectAsJson(&mut json) }?;
-                if let Ok(value) = serde_json::from_str(&take_pwstr(json)) { f(value) }
+                if let Err(e) = unsafe { args.ParameterObjectAsJson(&mut json) } {
+                    eprintln!("[nav] evento {event} sem parametros: {}", e.message());
+                    return Err(e);
+                }
+                match serde_json::from_str(&take_pwstr(json)) {
+                    Ok(value) => f(value),
+                    Err(e) => eprintln!("[nav] evento {event} com JSON invalido: {e}"),
+                }
             }
             Ok(())
         }));

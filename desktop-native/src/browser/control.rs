@@ -65,8 +65,15 @@ impl<P: Page> Controller<P> {
     }
 
     pub async fn start(&self, hidden: bool) {
-        for domain in ["Runtime", "Log", "Page"] { let _ = self.enable(domain).await; }
+        self.enable_base().await;
         self.set_hidden(hidden).await;
+    }
+
+    /// Sem Runtime/Log/Page o console e as refs morrem calados; `run` tenta de novo a cada verbo (já ligado não chama o CDP).
+    async fn enable_base(&self) {
+        for domain in ["Runtime", "Log", "Page"] {
+            if let Err(e) = self.enable(domain).await { eprintln!("[nav] {e}"); }
+        }
     }
 
     pub async fn set_hidden(&self, hidden: bool) {
@@ -74,7 +81,7 @@ impl<P: Page> Controller<P> {
         let _turn = self.turn.lock().await;
         self.state.borrow_mut().hidden = self.wanted_hidden.get();
         let layout = self.state.borrow().layout;
-        let _ = self.apply_layout(layout).await;
+        if let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] layout nao aplicado: {e}"); }
     }
 
     pub fn on_event(&self, method: &str, p: &Value) {
@@ -104,6 +111,7 @@ impl<P: Page> Controller<P> {
 
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
         let _turn = self.turn.lock().await;
+        self.enable_base().await;
         self.after_navigation().await;
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         let result = match verb {
@@ -137,7 +145,7 @@ impl<P: Page> Controller<P> {
             s.inflight = 0;
         }
         // O tema emulado se perde ao navegar; o tamanho não.
-        if self.state.borrow().theme != "sistema" { let _ = self.apply_theme().await; }
+        if self.state.borrow().theme != "sistema" && let Err(e) = self.apply_theme().await { eprintln!("[nav] tema nao reaplicado: {e}"); }
     }
 
     async fn enable(&self, domain: &'static str) -> Result<(), String> {
@@ -171,12 +179,18 @@ impl<P: Page> Controller<P> {
     }
 
     /// Ref velha e ref inexistente dão no mesmo lugar: o nó morre em qualquer re-render, e a saída é o mesmo snapshot novo.
-    async fn center(&self, r: &str) -> Option<(i64, i64)> {
-        let id = *self.state.borrow().refs.get(r)?;
+    /// Outra falha do CDP (página travada, sessão caída) não é ref velha: sobe como erro, porque snapshot novo não resolve.
+    async fn center(&self, r: &str) -> Result<Option<(i64, i64)>, String> {
+        let Some(id) = self.state.borrow().refs.get(r).copied() else { return Ok(None) };
         let _ = self.page.call("DOM.scrollIntoViewIfNeeded", json!({"backendNodeId": id})).await;
-        let model = self.page.call("DOM.getBoxModel", json!({"backendNodeId": id})).await.ok()?;
-        let q: Vec<f64> = model["model"]["content"].as_array()?.iter().filter_map(Value::as_f64).collect();
-        (q.len() >= 6).then(|| (((q[0] + q[4]) / 2.).round() as i64, ((q[1] + q[5]) / 2.).round() as i64))
+        let model = match self.page.call("DOM.getBoxModel", json!({"backendNodeId": id})).await {
+            Ok(m) => m,
+            Err(e) if e.contains("No node") => return Ok(None),
+            Err(e) => return Err(format!("{r}: {e}")),
+        };
+        let Some(content) = model["model"]["content"].as_array() else { return Ok(None) };
+        let q: Vec<f64> = content.iter().filter_map(Value::as_f64).collect();
+        Ok((q.len() >= 6).then(|| (((q[0] + q[4]) / 2.).round() as i64, ((q[1] + q[5]) / 2.).round() as i64)))
     }
 
     /// Ouvinte em captura prova que o EVENTO chegou ao documento. `pointerdown` antes de `mousedown`: um
@@ -184,15 +198,18 @@ impl<P: Page> Controller<P> {
     async fn arrived(&self, types: &[&str], fire: impl AsyncFn() -> Result<(), String>) -> Result<bool, String> {
         let arm = format!("(()=>{{window.__hangarSonda=0;const ts={};const f=()=>{{window.__hangarSonda=1;ts.forEach(t=>removeEventListener(t,f,true))}};ts.forEach(t=>addEventListener(t,f,true));return 1}})()",
             serde_json::to_string(types).unwrap_or_default());
-        let _ = self.page.call("Runtime.evaluate", json!({"expression": arm})).await;
+        self.page.call("Runtime.evaluate", json!({"expression": arm})).await.map_err(|e| format!("sonda nao armada: {e}"))?;
         fire().await?;
         self.frame().await;
-        // Marcador sumido = documento novo: o evento navegou, logo chegou. Leitura que falha também conta.
-        Ok(self.value(PROBE_READ).await.map_or(true, |v| v.as_i64() != Some(0)))
+        // Marcador sumido (2) = documento novo: o evento navegou, logo chegou. Leitura que falha não prova entrega.
+        match self.value(PROBE_READ).await {
+            Ok(v) => Ok(matches!(v.as_i64(), Some(1 | 2))),
+            Err(e) => { eprintln!("[nav] sonda nao lida: {e}"); Ok(false) }
+        }
     }
 
     async fn click(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         let base = |t: &str| json!({"type": t, "x": x, "y": y, "button": "left", "clickCount": 1});
         let ok = self.arrived(&["pointerdown", "mousedown"], async || {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
@@ -244,7 +261,7 @@ impl<P: Page> Controller<P> {
     }
 
     async fn hover(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await?;
         self.frame().await;
         Ok(format!("ok: hover {r}"))
@@ -277,8 +294,15 @@ impl<P: Page> Controller<P> {
             self.page.sleep(ms).await;
             return Ok(format!("ok: wait {target}ms"));
         }
-        if target == "--idle" { self.enable("Network").await?; }
         let needle = args.get(1).map(String::as_str).unwrap_or("");
+        // Alvo torto esperaria 15 s para dar um erro que já se sabe agora.
+        let valid = match target {
+            "--url" | "--text" => !needle.is_empty(),
+            "--idle" => true,
+            t => t.len() > 2 && t.starts_with("@e") && t[2..].bytes().all(|b| b.is_ascii_digit()),
+        };
+        if !valid { return Ok(format!("erro: wait: alvo invalido: {joined} (use @eN, --url texto, --text texto, --idle ou ms)")); }
+        if target == "--idle" { self.enable("Network").await?; }
         // Conta o tempo das checagens além das pausas: página presa num laço de JS não responde ao
         // evaluate, e sem teto o verbo seguraria a vez de todos os outros.
         let mut waited = 0;
@@ -468,6 +492,56 @@ mod tests {
         assert!(text(block_on(c.run("click", &s(&["@e1"])))).starts_with("erro: click @e1: o evento nao chegou"));
     }
 
+    fn is_probe_read(p: &Value) -> bool { p["expression"].as_str().is_some_and(|e| e.starts_with("(typeof window.__hangarSonda")) }
+    fn is_probe_arm(p: &Value) -> bool { p["expression"].as_str().is_some_and(|e| e.starts_with("(()=>{window.__hangarSonda")) }
+    fn boxed() -> Value { json!({"model": {"content": [0, 0, 20, 0, 20, 10, 0, 10]}}) }
+
+    #[test]
+    fn click_with_unreadable_probe_is_not_confirmed() {
+        let c = ctl(|m, p| match m {
+            "Accessibility.getFullAXTree" => Ok(tree()),
+            "DOM.getBoxModel" => Ok(boxed()),
+            "Runtime.evaluate" if is_probe_read(p) => Err("Execution context was destroyed".into()),
+            _ => Ok(json!({})),
+        });
+        block_on(c.run("snapshot", &[]));
+        assert!(text(block_on(c.run("click", &s(&["@e1"])))).starts_with("erro: click @e1: o evento nao chegou"));
+    }
+
+    #[test]
+    fn click_with_unarmed_probe_is_an_error() {
+        let c = ctl(|m, p| match m {
+            "Accessibility.getFullAXTree" => Ok(tree()),
+            "DOM.getBoxModel" => Ok(boxed()),
+            "Runtime.evaluate" if is_probe_arm(p) => Err("Cannot find context".into()),
+            _ => Ok(json!({})),
+        });
+        block_on(c.run("snapshot", &[]));
+        assert_eq!(text(block_on(c.run("click", &s(&["@e1"])))), "erro: sonda nao armada: Cannot find context");
+        assert!(!methods(&c).contains(&"Input.dispatchMouseEvent".to_string()));
+    }
+
+    #[test]
+    fn box_model_failure_other_than_missing_node_surfaces() {
+        let c = ctl(|m, _| match m {
+            "Accessibility.getFullAXTree" => Ok(tree()),
+            "DOM.getBoxModel" => Err("Could not compute box model.".into()),
+            _ => Ok(json!({})),
+        });
+        block_on(c.run("snapshot", &[]));
+        assert_eq!(text(block_on(c.run("hover", &s(&["@e1"])))), "erro: @e1: Could not compute box model.");
+    }
+
+    #[test]
+    fn wait_with_invalid_target_fails_at_once() {
+        let c = ctl(|_, _| Ok(json!({})));
+        for args in [&["--url"][..], &["--texto", "x"], &["@x1"], &[]] {
+            assert_eq!(text(block_on(c.run("wait", &s(args)))),
+                format!("erro: wait: alvo invalido: {} (use @eN, --url texto, --text texto, --idle ou ms)", args.join(" ")));
+        }
+        assert!(!methods(&c).contains(&"Runtime.evaluate".to_string()));
+    }
+
     #[test]
     fn type_without_editable_focus_is_refused() {
         let c = ctl(|m, _| Ok(if m == "Runtime.evaluate" { json!({"result": {"value": "button"}}) } else { json!({}) }));
@@ -563,7 +637,7 @@ mod tests {
         let c = ctl(|_, _| Ok(json!({"result": {"value": "x"}})));
         let (a, b) = block_on(futures::future::join(c.run("eval", &s(&["1"])), c.run("text", &[])));
         assert_eq!((text(a), text(b)), ("ok: \"x\"".into(), "x".into()));
-        assert_eq!(methods(&c).len(), 2);
+        assert_eq!(methods(&c).iter().filter(|m| !m.ends_with(".enable")).count(), 2);
     }
 
     #[test]

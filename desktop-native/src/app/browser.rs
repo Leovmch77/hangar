@@ -108,6 +108,7 @@ impl BrowserPanel {
             // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
             // roda até nascer pode executar outras tarefas da GPUI sem pânico.
             let engine = starter.and_then(|starter| starter.start(events)).map(Rc::new);
+            if let Err(e) = &engine { eprintln!("[nav] motor do navegador falhou: {e}"); }
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
                 this.engine = Some(engine);
@@ -134,6 +135,16 @@ impl BrowserPanel {
         let (setup, hidden) = (ctl.clone(), !self.shown);
         cx.spawn(async move |_, _| setup.start(hidden).await).detach();
         self.controller = Some(ctl);
+    }
+
+    /// Por que ainda não há controlador: `None` = motor nunca pedido, `Some(Ok)` = nascendo, `Some(Err)` = falhou.
+    #[cfg(target_os = "windows")]
+    pub(super) fn engine_status(&self) -> Option<Result<(), &str>> {
+        match &self.engine {
+            Some(Err(e)) => Some(Err(e)),
+            Some(Ok(_)) => Some(Ok(())),
+            None => self.starting.is_some().then_some(Ok(())),
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -314,10 +325,11 @@ impl Hangar {
     /// `hangar-preview open` → backend → evento `nav` na lista. O navegador nasce escondido se a sessão não estiver na
     /// tela, e o CLI já consegue dirigi-lo. Só do servidor desta máquina: o CLI que pediu roda nela.
     pub(super) fn receive_nav(&mut self, data: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
-        if !cfg!(target_os = "windows") || !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
-        let (Some(name), Some(url)) = (data["name"].as_str(), data["url"].as_str()) else { return };
+        if !cfg!(target_os = "windows") { return; }
+        if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { eprintln!("[nav] nav ignorado: servidor ativo nao e desta maquina"); return; }
+        let (Some(name), Some(url)) = (data["name"].as_str(), data["url"].as_str()) else { eprintln!("[nav] nav ignorado: sem name/url: {data}"); return };
         // Mesma chave de `browser_key` com essa sessão aberta: a lista que traz o evento é a do servidor ativo.
-        let Some(server) = self.server.as_deref() else { return };
+        let Some(server) = self.server.as_deref() else { eprintln!("[nav] nav ignorado: sem servidor ativo"); return };
         let key = format!("{}::{name}", super::servers::norm(server));
         let browser = self.browser_for(key, window, cx);
         browser.update(cx, |panel, cx| panel.go(url.to_owned(), window, cx));
@@ -340,8 +352,16 @@ impl Hangar {
             if closed { crate::browser::server::remove_sidecar(&key); cx.notify(); }
             return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
         }
-        let Some(ctl) = self.side.browsers.get(&key).and_then(|b| b.read(cx).controller()) else {
+        let Some(browser) = self.side.browsers.get(&key) else {
             return answer(reply, format!("erro: a sessao {key} nao tem navegador aberto"));
+        };
+        let panel = browser.read(cx);
+        let Some(ctl) = panel.controller() else {
+            return answer(reply, match panel.engine_status() {
+                Some(Err(e)) => format!("erro: o navegador da sessao {key} falhou ao iniciar: {e}"),
+                Some(Ok(())) => format!("erro: o navegador da sessao {key} ainda esta iniciando, tente de novo em instantes"),
+                None => format!("erro: a sessao {key} nao tem navegador aberto"),
+            });
         };
         cx.spawn(async move |_, _| { let _ = reply.send(ctl.run(&verb, &args).await); }).detach();
     }

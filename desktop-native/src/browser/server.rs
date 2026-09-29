@@ -47,7 +47,11 @@ pub fn write_sidecar(key: &str, url: &str, title: &str) {
 }
 
 pub fn remove_sidecar(key: &str) {
-    if let Some(dir) = nav_dir() { let _ = std::fs::remove_file(dir.join(format!("{}.json", sidecar_name(key)))); }
+    let Some(dir) = nav_dir() else { return };
+    match std::fs::remove_file(dir.join(format!("{}.json", sidecar_name(key)))) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("[nav] sidecar de {key} nao apagado: {e}"),
+        _ => {}
+    }
 }
 
 /// Só o app nativo grava `pid`: sidecar do Electron (sem `pid`) nunca é tocado.
@@ -115,16 +119,18 @@ pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = new_token()?;
+    // Converte antes de publicar a porta: servidor que não sobe nunca aparece no `_srv.json`.
+    let listener = { let _guard = runtime.enter(); tokio::net::TcpListener::from_std(listener)? };
     drop_stale_sidecars();
     write_json("_srv", &json!({"porta": port, "token": token, "pid": std::process::id(), "ts": now_ms()}))?;
     let token: Arc<str> = token.into();
     runtime.spawn(async move {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
-            Ok(l) => l,
-            Err(e) => { eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"); return; }
-        };
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(serve(stream, token.clone(), requests.clone()));
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => { tokio::spawn(serve(stream, token.clone(), requests.clone())); }
+                // Erro de accept (ex.: limite de sockets) é passageiro: sair do laço mataria o servidor calado.
+                Err(e) => { eprintln!("[nav] accept falhou: {e}"); tokio::time::sleep(Duration::from_millis(100)).await; }
+            }
         }
     });
     Ok(port)
