@@ -97,7 +97,10 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT, *,
     """
     try:
         proc = subprocess.Popen(
-            [_binario(), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            # Sem plugins: na largada o app-server confere cada marketplace git num temporário em
+            # CODEX_HOME/.tmp, e morto antes de acabar (sempre, aqui) deixa o temporário para trás.
+            [_binario(), "app-server", "-c", "features.plugins=false"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
             env=_environment(codex_home),
         )

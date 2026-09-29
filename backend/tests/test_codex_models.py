@@ -142,6 +142,8 @@ def test_listar_fala_json_rpc_e_cacheia(monkeypatch):
     ])
     assert [m["id"] for m in cm.listar(fresco=True)] == ["gpt-5.6-sol", "gpt-5.5"]
     assert criados[0].argv[:2] == ["/usr/bin/codex", "app-server"]
+    # Processo efêmero: com plugins ligados, cada largada deixava um temporário em CODEX_HOME/.tmp.
+    assert criados[0].argv[2:] == ["-c", "features.plugins=false"]
     # initialize ANTES do model/list: sem o handshake o app-server recusa o pedido.
     pedidos = [json.loads(l) for l in criados[0].escrito.getvalue().splitlines()]
     assert [p["method"] for p in pedidos] == ["initialize", "model/list"]

@@ -182,6 +182,22 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   409 `erro_sessao_orq` (`api._recusa_orq`), e os três clientes escondem compositor, terminal,
   parear e rodar, com o botão "Falar com o árbitro" no lugar. Ver
   [Provider `orq`](#provider-orq-a-linha-do-orquestrador-não-tem-pane).
+- **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
+  Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
+
+## Temporários `git-*` no `.tmp` do Codex
+
+Em 29/09/2026 (codex-cli 0.159.0) `~/.codex/.tmp` tinha 7.245 pastas `git-XXXXXX` vazias
+(`HEAD` + `objects/` + `refs/`) e `~/.codex-<conta>/.tmp` outras 3.434. Na largada, todo
+`codex app-server` roda `git ls-remote` em cada marketplace `source_type = "git"` usando um
+diretório temporário; se o processo sai antes de a conferência acabar, o temporário fica. Os
+comandos `codex plugin ... --json` não fazem isso. `codex_appserver.perguntar` (cota a cada
+poucos minutos por credencial e catálogo de modelos) mata o processo ~1 s depois de subir, então
+cada leitura deixava uma pasta. Medido em `CODEX_HOME` descartável com 3 marketplaces git:
+3 largadas mortas = 3 sobras; fechando o stdin também 3 (sair "limpo" não resolve); com
+`-c features.plugins=false`, 0. `account/rateLimits/read` e `model/list` respondem igual sem
+plugins. O `CodexNativo` do importador precisa de plugins e segue deixando uma sobra ocasional
+por rodada.
 
 ## Primeira mensagem na TUI recém-aberta
 
