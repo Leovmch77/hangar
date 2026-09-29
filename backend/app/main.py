@@ -157,7 +157,7 @@ def main():
     _saida_utf8()   # antes de qualquer print: o QR abaixo quebra em cp1252
     startup_guard(settings)
     _setup_diag_logging()
-    _state_dirs = list({Path(c.path) for c in list_config_dirs()}
+    _state_dirs = list({Path(c.path) for c in list_config_dirs(ordered=False)}
                        | {_backend_config_base().resolve(), Path.home() / ".claude"})
     # Renomeia os sidecars .hangar-* pra .hangar-* (link no caminho antigo). ANTES de tudo
     # que lê ou escreve sidecar: os hooks, o endpoint do Pi e o hook_state logo abaixo já são

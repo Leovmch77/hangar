@@ -68,10 +68,11 @@ def _projects_mtime(p: Path) -> float:
     return valor
 
 
-def list_config_dirs() -> list[ConfigDirInfo]:
+def list_config_dirs(ordered: bool = True) -> list[ConfigDirInfo]:
     """Config dirs do Claude pra escolher na criacao. Hibrido: CP_CLAUDE_CONFIG_DIRS ('label:path'
     por virgula) tem prioridade; senao auto-scan de ~/.claude* com login + projects/, label pelo
-    basename, ordenado por recencia (backup/abandonado afundam)."""
+    basename, ordenado por recencia (backup/abandonado afundam). `ordered=False` pula a ordem, que
+    varre projects/ inteiro: quem so busca ou confere pertinencia nao precisa dela."""
     active_base = _backend_config_base().resolve()
     raw = os.environ.get("CP_CLAUDE_CONFIG_DIRS", "").strip()
     entries: list[tuple[str, Path]] = []
@@ -97,7 +98,8 @@ def list_config_dirs() -> list[ConfigDirInfo]:
             entries.append((label.strip() or _label_for(p), p))
     else:
         found = [p.resolve() for p in Path.home().glob(".claude*") if p.is_dir() and _is_config_dir(p)]
-        found.sort(key=_projects_mtime, reverse=True)
+        if ordered:
+            found.sort(key=_projects_mtime, reverse=True)
         # A base do app entra mesmo deslogada: numa máquina nova ela é a primeira conta, e sem ela
         # a aba Contas só oferecia criar uma `~/.claude-<nome>`, deixando o `claude` do terminal
         # (que usa a base) preso na tela de boas-vindas.

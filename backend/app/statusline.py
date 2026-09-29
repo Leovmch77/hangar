@@ -43,7 +43,8 @@ def dirs_de_config() -> list[Path]:
     if now - _dirs_cache[0] < _DIRS_TTL and _dirs_cache[1]:
         return _dirs_cache[1]
     try:
-        dirs = list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
+        dirs = list({Path(c.path) for c in list_config_dirs(ordered=False)}
+                    | {_backend_config_base().resolve()})
     except OSError:
         dirs = [_backend_config_base()]
     _dirs_cache = (now, dirs)

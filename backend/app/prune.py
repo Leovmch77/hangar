@@ -80,7 +80,7 @@ def _config_bases() -> list[Path]:
     # Mesmas bases dos outros leitores (statusline/hook_state): todos os config dirs das
     # contas + o base do backend.
     try:
-        return list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
+        return list({Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()})
     except OSError:
         return [_backend_config_base()]
 

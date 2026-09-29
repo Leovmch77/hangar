@@ -242,7 +242,7 @@ def _base() -> Path:
 def _pastas_legadas() -> list[Path]:
     from app.config import list_config_dirs
     roots = {Path.home() / ".claude", Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))}
-    roots.update(Path(c.path) for c in list_config_dirs())
+    roots.update(Path(c.path) for c in list_config_dirs(ordered=False))
     return sorted({(root / ".hangar-diag").resolve() for root in roots})
 
 
