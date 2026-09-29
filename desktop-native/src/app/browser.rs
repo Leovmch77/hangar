@@ -190,12 +190,14 @@ impl Hangar {
     /// No Windows e no macOS a página é uma janela filha, por cima de tudo o que a GPUI desenha: qualquer camada sobre o
     /// painel a esconde. Cobre o painel fora de vista (fechado, estreito, sem sessão, visor de arquivos expandido), outra
     /// aba à frente (menu, subagente), as páginas de Configurações e Custos, a caixa de configurações ao vivo, a conexão,
-    /// a busca, os painéis presos ao compositor e à barra do topo, e os diálogos e folhas do kit.
+    /// a busca, os painéis presos ao compositor e à barra do topo, e os diálogos e folhas do kit. No Linux a página é
+    /// desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
     fn browser_visible(&self, window: &mut Window, cx: &mut App) -> bool {
+        let covered = cfg!(not(target_os = "linux")) && (self.connection_dialog || self.search.open || self.popup_open()
+            || window.has_active_dialog(cx) || window.has_active_sheet(cx));
         self.side_width(window).is_some() && !self.files_expanded()
             && !self.side_menu_shown() && !self.subagent_tab_open() && self.side_tab() == SideTab::Browser
-            && self.settings.is_none() && self.costs.view.is_none() && !self.connection_dialog && !self.search.open
-            && !self.popup_open() && !window.has_active_dialog(cx) && !window.has_active_sheet(cx)
+            && self.settings.is_none() && self.costs.view.is_none() && !covered
     }
 
     /// A cada quadro da janela, antes das áreas guardadas desenharem.

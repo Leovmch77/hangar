@@ -236,8 +236,10 @@ fn map_key(keystroke: &Keystroke) -> Option<(Key, c_uint)> {
         (_, "pageup") => Key::Sym(0xff55),
         (_, "pagedown") => Key::Sym(0xff56),
         (_, "space") => Key::Sym(0x20),
-        // Ctrl/Alt + letra: a letra pura, o modificador vai à parte.
-        (_, name) => Key::Char(single_char(name)?),
+        // Ctrl/Alt + letra: a letra pura, o modificador vai à parte. Sem eles, tecla sem texto é a tecla morta
+        // compondo: o caractere sai inteiro na próxima tecla.
+        (_, name) if m.control || m.alt => Key::Char(single_char(name)?),
+        _ => return None,
     };
     Some((key, mods))
 }
@@ -696,6 +698,8 @@ mod tests {
             (stroke("a", Some("a"), true, false), Some((Key::Char('a'), ctrl))),
             (stroke("z", None, true, true), Some((Key::Char('z'), ctrl | shift))),
             (stroke("f13", None, false, false), None),
+            // Tecla morta compondo (ABNT2 "~"): nada vai à página até o "ã" chegar.
+            (stroke("'", None, false, false), None),
         ] {
             assert_eq!(map_key(&keystroke), expected, "{keystroke:?}");
         }
