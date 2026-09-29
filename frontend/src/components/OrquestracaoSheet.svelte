@@ -609,7 +609,7 @@
          de grupo: a frase diz de que passo a sessão parte (backend/app/orq_start.py). -->
     {#if grupo.prontidao}
       {@const p = grupo.prontidao}
-      {@const plano = p.plan ? (p.plan.path.split('/').pop() ?? '') : ''}
+      {@const plano = p.plan ? (p.plan.path.split(/[\\/]/).pop() ?? '') : ''}
       <p class="os-intro">{p.phase === 'planner' ? m.orqcfg_fase_planner()
         : p.phase === 'prepare' ? (p.plan?.state === 'changed' ? m.orqcfg_fase_changed({ plano }) : m.orqcfg_fase_prepare({ plano }))
         : p.phase === 'launch' ? m.orqcfg_fase_launch({ plano }) : m.orqcfg_fase_arbiter({ plano })}</p>

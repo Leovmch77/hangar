@@ -454,15 +454,19 @@ def plan_sha(text: str) -> str:
 
 
 TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
-FENCE = re.compile(r"^(```|~~~).*?^\1", re.MULTILINE | re.DOTALL)
+# Closing fence: same character, at least as long, up to 3 spaces of indent (CommonMark).
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[`~]*[ \t]*$", re.MULTILINE | re.DOTALL)
 OPEN_STEP = re.compile(r"^\s*- \[ \] \*\*Step", re.MULTILINE)
 DONE_STEP = re.compile(r"^\s*- \[[xX]\] \*\*Step", re.MULTILINE)
 
 
 def _repo_files(repo: Path, *args: str) -> list[str]:
     # `git grep` exits 1 on no match; a folder outside git has no plan to find.
-    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
-                       capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
     return [line for line in r.stdout.splitlines() if line] if r.returncode == 0 else []
 
 
@@ -484,8 +488,9 @@ def find_plan(repo: Path) -> dict:
         m = PREPARADO.search(text)
         # A fenced `### Task` is a doc showing the format, not a plan; every step ticked is work done.
         body = FENCE.sub("", text)
-        if not m and not rel.endswith(".orq.md") and (not TASK_HEAD.search(body) or
-                                                      (DONE_STEP.search(body) and not OPEN_STEP.search(body))):
+        if DONE_STEP.search(body) and not OPEN_STEP.search(body):
+            continue
+        if not m and not rel.endswith(".orq.md") and not TASK_HEAD.search(body):
             continue
         state = ("stamped" if m.group(1) == plan_sha(text) else "changed") if m else \
             "unstamped" if rel.endswith(".orq.md") else "tasks"

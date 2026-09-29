@@ -106,6 +106,21 @@ def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_orq_celula_invalida"
 
 
+def test_find_plan_ignora_exemplo_e_plano_terminado(tmp_path):
+    """Exemplo do formato dentro de bloco de código não é plano, e plano com todo Step marcado —
+    carimbado ou não — é trabalho feito: nenhum dos dois pode virar o plano do play."""
+    import subprocess
+    from app import orq_start
+    orq = orq_start._orq()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "doc.md").write_text("````md\n```\n### Task 1: x\n```\n### Task 2: y\n````\n", encoding="utf-8")
+    feito = "### Task 1: x\n- [x] **Step 1: y**\n"
+    (tmp_path / "feito.orq.md").write_text(f"Preparado: ontem · sha {orq.plan_sha(feito)}\n{feito}", encoding="utf-8")
+    assert orq.find_plan(tmp_path) == {}
+    (tmp_path / "aberto.md").write_text("### Task 1: x\n- [ ] **Step 1: y**\n", encoding="utf-8")
+    assert orq.find_plan(tmp_path) == {"path": str(tmp_path / "aberto.md"), "state": "tasks"}
+
+
 def test_comecar_parte_do_passo_que_falta(cli, tmp_path):
     """O botão "Começar" nunca recusa por falta de plano: sem plano a PRÓPRIA sessão vira
     planejadora; com o plano carimbado e grupo, árbitra. A régua é o `find_plan` do orq.py."""
