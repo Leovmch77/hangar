@@ -53,7 +53,7 @@ from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
 from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody,
-                        ProjectShortcutsBody, session_key)
+                        ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
@@ -6538,6 +6538,26 @@ def shortcut_terminals_list(name: str):
     return {"terminals": shortcut_terminals.list_for(name)}
 
 
+def _answer(target: str | None, text: str, missing: HTTPException):
+    # Uma linha so, sem tecla de controle: `\n` viraria dois comandos, `\x03` um Ctrl+C, `\x1b` um Esc.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+        raise HTTPException(400, detail=erro("erro_shortcut_resposta_invalida", "a resposta e uma linha so"))
+    if target is None:
+        raise missing
+    from app import terminal_prompt
+    if not terminal_prompt.answer(target, text):
+        raise HTTPException(500, detail=erro("erro_shortcut_resposta", "o terminal recusou a resposta"))
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{name}/shortcut-terminals/{ident}/answer", dependencies=[Depends(require_auth)])
+def shortcut_terminal_answer(name: str, ident: str, body: ShortcutAnswerBody):
+    from app import shortcut_terminals
+    return _answer(shortcut_terminals.find(name, ident), body.text,
+                   HTTPException(404, detail=erro("erro_shortcut_terminal_inexistente",
+                                                  "terminal do atalho nao encontrado")))
+
+
 # POST, nao DELETE: o proxy da frente so deixa passar GET/POST.
 @app.post("/api/sessions/{name}/shortcut-terminals/{ident}/close", dependencies=[Depends(require_auth)])
 def shortcut_terminal_close(name: str, ident: str):
@@ -6572,6 +6592,12 @@ def hangar_terminal_close(ident: str):
     if not closed:
         raise HTTPException(500, detail=erro("erro_hangar_terminal_fechar", "o terminal No Hangar nao fechou"))
     return {"ok": True}
+
+
+@app.post("/api/hangar-terminals/{ident}/answer", dependencies=[Depends(require_auth)])
+def hangar_terminal_answer(ident: str, body: ShortcutAnswerBody):
+    from app import shortcut_terminals
+    return _answer(shortcut_terminals.find_hangar(ident), body.text, _hangar_404())
 
 
 @app.post("/api/hangar-terminals/{ident}/restart", dependencies=[Depends(require_auth)], status_code=202)

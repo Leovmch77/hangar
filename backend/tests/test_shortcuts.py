@@ -537,3 +537,83 @@ def test_shell_only_fields_are_validated():
     with pytest.raises(ValueError, match="runs_in"):
         rc.validate_shortcut_item(
             {"id": "y", "type": "send_text", "label": "L", "text": "t", "runs_in": "hangar"}, "w")
+
+
+# --- pergunta do terminal e resposta pelo app ------------------------------------------------
+
+def test_hangar_question_is_listed_and_answer_reaches_the_script(client, monkeypatch, tmp_path, private_tmux):
+    from app import api
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("read -p precisa de bash")
+    monkeypatch.setenv("SHELL", bash)
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
+    script = 'echo preparando; read -r -p "Pasta do PSS na VM [C:\\PSS]: " p; echo "$p" > resposta.txt; sleep 30'
+    ident = _run_hangar(client, monkeypatch, tmp_path, script, home=False).json()["terminal"]["id"]
+    question = _wait_for(lambda: next((t["question"] for t in _hangar(client) if t["id"] == ident), None))
+    assert question["text"] == "Pasta do PSS na VM" and question["default"] == "C:\\PSS"
+    assert question["screen"][-2:] == ["preparando", "Pasta do PSS na VM [C:\\PSS]:"]
+    r = client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": "D:\\X"}, headers=_auth())
+    assert r.status_code == 200
+    assert _wait_file(tmp_path / "resposta.txt") == "D:\\X"
+    assert _wait_for(lambda: all(t["question"] is None for t in _hangar(client)))
+
+
+def test_session_terminal_question_respects_ask(client, monkeypatch, tmp_path, private_tmux):
+    from app import api
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("read -p precisa de bash")
+    monkeypatch.setenv("SHELL", bash)
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
+    _run(client, monkeypatch, tmp_path, 'read -r -p "Porta [3000]: " p; sleep 30', name="a", ask=True)
+    _run(client, monkeypatch, tmp_path, 'read -r -p "Porta [3000]: " p; sleep 30', name="b", ask=False)
+    listed = lambda n: client.get(f"/api/sessions/{n}/shortcut-terminals", headers=_auth()).json()["terminals"]
+    assert _wait_for(lambda: listed("a")[0]["question"])["default"] == "3000"
+    assert listed("b")[0]["question"] is None
+    ident = listed("a")[0]["id"]
+    assert client.post(f"/api/sessions/a/shortcut-terminals/{ident}/answer", json={"text": ""},
+                       headers=_auth()).status_code == 200
+
+
+def test_running_program_is_not_a_question(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    _run_hangar(client, monkeypatch, tmp_path, "printf 'Porta: '; sleep 30")
+    time.sleep(0.5)
+    assert [t["question"] for t in _hangar(client)] == [None]
+
+
+def test_answer_rejects_line_breaks(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    ident = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()["terminal"]["id"]
+    for bad in ("a\nrm -rf x", "a\x03", "\x1b[A"):
+        r = client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": bad}, headers=_auth())
+        assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_shortcut_resposta_invalida"
+    assert client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": "-n x;y"}, headers=_auth()).status_code == 200
+
+
+@pytest.mark.parametrize("text", ["-n x;y", "-", "; touch invadido", "a;", ";", "a\\;", "--help"])
+def test_answer_text_reaches_the_terminal_untouched(client, monkeypatch, tmp_path, private_tmux, text):
+    # `-` inicial e `;` sao sintaxe do tmux: o que digitou tem que chegar no programa, letra por letra.
+    from app import api, tmux
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("read -p precisa de bash")
+    monkeypatch.setenv("SHELL", bash)
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
+    sent = []
+    real_send_keys = tmux.send_keys
+    monkeypatch.setattr(tmux, "send_keys", lambda name, keys, literal=False: (
+        sent.append((keys, literal)), real_send_keys(name, keys, literal=literal))[1])
+    script = 'read -r -p "Valor: " v; printf %s "[$v]" > resposta.txt; sleep 30'
+    ident = _run_hangar(client, monkeypatch, tmp_path, script, home=False).json()["terminal"]["id"]
+    assert _wait_for(lambda: next((t["question"] for t in _hangar(client) if t["id"] == ident), None))
+    r = client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": text}, headers=_auth())
+    assert r.status_code == 200
+    assert sent == [(text, True), ("Enter", False)]
+    assert _wait_file(tmp_path / "resposta.txt") == f"[{text}]"
+    assert not (tmp_path / "invadido").exists()

@@ -979,6 +979,9 @@ def _send_literal(target: str, text: str) -> bool:
     """
     # POSIX: caminho de sempre, BYTE-IDENTICO. O bug do '-' e do psmux; o tmux real honra o `--`.
     if os.name != "nt":
+        # `;` no fim do argumento o tmux le como separador de comando e descarta; `\;` chega literal.
+        if text.endswith(";"):
+            text = text[:-1] + "\\;"
         cp = _run(["tmux", "send-keys", "-t", target, "-l", "--", text])
         if cp.returncode != 0:
             _log.warning("tmux send-keys -l falhou pra %r: %s",

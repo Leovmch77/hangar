@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from app import tmux
+from app import terminal_prompt, tmux
 
 _log = logging.getLogger(__name__)
 
@@ -181,12 +181,16 @@ def _option(target: str, opt: str) -> str:
     return tmux._run(["tmux", "show-options", "-v", "-t", f"={target}:", opt]).stdout.rstrip("\n")
 
 
+def _question(r: dict) -> dict | None:
+    return terminal_prompt.pending_question(r["tmux"], r["pid"]) if r["alive"] and r["ask"] else None
+
+
 def list_for(owner: str) -> list[dict]:
     """Terminais de atalho da sessao `owner`, do mais antigo pro mais novo."""
     rows = [r for r in _rows() if r["owner"] == owner]
     rows.sort(key=lambda r: (r["created"], r["seq"], r["tmux"]))
     return [{**{k: r[k] for k in ("id", "label", "alive", "exit_code", "created", "ask", "key")},
-             "question": None} for r in rows]
+             "question": _question(r)} for r in rows]
 
 
 def find(owner: str, ident: str) -> str | None:
@@ -289,8 +293,9 @@ def start_hangar(key: str, cwd: str, command: str, label: str, env: dict[str, st
 def list_all() -> list[dict]:
     """Todos os terminais de atalho (das sessoes e No Hangar), do mais antigo pro mais novo."""
     rows = sorted(_rows(), key=lambda r: (r["created"], r["seq"], r["tmux"]))
+    terminal_prompt.forget({r["tmux"] for r in rows if r["alive"]})
     return [{**{k: r[k] for k in ("id", "label", "alive", "exit_code", "created", "owner", "key", "origin", "ask")},
-             "question": None} for r in rows]
+             "question": _question(r)} for r in rows]
 
 
 def hangar_row(ident: str) -> dict | None:

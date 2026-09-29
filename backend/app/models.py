@@ -632,6 +632,11 @@ class ShortcutShellBody(BaseModel):
     ask: bool = True
 
 
+class ShortcutAnswerBody(BaseModel):
+    # Vazio = so Enter (aceita o valor padrao da pergunta).
+    text: str = Field(default="", max_length=4096)
+
+
 # `Any` nos itens: item torto volta 400 apontando qual (validate_shortcut_item), nao 422 generico.
 class ProjectShortcutsBody(BaseModel):
     items: list[Any] = Field(max_length=500)
