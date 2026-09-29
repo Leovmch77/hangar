@@ -25,7 +25,8 @@ def env(tmp_path):
     fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
     fake.chmod(0o755)
     e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "ORQ_JEV": "off",
-         "HOME": str(tmp_path), "TYPESAFE_API_KEY": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
+         "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+         "TYPESAFE_API_KEY": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
     return d, log, e
 
 
@@ -689,6 +690,88 @@ def test_settings_json_que_nao_e_objeto_acorda_o_arbitro(env, tmp_path, jev_serv
     (tmp_path / ".claude" / "settings.json").write_text("[]")
     run({**_jev_env(e, jev_server, "shadow"), "TYPESAFE_API_KEY": ""}, "notify", "y")
     assert sent(log) == ["arb y"]
+    assert json.loads((d / "jev-shadow.jsonl").read_text())["error"] == "no key"
+
+
+@pytest.fixture
+def jev_cfg(tmp_path, monkeypatch):
+    """jev_config() com o ambiente limpo e o CLAUDE_CONFIG_DIR num tmp; devolve (módulo, pasta)."""
+    for k in ("TYPESAFE_API_KEY", "ORQ_JEV_URL", "JEV_ENDPOINT", "JEV_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(conta))
+    spec = importlib.util.spec_from_file_location("orq_cfg", ORQ)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m, conta
+
+
+def _runtime(conta, **campos):
+    (conta / "runtime-config.json").write_text(json.dumps(campos))
+
+
+def test_jev_config_sem_nada_e_a_typesafe_sem_chave(jev_cfg):
+    m, _ = jev_cfg
+    assert m.jev_config(auto=True) == {"key": "", "url": m.JEV_URL, "model": m.JEV_MODEL}
+
+
+def test_execucao_comum_ignora_o_runtime_config(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="https://rc/v1", jev_model="rc-model")
+    assert m.jev_config() == {"key": "", "url": m.JEV_URL, "model": m.JEV_MODEL}
+
+
+def test_jev_config_le_o_runtime_config_da_conta(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="tk", jev_endpoint="https://jev.local/v1", jev_model="m1")
+    assert m.jev_config(auto=True) == {"key": "tk", "url": "https://jev.local/v1", "model": "m1"}
+
+
+def test_jev_config_sem_config_dir_le_o_da_home(jev_cfg, tmp_path, monkeypatch):
+    m, _ = jev_cfg
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    (tmp_path / ".claude").mkdir()
+    _runtime(tmp_path / ".claude", jev_api_key="da-home")
+    assert m.jev_config(auto=True)["key"] == "da-home"
+
+
+def test_chave_openrouter_sem_endereco_usa_o_da_openrouter(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="", jev_model="")
+    assert m.jev_config(auto=True) == {"key": "sk-or-v1-x", "url": "https://openrouter.ai/api/alpha/decisions",
+                              "model": "typesafe/jev-1.13-20260917"}
+
+
+def test_ambiente_vence_o_runtime_config(jev_cfg, monkeypatch):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="https://rc/v1", jev_model="rc-model")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
+    monkeypatch.setenv("JEV_ENDPOINT", "https://env/v1")
+    monkeypatch.setenv("JEV_MODEL", "env-model")
+    assert m.jev_config(auto=True) == {"key": "env-key", "url": "https://env/v1", "model": "env-model"}
+    monkeypatch.setenv("ORQ_JEV_URL", "http://127.0.0.1:1/t")
+    assert m.jev_config(auto=True)["url"] == "http://127.0.0.1:1/t"
+
+
+def test_runtime_config_torto_vale_como_ausente(jev_cfg):
+    m, conta = jev_cfg
+    (conta / "runtime-config.json").write_text("[]")
+    assert m.jev_config(auto=True)["key"] == ""
+    (conta / "runtime-config.json").write_text("{torto")
+    assert m.jev_config(auto=True)["key"] == ""
+
+
+def test_notify_comum_nao_le_a_chave_do_runtime_config(env, tmp_path, jev_server):
+    d, log, e = env
+    init(e, tmp_path)
+    (tmp_path / ".claude").mkdir()
+    _runtime(tmp_path / ".claude", jev_api_key="rc-key")
+    jev_server["resp"] = _answers("act", 0.9)
+    run({**_jev_env(e, jev_server, "shadow"), "TYPESAFE_API_KEY": ""}, "notify", "x")
+    assert jev_server["body"] is None
+    assert sent(log) == ["arb x"]
     assert json.loads((d / "jev-shadow.jsonl").read_text())["error"] == "no key"
 
 

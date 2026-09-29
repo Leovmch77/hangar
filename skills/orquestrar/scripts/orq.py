@@ -46,6 +46,9 @@ EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "execut
                     "de", "para", "plano", "branch", "gid", "fase", "patch")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
+# The same Jev served by OpenRouter, for a `sk-or-` key with no endpoint configured.
+OPENROUTER_JEV_URL = "https://openrouter.ai/api/alpha/decisions"
+OPENROUTER_JEV_MODEL = "typesafe/jev-1.13-20260917"
 JEV_TIMEOUT_S = 5
 # A hung backend cannot hang the session that called orq.
 SEND_TIMEOUT_S = 30
@@ -1107,29 +1110,42 @@ def cmd_batch(a) -> int:
     return 0
 
 
-def jev_key() -> str:
-    k = os.environ.get("TYPESAFE_API_KEY", "")
-    if k:
-        return k
+def _json_object(p: Path) -> dict:
     try:
-        loaded = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        v = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
-    env = loaded.get("env") if isinstance(loaded, dict) else None
-    v = env.get("TYPESAFE_API_KEY") if isinstance(env, dict) else None
-    return v if isinstance(v, str) else ""
+        return {}
+    return v if isinstance(v, dict) else {}
 
 
-def jev_ask(text: str) -> dict:
+def jev_config(auto: bool = False) -> dict:
+    """The Jev's key, url and model. The environment wins; an auto run then reads the server's
+    runtime-config.json, where the Hangar settings screen writes them, and an OpenRouter key alone
+    implies its endpoint. A plain run keeps the environment-only lookup: orquestrar stays as it was."""
+    rc = _json_object(Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+                      / "runtime-config.json") if auto else {}
+    env = _json_object(Path.home() / ".claude" / "settings.json").get("env")
+    legacy = env.get("TYPESAFE_API_KEY") if isinstance(env, dict) else None
+
+    def first(*vals) -> str:
+        return next((v.strip() for v in vals if isinstance(v, str) and v.strip()), "")
+
+    key = first(os.environ.get("TYPESAFE_API_KEY"), rc.get("jev_api_key"), legacy)
+    url = first(os.environ.get("ORQ_JEV_URL"), os.environ.get("JEV_ENDPOINT"), rc.get("jev_endpoint"))
+    model = first(os.environ.get("JEV_MODEL"), rc.get("jev_model"))
+    if auto and not url and key.startswith("sk-or-"):
+        url, model = OPENROUTER_JEV_URL, model or OPENROUTER_JEV_MODEL
+    return {"key": key, "url": url or JEV_URL, "model": model or JEV_MODEL}
+
+
+def jev_ask(text: str, auto: bool = False) -> dict:
     """{'choice', 'p', 'veto'} or {'error'}; never raises — any failure wakes the arbiter."""
-    key = jev_key()
-    if not key:
+    c = jev_config(auto)
+    if not c["key"]:
         return {"error": "no key"}
-    model = os.environ.get("JEV_MODEL", "").strip() or JEV_MODEL
-    body = json.dumps({"model": model, "state": text[-20_000:], "questions": JEV_QUESTIONS}).encode()
-    url = os.environ.get("ORQ_JEV_URL") or os.environ.get("JEV_ENDPOINT", "").strip() or JEV_URL
-    req = urllib.request.Request(url, data=body,
-                                 headers={"authorization": f"Bearer {key}",
+    body = json.dumps({"model": c["model"], "state": text[-20_000:], "questions": JEV_QUESTIONS}).encode()
+    req = urllib.request.Request(c["url"], data=body,
+                                 headers={"authorization": f"Bearer {c['key']}",
                                           "content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
