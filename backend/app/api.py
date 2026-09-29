@@ -70,7 +70,7 @@ from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
 from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
-from app.state import corrige_ocioso_kimi, menu_codex
+from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
 from app.transcribe import transcribe, TranscribeError
@@ -950,6 +950,14 @@ def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
         infos = registry.list()
         _list_snap["snap"] = (time.monotonic(), infos)
         return infos
+
+
+def _invalidate_lists() -> None:
+    """Descarta o snapshot cru e a lista decorada do refresher: quem pedir /api/sessions depois de
+    uma mudança de membro ou de modo recalcula em vez de ver a sessão como era."""
+    with _list_lock:
+        _list_snap["snap"] = None
+    invalidate_recent_list()
 
 
 def _cached_info_sync(name: str) -> SessionInfo | None:
@@ -2172,9 +2180,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
             worktree["session_created"] = True
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
-            with _list_lock:
-                _list_snap["snap"] = None
-            invalidate_recent_list()
+            _invalidate_lists()
             return info
 
         worker = asyncio.create_task(asyncio.to_thread(create))
@@ -2311,7 +2317,10 @@ async def kill_session(name: str, by: str | None = None):
         await asyncio.to_thread(registry.kill, name)
     except KillFailed as e:
         raise HTTPException(500, str(e))
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
     plugin_bridge.esquecer(name)
+    forget_frame(name)
     if await asyncio.to_thread(share_store.revoke_session, name):
         await asyncio.to_thread(share_api.sync_tunnel)
     warn = None
@@ -2409,6 +2418,7 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
             await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
         finally:
             share_api.changing_mode.discard(name)
+            await asyncio.to_thread(_invalidate_lists)
 
 
 async def _trocar_modo(name: str, body: ModoExecucaoBody):
@@ -2508,9 +2518,8 @@ def _rename_session(name: str, body: RenameBody):
         od, nd = bastao_mod.caminho(name), bastao_mod.caminho(new)
         if od.exists():
             atomico.substituir(od, nd)
-        with _list_lock:
-            _list_snap["snap"] = None
-        invalidate_recent_list()
+        _invalidate_lists()
+        forget_frame(name)
         share_store.rename(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
@@ -2747,6 +2756,8 @@ def resume_session(name: str, body: ResumeBody):
         return registry.resume(name, sid)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    finally:
+        _invalidate_lists()
 
 
 @app.get("/api/sessions/{name}/history", dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
@@ -6865,8 +6876,10 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
     try:
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
-        return registry.create(name, cwd, config_dir=cfg, provider=body.provider,
+        info = registry.create(name, cwd, config_dir=cfg, provider=body.provider,
                                resume_session_id=session_id, engine=body.engine, **extras)
+        _invalidate_lists()
+        return info
     except ValueError as e:
         if mover:
             # Sessao nao nasceu: a conversa volta pra conta de origem. Falha aqui nao pode
@@ -7606,6 +7619,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
         vivo = hl._sessions.get(name)
+        await asyncio.to_thread(_invalidate_lists)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan": vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
@@ -7623,6 +7637,8 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         raise HTTPException(409, detail=erro("erro_permissao_leitura", str(e)))
     except ValueError as e:
         raise HTTPException(409, detail=erro("erro_permissao_invalida", str(e)))
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
     # cache da lista pode ter ficado com current velho; atualiza o current mas mantém modos
     key = _cache_key_perm(name, info)
     hit = _perm_modes_cache.get(key)
