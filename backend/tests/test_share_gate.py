@@ -158,8 +158,9 @@ def test_rotas_globais_do_chat_passam():
     assert c.get("/api/tts/audio/abc", headers=GUEST).status_code == 200
 
 
-def test_fechar_a_propria_sessao_passa():
-    assert _guest_client().delete("/api/sessions/cc", headers=GUEST).status_code == 200
+def test_convidado_nao_fecha_a_sessao_do_dono():
+    # Fechar mata a sessão do dono; o convidado só para de acompanhar do lado dele.
+    assert _guest_client().delete("/api/sessions/cc", headers=GUEST).status_code == 403
 
 
 def test_revogado_da_410():
