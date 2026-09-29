@@ -7,6 +7,11 @@ use crate::appearance::SideTab;
 use crate::browser::{Engine, Pointer, model};
 
 pub(super) struct BrowserPanel {
+    /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    key: String,
+    #[cfg(target_os = "windows")]
+    controller: Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>>,
     /// Nasce na primeira navegação, que tem a janela. No Linux só cabe um por processo: falhou, não tenta de novo.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
@@ -27,7 +32,7 @@ pub(super) struct BrowserPanel {
 }
 
 impl BrowserPanel {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (events, received) = async_channel::unbounded();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(tr("browser_address")));
         let focus = cx.focus_handle();
@@ -45,7 +50,7 @@ impl BrowserPanel {
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
-        Self { engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
+        Self { key, #[cfg(target_os = "windows")] controller: None, engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -59,6 +64,8 @@ impl BrowserPanel {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
             }
             self.page = page;
+            #[cfg(target_os = "windows")]
+            crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
         }
         cx.notify();
     }
@@ -67,24 +74,28 @@ impl BrowserPanel {
         let text = self.address.read(cx).value().to_string();
         match model::normalize_address(&text) {
             Err(key) => self.invalid = Some(tr(key)),
-            Ok(url) => {
-                self.invalid = None;
-                if self.engine.is_some() {
-                    self.navigate(url, window, cx);
-                } else if self.starting.replace(url).is_none() {
-                    // Enter repetido enquanto o motor nasce só troca o endereço pendente.
-                    self.start(window, cx);
-                }
-            }
+            Ok(url) => self.go(url, window, cx),
         }
         cx.notify();
+    }
+
+    /// Navega, ou faz o motor nascer e navega quando ele ficar pronto.
+    pub(super) fn go(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.invalid = None;
+        if self.engine.is_some() {
+            self.navigate(url, window, cx);
+        } else if self.starting.replace(url).is_none() {
+            // Enter repetido enquanto o motor nasce só troca o endereço pendente.
+            self.start(window, cx);
+        }
     }
 
     fn navigate(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(engine) = self.engine() else { return };
         engine.load(&url);
         self.address.update(cx, |input, cx| input.set_value(url, window, cx));
-        self.focus.focus(window, cx);
+        // Aberto pelo agente com o painel fora da tela: o foco fica onde o usuário está digitando.
+        if self.shown { self.focus.focus(window, cx); }
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -97,11 +108,33 @@ impl BrowserPanel {
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
                 this.engine = Some(engine);
+                #[cfg(target_os = "windows")]
+                if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
                 if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
                 cx.notify();
             });
         }));
     }
+
+    /// Liga o controlador do hangar-preview ao CDP do motor recém-nascido.
+    #[cfg(target_os = "windows")]
+    fn attach(&mut self, engine: &Rc<Engine>, cx: &mut Context<Self>) {
+        use crate::browser::control::{CdpPage, Controller, EVENTS};
+        let cdp = Rc::new(engine.cdp());
+        let ctl = Rc::new(Controller::new(CdpPage { cdp: cdp.clone(), executor: cx.background_executor().clone() }));
+        for event in EVENTS {
+            let weak = Rc::downgrade(&ctl);
+            if let Err(e) = cdp.on(event, move |params| if let Some(ctl) = weak.upgrade() { ctl.on_event(event, &params) }) {
+                eprintln!("[nav] evento {event} sem ouvinte: {e}");
+            }
+        }
+        let (setup, hidden) = (ctl.clone(), !self.shown);
+        cx.spawn(async move |_, _| setup.start(hidden).await).detach();
+        self.controller = Some(ctl);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn controller(&self) -> Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>> { self.controller.clone() }
 
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.page.url.clone().unwrap_or_default();
@@ -122,10 +155,15 @@ impl BrowserPanel {
     }
 
     /// Diz se mudou. Escondida, a página não se posiciona no desenho e a janela nativa some.
-    fn set_shown(&mut self, shown: bool) -> bool {
+    /// O controlador põe um viewport fixo na página escondida, para ela seguir desenhando para o hangar-preview.
+    fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
         if self.shown == shown { return false; }
         self.shown = shown;
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
+        #[cfg(target_os = "windows")]
+        if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
+        #[cfg(not(target_os = "windows"))]
+        let _ = cx;
         true
     }
 
@@ -215,7 +253,8 @@ impl Render for BrowserPanel {
 impl Hangar {
     /// Linha Navegador do menu do painel: abre o navegador na primeira vez e leva à aba dele.
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let browser = self.side.browser.get_or_insert_with(|| cx.new(|cx| BrowserPanel::new(window, cx))).clone();
+        let Some(key) = self.browser_key() else { return };
+        let browser = self.browser_for(key, window, cx);
         self.side.browser_open = true;
         self.choose_side_tab(SideTab::Browser, window, cx);
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
@@ -226,7 +265,7 @@ impl Hangar {
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
         self.side.browser_open = false;
-        if let Some(browser) = self.side.browser.clone() { browser.update(cx, |panel, _| { panel.set_shown(false); }); }
+        for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
 
@@ -246,12 +285,61 @@ impl Hangar {
 
     /// A cada quadro da janela, antes das áreas guardadas desenharem.
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(browser) = self.side.browser.clone() else { return };
-        let shown = self.browser_visible(window, cx);
-        if browser.update(cx, |panel, _| panel.set_shown(shown)) && shown {
-            // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
-            let id = browser.entity_id();
-            window.on_next_frame(move |_, cx| cx.notify(id));
+        let visible = self.browser_visible(window, cx);
+        let current = self.browser_key();
+        for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
+            let shown = visible && current.as_deref() == Some(key.as_str());
+            if browser.update(cx, |panel, cx| panel.set_shown(shown, cx)) && shown {
+                // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
+                let id = browser.entity_id();
+                window.on_next_frame(move |_, cx| cx.notify(id));
+            }
         }
+    }
+
+    /// Dono do navegador na tela: a sessão aberta, com a máquina dela, no Windows; uma chave só nos outros sistemas.
+    pub(super) fn browser_key(&self) -> Option<String> {
+        if cfg!(target_os = "windows") {
+            Some(format!("{}::{}", super::servers::norm(&self.session_server()?), self.selected.as_ref()?.name))
+        } else { Some("*".into()) }
+    }
+
+    fn browser_for(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserPanel> {
+        self.side.browsers.entry(key.clone()).or_insert_with(|| cx.new(|cx| BrowserPanel::new(key, window, cx))).clone()
+    }
+
+    /// `hangar-preview open` → backend → evento `nav` na lista. O navegador nasce escondido se a sessão não estiver na
+    /// tela, e o CLI já consegue dirigi-lo. Só do servidor desta máquina: o CLI que pediu roda nela.
+    pub(super) fn receive_nav(&mut self, data: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
+        if !cfg!(target_os = "windows") || !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
+        let (Some(name), Some(url)) = (data["name"].as_str(), data["url"].as_str()) else { return };
+        // Mesma chave de `browser_key` com essa sessão aberta: a lista que traz o evento é a do servidor ativo.
+        let Some(server) = self.server.as_deref() else { return };
+        let key = format!("{}::{name}", super::servers::norm(server));
+        let browser = self.browser_for(key, window, cx);
+        browser.update(cx, |panel, cx| panel.go(url.to_owned(), window, cx));
+        if let Some(api) = self.api.clone() {
+            let name = name.to_owned();
+            // Sem a confirmação o backend manda o mesmo `nav` de novo na próxima conexão; abrir duas vezes só renavega.
+            self.runtime.spawn(async move { let _ = api.server_send(reqwest::Method::DELETE, &["sessions", &name, "nav"], None, 15).await; });
+        }
+    }
+
+    /// Pedido do `/cmd` local: vai ao controlador do navegador da sessão pedida, esteja ela na tela ou não.
+    #[cfg(target_os = "windows")]
+    pub(super) fn dispatch_preview(&mut self, request: crate::browser::server::Request, cx: &mut Context<Self>) {
+        use crate::browser::control::Reply;
+        fn answer(reply: futures::channel::oneshot::Sender<Reply>, text: String) { let _ = reply.send(Reply::Text(text)); }
+        let crate::browser::server::Request { key, verb, args, tab, reply } = request;
+        if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
+        if verb == "close" {
+            let closed = self.side.browsers.remove(&key).is_some();
+            if closed { crate::browser::server::remove_sidecar(&key); cx.notify(); }
+            return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
+        }
+        let Some(ctl) = self.side.browsers.get(&key).and_then(|b| b.read(cx).controller()) else {
+            return answer(reply, format!("erro: a sessao {key} nao tem navegador aberto"));
+        };
+        cx.spawn(async move |_, _| { let _ = reply.send(ctl.run(&verb, &args).await); }).detach();
     }
 }

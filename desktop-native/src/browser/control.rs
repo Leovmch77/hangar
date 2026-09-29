@@ -1,7 +1,5 @@
 //! Verbos do hangar-preview sobre CDP, portados de `shell/preview_ctl.cjs`. Um controlador por navegador: é ele quem
 //! guarda refs, tema, layout e os registros de console e rede entre um comando e outro.
-// Ligado ao painel do navegador na Task de integração.
-#![allow(dead_code)]
 use std::{cell::RefCell, collections::{HashMap, HashSet, VecDeque}, future::Future, time::Instant};
 
 use futures::{future::{Either, select}, lock::Mutex};
@@ -374,6 +372,22 @@ impl<P: Page> Controller<P> {
         let png = base64::engine::general_purpose::STANDARD.decode(data["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
         Ok(Reply::Png(png))
+    }
+}
+
+/// A página de verdade: o CDP do WebView2 e o relógio da GPUI.
+#[cfg(target_os = "windows")]
+pub struct CdpPage {
+    pub cdp: std::rc::Rc<super::cdp::Cdp>,
+    pub executor: gpui_kit::BackgroundExecutor,
+}
+
+#[cfg(target_os = "windows")]
+impl Page for CdpPage {
+    fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> { self.cdp.call(method, params) }
+    fn sleep(&self, ms: u64) -> impl Future<Output = ()> {
+        let timer = self.executor.timer(std::time::Duration::from_millis(ms));
+        async move { timer.await; }
     }
 }
 

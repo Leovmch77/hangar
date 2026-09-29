@@ -1,7 +1,5 @@
 //! Servidor do hangar-preview dentro do app nativo: mesmo contrato do `shell/preview_srv.cjs` (porta efêmera, token
 //! sorteado, `~/.hangar/nav/_srv.json`), para o CLI, o backend e o Jev não mudarem.
-// Ligado ao app na Task de integração.
-#![allow(dead_code)]
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use futures::channel::oneshot;

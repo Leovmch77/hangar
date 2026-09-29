@@ -620,6 +620,18 @@ impl Hangar {
                 }
             }).detach();
         }
+        #[cfg(target_os = "windows")]
+        {
+            let (requests, received) = async_channel::unbounded::<crate::browser::server::Request>();
+            match crate::browser::server::start(&runtime, requests) {
+                Ok(_) => cx.spawn_in(window, async move |this, cx| {
+                    while let Ok(request) = received.recv().await {
+                        if this.update_in(cx, |this, _, cx| this.dispatch_preview(request, cx)).is_err() { break; }
+                    }
+                }).detach(),
+                Err(e) => eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"),
+            }
+        }
         let list_state = ListState::new(0, ListAlignment::Bottom, px(300.));
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
@@ -1207,6 +1219,7 @@ impl Hangar {
                         Err(_) => { self.list_error = Some(tr("invalid_response")); false }
                     }
                 } else if frame.event == "list_error" { self.list_error = Some(tr("list_stale")); true }
+                else if frame.event == "nav" { self.receive_nav(frame.data, window, cx); true }
                 else { visible = false; true };
                 let _ = frame.applied.send(applied);
             }
@@ -5124,7 +5137,7 @@ impl Render for Hangar {
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                if let Some(browser) = &this.side.browser { browser.read(cx).release_focus() }
+                for browser in this.side.browsers.values() { browser.read(cx).release_focus() }
             }))
             // Sessão solta fora da lista: nada acontece, só termina o arrasto.
             .on_drop(cx.listener(|this, _: &grouping::SessionDrag, _, cx| this.end_session_drag(cx)))

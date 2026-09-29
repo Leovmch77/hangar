@@ -16,7 +16,6 @@ pub struct Cdp {
     _receivers: RefCell<Vec<ICoreWebView2DevToolsProtocolEventReceiver>>,
 }
 
-#[allow(dead_code)] // Ligado ao hangar-preview no painel do navegador.
 impl Cdp {
     pub fn new(view: ICoreWebView2) -> Self { Self { view, _receivers: RefCell::default() } }
 

@@ -129,8 +129,9 @@ pub(super) struct Side {
     pub(super) shortcut_recheck: HashMap<String, std::time::Instant>,
     /// Há um run vivo no projeto desta sessão (botão Rodar aceso).
     pub(super) run: Option<(SessionKey, bool)>,
-    /// Um navegador por execução do app: aberto uma vez, segue o mesmo ao trocar de sessão ou de servidor.
-    pub(super) browser: Option<Entity<super::browser::BrowserPanel>>,
+    /// No Windows, um navegador por sessão (chave `servidor::sessão`), como o do Electron, para o hangar-preview
+    /// dirigir o da sessão certa. Nos outros sistemas a chave é uma só: no Linux um segundo motor não nasce no processo.
+    pub(super) browsers: HashMap<String, Entity<super::browser::BrowserPanel>>,
     /// A aba Navegador está na fileira. Fechar só esconde a página: no Linux o motor não nasce duas vezes no processo.
     pub(super) browser_open: bool,
 }
@@ -139,7 +140,7 @@ impl Default for Side {
     fn default() -> Self {
         let saved = appearance::get();
         Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None, browser_open: false,
+            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: false,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
@@ -937,7 +938,7 @@ impl Hangar {
                     Some(SideTab::Files) => div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element(),
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
-                    Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.side.browser.clone()).into_any_element(),
+                    Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.browser_key().and_then(|k| self.side.browsers.get(&k).cloned())).into_any_element(),
                     Some(SideTab::Context) => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element(),
                 }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))

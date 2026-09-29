@@ -99,7 +99,6 @@ impl Engine {
     pub fn reload(&self) { self.report(self.view.reload()); }
 
     #[cfg(target_os = "windows")]
-    #[allow(dead_code)] // Ligado ao hangar-preview no painel do navegador.
     pub fn cdp(&self) -> super::cdp::Cdp {
         use wry::WebViewExtWindows;
         super::cdp::Cdp::new(self.view.webview())

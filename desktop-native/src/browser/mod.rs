@@ -2,6 +2,7 @@
 //! Windows/macOS usam o webview do sistema (wry) como janela filha; Linux, WPE.
 pub mod model;
 pub mod preview_fmt;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod control;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod server;
