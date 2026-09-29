@@ -190,7 +190,8 @@ def test_tmp_orfao_no_active_que_a_poda_normal_nem_visita(tmp_path):
 
 
 def test_active_velho_de_pid_morto_sai(tmp_path):
-    """`.hangar-active` prova vida pelo pid: velho e morto sai; novo, vivo ou de sessao viva fica."""
+    """`.hangar-active` prova vida pelo pid: velho e morto sai; novo, vivo, sem pid ou de sessao
+    viva fica."""
     import subprocess
     import sys
     morto = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -211,9 +212,9 @@ def test_active_velho_de_pid_morto_sai(tmp_path):
     velho_vivo = marcador("velho-vivo", os.getpid(), 30)
     da_sessao_viva = marcador("viva", morto.pid, 30)
     apagados = prune._podar([base], {"viva"}, {"sessao"}, {"1"}, _AGORA)
-    assert apagados[".hangar-active"] == 2
-    assert not velho_morto.exists() and not sem_pid.exists()
-    assert novo_morto.exists() and velho_vivo.exists() and da_sessao_viva.exists()
+    assert apagados[".hangar-active"] == 1
+    assert not velho_morto.exists()
+    assert sem_pid.exists() and novo_morto.exists() and velho_vivo.exists() and da_sessao_viva.exists()
 
 
 def test_sidecar_de_verdade_nunca_casa_o_padrao_de_tmp():

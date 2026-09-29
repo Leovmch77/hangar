@@ -161,7 +161,8 @@ def _podar_tmp(d: Path, agora: float) -> int:
 def _podar_active(d: Path, chaves_stem: set[str], agora: float) -> int:
     """`.hangar-active/<boot_id>.json`: a chave e o boot_id, que difere do session_key depois de
     resume/clear, entao quem prova vida e o `pid` gravado pelo hook. Sai so com idade >= _MIN_AGE
-    E pid morto (ou ausente); o registry le todos a cada tick, e o acumulo pesava ali."""
+    E pid gravado e morto; o registry le todos a cada tick, e o acumulo pesava ali. Sem pid nao ha
+    prova de morte, e o marcador fica."""
     from app.procinfo import pid_vivo
 
     if not d.is_dir():
@@ -176,7 +177,7 @@ def _podar_active(d: Path, chaves_stem: set[str], agora: float) -> int:
                     pid = json.loads(f.read_text(encoding="utf-8")).get("pid")
                 except (ValueError, AttributeError):
                     pid = None
-                if isinstance(pid, int) and pid_vivo(pid):
+                if not isinstance(pid, int) or pid_vivo(pid):
                     continue
                 f.unlink()
                 n += 1
