@@ -35,6 +35,7 @@ TIPOS = {
     "integracao_vermelha": {"task", "motivo"},
     "conflito": {"task", "motivo"},
     "advance_falhou": {"passo", "motivo"},
+    "tudo_integrado": set(),
 }
 RESULTADOS = {"aprova", "reprova", "devolvido", "corrige"}
 FASES = {"codigo", "prova"}

@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -464,8 +465,8 @@ def plan_tasks(text: str) -> list[dict]:
     if len(rows) < 2:
         return []
     head = [c.strip().lower() for c in rows[0].strip().strip("|").split("|")]
-    col = {name: head.index(name) for name in ("#", "files", "verification", "wave", "roteiro")
-           if name in head}
+    col = {name: head.index(name) for name in ("#", "what it is", "files", "verification", "wave",
+                                               "risk", "roteiro") if name in head}
     out = []
     for row in rows[2:]:
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
@@ -473,8 +474,11 @@ def plan_tasks(text: str) -> list[dict]:
         if not get("#").isdigit():
             continue
         rot = get("roteiro").strip("`")
-        out.append({"n": int(get("#")), "files": re.findall(r"`([^`]+)`", get("files")),
+        risk = get("risk").strip("`").lower()
+        out.append({"n": int(get("#")), "title": get("what it is"),
+                    "files": re.findall(r"`([^`]+)`", get("files")),
                     "verification": get("verification"), "wave": get("wave"),
+                    "risk": "" if risk in ("", "—", "-") else risk,
                     "roteiro": "" if rot in ("", "—", "-") else rot})
     return out
 
@@ -1131,19 +1135,22 @@ def cmd_commit(a) -> int:
     return 0
 
 
-def cmd_batch(a) -> int:
-    d = base_dir(a.dir)
+def take_batch(d: Path) -> str | None:
+    """The pending proofs become the next batch; its line, or None when nothing is pending."""
     pend = pending_proofs(d)
     if not pend:
-        print("no pending proof")
-        return 0
+        return None
     # Plan-relative in the plan; the proof session runs elsewhere and needs a path it can open.
     base = Path(config(d)["plan"]).expanduser().resolve().parent
     n = len(_jsonl(d / "prova-lotes.jsonl")) + 1
     with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
     journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
-    print(f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend))
+    return f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend)
+
+
+def cmd_batch(a) -> int:
+    print(take_batch(base_dir(a.dir)) or "no pending proof")
     return 0
 
 
@@ -1642,8 +1649,265 @@ def _integrate_all(d: Path, cfg: dict, acts: list[str]) -> bool:
     return True
 
 
+KICKOFF_DIR = Path(os.environ.get("ORQ_KICKOFF_DIR")
+                   or HERE.parents[1] / "orquestrar-auto" / "references")
+
+
+def render_kickoff(role: str, ctx: dict) -> str:
+    if role not in ("executor", "revisor"):
+        raise OrqError(f"no kick-off mold for role {role!r}")
+    path = KICKOFF_DIR / f"kickoff-{role}.md"
+    try:
+        mold = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise OrqError(f"kick-off mold missing: {path}") from None
+    try:
+        return mold.format_map(ctx)
+    except (KeyError, IndexError, ValueError) as e:
+        raise OrqError(f"kick-off mold {path.name}: bad placeholder {e}") from None
+
+
+def _norm(cell: str) -> str:
+    """Compared the way backend/app/orq_md.py does: no accents, no markdown, lower case."""
+    s = unicodedata.normalize("NFKD", cell.strip().strip("`").replace("**", "").strip())
+    return re.sub(r"\s+", " ", "".join(c for c in s if not unicodedata.combining(c))).lower()
+
+
+def team_rows(text: str) -> list[dict]:
+    """`## Quem é quem`, read as backend/app/orq_papeis.py reads it: orq stays stdlib and runs
+    outside the backend. Keys without accents, `-` read as empty."""
+    lines = [l for l in _section(text, "Quem é quem") if l.strip().startswith("|")]
+    if len(lines) < 2:
+        return []
+    cells = lambda l: [c.strip() for c in l.strip().strip("|").split("|")]
+    head = [_norm(c) for c in cells(lines[0])]
+    out = []
+    for l in lines[2:]:
+        vals = [c.strip("`").strip() for c in cells(l)]
+        row = {h: ("" if v in ("-", "—") else v) for h, v in zip(head, vals)}
+        if row.get("papel"):
+            out.append(row)
+    return out
+
+
+def role_row(rows: list[dict], role: str, n: int, risk: str) -> dict:
+    """The role's row for Task N: numeric `vez` rotates by (N-1) % total; low/high follows the
+    Task's Risk (arbitro-lancamento.md, "A rotating role")."""
+    mine = [r for r in rows if _norm(r["papel"]) == role]
+    if not mine:
+        raise OrqError(f"no '{role}' row in ## Quem é quem")
+    if len(mine) == 1:
+        return mine[0]
+    vez = [r.get("vez", "") for r in mine]
+    if all(v.isdigit() for v in vez):
+        return mine[(n - 1) % len(mine)]
+    hit = [r for r in mine if r.get("vez", "").lower() == risk]
+    if len(hit) == 1:
+        return hit[0]
+    raise OrqError(f"cannot pick the {role} row for Task {n} (vez {vez}, Risk {risk or 'none'})")
+
+
+def session_name(pattern: str, n: int) -> str:
+    """One session per Task: `x-t*` → `x-t4`; a fixed name gets the Task as suffix, so two Tasks of
+    a wave never share a session."""
+    if not pattern:
+        raise OrqError("a row without a session name")
+    return pattern.replace("*", str(n)) if "*" in pattern else f"{pattern}-t{n}"
+
+
+def open_flags(row: dict, read_only: bool) -> list[str]:
+    """The row as `hangar-send --new` flags (arbitro-lancamento.md, "Opening a session"); the
+    `abertura` cell goes last, as written."""
+    prov = (row.get("provider") or "claude").lower()
+    flags = ["--provider", prov]
+    conta = row.get("conta", "")
+    if prov in ("claude", "codex") and conta not in ("", "padrao", "default"):
+        flags += ["--conta", conta]
+    if row.get("modelo") not in (None, "", "default"):
+        flags += ["--model", row["modelo"]]
+    if row.get("esforco") and prov != "kimi":
+        flags += ["--effort", row["esforco"]]
+    extra = shlex.split(row.get("abertura", ""))
+    # The backend refuses read-only on a session without terminal.
+    if read_only and "--read-only" not in extra and "--headless" not in extra:
+        flags.append("--read-only")
+    if jev_config().get("key") and not {"--jev", "--sem-jev"} & set(extra):
+        flags.append("--jev")
+    return flags + extra
+
+
+def _model_matches(want: str, got: str | None) -> bool:
+    """`opus[1m]` is born as `opus` plus a context window, and a live session may carry the full
+    id: the base name on either side is enough."""
+    base = re.sub(r"\[.*?\]$", "", want).lower()
+    return bool(got) and (base in got.lower() or got.lower() in base)
+
+
+def prove_born(name: str, row: dict) -> str | None:
+    """What was born, never what was asked: the sidecar of a session without terminal, or the
+    pane's start command, carries the row's provider and model. None = it matches."""
+    prov = (row.get("provider") or "claude").lower()
+    want = row.get("modelo") if row.get("modelo") not in (None, "", "default") else ""
+    for sub, dflt in (("claude-headless", "claude"), ("codex-sessions", "codex")):
+        f = Path.home() / ".hangar" / sub / f"{name}.json"
+        if f.exists():
+            sc = json.loads(f.read_text(encoding="utf-8"))
+            got = sc.get("provider") or dflt
+            if got != prov:
+                return f"{name}: born on {got}, row says {prov}"
+            if want and not _model_matches(want, sc.get("model")):
+                return f"{name}: born on model {sc.get('model')}, row says {want}"
+            return None
+    r = subprocess.run(["tmux", "display", "-p", "-t", f"={name}:", "#{pane_start_command}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"{name}: no sidecar and no tmux pane to prove what was born"
+    cmd = r.stdout.strip()
+    if prov not in cmd or (want and not _model_matches(want, cmd)):
+        return f"{name}: pane started `{cmd[:160]}`, row says {prov} {want}".rstrip()
+    return None
+
+
+def hangar_new(name: str, cwd: str, flags: list[str]) -> None:
+    cmd = [os.environ.get("ORQ_SEND", "hangar-send"), "--new", name, cwd, *flags]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=SEND_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise OrqError(f"hangar-send --new {name} did not answer in {SEND_TIMEOUT_S}s") from None
+    if r.returncode != 0:
+        raise OrqError(f"hangar-send --new {name} failed (rc={r.returncode}): "
+                       f"{(r.stderr or r.stdout).strip()[:300]}")
+
+
+def _open_task(d: Path, cfg: dict, pj: dict, t: dict) -> str:
+    """Worktree (in a wave), executor and reviewer from `## Quem é quem`, proof of what was born,
+    `task_inicio`, then the kick-offs: the arbiter's handoff order (arbitro.md, step 2)."""
+    n, repo = t["n"], cfg["repo"]
+    title = t["title"] or f"Task {n}"
+    rows = team_rows(Path(cfg["contract"]).read_text(encoding="utf-8"))
+    ex_row = role_row(rows, "executor", n, t["risk"])
+    rev_row = None if pj.get("revisao") == "subagente" else role_row(rows, "revisor", n, t["risk"])
+    ex = session_name(ex_row.get("sessao", ""), n)
+    rev = session_name(rev_row.get("sessao", ""), n) if rev_row else SUBAGENT
+    branch = git(repo, "branch", "--show-current").strip()
+    if not branch:
+        raise OrqError(f"{repo} is on a detached HEAD: no branch to work on")
+    wave = (pj.get("paralelo") or 1) > 1
+    cwd = str(Path(repo).parent / f"{Path(repo).name}-t{n}") if wave else repo
+    if wave:
+        branch = f"{branch}-t{n}"
+    # The executor's Expected HEAD: the main line after the merges so far, and the wave's base.
+    base = git(repo, "rev-parse", "HEAD").strip()
+    ctx = {"task": n, "title": title, "worktree": cwd, "branch": branch, "run_dir": str(d),
+           "plan": cfg["plan"], "contract": cfg["contract"], "executor": ex, "reviewer": rev,
+           "arbiter": state(d)["arbiter"], "base": base,
+           # One by one, never "the ones in the contract" (arbitro-lancamento.md, "Kick-off").
+           "untouchables": "\n".join(f"- {u}" for u in cfg.get("untouchables") or []) or "- none"}
+    # Rendered before anything opens: a broken mold costs no session.
+    kicks = [(role, target, render_kickoff(role, ctx))
+             for role, target in (("revisor", rev), ("executor", ex)) if target != SUBAGENT]
+    if wave:
+        git(repo, "worktree", "add", cwd, "-b", branch, base)
+        journal_append(d, f"T{n} worktree {cwd}, branch {branch}, base {base[:12]}")
+    for name, row, read_only in ((ex, ex_row, False), (rev, rev_row, True)):
+        if row is None:
+            continue
+        hangar_new(name, cwd, open_flags(row, read_only))
+        why = prove_born(name, row)
+        if why:
+            raise OrqError(f"born wrong: {why}")
+    ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": title, "executor": ex, "par": rev})
+    journal_append(d, _event_line(ev))
+    for role, target, text in kicks:
+        path = d / "kickoffs" / f"task{n}-{role}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        _say(d, target, text)
+    who = [f"{name} ({row.get('provider') or 'claude'}, {row.get('modelo') or 'modelo padrão'})"
+           for name, row in ((ex, ex_row), (rev, rev_row)) if row]
+    timeline(d, "advance", f"T{n}: abriu {' e '.join(who)} e entregou o kick-off", n)
+    return f"opened T{n}: {ex} + {rev}"
+
+
+def _open_ready(d: Path, cfg: dict, acts: list[str]) -> None:
+    """The current wave — the first with a Task not integrated — opens its Tasks while
+    `Paralelo:` has room; a later wave waits for the whole wave before it."""
+    ptext = plan_text(cfg["plan"])
+    pj, tasks = projeto(ptext), plan_tasks(ptext)
+    evs = events(d)
+    started = {ev.get("task") for ev in evs if ev.get("tipo") == "task_inicio"}
+    done = _integrated(d, evs)
+    in_wave = lambda t, w: t["wave"].isdigit() and int(t["wave"]) == w
+    waves = sorted({int(t["wave"]) for t in tasks if t["wave"].isdigit()})
+    wave = next((w for w in waves if any(t["n"] not in done for t in tasks if in_wave(t, w))), None)
+    if wave is None:
+        return
+    room = (pj.get("paralelo") or 1) - len(started - done)
+    for t in tasks:
+        if room <= 0:
+            return
+        if not in_wave(t, wave) or t["n"] in started or _failed_since(evs, "open", t["n"], None):
+            continue
+        room -= 1
+        try:
+            acts.append(_open_task(d, cfg, pj, t))
+        except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, "open", t["n"], str(e)))
+
+
+def _announce_batch(d: Path, cfg: dict, acts: list[str]) -> None:
+    """`Prova: lote(N)`: the batch goes out full, or when a wave is over, and only on integrated
+    code; the arbiter opens the proof session (prova-lote.md)."""
+    prova = plan_of(d).get("prova")
+    pend = pending_proofs(d)
+    if not prova or prova[0] != "lote" or not pend:
+        return
+    if any(p.get("task") not in _integrated(d, events(d)) for p in pend):
+        return
+    tasks = plan_tasks(plan_text(cfg["plan"]))
+    wave = {t["n"]: t["wave"] for t in tasks}
+    closed = _closed(d)
+    wave_over = any(all(t["n"] in closed for t in tasks if t["wave"] == wave.get(p.get("task")))
+                    for p in pend)
+    if len(pend) < prova[1] and not wave_over:
+        return
+    line = take_batch(d)
+    names = ", ".join(f"T{p['task']}" for p in pend)
+    _wake(d, f"[decisao] Proof batch ready — {line}. Open one proof session for those roteiros on "
+             "the integrated code (prova-lote.md).",
+          f"acordou o árbitro: lote de prova pronto ({names})")
+    acts.append(f"batch: {line}")
+
+
+def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
+    tasks = plan_tasks(plan_text(cfg["plan"]))
+    evs = events(d)
+    if not tasks or any(ev.get("tipo") == "tudo_integrado" for ev in evs):
+        return
+    if not {t["n"] for t in tasks} <= _integrated(d, evs):
+        return
+    event_append(d, {"tipo": "tudo_integrado"})
+    _wake(d, "[decisao] Every Task of the plan is integrated: your turn for the final review "
+             "(arbitro-encerramento.md, \"Phase 4\").",
+          "acordou o árbitro: todas as Tasks integradas, hora da revisão final")
+    acts.append("all integrated: arbiter woken for the final review")
+
+
 def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
-    _integrate_all(d, cfg, acts)
+    """Integration first: nothing opens or goes to proof on a main line that is red or waiting."""
+    if not _integrate_all(d, cfg, acts):
+        return
+    evs = events(d)
+    # A step that failed as a whole waits for a new close before it is tried again; a failed
+    # opening of one Task carries its number and is skipped inside _open_ready.
+    since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+    for passo, step in (("batch", _announce_batch), ("open", _open_ready), ("final", _final_review)):
+        if _failed_since(evs, passo, None, since):
+            continue
+        try:
+            step(d, cfg, acts)
+        except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, passo, None, str(e)))
 
 
 def advance(d: Path) -> list[str]:

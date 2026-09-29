@@ -15,8 +15,22 @@ import pytest
 
 ORQ = Path(__file__).resolve().parents[2] / "skills" / "orquestrar" / "scripts" / "orq.py"
 
-# One line per hangar-send call: "$*" (target and text, or --new and its flags).
-FAKE = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$FAKE_LOG"\n'
+# One line per hangar-send call ("$*"); `--new` also writes the sidecar the backend would, with
+# the model asked for, or FAKE_BORN_MODEL to simulate a session born on another one.
+FAKE = r"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+a = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(" ".join(a) + "\n")
+if a[:1] == ["--new"]:
+    opt = lambda k, dflt=None: a[a.index(k) + 1] if k in a else dflt
+    side = Path.home() / ".hangar" / "claude-headless"
+    side.mkdir(parents=True, exist_ok=True)
+    (side / (a[1] + ".json")).write_text(json.dumps({
+        "name": a[1], "provider": opt("--provider", "claude"),
+        "model": os.environ.get("FAKE_BORN_MODEL") or opt("--model")}))
+"""
 
 ROWS = ("| 1 | first | §1 | `a.txt` · `messages/pt.json` | `true` | 1 | low | — |\n"
         "| 2 | second | §2 | `a.txt` · `messages/pt.json` | `true` | 1 | high | — |\n")
@@ -379,3 +393,168 @@ def test_a_conflict_whose_wake_fails_is_not_a_failed_step(tmp_path):
     run(e, "advance")
     tipos = [x["tipo"] for x in events(d)]
     assert "conflito" in tipos and "advance_falhou" not in tipos
+
+
+CONTRACT = """# Regras
+
+## Quem é quem
+
+| papel | vez | sessão | provider | conta | modelo | esforço | abertura |
+|---|---|---|---|---|---|---|---|
+| árbitro | - | arb | claude | padrao | opus[1m] | high | - |
+| executor | low | w-t* | claude | 200-01 | opus[1m] | medium | - |
+| executor | high | w-t* | codex | openai-codex | gpt-6-sol | high | --headless |
+| revisor | - | w-rev-* | claude | padrao | opus[1m] | high | - |
+"""
+ROWS3 = ROWS + "| 3 | third | §3 | `c.txt` | `true` | 2 | low | — |\n"
+ONE = "| 1 | first | §1 | `a.txt` | `true` | 1 | low | {rot} |\n"
+
+
+def with_molds(tmp_path, e):
+    """Every placeholder shows up in the text sent; the untouchables list is the only multi-line one,
+    so it goes last, on its own lines."""
+    m = tmp_path / "molds"
+    m.mkdir(exist_ok=True)
+    for role in ("executor", "revisor"):
+        (m / f"kickoff-{role}.md").write_text(
+            role.upper() + " T{task} {title} wt={worktree} br={branch} dir={run_dir} plan={plan} "
+            "c={contract} ex={executor} rev={reviewer} arb={arbiter} base={base}\n{untouchables}")
+    return {**e, "ORQ_KICKOFF_DIR": str(m)}
+
+
+def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path):
+    root = tmp_path.resolve()
+    d, r, g, e, log = start(tmp_path, rows=ROWS3, contract=CONTRACT)
+    e = with_molds(tmp_path, e)
+    cfg = json.loads((d / "orq.json").read_text())
+    cfg["untouchables"] = ["CLAUDE.md", "docs/*"]
+    (d / "orq.json").write_text(json.dumps(cfg))
+    base = g("rev-parse", "HEAD")
+    assert run(e, "advance").stdout.splitlines() == ["opened T1: w-t1 + w-rev-1",
+                                                     "opened T2: w-t2 + w-rev-2"]
+    wt1, wt2 = root / "repo-t1", root / "repo-t2"
+    assert git_in(wt1)("branch", "--show-current") == "main-t1"
+    assert git_in(wt2)("rev-parse", "HEAD") == g("rev-parse", "HEAD")
+    assert [m for m in sent(log) if m.startswith("--new ")] == [
+        f"--new w-t1 {wt1} --provider claude --conta 200-01 --model opus[1m] --effort medium",
+        f"--new w-rev-1 {wt1} --provider claude --model opus[1m] --effort high --read-only",
+        f"--new w-t2 {wt2} --provider codex --conta openai-codex --model gpt-6-sol --effort high --headless",
+        f"--new w-rev-2 {wt2} --provider claude --model opus[1m] --effort high --read-only",
+    ]
+    assert [(x["task"], x["titulo"], x["executor"], x["par"]) for x in events(d)
+            if x["tipo"] == "task_inicio"] == [(1, "first", "w-t1", "w-rev-1"), (2, "second", "w-t2", "w-rev-2")]
+    head = (f"EXECUTOR T1 first wt={wt1} br=main-t1 dir={d} plan={root / 'plan.orq.md'} "
+            f"c={root / 'regras.md'} ex=w-t1 rev=w-rev-1 arb=arb base={base}")
+    assert [m for m in sent(log) if m.startswith("w-t1 ")] == [f"w-t1 [painel: orquestrador g1] {head}"]
+    assert (d / "kickoffs" / "task1-executor.md").read_text() == f"{head}\n- CLAUDE.md\n- docs/*"
+    assert (d / "kickoffs" / "task1-revisor.md").read_text().startswith("REVISOR T1 first")
+    assert any(x["kind"] == "advance" and x["task"] == 1 and "abriu w-t1" in x["text"]
+               for x in timeline_lines(d))
+    assert run(e, "advance").stdout == ""   # the wave is full, T3 waits for wave 1
+
+
+def test_sequential_opens_on_the_main_line_after_the_previous_is_integrated(tmp_path):
+    root = tmp_path.resolve()
+    rows = ONE.format(rot="—") + "| 2 | second | §2 | `b.txt` | `true` | 2 | low | — |\n"
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=rows, contract=CONTRACT)
+    e = with_molds(tmp_path, e)
+    assert run(e, "advance").stdout.splitlines() == ["opened T1: w-t1 + w-rev-1"]
+    assert f"--new w-t1 {root / 'repo'} --provider claude" in "\n".join(sent(log))
+    assert run(e, "advance").stdout == ""
+    (r / "a.txt").write_text("x\n")
+    g("commit", "-qam", "t1")
+    close(d, 1, g("rev-parse", "HEAD"))
+    assert run(e, "advance").stdout.splitlines() == [f"integrated T1 {g('rev-parse', 'HEAD')[:12]}",
+                                                     "opened T2: w-t2 + w-rev-2"]
+
+
+def test_subagent_review_opens_only_the_executor(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"),
+                            revisao="subagente", contract=CONTRACT)
+    e = with_molds(tmp_path, e)
+    assert run(e, "advance").stdout.splitlines() == ["opened T1: w-t1 + subagente"]
+    assert [m.split()[1] for m in sent(log) if m.startswith("--new ")] == ["w-t1"]
+    assert [x["par"] for x in events(d) if x["tipo"] == "task_inicio"] == ["subagente"]
+    assert not (d / "kickoffs" / "task1-revisor.md").exists()
+    kick = (d / "kickoffs" / "task1-executor.md").read_text()
+    assert "rev=subagente" in kick and "br=main " in kick
+    # On the main line the base is the checkout's HEAD; no untouchables → "- none".
+    assert kick.endswith(f"base={g('rev-parse', 'HEAD')}\n- none")
+
+
+def test_born_on_another_model_fails_once_and_is_not_retried(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"), contract=CONTRACT)
+    e = {**with_molds(tmp_path, e), "FAKE_BORN_MODEL": "sonnet"}
+    assert run(e, "advance").stdout.strip() == (
+        "failed open T1: born wrong: w-t1: born on model sonnet, row says opus[1m]")
+    run(e, "advance")
+    assert len([m for m in sent(log) if m.startswith("--new ")]) == 1
+    assert [(x["passo"], x["task"]) for x in events(d) if x["tipo"] == "advance_falhou"] == [("open", 1)]
+    assert not any(x["tipo"] == "task_inicio" for x in events(d))
+    assert len([m for m in sent(log) if "orq advance failed at open T1" in m]) == 1
+
+
+def test_last_task_integrated_wakes_the_arbiter_for_the_final_review_once(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    assert run(e, "advance").stdout.splitlines()[-1] == "all integrated: arbiter woken for the final review"
+    run(e, "advance")
+    assert len([x for x in events(d) if x["tipo"] == "tudo_integrado"]) == 1
+    assert len([m for m in sent(log) if "Every Task of the plan is integrated" in m]) == 1
+
+
+def test_full_proof_batch_is_announced_once_its_tasks_are_integrated(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="r1.md"), prova="lote(1)")
+    started(e, tasks=(1,))
+    h = g("rev-parse", "HEAD")
+    close(d, 1, h)
+    with (d / "prova-fila.jsonl").open("w") as f:   # what `orq commit` queues
+        f.write(json.dumps({"ts": "2026-09-28T10:00:00-03:00", "task": 1, "roteiro": "r1.md", "hash": h}) + "\n")
+    out = run(e, "advance").stdout.splitlines()
+    assert out[1] == f"batch: lote 1: T1 {tmp_path.resolve() / 'r1.md'} {h[:12]}"
+    assert [json.loads(l)["tasks"] for l in (d / "prova-lotes.jsonl").read_text().splitlines()] == [[1]]
+    assert any("[painel: orquestrador g1] [decisao] Proof batch ready — lote 1: T1" in m for m in sent(log))
+
+
+def test_team_table_reads_like_the_backend():
+    from app import orq_papeis
+    m = orq_mod()
+    ours = [(x["papel"], x["vez"], x["sessao"], x["provider"].lower(), x["conta"], x["modelo"], x["esforco"])
+            for x in m.team_rows(CONTRACT)]
+    theirs = [(p.papel, p.vez, p.sessao, p.provider, p.conta, p.modelo, p.esforco)
+              for p in orq_papeis.ler(CONTRACT)]
+    assert ours == theirs
+
+
+def test_role_row_rotation_risk_names_and_flags(monkeypatch):
+    m = orq_mod()
+    monkeypatch.setattr(m, "jev_config", lambda: {})   # in-process: the machine's key would add --jev
+    rows = [{"papel": "executor", "vez": "1", "sessao": "a"}, {"papel": "executor", "vez": "2", "sessao": "b"}]
+    assert [m.role_row(rows, "executor", n, "")["sessao"] for n in (1, 2, 3)] == ["a", "b", "a"]
+    rows = [{"papel": "executor", "vez": "low", "sessao": "a"}, {"papel": "executor", "vez": "high", "sessao": "b"}]
+    assert m.role_row(rows, "executor", 5, "high")["sessao"] == "b"
+    with pytest.raises(m.OrqError):
+        m.role_row(rows, "executor", 5, "")
+    assert [m.session_name("w-t*", 4), m.session_name("w-review", 4)] == ["w-t4", "w-review-t4"]
+    # The backend refuses a session without terminal and read-only together: headless wins.
+    assert m.open_flags({"provider": "claude", "abertura": "--headless"}, True) == ["--provider", "claude", "--headless"]
+
+
+def test_kickoff_mold_with_an_unknown_placeholder_is_an_error(tmp_path, monkeypatch):
+    m = orq_mod()
+    (tmp_path / "kickoff-executor.md").write_text("T{task} {nope}")
+    monkeypatch.setattr(m, "KICKOFF_DIR", tmp_path)
+    with pytest.raises(m.OrqError, match="nope"):
+        m.render_kickoff("executor", {"task": 1})
+
+
+@pytest.mark.parametrize("role", ["executor", "revisor"])
+def test_the_real_molds_render_with_the_twelve_keys(role, monkeypatch):
+    monkeypatch.delenv("ORQ_KICKOFF_DIR", raising=False)
+    m = orq_mod()
+    keys = ("task", "title", "worktree", "branch", "run_dir", "plan", "contract", "executor",
+            "reviewer", "arbiter", "base", "untouchables")
+    text = m.render_kickoff(role, {k: f"<{k}>" for k in keys})
+    assert "{" not in text and "}" not in text
+    assert "<task>" in text and "<untouchables>" in text
