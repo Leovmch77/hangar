@@ -159,7 +159,9 @@ def _preparar(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA synchronous=NORMAL")
     try:
         atual = conn.execute("SELECT v FROM meta WHERE k='esquema'").fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
         atual = None
     if atual and atual[0] == str(ESQUEMA):
         return
@@ -168,8 +170,9 @@ def _preparar(conn: sqlite3.Connection) -> None:
         atual = None
         try:
             atual = conn.execute("SELECT v FROM meta WHERE k='esquema'").fetchone()
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
         if not (atual and atual[0] == str(ESQUEMA)):
             for (nome,) in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall():

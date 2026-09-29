@@ -236,6 +236,7 @@ class Index:
             "SELECT offset, lines, cwd, preview, head_done, internal FROM files WHERE id=?", (fid,)).fetchone()
         from app.archive import _cortar, _texto_simples
         linhas: list[tuple] = []
+        ilegiveis = 0
         with open(path, "rb") as fh:
             fh.seek(offset)
             for raw in fh:
@@ -252,6 +253,11 @@ class Index:
                 except Exception:
                     # Linha que o parser não entende não pode travar o arquivo inteiro para sempre.
                     evs, obj = [], None
+                    ilegiveis += 1
+                    if ilegiveis == 1:
+                        # Parser que regrediu indexaria a sessão como vazia e a busca diria "nada".
+                        _log.warning("índice: linha ilegível em %s (byte %d); pulando",
+                                     path, offset - len(raw), exc_info=True)
                 msgs = [ev for ev in evs if ev.kind in ("user_msg", "assistant_msg") and ev.text]
                 if not head_done:
                     c = obj.get("cwd") if isinstance(obj, dict) else None
@@ -362,5 +368,8 @@ def start_background() -> None:
         _current = Index(path)
     except Exception:
         _log.warning("índice de transcripts indisponível; a busca segue no rg", exc_info=True)
+        # Sem índice a busca volta a levar segundos: fica no diário exportável, não só no journal.
+        from app import diag
+        diag.registrar("busca.indice_indisponivel")
         return
     threading.Thread(target=_loop, args=(_current,), name="transcript-index", daemon=True).start()

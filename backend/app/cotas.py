@@ -645,7 +645,7 @@ def _ler_codex_detalhada(home: Path | str | None = None) -> _LeituraDetalhada:
         except codex_appserver.CodexAusente:
             return "indisponivel", [], "codex-ausente", None
         except (RuntimeError, OSError) as e:
-            _log.debug("cota: codex nao respondeu: %r", e)
+            _log.info("cota: codex nao respondeu: %r", e)
             return "indisponivel", [], "sem-resposta", None
     limites = r.get("rateLimits")
     limites = limites if isinstance(limites, dict) else {}
