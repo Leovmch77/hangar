@@ -1120,7 +1120,7 @@ def test_events_route_passes_session_provider_to_merged_events():
     import asyncio
     info = SessionInfo(name="cx", cwd="/tmp", jsonl="/r/cx.jsonl", provider="codex")
 
-    async def _fake_merged_events(name, jsonl, provider="claude", start_offset=None):
+    async def _fake_merged_events(name, jsonl, provider="claude", start_offset=None, count_app=True):
         return
         yield  # pragma: no cover -- nunca alcancado; so torna isto um async generator
 
@@ -1129,7 +1129,7 @@ def test_events_route_passes_session_provider_to_merged_events():
          patch("app.api.merged_events", side_effect=_fake_merged_events) as me:
         resp = asyncio.run(api_mod.events("cx", req))
     assert resp is not None
-    me.assert_called_once_with("cx", "/r/cx.jsonl", provider="codex", start_offset=None)
+    me.assert_called_once_with("cx", "/r/cx.jsonl", provider="codex", start_offset=None, count_app=True)
 
 
 def test_events_route_forwards_last_event_id_as_offset():
@@ -1139,7 +1139,7 @@ def test_events_route_forwards_last_event_id_as_offset():
     import asyncio
     info = SessionInfo(name="cx", cwd="/tmp", jsonl="/r/cx.jsonl", provider="claude")
 
-    async def _fake(name, jsonl, provider="claude", start_offset=None):
+    async def _fake(name, jsonl, provider="claude", start_offset=None, count_app=True):
         return
         yield  # pragma: no cover
 
