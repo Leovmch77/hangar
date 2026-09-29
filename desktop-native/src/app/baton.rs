@@ -154,8 +154,11 @@ impl Hangar {
     /// daquela máquina, um aviso.
     fn open_origin(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let target = super::sidebar::Target::new(&self.open_server(), name);
-        if self.select_target(&target, window, cx).is_none() {
+        // Sem a conexão da máquina, o `select_target` já avisou o motivo.
+        if self.target_session(&target).is_none() {
             window.push_notification(Notification::warning(tr("baton_origin_missing").replace("{nome}", name)), cx);
+            return;
         }
+        self.select_target(&target, window, cx);
     }
 }

@@ -1607,7 +1607,7 @@ impl Hangar {
             None => self.api.clone(),
         };
         let Some(api) = api else {
-            if baton.is_some() { window.push_notification(Notification::error(tr("connection_failed")), cx); }
+            if let Some(baton) = &baton { window.push_notification(Notification::error(self.machine_error(&baton.server)), cx); }
             return;
         };
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,

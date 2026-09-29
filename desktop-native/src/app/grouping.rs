@@ -11,11 +11,13 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Por que soltar a origem sobre o alvo não agrupa (`DropReason` do web).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Refusal { Same, OtherServer, Dead, SameGroup, CrossServer, Orq }
+pub(super) enum Refusal { Same, OtherServer, Dead, SameGroup, CrossServer, Orq, Invite }
 
 impl Refusal {
     pub(super) fn text(self) -> String {
         web(match self {
+            // O web nem deixa arrastar a linha do convite, então não tem frase para isto.
+            Refusal::Invite => return tr("group_refusal_invite"),
             Refusal::Same => "grupo_recusa_same",
             Refusal::OtherServer => "grupo_recusa_other_server",
             Refusal::Dead => "grupo_recusa_dead",
@@ -193,7 +195,7 @@ impl Hangar {
     /// O que soltar ali faria, pela sessão viva: `None` é nada (fundo sem grupo, sessão sumida).
     fn verdict(&self, origin: &Target, spot: Option<&DropSpot>) -> Option<Result<DropAction, Refusal>> {
         // Convidado não agrupa nem desagrupa: parear é rota do servidor inteiro do dono.
-        if self.invite_target(origin) { return None; }
+        if self.invite_target(origin) { return Some(Err(Refusal::Invite)); }
         let session = self.target_session(origin)?;
         match spot {
             None => can_leave(session).then_some(Ok(DropAction::Leave)),
@@ -308,8 +310,8 @@ impl Hangar {
         let title = web_with("sessao_grupo_pareado", "label", label);
         let tip = title.clone();
         let server = remote.map(str::to_owned).unwrap_or_else(|| self.active_key());
-        let rep = members.first().map_or_else(String::new, |rep| rep.name.clone());
-        let spot = DropSpot::Pair { gid: gid.to_owned(), rep: Target::new(&server, &rep) };
+        // Sem membro o cabeçalho não é alvo de soltar: um `Target` de nome vazio não é sessão nenhuma.
+        let spot = members.first().map(|rep| DropSpot::Pair { gid: gid.to_owned(), rep: Target::new(&server, &rep.name) });
         let pill = |text: String, color: Hsla, bg: Hsla| div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(bg)
             .flex().justify_center().font_family(theme::MONO).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(text);
         let weak = cx.entity().downgrade();
@@ -325,7 +327,7 @@ impl Hangar {
             .when(awaiting > 0, |el| el.child(pill(awaiting.to_string(), theme::warning(), theme::warning().opacity(0.14))))
             .child(pill(members.len().to_string(), theme::muted(), theme::inset()))
             .on_change(move |_, _, _, cx| { let _ = weak.update(cx, |this, cx| this.toggle_group(key.clone(), cx)); });
-        self.drop_target(header, spot, 8., cx).into_any_element()
+        match spot { Some(spot) => self.drop_target(header, spot, 8., cx).into_any_element(), None => header.into_any_element() }
     }
 
     // ── Diálogo ──

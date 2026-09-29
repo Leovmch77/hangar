@@ -161,13 +161,15 @@ impl Hangar {
 
     /// Máquinas da busca de conteúdo: as próprias ligadas, a ativa primeiro. Convite fica de fora: a busca é rota do servidor
     /// inteiro do dono.
-    fn search_machines(&self, cx: &App) -> Vec<(String, String, Option<Api>)> {
+    /// Sem conexão, a máquina leva o motivo no lugar dela.
+    fn search_machines(&self, cx: &App) -> Vec<(String, String, Result<Api, String>)> {
         let active = self.active_key();
-        let mut list: Vec<(String, String, Option<Api>)> = self.servers.iter().filter(|s| !s.disabled && !s.invite)
-            .map(|s| { let key = servers::norm(&s.address); (key.clone(), s.label.clone(), self.machine_api(&key)) }).collect();
+        let api = |key: &str| self.machine_api(key).ok_or_else(|| self.machine_error(key));
+        let mut list: Vec<(String, String, Result<Api, String>)> = self.servers.iter().filter(|s| !s.disabled && !s.invite)
+            .map(|s| { let key = servers::norm(&s.address); (key.clone(), s.label.clone(), api(&key)) }).collect();
         if let Some(ix) = list.iter().position(|(key, ..)| *key == active) { let first = list.remove(ix); list.insert(0, first); }
         // A ativa ainda fora da lista gravada (a conexão grava depois da primeira resposta) entra do mesmo jeito.
-        else if !active.is_empty() && !self.active_invite() { list.insert(0, (active, self.server_label(cx), self.api.clone())); }
+        else if !active.is_empty() && !self.active_invite() { list.insert(0, (active.clone(), self.server_label(cx), api(&active))); }
         list
     }
 
@@ -182,6 +184,13 @@ impl Hangar {
         let seq = self.search.hits.start();
         // Uma busca por máquina, como o fan-out do web: a lenta ou fora do ar falha sozinha, sem segurar as outras.
         let machines = self.search_machines(cx);
+        // Nenhuma máquina para buscar não é "nada encontrado".
+        if machines.is_empty() {
+            self.search.hits.finish(seq, Err(tr("search_no_machines")));
+            self.search.failed.clear();
+            cx.notify();
+            return;
+        }
         let connection = self.connection;
         let task = self.runtime.spawn(async move {
             futures::future::join_all(machines.into_iter().map(|(key, label, api)| {
@@ -189,20 +198,28 @@ impl Hangar {
                 async move {
                     // 30 s: a busca varre as conversas de todas as contas; termo raro percorre tudo antes de parar.
                     let result = match api {
-                        Some(api) => api.server_read(&["search"], &[("q", query.as_str())], 30).await,
-                        None => Err(Failure::local("connection_failed")),
+                        Ok(api) => api.server_read(&["search"], &[("q", query.as_str())], 30).await.map_err(|e| Hangar::failure(&e)),
+                        Err(reason) => Err(reason),
                     };
                     (key, label, result)
                 }
             })).await
         });
         cx.spawn(async move |this, cx| {
-            let Ok(results) = task.await else { return };
+            let joined = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.connection != connection { return; }
+                // Tarefa perdida ou conexão trocada no meio: a busca termina com o aviso, nunca presa em "Buscando…".
+                let results = match joined {
+                    Ok(results) if this.connection == connection => results,
+                    _ => {
+                        if this.search.hits.finish(seq, Err(tr("search_interrupted"))) { this.search.failed.clear(); }
+                        cx.notify();
+                        return;
+                    }
+                };
                 let (mut hits, mut failed) = (Vec::new(), Vec::new());
                 for (key, label, result) in results {
-                    match result.map_err(|e| Self::failure(&e)).and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))) {
+                    match result.and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))) {
                         Ok(list) => hits.extend(list.into_iter().map(|hit| Hit { server: key.clone(), label: label.clone(), ..hit })),
                         Err(error) => failed.push(format!("{label} ({error})")),
                     }
@@ -296,7 +313,7 @@ impl Hangar {
     /// de onde o trecho veio.
     fn search_resume(&mut self, hit: Hit, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.machine_api(&hit.server) else {
-            self.search.resume_error = Some(tr("connection_failed"));
+            self.search.resume_error = Some(self.machine_error(&hit.server));
             cx.notify();
             return;
         };
@@ -304,15 +321,16 @@ impl Hangar {
         let server = hit.server.clone();
         self.search.resuming = Some(hit.conversation());
         self.search.resume_error = None;
-        let connection = self.connection;
         let task = self.runtime.spawn(async move {
             api.server_send(reqwest::Method::POST, &["archive", &hit.project, &hit.session_id, "resume"], Some(json!({})), 120).await
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(result) = task.await else { return };
+            let joined = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.connection != connection { return; }
+                // Sem isto o botão ficava ocupado para sempre e nenhuma outra retomada saía. Trocar a conexão ativa não
+                // descarta: a sessão já nasceu na máquina do trecho, e é nela que abre.
                 this.search.resuming = None;
+                let Ok(result) = joined else { this.search.resume_error = Some(tr("search_interrupted")); cx.notify(); return };
                 match result.map_err(|e| Self::fetch_failure(&e)).and_then(|v| serde_json::from_value::<SessionInfo>(v).map_err(|_| tr("invalid_response"))) {
                     Ok(session) => {
                         this.search.previous_focus = None;
@@ -324,8 +342,7 @@ impl Hangar {
                         if let Some(list) = this.remote.get_mut(&server).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
                             list.sessions.push(session.clone());
                         }
-                        this.select_on(&server, session, window, cx);
-                        if readable { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                        if this.select_on(&server, session, window, cx) && readable { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
                     }
                     Err(error) => this.search.resume_error = Some(error),
                 }
@@ -349,19 +366,23 @@ impl Hangar {
         let seq = remote.start();
         self.search.preview = Some((key.clone(), remote));
         // O contexto é lido da máquina do trecho.
-        let api = self.machine_api(&hit.server);
+        let api = self.machine_api(&hit.server).ok_or_else(|| self.machine_error(&hit.server));
         let connection = self.connection;
         let task = self.runtime.spawn(async move {
-            let Some(api) = api else { return Err(Failure::local("connection_failed")) };
+            let api = match api { Ok(api) => api, Err(reason) => return Err(Failure::local(reason)) };
             api.server_read(&["search", "context"], &[("project", hit.project.as_str()), ("session_id", hit.session_id.as_str()), ("event_id", event.as_str())], 15).await
         });
         cx.spawn(async move |this, cx| {
-            let Ok(result) = task.await else { return };
+            let joined = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.connection != connection { return; }
+                let current = this.connection == connection;
                 let Some((_, remote)) = this.search.preview.as_mut().filter(|(k, _)| *k == key) else { return };
-                remote.finish(seq, result.map_err(|e| Self::fetch_failure(&e))
-                    .and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response"))));
+                // Tarefa perdida ou conexão trocada: a prévia termina com o aviso em vez de carregar para sempre.
+                let result = match joined {
+                    Ok(result) if current => result.map_err(|e| Self::fetch_failure(&e)),
+                    _ => Err(tr("search_interrupted")),
+                };
+                remote.finish(seq, result.and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response"))));
                 cx.notify();
             });
         }).detach();
@@ -380,10 +401,14 @@ impl Hangar {
             api.server_send(reqwest::Method::POST, &["ask-history"], Some(json!({ "question": question })), 90).await
         });
         cx.spawn(async move |this, cx| {
-            let Ok(result) = task.await else { return };
+            let joined = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.connection != connection { return; }
-                let parsed = result.map_err(|e| Self::failure(&e)).and_then(|v| {
+                // Mesmo caso da busca: sem resposta útil, o botão não pode ficar em "Perguntando…".
+                let result = match joined {
+                    Ok(result) if this.connection == connection => result.map_err(|e| Self::failure(&e)),
+                    _ => Err(tr("search_interrupted")),
+                };
+                let parsed = result.and_then(|v| {
                     let answer = v.get("answer").and_then(Value::as_str).unwrap_or_default().to_owned();
                     let hits = serde_json::from_value::<Vec<Hit>>(v.get("hits").cloned().unwrap_or(json!([]))).map_err(|_| tr("invalid_response"))?;
                     Ok((answer, hits.into_iter().map(|hit| Hit { server: server.clone(), label: label.clone(), ..hit }).collect()))
@@ -467,7 +492,8 @@ impl Hangar {
                 rows.push(state_line(web_with("busca_servidor_falhou", &[("servidor", failed.clone())]), theme::danger()));
             }
             match &self.search.hits.value {
-                Some(Err(error)) => rows.push(state_line(web_with("busca_servidor_falhou", &[("servidor", format!("{} ({error})", self.server_label(cx)))]), theme::danger())),
+                // A falha por máquina vai em `failed`; aqui é a da busca inteira, já com o motivo.
+                Some(Err(error)) => rows.push(state_line(error.clone(), theme::danger())),
                 Some(Ok(hits)) if hits.is_empty() && !self.search.failed.is_empty() => {}
                 Some(Ok(hits)) if hits.is_empty() => rows.push(state_line(web_with("busca_nenhum_todas", &[("termos", words.join(", "))]), theme::muted())),
                 Some(Ok(hits)) => {

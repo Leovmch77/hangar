@@ -78,7 +78,8 @@ impl Hangar {
             let list = self.remote.entry(key.clone()).or_default();
             let api = match Api::new(&entry.address, &entry.token) {
                 Ok(api) => api,
-                Err(error) => { list.error = Some(Self::failure(&error)); continue; }
+                // A conexão antiga não pode seguir servindo as ações de uma entrada que já não abre.
+                Err(error) => { list.error = Some(Self::failure(&error)); list.api = None; continue; }
             };
             list.api = Some(api.clone());
             self.remote_tasks.push(self.runtime.spawn(run_list(api, key, self.remote_gen, self.tx.clone())));
@@ -106,7 +107,8 @@ impl Hangar {
                 list.error = Some(tr_shared("convite_encerrado", &[]));
             }
             RemoteUpdate::Sessions(Err(error)) => list.error = Some(Self::failure(&error)),
-            RemoteUpdate::Stream(Update::Online) => { changed = !list.online; list.online = true; }
+            // Voltou: o erro da queda sai do cabeçalho.
+            RemoteUpdate::Stream(Update::Online) => { changed = !list.online || list.error.is_some(); list.online = true; list.error = None; }
             RemoteUpdate::Stream(Update::Offline(error)) => {
                 list.online = false;
                 list.error = Some(if ended(&error) {
@@ -144,8 +146,7 @@ impl Hangar {
         let list = self.remote.get(key);
         match list.filter(|l| l.loaded).map(|l| l.sessions.iter().find(|s| s.name == name).cloned()) {
             Some(Some(session)) => {
-                self.select_on(key, session.clone(), window, cx);
-                self.focus_composer_for(&session, window, cx);
+                if self.select_on(key, session.clone(), window, cx) { self.focus_composer_for(&session, window, cx); }
             }
             Some(None) => self.remote_open_failed(&name, None, window, cx),
             None => match list.and_then(|l| l.error.clone()) {
@@ -182,6 +183,11 @@ impl Hangar {
         self.remote.get(key).and_then(|list| list.api.clone())
     }
 
+    /// Por que a máquina `key` está sem conexão: a falha da lista dela, que diz mais que o genérico.
+    pub(super) fn machine_error(&self, key: &str) -> String {
+        self.remote.get(key).and_then(|list| list.error.clone()).unwrap_or_else(|| tr("connection_failed"))
+    }
+
     /// Lista de outra máquina mudou: a sessão aberta dela acompanha, e a que esperava por ela abre.
     pub(super) fn remote_changed(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         let waiting = self.pending_remote.as_ref().is_some_and(|(want, _)| want == key);
@@ -201,8 +207,7 @@ impl Hangar {
         if waiting && let Some((_, name)) = self.pending_remote.take() {
             match list.into_iter().find(|s| s.name == name) {
                 Some(session) => {
-                    self.select_on(key, session.clone(), window, cx);
-                    self.focus_composer_for(&session, window, cx);
+                    if self.select_on(key, session.clone(), window, cx) { self.focus_composer_for(&session, window, cx); }
                 }
                 None => self.remote_open_failed(&name, None, window, cx),
             }

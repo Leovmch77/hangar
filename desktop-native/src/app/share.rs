@@ -289,7 +289,7 @@ impl Hangar {
     /// O convite nasce na máquina da sessão: é o backend dela que guarda o código e abre a porta do convidado.
     pub(super) fn open_share_dialog(&mut self, target: super::sidebar::Target, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.machine_api(&target.server) else {
-            window.push_notification(Notification::error(tr("connection_failed")), cx);
+            window.push_notification(Notification::error(self.machine_error(&target.server)), cx);
             return;
         };
         let (runtime, name) = (self.runtime.handle().clone(), target.name);

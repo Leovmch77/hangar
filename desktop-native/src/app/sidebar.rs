@@ -346,11 +346,10 @@ impl Hangar {
         if self.is_active_key(&target.server) { self.tab_focus.get(&target.name) } else { self.sidebar.remote_focus.get(target) }
     }
 
-    /// Abre a sessão da linha na máquina dela, sem trocar o servidor ativo.
+    /// Abre a sessão da linha na máquina dela, sem trocar o servidor ativo. `None`: fora da lista ou sem conexão (já avisada).
     pub(super) fn select_target(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) -> Option<SessionInfo> {
         let session = self.target_session(target)?.clone();
-        self.select_on(&target.server, session.clone(), window, cx);
-        Some(session)
+        self.select_on(&target.server, session.clone(), window, cx).then_some(session)
     }
 
     /// O clique na linha: abre e leva o foco ao compositor.
@@ -439,11 +438,12 @@ impl Hangar {
             self.sidebar.focus_tab = None;
             if self.root_focus.is_focused(window) && let Some(focus) = self.row_focus(&new).cloned() { focus.focus(window, cx); }
         }
+        // Só deixa de seguir depois de abrir: sem conexão, a próxima lista tenta de novo.
         if let Some(new) = self.sidebar.follow.clone().filter(|t| alive(self, t)) {
-            self.sidebar.follow = None;
-            if self.selected.is_none() {
+            if self.selected.is_some() { self.sidebar.follow = None; }
+            else if self.select_target(&new, window, cx).is_some() {
+                self.sidebar.follow = None;
                 self.error = None;
-                self.select_target(&new, window, cx);
             }
         }
     }
@@ -538,7 +538,7 @@ impl Hangar {
         // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
         let mute = !self.invite_target(&target);
         let Some(api) = self.machine_api(&target.server) else {
-            let failed = tr("connection_failed");
+            let failed = self.machine_error(&target.server);
             self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
             return;
         };
@@ -626,7 +626,7 @@ impl Hangar {
         let new = edit.input.read(cx).value().trim().to_owned();
         let unchanged = new.is_empty() || new == edit.target.name;
         let old = edit.target.clone();
-        let offline = self.machine_api(&old.server).is_none();
+        let offline = self.machine_api(&old.server).is_none().then(|| self.machine_error(&old.server));
         let Some(edit) = self.sidebar.editing.as_mut() else { return };
         if edit.inline {
             // Na linha o campo fecha na hora e a falha vai à notificação, como o `saveEdit` do web.
@@ -634,14 +634,14 @@ impl Hangar {
             self.root_focus.focus(window, cx);
             cx.notify();
             if unchanged { return; }
-            if offline { window.push_notification(Notification::error(tr("sidebar_rename_failed").replace("{n}", &tr("connection_failed"))), cx); return; }
+            if let Some(reason) = offline { window.push_notification(Notification::error(tr("sidebar_rename_failed").replace("{n}", &reason)), cx); return; }
         } else {
             // No diálogo, vazio ou igual não faz nada (o web só envia válido), e gravando não manda de novo. Ele fica aberto
             // com o botão ocupado até a resposta, que fecha ou mostra o motivo junto do campo.
             let mut status = edit.status.borrow_mut();
             if unchanged || status.sent.is_some() { return; }
-            if offline {
-                *status = Pending { sent: None, error: Some(tr("sidebar_rename_failed").replace("{n}", &tr("connection_failed"))) };
+            if let Some(reason) = offline {
+                *status = Pending { sent: None, error: Some(tr("sidebar_rename_failed").replace("{n}", &reason)) };
                 drop(status);
                 cx.notify();
                 return;
@@ -655,13 +655,13 @@ impl Hangar {
 
     /// Grava na máquina da linha; sem a conexão dela a falha volta pelo mesmo caminho da resposta, nunca calada.
     fn write(&mut self, target: Target, what: Write, cx: &mut Context<Self>) {
-        let api = self.machine_api(&target.server);
+        let api = self.machine_api(&target.server).ok_or_else(|| self.machine_error(&target.server));
         let tell = self.sidebar_tell();
-        let editor = matches!(what, Write::Editor).then(|| self.local_editor(api.clone(), &target.name)).flatten();
+        let editor = matches!(what, Write::Editor).then(|| self.local_editor(api.clone().ok(), &target.name)).flatten();
         self.runtime.spawn(async move {
-            let Some(api) = api else {
-                tell.send(SidebarReply::Wrote(target, what, Err(Failure::local("connection_failed")))).await;
-                return;
+            let api = match api {
+                Ok(api) => api,
+                Err(reason) => { tell.send(SidebarReply::Wrote(target, what, Err(Failure::local(reason)))).await; return; }
             };
             let name = &target.name;
             let result = match &what {
@@ -699,7 +699,7 @@ impl Hangar {
     fn git_write(&mut self, target: Target, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {
         let name = target.name.clone();
         let Some(api) = self.machine_api(&target.server) else {
-            window.push_notification(git_note(&name, NotificationType::Error, tr("connection_failed")), cx);
+            window.push_notification(git_note(&name, NotificationType::Error, self.machine_error(&target.server)), cx);
             return;
         };
         let waiting = match &what {
@@ -786,7 +786,7 @@ impl Hangar {
         let text = chain.input.read(cx).value().trim().to_owned();
         if text.is_empty() || chain.status.borrow().sent.is_some() { return; }
         let Some(api) = self.machine_api(&chain.from.server) else {
-            *chain.status.borrow_mut() = Pending { sent: None, error: Some(tr("sidebar_chain_failed").replace("{n}", &tr("connection_failed"))) };
+            *chain.status.borrow_mut() = Pending { sent: None, error: Some(tr("sidebar_chain_failed").replace("{n}", &self.machine_error(&chain.from.server))) };
             cx.notify();
             return;
         };
@@ -813,7 +813,7 @@ impl Hangar {
             move |window, cx| { let _ = this.update(cx, |this, cx| {
                     // A linha some na hora e volta se o servidor recusar; sem conexão nada sai, ela não some e o motivo aparece.
                     if this.machine_api(&target.server).is_none() {
-                        window.push_notification(Notification::error(tr("sidebar_close_failed").replace("{n}", &tr("connection_failed"))), cx);
+                        window.push_notification(Notification::error(tr("sidebar_close_failed").replace("{n}", &this.machine_error(&target.server))), cx);
                         return;
                     }
                     this.sidebar.deleting.insert(target.clone());

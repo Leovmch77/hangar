@@ -880,7 +880,7 @@ impl Hangar {
         // A sessão aberta continua aberta, na máquina dela; a do servidor que acabou de conectar abre quando a lista chegar.
         match reopen {
             Some((session, key)) if Some(key.as_str()) == self.server.as_deref().map(servers::norm).as_deref() => self.pending_open = Some(session.name),
-            Some((session, key)) => self.select_on(&key, session, window, cx),
+            Some((session, key)) => { self.select_on(&key, session, window, cx); }
             None => {}
         }
         cx.notify();
@@ -961,12 +961,18 @@ impl Hangar {
         if let Some(session) = self.selected.clone() { self.open_session(self.open_api.clone(), session, window, cx); }
     }
 
-    /// Sessão de qualquer máquina da lista, sem trocar o servidor ativo.
-    pub(super) fn select_on(&mut self, key: &str, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
-        if self.server.as_deref().map(servers::norm).as_deref() == Some(key) { return self.select(session, window, cx); }
-        let Some(api) = self.server_entry(key).and_then(|entry| Api::new(&entry.address, &entry.token).ok()) else { return };
+    /// Sessão de qualquer máquina da lista, sem trocar o servidor ativo. Sem a conexão da máquina, avisa o motivo e devolve
+    /// `false`: quem chamou não segue como se tivesse aberto.
+    pub(super) fn select_on(&mut self, key: &str, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.is_active_key(key) { self.select(session, window, cx); return true; }
+        let Some(api) = self.machine_api(key) else {
+            let text = tr("remote_open_failed").replace("{name}", &session.name).replace("{erro}", &self.machine_error(key));
+            window.push_notification(Notification::warning(text), cx);
+            return false;
+        };
         self.pending_remote = None;
         self.open_session(Some(api), session, window, cx);
+        true
     }
 
     fn open_session(&mut self, open_api: Option<Api>, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
@@ -2385,8 +2391,10 @@ impl Hangar {
             if !full && index < items { return None; }
             let body = if id == PREVIEW { preview_source(&self.visible_preview) } else {
                 let Some(Item::Event(i)) = self.items.get(index) else { return None };
-                let message = old.remove(id).filter(|_| *i < stable).unwrap_or_else(|| prepare_message(&events[*i]));
-                let Prepared::Message { markdown, .. } = &message else { unreachable!() };
+                // Guardado de outro tipo sob o mesmo id é preparado de novo, em vez de derrubar o app.
+                let message = old.remove(id).filter(|m| *i < stable && matches!(m, Prepared::Message { .. }))
+                    .unwrap_or_else(|| prepare_message(&events[*i]));
+                let Prepared::Message { markdown, .. } = &message else { return None };
                 let body = markdown.clone();
                 prepared.insert(id.clone(), message);
                 body
