@@ -203,7 +203,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   nativo no mesmo trabalho, ou vira linha `pendente` com o motivo em
   `desktop-native/docs/chat-parity.md` (e vice-versa). O nativo é o padrão: o instalador o baixa
   da release `native-latest` no pacote da máquina (`scripts/install-native.sh`/`.ps1`) e o
-  Electron fica ao lado como "Hangar (Electron)", porque o navegador embutido mora nele.
+  Electron fica ao lado como "Hangar (Electron)", porque o navegador embutido com tela remota e
+  abas mora nele; no Windows o nativo já atende o `hangar-preview` (CDP dentro do processo, um
+  navegador por sessão, sem abas).
 - **Two views: mobile & desktop (820px).** `Sidebar` (desktop) e `SessionList` (mobile) são
   arquivos separados: template e CSS mudam nos DOIS e se verifica nos DOIS. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma

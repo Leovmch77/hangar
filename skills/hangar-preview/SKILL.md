@@ -19,7 +19,8 @@ allowed-tools: Bash(hangar-preview:*)
 
 # hangar-preview — dirigir o navegador embutido da sessão
 
-O navegador embutido é um Chromium de verdade (view nativo do Electron), um por sessão. O CLI
+O navegador embutido é um Chromium de verdade (view nativo do Electron; no Windows também o
+WebView2 do app nativo, dirigido por CDP dentro do processo), um por sessão. O CLI
 resolve sozinho QUAL é o da sua sessão: pela chave estável do sidecar no modo sem terminal e pelo
 nome do tmux no modo com terminal. Depois fala com o servidor local do shell — duas sessões com a
 mesma URL aberta não se confundem.
@@ -203,6 +204,9 @@ aba escondida custa 2-3 s a mais que o da visível.
 sabe onde se está sem pedir `tab list`. Com uma aba só a saída é a mesma de sempre.
 
 No `batch` cada linha pode levar o seu `--aba`, e linhas `tab ...` valem normalmente.
+
+**No app nativo (Windows) não há abas**: é um navegador por sessão, e `tab ...` e `--aba` respondem
+`erro: o app nativo ainda nao tem abas: e um navegador por sessao`. Use os comandos sem `--aba`.
 
 ## Se um comando falhar
 

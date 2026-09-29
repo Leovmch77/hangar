@@ -609,3 +609,26 @@ O plano original da troca, mantido como registro:
   nova.
 - Antes: fechar ou aceitar por escrito as linhas `pendente` de `chat-parity.md` e os módulos
   listados ali como fora do nativo (terminal, navegador, Git completo, voz, Board/Canvas).
+
+## Navegador do app nativo: CDP dentro do processo no Windows
+
+29/09/2026. No Windows o app nativo (`desktop-native/`) atende o `hangar-preview` e as tools MCP de
+navegador sem o Electron. Cada sessão tem o seu WebView2, e o app o dirige por CDP dentro do
+próprio processo, **sem porta de depuração**. O servidor local `/cmd` segue o mesmo contrato do
+shell Electron (`~/.hangar/nav/_srv.json`); o sidecar grava o `pid`, o `hangar-preview list`
+confere o navegador nativo por esse pid, e o `navshell._chave` do backend acha o sidecar sem
+`targetId` de CDP.
+
+- **Nativo e Electron abertos juntos disputam o `_srv.json`, e vale o último que subiu.**
+- **Sem abas**: `tab ...` e `--aba` respondem `erro: o app nativo ainda nao tem abas: e um
+  navegador por sessao`.
+- **`open` só é atendido com o servidor ativo do app nesta máquina por loopback**
+  (`127.0.0.1`/`localhost`). Com outra máquina ativa ele não faz nada, e a marca do pedido
+  pendente espera o prazo dela.
+- **`open` com a sessão na tela cria o navegador, mas não abre a aba Navegador sozinho** (o
+  Electron monta o painel). Linha `pendente` em `desktop-native/docs/chat-parity.md`.
+- **A tela remota do navegador no celular** (`backend/app/navsock.py`, porta 9223) continua só no
+  Electron.
+- **macOS e Linux não mudam**: um navegador por janela, sem controle pelo CLI.
+
+Medição: pendente — conferência no app com o usuário.
