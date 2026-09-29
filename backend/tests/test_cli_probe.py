@@ -171,3 +171,16 @@ def test_windows_path_com_drive_e_pathext(tmp_path, monkeypatch):
     # pi e kimi não existem → nao_encontrado
     assert res["pi"]["disponivel"] is False
     assert res["kimi"]["disponivel"] is False
+
+
+def test_windows_ignora_pathext_que_nao_e_cli(tmp_path, monkeypatch):
+    # PATHEXT traz .JS/.VBS/.WSF, mas um `claude.js` no PATH não é o agente instalado.
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os, "pathsep", ";")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF")
+    for nome in ("claude.JS", "codex.VBS", "pi.WSF"):
+        (tmp_path / nome).write_text("x")
+    monkeypatch.setattr(cli_probe, "_path_login", str(tmp_path))
+    res = cli_probe.sondar_providers()
+    for p in ("claude", "codex", "pi"):
+        assert res[p] == {"disponivel": False, "motivo": "nao_encontrado"}

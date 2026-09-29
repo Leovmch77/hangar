@@ -21,6 +21,7 @@ import time
 _log = logging.getLogger("hangar")
 
 _BIN = {"claude": "claude", "codex": "codex", "pi": "pi", "omp": "omp", "kimi": "kimi"}
+_EXT_RUNNABLE = {".exe", ".cmd", ".bat", ".com"}
 
 # Seam para testes — monkeypatch para forjar o PATH do login (mesma técnica de procinfo.py).
 # Quando não-None, _obter_path() devolve este valor (se for callable, chama).
@@ -112,10 +113,12 @@ def _sondar_sem_cache() -> dict[str, dict]:
         for d in dirs:
             if not d:
                 continue
-            # candidatos: no Windows tenta cada PATHEXT
+            # candidatos: no Windows tenta cada PATHEXT que o pane consegue rodar como CLI;
+            # .JS/.VBS/.WSF abririam no WSH, não são o agente.
             if os.name == "nt":
                 pathext = os.environ.get("PATHEXT", "")
-                exts = [e.strip() for e in pathext.split(";") if e.strip()] if pathext else []
+                exts = [e.strip() for e in pathext.split(";")
+                        if e.strip().lower() in _EXT_RUNNABLE] if pathext else []
                 candidatos = [os.path.join(d, bin_name + ext) for ext in exts]
                 candidatos.append(os.path.join(d, bin_name))
             else:

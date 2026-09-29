@@ -197,7 +197,7 @@ def _estado_login(bruto: dict | None) -> EstadoLogin:
     )
 
 
-_login_cache: dict[str, tuple[float, EstadoLogin]] = {}
+_login_cache: dict[str, tuple[float, EstadoLogin, tuple[int, int, int] | None]] = {}
 _login_lock = threading.Lock()
 
 
