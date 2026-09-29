@@ -298,3 +298,84 @@ def test_union_proof_refuses_a_changed_value_and_a_lost_line():
     assert m._prove_additive("m.json", b'{"a": "1"}', b'{"a": "2"}', b'{"a": "1", "a": "2"}')
     assert m._prove_additive("m.txt", b"x\ny\n", b"x\nz\n", b"x\ny\n")
     assert m._prove_additive("m.json", b'{"a": "1"}', b'{"b": "2"}', b'{"a": "1", "b": "2"}') is None
+
+
+def hook(g, r, name):
+    """A repo hook that refuses; the path is explicit so a global core.hooksPath cannot hide it."""
+    hooks = r / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / name).write_text("#!/bin/sh\nexit 1\n")
+    (hooks / name).chmod(0o755)
+    g("config", "core.hooksPath", str(hooks))
+
+
+def test_a_merge_refused_by_a_hook_is_aborted(tmp_path):
+    d, r, g, e, log = start(tmp_path, integ="`test -f b.txt`")
+    started(e)
+    close(d, 1, branch_commit(g, r, "main-t1", "b.txt", "b\n"))
+    before = g("rev-parse", "HEAD")
+    hook(g, r, "commit-msg")
+    assert run(e, "advance").stdout.startswith("failed integrate T1")
+    assert not (r / ".git" / "MERGE_HEAD").exists()
+    assert g("status", "--porcelain") == "" and g("rev-parse", "HEAD") == before
+
+
+def test_a_union_commit_refused_by_pre_commit_is_aborted(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    started(e)
+    h1 = branch_commit(g, r, "main-t1", "messages/pt.json", '{\n  "a": "A",\n  "b": "B",\n  "z": "Z"\n}\n')
+    h2 = branch_commit(g, r, "main-t2", "messages/pt.json", '{\n  "a": "A",\n  "c": "C",\n  "z": "Z"\n}\n')
+    close(d, 1, h1)
+    close(d, 2, h2)
+    hook(g, r, "pre-commit")   # git merge runs no pre-commit: only the union's commit meets it
+    out = run(e, "advance").stdout
+    assert "integrated T1" in out and "failed integrate T2" in out
+    assert not (r / ".git" / "MERGE_HEAD").exists()
+    assert g("status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_a_dirty_main_line_waits_without_event_or_wake(tmp_path, staged):
+    counter = tmp_path / "ran"
+    d, r, g, e, log = start(tmp_path, integ=f"`echo x >> {counter}`")
+    started(e)
+    close(d, 1, branch_commit(g, r, "main-t1", "b.txt", "b\n"))
+    before, n_events = g("rev-parse", "HEAD"), len(events(d))
+    (r / "messages" / "pt.json").write_text("{}\n")   # a file the Task never touched
+    if staged:
+        g("add", "messages/pt.json")
+    run(e, "advance")
+    run(e, "advance")
+    assert g("rev-parse", "HEAD") == before and not counter.exists()
+    assert len(events(d)) == n_events and sent(log) == []
+    waits = [x for x in timeline_lines(d) if x["kind"] == "notice"]
+    assert len(waits) == 1 and "árvore limpa" in waits[0]["text"]   # once per dirty episode
+    g("checkout", "HEAD", "--", "messages/pt.json")
+    assert "integrated T1" in run(e, "advance").stdout
+
+
+def test_a_modify_delete_conflict_in_an_additive_file_is_not_a_union(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    started(e)
+    h1 = branch_commit(g, r, "main-t1", "messages/pt.json", '{\n  "a": "A",\n  "b": "B",\n  "z": "Z"\n}\n')
+    g("checkout", "-q", "-b", "main-t2", "main")
+    g("rm", "-q", "messages/pt.json")
+    g("commit", "-qm", "t2")
+    h2 = g("rev-parse", "HEAD")
+    g("checkout", "-q", "main")
+    close(d, 1, h1)
+    close(d, 2, h2)
+    run(e, "advance")
+    assert [x["task"] for x in events(d) if x["tipo"] == "conflito"] == [2]
+    assert (r / "messages" / "pt.json").exists() and g("status", "--porcelain") == ""
+
+
+def test_a_conflict_whose_wake_fails_is_not_a_failed_step(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    started(e)
+    close(d, 1, branch_commit(g, r, "main-t1", "a.txt", "one\n2\n3\n"))
+    close(d, 2, branch_commit(g, r, "main-t2", "a.txt", "two\n2\n3\n"))
+    e = {**e, "FAKE_LOG": str(tmp_path / "missing" / "sent.log")}   # the fake send exits non-zero
+    run(e, "advance")
+    tipos = [x["tipo"] for x in events(d)]
+    assert "conflito" in tipos and "advance_falhou" not in tipos

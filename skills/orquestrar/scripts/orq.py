@@ -1445,7 +1445,7 @@ def _prove_additive(path: str, ours: bytes, theirs: bytes, merged: bytes) -> str
     value; any other file keeps every line of both sides and adds none."""
     if path.endswith(".json"):
         try:
-            o, t, m = (json.loads(x or b"{}") for x in (ours, theirs, merged))
+            o, t, m = (json.loads(x) for x in (ours, theirs, merged))
         except ValueError as e:
             return f"{path}: the union is not valid JSON ({e})"
         if not all(isinstance(x, dict) for x in (o, t, m)):
@@ -1466,12 +1466,14 @@ def _union_resolve(repo: str, path: str) -> str | None:
     sides = {}
     for stage in (1, 2, 3):
         r = subprocess.run(["git", "-C", repo, "show", f":{stage}:{path}"], capture_output=True)
-        sides[stage] = r.stdout if r.returncode == 0 else b""
+        sides[stage] = r.stdout if r.returncode == 0 else None
+    if sides[2] is None or sides[3] is None:
+        return f"{path}: deleted on one side, no union"
     with tempfile.TemporaryDirectory() as tmp:
         names = []
         for stage in (2, 1, 3):  # current, base, other
             p = Path(tmp) / str(stage)
-            p.write_bytes(sides[stage])
+            p.write_bytes(sides[stage] or b"")  # no base: both sides added the file
             names.append(str(p))
         r = subprocess.run(["git", "merge-file", "-p", "--union", *names], capture_output=True)
     if r.returncode != 0:
@@ -1484,6 +1486,17 @@ def _union_resolve(repo: str, path: str) -> str | None:
     return None
 
 
+def _abort_merge(repo: str) -> None:
+    """The user's checkout never stays half-merged; an abort that fails is raised, never hidden."""
+    if subprocess.run(["git", "-C", repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                      capture_output=True).returncode != 0:
+        return
+    r = subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OrqError(f"git merge --abort failed, the main line is mid-merge: "
+                       f"{(r.stderr or r.stdout).strip()[:200]}")
+
+
 def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
     """`git merge --no-ff` of the verified commit. None = merged (additive conflicts resolved);
     else the conflicting files and the reason, with the merge aborted."""
@@ -1491,24 +1504,31 @@ def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
                        capture_output=True, text=True)
     if r.returncode == 0:
         return None
-    files = git(repo, "diff", "--name-only", "--diff-filter=U").splitlines()
-    if not files:
-        raise OrqError(f"git merge {h[:12]}: {(r.stderr or r.stdout).strip()[:300]}")
-    pats = additive_files(plan_text(config(d)["plan"]))
-    others = [f for f in files if not any(fnmatch.fnmatch(f, p) for p in pats)]
-    whys = [] if others else [w for f in files if (w := _union_resolve(repo, f))]
-    if not others and not whys:
+    merged = False
+    try:
+        files = git(repo, "diff", "--name-only", "--diff-filter=U").splitlines()
+        if not files:  # not a conflict: a bad hash, or a hook that refused the merge commit
+            raise OrqError(f"git merge {h[:12]}: {(r.stderr or r.stdout).strip()[:300]}")
+        plan = config(d).get("plan")
+        pats = additive_files(plan_text(plan)) if plan else []
+        others = [f for f in files if not any(fnmatch.fnmatch(f, p) for p in pats)]
+        whys = [] if others else [w for f in files if (w := _union_resolve(repo, f))]
+        if others or whys:
+            return others or files, "; ".join(whys)
         git(repo, "commit", "--no-edit")
-        journal_append(d, f"T{n}: additive conflict in {', '.join(files)} resolved by union, "
-                          "proven by content")
-        return None
-    subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True)
-    return others or files, "; ".join(whys)
+        merged = True
+    finally:
+        if not merged:
+            _abort_merge(repo)
+    journal_append(d, f"T{n}: additive conflict in {', '.join(files)} resolved by union, "
+                      "proven by content")
+    return None
 
 
 def _collided_with(d: Path, files: list[str], n: int) -> int | None:
     """The latest integrated Task whose plan Files cover a conflicting file."""
-    owned = {t["n"]: t["files"] for t in plan_tasks(plan_text(config(d)["plan"]))}
+    plan = config(d).get("plan")
+    owned = {t["n"]: t["files"] for t in plan_tasks(plan_text(plan))} if plan else {}
     for ev in reversed(events(d)):
         t = ev.get("task")
         if ev.get("tipo") != "integrada" or t == n:
@@ -1546,9 +1566,16 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
     `Integração:`. True = green, or a conflict that left the main line untouched; False = the main
     line waits for someone."""
     repo = cfg["repo"]
-    merged = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
-                            capture_output=True).returncode != 0
-    if merged:
+    # Git merges over uncommitted changes it does not touch, and Integração: would test them too.
+    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+        text = f"T{n}: a linha principal tem mudanças não commitadas; a integração espera a árvore limpa"
+        last = (_jsonl(d / f"timeline-{d.resolve().name}.jsonl") or [{}])[-1]
+        if last.get("text") != text:  # once per dirty episode, not every pass
+            timeline(d, "notice", text, n)
+        return False
+    needs_merge = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
+                                 capture_output=True).returncode != 0
+    if needs_merge:
         conflict = _merge(d, repo, n, h)
         if conflict:
             files, why = conflict
@@ -1557,10 +1584,13 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
                              f"T{other}" if other else "a linha principal", ", ".join(files))
             event_append(d, {"tipo": "conflito", "task": n,
                              "motivo": f"{names} with {en}" + (f" ({why})" if why else "")})
-            _wake(d, f"[decisao] T{n} conflicted with {en} in {names}" + (f" ({why})" if why else "")
-                     + ". Merge aborted: the main line is as before.",
-                  f"acordou o árbitro: T{n} conflitou com {pt} em {names}", n)
             acts.append(f"conflict T{n}: {names}")
+            try:
+                _wake(d, f"[decisao] T{n} conflicted with {en} in {names}" + (f" ({why})" if why else "")
+                         + ". Merge aborted: the main line is as before.",
+                      f"acordou o árbitro: T{n} conflitou com {pt} em {names}", n)
+            except OrqError as e:
+                journal_append(d, f"advance: arbiter not woken about the T{n} conflict: {e}")
             return True
     head = git(repo, "rev-parse", "HEAD").strip()
     cmds = plan_of(d).get("integracao") or []
@@ -1576,8 +1606,8 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
             choice = "back"  # a second red never runs again
     if ok:
         event_append(d, {"tipo": "integrada", "task": n, "commit": head})
-        journal_append(d, f"integrated T{n} at {head[:12]}" + (" (merge)" if merged else ""))
-        timeline(d, "advance", f"T{n} fechada → " + ("merge → " if merged else "") + "integração verde", n)
+        journal_append(d, f"integrated T{n} at {head[:12]}" + (" (merge)" if needs_merge else ""))
+        timeline(d, "advance", f"T{n} fechada → " + ("merge → " if needs_merge else "") + "integração verde", n)
         acts.append(f"integrated T{n} {head[:12]}")
         return True
     event_append(d, {"tipo": "integracao_vermelha", "task": n, "motivo": str(log)})
