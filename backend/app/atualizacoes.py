@@ -98,12 +98,14 @@ def _passo(arquivo: Path) -> dict | None:
         # precisa de prova: não há efeito a verificar.
         _log.warning("passo %s ignorado: tem 'comando' mas nao tem 'prova'", arquivo.name)
         return None
+    comando = (campos.get("comando_windows" if _WINDOWS else "comando_posix")
+               or campos.get("comando", "")).strip()
     return {
         "id": ident,
         "titulo": campos["titulo"],
-        "comando": (campos.get("comando_windows" if _WINDOWS else "comando_posix")
-                    or campos.get("comando", "")).strip(),
-        "prova": campos.get("prova", "").split(),
+        "comando": comando,
+        # Sem comando neste sistema o passo é só texto: a prova é do efeito do outro sistema.
+        "prova": campos.get("prova", "").split() if comando else [],
         "destrutivo": campos.get("destrutivo", "").strip().lower() in ("true", "sim", "1"),
         "texto": corpo,
         "arquivo": arquivo.name,

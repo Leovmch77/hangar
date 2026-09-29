@@ -48,6 +48,16 @@ def test_comando_especifico_da_plataforma_vence_o_generico(passos, monkeypatch):
     assert atualizacoes.todos()[0]["comando"] == "echo windows"
 
 
+def test_passo_so_posix_no_windows_vira_texto_e_nao_cobra_prova(passos, monkeypatch):
+    """A prova é do efeito do comando posix; cobrá-la no Windows travava a atualização lá."""
+    _escreve(passos, "x", id="x", titulo="Só Linux", comando_posix="touch marca", prova="marca")
+    monkeypatch.setattr(atualizacoes, "_WINDOWS", True)
+    (p,) = atualizacoes.todos()
+    assert p["comando"] == "" and p["prova"] == []
+    atualizacoes.aplicar(p)
+    assert "x" in atualizacoes.aplicados()
+
+
 def test_sem_titulo_e_ignorado_sem_derrubar_o_resto(passos):
     """Arquivo malformado não pode travar a atualização de todo mundo."""
     _escreve(passos, "quebrado", id="quebrado", comando="echo oi", prova="docs")
