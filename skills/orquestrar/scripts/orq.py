@@ -21,9 +21,11 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -1287,6 +1289,368 @@ def cmd_log(a) -> int:
     return 0
 
 
+# ---- orq advance: the orchestrator of an `auto` run -------------------------------------------
+
+JEV_PICK_P = 0.85  # below it the rule decides; not calibrated yet, like the triage thresholds were
+JEV_RED = {"red": {"type": "choice", "instructions": (
+    "A software team merged a finished Task into its main line and ran the integration commands. "
+    "They failed; the failing command and the end of its output follow. What should happen?"),
+    "criteria": {
+        "back": "the failure comes from the merged change: the Task goes back to its executor to fix",
+        "retry": ("the failure is transient and unrelated to the change (network, timeout, a busy "
+                  "port or device): run the same commands once more"),
+        "wake": "it needs a person: the environment is broken, or it is unclear whose failure it is",
+        "none": "none of these",
+    }}}
+RED_PT = {"back": "devolver à Task", "retry": "rodar de novo", "wake": "acordar o árbitro"}
+PASSO_PT = {"integrate": "integrar", "open": "abrir", "batch": "anunciar o lote de prova",
+            "final": "pedir a revisão final"}
+
+
+def _at_or_after(ts, ref) -> bool:
+    """`ts` at or after `ref`; ts has second precision, so the same second counts. A ref missing
+    or that does not parse lets every event count."""
+    if ref is None:
+        return True
+    try:
+        return datetime.fromisoformat(ts) >= datetime.fromisoformat(ref)
+    except (TypeError, ValueError):
+        return True
+
+
+def _closes(d: Path) -> dict[int, dict]:
+    """Task → its latest closed.jsonl line, ordered by when it closed: the merge order."""
+    out: dict[int, dict] = {}
+    for c in _jsonl(d / "closed.jsonl"):
+        if isinstance(c.get("task"), int) and c.get("hash"):
+            out.pop(c["task"], None)
+            out[c["task"]] = c
+    return out
+
+
+def _outcome(evs: list[dict], n: int, close: dict) -> str | None:
+    """How integrating this close ended, None while not tried. A new close (the fix of a red
+    integration, or a correction after a conflict) starts over."""
+    out = None
+    for ev in evs:
+        if ev.get("task") != n or not _at_or_after(ev.get("ts"), close.get("ts")):
+            continue
+        t = ev.get("tipo")
+        if t in ("integrada", "conflito", "integracao_vermelha") or (
+                t == "advance_falhou" and ev.get("passo") == "integrate"):
+            out = t
+    return out
+
+
+def _integrated(d: Path, evs: list[dict]) -> set[int]:
+    return {n for n, c in _closes(d).items() if _outcome(evs, n, c) == "integrada"}
+
+
+def _failed_since(evs: list[dict], passo: str, task: int | None, since) -> bool:
+    return any(ev.get("tipo") == "advance_falhou" and ev.get("passo") == passo
+               and ev.get("task") == task and _at_or_after(ev.get("ts"), since) for ev in evs)
+
+
+def additive_files(text: str) -> list[str]:
+    """The optional `Aditivos:` line of `## Projeto`: globs of files where Tasks insert at declared
+    anchors, whose positional conflicts the orchestrator resolves by union."""
+    for line in _section(text, "Projeto"):
+        k, sep, v = line.partition(":")
+        if sep and k.strip().lower() == "aditivos":
+            return re.findall(r"`([^`]+)`", v)
+    return []
+
+
+def orchestrator_tag(d: Path) -> str:
+    """The panel's notice form: nobody answers it as if it were a session."""
+    gid = next((ev["gid"] for ev in reversed(events(d))
+                if ev.get("tipo") == "execucao_inicio" and ev.get("gid")), d.name)
+    return f"[painel: orquestrador {gid}] "
+
+
+def _say(d: Path, target: str, text: str) -> None:
+    send(target, orchestrator_tag(d) + text)
+
+
+def _wake(d: Path, text: str, line: str, task: int | None = None, kind: str = "woke") -> None:
+    """The arbiter, from the orchestrator. Journal and timeline first: a failed send still leaves
+    the trail."""
+    journal_append(d, f"orchestrator → arbiter: {text}")
+    timeline(d, kind, line, task)
+    _say(d, state(d)["arbiter"], text)
+
+
+def _fail(d: Path, passo: str, task: int | None, err: str) -> str:
+    """A step that broke: recorded and the arbiter woken, once. Callers skip a (step, Task) that
+    already failed, so it never repeats in a loop."""
+    ev = {"tipo": "advance_falhou", "passo": passo, "motivo": err[:500]}
+    if task is not None:
+        ev["task"] = task
+    event_append(d, ev)
+    where = passo + (f" T{task}" if task is not None else "")
+    try:
+        _wake(d, f"[decisao] orq advance failed at {where}: {err[:300]}. It will not retry this "
+                 "step: do it by hand or take it to the user.",
+              f"falhou ao {PASSO_PT[passo]}" + (f" a T{task}" if task is not None else "")
+              + f": {err[:200]}", task, kind="failed")
+    except OrqError as e:
+        journal_append(d, f"advance: arbiter not woken about {where}: {e}")
+    return f"failed {where}: {err}"
+
+
+def jev_pick(text: str, questions: dict) -> str | None:
+    """The winner of the one choice question in `questions`, when sure; None on doubt, `none`, no
+    key or any failure — the caller's rule decides then."""
+    jc = jev_config(auto=True)
+    if not jc.get("key"):
+        return None
+    (qname,) = questions
+    body = json.dumps({"model": jc.get("model"), "state": text[-20_000:],
+                       "questions": questions}).encode()
+    req = urllib.request.Request(jc.get("url") or JEV_URL, data=body,
+                                 headers={"authorization": f"Bearer {jc['key']}",
+                                          "content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
+            ans = json.load(r)["answers"][qname]
+        choice = ans.get("choice")
+        p = float((ans.get("probabilities") or {}).get(choice, 0.0))
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError,
+            TypeError, AttributeError):
+        return None
+    ok = choice in questions[qname]["criteria"] and choice != "none" and p >= JEV_PICK_P
+    return choice if ok else None
+
+
+def _red_choice(d: Path, cfg: dict, n: int, why: str, log: Path) -> str:
+    """The code builds the options and the Jev picks. No key, an error, doubt or shadow mode →
+    the rule: back to the Task, never run again."""
+    if not jev_config(auto=True).get("key"):
+        return "back"
+    try:
+        tail = log.read_text(encoding="utf-8", errors="replace")[-8000:]
+    except OSError:
+        tail = ""
+    pick = jev_pick(f"{why}\n\n{tail}", JEV_RED)
+    if cfg.get("jev") == "on":
+        return pick or "back"
+    if pick:
+        timeline(d, "notice", f"T{n}: o Jev escolheria \"{RED_PT[pick]}\"; só anotando, a regra "
+                              "devolve à Task", n)
+    return "back"
+
+
+def _prove_additive(path: str, ours: bytes, theirs: bytes, merged: bytes) -> str | None:
+    """A union is accepted only by content: a JSON object keeps every key of both sides with its
+    value; any other file keeps every line of both sides and adds none."""
+    if path.endswith(".json"):
+        try:
+            o, t, m = (json.loads(x or b"{}") for x in (ours, theirs, merged))
+        except ValueError as e:
+            return f"{path}: the union is not valid JSON ({e})"
+        if not all(isinstance(x, dict) for x in (o, t, m)):
+            return f"{path}: not a JSON object"
+        if set(m) != set(o) | set(t):
+            return f"{path}: {len(m)} keys after the union, {len(set(o) | set(t))} expected"
+        changed = sorted(k for k in m if (k in o and m[k] != o[k]) or (k in t and m[k] != t[k]))
+        return f"{path}: values changed for {changed}" if changed else None
+    o, t, m = (Counter(x.decode("utf-8", "replace").splitlines()) for x in (ours, theirs, merged))
+    lost = [k for k, c in (o | t).items() if m[k] < c]
+    added = [k for k in m if k not in o and k not in t]
+    return f"{path}: the union lost {len(lost)} line(s), added {len(added)}" if lost or added else None
+
+
+def _union_resolve(repo: str, path: str) -> str | None:
+    """A positional conflict in a declared additive file: both sides kept (`git merge-file
+    --union`), staged only when the content proves it. None = resolved; else why not."""
+    sides = {}
+    for stage in (1, 2, 3):
+        r = subprocess.run(["git", "-C", repo, "show", f":{stage}:{path}"], capture_output=True)
+        sides[stage] = r.stdout if r.returncode == 0 else b""
+    with tempfile.TemporaryDirectory() as tmp:
+        names = []
+        for stage in (2, 1, 3):  # current, base, other
+            p = Path(tmp) / str(stage)
+            p.write_bytes(sides[stage])
+            names.append(str(p))
+        r = subprocess.run(["git", "merge-file", "-p", "--union", *names], capture_output=True)
+    if r.returncode != 0:
+        return f"{path}: git merge-file failed ({r.stderr.decode(errors='replace').strip()[:120]})"
+    why = _prove_additive(path, sides[2], sides[3], r.stdout)
+    if why:
+        return why
+    (Path(repo) / path).write_bytes(r.stdout)
+    git(repo, "add", "--", path)
+    return None
+
+
+def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
+    """`git merge --no-ff` of the verified commit. None = merged (additive conflicts resolved);
+    else the conflicting files and the reason, with the merge aborted."""
+    r = subprocess.run(["git", "-C", repo, "merge", "--no-ff", "-m", f"Merge Task {n} ({h[:12]})", h],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return None
+    files = git(repo, "diff", "--name-only", "--diff-filter=U").splitlines()
+    if not files:
+        raise OrqError(f"git merge {h[:12]}: {(r.stderr or r.stdout).strip()[:300]}")
+    pats = additive_files(plan_text(config(d)["plan"]))
+    others = [f for f in files if not any(fnmatch.fnmatch(f, p) for p in pats)]
+    whys = [] if others else [w for f in files if (w := _union_resolve(repo, f))]
+    if not others and not whys:
+        git(repo, "commit", "--no-edit")
+        journal_append(d, f"T{n}: additive conflict in {', '.join(files)} resolved by union, "
+                          "proven by content")
+        return None
+    subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True)
+    return others or files, "; ".join(whys)
+
+
+def _collided_with(d: Path, files: list[str], n: int) -> int | None:
+    """The latest integrated Task whose plan Files cover a conflicting file."""
+    owned = {t["n"]: t["files"] for t in plan_tasks(plan_text(config(d)["plan"]))}
+    for ev in reversed(events(d)):
+        t = ev.get("task")
+        if ev.get("tipo") != "integrada" or t == n:
+            continue
+        if any(f == p or f.startswith(p.rstrip("/") + "/") for f in files for p in owned.get(t, [])):
+            return t
+    return None
+
+
+def _back_to_executor(d: Path, repo: str, n: int, why: str, log: Path) -> None:
+    """The page's rule for a red integration: the Task goes back to its executor, who fixes it on
+    the main line; the reviewer judges before the new commit."""
+    ini = next((ev for ev in reversed(events(d))
+                if ev.get("tipo") == "task_inicio" and ev.get("task") == n), None)
+    roles = state(d)["roles"].get(n, {})  # after swaps
+    if not ini or not roles.get("executor"):
+        raise OrqError(f"Task {n} has no task_inicio: executor unknown")
+    close_ts = _closes(d)[n].get("ts")
+    # A task_inicio in the close's own second would not reopen the Task (second precision).
+    deadline = time.time() + 1.5
+    while close_ts and now() <= close_ts and time.time() < deadline:
+        time.sleep(0.2)
+    ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": ini.get("titulo") or f"Task {n}",
+                          "executor": roles["executor"], "par": roles.get("par")})
+    journal_append(d, _event_line(ev))
+    _say(d, roles["executor"], f"[decisao] Integration red after Task {n} was merged: {why} (log "
+                               f"{log}). Fix it on the main line, {repo}, not in a worktree: freeze "
+                               "the round and deliver it to your reviewer as usual; the commit closes "
+                               f"with `orq commit --task {n} --hash <hash>`, without --repo.")
+    timeline(d, "advance", f"T{n}: integração vermelha → devolvida ao executor {roles['executor']}", n)
+
+
+def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
+    """Merge when the commit is not on the main line yet (a worktree Task), then the plan's
+    `Integração:`. True = green, or a conflict that left the main line untouched; False = the main
+    line waits for someone."""
+    repo = cfg["repo"]
+    merged = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
+                            capture_output=True).returncode != 0
+    if merged:
+        conflict = _merge(d, repo, n, h)
+        if conflict:
+            files, why = conflict
+            other = _collided_with(d, files, n)
+            en, pt, names = (f"T{other}" if other else "the main line",
+                             f"T{other}" if other else "a linha principal", ", ".join(files))
+            event_append(d, {"tipo": "conflito", "task": n,
+                             "motivo": f"{names} with {en}" + (f" ({why})" if why else "")})
+            _wake(d, f"[decisao] T{n} conflicted with {en} in {names}" + (f" ({why})" if why else "")
+                     + ". Merge aborted: the main line is as before.",
+                  f"acordou o árbitro: T{n} conflitou com {pt} em {names}", n)
+            acts.append(f"conflict T{n}: {names}")
+            return True
+    head = git(repo, "rev-parse", "HEAD").strip()
+    cmds = plan_of(d).get("integracao") or []
+    log = d / "checks" / f"integration-t{n}-{head[:12]}.log"
+    ok, why = run_checks(repo, cmds, log)
+    choice = "back"
+    if not ok:
+        choice = _red_choice(d, cfg, n, why, log)
+        if choice == "retry":
+            timeline(d, "advance", f"T{n}: integração vermelha, rodando de novo uma vez", n)
+            log = log.with_name(log.stem + "-retry.log")
+            ok, why = run_checks(repo, cmds, log)
+            choice = "back"  # a second red never runs again
+    if ok:
+        event_append(d, {"tipo": "integrada", "task": n, "commit": head})
+        journal_append(d, f"integrated T{n} at {head[:12]}" + (" (merge)" if merged else ""))
+        timeline(d, "advance", f"T{n} fechada → " + ("merge → " if merged else "") + "integração verde", n)
+        acts.append(f"integrated T{n} {head[:12]}")
+        return True
+    event_append(d, {"tipo": "integracao_vermelha", "task": n, "motivo": str(log)})
+    journal_append(d, f"integration red after T{n}: {why}")
+    if choice == "wake":
+        _wake(d, f"[decisao] Integration red after T{n}: {why}. The main line keeps the merge; "
+                 "decide: back to its executor, run again, or something else.",
+              f"acordou o árbitro: integração vermelha depois da T{n} (o Jev pediu)", n)
+        acts.append(f"red T{n}: arbiter woken")
+        return False
+    _back_to_executor(d, repo, n, why, log)
+    acts.append(f"red T{n}: back to its executor")
+    return False
+
+
+def _integrate_all(d: Path, cfg: dict, acts: list[str]) -> bool:
+    """Every closed Task not integrated yet, in closing order. False = the main line waits (red, or
+    a failed step) and nothing else moves."""
+    evs = events(d)
+    for n, close in _closes(d).items():
+        out = _outcome(evs, n, close)
+        if out in ("integrada", "conflito"):
+            continue
+        if out is not None:
+            return False
+        try:
+            if not _integrate(d, cfg, n, close["hash"], acts):
+                return False
+        except (OrqError, OSError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, "integrate", n, str(e)))
+            return False
+    return True
+
+
+def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
+    _integrate_all(d, cfg, acts)
+
+
+def advance(d: Path) -> list[str]:
+    """The orchestrator's pass: every step the rule knows, each one an event, a journal line and a
+    timeline line. Single by a file lock; a caller that finds it held leaves a mark, and the holder
+    runs one more pass for it."""
+    import fcntl  # POSIX only: the other commands keep working without it
+    cfg = config(d)
+    if not cfg.get("auto"):
+        return []
+    again = d / "advance.again"
+    again.touch()
+    acts: list[str] = []
+    # "a", not "w": a caller that finds it held must not wipe the holder's pid.
+    with (d / "advance.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return []
+        # The pid shows who holds it; the lock's mtime is what Hangar reads as "working".
+        lock.truncate(0)
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
+        # ponytail: a mark left between the holder's last check and its unlock waits for the next
+        # trigger (the watchdog's cycle at worst).
+        while again.exists() and not state(d)["ended"]:
+            again.unlink()
+            _pass(d, cfg, acts)
+    return acts
+
+
+def cmd_advance(a) -> int:
+    for line in advance(base_dir(a.dir)):
+        print(line)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="orq", description=__doc__.splitlines()[0])
     p.add_argument("--dir")
@@ -1353,13 +1717,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("log", help="a decision entry in the journal")
     s.add_argument("--task", type=int)
     s.add_argument("text")
+    sub.add_parser("advance", help="the orchestrator's pass: integrate, open, announce (auto runs only)")
     return p
 
 
 CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
-        "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package}
+        "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package,
+        "advance": cmd_advance}
 
 
 def main(argv: list[str] | None = None) -> int:

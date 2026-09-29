@@ -4,8 +4,8 @@
 Uso: python3 ${CLAUDE_SKILL_DIR}/scripts/orq-valida-eventos.py <arquivo> [...]
 Sai 0 se todos válidos; imprime linha e defeito de cada inválida.
 
-Os seis tipos e seus campos obrigatórios estão em TIPOS abaixo. Regras que o código cobra ou que
-completam o contrato:
+Os tipos e seus campos obrigatórios estão em TIPOS abaixo: os seis da orquestração e os que só o
+`orq advance` escreve (execução `auto`). Regras que o código cobra ou que completam o contrato:
   - `ts` sempre presente, ISO-8601 com offset (saída de `date -Iseconds`).
   - `task` e `rodada` são números; `rodada` começa em 1 — rodada desconhecida é OMITIDA, nunca 0.
   - `veredito.resultado` ∈ aprova|reprova|devolvido|corrige (o MESMO vocabulário do parecer); leva
@@ -14,7 +14,7 @@ completam o contrato:
     o executor o aplica com `orq apply-patch`). `entrega` leva o hash da rodada (stash) no campo `commit`.
   - `fase` (opcional, em `entrega` e `veredito`) ∈ codigo|prova: rodada em duas fases de Task com
     prova de tela. Sem `fase`, a rodada é única.
-  - Campo extra pode; tipo novo NÃO — o app agrega por esses seis.
+  - Campo extra pode; tipo novo só entra aqui. O app agrega pelos seis primeiros e ignora o resto.
 
 Exemplo, no fecho de uma rodada:
   {"ts": "2026-08-25T14:02:11-03:00", "tipo": "veredito", "task": 7, "rodada": 3,
@@ -30,6 +30,11 @@ TIPOS = {
     "veredito": {"task", "rodada", "resultado", "sessao"},
     "sessao_trocada": {"de", "para"},
     "execucao_fim": {"resultado"},
+    # Só o `orq advance` escreve estes.
+    "integrada": {"task", "commit"},
+    "integracao_vermelha": {"task", "motivo"},
+    "conflito": {"task", "motivo"},
+    "advance_falhou": {"passo", "motivo"},
 }
 RESULTADOS = {"aprova", "reprova", "devolvido", "corrige"}
 FASES = {"codigo", "prova"}

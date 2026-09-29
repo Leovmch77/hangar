@@ -79,7 +79,7 @@ git merge --no-ff <work>-t2
 - Merge conflict → the regions overlapped. Don't resolve it yourself: the losing Task gets a
   correction round on the merged base, same executor — a new worktree from the merged tip, its
   approved diff as reference, only its own region redone. Exception: a positional conflict in a
-  file the plan declared additive — resolve it at the merge by merge strategy and prove it by
+  file the plan's `Aditivos:` line declares — resolve it at the merge by merge strategy and prove it by
   content (key counts on each side before and after, zero values changed).
 - The plan's `Integração:` after each merge. Red → back to that Task's executor even
   with its isolated `APROVA`: fix on the main line, reviewer judges before the commit — dirty
