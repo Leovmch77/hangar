@@ -453,6 +453,54 @@ def plan_sha(text: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
+TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
+FENCE = re.compile(r"^(```|~~~).*?^\1", re.MULTILINE | re.DOTALL)
+OPEN_STEP = re.compile(r"^\s*- \[ \] \*\*Step", re.MULTILINE)
+DONE_STEP = re.compile(r"^\s*- \[[xX]\] \*\*Step", re.MULTILINE)
+
+
+def _repo_files(repo: Path, *args: str) -> list[str]:
+    # `git grep` exits 1 on no match; a folder outside git has no plan to find.
+    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
+                       capture_output=True, text=True)
+    return [line for line in r.stdout.splitlines() if line] if r.returncode == 0 else []
+
+
+def find_plan(repo: Path) -> dict:
+    """The plan a run would start from, best first: stamped, stamped then edited, an unstamped
+    `.orq.md`, then any plan in the Task/Step format, newest first. `{}` = no plan."""
+    orq = _repo_files(repo, "ls-files", "-co", "--exclude-standard", "*.orq.md")
+    tasks = _repo_files(repo, "grep", "-l", "--untracked", "-E", r"^### Task [0-9]+:", "--", "*.md")
+    # The superpowers plans folder is usually gitignored, so git sees none of it.
+    kept = sorted(str(p.relative_to(repo)) for p in (repo / "docs/superpowers/plans").glob("*.md"))
+    rank = {"stamped": 0, "changed": 1, "unstamped": 2, "tasks": 3}
+    found = []
+    for rel in dict.fromkeys(orq + tasks + kept):
+        path = repo / rel
+        try:
+            text, mtime = path.read_text(encoding="utf-8"), path.stat().st_mtime
+        except (OSError, UnicodeDecodeError):
+            continue
+        m = PREPARADO.search(text)
+        # A fenced `### Task` is a doc showing the format, not a plan; every step ticked is work done.
+        body = FENCE.sub("", text)
+        if not m and not rel.endswith(".orq.md") and (not TASK_HEAD.search(body) or
+                                                      (DONE_STEP.search(body) and not OPEN_STEP.search(body))):
+            continue
+        state = ("stamped" if m.group(1) == plan_sha(text) else "changed") if m else \
+            "unstamped" if rel.endswith(".orq.md") else "tasks"
+        found.append((rank[state], -mtime, str(path), state))
+    if not found:
+        return {}
+    _, _, path, state = min(found)
+    return {"path": path, "state": state}
+
+
+def cmd_readiness(a) -> int:
+    print(json.dumps(find_plan(Path(a.repo).expanduser().resolve()), ensure_ascii=False))
+    return 0
+
+
 def plan_of(d: Path) -> dict:
     """`{}` for a run started before plans were stamped: every plan-driven gate stays off."""
     p = config(d).get("plan")
@@ -1204,6 +1252,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--contract", required=True)
     s.add_argument("--untouchable", action="append", default=[])
     s.add_argument("--plan", help="required, except to re-init a run started without a plan")
+    s = sub.add_parser("readiness", help="which plan a run starts from, and whether it is stamped (JSON)")
+    s.add_argument("--repo", required=True)
     s = sub.add_parser("plan-check", help="check the orchestration plan's structure; --stamp marks it prepared")
     s.add_argument("plan")
     s.add_argument("--repo", required=True)
@@ -1260,7 +1310,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-CMDS = {"init": cmd_init, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
+CMDS = {"init": cmd_init, "readiness": cmd_readiness, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
         "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package}
