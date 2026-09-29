@@ -61,7 +61,7 @@ const TUNES: [Tune; 4] = [
 struct Field { key: &'static str, label: &'static str, help: &'static str, icon: IconName, kind: Kind, page: Page }
 
 /// Na ordem do `CAMPOS` do web, filtrada por página.
-const FIELDS: [Field; 30] = [
+const FIELDS: [Field; 32] = [
     Field { key: "upload_retention_days", label: "server_keep_attachments", help: "server_keep_attachments_help", icon: IconName::Paperclip,
         kind: Kind::Number("server_days"), page: Page::Attachments },
     Field { key: "notify_finished", label: "server_notify_finished", help: "server_notify_finished_help", icon: IconName::CircleCheck,
@@ -80,11 +80,15 @@ const FIELDS: [Field; 30] = [
     Field { key: "jev_api_key", label: "server_jev_key", help: "server_jev_key_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Advanced },
     // Logo abaixo da chave, como no web: é o único campo cujo efeito depende dela.
     Field { key: "jev_padrao", label: "server_jev_default", help: "server_jev_default_help", icon: IconName::Rocket, kind: Kind::Toggle, page: Page::Advanced },
-    Field { key: "jev_texto_base_url", label: "server_jev_endpoint", help: "server_jev_endpoint_help", icon: IconName::Globe, kind: Kind::Text,
+    Field { key: "jev_endpoint", label: "server_jev_endpoint", help: "server_jev_endpoint_help", icon: IconName::Globe, kind: Kind::Text,
         page: Page::Advanced },
+    Field { key: "jev_model", label: "server_jev_model", help: "server_jev_model_help", icon: IconName::Bot, kind: Kind::Text, page: Page::Advanced },
+    Field { key: "jev_texto_base_url", label: "server_jev_text_endpoint", help: "server_jev_text_endpoint_help", icon: IconName::Globe,
+        kind: Kind::Text, page: Page::Advanced },
     Field { key: "jev_texto_api_key", label: "server_jev_text_key", help: "server_jev_text_key_help", icon: IconName::Key, kind: Kind::Secret,
         page: Page::Advanced },
-    Field { key: "jev_texto_modelo", label: "server_jev_model", help: "server_jev_model_help", icon: IconName::Bot, kind: Kind::Text, page: Page::Advanced },
+    Field { key: "jev_texto_modelo", label: "server_jev_text_model", help: "server_jev_text_model_help", icon: IconName::Bot, kind: Kind::Text,
+        page: Page::Advanced },
     Field { key: "jev_texto_cmd", label: "server_jev_cmd", help: "server_jev_cmd_help", icon: IconName::SquareTerminal, kind: Kind::Text,
         page: Page::Advanced },
     // Voz, na ordem do `VozSettings.svelte`; a página as distribui pelas seções dela.
@@ -1305,6 +1309,22 @@ mod tests {
         assert_eq!(s.input_text("jev_api_key", Kind::Secret), "digitada");
         s.fields.insert("jev_texto_api_key".into(), json!({"valor": "", "definido": false, "origem": "env"}));
         assert_eq!(s.secret_mask("jev_texto_api_key"), None);
+    }
+
+    #[test]
+    fn jev_fields_follow_the_web_order_and_labels() {
+        let jev: Vec<(&str, &str)> = super::FIELDS.iter().filter(|f| f.key.starts_with("jev_")).map(|f| (f.key, f.label)).collect();
+        assert_eq!(jev, [("jev_api_key", "server_jev_key"), ("jev_padrao", "server_jev_default"), ("jev_endpoint", "server_jev_endpoint"),
+            ("jev_model", "server_jev_model"), ("jev_texto_base_url", "server_jev_text_endpoint"), ("jev_texto_api_key", "server_jev_text_key"),
+            ("jev_texto_modelo", "server_jev_text_model"), ("jev_texto_cmd", "server_jev_cmd")]);
+        // `reveal` acha o campo pelo rótulo: rótulo repetido abriria a seção errada.
+        let labels: std::collections::HashSet<&str> = super::FIELDS.iter().map(|f| f.label).collect();
+        assert_eq!(labels.len(), super::FIELDS.len());
+        use crate::i18n::{tr, tr_shared};
+        assert_eq!(tr("server_jev_endpoint"), tr_shared("config_server_jev_endpoint", &[]));
+        assert_eq!(tr("server_jev_model"), tr_shared("config_server_jev_modelo", &[]));
+        assert_eq!(tr("server_jev_text_endpoint"), tr_shared("config_server_jev_texto_endpoint", &[]));
+        assert_eq!(tr("server_jev_text_model"), tr_shared("config_server_jev_texto_modelo", &[]));
     }
 
     #[test]

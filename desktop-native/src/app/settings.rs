@@ -102,8 +102,9 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Advanced, &[("server_automations", Some("server_automations_help")), ("server_thinking", Some("server_thinking_help")),
         ("server_translate_thinking", Some("server_translate_thinking_help")), ("server_editor", Some("server_editor_help")),
         ("server_jev_key", Some("server_jev_key_help")), ("server_jev_default", Some("server_jev_default_help")),
-        ("server_jev_endpoint", Some("server_jev_endpoint_help")), ("server_jev_text_key", Some("server_jev_text_key_help")),
-        ("server_jev_model", Some("server_jev_model_help")), ("server_jev_cmd", Some("server_jev_cmd_help")),
+        ("server_jev_endpoint", Some("server_jev_endpoint_help")), ("server_jev_model", Some("server_jev_model_help")),
+        ("server_jev_text_endpoint", Some("server_jev_text_endpoint_help")), ("server_jev_text_key", Some("server_jev_text_key_help")),
+        ("server_jev_text_model", Some("server_jev_text_model_help")), ("server_jev_cmd", Some("server_jev_cmd_help")),
         ("server_roots", Some("server_roots_help")), ("server_machine_only", Some("server_machine_only_help")), ("server_env", Some("server_env_help"))]),
 ];
 
@@ -924,5 +925,13 @@ mod tests {
         assert_eq!(matching("hyprland", &texts), vec![1]);
         assert!(matching("  ", &texts).is_empty());
         assert!(matching("nada disso", &texts).is_empty());
+    }
+
+    #[test]
+    fn advanced_search_finds_every_jev_field() {
+        let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::Advanced).expect("Avançado na busca");
+        for label in ["server_jev_endpoint", "server_jev_model", "server_jev_text_endpoint", "server_jev_text_model"] {
+            assert!(rows.iter().any(|(row, _)| *row == label), "{label} fora da busca");
+        }
     }
 }
