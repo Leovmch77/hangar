@@ -385,6 +385,11 @@ def _list_sig(infos) -> str:
     )
 
 
+def _shortcuts_snapshot() -> str | None:
+    from app import shortcut_terminals
+    return json.dumps(shortcut_terminals.list_all(), ensure_ascii=False)
+
+
 class _ListRefresher:
     """UM refresher em background (single-flight, compartilhado por TODAS as conexoes da lista) que
     produz o snapshot de list_with_state no ritmo dele. Desenho (decisao do jefferson): a conexao SSE
@@ -397,6 +402,7 @@ class _ListRefresher:
     def __init__(self, poll: float = 1.5):
         self.poll = poll
         self.data: str | None = None
+        self.shortcuts_data: str | None = None
         self.sig: str | None = None
         self.version = 0
         self.errored = False
@@ -414,6 +420,7 @@ class _ListRefresher:
             self._loop = loop
             self._cond = asyncio.Condition()
             self.data = None
+            self.shortcuts_data = None
             self.sig = None
             self.version = 0
             self.errored = False
@@ -424,8 +431,16 @@ class _ListRefresher:
             context.run(diag.req_atual.set, "")
             self._task = asyncio.create_task(self._run(), context=context)
 
+    async def _read_shortcuts(self) -> str | None:
+        try:
+            return await asyncio.to_thread(_shortcuts_snapshot)
+        except Exception:
+            _log.warning("terminais de atalho: leitura falhou; mantem a anterior", exc_info=True)
+            return self.shortcuts_data
+
     async def _run(self):
         while True:
+            shortcuts = await self._read_shortcuts()
             try:
                 started = time.monotonic()
                 snap = [i.model_copy() for i in await _cached_list()]
@@ -466,13 +481,17 @@ class _ListRefresher:
             # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
             self.latest = (started, infos)
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
-            if data is not None:
+            # `data`/`sig` só andam quando a assinatura da lista muda: gravar `data` numa mudança que
+            # é só dos terminais reemitiria `sessions` por um `last_activity` que a assinatura ignora.
+            if data is not None or shortcuts != self.shortcuts_data:
                 if self.errored:
                     diag.registrar("lista.recuperada", quantidade=len(infos))
                 async with self._cond:
-                    self.errored = False
-                    self.sig = sig
-                    self.data = data
+                    if data is not None:
+                        self.errored = False
+                        self.sig = sig
+                        self.data = data
+                    self.shortcuts_data = shortcuts
                     self.version += 1
                     self._cond.notify_all()
             await asyncio.sleep(self.poll)
@@ -527,21 +546,32 @@ async def list_events(ping_secs: float = 8.0, only=None):
         plugin_bridge.app_entrou()
 
     async def reader():
-        last_version = -1
+        last_version, last_data, last_shortcuts, was_error = -1, None, None, False
         while True:
             async with cond:
                 await cond.wait_for(lambda: _list_refresher.version != last_version)
                 last_version = _list_refresher.version
                 errored = _list_refresher.errored
                 data = _list_refresher.data
+                shortcuts = _list_refresher.shortcuts_data
             if errored:
                 await queue.put(("list_error", "{}"))   # falha do refresher — front distingue de offline
-            elif data is not None:
+                was_error = True
+                continue
+            if data is not None:
                 if only is not None:
                     data = json.dumps([guest_safe(x) for x in json.loads(data)
                                        if x.get("name") == (only if isinstance(only, str)
                                                             else only.session)], ensure_ascii=False)
-                await queue.put(("sessions", data))
+                # Compara o que sairia: versão só dos terminais de atalho não reenvia `sessions`,
+                # mas renomear a sessão do convidado muda o recorte sem mudar o dado da lista.
+                if data != last_data or was_error:
+                    last_data, was_error = data, False
+                    await queue.put(("sessions", data))
+            # Terminal de atalho não entra no stream do convidado.
+            if only is None and shortcuts is not None and shortcuts != last_shortcuts:
+                last_shortcuts = shortcuts
+                await queue.put(("shortcut_terminals", shortcuts))
 
     async def ping_loop():
         while True:

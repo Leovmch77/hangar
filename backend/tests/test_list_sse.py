@@ -12,6 +12,8 @@ def _stub_cached_list(monkeypatch):
     monkeypatch.setattr(sse, "_cached_list", _fc)
     # Refresher unico (singleton): poll rapido pros testes; re-bind por event loop cuida do reset.
     monkeypatch.setattr(sse._list_refresher, "poll", 0.001)
+    # None = nada a mandar de terminais de atalho: os testes de `sessions` nao contam esse evento.
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: None)
 
 
 class _Info:
@@ -248,3 +250,28 @@ def test_status_sig_reduz_sem_relogio_e_custo():
     assert sse._status_sig(a) != sse._status_sig(c)          # % mudou -> sig muda
     assert sse._status_sig(None) is None
     assert sse._status_sig("sem emojis") == (None, None, None, None, None)
+
+
+def test_shortcut_terminals_go_out_as_own_event_without_resending_sessions(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    frames = iter(["[]", '[{"id": "abc123"}]'])
+    last = {"v": "[]"}
+
+    def snap():
+        last["v"] = next(frames, last["v"])
+        return last["v"]
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", snap)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=9999), 3))
+    assert [e["event"] for e in evs] == ["sessions", "shortcut_terminals", "shortcut_terminals"]
+    assert json.loads(evs[2]["data"]) == [{"id": "abc123"}]
+
+
+def test_guest_never_gets_shortcut_terminals(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: '[{"id": "abc123"}]')
+    evs = asyncio.run(_take(sse.list_events(ping_secs=0.05, only="cc"), 3))
+    assert "shortcut_terminals" not in [e["event"] for e in evs]

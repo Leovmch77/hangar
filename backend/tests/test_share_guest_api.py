@@ -179,7 +179,7 @@ def test_guest_does_not_reach_the_hangar_terminal_routes(guest_client, monkeypat
 
 class _FakeRefresher:
     def __init__(self, data):
-        self.version, self.errored, self.data = 1, False, data
+        self.version, self.errored, self.data, self.shortcuts_data = 1, False, data, None
         self._cond = asyncio.Condition()
 
     def acquire(self):
