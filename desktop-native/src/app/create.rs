@@ -774,7 +774,8 @@ impl NewSession {
                     for (file, bytes, image) in files {
                         match api.upload(&opened.session.name, &file, composer::mime_for(&file), bytes.to_vec()).await {
                             Ok(up) => uploads.push((image, up)),
-                            Err(error) => { failed = Some(error); break; }
+                            // O aviso diz qual arquivo segurou a mensagem; ela não saiu, então a falha é certa.
+                            Err(error) => { failed = Some(Failure::local(format!("{file}: {}", Hangar::failure(&error)))); break; }
                         }
                     }
                     let message = composer::compose_prompt(&text, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
@@ -1645,6 +1646,9 @@ impl Hangar {
         if let Some(list) = self.remote.get_mut(&target).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
             list.sessions.push(session.clone());
         }
+        // Sessão ainda sem transcript não tem chave: a primeira mensagem que falhou não tem onde esperar.
+        let unkeyed = first.as_ref().filter(|_| SessionKey::new(&server, &session).is_none())
+            .and_then(|(_, text, _, result)| result.as_ref().err().map(|error| (text.clone(), Self::failure(error))));
         // Chaves e seleção valem só na máquina onde a sessão nasceu.
         if let Some((_, text, message, result)) = first.as_ref()
             && let Some(key) = SessionKey::new(&server, &session) {
@@ -1659,7 +1663,7 @@ impl Hangar {
                 self.attachments.entry(key).or_default().extend(list);
             }
         }
-        if first.is_some() && let Some(list) = self.attachments.remove(&new_chat_key()) {
+        if first.is_some() && unkeyed.is_none() && let Some(list) = self.attachments.remove(&new_chat_key()) {
             for image in list.into_iter().filter_map(|a| a.image) { release_image(image, window, cx); }
         }
         let home = if compact { self.new_chat.take() } else {
@@ -1670,7 +1674,12 @@ impl Hangar {
         let readable = session.readable();
         let key = SessionKey::new(&server, &session);
         if current { self.select_on(&target, session, window, cx); }
-        let sent = first.as_ref().is_some_and(|(.., result)| result.is_ok());
+        // Os anexos ficam na tela de nova conversa; o texto volta ao campo.
+        if let Some((text, error)) = unkeyed {
+            if current && self.composer.read(cx).value().is_empty() { self.composer.update(cx, |input, cx| input.set_value(text, window, cx)); }
+            window.push_notification(Notification::warning(tr("first_message_not_sent").replace("{erro}", &error)).autohide(false), cx);
+        }
+        let sent =first.as_ref().is_some_and(|(.., result)| result.is_ok());
         match opening.filter(|_| current) {
             // O envio que falhou volta ao campo pelo rascunho, com o aviso da entrega; a bolha não fica.
             Some(opening) => if sent {

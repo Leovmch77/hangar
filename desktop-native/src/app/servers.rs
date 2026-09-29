@@ -127,13 +127,27 @@ impl Hangar {
     /// Clique numa sessão de outra máquina: abre nela sem trocar o servidor ativo; lista ainda não lida abre quando chegar.
     pub(super) fn open_remote(&mut self, key: &str, name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_remote = None;
-        match self.remote.get(key).filter(|l| l.loaded).and_then(|l| l.sessions.iter().find(|s| s.name == name).cloned()) {
-            Some(session) => {
+        let list = self.remote.get(key);
+        match list.filter(|l| l.loaded).map(|l| l.sessions.iter().find(|s| s.name == name).cloned()) {
+            Some(Some(session)) => {
                 self.select_on(key, session.clone(), window, cx);
                 self.focus_composer_for(&session, window, cx);
             }
-            None => self.pending_remote = Some((key.to_owned(), name)),
+            Some(None) => self.remote_open_failed(&name, None, window, cx),
+            None => match list.and_then(|l| l.error.clone()) {
+                Some(error) => self.remote_open_failed(&name, Some(error), window, cx),
+                None => self.pending_remote = Some((key.to_owned(), name)),
+            },
         }
+    }
+
+    /// O clique numa sessão de outra máquina que não abre avisa, em vez de ficar esperando calado.
+    fn remote_open_failed(&mut self, name: &str, error: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match error {
+            Some(error) => tr("remote_open_failed").replace("{name}", name).replace("{erro}", &error),
+            None => tr("search_session_gone").replace("{name}", name),
+        };
+        window.push_notification(Notification::warning(text), cx);
     }
 
     /// Chave da máquina da sessão aberta quando ela não é a ativa.
@@ -141,17 +155,28 @@ impl Hangar {
 
     /// Lista de outra máquina mudou: a sessão aberta dela acompanha, e a que esperava por ela abre.
     pub(super) fn remote_changed(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(list) = self.remote.get(key).filter(|l| l.loaded).map(|l| l.sessions.clone()) else { return };
+        let waiting = self.pending_remote.as_ref().is_some_and(|(want, _)| want == key);
+        let Some(list) = self.remote.get(key).filter(|l| l.loaded).map(|l| l.sessions.clone()) else {
+            // Lista que falhou antes de chegar: o pedido pendente desiste com o motivo.
+            if waiting && let Some(error) = self.remote.get(key).and_then(|l| l.error.clone())
+                && let Some((_, name)) = self.pending_remote.take() {
+                self.remote_open_failed(&name, Some(error), window, cx);
+            }
+            return;
+        };
         if self.open_key().as_deref() == Some(key) {
             self.follow_open(&list, window, cx);
             self.refresh_group_sheet(window, cx);
         }
         // Lista lida sem a sessão esperada: desiste, em vez de esperar a próxima para sempre.
-        if self.pending_remote.as_ref().is_some_and(|(want, _)| want == key)
-            && let Some((_, name)) = self.pending_remote.take()
-            && let Some(session) = list.into_iter().find(|s| s.name == name) {
-            self.select_on(key, session.clone(), window, cx);
-            self.focus_composer_for(&session, window, cx);
+        if waiting && let Some((_, name)) = self.pending_remote.take() {
+            match list.into_iter().find(|s| s.name == name) {
+                Some(session) => {
+                    self.select_on(key, session.clone(), window, cx);
+                    self.focus_composer_for(&session, window, cx);
+                }
+                None => self.remote_open_failed(&name, None, window, cx),
+            }
         }
     }
 
@@ -206,11 +231,14 @@ impl Hangar {
     }
 
     pub(super) fn persist_servers(&self) {
-        let (address, token) = (self.server.clone().unwrap_or_default(), self.active_token.clone());
-        if address.is_empty() || token.is_empty() { return; }
+        let active = Some((self.server.clone().unwrap_or_default(), self.active_token.clone())).filter(|(a, t)| !a.is_empty() && !t.is_empty());
         let (servers, connection, tx) = (self.servers.clone(), self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let saved = tokio::task::spawn_blocking(move || save_connection(&address, &token, &servers).map_err(|e| e.to_string())).await;
+            let saved = tokio::task::spawn_blocking(move || {
+                // Sem conexão ativa a lista grava do mesmo jeito, mantendo a conexão que o arquivo já tinha.
+                let (address, token) = active.or_else(load_connection).unwrap_or_default();
+                save_connection(&address, &token, &servers).map_err(|e| e.to_string())
+            }).await;
             if let Err(error) = saved.map_err(|e| e.to_string()).and_then(|r| r) {
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::ConnectionNotSaved(error) }).await;
             }

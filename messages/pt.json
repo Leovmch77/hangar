@@ -4148,6 +4148,8 @@
   "native_untracked": "Esta sessão ainda não tem um vínculo confiável com a conversa.",
   "native_starting": "Aguardando o histórico da sessão…",
   "native_session_gone": "A sessão foi encerrada ou removida.",
+  "native_remote_open_failed": "Não foi possível abrir {name}: {erro}",
+  "native_first_message_not_sent": "A sessão nasceu, mas a primeira mensagem não foi enviada: {erro}. Os anexos continuam na tela de nova conversa.",
   "native_stop_requested": "Interrupção solicitada.",
   "native_retry": "Tentar novamente",
   "native_interrupted": "Resposta interrompida.",

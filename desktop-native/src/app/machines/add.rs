@@ -186,6 +186,8 @@ pub(in crate::app) struct AddMachine {
     follow: bool,
     /// Registrado aqui, mas uma das pontas não fechou: o resultado de cada uma fica à vista.
     sides: Option<(Going, Going)>,
+    /// A máquina já foi salva nesta abertura e os recados falharam: tentar de novo só registra, não trata como conhecida.
+    unregistered: Option<String>,
     /// Busca no Tailscale, sob demanda e deste diálogo: `None` é "ainda não buscou".
     discover: Remote<Vec<Discovered>>,
     _subscriptions: Vec<Subscription>,
@@ -212,7 +214,7 @@ impl AddMachine {
             }),
         ];
         Self { hangar: hangar.downgrade(), seq: 0, address, token, name, busy: false, error: None, found: None, messages: false, follow: true, sides: None,
-            discover: Remote::default(), _subscriptions: subscriptions }
+            unregistered: None, discover: Remote::default(), _subscriptions: subscriptions }
     }
 
     pub(super) fn waiting(&self, seq: u64) -> bool { self.busy && self.seq == seq }
@@ -283,10 +285,11 @@ impl AddMachine {
             let known = h.known_machine(&found.id);
             (h.machines.id_loaded().to_owned(), known.clone(), known.is_some_and(|k| h.moves_active(&k, &found.base)))
         };
+        let retry = self.unregistered.as_ref() == Some(&found.id);
         let typed = self.name.read(cx).value().trim().to_owned();
         let label = if !typed.is_empty() { typed } else if !found.id.is_empty() { found.id.clone() } else { short_host(&found.base) };
         // Mesma máquina por outro endereço: a entrada que já existe troca de endereço, continua uma linha só.
-        if let Some(entry) = known {
+        if let Some(entry) = known.filter(|_| !retry) {
             if stuck { return; }
             if !hangar.update(cx, |hangar, cx| hangar.move_machine(&entry.id, &found, label, window, cx)) {
                 self.error = Some(tr("machines_add_error_invite"));
@@ -300,12 +303,13 @@ impl AddMachine {
         if !messages && !self.follow { self.error = Some(tr("machines_add_error_none")); cx.notify(); return; }
         if messages && found.id.is_empty() { self.error = Some(tr("machines_add_error_no_id")); cx.notify(); return; }
         let entry = ServerEntry { id: servers::new_id(), label, address: found.base.clone(), token: found.token.clone(), disabled: false, invite: false };
-        if self.follow && !hangar.update(cx, |hangar, cx| hangar.save_machine(entry, window, cx)) {
+        if self.follow && !retry &&!hangar.update(cx, |hangar, cx| hangar.save_machine(entry, window, cx)) {
             self.error = Some(tr("machines_add_error_invite"));
             cx.notify();
             return;
         }
         if !messages { return self.close(window, cx); }
+        self.unregistered = Some(found.id.clone());
         self.seq += 1;
         (self.busy, self.error) = (true, None);
         let (me, seq) = (cx.entity_id(), self.seq);
@@ -346,7 +350,7 @@ impl AddMachine {
     pub(super) fn registered(&mut self, seq: u64, result: Result<(Going, Going), String>, cx: &mut Context<Self>) {
         if !self.waiting(seq) { return; }
         self.busy = false;
-        match result { Ok(sides) => self.sides = Some(sides), Err(error) => self.error = Some(error) }
+        match result { Ok(sides) => { self.sides = Some(sides); self.unregistered = None; } Err(error) => self.error = Some(error) }
         cx.notify();
     }
 }
@@ -381,7 +385,8 @@ impl Render for AddMachine {
             let own_url = h.api.as_ref().map(|api| api.identity().trim_end_matches('/').to_owned()).unwrap_or_default();
             let mut known = m.peers.ok().map(|list| list.iter().map(|p| host_of(&p.url)).collect::<HashSet<_>>()).unwrap_or_default();
             known.insert(host_of(&own_url));
-            let same = self.found.as_ref().and_then(|f| h.known_machine(&f.id));
+            // A que esta abertura salvou e ainda falta registrar não conta como repetida: os recados continuam à vista.
+            let same = self.found.as_ref().filter(|f| self.unregistered.as_ref() != Some(&f.id)).and_then(|f| h.known_machine(&f.id));
             let stuck = same.as_ref().zip(self.found.as_ref()).is_some_and(|(s, f)| h.moves_active(s, &f.base));
             (h.server_label(cx), m.id_loaded().to_owned(), h.api.is_some(), known, same, stuck)
         };
