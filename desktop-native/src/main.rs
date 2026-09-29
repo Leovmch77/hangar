@@ -3,6 +3,9 @@
 mod api;
 mod app;
 mod appearance;
+// ponytail: sai quando o painel usar o módulo
+#[allow(dead_code, unused_imports)]
+mod browser;
 mod cards;
 mod chat;
 mod composer;
