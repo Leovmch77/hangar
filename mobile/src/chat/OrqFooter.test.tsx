@@ -7,7 +7,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 const push = vi.hoisted(() => vi.fn());
 vi.mock('expo-router', () => ({ useRouter: () => ({ push }) }));
-vi.mock('../paraglide/messages', () => ({ orq_talk_to_arbiter: () => 'orq_talk_to_arbiter' }));
+vi.mock('../paraglide/messages', () => ({
+  orq_talk_to_arbiter: () => 'orq_talk_to_arbiter',
+  orq_row_badge: () => 'orq_row_badge',
+}));
 
 import { OrqFooter } from './OrqFooter';
 
@@ -29,9 +32,21 @@ describe('OrqFooter', () => {
     act(() => root.unmount());
   });
 
-  it('sem árbitro conhecido não mostra botão', async () => {
+  it('diz o que a linha é, como o web e o nativo', async () => {
+    const { container, root } = await render('arb-2');
+    expect(container.textContent).toContain('orq_row_badge');
+    act(() => root.unmount());
+  });
+
+  it('sem árbitro conhecido o botão aparece desligado', async () => {
+    push.mockClear();
     const { container, root } = await render(null);
-    expect(container.querySelector('button')).toBeNull();
+    const botao = container.querySelector('button[aria-label="orq_talk_to_arbiter"]') as HTMLButtonElement;
+    expect(botao).not.toBeNull();
+    expect(botao.getAttribute('aria-disabled') === 'true' || botao.disabled).toBe(true);
+    expect(container.textContent).toContain('orq_row_badge');
+    await act(async () => botao.click());
+    expect(push).not.toHaveBeenCalled();
     act(() => root.unmount());
   });
 });

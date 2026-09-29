@@ -13,7 +13,8 @@ interface Props {
   name: string;
   /** Recicla o processo da sessão Claude sem terminal (relê MCP/hooks/settings). Ausente = não se aplica. */
   recarregar?: { bloqueado: boolean; onPress: () => void };
-  /** Linha do orquestrador: sem pane nem entrada, então Terminal, resposta e anexos não têm o que abrir. */
+  /** Linha do orquestrador: sem pane nem entrada, então Terminal, resposta e anexos não têm o que abrir;
+   *  o grupo é montado pelo orq, então parear à mão também sai. */
   orq?: boolean;
 }
 
@@ -41,7 +42,7 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq }: Pr
     }] : []),
     ...(orq ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
     { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
-    { icon: 'Users', label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' },
+    ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },
     ...(orq ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
     ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),
