@@ -20,6 +20,7 @@ export default function AskSheet() {
   const askOpen = chat.use((s) => s.askOpen);
   const [routeError, setRouteError] = useState('');
   const navegando = useRef(false);
+  const pulando = useRef(false);
 
   useEffect(() => { setRouteError(''); }, [payload?.request_id]);
 
@@ -50,10 +51,14 @@ export default function AskSheet() {
   const handleCancel = () => {
     const id = payload.request_id;
     if (!payload.is_async || typeof id !== 'string') { chat.closeAsk(); return; }
+    if (pulando.current) return;
+    pulando.current = true;
     setRouteError('');
+    const atual = () => chat.use.getState().askPayload?.request_id === id;
     skipQuestion(sessionName, id)
-      .then(() => chat.closeAsk())
-      .catch((e) => setRouteError(e instanceof Error ? e.message : m.askq_erro_envio()));
+      .then(() => { if (atual()) chat.closeAsk(); })
+      .catch((e) => { if (atual()) setRouteError(e instanceof Error ? e.message : m.askq_erro_envio()); })
+      .finally(() => { pulando.current = false; });
   };
 
   const handleSubmit = async (answers: AnswerItem[]) => {

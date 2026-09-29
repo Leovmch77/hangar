@@ -1404,8 +1404,13 @@ class CodexAdapter:
         if sess is None:
             raise ValueError("A sessão não está disponível.")
         questions = sess["async_questions"]
+        if not any(q["request_id"] == request_id for q in questions._pending.values()):
+            raise ValueError("A pergunta já foi respondida ou pertence a outra conversa.")
+        # Grava antes de esconder: descarte só na memória voltaria na próxima reconexão.
+        if await asyncio.to_thread(codex_sessions.update, name,
+                                   skipped_async_questions=sorted(questions.skipped | {request_id})) is None:
+            raise RuntimeError("sidecar da sessão Codex ausente")
         questions.skip(request_id)
-        await asyncio.to_thread(codex_sessions.update, name, skipped_async_questions=sorted(questions.skipped))
         for listener in sess.get("ouvintes", []):
             listener.put_nowait(self._question_state(name, sess))
 

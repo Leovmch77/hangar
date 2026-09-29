@@ -12,11 +12,13 @@
     payload: AskQuestionPayload | null;
     onSubmit: (answers: AnswerItem[]) => Promise<void>;
     onClose: () => void;
+    /** Botão Cancelar do passo a passo; Esc e o fundo só escondem (`onClose`). */
+    onCancel?: () => void;
     onFallback: () => void; // abre o espelho TUI se algo falhar (reservado)
   }
-  let { open, payload, onSubmit, onClose }: Props = $props();
+  let { open, payload, onSubmit, onClose, onCancel }: Props = $props();
 </script>
 
 <BottomSheet {open} {onClose} ariaLabel={m.ask_perguntas()} centered={desktop.atual}>
-  <AskQuestionStepper {open} {payload} {onSubmit} {onClose} />
+  <AskQuestionStepper {open} {payload} {onSubmit} onClose={onCancel ?? onClose} />
 </BottomSheet>

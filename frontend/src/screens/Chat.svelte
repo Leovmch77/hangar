@@ -1374,11 +1374,19 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   function closeAsk() {
     if (askPiId) askPiDismissed = askPiId;
     askOpen = false;
-    // Pergunta assíncrona do Codex não tem descarte nativo: sem isto ela volta a cada recarga.
+  }
+  // Pergunta assíncrona do Codex não tem descarte nativo: sem isto ela volta a cada recarga.
+  function cancelAsk() {
     const id = askPayload?.request_id;
-    if (askPayload?.is_async && typeof id === 'string') {
-      skipQuestion(sessionName, id).catch((err) => { askOpen = true; mostrarAviso(err); });
-    }
+    if (!askPayload?.is_async || typeof id !== 'string') { closeAsk(); return; }
+    closeAsk();
+    skipQuestion(sessionName, id)
+      .then(() => { if (askPayload?.request_id === id) askPayload = null; })
+      .catch((err) => {
+        if (askPayload?.request_id !== id) return;
+        askOpen = true;
+        mostrarAviso(err);
+      });
   }
   function openMirror() { mirrorOpen = true; }
   // "Voltar ao chat" = SO esconde o espelho. NAO manda Escape -> a TUI fica como esta (nao fecha o
@@ -3140,7 +3148,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       askPayload={askPayload}
       askActive={askOpen && askPayload != null}
       onAnswer={handleAnswer}
-      onAskClose={closeAsk}
+      onAskClose={cancelAsk}
       onForward={(t) => (forwardText = t)}
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
@@ -3393,6 +3401,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       payload={askPayload}
       onSubmit={handleAnswer}
       onClose={closeAsk}
+      onCancel={cancelAsk}
       onFallback={openMirror}
     />
   {/if}

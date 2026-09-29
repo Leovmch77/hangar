@@ -7188,6 +7188,10 @@ def skip_question(name: str, body: SkipQuestionBody):
         future.result(timeout=10)
     except ValueError as exc:
         raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
+    except Exception as exc:
+        future.cancel()
+        _log.warning("Falha ao pular pergunta do Codex: %s", type(exc).__name__)
+        raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex.")) from exc
     return {"ok": True}
 
 
