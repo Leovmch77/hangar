@@ -6,8 +6,14 @@ precisa de trava nos dois, senao o do Claude volta na primeira mexida.
 """
 
 import json
+import os
+
+import pytest
 
 from app.subagents import get_subagent, list_subagents
+
+# chmod(0o000) não tira a leitura no Windows (só o bit de somente-leitura existe lá).
+_sem_chmod = pytest.mark.skipif(os.name == "nt", reason="chmod não bloqueia leitura no Windows")
 
 
 def _linhas(agent: str) -> str:
@@ -32,6 +38,7 @@ def _sessao(tmp_path, agentes: list[str]) -> str:
     return str(jsonl)
 
 
+@_sem_chmod
 def test_transcript_ilegivel_aparece_marcado_em_vez_de_sumir(tmp_path):
     main = _sessao(tmp_path, ["aa01", "aa02"])
     alvo = tmp_path / "s" / "subagents" / "agent-aa02.jsonl"
@@ -45,6 +52,7 @@ def test_transcript_ilegivel_aparece_marcado_em_vez_de_sumir(tmp_path):
     assert "ilegivel" not in ags["aa01"]
 
 
+@_sem_chmod
 def test_detalhe_de_ilegivel_nao_e_404(tmp_path):
     # O arquivo EXISTE — devolver None juntava "nao deu pra ler" com "nao existe" no mesmo 404, e a
     # linha que a lista marcou como ilegivel abria dizendo que o agente nem existe.
@@ -100,6 +108,7 @@ def test_falha_vem_do_erro_de_api_na_ultima_resposta(tmp_path):
     assert "finished" not in ags["falha01"]
 
 
+@_sem_chmod
 def test_ilegivel_nao_afirma_falha(tmp_path):
     main = _sessao(tmp_path, ["aa01"])
     alvo = tmp_path / "s" / "subagents" / "agent-aa01.jsonl"

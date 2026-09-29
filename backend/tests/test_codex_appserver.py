@@ -246,7 +246,7 @@ async def test_close_clean_after_limit_overrun_line():
     await asyncio.wait_for(client.close(), timeout=1)  # sem hang
 
 
-async def test_shared_websocket_transport_returns_endpoint_and_handles_request():
+async def test_shared_websocket_transport_returns_endpoint_and_handles_request(tmp_path):
     class _FakeWebSocket:
         def __init__(self):
             self.sent = []
@@ -276,10 +276,12 @@ async def test_shared_websocket_transport_returns_endpoint_and_handles_request()
          patch("app.adapters.codex.appserver.websockets.connect",
                AsyncMock(return_value=ws)):
         client = AppServerClient()
-        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home="/tmp/codex-work")
+        # Caminho absoluto do próprio sistema: `/tmp/x` vira `C:\tmp\x` no Windows.
+        home = tmp_path / "codex-work"
+        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home=str(home))
         assert endpoint == "ws://127.0.0.1:45123"
         spawn.assert_awaited_once()
-        assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == "/tmp/codex-work"
+        assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == str(home)
 
         task = asyncio.create_task(client.request("thread/list", {"limit": 1}))
         await asyncio.sleep(0)

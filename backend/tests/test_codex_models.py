@@ -268,6 +268,8 @@ def test_checar_escolha_usa_o_catalogo_da_conta_pedida(monkeypatch, tmp_path):
 
 
 def test_invalidar_catalogo_de_uma_conta_nao_apaga_as_outras(tmp_path, monkeypatch):
+    # O cache chaveia pelo caminho resolvido; no Windows o tmp_path cru tem outra caixa.
+    tmp_path = tmp_path.resolve()
     calls = []
 
     def perguntar(metodo, *, codex_home=None, **kwargs):

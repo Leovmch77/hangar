@@ -209,7 +209,7 @@ def test_codex_home_manda_no_caminho(monkeypatch, tmp_path):
     _auth(outro)
     _home(monkeypatch, tmp_path / "vazio")
     monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", outro / ".codex")
-    assert cotas.id_conta_codex() == f"codex:{outro / '.codex'}"
+    assert cotas.id_conta_codex() == f"codex:{(outro / '.codex').resolve()}"
 
 
 def _app_server_falso(monkeypatch, linhas: list[str], stderr: str = ""):
@@ -310,6 +310,8 @@ def test_fontes_codex_sao_separadas_mesmo_sem_auth(monkeypatch, tmp_path):
 
 
 def test_cota_codex_le_roots_com_mesma_assinatura(monkeypatch, tmp_path):
+    # A cota lê o root resolvido; no Windows o tmp_path cru tem outra caixa.
+    tmp_path = tmp_path.resolve()
     monkeypatch.setattr(__import__("pathlib").Path, "home",
                         classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")

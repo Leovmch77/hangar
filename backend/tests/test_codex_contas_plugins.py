@@ -45,6 +45,9 @@ def _plugin(marketplace: Path, name: str, version: str = "1.0.0") -> Path:
 
 @pytest.fixture
 def contas(tmp_path, monkeypatch):
+    # No Windows o tmp_path vem com a caixa do login (`administrator`); a produção resolve e compara
+    # com a caixa real do disco.
+    tmp_path = tmp_path.resolve()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     home = tmp_path / "home"
     home.mkdir()
@@ -412,7 +415,8 @@ async def test_remocao_da_fonte_desabilita_apenas_plugin_gerenciado(contas, fake
     previous = {"plugins": {"sample@accounts-local": {
         "pluginId": "sample@accounts-local", "marketplace": "accounts-local",
         "version": "1.0.0", "enabled": True,
-        "origem": {"type": "local", "source": str(marketplace)},
+        # Forma que o manifesto grava: normcase minúscula no Windows.
+        "origem": {"type": "local", "source": os.path.normcase(str(marketplace))},
     }}}
 
     result = await sync_plugins(source, target, previous)
