@@ -46,8 +46,8 @@ _OK, _ENDED, _UNSURE = "ok", "ended", "unsure"
 
 
 def guest_of(obj):
-    scope = obj if isinstance(obj, dict) else obj.scope
-    return scope.get(GUEST_SCOPE_KEY)
+    scope = obj if isinstance(obj, dict) else getattr(obj, "scope", None)
+    return scope.get(GUEST_SCOPE_KEY) if scope else None
 
 
 def guest_allowed(method: str, path: str, session: str) -> bool:

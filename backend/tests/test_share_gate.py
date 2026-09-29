@@ -340,3 +340,7 @@ def test_socket_principal_nao_e_herdado_por_processos_filhos():
         assert s.get_inheritable() is False
     finally:
         s.close()
+
+
+def test_guest_of_sem_scope_devolve_none():
+    assert share_gate.guest_of(object()) is None
