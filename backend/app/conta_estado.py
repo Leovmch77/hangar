@@ -43,7 +43,7 @@ _STATUS_SUBDIR = ".hangar-status"
 # 30s é curto o bastante pra um login novo (OAuth leva minutos) aparecer sem refresh manual e
 # longo o bastante pra não pagar N subprocesses a cada montagem da aba.
 _LOGIN_TTL = 30.0
-_LOGIN_TTL_ARQUIVO = 600.0
+_LOGIN_TTL_ARQUIVO = 120.0
 _CLI_TIMEOUT = 10.0
 
 
@@ -252,12 +252,13 @@ def _marcar_onboarding(destino: Path, dir_conta: str) -> None:
         _log.warning("não consegui marcar o onboarding de %s: %s", dir_conta, exc)
 
 
-def _assinatura_credencial(dir_conta: str) -> tuple[int, int] | None:
+def _assinatura_credencial(dir_conta: str) -> tuple[int, int, int] | None:
     try:
         st = (Path(dir_conta) / ".credentials.json").stat()
     except OSError:
         return None
-    return st.st_mtime_ns, st.st_size
+    # Gravação atômica troca o inode: pega a troca mesmo com mtime e tamanho iguais.
+    return st.st_ino, st.st_mtime_ns, st.st_size
 
 
 def _login_de(cfg) -> EstadoLogin:
