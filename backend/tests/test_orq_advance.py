@@ -889,7 +889,30 @@ def test_a_failed_final_review_wake_does_not_mark_the_plan_integrated(tmp_path):
     close(d, 1, g("rev-parse", "HEAD"))
     run({**e, "FAKE_FAIL": "arb"}, "advance")
     assert not any(x["tipo"] == "tudo_integrado" for x in events(d))
+    assert not any(x["tipo"] == "advance_falhou" for x in events(d))   # a send failure retries
+
+
+def test_a_final_review_wake_that_fails_twice_is_retried_and_recorded_once(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    for _ in range(2):
+        run({**e, "FAKE_FAIL": "arb"}, "advance")
+    assert run(e, "advance").stdout.splitlines()[-1] == "all integrated: arbiter woken for the final review"
+    run(e, "advance")
+    assert len([x for x in events(d) if x["tipo"] == "tudo_integrado"]) == 1
+    assert not any(x["tipo"] == "advance_falhou" for x in events(d))
+    assert (tmp_path / "sent.log.painel").read_text().splitlines() == ["arb"]   # woken once
+
+
+def test_a_final_review_wake_that_fails_three_times_is_a_failed_step(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    for _ in range(4):
+        run({**e, "FAKE_FAIL": "arb"}, "advance")
     assert [x["passo"] for x in events(d) if x["tipo"] == "advance_falhou"] == ["final"]
+    assert not any(x["tipo"] == "tudo_integrado" for x in events(d))
 
 
 def test_a_failed_batch_wake_leaves_the_proofs_pending(tmp_path):
@@ -902,3 +925,86 @@ def test_a_failed_batch_wake_leaves_the_proofs_pending(tmp_path):
     run({**e, "FAKE_FAIL": "arb"}, "advance")
     assert not (d / "prova-lotes.jsonl").exists()
     assert [p["task"] for p in orq_mod().pending_proofs(d)] == [1]
+
+
+def test_a_merge_killed_before_merge_head_leaves_no_dirty_tree(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+
+    def half_merge(cmd, timeout):   # killed after writing files, before MERGE_HEAD
+        (r / "a.txt").write_text("half\n")
+        g("add", "a.txt")
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(m, "_run_bounded", half_merge)
+    with pytest.raises(m.OrqError, match="timed out"):
+        m._merge(d, str(r), 1, "deadbeef" * 5)
+    assert g("status", "--porcelain") == "" and (r / "a.txt").read_text() == "1\n2\n3\n"
+
+
+def test_a_killed_merge_whose_reset_fails_names_the_dirty_files(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+
+    def half_merge(cmd, timeout):   # the killed git left its index.lock behind
+        (r / "a.txt").write_text("half\n")
+        (r / ".git" / "index.lock").write_text("")
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    monkeypatch.setattr(m, "_run_bounded", half_merge)
+    with pytest.raises(m.OrqError, match="reset --merge") as ex:
+        m._merge(d, str(r), 1, "deadbeef" * 5)
+    assert "a.txt" in str(ex.value)
+
+
+def test_run_bounded_never_waits_on_a_pipe_held_outside_the_group(tmp_path):
+    m = orq_mod()
+    t0 = time.monotonic()
+    # setsid: the grandchild escapes killpg and keeps stdout open.
+    with pytest.raises(subprocess.TimeoutExpired):
+        m._run_bounded(["sh", "-c", "setsid sleep 20 & sleep 20"], 0.5)
+    assert time.monotonic() - t0 < 12
+
+
+def test_a_wake_that_cannot_even_be_journaled_never_raises(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+    for exc in (KeyError("arbiter"), OSError("disk full"), ValueError("bad"), m.OrqError("send")):
+        def boom(*a, exc=exc, **k):
+            raise exc
+        monkeypatch.setattr(m, "_wake", boom)
+        monkeypatch.setattr(m, "journal_append", lambda *a: (_ for _ in ()).throw(OSError("ro")))
+        m._wake_or_journal(d, "text", "line", 1)
+
+
+def test_an_event_whose_advance_and_wake_both_fail_still_sends_its_notice(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    (d / "advance.log").mkdir()   # no background pass racing the assertions
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex1", "--par", "rev1")
+    (r / "a.txt").write_text("x\n")
+    g("add", "a.txt")
+    h = g("stash", "create")
+    g("stash", "store", "-m", "task-1 round 1", h)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+    monkeypatch.setattr(m, "spawn_advance", lambda d: "no fork")
+
+    def boom(*a, **k):
+        raise KeyError("arbiter")
+    monkeypatch.setattr(m, "_wake", boom)
+    real = m.journal_append
+
+    def ro(d, text):   # only the "not started" line fails to be written
+        if "not started" in text or "not woken" in text:
+            raise OSError("ro")
+        real(d, text)
+    monkeypatch.setattr(m, "journal_append", ro)
+    run(e, "event", "entrega", "--task", "1", "--rodada", "1", "--commit", h)
+    assert m.main(["event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova",
+                   "--sessao", "rev1"]) == 0
+    assert any(s.startswith("ex1 APROVA Task 1") for s in sent(log))

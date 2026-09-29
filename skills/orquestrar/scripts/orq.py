@@ -59,6 +59,7 @@ OPENROUTER_JEV_MODEL = "typesafe/jev-1.13-20260917"
 JEV_TIMEOUT_S = 5
 # A hung backend cannot hang the session that called orq.
 SEND_TIMEOUT_S = 30
+SEND_TRIES = 3   # failed wakes of the batch or final step before it counts as failed
 # Calibrated on real arbiter messages: changing a word or a threshold means measuring again.
 DISCARD_P = 0.85  # p of "nothing" (the choice's winner) needed to drop
 VETO_P = 0.40     # any alert above this keeps the arbiter awake
@@ -105,6 +106,10 @@ JEV_QUESTIONS = {
 
 class OrqError(Exception):
     pass
+
+
+class SendError(OrqError):
+    """hangar-send did not deliver: the step may be tried again."""
 
 
 def now() -> str:
@@ -342,9 +347,9 @@ def send(target: str, text: str, tmux: bool = False, painel: bool = False) -> No
         r = subprocess.run(cmd + [target, text], capture_output=True, text=True,
                            timeout=SEND_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
-        raise OrqError(f"hangar-send {target} did not answer in {SEND_TIMEOUT_S}s") from None
+        raise SendError(f"hangar-send {target} did not answer in {SEND_TIMEOUT_S}s") from None
     if r.returncode != 0:
-        raise OrqError(f"hangar-send {target} failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
+        raise SendError(f"hangar-send {target} failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
 
 
 def _send_after_event(target: str, text: str, arbiter: str) -> None:
@@ -803,7 +808,7 @@ def cmd_event(a) -> int:
     # Before the notices: a failed send must not cost the orchestrator its trigger.
     if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
         if err := spawn_advance(d):
-            journal_append(d, f"{ev['tipo']} T{ev.get('task')}: orq advance not started: {err}")
+            _journal_or_warn(d, f"{ev['tipo']} T{ev.get('task')}: orq advance not started: {err}")
             _advance_not_started(d, f"{ev['tipo']} T{ev.get('task')}", ev.get("task"), err)
     _after_event(d, ev)
     print("ok")
@@ -937,7 +942,12 @@ def _run_bounded(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
                 os.killpg(p.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass   # the group ended between the timeout and the kill
-            p.communicate()
+            try:
+                p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # A process outside the group still holds the pipe: drop it, never wait forever.
+                p.stdout.close()
+                p.stderr.close()
             raise
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
@@ -1657,12 +1667,21 @@ def _union_resolve(repo: str, path: str) -> str | None:
     return None
 
 
+def _journal_or_warn(d: Path, text: str) -> None:
+    """A journal that cannot be written must not cost the caller its next step."""
+    try:
+        journal_append(d, text)
+    except OSError as e:
+        print(f"orq: warning: journal not written ({e}): {text}", file=sys.stderr)
+
+
 def _wake_or_journal(d: Path, text: str, line: str, task: int | None = None) -> None:
-    """A failure only the arbiter can act on; a send that fails too stays in the journal."""
+    """A failure only the arbiter can act on; a send that fails too stays in the journal. Never
+    raises: the caller still has its notice or its advance to run."""
     try:
         _wake(d, text, line, task, kind="failed")
-    except OrqError as e:
-        journal_append(d, f"arbiter not woken: {e}")
+    except (OrqError, OSError, ValueError, KeyError) as e:
+        _journal_or_warn(d, f"arbiter not woken: {e}")
 
 
 def _advance_not_started(d: Path, after: str, task: int | None, err: str) -> None:
@@ -1683,14 +1702,29 @@ def _abort_merge(repo: str) -> None:
                        f"{(r.stderr or r.stdout).strip()[:200]}")
 
 
+def _undo_killed_merge(repo: str, before: str) -> None:
+    """A merge killed before writing MERGE_HEAD can leave its files in the tree, where
+    `merge --abort` does not reach."""
+    if git(repo, "status", "--porcelain") == before:
+        return
+    r = subprocess.run(["git", "-C", repo, "reset", "--merge"], capture_output=True, text=True)
+    if r.returncode != 0:
+        left = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True,
+                              text=True).stdout.strip()
+        raise OrqError(f"git reset --merge failed after a killed merge "
+                       f"({(r.stderr or r.stdout).strip()[:200]}); the main line is dirty: {left[:600]}")
+
+
 def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
     """`git merge --no-ff` of the verified commit. None = merged (additive conflicts resolved);
     else the conflicting files and the reason, with the merge aborted."""
+    before = git(repo, "status", "--porcelain")
     try:
         r = _run_bounded(["git", "-C", repo, "merge", "--no-ff", "-m", f"Merge Task {n} ({h[:12]})", h],
                          MERGE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         _abort_merge(repo)
+        _undo_killed_merge(repo, before)
         raise OrqError(f"git merge {h[:12]}: timed out after {MERGE_TIMEOUT_S}s, killed and "
                        "aborted") from None
     if r.returncode == 0:
@@ -2109,6 +2143,21 @@ def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
     acts.append("all integrated: arbiter woken for the final review")
 
 
+def _send_retry(d: Path, passo: str) -> bool:
+    """True = a failed wake of this step is tried again on a later pass; the SEND_TRIES-th failure
+    is final and resets the count."""
+    f = d / f"send-tries-{passo}"
+    try:
+        n = int(f.read_text(encoding="utf-8")) + 1
+    except (OSError, ValueError):
+        n = 1
+    if n >= SEND_TRIES:
+        f.unlink(missing_ok=True)
+        return False
+    f.write_text(str(n), encoding="utf-8")
+    return True
+
+
 def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
     """Integration first: nothing opens or goes to proof on a main line that is red or waiting."""
     off = _off_branch(d, cfg["repo"])
@@ -2126,6 +2175,12 @@ def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
             continue
         try:
             step(d, cfg, acts)
+            (d / f"send-tries-{passo}").unlink(missing_ok=True)
+        except SendError as e:
+            if _send_retry(d, passo):
+                acts.append(f"{passo}: arbiter not reached ({e}), retried on the next pass")
+            else:
+                acts.append(_fail(d, passo, None, str(e)))
         except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
             acts.append(_fail(d, passo, None, str(e)))
 
