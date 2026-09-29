@@ -847,7 +847,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                 ? mensagemRecusa(dropRecusa)
                 : (!expanded
                   ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
-                  : (s.tracked === false ? untrackedReason(s.provider) : m.sessao_toque_renomear()))}
+                  : (s.tracked === false ? untrackedReason(s.provider) : isOrq(s) ? m.orq_row_badge() : m.sessao_toque_renomear()))}
               onpointerdown={() => { if (!model.selectMode && !sidebarPin.collapsed && !isOrq(s)) pressStart(rowKey); }}
               onpointerup={pressEnd}
               onpointerleave={pressEnd}
@@ -855,7 +855,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               oncontextmenu={(e) => { if (!model.selectMode) openMenu(e, s, s.serverId); }}
               onclick={() => {
                 hpLeave();   // clique nao move o mouse -> sem mouseleave; fecha a espiada na mao
-                if (model.selectMode) { if (s.tracked !== false) model.toggleSelected(selKey); return; }
+                if (model.selectMode) { if (s.tracked !== false && !isOrq(s)) model.toggleSelected(selKey); return; }
                 onMainClick(s.name, s.serverId, s.tracked, s.provider);
               }}
             >

@@ -1051,6 +1051,20 @@ describe('Sidebar — linha do orquestrador sem LLM', () => {
     const t = montar();
     await tick();
     expect(document.querySelector('.orq-badge')?.textContent?.trim()).toBe(m.orq_row_badge());
+    // Toque longo desligado: o title não promete renomear.
+    expect(document.querySelector('.sess-main')!.getAttribute('title')).toBe(m.orq_row_badge());
+    unmount(t.comp);
+  });
+
+  it('seleção múltipla não aceita a linha', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    document.querySelector<HTMLButtonElement>('.select-toggle-btn')!.click();
+    await tick();
+    document.querySelector<HTMLElement>('.sess-main')!.click();
+    await tick();
+    expect(document.querySelector('.sess-main')!.getAttribute('aria-pressed')).toBe('false');
     unmount(t.comp);
   });
 

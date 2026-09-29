@@ -1390,7 +1390,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // ganha o botão de terminal quando existe pelo menos um.
   const atalhoKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
   const temTerminalDeAtalho = $derived(shortcutTerminalsOf(atalhoKey).length > 0);
-  const botaoTerminal = $derived(!sessionHeadless || temTerminalDeAtalho);
+  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho));
   $effect(() => {
     const key = atalhoKey;
     refreshShortcutTerminals(key).catch(() => { /* servidor sem a rota ou fora: sem botão extra */ });
@@ -1508,8 +1508,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!desktop || !publishWorkspaceActions || !publish) return;
     publish([
       action('git', m.sessao_git(), () => (gitOpen = true)),
-      action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
-      action('run', m.chat_executar_workflow(), () => (runOpen = true)),
+      // Orquestrador não tem pane: parear e rodar workflow não têm onde agir.
+      ...(orqSession ? [] : [
+        action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
+        action('run', m.chat_executar_workflow(), () => (runOpen = true)),
+      ]),
       ...(botaoTerminal ? [action('terminal', m.ctx_terminal(), abrirTerminalReal)] : []),
       ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
       ...(recarregavel ? [action('recarregar', m.recarregar_sessao(), recarregar)] : []),
@@ -2891,7 +2894,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   {/if}
   <div class="navbar-mount" bind:this={navEl}>
     {#if !splitTab}
-    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
+    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop && !orqSession ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
     {/if}
   </div>
 
@@ -2929,7 +2932,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       modoBloqueado={!modoLivre || trocandoModo}
       onOpenNavegador={alternarNavegador}
       terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen}
-      onOpenRun={() => (runOpen = true)}
+      onOpenRun={orqSession ? undefined : () => (runOpen = true)}
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
       {shortcuts}
