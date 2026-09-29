@@ -459,6 +459,8 @@ pub(in crate::app) struct Machines {
     /// O diálogo Adicionar aberto.
     add: Option<Entity<AddMachine>>,
     pair: Pair,
+    /// Janela estreita: o detalhe fica embaixo da lista, e escolher uma máquina rola até ele.
+    stacked: bool,
 }
 
 impl Drop for Machines {
@@ -492,8 +494,8 @@ impl Hangar {
         // Atualização em curso segue na tela; o resultado de uma anterior sai, como o do reinício.
         if !m.upgrade.busy() { m.upgrade = Upgrade { seq: m.upgrade.seq + 1, ..Upgrade::default() }; }
         (m.id_saved, m.leave_error, m.peer_error, m.adopt_error, m.far_failed) = (false, None, None, None, false);
-        // "Não respondem" nasce fechado, como o `<details>` do web remontado.
-        m.silent_open = false;
+        // "Não respondem" nasce fechado, como o `<details>` do web remontado; o painel volta a este servidor.
+        (m.silent_open, m.peer_open, m.peer_advanced) = (false, None, false);
         // Medições só em memória: cada abertura mede de novo, e a resposta de um teste de antes cai pelo `seq`.
         m.checks.clear();
         if !m.id_saving { self.load_machine_id(cx); }
@@ -633,19 +635,21 @@ impl Hangar {
         let text = tr(if line.peer.is_none() { "machines_remove_line_local" } else if line.entry.is_some() { "machines_remove_line" } else {
             "machines_peer_here_only" });
         let (peer, entries) = (line.peer.as_ref().map(|p| p.id.clone()), line.entries.iter().map(|s| s.id.clone()).collect::<Vec<_>>());
+        let open_key = line.open_key().to_owned();
         let this = cx.entity().downgrade();
         chrome::confirm_alert(window, cx, title, text, tr("machines_peer_remove"), ButtonVariant::Danger, move |window, cx| {
             match &peer {
                 Some(id) => { let _ = this.update(cx, |this, cx| this.write_peer(id.clone(), spot, PeerWrite::Removed, cx)); true }
-                // Só deste aparelho: sai na hora, e o detalhe de onde se pediu fecha junto.
+                // Só deste aparelho: sai na hora. O painel só deixa a máquina se era ela que estava aberta.
                 None => {
                     let _ = this.update(cx, |this, cx| {
                         this.forget_entries(&entries);
-                        this.machines.peer_open = None;
+                        if this.machines.peer_open.as_deref() == Some(open_key.as_str()) { this.machines.peer_open = None; }
                         cx.notify();
                     });
                     if spot == Spot::Row { return true; }
-                    window.close_all_dialogs(cx);
+                    // O botão focado saiu com o detalhe: fecha só a pergunta e devolve o foco à página, senão o Esc não chega.
+                    window.close_dialog(cx);
                     let _ = this.update(cx, |this, cx| this.root_focus.focus(window, cx));
                     false
                 }
@@ -655,18 +659,23 @@ impl Hangar {
 
     /// O detalhe mora no painel ao lado da lista, como a Aparência: nada abre em diálogo.
     fn open_line_detail(&mut self, key: String, _: &mut Window, cx: &mut Context<Self>) {
+        // Com uma gravação do detalhe no ar, trocar de máquina esconderia o erro dela; a da linha mostra o erro na própria linha.
+        if self.detail_busy() { return; }
         // Abrir o detalhe mede de novo: o resultado de antes era de outra hora.
         let peer = self.machine_lines().into_iter().find(|l| l.open_key() == key).and_then(|l| l.peer);
         if let Some(peer) = peer { self.check_peer(&peer.id, cx); }
         let (m, id) = (&mut self.machines, key);
         (m.peer_open, m.peer_advanced) = (Some(id.clone()), false);
         if m.peer_error.as_ref().is_some_and(|(_, spot, _)| *spot != Spot::Row) { m.peer_error = None; }
+        if m.stacked { self.jump_to("machines_detail"); }
         cx.notify();
     }
 
     fn peer_error_at(&self, id: &str, spot: Spot) -> Option<String> {
         self.machines.peer_error.as_ref().filter(|(i, s, _)| i == id && *s == spot).map(|(.., error)| error.clone())
     }
+
+    fn detail_busy(&self) -> bool { self.machines.peer_busy.as_ref().is_some_and(|(_, spot)| *spot != Spot::Row) }
 
     fn peer_busy_at(&self, id: &str, spot: Spot) -> bool {
         self.machines.peer_busy.as_ref().is_some_and(|(i, s)| i == id && *s == spot)
@@ -949,11 +958,12 @@ impl Hangar {
                             m.far_failed = far_failed;
                             if !entries.is_empty() { self.forget_entries(&entries); }
                             let m = &mut self.machines;
-                            // Saiu pelo detalhe (rodapé ou recados): o detalhe dela fecha, como no web.
-                            if matches!(spot, Spot::Footer | Spot::Messages) && m.peer_open.as_deref() == Some(id.as_str()) {
+                            // A máquina aberta saiu (por onde for): o painel volta a este servidor, e a chave velha não reabre
+                            // sozinha se ela voltar à lista.
+                            if m.peer_open.as_deref() == Some(id.as_str()) {
                                 m.peer_open = None;
-                                // O botão focado saiu junto com o detalhe: sem isto o foco fica fora da árvore e o Esc não chega à página.
-                                if !window.has_active_dialog(cx) { self.root_focus.focus(window, cx); }
+                                // Pedida pelo detalhe, o botão focado saiu junto: sem isto o foco fica fora da árvore e o Esc não chega.
+                                if matches!(spot, Spot::Footer | Spot::Messages) && !window.has_active_dialog(cx) { self.root_focus.focus(window, cx); }
                             }
                         }
                         self.peers_arrived(cx);
@@ -1065,7 +1075,9 @@ impl Hangar {
     }
 
     fn open_machine_detail(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_busy() { return; }
         self.machines.peer_open = None;
+        if self.machines.stacked { self.jump_to("machines_detail"); }
         cx.notify();
     }
 
@@ -1085,6 +1097,7 @@ impl Hangar {
         let width = f32::from(width);
         let wide = width >= 1320.;
         let list_w = (width >= 1100.).then_some(if wide { 400. } else { 320. });
+        self.machines.stacked = list_w.is_none();
         let offline = self.api.is_none();
         // Os dois abrem diálogo: o foco volta a eles no Esc.
         let this = cx.entity().downgrade();
@@ -1175,8 +1188,8 @@ impl Hangar {
             .child(self.render_peers(open_key.as_deref(), cx))
             .child(actions);
         // Fundo mais fundo que as caixas do detalhe: no mesmo tom elas sumiriam dentro do painel.
-        let pane = div().id("machines-detail-pane").flex_1().min_w_0().p(px(22.)).rounded(px(16.)).border_1().border_color(theme::border())
-            .bg(theme::inset()).child(detail);
+        let pane = self.mark(div().flex_1().min_w_0().p(px(22.)).rounded(px(16.)).border_1().border_color(theme::border())
+            .bg(theme::inset()).child(detail), "machines_detail").id("machines-detail-pane");
         let body = match list_w {
             Some(w) => div().mt(px(24.)).flex().items_start().gap(px(24.)).child(div().w(px(w)).flex_shrink_0().child(list)).child(pane),
             None => div().mt(px(24.)).flex().flex_col().gap(px(24.)).child(list).child(pane),
