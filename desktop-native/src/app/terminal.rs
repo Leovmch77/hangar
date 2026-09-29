@@ -144,10 +144,16 @@ fn failure_message(error: Failure) -> String {
     if error.status == Some(404) { tr("term_missing") } else { Hangar::failure(&error) }
 }
 
+/// O botão de terminal do cabeçalho: sessão sem pane só tem terminal quando um atalho abriu um; o orquestrador não tem nenhum.
+pub(super) fn terminal_offered(session: &SessionInfo, shortcut_terms: bool) -> bool {
+    !session.orq() && (!session.headless || shortcut_terms)
+}
+
 impl Hangar {
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.is_some() { self.close_terminal(true, window, cx); return; }
-        let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless || s.orq())) else { return; };
+        if self.selected.as_ref().is_some_and(SessionInfo::orq) { return; }
+        let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless)) else { return; };
         self.terminal_serial += 1;
         self.terminal = Some(Panel::new(self.terminal_serial, session.clone(), headless, cx));
         self.terminal.as_ref().unwrap().focus.focus(window, cx);
@@ -570,6 +576,17 @@ mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
     use super::{ShortcutTerm, parse_shortcut_terms, shortcut_tab_label};
     use serde_json::Value;
+
+    #[test]
+    fn orq_row_never_offers_the_terminal() {
+        use super::{SessionInfo, terminal_offered};
+        let orq = SessionInfo { provider: "orq".into(), ..Default::default() };
+        assert!(!terminal_offered(&orq, false) && !terminal_offered(&orq, true), "nem com terminal de atalho");
+        let pane = SessionInfo { provider: "claude".into(), ..Default::default() };
+        assert!(terminal_offered(&pane, false));
+        let headless = SessionInfo { headless: true, ..pane };
+        assert!(!terminal_offered(&headless, false) && terminal_offered(&headless, true));
+    }
 
     fn term(id: &str, alive: bool, exit_code: Option<i64>) -> ShortcutTerm {
         ShortcutTerm { id: id.into(), label: format!("L{id}"), alive, exit_code }

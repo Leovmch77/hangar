@@ -4062,7 +4062,7 @@ impl Hangar {
                     .child(format!("? {}", session.pending_questions))))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select(pick.clone(), window, cx);
-                    if !this.connection_dialog && pick.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                    this.focus_composer_for(&pick, window, cx);
                 }))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -4203,7 +4203,7 @@ impl Hangar {
                     this.hide_preview();
                     this.sidebar.hover = hover;
                     this.select(session.clone(), window, cx);
-                    if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                    this.focus_composer_for(&session, window, cx);
                 }))
                 .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element(),
             })
@@ -4342,9 +4342,7 @@ impl Hangar {
                     if this.take_long_press() { return; }
                     this.select(session.clone(), window, cx);
                     // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
-                    if !this.connection_dialog && session.readable() {
-                        this.composer.update(cx, |input, cx| input.focus(window, cx));
-                    }
+                    this.focus_composer_for(&session, window, cx);
                 }))
                 .context_menu(sidebar::session_menu(weak, menu_session))
                 .into_any_element(),
@@ -4708,11 +4706,12 @@ impl Hangar {
                     .child(hint)))
     }
 
-    /// Rodapé da linha `orq`: sem campo de digitar, só o botão que abre o árbitro da orquestração.
+    /// Rodapé da linha `orq`, como o do web: sem campo de digitar, o selo e o botão que abre o árbitro da orquestração.
     fn render_orq_footer(&self, orq: &str, cx: &mut Context<Self>) -> Div {
         let target = orq.to_owned();
-        div().w_full().py_3().flex().justify_center()
-            .child(Button::new("orq-talk-to-arbiter").primary().small().label(tr_shared("orq_talk_to_arbiter", &[]))
+        div().w_full().py_3().flex().flex_col().items_center().gap_2()
+            .child(div().text_sm().text_color(theme::muted()).child(tr_shared("orq_row_badge", &[])))
+            .child(Button::new("orq-talk-to-arbiter").small().label(tr_shared("orq_talk_to_arbiter", &[]))
                 .disabled(self.arbiter_of(orq).is_none())
                 .on_click(cx.listener(move |this, _, window, cx| this.open_arbiter(&target, window, cx))))
     }
@@ -4726,7 +4725,12 @@ impl Hangar {
     fn open_arbiter(&mut self, orq: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(arbiter) = self.arbiter_of(orq).cloned() else { return };
         self.select(arbiter.clone(), window, cx);
-        if !self.connection_dialog && arbiter.readable() { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
+        self.focus_composer_for(&arbiter, window, cx);
+    }
+
+    /// Foco no campo depois de escolher uma conversa, só se ela tem compositor desenhado.
+    fn focus_composer_for(&mut self, session: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.connection_dialog && session.takes_messages() { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
     }
 
     /// Entre o cabeçalho e a faixa de baixo: o cartão de antes da conversa, a lista ou o aviso de vazio.
@@ -4906,8 +4910,7 @@ impl Render for Hangar {
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
                     .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))))
-                // Sessão sem pane só tem terminal quando um atalho abriu um.
-                .when(self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
+                .when(self.selected.as_ref().is_some_and(|s| terminal::terminal_offered(s, self.has_shortcut_terms())), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
                         tr("term_toggle"), cx).selected(self.terminal.is_some())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).

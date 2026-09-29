@@ -197,8 +197,8 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Capacidade | Estado | Observação |
 |---|---|---|
 | Linha `orq` com o selo "Orquestrador · sem LLM" (`orq_row_badge`), no bloco do grupo do árbitro | implementado | barra e Conversas mostram o selo; no trilho ele vai na dica; nas abas do topo, só o glifo ◇ |
-| Conversa da linha do tempo sem compositor, com "Falar com o árbitro" (`orq_talk_to_arbiter`) abrindo o árbitro atual | implementado | o árbitro sai de `orq_arbiter` na lista a cada clique; fora da lista, o botão fica desligado; conversa vazia diz que o orquestrador não recebe mensagens |
-| Renomear, fechar, interromper e o terminal da sessão escondidos | implementado | o menu da linha tem só "Falar com o árbitro"; pressionar para renomear e o Esc não agem; o terminal abre só com shells; um 409 `erro_sessao_orq` que escape aparece com o texto do web |
+| Conversa da linha do tempo sem compositor, com "Falar com o árbitro" (`orq_talk_to_arbiter`) abrindo o árbitro atual | implementado | rodapé como o do web: o selo "Orquestrador · sem LLM" e o botão no estilo comum; o árbitro sai de `orq_arbiter` na lista a cada clique; fora da lista, o botão fica desligado; conversa vazia diz que o orquestrador não recebe mensagens |
+| Renomear, fechar, interromper e o terminal da sessão escondidos | implementado | o menu da linha tem só "Falar com o árbitro"; pressionar para renomear e o Esc não agem; sem terminal (o botão do cabeçalho some, mesmo com terminal de atalho); clicar na linha não põe o foco num campo que não está desenhado; um 409 `erro_sessao_orq` que escape aparece com o texto do web |
 
 ## Como rodar a prova
 

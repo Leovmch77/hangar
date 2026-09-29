@@ -231,9 +231,8 @@ impl Hangar {
         self.close_search(window, cx);
         self.close_costs(window, cx);
         self.close_settings(window, cx);
-        let readable = session.readable();
-        self.select(session, window, cx);
-        if readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
+        self.select(session.clone(), window, cx);
+        self.focus_composer_for(&session, window, cx);
     }
 
     /// Conversa arquivada: sobe uma sessão nova com `--resume` na conta dona dela, pela rota do Arquivo do web.

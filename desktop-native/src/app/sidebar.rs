@@ -1287,7 +1287,7 @@ impl Hangar {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.hide_preview();
                         this.select(session.clone(), window, cx);
-                        if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                        this.focus_composer_for(&session, window, cx);
                     }))
                     .context_menu(session_menu(weak, menu_session))
                     .into_any_element()
