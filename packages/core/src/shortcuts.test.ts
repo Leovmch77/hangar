@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   defaultShortcuts,
+  mergeProjectShortcuts,
   resolveShortcuts,
   serializeShortcuts,
   sendsDirect,
@@ -50,6 +51,41 @@ describe('resolveShortcuts', () => {
       { id: 'rodar', type: 'internal', action: 'rodar' },
     ];
     expect(resolveShortcuts(serializeShortcuts(list))).toEqual(list);
+  });
+});
+
+describe('pasta do atalho shell', () => {
+  it('sobrevive ao roundtrip; pasta vazia ou de outro tipo descarta o item', () => {
+    const ok: Shortcut = { id: 'a1', type: 'shell', label: 'Debug', command: 'npm run debug', pasta: 'frontend' };
+    const raw = JSON.stringify([
+      ok,
+      { id: 'a2', type: 'shell', label: 'X', command: 'x', pasta: '  ' },
+      { id: 'a3', type: 'shell', label: 'Y', command: 'y', pasta: 3 },
+    ]);
+    expect(resolveShortcuts(raw)).toEqual([ok]);
+    expect(resolveShortcuts(serializeShortcuts([ok]))).toEqual([ok]);
+  });
+});
+
+describe('mergeProjectShortcuts', () => {
+  const global: Shortcut[] = [{ id: 'terminal', type: 'internal', action: 'terminal' }];
+  it('globais primeiro, depois os do projeto; mesmo id nas duas listas não colide na chave', () => {
+    const own: Shortcut = { id: 'terminal', type: 'shell', label: 'Debug', command: 'd', pasta: '/tmp' };
+    expect(mergeProjectShortcuts(global, [own])).toEqual([
+      { shortcut: global[0], scope: 'global', key: 'global:terminal' },
+      { shortcut: own, scope: 'project', key: 'project:terminal' },
+    ]);
+  });
+  it('do projeto: interno, inválido e id repetido caem fora; sem lista = só globais', () => {
+    const project = [
+      { id: 'modo', type: 'internal', action: 'modo' },
+      { id: 'p1', type: 'send_text', label: 'X', text: '/x' },
+      { id: 'p1', type: 'send_text', label: 'Y', text: '/y' },
+      { id: 'p2', type: 'shell', label: 'Z' },
+    ];
+    expect(mergeProjectShortcuts(global, project).map((e) => e.key))
+      .toEqual(['global:terminal', 'project:p1']);
+    expect(mergeProjectShortcuts(global, null)).toHaveLength(1);
   });
 });
 

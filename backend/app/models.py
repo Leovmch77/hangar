@@ -618,3 +618,10 @@ class ShortcutShellBody(BaseModel):
     command: str = Field(max_length=200_000)
     # Rotulo da aba do terminal do atalho; vazio cai no proprio comando.
     label: str = Field(default="", max_length=200)
+    # Onde rodar: absoluta ou relativa a raiz da copia da sessao; ausente = cwd da sessao.
+    pasta: Optional[str] = Field(default=None, max_length=4096)
+
+
+# `Any` nos itens: item torto volta 400 apontando qual (validate_shortcut_item), nao 422 generico.
+class ProjectShortcutsBody(BaseModel):
+    items: list[Any] = Field(max_length=500)

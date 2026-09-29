@@ -11,6 +11,7 @@ import {
   inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
 import type { CotaContaResumo } from './cotaResumo';
+import type { ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncReport } from './configSync';
 import type {
@@ -2473,11 +2474,24 @@ export interface ShortcutTerminal {
 /** Atalho "shell" da fileira, no cwd da sessão. No servidor POSIX cada execução ganha um
  * terminal próprio (`terminal` na resposta). Se o comando sai com erro nos primeiros 2 s, volta
  * 422 com o código e o fim da saída — o terminal continua listado pra ver a saída inteira. */
-export function runShortcutShell(name: string, command: string, label?: string):
+export function runShortcutShell(name: string, command: string, label?: string, pasta?: string):
     Promise<{ ok: boolean; terminal?: ShortcutTerminal }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
     method: 'POST',
-    body: JSON.stringify(label ? { command, label } : { command }),
+    body: JSON.stringify({ command, ...(label ? { label } : {}), ...(pasta ? { pasta } : {}) }),
+  });
+}
+
+/** Atalhos do projeto da sessão (guardados na máquina do servidor, por repositório). */
+export function getProjectShortcuts(name: string): Promise<ProjectShortcuts> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/project-shortcuts`);
+}
+
+/** Grava a lista INTEIRA do projeto; lista vazia apaga. Devolve como o servidor gravou. */
+export function putProjectShortcuts(name: string, items: ProjectShortcut[]): Promise<ProjectShortcuts> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/project-shortcuts`, {
+    method: 'PUT',
+    body: JSON.stringify({ items }),
   });
 }
 

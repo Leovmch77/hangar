@@ -252,29 +252,35 @@ def _validate_shortcuts(text: str) -> None:
     if not isinstance(items, list):
         raise ValueError("shortcuts: esperado uma lista de atalhos")
     for i, item in enumerate(items, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(f"shortcuts: item {i} nao e um objeto")
-        if not isinstance(item.get("id"), str) or not item["id"].strip():
-            raise ValueError(f"shortcuts: item {i} sem id")
-        kind = item.get("type")
-        if kind == "internal":
-            if item.get("action") not in _SHORTCUT_INTERNAL_ACTIONS:
-                raise ValueError(
-                    f"shortcuts: item {i} tem action desconhecida "
-                    f"(use uma de: {', '.join(sorted(_SHORTCUT_INTERNAL_ACTIONS))})"
-                )
-        elif kind == "send_text":
-            if not isinstance(item.get("text"), str) or not item["text"].strip():
-                raise ValueError(f"shortcuts: item {i} (send_text) sem texto a enviar")
-        elif kind == "shell":
-            if not isinstance(item.get("command"), str) or not item["command"].strip():
-                raise ValueError(f"shortcuts: item {i} (shell) sem comando")
-        else:
-            raise ValueError(f"shortcuts: item {i} tem type desconhecido '{kind}'")
-        if kind in ("send_text", "shell") and (
-            not isinstance(item.get("label"), str) or not item["label"].strip()
-        ):
-            raise ValueError(f"shortcuts: item {i} sem rotulo")
+        validate_shortcut_item(item, f"shortcuts: item {i}")
+
+
+def validate_shortcut_item(item: Any, where: str) -> None:
+    """Regras de um atalho, compartilhadas pela lista global e pelas listas por projeto.
+    `where` abre a mensagem ("shortcuts: item 3") pra apontar o item recusado."""
+    if not isinstance(item, dict):
+        raise ValueError(f"{where} nao e um objeto")
+    if not isinstance(item.get("id"), str) or not item["id"].strip():
+        raise ValueError(f"{where} sem id")
+    kind = item.get("type")
+    if kind == "internal":
+        if item.get("action") not in _SHORTCUT_INTERNAL_ACTIONS:
+            raise ValueError(
+                f"{where} tem action desconhecida "
+                f"(use uma de: {', '.join(sorted(_SHORTCUT_INTERNAL_ACTIONS))})"
+            )
+    elif kind == "send_text":
+        if not isinstance(item.get("text"), str) or not item["text"].strip():
+            raise ValueError(f"{where} (send_text) sem texto a enviar")
+    elif kind == "shell":
+        if not isinstance(item.get("command"), str) or not item["command"].strip():
+            raise ValueError(f"{where} (shell) sem comando")
+    else:
+        raise ValueError(f"{where} tem type desconhecido '{kind}'")
+    if kind in ("send_text", "shell") and (
+        not isinstance(item.get("label"), str) or not item["label"].strip()
+    ):
+        raise ValueError(f"{where} sem rotulo")
 
 
 def _coagir(campo: str, valor: Any) -> Any:

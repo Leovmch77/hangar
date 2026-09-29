@@ -28,6 +28,7 @@ export interface ShortcutShell {
   label: string;
   icon?: string;
   command: string;        // roda na máquina do servidor, cwd da sessão, dispara-e-esquece
+  pasta?: string;         // absoluta ou relativa à raiz da cópia da sessão; ausente = cwd da sessão
   confirm?: boolean;
 }
 
@@ -59,7 +60,8 @@ function isValid(item: unknown): item is Shortcut {
   }
   if (o.type === 'shell') {
     return typeof o.label === 'string' && !!o.label.trim()
-      && typeof o.command === 'string' && !!o.command.trim();
+      && typeof o.command === 'string' && !!o.command.trim()
+      && (o.pasta === undefined || (typeof o.pasta === 'string' && !!o.pasta.trim()));
   }
   return false;
 }
@@ -84,6 +86,40 @@ export function resolveShortcuts(raw: string | null | undefined): Shortcut[] {
 
 export function serializeShortcuts(list: Shortcut[]): string {
   return JSON.stringify(list);
+}
+
+/** Atalho do projeto: só `send_text` e `shell` (os internos são do servidor inteiro). */
+export type ProjectShortcut = ShortcutSendText | ShortcutShell;
+
+/** Resposta de GET/PUT `/api/sessions/{name}/project-shortcuts`. `key` = repositório git (ou a
+ * pasta, fora de git); `root` = raiz da cópia da sessão, contra a qual `pasta` relativa resolve. */
+export interface ProjectShortcuts {
+  key: string;
+  name: string;
+  root: string;
+  items: ProjectShortcut[];
+}
+
+export type ShortcutScope = 'global' | 'project';
+
+export interface ScopedShortcut {
+  shortcut: Shortcut;
+  scope: ShortcutScope;
+  key: string;  // `${scope}:${id}`: o mesmo id nas duas listas não colide no {#each} com chave
+}
+
+/** Globais e depois os do projeto, cada um com o escopo. Item do projeto inválido ou interno
+ * (arquivo editado à mão) cai fora, e id repetido dentro do projeto fica só o primeiro. */
+export function mergeProjectShortcuts(
+  global: Shortcut[], project: unknown[] | null | undefined,
+): ScopedShortcut[] {
+  const seen = new Set<string>();
+  const own = (project ?? []).filter(
+    (s): s is ProjectShortcut => isValid(s) && s.type !== 'internal' && !seen.has(s.id) && !!seen.add(s.id),
+  );
+  const tag = (scope: ShortcutScope) => (shortcut: Shortcut): ScopedShortcut =>
+    ({ shortcut, scope, key: `${scope}:${shortcut.id}` });
+  return [...global.map(tag('global')), ...own.map(tag('project'))];
 }
 
 /** true quando o atalho envia direto (padrão do send_text; flag desligada = pré-preencher). */

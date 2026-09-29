@@ -53,7 +53,7 @@ from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
 from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody,
-                        session_key)
+                        ProjectShortcutsBody, session_key)
 from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
@@ -95,6 +95,7 @@ from app import loop as loop_mod
 from app.transcript import last_assistant_text
 from app import tunnel
 from app import runner
+from app import project_shortcuts
 from app import projects
 from app import archive_providers
 from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
@@ -6296,6 +6297,32 @@ def runner_pane(name: str):
     return {"pane": runner.run_pane(_session_cwd(name))}
 
 
+def _project_error(e: project_shortcuts.ProjectError) -> HTTPException:
+    return HTTPException(409, detail=erro("erro_project_shortcuts_projeto", str(e)))
+
+
+@app.get("/api/sessions/{name}/project-shortcuts", dependencies=[Depends(require_auth)])
+def get_project_shortcuts(name: str):
+    try:
+        return project_shortcuts.describe(_session_cwd(name))
+    except project_shortcuts.ProjectError as e:
+        raise _project_error(e)
+
+
+@app.put("/api/sessions/{name}/project-shortcuts", dependencies=[Depends(require_auth)])
+def put_project_shortcuts(name: str, body: ProjectShortcutsBody):
+    # Lista INTEIRA do projeto (add/editar/remover sao a mesma gravacao); vazia remove o projeto.
+    cwd = _session_cwd(name)
+    try:
+        project = project_shortcuts.project_of(cwd)
+        project_shortcuts.save_items(project["key"], body.items)
+    except project_shortcuts.ProjectError as e:
+        raise _project_error(e)
+    except ValueError as e:
+        raise HTTPException(400, detail=erro("erro_project_shortcuts", str(e)))
+    return {**project, "items": project_shortcuts.load_items(project["key"])}
+
+
 _DISPLAY_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "HYPRLAND_INSTANCE_SIGNATURE")
 _SHORTCUT_FAIL_WINDOW = 2.0
 
@@ -6338,6 +6365,13 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
     command = body.command.strip()
     if not command:
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
+    if body.pasta is not None:
+        try:
+            cwd = project_shortcuts.resolve_folder(cwd, body.pasta)
+        except project_shortcuts.ProjectError as e:
+            raise _project_error(e)
+        except ValueError as e:
+            raise HTTPException(400, detail=erro("erro_shortcut_pasta", str(e)))
     # Atalho importado com a credencial em branco: rodar mandaria o marcador literal pro programa.
     from app.shortcut_transfer import has_placeholder
     missing = has_placeholder(command)
