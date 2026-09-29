@@ -7,20 +7,26 @@
   import { withServer } from '../lib/auth';
   import { copyText } from '../lib/clipboard';
   import {
-    createShare, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn,
-    SharePrerequisiteError, type ShareInfo, type ShareCreated,
+    createShare, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn, sharePrereqs,
+    SharePrerequisiteError, type ShareInfo, type ShareCreated, type SharePrereqs,
   } from '@hangar/core';
 
   interface Props { open: boolean; name: string; serverId: string; onClose: () => void }
   let { open, name, serverId, onClose }: Props = $props();
+
+  const CONFERIR_MS = 3000;
+  const CONFERIR_ATE_MS = 5 * 60_000;
 
   let shares = $state<ShareInfo[] | null>(null);
   let erroLista = $state('');
   let criado = $state<ShareCreated | null>(null);
   let gerando = $state(false);
   let erroGerar = $state('');
-  let preRequisito = $state<SharePrerequisiteError | null>(null);
+  let preRequisito = $state<SharePrereqs | null>(null);
   let copiado = $state(false);
+  let comandoCopiado = $state(false);
+  let conferindo = $state(false);
+  let timer: ReturnType<typeof setInterval> | undefined;
 
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -41,7 +47,35 @@
     preRequisito = null;
     copiado = false;
     void carregar();
+    // Fechar a folha (ou desmontar) para a conferência: ninguém está esperando a resposta.
+    return pararConferencia;
   });
+
+  function pararConferencia() {
+    clearInterval(timer);
+    timer = undefined;
+    conferindo = false;
+  }
+
+  // Liberar acontece no site do Tailscale; daqui só dá pra perguntar ao backend até ficar pronto.
+  function conferir() {
+    pararConferencia();
+    conferindo = true;
+    const fim = Date.now() + CONFERIR_ATE_MS;
+    const id = setInterval(async () => {
+      if (Date.now() > fim) { pararConferencia(); return; }
+      let r: SharePrereqs;
+      try {
+        r = await withServer(serverId, () => sharePrereqs());
+      } catch {
+        return;
+      }
+      if (timer !== id) return;
+      preRequisito = r.missing.length ? r : null;
+      if (!preRequisito) pararConferencia();
+    }, CONFERIR_MS);
+    timer = id;
+  }
 
   async function gerar() {
     if (gerando) return;
@@ -49,15 +83,22 @@
     erroGerar = '';
     preRequisito = null;
     copiado = false;
+    comandoCopiado = false;
     try {
       criado = await withServer(serverId, () => createShare(name));
       void carregar();
     } catch (e) {
-      if (e instanceof SharePrerequisiteError) preRequisito = e;
+      if (e instanceof SharePrerequisiteError) preRequisito = { missing: e.missing, fix: e.fix, enable_url: e.enableUrl };
       else erroGerar = msg(e);
     } finally {
       gerando = false;
     }
+  }
+
+  async function copiarComando() {
+    if (!comandoOperador) return;
+    await copyText(comandoOperador);
+    comandoCopiado = true;
   }
 
   async function copiar() {
@@ -92,6 +133,10 @@
     (preRequisito?.missing ?? []).map((f) =>
       f === 'operator' ? m.compartilhar_falta_operador() : f === 'funnel' ? m.compartilhar_falta_funnel() : f),
   );
+  // Só a linha do comando: colar o `fix` inteiro num terminal rodaria também a frase do Funnel.
+  const comandoOperador = $derived(
+    preRequisito?.missing.includes('operator') ? preRequisito.fix.split('\n').find((l) => l.includes('--operator=')) ?? '' : '',
+  );
 </script>
 
 <BottomSheet {open} {onClose} ariaLabel={m.compartilhar_titulo({ nome: name })} centered={desktop.atual}>
@@ -111,7 +156,7 @@
         </div>
       </div>
     {:else}
-      <button type="button" class="share-btn primario" onclick={gerar} disabled={gerando}>
+      <button type="button" class="share-btn primario" onclick={gerar} disabled={gerando || conferindo}>
         {gerando ? m.compartilhar_gerando() : m.compartilhar_gerar()}
       </button>
     {/if}
@@ -121,6 +166,17 @@
         <p>{m.compartilhar_pre_requisito()}</p>
         <ul>{#each faltas as f (f)}<li>{f}</li>{/each}</ul>
         {#if preRequisito.fix}<code class="share-fix">{preRequisito.fix}</code>{/if}
+        <div class="share-acoes">
+          {#if comandoOperador}
+            <button type="button" class="share-btn" onclick={copiarComando}>{comandoCopiado ? m.compartilhar_copiado() : m.compartilhar_copiar()}</button>
+          {/if}
+          {#if preRequisito.enable_url}
+            <a class="share-btn primario" href={preRequisito.enable_url} target="_blank" rel="noopener noreferrer"
+               onclick={conferir}>{m.compartilhar_liberar_tailscale()}</a>
+          {/if}
+        </div>
+        {#if comandoOperador}<p class="share-sub">{m.compartilhar_operador_dica()}</p>{/if}
+        {#if conferindo}<p class="share-sub" role="status">{m.compartilhar_conferindo()}</p>{/if}
       </div>
     {:else if erroGerar}
       <p class="share-erro" role="alert">{erroGerar}</p>

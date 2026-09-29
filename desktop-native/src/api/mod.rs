@@ -261,10 +261,16 @@ impl Api {
             .map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
         if r.status() == StatusCode::CONFLICT {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
-            if let Some((missing, fix)) = share_blocked(&body) { return Err(ShareFailure::Blocked { missing, fix }); }
+            if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
             return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false }));
         }
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
+    }
+
+    /// Só consulta o que falta; não liga o Funnel.
+    pub async fn share_prereqs(&self) -> Result<SharePrereqs, Failure> {
+        let value = self.server_read(&["share", "prereqs"], &[], 15).await?;
+        serde_json::from_value(value).map_err(|_| Failure::local("invalid_response"))
     }
 
     pub async fn shares(&self, name: &str) -> Result<Vec<ShareEntry>, Failure> {
@@ -420,17 +426,19 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
 
-pub enum ShareFailure { Blocked { missing: Vec<String>, fix: String }, Other(Failure) }
+/// Tudo o que falta na máquina para o Funnel subir (operador, liberação na tailnet) e como resolver. `enable_url` só vem
+/// com `funnel` faltando.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct SharePrereqs { pub missing: Vec<String>, pub fix: String, pub enable_url: Option<String> }
 
-/// Tudo o que falta na máquina para o Funnel subir (operador, liberação na tailnet) e como resolver. Lista vazia ainda é
-/// pré-requisito: o `fix` diz o que fazer.
-pub fn share_blocked(body: &Value) -> Option<(Vec<String>, String)> {
+pub enum ShareFailure { Blocked(SharePrereqs), Other(Failure) }
+
+/// Lista vazia ainda é pré-requisito: o `fix` diz o que fazer.
+pub fn share_blocked(body: &Value) -> Option<SharePrereqs> {
     let detail = body.get("detail")?;
     if detail.get("code")?.as_str()? != "erro_compartilhar_pre_requisito" { return None; }
-    let params = detail.get("params");
-    let text = |key: &str| params.and_then(|p| p.get(key));
-    let missing = text("missing").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
-    Some((missing, text("fix").and_then(Value::as_str).unwrap_or_default().to_owned()))
+    Some(detail.get("params").cloned().and_then(|p| serde_json::from_value(p).ok()).unwrap_or_default())
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -465,9 +473,13 @@ mod tests {
     fn share_prerequisite_is_read_from_the_409_body() {
         let body = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "msg": "x",
             "params": {"missing": ["operator", "funnel"], "fix": "sudo tailscale set --operator=$USER"}}});
-        assert_eq!(share_blocked(&body), Some((vec!["operator".into(), "funnel".into()], "sudo tailscale set --operator=$USER".into())));
+        assert_eq!(share_blocked(&body), Some(SharePrereqs { missing: vec!["operator".into(), "funnel".into()],
+            fix: "sudo tailscale set --operator=$USER".into(), enable_url: None }));
         let empty = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "params": {"missing": [], "fix": "https://login.tailscale.com/admin"}}});
-        assert_eq!(share_blocked(&empty), Some((vec![], "https://login.tailscale.com/admin".into())));
+        assert_eq!(share_blocked(&empty), Some(SharePrereqs { fix: "https://login.tailscale.com/admin".into(), ..Default::default() }));
+        let funnel = json!({"detail": {"code": "erro_compartilhar_pre_requisito",
+            "params": {"missing": ["funnel"], "fix": "libere", "enable_url": "https://login.tailscale.com/f/funnel?node=n1"}}});
+        assert_eq!(share_blocked(&funnel).and_then(|p| p.enable_url).as_deref(), Some("https://login.tailscale.com/f/funnel?node=n1"));
         assert_eq!(share_blocked(&json!({"detail": {"code": "erro_outro", "params": {"missing": ["a"], "fix": "b"}}})), None);
         assert_eq!(share_blocked(&json!({"detail": "texto"})), None);
     }

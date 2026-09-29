@@ -81,7 +81,37 @@ def test_pre_requisito_faltando_nao_grava_nada(cli, monkeypatch):
     assert d["code"] == "erro_compartilhar_pre_requisito"
     assert d["params"]["missing"] == ["operator"]
     assert "--operator" in d["params"]["fix"]
+    assert "enable_url" not in d["params"]
     assert share_store.has_active() is False
+
+
+def test_funnel_faltando_leva_o_link_de_liberar(cli, monkeypatch):
+    def falha():
+        raise share_tunnel.TunnelError(["funnel"], "libere", "https://login.tailscale.com/f/funnel?node=n1")
+    monkeypatch.setattr(share_tunnel, "ensure_on", falha)
+    d = cli.post("/api/sessions/proj/share", headers=AUTH).json()["detail"]
+    assert d["params"]["enable_url"] == "https://login.tailscale.com/f/funnel?node=n1"
+
+
+def test_prereqs_do_dono(cli, monkeypatch):
+    assert cli.get("/api/share/prereqs").status_code == 401
+    pre = {"missing": ["funnel"], "fix": "libere", "enable_url": "https://login.tailscale.com/f/funnel?node=n1"}
+    monkeypatch.setattr(share_tunnel, "prereqs", lambda: pre)
+    assert cli.get("/api/share/prereqs", headers=AUTH).json() == pre
+
+
+def test_prereqs_sem_tailscale_e_409_de_pre_requisito(cli, monkeypatch):
+    def sem():
+        raise share_tunnel.TunnelError([], "tailscale nao encontrado")
+    monkeypatch.setattr(share_tunnel, "prereqs", sem)
+    r = cli.get("/api/share/prereqs", headers=AUTH)
+    assert r.status_code == 409
+    assert r.json()["detail"]["params"] == {"missing": [], "fix": "tailscale nao encontrado"}
+
+
+def test_prereqs_fora_da_porta_do_convidado():
+    from app.share_gate import guest_allowed
+    assert guest_allowed("GET", "/api/share/prereqs", "proj") is False
 
 
 def test_fechar_sessao_revoga(cli, syncs, monkeypatch):

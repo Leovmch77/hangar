@@ -299,8 +299,12 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
 
 - **Quem entra pode tudo nesta máquina, como você.** A sessão roda comandos sem pedir permissão e o
   terminal alcança suas outras sessões. Compartilhe só com quem você confia.
-- **Pré-requisitos, uma vez só:** `sudo tailscale set --operator=$USER` (o `install.sh` já roda) e o
-  Funnel liberado na política da tailnet (o próprio diálogo mostra o comando ou o link quando falta).
+- **Pré-requisitos, uma vez só:** `sudo tailscale set --operator=$USER` (só no Linux; o `install.sh`
+  já roda) e o Funnel liberado na política da tailnet. Quando falta algo, o diálogo mostra dois botões:
+  **"Autorizar"** (app nativo no Linux, com o servidor desta máquina) pede a sua senha e libera o
+  operador; no web o comando aparece com "Copiar". **"Liberar no Tailscale"** abre a página do
+  Tailscale que libera o Funnel e fica conferindo por 5 min: liberou, o aviso some e o "Gerar link de
+  convite" volta.
 - **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
   `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
 - **Receber:** no app nativo, clique no link (ou "Entrar em sessão compartilhada" na página Máquinas

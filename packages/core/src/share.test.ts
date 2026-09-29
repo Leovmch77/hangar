@@ -3,7 +3,7 @@ import {
   parseInviteLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError,
 } from './share';
 import { configureApi, type ApiEnv } from './apiEnv';
-import { getConfig, getAtualizacao, checkInviteForServer, createShare } from './api';
+import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs } from './api';
 import type { Server } from './servers';
 
 const CONVITE: Server = { id: 'srv-i', label: 'Convite · J', baseUrl: 'https://dono.ts.net:8443', token: 'tg', invite: true };
@@ -147,5 +147,26 @@ describe('createShare', () => {
     expect(e).toBeInstanceOf(SharePrerequisiteError);
     expect((e as SharePrerequisiteError).missing).toEqual(['operator']);
     expect((e as SharePrerequisiteError).fix).toBe('sudo tailscale set --operator=$USER');
+    expect((e as SharePrerequisiteError).enableUrl).toBeNull();
+  });
+  it('409 com funnel faltando traz o link de liberar', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(409, { detail: {
+      code: 'erro_compartilhar_pre_requisito', msg: 'x',
+      params: { missing: ['funnel'], fix: 'libere', enable_url: 'https://login.tailscale.com/f/funnel?node=n1' },
+    } }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect((e as SharePrerequisiteError).enableUrl).toBe('https://login.tailscale.com/f/funnel?node=n1');
+  });
+});
+
+describe('sharePrereqs', () => {
+  it('consulta a rota do dono sem ligar nada', async () => {
+    ambiente();
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(200, { missing: [], fix: '', enable_url: null }));
+    expect(await sharePrereqs()).toEqual({ missing: [], fix: '', enable_url: null });
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe('https://dono.ts.net:8443/api/share/prereqs');
+    expect(init?.method).toBeUndefined();
   });
 });

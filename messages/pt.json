@@ -5921,6 +5921,12 @@
   "native_invite_badge": "convidado",
   "native_invite_own_server": "Este endereço já é uma máquina sua na lista. Abra a sessão por ela; o convite não foi usado.",
   "native_share_open_link": "Abrir link",
+  "native_share_authorize": "Autorizar",
+  "native_share_authorizing": "Autorizando…",
+  "native_share_authorize_dismissed": "Autorização cancelada.",
+  "native_share_authorize_denied": "O sistema não autorizou. Rode o comando acima num terminal.",
+  "native_share_authorize_missing": "Esta máquina não tem o pkexec. Rode o comando acima num terminal.",
+  "native_share_authorize_failed": "Não deu para autorizar: {erro}",
   "erro_compartilhar_pre_requisito": "Falta configurar o compartilhamento nesta máquina.",
   "erro_compartilhamento_inexistente": "Esse acesso não existe mais.",
   "convite_erro_rede": "Não deu para falar com a máquina do convite.",
@@ -5964,6 +5970,9 @@
   "compartilhar_tentar_de_novo": "Tentar de novo",
   "compartilhar_pre_requisito": "Falta configurar o compartilhamento nesta máquina:",
   "compartilhar_falta_operador": "o backend ainda não pode ligar o Funnel do Tailscale",
-  "compartilhar_falta_funnel": "o Funnel não está liberado na sua tailnet"
+  "compartilhar_falta_funnel": "o Funnel não está liberado na sua tailnet",
+  "compartilhar_liberar_tailscale": "Liberar no Tailscale",
+  "compartilhar_conferindo": "Esperando a liberação no Tailscale…",
+  "compartilhar_operador_dica": "No app nativo do Hangar nesta máquina, o botão Autorizar faz isso com um clique."
 
 }

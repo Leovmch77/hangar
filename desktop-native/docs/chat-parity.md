@@ -188,6 +188,8 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | "Compartilhar sessão" no menu da sessão (some em servidor de convite), diálogo com aviso de confiança, gerar link (aparece uma vez), copiar, WhatsApp, quem tem acesso, revogar um e encerrar todos, pré-requisito do Funnel com o comando de correção | implementado | `share.rs`; sem exercício na janela real; quando o diálogo abre só a lista é lida, o link nasce no botão |
 | 🔗 na linha da sessão compartilhada, com dica | implementado | `SessionInfo.shared`; o web marca a linha do mesmo jeito |
 | Botão "Abrir link" quando o `fix` do pré-requisito é uma URL | diferença deliberada | o web só mostra o texto do `fix`; no nativo a URL abre no navegador e um comando vira "Copiar" |
+| "Liberar no Tailscale" (abre o `enable_url` e confere `GET /api/share/prereqs` a cada 3 s, por até 5 min, enquanto o diálogo está aberto; liberado, some o aviso e o "Gerar" volta) e "Copiar" só da linha do comando do operador | implementado | nos dois clientes; sem exercício na janela real |
+| "Autorizar" o operador com `pkexec tailscale set --operator=<usuário>` | diferença deliberada | só no nativo, no Linux e com o servidor ativo em loopback: o `pkexec` precisa do agente de senha da sessão gráfica, que o backend (serviço de systemd) não tem; o web mostra o comando com "Copiar" e a dica de que o app nativo desta máquina autoriza com um clique |
 | Campo do link selecionável e com seleção automática ao focar | pendente | o nativo mostra o link como texto (não selecionável), com "Copiar"; sem `Input` somente leitura no diálogo |
 ## Como rodar a prova
 

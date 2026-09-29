@@ -35,13 +35,18 @@ export class InviteRedeemError extends Error {
   }
 }
 
+// O que falta para o dono compartilhar (`GET /api/share/prereqs`); `enable_url` só vem com `funnel` faltando.
+export interface SharePrereqs { missing: string[]; fix: string; enable_url: string | null }
+
 export class SharePrerequisiteError extends Error {
   readonly missing: string[];
   readonly fix: string;
-  constructor(missing: string[], fix: string, message: string) {
+  readonly enableUrl: string | null;
+  constructor(missing: string[], fix: string, message: string, enableUrl: string | null = null) {
     super(message);
     this.missing = missing;
     this.fix = fix;
+    this.enableUrl = enableUrl;
   }
 }
 

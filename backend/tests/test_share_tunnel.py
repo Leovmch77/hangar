@@ -11,6 +11,7 @@ class FakeTailscale:
         self.funnel_cap = funnel_cap
         self.operator = operator
         self.on = on
+        self.funnel_reply: tuple[str, int] | None = None
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, *args):
@@ -18,7 +19,7 @@ class FakeTailscale:
         out, rc = "", 0
         if args[:2] == ("status", "--json"):
             cap = {"funnel": None, "https": None} if self.funnel_cap else {"https": None}
-            out = json.dumps({"Self": {"DNSName": "nb.tail1.ts.net.", "CapMap": cap}})
+            out = json.dumps({"Self": {"ID": "nKA3Du", "DNSName": "nb.tail1.ts.net.", "CapMap": cap}})
         elif args[:2] == ("debug", "prefs"):
             out = json.dumps({"OperatorUser": self.operator} if self.operator else {})
         elif args[:3] == ("funnel", "status", "--json"):
@@ -27,6 +28,8 @@ class FakeTailscale:
             if not self.on:
                 out, rc = "error: handler does not exist", 1
             self.on = False
+        elif args[0] == "funnel" and self.funnel_reply:
+            out, rc = self.funnel_reply
         elif args[0] == "funnel":
             self.on = True
         return subprocess.CompletedProcess(["tailscale", *args], rc, stdout=out, stderr="")
@@ -37,6 +40,7 @@ def fake(monkeypatch):
     f = FakeTailscale()
     monkeypatch.setattr(share_tunnel, "_run", f)
     monkeypatch.setattr(share_tunnel.getpass, "getuser", lambda: "jefferson")
+    monkeypatch.setattr(share_tunnel.sys, "platform", "linux")
     return f
 
 
@@ -57,7 +61,42 @@ def test_ensure_on_sem_operador_e_sem_funnel_diz_o_que_falta(fake):
         share_tunnel.ensure_on()
     assert e.value.missing == ["operator", "funnel"]
     assert "tailscale set --operator=" in e.value.fix
+    assert e.value.enable_url == "https://login.tailscale.com/f/funnel?node=nKA3Du"
     assert not any(c[0] == "funnel" and "status" not in c for c in fake.calls)
+
+
+def test_so_operador_faltando_nao_leva_link_do_funnel(fake):
+    fake.operator = None
+    with pytest.raises(share_tunnel.TunnelError) as e:
+        share_tunnel.ensure_on()
+    assert e.value.missing == ["operator"] and e.value.enable_url is None
+
+
+@pytest.mark.parametrize("plataforma", ["win32", "darwin"])
+def test_fora_do_linux_operador_nao_e_exigido(fake, monkeypatch, plataforma):
+    monkeypatch.setattr(share_tunnel.sys, "platform", plataforma)
+    fake.operator = None
+    assert share_tunnel.ensure_on() == "https://nb.tail1.ts.net:8443"
+    assert not any(c[:2] == ("debug", "prefs") for c in fake.calls)
+
+
+def test_link_impresso_pelo_tailscale_vence_o_montado(fake):
+    fake.funnel_reply = ("Funnel is not enabled on your tailnet.\nTo enable, visit:\n\n"
+                         "         https://login.tailscale.com/f/funnel?node=nKA3Du&x=1\n", 1)
+    with pytest.raises(share_tunnel.TunnelError) as e:
+        share_tunnel.ensure_on()
+    assert e.value.missing == ["funnel"]
+    assert e.value.enable_url == "https://login.tailscale.com/f/funnel?node=nKA3Du&x=1"
+
+
+def test_prereqs_so_consulta_e_diz_o_que_falta(fake):
+    fake.funnel_cap = False
+    assert share_tunnel.prereqs() == {
+        "missing": ["funnel"], "fix": share_tunnel._FIX_FUNNEL,
+        "enable_url": "https://login.tailscale.com/f/funnel?node=nKA3Du"}
+    fake.funnel_cap = True
+    assert share_tunnel.prereqs() == {"missing": [], "fix": "", "enable_url": None}
+    assert not any(c[0] == "funnel" for c in fake.calls)
 
 
 def test_ensure_off_e_idempotente(fake):

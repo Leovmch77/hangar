@@ -72,11 +72,30 @@ def _create(name: str) -> dict:
     try:
         base = share_tunnel.ensure_on()
     except share_tunnel.TunnelError as e:
-        raise HTTPException(409, detail=erro(
-            "erro_compartilhar_pre_requisito", f"falta preparar o compartilhamento: {e.fix}",
-            missing=e.missing, fix=e.fix))
+        raise _prereq_error(e)
     s, code = share_store.create(name, life)
     return {"id": s.id, "link": f"{base}/convite/{code}", "expires_at": s.code_expires_at}
+
+
+def _prereq_error(e: share_tunnel.TunnelError) -> HTTPException:
+    params = {"missing": e.missing, "fix": e.fix}
+    if e.enable_url:
+        params["enable_url"] = e.enable_url
+    return HTTPException(409, detail=erro(
+        "erro_compartilhar_pre_requisito", f"falta preparar o compartilhamento: {e.fix}", **params))
+
+
+def _prereqs() -> dict:
+    try:
+        return share_tunnel.prereqs()
+    except share_tunnel.TunnelError as e:
+        # Sem tailscale ou deslogado: mesma resposta do gerar, e quem confere segue esperando.
+        raise _prereq_error(e)
+
+
+@router.get("/api/share/prereqs", dependencies=[Depends(require_auth)])
+async def share_prereqs():
+    return await asyncio.to_thread(_prereqs)
 
 
 @router.post("/api/sessions/{name}/share", dependencies=[Depends(require_auth)])

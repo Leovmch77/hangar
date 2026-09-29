@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import getpass
 import json
+import re
+import sys
 
 from app import tunnel
 
@@ -16,13 +18,15 @@ FUNNEL_PORT = 8443
 _FIX_OPERATOR = "sudo tailscale set --operator=$USER"
 _FIX_FUNNEL = ("libere o Funnel na política da tailnet (nodeAttrs \"funnel\"): "
                "https://login.tailscale.com/admin/acls/file")
+_LOGIN_URL = re.compile(r"https://login\.tailscale\.com/\S+")
 
 
 class TunnelError(Exception):
-    def __init__(self, missing: list[str], fix: str):
+    def __init__(self, missing: list[str], fix: str, enable_url: str | None = None):
         super().__init__(fix)
         self.missing = missing
         self.fix = fix
+        self.enable_url = enable_url
 
 
 def _run(*args: str):
@@ -53,17 +57,32 @@ def host() -> str:
 
 def _missing(self_status: dict) -> list[str]:
     faltam = []
-    p = _call("debug", "prefs")
-    try:
-        operador = json.loads(p.stdout).get("OperatorUser") or ""
-    except ValueError:
-        operador = ""
-    if operador != getpass.getuser():
-        faltam.append("operator")
+    # Operador é coisa do tailscaled do Linux; no Windows e no macOS o app do Tailscale não o usa.
+    if sys.platform.startswith("linux"):
+        p = _call("debug", "prefs")
+        try:
+            operador = json.loads(p.stdout).get("OperatorUser") or ""
+        except ValueError:
+            operador = ""
+        if operador != getpass.getuser():
+            faltam.append("operator")
     caps = self_status.get("CapMap") or {}
     if not any(k == "funnel" or k.startswith("https://tailscale.com/cap/funnel") for k in caps):
         faltam.append("funnel")
     return faltam
+
+
+def _prereqs(self_status: dict) -> dict:
+    faltam = _missing(self_status)
+    fixes = {"operator": _FIX_OPERATOR, "funnel": _FIX_FUNNEL}
+    node = self_status.get("ID") or ""
+    enable_url = f"https://login.tailscale.com/f/funnel?node={node}" if node and "funnel" in faltam else None
+    return {"missing": faltam, "fix": "\n".join(fixes[f] for f in faltam), "enable_url": enable_url}
+
+
+def prereqs() -> dict:
+    """O que falta para o Funnel subir, sem ligar nada."""
+    return _prereqs(_status())
 
 
 def _is_on() -> bool:
@@ -78,13 +97,16 @@ def _is_on() -> bool:
 def ensure_on() -> str:
     s = _status()
     name = (s.get("DNSName") or "").rstrip(".")
-    faltam = _missing(s)
-    if faltam:
-        fixes = {"operator": _FIX_OPERATOR, "funnel": _FIX_FUNNEL}
-        raise TunnelError(faltam, "\n".join(fixes[f] for f in faltam))
+    pre = _prereqs(s)
+    if pre["missing"]:
+        raise TunnelError(pre["missing"], pre["fix"], pre["enable_url"])
     p = _call("funnel", "--bg", "--yes", f"--https={FUNNEL_PORT}", f"http://127.0.0.1:{GUEST_PORT}")
     if p.returncode != 0:
-        raise TunnelError([], (p.stderr or p.stdout or "tailscale funnel falhou").strip())
+        out = (p.stderr or p.stdout or "tailscale funnel falhou").strip()
+        # A tailnet recusou o Funnel e o próprio tailscale imprimiu o link para liberar.
+        if hit := _LOGIN_URL.search(p.stdout + p.stderr):
+            raise TunnelError(["funnel"], _FIX_FUNNEL, hit.group(0))
+        raise TunnelError([], out)
     return f"https://{name}:{FUNNEL_PORT}"
 
 

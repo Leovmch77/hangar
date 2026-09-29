@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import * as m from '../paraglide/messages';
 
 const core = vi.hoisted(() => ({
-  listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(),
+  listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
 }));
 vi.mock('../lib/auth', () => ({ withServer: (_id: string, fn: () => unknown) => fn() }));
 vi.mock('../lib/clipboard', () => ({ copyText: vi.fn(async () => {}) }));
@@ -17,10 +17,10 @@ const ShareSessionSheet = (await import('./ShareSessionSheet.svelte')).default;
 const { SharePrerequisiteError } = await import('@hangar/core');
 
 async function settle() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await tick(); } }
-function montar() {
+function montar(props: { open: boolean } = { open: true }) {
   const el = document.createElement('div');
   document.body.appendChild(el);
-  return mount(ShareSessionSheet, { target: el, props: { open: true, name: 's1', serverId: 'srv-a', onClose: vi.fn() } });
+  return mount(ShareSessionSheet, { target: el, props: { get open() { return props.open; }, name: 's1', serverId: 'srv-a', onClose: vi.fn() } });
 }
 const botao = (t: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === t)!;
 const agora = () => Math.floor(Date.now() / 1000);
@@ -67,6 +67,97 @@ describe('ShareSessionSheet', () => {
     expect(document.body.textContent).toContain(m.compartilhar_falta_funnel());
     expect(document.body.textContent).toContain('https://login.tailscale.com/f/funnel');
     unmount(c);
+  });
+
+  describe('liberar no Tailscale', () => {
+    const LIBERAR = 'https://login.tailscale.com/f/funnel?node=n1';
+    const liberar = () => document.querySelector<HTMLAnchorElement>(`a[href="${LIBERAR}"]`);
+    async function bloqueado(missing = ['funnel'], fix = 'libere', enableUrl: string | null = LIBERAR) {
+      core.listShares.mockResolvedValue({ shares: [] });
+      core.createShare.mockRejectedValue(new SharePrerequisiteError(missing, fix, 'x', enableUrl));
+      botao(m.compartilhar_gerar()).click();
+      await settle();
+    }
+    // O link abre em outra aba; no teste só interessa o clique chegar ao componente.
+    function clicarLiberar() {
+      document.addEventListener('click', (e) => e.preventDefault(), { capture: true, once: true });
+      liberar()!.click();
+    }
+
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it('confere a cada 3 s e, liberado, some o aviso e o gerar volta', async () => {
+      core.listShares.mockResolvedValue({ shares: [] });
+      const c = montar();
+      await settle();
+      await bloqueado();
+      clicarLiberar();
+      await settle();
+      expect(botao(m.compartilhar_gerar()).disabled).toBe(true);
+      expect(document.body.textContent).toContain(m.compartilhar_conferindo());
+
+      core.sharePrereqs.mockResolvedValueOnce({ missing: ['funnel'], fix: 'libere', enable_url: LIBERAR });
+      await vi.advanceTimersByTimeAsync(3000);
+      await settle();
+      expect(liberar()).not.toBeNull();
+
+      core.sharePrereqs.mockResolvedValueOnce({ missing: [], fix: '', enable_url: null });
+      await vi.advanceTimersByTimeAsync(3000);
+      await settle();
+      expect(liberar()).toBeNull();
+      expect(document.body.textContent).not.toContain(m.compartilhar_pre_requisito());
+      expect(botao(m.compartilhar_gerar()).disabled).toBe(false);
+      await vi.advanceTimersByTimeAsync(9000);
+      expect(core.sharePrereqs).toHaveBeenCalledTimes(2);
+      unmount(c);
+    });
+
+    it('fechar a folha para a conferência', async () => {
+      core.listShares.mockResolvedValue({ shares: [] });
+      core.sharePrereqs.mockResolvedValue({ missing: ['funnel'], fix: 'libere', enable_url: LIBERAR });
+      const props = $state({ open: true });
+      const c = montar(props);
+      await settle();
+      await bloqueado();
+      clicarLiberar();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(core.sharePrereqs).toHaveBeenCalledTimes(1);
+      props.open = false;
+      await settle();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(core.sharePrereqs).toHaveBeenCalledTimes(1);
+      unmount(c);
+    });
+
+    it('para sozinha depois de 5 min', async () => {
+      core.listShares.mockResolvedValue({ shares: [] });
+      core.sharePrereqs.mockRejectedValue(new Error('409'));
+      const c = montar();
+      await settle();
+      await bloqueado();
+      clicarLiberar();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 6000);
+      const n = core.sharePrereqs.mock.calls.length;
+      expect(n).toBeGreaterThanOrEqual(99);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(core.sharePrereqs).toHaveBeenCalledTimes(n);
+      expect(botao(m.compartilhar_gerar()).disabled).toBe(false);
+      unmount(c);
+    });
+
+    it('operador faltando: copia só a linha do comando e dá a dica do app nativo', async () => {
+      core.listShares.mockResolvedValue({ shares: [] });
+      const c = montar();
+      await settle();
+      await bloqueado(['operator', 'funnel'], 'sudo tailscale set --operator=$USER\nlibere o Funnel');
+      const { copyText } = await import('../lib/clipboard');
+      botao(m.compartilhar_copiar()).click();
+      await settle();
+      expect(copyText).toHaveBeenCalledWith('sudo tailscale set --operator=$USER');
+      expect(document.body.textContent).toContain(m.compartilhar_operador_dica());
+      unmount(c);
+    });
   });
 
   it('revogar um acesso chama a rota com a sessão e o id, e recarrega', async () => {
