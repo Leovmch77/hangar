@@ -105,7 +105,7 @@ def ensure_on() -> str:
         out = (p.stderr or p.stdout or "tailscale funnel falhou").strip()
         # A tailnet recusou o Funnel e o próprio tailscale imprimiu o link para liberar.
         if hit := _LOGIN_URL.search(p.stdout + p.stderr):
-            raise TunnelError(["funnel"], _FIX_FUNNEL, hit.group(0))
+            raise TunnelError(["funnel"], _FIX_FUNNEL, hit.group(0).rstrip(".,;)"))
         raise TunnelError([], out)
     return f"https://{name}:{FUNNEL_PORT}"
 

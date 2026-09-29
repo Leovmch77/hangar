@@ -8,7 +8,7 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 import { registrar as registrarDiag, novoReq } from './diag';
 import { retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import {
-  inviteAllows, SharePrerequisiteError, type ShareCreated, type ShareInfo, type SharePrereqs,
+  inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
 import type { CotaContaResumo } from './cotaResumo';
 import type { UsoFiltros, UsoReport } from './uso';
@@ -2777,7 +2777,7 @@ export async function createShare(name: string): Promise<ShareCreated> {
         Array.isArray(d.params?.missing) ? d.params.missing : [],
         typeof d.params?.fix === 'string' ? d.params.fix : '',
         formataErro(d) ?? m.erro_compartilhar_pre_requisito(),
-        typeof d.params?.enable_url === 'string' ? d.params.enable_url : null,
+        tailscaleEnableUrl(d.params?.enable_url),
       );
     }
   }
@@ -2786,8 +2786,9 @@ export async function createShare(name: string): Promise<ShareCreated> {
 }
 
 // Só consulta: não liga o Funnel. Sem tailscale responde 409, e quem confere segue esperando.
-export function sharePrereqs(): Promise<SharePrereqs> {
-  return apiFetch('/api/share/prereqs');
+export async function sharePrereqs(): Promise<SharePrereqs> {
+  const r = await apiFetch<SharePrereqs>('/api/share/prereqs');
+  return { ...r, enable_url: tailscaleEnableUrl(r.enable_url) };
 }
 
 export function listShares(name: string): Promise<{ shares: ShareInfo[] }> {

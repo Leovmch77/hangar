@@ -89,6 +89,13 @@ def test_link_impresso_pelo_tailscale_vence_o_montado(fake):
     assert e.value.enable_url == "https://login.tailscale.com/f/funnel?node=nKA3Du&x=1"
 
 
+def test_link_impresso_perde_a_pontuacao_da_frase(fake):
+    fake.funnel_reply = ("To enable, visit (https://login.tailscale.com/f/funnel?node=nKA3Du).", 1)
+    with pytest.raises(share_tunnel.TunnelError) as e:
+        share_tunnel.ensure_on()
+    assert e.value.enable_url == "https://login.tailscale.com/f/funnel?node=nKA3Du"
+
+
 def test_prereqs_so_consulta_e_diz_o_que_falta(fake):
     fake.funnel_cap = False
     assert share_tunnel.prereqs() == {

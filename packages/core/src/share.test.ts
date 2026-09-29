@@ -158,6 +158,15 @@ describe('createShare', () => {
     const e = await createShare('s1').catch((x: unknown) => x);
     expect((e as SharePrerequisiteError).enableUrl).toBe('https://login.tailscale.com/f/funnel?node=n1');
   });
+  it('409 com enable_url fora do Tailscale descarta o link', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(409, { detail: {
+      code: 'erro_compartilhar_pre_requisito', msg: 'x',
+      params: { missing: ['funnel'], fix: 'libere', enable_url: 'javascript:alert(1)' },
+    } }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect((e as SharePrerequisiteError).enableUrl).toBeNull();
+  });
 });
 
 describe('sharePrereqs', () => {
@@ -168,5 +177,16 @@ describe('sharePrereqs', () => {
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe('https://dono.ts.net:8443/api/share/prereqs');
     expect(init?.method).toBeUndefined();
+  });
+  it('só a página do Tailscale passa como enable_url', async () => {
+    ambiente();
+    const ok = 'https://login.tailscale.com/f/funnel?node=n1';
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(resposta(200, { missing: ['funnel'], fix: 'x', enable_url: 'javascript:alert(1)' }))
+      .mockResolvedValueOnce(resposta(200, { missing: ['funnel'], fix: 'x', enable_url: 'https://login.tailscale.com.evil.io/f' }))
+      .mockResolvedValueOnce(resposta(200, { missing: ['funnel'], fix: 'x', enable_url: ok }));
+    expect((await sharePrereqs()).enable_url).toBeNull();
+    expect((await sharePrereqs()).enable_url).toBeNull();
+    expect((await sharePrereqs()).enable_url).toBe(ok);
   });
 });

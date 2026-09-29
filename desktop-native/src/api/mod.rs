@@ -430,7 +430,13 @@ pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_
 /// com `funnel` faltando.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 #[serde(default)]
-pub struct SharePrereqs { pub missing: Vec<String>, pub fix: String, pub enable_url: Option<String> }
+pub struct SharePrereqs { pub missing: Vec<String>, pub fix: String, #[serde(deserialize_with = "tailscale_link")] pub enable_url: Option<String> }
+
+/// O link vem do servidor e vai para `open_url`: só a página do Tailscale passa, qualquer outro esquema ou host vira `None`.
+fn tailscale_link<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let value = <Option<String> as serde::Deserialize>::deserialize(d).unwrap_or(None);
+    Ok(value.filter(|url| url.starts_with("https://login.tailscale.com/")))
+}
 
 pub enum ShareFailure { Blocked(SharePrereqs), Other(Failure) }
 
@@ -480,6 +486,13 @@ mod tests {
         let funnel = json!({"detail": {"code": "erro_compartilhar_pre_requisito",
             "params": {"missing": ["funnel"], "fix": "libere", "enable_url": "https://login.tailscale.com/f/funnel?node=n1"}}});
         assert_eq!(share_blocked(&funnel).and_then(|p| p.enable_url).as_deref(), Some("https://login.tailscale.com/f/funnel?node=n1"));
+        for bad in [json!("javascript:alert(1)"), json!("https://login.tailscale.com.evil.io/f"), json!(7)] {
+            let body = json!({"detail": {"code": "erro_compartilhar_pre_requisito", "params": {"missing": ["funnel"], "fix": "libere", "enable_url": bad}}});
+            let prereqs = share_blocked(&body).expect("still a prerequisite");
+            assert_eq!((prereqs.missing, prereqs.enable_url), (vec!["funnel".to_owned()], None));
+        }
+        let direct: SharePrereqs = serde_json::from_value(json!({"missing": ["funnel"], "enable_url": "javascript:alert(1)"})).unwrap();
+        assert_eq!(direct.enable_url, None);
         assert_eq!(share_blocked(&json!({"detail": {"code": "erro_outro", "params": {"missing": ["a"], "fix": "b"}}})), None);
         assert_eq!(share_blocked(&json!({"detail": "texto"})), None);
     }

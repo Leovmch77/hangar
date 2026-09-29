@@ -38,6 +38,12 @@ export class InviteRedeemError extends Error {
 // O que falta para o dono compartilhar (`GET /api/share/prereqs`); `enable_url` só vem com `funnel` faltando.
 export interface SharePrereqs { missing: string[]; fix: string; enable_url: string | null }
 
+// O link vem do servidor e vira `href`: um `javascript:` de um peer comprometido rodaria na origem
+// que guarda o token de todos os servidores. Só a página do Tailscale passa.
+export function tailscaleEnableUrl(value: unknown): string | null {
+  return typeof value === 'string' && value.startsWith('https://login.tailscale.com/') ? value : null;
+}
+
 export class SharePrerequisiteError extends Error {
   readonly missing: string[];
   readonly fix: string;
