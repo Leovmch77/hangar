@@ -116,17 +116,31 @@ def _issue(code: str, **params) -> dict:
     return {"code": code, "params": {k: str(v) for k, v in params.items()}}
 
 
+# Roda dentro do loop a cada preparo; a versão só muda quando o binário muda.
+_cli_versions: dict[tuple[str, int, int], str] = {}
+
+
 def _cli_version() -> str:
     binary = shutil.which("codex")
     if not binary:
         return "indisponível"
+    try:
+        stat = os.stat(binary)
+    except OSError:
+        return "indisponível"
+    key = (binary, stat.st_mtime_ns, stat.st_size)
+    if key in _cli_versions:
+        return _cli_versions[key]
     try:
         result = subprocess.run([binary, "--version"], capture_output=True, text=True,
                                 timeout=2, check=False)
     except (OSError, subprocess.SubprocessError):
         return "indisponível"
     lines = (result.stdout or "").strip().splitlines()
-    return lines[0][:80] if result.returncode == 0 and lines else "indisponível"
+    if result.returncode != 0 or not lines:
+        return "indisponível"
+    _cli_versions[key] = lines[0][:80]
+    return _cli_versions[key]
 
 
 _ETAPAS = ("configuracoes", "recursos", "plugins")

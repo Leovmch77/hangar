@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -23,6 +24,8 @@ _NATIVO = CodexNativo
 _REPO = Path(__file__).resolve().parents[2]
 _BUNDLED_MARKERS = (".tmp", "bundled-marketplaces")
 _MARKETPLACE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+# Recusa do `marketplace add` quando o clone existe mas o marketplace não está listado.
+_ORPHAN_CLONE = "is already added from a different source"
 
 
 def _issue(code: str, **params) -> dict:
@@ -354,7 +357,15 @@ async def _ensure_marketplace(native, entry: dict, plugin: dict,
                 args.extend(["--sparse", path])
     args.append("--json")
     try:
-        await native.cli(args)
+        try:
+            await native.cli(args, esperado=_ORPHAN_CLONE)
+        except CodexNativoErro as exc:
+            if _ORPHAN_CLONE not in str((exc.data or {}).get("stderr", "")):
+                raise
+            # Clone que o config perdeu: o `add` recusa pra sempre e cada preparo pagava um clone
+            # de rede em vão. O `remove` nativo apaga o clone órfão; o `add` volta a funcionar.
+            await native.cli(["plugin", "marketplace", "remove", name, "--json"])
+            await native.cli(args)
         current = _marketplace_map(await _marketplaces(native))
     except (OSError, ValueError, RuntimeError, CodexNativoErro):
         issues.append(_issue("codex_account_plugin_marketplace_add_failed", marketplace=name))
@@ -479,10 +490,12 @@ async def sync_plugins(source: Account, target: Account, previous: dict) -> dict
     try:
         source_native = _NATIVO(Path.home(), source.home, account=source)
         target_native = _NATIVO(Path.home(), target.home, account=target)
-        source_items = _plugins(await source_native.plugins_instalados())
-        target_items = _plugins(await target_native.plugins_instalados())
-        source_markets = _marketplace_map(await _marketplaces(source_native))
-        target_markets = _marketplace_map(await _marketplaces(target_native))
+        # Quatro leituras independentes: juntas, o inventário custa a mais lenta, não a soma.
+        inventory = await asyncio.gather(
+            source_native.plugins_instalados(), target_native.plugins_instalados(),
+            _marketplaces(source_native), _marketplaces(target_native))
+        source_items, target_items = _plugins(inventory[0]), _plugins(inventory[1])
+        source_markets, target_markets = _marketplace_map(inventory[2]), _marketplace_map(inventory[3])
         source_config = _config(source)
     except (OSError, ValueError, RuntimeError, CodexNativoErro) as exc:
         issues.append(_issue("codex_account_plugin_inventory_failed", error=type(exc).__name__))

@@ -1,6 +1,6 @@
 """Lista única de credenciais (app/credenciais.py) + apelido (app/apelidos.py).
 
-Nada de rede nem de disco real: `list_config_dirs`, `engines.listar`, `_login_de` e
+Nada de rede nem de disco real: `list_config_dirs`, `engines.listar`, `logins` e
 `cotas.listar_cotas` são trocados; o apelido escreve num `tmp_path` pela pasta compartilhada.
 """
 import json
@@ -61,7 +61,8 @@ def test_apelido_tem_teto_de_tamanho(casa):
 def _monta(monkeypatch, *, dirs=(), motores=None, cotas_lista=()):
     monkeypatch.setattr(credenciais, "list_config_dirs", lambda: list(dirs))
     monkeypatch.setattr(engines, "listar", lambda: dict(motores or {}))
-    monkeypatch.setattr(credenciais, "_login_de", lambda c: credenciais.EstadoLogin(estado="ok", loggedIn=True))
+    monkeypatch.setattr(credenciais, "logins",
+                        lambda cfgs: [credenciais.EstadoLogin(estado="ok", loggedIn=True) for _ in cfgs])
     monkeypatch.setattr(contas, "e_conta", lambda p: True)
     # `forcar=False` na assinatura: a lista aceita ?forcar=true (botão "atualizar" da tela),
     # que só repassa o flag pra cá — o mock recebe e ignora.
