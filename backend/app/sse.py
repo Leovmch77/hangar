@@ -427,6 +427,7 @@ class _ListRefresher:
     async def _run(self):
         while True:
             try:
+                started = time.monotonic()
                 snap = [i.model_copy() for i in await _cached_list()]
                 infos = await _list_registry.list_with_state(snap)
                 sig = _list_sig(infos)
@@ -462,7 +463,8 @@ class _ListRefresher:
                 continue
             # A cada tique, mesmo sem mudança na sig: o /api/sessions serve daqui campos que a sig
             # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
-            self.latest = (time.monotonic(), infos)
+            # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
+            self.latest = (started, infos)
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
             if data is not None:
                 if self.errored:
@@ -494,9 +496,18 @@ _list_refresher = _ListRefresher()
 def recent_list(max_age: float) -> list | None:
     """Última lista decorada do refresher, se viva e com no máximo `max_age` s. Só leitura."""
     latest = getattr(_list_refresher, "latest", None)
-    if latest is None or time.monotonic() - latest[0] > max_age:
+    if latest is None or time.monotonic() - latest[0] > max_age or latest[0] < _list_invalidated_at:
         return None
     return latest[1]
+
+
+# Criação/rename: a lista do refresher ainda não tem a sessão nova; /api/sessions recalcula.
+_list_invalidated_at = 0.0
+
+
+def invalidate_recent_list() -> None:
+    global _list_invalidated_at
+    _list_invalidated_at = time.monotonic()
 
 
 async def list_events(ping_secs: float = 8.0, only=None):

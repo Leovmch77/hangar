@@ -69,7 +69,7 @@ from app.adapters import CLAUDE_HEADLESS, get_adapter
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
-from app.sse import merged_events, nav_confirmar, nav_pendente
+from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
@@ -2170,6 +2170,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
             with _list_lock:
                 _list_snap["snap"] = None
+            invalidate_recent_list()
             return info
 
         worker = asyncio.create_task(asyncio.to_thread(create))
@@ -2505,6 +2506,7 @@ def _rename_session(name: str, body: RenameBody):
             atomico.substituir(od, nd)
         with _list_lock:
             _list_snap["snap"] = None
+        invalidate_recent_list()
         share_store.rename(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
