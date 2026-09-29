@@ -98,6 +98,13 @@ impl Engine {
     pub fn forward(&self) { self.report(self.view.evaluate_script("history.forward()")); }
     pub fn reload(&self) { self.report(self.view.reload()); }
 
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)] // Ligado ao hangar-preview no painel do navegador.
+    pub fn cdp(&self) -> super::cdp::Cdp {
+        use wry::WebViewExtWindows;
+        super::cdp::Cdp::new(self.view.webview())
+    }
+
     pub fn place(&self, bounds: Bounds<Pixels>, _window: &mut Window) {
         let hidden = self.placed.get().is_none();
         if self.placed.get() == Some(bounds) { return; }

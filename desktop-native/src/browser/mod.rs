@@ -1,6 +1,8 @@
 //! Navegador embutido do painel lateral. Motor por sistema, mesma superfície de chamada:
 //! Windows/macOS usam o webview do sistema (wry) como janela filha; Linux, WPE.
 pub mod model;
+#[cfg(target_os = "windows")]
+pub mod cdp;
 
 #[cfg(target_os = "linux")]
 mod linux;
