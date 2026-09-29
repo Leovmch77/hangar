@@ -134,6 +134,9 @@ WorkingDirectory=$REPO/backend
 # Explicit PATH: the backend spawns \`claude\` (~/.local/bin) and \`tmux\` — the user manager's
 # PATH may lack ~/.local/bin on a lingering boot with no login session.
 Environment=PATH=$NODE_BIN:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+# glibc abre uma arena de malloc por thread; com dezenas de threads a fragmentação segura a RSS
+# alta por horas. Duas arenas bastam para um processo que passa a maior parte do tempo esperando.
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=$UV_BIN run python -m app.main
 Restart=on-failure
 RestartSec=2
