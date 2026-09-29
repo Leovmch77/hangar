@@ -3,6 +3,8 @@
 pub mod model;
 pub mod preview_fmt;
 pub mod control;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod server;
 #[cfg(target_os = "windows")]
 pub mod cdp;
 

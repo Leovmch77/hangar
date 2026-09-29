@@ -98,7 +98,6 @@ pub fn parse_layout(args: &[String]) -> Result<Layout, String> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn sidecar_name(key: &str) -> String {
     let mut out = String::new();
     let mut gap = false;
