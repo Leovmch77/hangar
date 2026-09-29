@@ -268,12 +268,14 @@ async def test_kimi_sem_promocao_mantem_recado(isolated, monkeypatch, promoted):
 def test_cli_1a1_pede_steer_e_exibe_resultado(tmp_path, steered, delivered, expected):
     source = (Path(__file__).parents[2] / "scripts/hangar-send").read_text()
     tail = source[source.index('msg="$*"'):]
+    # O recorte começa dentro do ramo do envio normal (o outro é o aviso de painel) e leva o `fi` dele.
     program = '''set -e
 sender=origem
 target=dest
 sess=dest
 set -- "recado"
 api() { printf '%s' "$3" > "$BODY_FILE"; printf '%s' "$RESPONSE"; }
+if true; then
 ''' + tail
     body_file = tmp_path / "body.json"
     result = subprocess.run(["bash", "-c", program], env={**os.environ,
