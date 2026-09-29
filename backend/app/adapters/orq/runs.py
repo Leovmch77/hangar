@@ -16,6 +16,8 @@ from app import orq, orq_conductor
 ACTIVE_S = 120
 
 _log = logging.getLogger(__name__)
+# Caminhos já avisados: a lista chama group_phase a cada varredura.
+_warned: set[str] = set()
 
 
 def root() -> Path:
@@ -60,8 +62,12 @@ def group_phase(gid: str) -> str | None:
     except FileNotFoundError:
         return None
     except OSError as e:
-        _log.warning("orq: execuções ilegíveis, grupo %s mantido: %s", gid, e)
+        path = str(e.filename or e)
+        if path not in _warned:
+            _warned.add(path)
+            _log.warning("orq: execuções ilegíveis, grupo %s mantido: %s", gid, e)
         return "unknown"
+    _warned.clear()   # legível de novo: a próxima falha é outro episódio
     fases = {r[2] for r in runs if r[1] == gid}
     return "live" if False in fases else "ended" if fases else None
 

@@ -136,6 +136,16 @@ def test_unreadable_runs_root_never_dissolves_a_lone_orq_group(root, caplog):
     assert "orq" in caplog.text
 
 
+def test_an_unreadable_runs_root_is_warned_once(root, caplog):
+    root.chmod(0)
+    try:
+        for _ in range(3):
+            assert runs.group_phase("g") == "unknown"
+    finally:
+        root.chmod(0o755)
+    assert len([r for r in caplog.records if "ilegíveis" in r.getMessage()]) == 1
+
+
 def test_unreadable_events_never_dissolve_a_lone_orq_group(root):
     _old_lone_orq()
     _run(root, PairLink("arb").get()["gid"], ended=True)
