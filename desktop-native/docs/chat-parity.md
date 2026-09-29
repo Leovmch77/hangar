@@ -85,6 +85,7 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Capacidade | Estado | Observação |
 |---|---|---|
 | Codex antes da conversa (`tracked=false`): pergunta da lista respondida por `/select` | conferido | confere que a pergunta não mudou antes de enviar; falha com motivo; a conversa abre sozinha quando o transcript aparece |
+| Abertura do Codex antes do histórico | implementado (espera conferida) | mostra `startup_steps` na ordem, etapa atual, marca animada e espera desde a seleção nesta tela; cabeçalho não diz pronto antes de poder ler a conversa; preserva pergunta e falha. Janela isolada com servidor sintético: etapas, cabeçalho carregando e contador crescendo conferidos; falha não exercitada nessa janela |
 | Implementar plano do Claude sem terminal parado em modo plano | conferido | troca para o modo anterior, envia o pedido; envio recusado volta ao plano; troca recusada e incerteza têm aviso próprio |
 | Âncora do plano sem terminal pelo `anchor_id` da descoberta | pendente | usa a última resposta do turno; o pedido enviado é o mesmo, só a âncora pode diferir num turno com várias respostas |
 | Plano do Claude com terminal (`/plan-preview`) | conferido | descoberta ao abrir e ao fim do turno; conteúdo só no gesto "Ler plano" |
@@ -97,6 +98,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 
 | Capacidade | Estado | Observação |
 |---|---|---|
+| Rodapé de memória do Codex (`oai-mem-citation`) | implementado | oculto em respostas e prévias Markdown, inclusive rodapé todo na mesma linha e cauda incompleta durante streaming; exemplos em cercas de código e texto da pessoa preservados. Mesmo tratamento do `planDisplayText` do core; não exercitado na janela real |
 | Mensagem com marcadores mostra só a legenda e os anexos | conferido | imagem inline pelos bytes do cofre; arquivo como nome + ações |
 | Imagem colada no terminal (`image_count`) | conferido | `/transcript-image`; sem duplicar quando o caminho também foi escrito |
 | Caminhos citados pelo assistente (absoluto, `~/`, relativo com pasta) | conferido | `/file?path=`; recusa do backend aparece com o motivo dele |

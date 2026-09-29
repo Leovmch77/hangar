@@ -521,6 +521,19 @@ async def test_preparacao_codex_publica_etapa_atual_sem_cache_anterior(tmp_path,
                               "Continue without trusting (hooks won't run)"]
 
 
+@pytest.mark.parametrize("failed", [True, False])
+async def test_codex_abertura_fatal_nao_fica_trabalhando(tmp_path, monkeypatch, failed):
+    reg = SessionRegistry(projects_dir=tmp_path)
+    message = "sincronização da conta falhou; Codex não foi aberto" if failed else "integração falhou; a sessão abre assim mesmo"
+    frame = f"hangar-codex-tui: {message}\n" + ("Pressione Enter para fechar esta sessão.\n" if failed else "")
+    monkeypatch.setattr(registry.tmux, "capture_pane", lambda *args: frame)
+    info = registry.SessionInfo(name="cx", provider="codex", jsonl=None, tracked=False)
+    out = await reg.list_with_state([info])
+    assert out[0].state == ("awaiting_input" if failed else "working")
+    assert out[0].problema == ("codex_abertura_falhou" if failed else None)
+    assert out[0].label == message
+
+
 def test_git_codex_atualiza_lista_mesmo_sem_novo_turno():
     from app.sse import _list_sig
 

@@ -10,7 +10,7 @@ import { ToolGroup } from './tools/ToolGroup';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { StatusLine } from './StatusLine';
 import { ThinkingBlock } from './ThinkingBlock';
-import { agruparConversa, entraNoPensamento, type ChatEvent, type ItemConversa, type SessionInfo } from '@hangar/core';
+import { agruparConversa, entraNoPensamento, planDisplayText, type ChatEvent, type ItemConversa, type SessionInfo } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import type { PendingMsg } from './pending';
 import * as m from '../paraglide/messages';
@@ -58,6 +58,8 @@ export function MessageList({
   sessionName,
   serverId,
 }: Props) {
+  const codex = session?.provider === 'codex';
+  const visiblePreview = codex ? planDisplayText(preview) : preview;
   const detail = useRef<ToolDetailHandle>(null);
   const pref = useAparencia((s) => s.pensamentoTools);
   const results = useMemo(() => {
@@ -99,7 +101,7 @@ export function MessageList({
           return <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} />;
         }
         if (ev.kind === 'assistant_msg') {
-          return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
+          return <AssistantBubble text={codex ? planDisplayText(ev.text ?? '') : ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
         }
         if (ev.kind === 'notice') {
           // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
@@ -120,7 +122,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, codex]);
 
   return (
     <>
@@ -157,7 +159,7 @@ export function MessageList({
             </View>
           ))}
           {optionsSlot ?? null}
-          {preview ? <PreviewBubble text={preview} md={previewMd} full={previewFull} /> : null}
+          {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} /> : null}
         </View>
       }
       accessibilityLabel={m.msg_aria_mensagens()}

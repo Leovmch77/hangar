@@ -16,6 +16,7 @@ pub struct SessionInfo {
     #[serde(default)] pub pending_questions: u32,
     pub problema: Option<String>,
     pub label: Option<String>,
+    #[serde(default)] pub startup_steps: Vec<String>,
     pub last_activity: Option<f64>,
     pub branch: Option<String>,
     pub git_added: Option<i64>,
@@ -54,6 +55,10 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
+    pub fn display_state(&self) -> &str {
+        if self.provider == "codex" && !self.readable() && !matches!(self.state.as_str(), "awaiting_input" | "dead") { "loading" }
+        else { &self.state }
+    }
     pub fn peers(&self) -> &[String] { self.pair_peers.as_deref().unwrap_or_default() }
     /// O orquestrador sem LLM: tem linha do tempo, mas não recebe mensagem, nome novo, fechar nem interromper.
     pub fn orq(&self) -> bool { self.provider == "orq" }
@@ -249,6 +254,21 @@ pub struct Steered {
 mod tests {
     use super::SessionInfo;
     use serde_json::json;
+
+    #[test]
+    fn unreadable_codex_is_loading_except_for_user_question_or_failure() {
+        let mut session: SessionInfo = serde_json::from_value(json!({"name": "codex", "provider": "codex", "state": "idle",
+            "startup_steps": ["Preparing", "Starting"]})).unwrap();
+        assert_eq!(session.startup_steps, ["Preparing", "Starting"]);
+        for state in ["idle", "working"] { session.state = state.into(); assert_eq!(session.display_state(), "loading"); }
+        for state in ["awaiting_input", "dead"] { session.state = state.into(); assert_eq!(session.display_state(), state); }
+        session.state = "idle".into();
+        session.jsonl = Some("/tmp/thread.jsonl".into());
+        assert_eq!(session.display_state(), "idle");
+        session.jsonl = None;
+        session.provider = "claude".into();
+        assert_eq!(session.display_state(), "idle");
+    }
 
     #[test]
     fn orq_row_reads_the_arbiter_and_finds_it_in_the_list() {

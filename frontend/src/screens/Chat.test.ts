@@ -215,10 +215,10 @@ it('abre o SSE sem esperar a primeira carga do histórico', async () => {
   }
 });
 
-it.each([true, false])('mostra a preparação do Codex sem conversa antiga (desktop=%s)', async (desktop) => {
+it.each([[true, 'working'], [false, 'working'], [true, 'idle'], [false, 'idle']] as const)('mostra a preparação do Codex sem conversa antiga (desktop=%s, state=%s)', async (desktop, state) => {
   const api = await import('@hangar/core');
   const sessao = {
-    name: 'sess', provider: 'codex', tracked: false, jsonl: null, state: 'working',
+    name: 'sess', provider: 'codex', tracked: false, jsonl: null, state,
     label: 'integração Codex: conferindo plugins',
     startup_steps: ['preparando as instruções do Codex', 'integração Codex: conferindo plugins'],
   } satisfies SessionInfo;
@@ -234,6 +234,8 @@ it.each([true, false])('mostra a preparação do Codex sem conversa antiga (desk
     expect(Array.from(t.el.querySelectorAll('.codex-steps li'), (li) => li.textContent))
       .toEqual(['preparando as instruções do Codex', 'integração Codex: conferindo plugins']);
     expect(t.el.querySelector('.codex-pre')).not.toBeNull();
+    expect(t.el.querySelector('.codex-pre .spinner')?.textContent).toContain(m.chat_codex_opening());
+    expect(t.el.textContent).toContain(m.chat_codex_wait_elapsed({ tempo: '0.0s' }));
     expect(t.el.textContent).not.toContain('Não achei o transcript');
   } finally {
     await unmount(t.comp);

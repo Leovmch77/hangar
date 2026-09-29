@@ -117,11 +117,35 @@ pub fn proposed_plan(text: &str) -> Option<String> {
     (!plan.is_empty()).then(|| plan.to_owned())
 }
 
-/// Porta de `planDisplayText` (core) sem a citação de memória: as marcas do protocolo não aparecem.
+/// Porta de `planDisplayText` (core): as marcas do protocolo não aparecem.
 pub fn plan_display(text: &str) -> String {
     let mut text = text.to_owned();
+    if let Some((start, end)) = memory_citation(&text) { text.replace_range(start..end, ""); }
     for (start, end, _) in plan_markers(&text).into_iter().rev() { text.replace_range(start..end, ""); }
     text
+}
+
+fn memory_citation(text: &str) -> Option<(usize, usize)> {
+    let (mut offset, mut fence, mut start) = (0usize, String::new(), None);
+    for line in text.split('\n') {
+        if fence.is_empty() && (start.is_some() || line.trim_start().starts_with("<oai-mem-citation>")) {
+            let start = *start.get_or_insert(offset);
+            if let Some(close) = line.find("</oai-mem-citation>") {
+                return Some((start, offset + close + "</oai-mem-citation>".len()));
+            }
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let body = &line[indent..];
+        let run = |ch: char| body.chars().take_while(|&c| c == ch).count();
+        let delimiter = if indent <= 3 && run('`') >= 3 { Some("`".repeat(run('`'))) }
+            else if indent <= 3 && run('~') >= 3 { Some("~".repeat(run('~'))) } else { None };
+        if let Some(value) = delimiter {
+            if fence.is_empty() { fence = value; }
+            else if value.starts_with(&fence[..1]) && value.len() >= fence.len() { fence.clear(); }
+        }
+        offset += line.len() + 1;
+    }
+    start.map(|start| (start, text.len()))
 }
 
 fn plan_markers(text: &str) -> Vec<(usize, usize, bool)> {
@@ -274,6 +298,16 @@ mod tests {
         assert_eq!(proposed_plan("```\n<proposed_plan>\nx\n</proposed_plan>\n```"), None);
         assert_eq!(proposed_plan("sem plano"), None);
         assert_eq!(plan_display("a\n<proposed_plan>\nb\n</proposed_plan>\n```\n<proposed_plan>\n```"), "a\n\nb\n\n```\n<proposed_plan>\n```");
+    }
+
+    #[test]
+    fn reply_hides_memory_footer_and_streaming_tail_but_preserves_examples() {
+        assert_eq!(plan_display("Resposta\n<oai-mem-citation>\nMEMORY.md:1\n</oai-mem-citation>\nfim"), "Resposta\n\nfim");
+        assert_eq!(plan_display("Resposta\n  <oai-mem-citation>MEMORY.md:1</oai-mem-citation> fim"), "Resposta\n fim");
+        assert_eq!(plan_display("Resposta\n<oai-mem-citation>\nMEMORY.md:1"), "Resposta\n");
+        for example in ["```xml\n<oai-mem-citation>x</oai-mem-citation>\n```", "~~~\n<oai-mem-citation>x\n~~~", "`<oai-mem-citation>`", "Exemplo: <oai-mem-citation>x</oai-mem-citation>"] {
+            assert_eq!(plan_display(example), example);
+        }
     }
 
     #[test]

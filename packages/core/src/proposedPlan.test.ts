@@ -28,7 +28,14 @@ describe('plano proposto pelo Codex', () => {
     expect(planDisplayText(`Resposta.\n\n${cite}`)).toBe('Resposta.\n\n');
     const example = '```\n' + cite + '\n```';
     expect(planDisplayText(example)).toBe(example);
-    expect(planDisplayText('<oai-mem-citation>\nincompleto')).toBe('<oai-mem-citation>\nincompleto');
+    expect(planDisplayText('Resposta.\n<oai-mem-citation>\nincompleto')).toBe('Resposta.\n');
+  });
+  it('oculta a citação em uma linha preservando o texto após o fechamento', () => {
+    const cite = '<oai-mem-citation><citation_entries>MEMORY.md:32-36|note=[x]</citation_entries></oai-mem-citation>';
+    expect(planDisplayText(`Resposta.\n${cite}\nOutra frase.`)).toBe('Resposta.\n\nOutra frase.');
+    expect(planDisplayText(`${cite} Outra frase.`)).toBe(' Outra frase.');
+    expect(planDisplayText(`~~~xml\n${cite}\n~~~`)).toBe(`~~~xml\n${cite}\n~~~`);
+    expect(planDisplayText('`<oai-mem-citation>` é uma tag.')).toBe('`<oai-mem-citation>` é uma tag.');
   });
   it('reconhece a tag final sem abertura no trecho recebido', () => {
     expect(proposedPlan('# Plano\n\nEtapas.\n</proposed_plan>')).toBe('# Plano\n\nEtapas.');

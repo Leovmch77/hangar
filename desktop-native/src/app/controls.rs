@@ -47,6 +47,7 @@ pub(super) struct Controls {
     plans_done: HashSet<String>,
     planning: HashSet<SessionKey>,
     preselect: Option<SessionKey>,
+    prethread_since: Option<Instant>,
     // Linha sob o teclado; `None` é a atual (ou a primeira livre) até ↑↓ ou o ponteiro moverem.
     highlight: Option<usize>,
     scroll: ScrollHandle,
@@ -61,7 +62,7 @@ pub(super) struct Controls {
 }
 
 impl Controls {
-    pub fn on_select(&mut self) { self.open = None; self.plan = None; }
+    pub fn on_select(&mut self) { self.open = None; self.plan = None; self.prethread_since = Some(Instant::now()); }
     pub fn clear_plan_preview(&mut self) { self.plan = None; }
     pub fn picker_open(&self) -> bool { self.open.is_some() }
 }
@@ -960,8 +961,28 @@ impl Hangar {
                 }
             }
             _ => {
-                let label = session.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| tr("prethread_waiting"));
-                body = body.child(div().text_sm().text_color(theme::muted()).child(label));
+                let failed = session.state == "dead" || session.problema.as_deref().is_some_and(|p| !p.trim().is_empty());
+                let opening = !failed && session.state != "awaiting_input";
+                let label = session.label.clone().filter(|l| !l.trim().is_empty())
+                    .or_else(|| session.question.clone().filter(|q| !q.trim().is_empty()))
+                    .or_else(|| session.startup_steps.last().cloned())
+                    .unwrap_or_else(|| tr(if session.state == "dead" { "chip_dead" } else { "prethread_waiting" }));
+                let color = if failed { theme::warning() } else { theme::accent() };
+                for step in session.startup_steps.iter().take(session.startup_steps.len().saturating_sub(1)) {
+                    body = body.child(div().text_xs().text_color(theme::muted()).child(step.clone()));
+                }
+                body = body.child(div().flex().items_center().gap_2().text_sm().text_color(color)
+                    .when(opening, |el| el.child(self.working_mark_slot(panes::Area::Conversation, "prethread-mark", 16., color)))
+                    .child(div().flex_1().min_w_0().child(label.clone())));
+                if opening && let Some(since) = self.controls.prethread_since {
+                    body = body.child(div().h(px(20.)).flex().items_center().gap_2().text_xs().text_color(theme::muted())
+                        .child(tr("prethread_elapsed"))
+                        .child(self.elapsed_slot(panes::Area::Conversation, "prethread-elapsed", since, None)));
+                }
+                if let Some(problem) = session.problema.as_ref().filter(|p| !p.trim().is_empty() && *p != &label) {
+                    let problem = if problem == "codex_abertura_falhou" { tr_shared("problema_codex_abertura_falhou", &[]) } else { problem.clone() };
+                    body = body.child(div().text_sm().text_color(theme::warning()).child(problem));
+                }
             }
         }
         Some(div().flex_1().p_6().flex().flex_col().gap_3()

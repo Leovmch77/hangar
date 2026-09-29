@@ -52,6 +52,7 @@
     // Estado da sessao aberta, ao lado do breadcrumb (so no desktop; sem estado, sem pilula).
     // O rotulo e a cor saem do proprio StateChip — antes vinham prontos do Chat.
     state?: State;
+    stateLabel?: string;
     // Badge discreto do provider (ex: "Codex") junto do titulo/crumb — so aparece quando != Claude
     // (Claude e o caso comum, sem ruido visual extra). Ver Chat.svelte.
     providerLabel?: string | null;
@@ -64,7 +65,7 @@
     loopColor?: string;
     onLoopTap?: () => void;
   }
-  let { title = 'Hangar', showBack = false, onBack, onMenu, onTitleTap, status = null, onExpandUsage, limited = false, limitReset = null, onOpenActivity, activityBadge = 0, activityRunning = false, onOpenTerminal, terminalAlert = false, onOpenNavegador, onOpenRun, onOpenAttachments, runRunning = false, working = false, subtitle = null, subtitleHot = null, conta = null, crumbs = null, state, providerLabel = null, onProviderTap, loopLabel = null, loopColor, onLoopTap }: Props = $props();
+  let { title = 'Hangar', showBack = false, onBack, onMenu, onTitleTap, status = null, onExpandUsage, limited = false, limitReset = null, onOpenActivity, activityBadge = 0, activityRunning = false, onOpenTerminal, terminalAlert = false, onOpenNavegador, onOpenRun, onOpenAttachments, runRunning = false, working = false, subtitle = null, subtitleHot = null, conta = null, crumbs = null, state, stateLabel, providerLabel = null, onProviderTap, loopLabel = null, loopColor, onLoopTap }: Props = $props();
 
   // Sinal do "⋯": no celular Rodar/Atividade moram dentro do menu, entao o estado deles precisa
   // aparecer no botao — senao voce so descobre que algo esta rodando abrindo o menu.
@@ -108,7 +109,7 @@
         {:else if providerLabel}
           <span class="provider-badge">{providerLabel}</span>
         {/if}
-        {#if state}<StateChip {state} size="md" />{/if}
+        {#if state}<StateChip {state} label={stateLabel} size="md" />{/if}
         {#if loopLabel}
           <button type="button" class="loop-chip" style="color: {loopColor};" onclick={(e) => { e.stopPropagation(); onLoopTap?.(); }} aria-label={m.ctx_aria_loop({ n: loopLabel })}>{loopLabel}</button>
         {/if}

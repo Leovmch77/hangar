@@ -4778,7 +4778,7 @@ fn working_tokens(label: Option<&str>) -> Option<String> {
 }
 
 fn preview_source(preview: &Preview) -> String {
-    if preview.md { return safe_markdown(&composer::citation_markdown(&crate::mend::close_hanging(&preview.text))); }
+    if preview.md { return safe_markdown(&composer::citation_markdown(&crate::mend::close_hanging(&interaction::plan_display(&preview.text)))); }
     let line_count = preview.text.lines().count();
     let source = if preview.full || line_count <= 10 { preview.text.as_str() }
         else { &preview.text[preview.text.match_indices('\n').nth(line_count - 11).map(|(index, _)| index + 1).unwrap_or(0)..] };
@@ -5085,7 +5085,7 @@ impl Render for Hangar {
         // Sessão sem conversa não tem stream próprio: o estado é o da lista.
         let header_state = if self.chat_online && self.chat.state.state.is_empty() { "loading".to_owned() }
             else if self.chat_online { self.chat.state.state.clone() }
-            else if let Some(s) = self.selected.as_ref().filter(|s| !s.readable()) { s.state.clone() }
+            else if let Some(s) = self.selected.as_ref().filter(|s| !s.readable()) { s.display_state().to_owned() }
             else if self.selected.is_some() { "reconnecting".to_owned() }
             else if self.list_online { "connected".to_owned() } else { "disconnected".to_owned() };
         let session_chip = matches!(header_state.as_str(), "working" | "idle" | "awaiting_input" | "dead");
@@ -5499,6 +5499,17 @@ mod tests {
         // Sem forma de imagem, alvo com `<` ou dentro de código: o `!` continua escapado ou intocado.
         assert_eq!(safe_markdown("![só texto] e ![x](https://h/<b>)"), "\\![só texto] e \\![x](https://h/&lt;b>)");
         assert_eq!(safe_markdown("`![a](/t/a.png)`"), "`![a](/t/a.png)`");
+    }
+
+    #[test]
+    fn memory_footer_is_filtered_only_from_assistant_display_and_markdown_preview() {
+        let text = "Resposta\n<oai-mem-citation>MEMORY.md:1";
+        for kind in ["user_msg", "assistant_msg"] {
+            let event = ChatEvent { kind: kind.into(), text: Some(text.into()), ..Default::default() };
+            assert_eq!(super::display_body(&event), if kind == "assistant_msg" { "Resposta\n" } else { text });
+        }
+        let preview = super::Preview { text: text.into(), md: true, ..Default::default() };
+        assert_eq!(super::preview_source(&preview), "Resposta\n");
     }
 
     #[test]

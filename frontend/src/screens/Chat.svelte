@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { ctxPanel, reclamparLargura } from '../lib/ctxPanel.svelte';
   import NavBar from '../components/NavBar.svelte';
+  import Spinner from '../components/Spinner.svelte';
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
@@ -72,6 +73,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     descartarDaFila,
   } from '@hangar/core';
   import { formataErro } from '@hangar/core';
+  import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
@@ -1039,7 +1041,17 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // sessao. A lista raspa o pane so nesse estado e so quando ha seletor na tela (registry).
   const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
   const currentState = $derived<State>(codexPreThread
-    ? codexEntrada?.state ?? 'idle' : stateEvent?.state ?? 'idle');
+    ? codexEntrada?.state === 'awaiting_input' || codexEntrada?.state === 'dead' ? codexEntrada.state : 'working'
+    : stateEvent?.state ?? 'idle');
+  const codexWaitKey = $derived(codexPreThread && currentState === 'working' ? sessionName : '');
+  let codexWaitMs = $state(0);
+  $effect(() => {
+    if (!codexWaitKey) return;
+    const started = Date.now();
+    codexWaitMs = 0;
+    const timer = setInterval(() => { codexWaitMs = Date.now() - started; }, 1000);
+    return () => clearInterval(timer);
+  });
   const modoLivre = $derived(currentState === 'idle');
   let claudePlanDiscovery = $state<ClaudePlanDiscovery | null>(null);
   let claudePlanDiscoveryLoading = $state(false);
@@ -2917,7 +2929,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   {/if}
   <div class="navbar-mount" bind:this={navEl}>
     {#if !splitTab}
-    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop && !orqSession ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
+    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} stateLabel={codexWaitKey ? m.chat_codex_opening() : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop && !orqSession ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
     {/if}
   </div>
 
@@ -3080,6 +3092,13 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
          o cartão com opções ficava espremido e fora de centro numa área larga. -->
     <div class="chat-error codex-pre">
       <p class="chat-error-title">{m.chat_sem_thread_codex()}</p>
+      {#if textoProblema(codexEntrada?.problema)}
+        <p class="chat-error-title">{textoProblema(codexEntrada?.problema)}</p>
+      {/if}
+      {#if codexWaitKey}
+        <Spinner label={m.chat_codex_opening()} />
+        <p class="chat-error-hint" aria-live="off">{m.chat_codex_wait_elapsed({ tempo: fmtDur(codexWaitMs) })}</p>
+      {/if}
       {#if codexEntrada?.startup_steps?.length}
         <div class="codex-steps" role="log" aria-live="polite">
           <ol>

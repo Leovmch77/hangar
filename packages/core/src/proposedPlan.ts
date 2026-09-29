@@ -39,26 +39,26 @@ export function planTitle(text: string): string | null {
   return null;
 }
 
-// Bloco de citação da memória do Codex (`memories = true`): o prompt manda o modelo fechar a
-// resposta com ele pra TUI parsear; aqui ele sai inteiro — o conteúdo é id de rollout, não prosa.
+// A citação é metadado, inclusive enquanto o rodapé ainda está sendo escrito.
 function memCitation(text: string): { start: number; end: number } | null {
   let offset = 0;
   let fence = '';
   let start = -1;
   for (const line of text.split('\n')) {
+    if (!fence && (start >= 0 || /^\s*<oai-mem-citation>/.test(line))) {
+      if (start < 0) start = offset;
+      const close = line.indexOf('</oai-mem-citation>');
+      if (close >= 0) return { start, end: offset + close + '</oai-mem-citation>'.length };
+    }
     const delimiter = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (delimiter) {
       const value = delimiter[1];
       if (!fence) fence = value;
       else if (value[0] === fence[0] && value.length >= fence.length) fence = '';
-    } else if (!fence && start < 0 && /^\s*<oai-mem-citation>\s*$/.test(line)) {
-      start = offset;
-    } else if (!fence && start >= 0 && /^\s*<\/oai-mem-citation>\s*$/.test(line)) {
-      return { start, end: offset + line.length };
     }
     offset += line.length + 1;
   }
-  return null;
+  return start >= 0 ? { start, end: text.length } : null;
 }
 
 export function planDisplayText(text: string): string {

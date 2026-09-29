@@ -1567,6 +1567,10 @@ class SessionRegistry:
                 menu = menu_codex(frame)
                 if menu:
                     info.state, (info.question, info.options) = "awaiting_input", menu
+                elif any(line.strip() == "Pressione Enter para fechar esta sessão." for line in frame.splitlines()):
+                    info.state = "awaiting_input"
+                    info.problema = "codex_abertura_falhou"
+                    info.label = info.startup_steps[-1] if info.startup_steps else None
                 elif info.startup_steps:
                     info.state = "working"
                     info.label = info.startup_steps[-1]
