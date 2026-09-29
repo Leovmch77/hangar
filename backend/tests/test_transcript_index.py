@@ -209,3 +209,54 @@ def test_versao_do_esquema_diferente_reconstroi(tmp_path, base):
     j = ti.Index(p)
     assert not j.ready
     assert j._conn.execute("SELECT count(*) FROM files").fetchone()[0] == 0
+
+
+class _StatInoGrande:
+    """Stat do Windows com file ID acima do INTEGER com sinal do SQLite."""
+
+    def __init__(self, real):
+        self._real = real
+        self.st_ino = 2**64 - 5
+
+    def __getattr__(self, nome):
+        return getattr(self._real, nome)
+
+
+def test_ino_acima_de_64_bits_com_sinal_indexa(base, idx, monkeypatch):
+    import pathlib
+    stat_real = pathlib.Path.stat
+    monkeypatch.setattr(pathlib.Path, "stat", lambda self, **kw: (
+        _StatInoGrande(stat_real(self, **kw)) if self.suffix == ".jsonl" else stat_real(self, **kw)))
+    _escrever(base, _linha("agulha grande", "u1"))
+    idx.update(providers=False)
+    assert [h.event_id for h in _achar(idx, "agulha")] == ["u1"]
+    antes = idx._conn.execute("SELECT ino, offset FROM files").fetchall()
+    idx.update(providers=False)   # mesmo ino guardado: segunda passada não relê
+    assert idx._conn.execute("SELECT ino, offset FROM files").fetchall() == antes
+    assert [h.event_id for h in _achar(idx, "agulha")] == ["u1"]
+
+
+def test_indice_corrompido_fecha_conexao_antes_de_apagar(tmp_path, base, monkeypatch):
+    import os
+    p = tmp_path / "idx.sqlite3"
+    p.write_bytes(b"isto nao e um banco sqlite" * 100)
+    abertas = []
+    connect_real = sqlite3.connect
+    monkeypatch.setattr(ti.sqlite3, "connect", lambda *a, **kw: abertas.append(connect_real(*a, **kw)) or abertas[-1])
+    unlink_real = os.unlink
+
+    def unlink_como_windows(caminho):
+        for c in abertas:
+            try:
+                c.execute("SELECT 1")
+            except sqlite3.ProgrammingError:
+                continue   # fechada
+            raise PermissionError(32, "arquivo em uso por outro processo", caminho)
+        unlink_real(caminho)
+
+    monkeypatch.setattr(ti.os, "unlink", unlink_como_windows)
+    i = ti.Index(p)
+    assert not i.ready
+    _escrever(base, _linha("agulha", "u1"))
+    i.update(providers=False)
+    assert i._conn.execute("SELECT count(*) FROM files").fetchone()[0] == 1

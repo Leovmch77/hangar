@@ -90,17 +90,28 @@ def fts_query(terms: list[str]) -> Optional[str]:
     return " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
+def _ino(st: os.stat_result) -> int:
+    # No Windows o file ID passa de 64 bits (ReFS) ou usa o bit alto (NTFS); o INTEGER do
+    # SQLite é com sinal e estouraria.
+    return st.st_ino & 0x7FFF_FFFF_FFFF_FFFF
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=10, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
 def _open(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     for tentativa in (1, 2):
+        conn = None
         try:
             conn = _connect(path)
             if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
@@ -113,6 +124,9 @@ def _open(path: Path) -> sqlite3.Connection:
                 conn.commit()
             return conn
         except sqlite3.DatabaseError:
+            # Conexão aberta segura o arquivo no Windows e o unlink falharia (WinError 32).
+            if conn is not None:
+                conn.close()
             # Índice é cache: arquivo corrompido se apaga e se reconstrói.
             if tentativa == 2:
                 raise
@@ -188,7 +202,7 @@ class Index:
         # pelo rowid, sem ordenar todas as casadas. Até a construção terminar a busca usa o rg.
         for p, (proj, sid, st) in sorted(atuais.items(), key=lambda kv: kv[1][2].st_mtime_ns):
             antigo = conhecidos.get(p)
-            if antigo and (antigo[1], antigo[2], antigo[3]) == (st.st_size, st.st_mtime_ns, st.st_ino):
+            if antigo and (antigo[1], antigo[2], antigo[3]) == (st.st_size, st.st_mtime_ns, _ino(st)):
                 continue
             # Um arquivo = uma transação: linhas e offset entram juntos ou nenhum entra; sobra
             # parcial com offset velho viraria mensagem duplicada na passada seguinte.
@@ -211,13 +225,13 @@ class Index:
         conn = self._conn
         if antigo is None:
             fid = conn.execute("INSERT INTO files(path, project, session_id, ino) VALUES (?,?,?,?)",
-                               (path, project, sid, st.st_ino)).lastrowid
+                               (path, project, sid, _ino(st))).lastrowid
         else:
             fid = antigo[0]
-            if antigo[3] != st.st_ino or st.st_size < antigo[4]:
+            if antigo[3] != _ino(st) or st.st_size < antigo[4]:
                 conn.execute("DELETE FROM msg WHERE file_id=?", (fid,))
                 conn.execute("UPDATE files SET offset=0, lines=0, cwd=NULL, preview='', head_done=0, "
-                             "internal=NULL, ino=? WHERE id=?", (st.st_ino, fid))
+                             "internal=NULL, ino=? WHERE id=?", (_ino(st), fid))
         offset, lines, cwd, preview, head_done, internal = conn.execute(
             "SELECT offset, lines, cwd, preview, head_done, internal FROM files WHERE id=?", (fid,)).fetchone()
         from app.archive import _cortar, _texto_simples
