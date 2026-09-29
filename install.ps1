@@ -1789,9 +1789,9 @@ if ($registrou) {
                 if ($registered.Settings.MultipleInstances -ne 'IgnoreNew' -or $registered.Settings.RestartCount -ne 3) {
                     throw "A tarefa $($t.Nome) nao manteve a protecao contra duplicacao e os reinicios automaticos"
                 }
-                if ($registered.Settings.Priority -ne 4) {
-                    Falta "a tarefa $($t.Nome) ficou com prioridade $($registered.Settings.Priority), nao 4 (normal)"
-                }
+            }
+            if ($registered.Settings.Priority -ne 4) {
+                Falta "a tarefa $($t.Nome) ficou com prioridade $($registered.Settings.Priority), nao 4 (normal)"
             }
             # Registrar NAO inicia: o gatilho e "no logon", entao sem isto nada sobe ate o
             # proximo login e a pessoa abre o navegador numa porta morta logo apos instalar.

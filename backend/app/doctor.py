@@ -30,6 +30,7 @@ def _porta_responde(porta: int) -> bool:
 
 def _tempo_resposta(porta: int) -> float | None:
     """Segundos até a primeira resposta HTTP; None = aceita conexão mas não responde em 10 s."""
+    import http.client
     import time
     import urllib.error
     import urllib.request
@@ -38,7 +39,7 @@ def _tempo_resposta(porta: int) -> float | None:
         urllib.request.urlopen(f"http://127.0.0.1:{porta}/", timeout=10).close()
     except urllib.error.HTTPError:
         pass  # 401/404 também é resposta: o processo está atendendo
-    except OSError:
+    except (OSError, http.client.HTTPException):
         return None
     return time.monotonic() - inicio
 
@@ -62,7 +63,7 @@ def _reinicios_automaticos(dias: int = 7) -> list[str] | None:
     try:
         r = subprocess.run(["journalctl", "--user", "-u", "hangar-backend", "--since", f"-{dias}d",
                             "-o", "short-iso", "--no-pager", "-q"],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, errors="replace", timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if r.returncode != 0:
