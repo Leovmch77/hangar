@@ -1194,7 +1194,7 @@ impl Hangar {
     pub(super) fn render_nav_rail(&self, selected_name: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let a = appearance::get();
         let fit_content = a.panels == appearance::Panels::Floating && a.sidebar_height == appearance::SidebarHeight::Content;
-        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
+        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         let local = self.sidebar_layout(cx);
         let mut rows: Vec<AnyElement> = Vec::new();
         let place = |layout: &Layout, remote: Option<&str>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
@@ -1278,7 +1278,7 @@ impl Hangar {
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(if awaiting { theme::warning() } else { theme::text() }).child(top))
                 .child(div().min_h(px(10.)).text_color(theme::faint()).child(bottom)))
             .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
-            .when(mixed, |el| el.child(chrome::provider_badge(&session.provider)));
+            .when(mixed && !session.orq(), |el| el.child(chrome::provider_badge(&session.provider)));
         match remote {
             Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx))).into_any_element(),
             None => {

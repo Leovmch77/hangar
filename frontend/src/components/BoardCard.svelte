@@ -387,7 +387,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   const loopChip = $derived(loopBadge(session.loop_status, session.loop_iter, session.loop_max));
   const planChip = $derived(planBadge(session));
   // Provider do card — só as não-Claude ganham chip (ver providerTag em lib/format).
-  const provTag = $derived(providerTag(session.provider));
+  // O orquestrador não roda agente: glifo de provider nele seria mentira.
+  const provTag = $derived(isOrq(session) ? null : providerTag(session.provider));
   // Código -> texto, igual ao SessionCard: código desconhecido some em vez de virar id cru na tela.
   const problema = $derived(
     textoProblema(session.problema),

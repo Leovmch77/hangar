@@ -350,7 +350,7 @@ import { textoProblema } from '../lib/problema';
                           shared={session.shared === true} guest={(session as AggSession).serverInvite === true} />
           <!-- Marca do agente junto dos outros sinais do nome, não numa fila de chips própria: cada
                agente tem marca colorida, o nome ao lado repetia o desenho e segue no title. -->
-          {#if showProvider}
+          {#if showProvider && !orq}
             <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={session.provider} size={12} /></span>
           {/if}
           {#if pendingQuestions > 0}

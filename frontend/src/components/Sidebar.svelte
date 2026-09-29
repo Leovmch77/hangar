@@ -890,7 +890,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                 {:else}
                   <span class="row-mark" style="color: {s.limited ? 'var(--pill-limite-fg)' : stateColors[s.state]};"><HangarMark size={18} /></span>
                 {/if}
-                {#if !model.selectMode && model.showProviderTags}
+                {#if !model.selectMode && model.showProviderTags && !isOrq(s)}
                   <!-- Quando a lista MISTURA agentes, todo mundo leva o glifo, Claude incluído —
                        marcar só a exceção não diz de quem é o resto. Vai no canto de cima do avatar
                        (o de baixo é da barra de plano), absoluto pra não empurrar nada nem mudar a

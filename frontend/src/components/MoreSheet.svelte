@@ -66,7 +66,7 @@
     {/if}
 
     {#if onRun}
-      <button class="item" onclick={() => pick(onRun)}>
+      <button class="item" onclick={() => onRun && pick(onRun)}>
         <span class="ico" class:on={runRunning} aria-hidden="true">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
             {#if runRunning}<rect x="6" y="6" width="12" height="12" rx="2" />{:else}<path d="M8 5v14l11-7z" />{/if}

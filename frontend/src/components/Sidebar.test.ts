@@ -60,7 +60,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   // Mesmo shape do real: itens do cluster são {session} (ou {kind:'header',...}); o template lê
   // item.session — sessão crua no lugar certo quebraria na chave do each.
   clusterByPair: (s: unknown[]) => s.map((x) => ({ session: x })),
-  untrackedReason: () => '', providerName: () => 'claude',
+  untrackedReason: () => '', providerName: vi.fn(() => 'claude'),
   providerTag: () => null,
   cwdParts: (c: string | undefined) => ({ prefix: '', base: c ?? '' }),
  loopBadge: () => null, LOOP_TONE_COLOR: {},
@@ -1054,6 +1054,27 @@ describe('Sidebar — linha do orquestrador sem LLM', () => {
     // Toque longo desligado: o title não promete renomear.
     expect(document.querySelector('.sess-main')!.getAttribute('title')).toBe(m.orq_row_badge());
     unmount(t.comp);
+  });
+
+  it('sem glifo de provider quando a lista mistura agentes', async () => {
+    comOrq();
+    const sessions = (storeState.byServer[0] as { sessions: unknown[] }).sessions;
+    sessions.push(
+      { name: 'c1', serverId: 'srv-a', state: 'idle' },
+      { name: 'x1', serverId: 'srv-a', state: 'idle', provider: 'codex' },
+    );
+    // showProviderTags lê as rows do store, não os grupos.
+    storeState.rows.push(...sessions);
+    vi.mocked(api.providerName).mockImplementation((p) => p ?? 'claude');
+    const t = montar();
+    await tick();
+    const mains = [...document.querySelectorAll('.sess-main')];
+    const orqMain = mains.find((b) => b.querySelector('.orq-badge'))!;
+    expect(document.querySelectorAll('.prov-rail').length).toBe(2);
+    expect(orqMain.querySelector('.prov-rail')).toBeNull();
+    unmount(t.comp);
+    storeState.rows.length = 0;
+    vi.mocked(api.providerName).mockImplementation(() => 'claude');
   });
 
   it('seleção múltipla não aceita a linha', async () => {

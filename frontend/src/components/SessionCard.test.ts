@@ -162,6 +162,12 @@ describe('SessionCard: orquestrador sem LLM', () => {
     unmount(comp);
   });
 
+  it('sem glifo de provider mesmo quando a lista mistura agentes', () => {
+    const { el, comp } = montar(sessao({ provider: 'orq', orq_arbiter: 'arb' }), { showProvider: true });
+    expect(el.querySelector('.prov-chip')).toBeNull();
+    unmount(comp);
+  });
+
   it('sessão comum continua com Excluir e sem selo', () => {
     const { el, comp } = montar(sessao({ provider: 'claude' }));
     expect(el.querySelector('.orq-badge')).toBeNull();

@@ -2150,6 +2150,7 @@
   "grupo_recusa_same_group": "Those sessions are already in the same group.",
   "grupo_recusa_other_server": "Sessions from different servers can't be grouped this way.",
   "grupo_recusa_cross_server": "One of the sessions is already paired 1:1 with another server.",
+  "grupo_recusa_orq": "The orchestrator row can't join or leave a group by hand.",
   "arquivo_sem_permissao": "No permission to read this folder.",
   "arquivo_ilegivel": "Couldn't read this folder.",
   "arquivo_raiz_nao_liberada": "This root is not allowed.",

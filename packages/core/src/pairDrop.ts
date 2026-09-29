@@ -1,4 +1,5 @@
 import type { SessionInfo } from './types';
+import { isOrq } from './format';
 
 // Regra pura de "posso soltar a sessão origem sobre o alvo pra formar/entrar num grupo?" — as
 // telas (Sidebar/Board/Canvas/celular) só desenham o que esta função responde. Pede só serverId a
@@ -10,11 +11,13 @@ function temPeerRemoto(s: SessaoComServidor): boolean {
   return (s.pair_peers ?? []).some((p) => p.includes('::'));
 }
 
-export type DropReason = 'same' | 'other_server' | 'dead' | 'same_group' | 'cross_server';
+export type DropReason = 'same' | 'other_server' | 'dead' | 'same_group' | 'cross_server' | 'orq';
 export type DropResult = { ok: true } | { ok: false; reason: DropReason };
 
 export function canPair(origem: SessaoComServidor, alvo: SessaoComServidor): DropResult {
   if (origem.serverId === alvo.serverId && origem.name === alvo.name) return { ok: false, reason: 'same' };
+  // O grupo da orquestração é montado pelo orq; agrupar a linha dele à mão desfaz a execução.
+  if (isOrq(origem) || isOrq(alvo)) return { ok: false, reason: 'orq' };
   if (origem.serverId !== alvo.serverId) return { ok: false, reason: 'other_server' };
   if (origem.state === 'dead' || alvo.state === 'dead') return { ok: false, reason: 'dead' };
   if (origem.pair_gid != null && origem.pair_gid === alvo.pair_gid) return { ok: false, reason: 'same_group' };
@@ -25,5 +28,6 @@ export function canPair(origem: SessaoComServidor, alvo: SessaoComServidor): Dro
 // Só pair_gid perde o par cross-server (sem gid comum) e o sidecar legado sem gid
 // (`_gid_legado`, pair.py:54) — por isso o teste de "tem vínculo" olha os dois campos.
 export function canLeave(s: SessaoComServidor): boolean {
+  if (isOrq(s)) return false;
   return s.pair_gid != null || (s.pair_peers?.length ?? 0) > 0;
 }

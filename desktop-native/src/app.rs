@@ -3905,7 +3905,7 @@ impl Hangar {
             .when_some(count, |el, n| el.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(n.to_string())));
         let mut children: Vec<AnyElement> = Vec::new();
         // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
-        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
+        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let session = match row {
@@ -4218,6 +4218,8 @@ impl Hangar {
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
     fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // O orquestrador não roda agente: selo de provider nele seria mentira.
+        let mixed = mixed && !session.orq();
         let local = remote.is_none();
         let state = session.state.as_str();
         let limited = session.limited == Some(true);

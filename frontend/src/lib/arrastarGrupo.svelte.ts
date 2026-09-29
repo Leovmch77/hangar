@@ -65,5 +65,6 @@ export function mensagemRecusa(reason: DropReason): string {
     case 'same_group': return m.grupo_recusa_same_group();
     case 'other_server': return m.grupo_recusa_other_server();
     case 'cross_server': return m.grupo_recusa_cross_server();
+    case 'orq': return m.grupo_recusa_orq();
   }
 }

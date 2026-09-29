@@ -2150,6 +2150,7 @@
   "grupo_recusa_same_group": "Essas sessões já estão no mesmo grupo.",
   "grupo_recusa_other_server": "Sessões de servidores diferentes não se agrupam por aqui.",
   "grupo_recusa_cross_server": "Uma das sessões já está pareada 1:1 com outro servidor.",
+  "grupo_recusa_orq": "A linha do orquestrador não entra nem sai de grupo à mão.",
   "arquivo_sem_permissao": "Sem permissão para ler esta pasta.",
   "arquivo_ilegivel": "Não foi possível ler esta pasta.",
   "arquivo_raiz_nao_liberada": "Esta raiz não está liberada.",

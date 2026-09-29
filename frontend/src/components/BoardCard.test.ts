@@ -49,6 +49,13 @@ describe('BoardCard: orquestrador sem LLM', () => {
     unmount(comp);
   });
 
+  it('sem glifo de provider: não roda agente', async () => {
+    const { el, comp } = montar({ provider: 'orq', orq_arbiter: 'arb' });
+    await tick();
+    expect(el.querySelector('.prov-chip')).toBeNull();
+    unmount(comp);
+  });
+
   it('sem árbitro registrado o botão fica desligado', async () => {
     const { el, comp } = montar({ provider: 'orq', orq_arbiter: null });
     await tick();
