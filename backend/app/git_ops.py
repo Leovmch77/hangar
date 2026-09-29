@@ -160,8 +160,8 @@ _SUMMARY_MAX_AGE = 10.0
 
 
 def _repo_fingerprint(cwd: str) -> tuple | None:
-    """mtimes de index, HEAD, ref atual e packed-refs; None quando nao da pra ler (sem atalho).
-    Worktree ligada: index/HEAD na gitdir dela, refs na pasta comum (`commondir`)."""
+    """mtimes de index, HEAD, ref atual, packed-refs e FETCH_HEAD; None quando nao da pra ler (sem
+    atalho). Worktree ligada: index/HEAD na gitdir dela, refs e FETCH_HEAD na pasta comum."""
     try:
         gitdir = os.path.join(cwd, ".git")
         if os.path.isfile(gitdir):
@@ -179,7 +179,9 @@ def _repo_fingerprint(cwd: str) -> tuple | None:
         head_path = os.path.join(gitdir, "HEAD")
         with open(head_path, encoding="utf-8", errors="replace") as f:
             head = f.read().strip()
-        paths = [os.path.join(gitdir, "index"), head_path, os.path.join(common, "packed-refs")]
+        # FETCH_HEAD: fetch muda ahead/behind sem tocar em index nem na ref local.
+        paths = [os.path.join(gitdir, "index"), head_path, os.path.join(common, "packed-refs"),
+                 os.path.join(common, "FETCH_HEAD")]
         if head.startswith("ref: "):
             paths.append(os.path.join(common, head[len("ref: "):]))
         fp = []
@@ -193,16 +195,16 @@ def _repo_fingerprint(cwd: str) -> tuple | None:
         return None
 
 
-def _cache_hit(cache: dict, cwd: str, now: float) -> tuple[bool, dict | None, tuple | None]:
-    """(acertou, resultado, fingerprint atual). Falha e timeout nao usam o atalho: seguem o TTL."""
+def _cache_hit(cache: dict, cwd: str, now: float) -> tuple[bool, dict | None]:
+    """(acertou, resultado). Falha e timeout nao usam o atalho: seguem o TTL."""
     hit = cache.get(cwd)
     if hit and now - hit[0] < hit[2]:
-        return True, hit[1], None
-    fp = _repo_fingerprint(cwd)
-    if (hit and hit[1] is not None and fp is not None and hit[3] == fp
-            and now - hit[0] < _SUMMARY_MAX_AGE):
-        return True, hit[1], fp
-    return False, None, fp
+        return True, hit[1]
+    if hit and hit[1] is not None and now - hit[0] < _SUMMARY_MAX_AGE:
+        fp = _repo_fingerprint(cwd)
+        if fp is not None and hit[3] == fp:
+            return True, hit[1]
+    return False, None
 
 
 def git_summary(cwd: str | None) -> dict | None:
@@ -213,7 +215,7 @@ def git_summary(cwd: str | None) -> dict | None:
     if not cwd or not os.path.exists(os.path.join(cwd, ".git")):
         return None
     now = time.monotonic()
-    ok, cached, fp = _cache_hit(_summary_cache, cwd, now)
+    ok, cached = _cache_hit(_summary_cache, cwd, now)
     if ok:
         return cached
     ttl = _SUMMARY_TTL
@@ -237,7 +239,8 @@ def git_summary(cwd: str | None) -> dict | None:
             _log.warning("git_summary returncode=%s em %s (badge omitido, retry em %ss)",
                          p.returncode, cwd, _SUMMARY_TTL)
             result = None
-    _summary_cache[cwd] = (now, result, ttl, fp)
+    # Fingerprint DEPOIS do git: o `git status` regrava o index, e o de antes nunca casaria.
+    _summary_cache[cwd] = (now, result, ttl, _repo_fingerprint(cwd))
     return result
 
 
@@ -272,7 +275,7 @@ def git_diffstat(cwd: str | None) -> dict | None:
     if not cwd or not os.path.exists(os.path.join(cwd, ".git")):
         return None
     now = time.monotonic()
-    ok, cached, fp = _cache_hit(_diffstat_cache, cwd, now)
+    ok, cached = _cache_hit(_diffstat_cache, cwd, now)
     if ok:
         return cached
     ttl = _SUMMARY_TTL
@@ -297,7 +300,7 @@ def git_diffstat(cwd: str | None) -> dict | None:
             _log.warning("git_diffstat returncode=%s em %s (badge omitido, retry em %ss)",
                          p.returncode, cwd, _SUMMARY_TTL)
             result = None
-    _diffstat_cache[cwd] = (now, result, ttl, fp)
+    _diffstat_cache[cwd] = (now, result, ttl, _repo_fingerprint(cwd))
     return result
 
 

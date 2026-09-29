@@ -171,6 +171,43 @@ def test_git_summary_pula_git_quando_index_e_head_nao_mudaram(tmp_path, monkeypa
     assert calls["n"] == 3
 
 
+def test_git_summary_fingerprint_depois_do_git_e_fetch_head(tmp_path, monkeypatch):
+    # `git status` regrava o index: a impressão tirada antes dele nunca casaria. Fetch muda
+    # ahead/behind só pelo FETCH_HEAD.
+    import os
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    (git / "refs" / "heads" / "main").write_text("0" * 40 + "\n")
+    (git / "index").write_bytes(b"x")
+    from app import git_ops
+
+    clock = [1000.0]
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: clock[0])
+    calls = {"n": 0}
+
+    def bump(p):
+        ns = os.stat(p).st_mtime_ns if p.exists() else 0
+        p.touch()
+        os.utime(p, ns=(ns + 1_000_000_000, ns + 1_000_000_000))
+
+    def fake_run(cwd, *a, timeout=None, **k):
+        calls["n"] += 1
+        bump(git / "index")
+        return type("P", (), {"returncode": 0, "stdout": "## main\n"})()
+
+    monkeypatch.setattr(git_ops, "_run", fake_run)
+    git_ops._summary_cache.clear()
+
+    git_ops.git_summary(str(tmp_path))
+    clock[0] = 1005.0
+    git_ops.git_summary(str(tmp_path))
+    assert calls["n"] == 1
+    bump(git / "FETCH_HEAD")
+    git_ops.git_summary(str(tmp_path))
+    assert calls["n"] == 2
+
+
 def test_sessioninfo_serializa_campos_git():
     from app.models import SessionInfo
     s = SessionInfo(name="x", git_dirty=3, git_ahead=2, git_behind=0)
