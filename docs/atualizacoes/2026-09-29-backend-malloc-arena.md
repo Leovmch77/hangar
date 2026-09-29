@@ -8,4 +8,6 @@ destrutivo: true
 
 O serviço do Hangar no Linux crescia centenas de megabytes em poucas horas e empurrava a máquina
 para o swap. Agora ele segura bem menos memória parada. Vale para quem roda o backend como
-serviço do systemd; quem roda na mão não é tocado.
+serviço do systemd; quem roda na mão não é tocado. A atualização reescreve o serviço e reinicia o
+backend: sessões sem terminal abertas nesse momento são interrompidas, e as conexões do celular
+caem por alguns segundos.
