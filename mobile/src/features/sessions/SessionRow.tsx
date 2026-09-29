@@ -4,7 +4,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import ReanimatedSwipeable, { type SwipeableMethods } from 'react-native-gesture-handler/ReanimatedSwipeable';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as Haptics from 'expo-haptics';
-import { cwdParts, loopBadge, planBadge, providerTag, relativeTime, rotuloEstado, untrackedReason, type AggSession } from '@hangar/core';
+import { cwdParts, isOrq, loopBadge, planBadge, providerTag, relativeTime, rotuloEstado, untrackedReason, type AggSession } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
 import { StateDot } from '../../ui/StateDot';
 import { Icon } from '../../ui/Icon';
@@ -36,6 +36,8 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
   const { theme } = useUnistyles();
   const swipe = useRef<SwipeableMethods>(null);
   const [menuAberto, setMenuAberto] = useState(false);
+  // O orquestrador não se renomeia nem se fecha: o backend recusa, então a linha nem oferece.
+  const orq = isOrq(s);
   // Toque longo pelo gesture-handler, não pelo `Pressable`: assim ele convive com o arrasto do
   // swipe (o mesmo reconhecedor decide quem ganha) em vez de disputar o toque com ele.
   const toqueLongo = useMemo(
@@ -43,21 +45,22 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
       Gesture.LongPress()
         .minDuration(500)
         .runOnJS(true)
+        .enabled(!orq)
         .onStart(() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
           setMenuAberto(true);
         }),
-    [],
+    [orq],
   );
   // Renomear/Git/Loop/Excluir só existiam no toque longo e no arrasto — dois gestos que o leitor
   // de tela não alcança. Aqui elas viram ações do rotor/menu de acessibilidade da própria linha.
   const acoesA11y = useMemo(
     () => [
-      { name: 'rename', label: m.sessao_renomear() },
+      ...(orq ? [] : [{ name: 'rename', label: m.sessao_renomear() }]),
       ...(s.cwd ? [{ name: 'git', label: 'Git' }] : []),
-      { name: 'delete', label: m.sessao_excluir_curto() },
+      ...(orq ? [] : [{ name: 'delete', label: m.sessao_excluir_curto() }]),
     ],
-    [s.cwd],
+    [s.cwd, orq],
   );
   const untracked = s.tracked === false;
   const cwd = cwdParts(s.cwd);
@@ -74,16 +77,18 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
           <Icon name="GitBranch" size={18} color="#fff" />
         </Pressable>
       ) : null}
-      <Pressable onPress={onExcluir} style={[styles.acao, { backgroundColor: theme.tokens.status.error }]} accessibilityRole="button" accessibilityLabel={m.sessao_excluir_curto()}>
-        <Icon name="Trash2" size={18} color="#fff" />
-      </Pressable>
+      {orq ? null : (
+        <Pressable onPress={onExcluir} style={[styles.acao, { backgroundColor: theme.tokens.status.error }]} accessibilityRole="button" accessibilityLabel={m.sessao_excluir_curto()}>
+          <Icon name="Trash2" size={18} color="#fff" />
+        </Pressable>
+      )}
     </View>
   );
 
   return (
     <ReanimatedSwipeable
       ref={swipe}
-      renderRightActions={acoes}
+      renderRightActions={orq && !s.cwd ? undefined : acoes}
       rightThreshold={40}
       overshootRight={false}
       onSwipeableWillOpen={() => aoAbrir?.(swipe.current)}
@@ -120,7 +125,7 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
             <View style={styles.linha1}>
               <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>
               {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
-              {providerTag(s.provider) ? <Chip>{providerTag(s.provider)!}</Chip> : null}
+              {orq ? <Chip>{m.orq_row_badge()}</Chip> : providerTag(s.provider) ? <Chip>{providerTag(s.provider)!}</Chip> : null}
               {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
             </View>
             {sub ? (
