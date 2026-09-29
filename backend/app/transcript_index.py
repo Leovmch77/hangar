@@ -29,6 +29,8 @@ _HEAD_LINES = 60        # o que archive._head_info lê
 _INTERNAL_LINES = 30    # o que search._interno lê
 _PER_FILE = 3
 _INTERVAL = 45.0
+# Boot já paga sondas de CLI e a coleta de custos; a construção entra depois, e a busca usa o rg até lá.
+_START_DELAY = 90.0
 # Busca com índice mais velho que isto roda uma passada antes: a conversa de agora tem de aparecer.
 _STALE_ON_SEARCH = 5.0
 
@@ -301,11 +303,14 @@ def _internal_prefixes() -> tuple[str, ...]:
 
 
 def _loop(idx: Index) -> None:
+    time.sleep(_START_DELAY)
     while True:
         inicio = time.monotonic()
         try:
             idx.update()
-            _log.info("índice de transcripts atualizado em %.1fs", time.monotonic() - inicio)
+            gasto = time.monotonic() - inicio
+            # Passada normal leva milissegundos a cada 45 s: só a lenta merece linha no journal.
+            (_log.info if gasto > 1.0 else _log.debug)("índice de transcripts atualizado em %.1fs", gasto)
         except Exception:
             _log.warning("passada do índice de transcripts falhou", exc_info=True)
         time.sleep(_INTERVAL)
