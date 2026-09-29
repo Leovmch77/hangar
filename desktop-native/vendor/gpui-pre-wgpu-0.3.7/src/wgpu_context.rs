@@ -464,11 +464,17 @@ impl WgpuContext {
         desc: &wgpu::DeviceDescriptor<'_>,
     ) -> Option<(wgpu::Device, wgpu::Queue)> {
         const DRM_MODIFIER: &std::ffi::CStr = c"VK_EXT_image_drm_format_modifier";
-        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
+        let Some(hal) = (unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }) else {
+            log::info!("wgpu adapter is not Vulkan: no DMA-BUF import (embedded browser unavailable)");
+            return None;
+        };
         if !hal
             .physical_device_capabilities()
             .supports_extension(DRM_MODIFIER)
         {
+            log::warn!(
+                "Vulkan adapter lacks {DRM_MODIFIER:?}: no DMA-BUF import (embedded browser unavailable)"
+            );
             return None;
         }
         let open = unsafe {

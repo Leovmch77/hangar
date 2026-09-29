@@ -15,7 +15,8 @@ pub use wry_engine::Engine;
 pub enum Event {
     State(model::PageState),
     /// Quadro novo para desenhar; só o motor que pinta pela GPUI manda.
-    #[cfg(target_os = "linux")]
+    // Fica em todo sistema para o `if let` de quem recebe não virar padrão irrefutável.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Frame,
 }
 

@@ -82,6 +82,7 @@ api! {
     wpe_view_set_visible: unsafe extern "C" fn(P, c_int);
     wpe_view_event: unsafe extern "C" fn(P, P);
     wpe_toplevel_resize: unsafe extern "C" fn(P, c_int, c_int) -> c_int;
+    wpe_toplevel_get_size: unsafe extern "C" fn(P, *mut c_int, *mut c_int);
     wpe_toplevel_get_scale: unsafe extern "C" fn(P) -> f64;
     wpe_toplevel_scale_changed: unsafe extern "C" fn(P, f64);
     wpe_event_pointer_button_new: unsafe extern "C" fn(c_int, P, c_int, u32, c_uint, c_uint, f64, f64, c_uint) -> P;
@@ -117,6 +118,7 @@ api! {
     webkit_network_error_quark: unsafe extern "C" fn() -> u32;
     webkit_navigation_policy_decision_get_navigation_action: unsafe extern "C" fn(P) -> P;
     webkit_navigation_action_get_request: unsafe extern "C" fn(P) -> P;
+    webkit_navigation_action_is_user_gesture: unsafe extern "C" fn(P) -> c_int;
     webkit_uri_request_get_uri: unsafe extern "C" fn(P) -> *const c_char;
     webkit_policy_decision_ignore: unsafe extern "C" fn(P);
 }

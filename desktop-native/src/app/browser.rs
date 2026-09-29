@@ -20,7 +20,7 @@ pub(super) struct BrowserPanel {
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
     _drain: Task<()>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
 }
 
 impl BrowserPanel {
@@ -33,10 +33,12 @@ impl BrowserPanel {
                 if this.update_in(cx, |this, window, cx| this.receive(event, window, cx)).is_err() { break; }
             }
         });
+        let address_focus = address.focus_handle(cx);
         let subscriptions = [
             cx.subscribe_in(&address, window, |this, _, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = event { this.submit(window, cx); }
             }),
+            cx.on_focus(&address_focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.release_focus() }),
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
@@ -163,6 +165,9 @@ impl Render for BrowserPanel {
             .disabled(!ready || self.page.url.is_none())
             .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.reload() }));
         let address = div().flex_1().min_w_0()
+            // O foco da GPUI pode já estar na barra enquanto a página nativa segura o do sistema: sem troca, o
+            // `on_focus` não dispara, então o clique também devolve.
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| if let Some(engine) = this.engine() { engine.release_focus() }))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
                 .when(self.page.loading, |el| el.suffix(chrome::Spinner::new("browser-loading", IconName::LoaderCircle, px(12.), theme::muted()))));
@@ -190,11 +195,11 @@ impl Hangar {
     /// No Windows e no macOS a página é uma janela filha, por cima de tudo o que a GPUI desenha: qualquer camada sobre o
     /// painel a esconde. Cobre o painel fora de vista (fechado, estreito, sem sessão, visor de arquivos expandido), outra
     /// aba à frente (menu, subagente), as páginas de Configurações e Custos, a caixa de configurações ao vivo, a conexão,
-    /// a busca, os painéis presos ao compositor e à barra do topo, e os diálogos e folhas do kit. No Linux a página é
-    /// desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
+    /// a busca, os painéis presos ao compositor e à barra do topo, os diálogos e folhas do kit e as notificações. No
+    /// Linux a página é desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
     fn browser_visible(&self, window: &mut Window, cx: &mut App) -> bool {
         let covered = cfg!(not(target_os = "linux")) && (self.connection_dialog || self.search.open || self.popup_open()
-            || window.has_active_dialog(cx) || window.has_active_sheet(cx));
+            || window.has_active_dialog(cx) || window.has_active_sheet(cx) || !window.notifications(cx).is_empty());
         self.side_width(window).is_some() && !self.files_expanded()
             && !self.side_menu_shown() && !self.subagent_tab_open() && self.side_tab() == SideTab::Browser
             && self.settings.is_none() && self.costs.view.is_none() && !covered

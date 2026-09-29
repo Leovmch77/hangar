@@ -4091,6 +4091,7 @@
   "native_browser_address_invalid": "Enter a valid website or localhost address.",
   "native_browser_address_scheme": "Only http and https addresses are supported.",
   "native_browser_address_credentials": "Use an address without an embedded username or password.",
+  "native_browser_blocked": "Blocked address: {url}",
   "native_auth_error": "Token rejected. Open Connection and check your credentials.",
   "native_connection_not_saved": "Connected, but the connection was not saved for next launch: {error}",
   "native_rate_limited": "Too many attempts. The connection will wait for the server retry period.",

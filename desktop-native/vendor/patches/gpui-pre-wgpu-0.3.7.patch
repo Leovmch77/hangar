@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/MODIFICADO.md gpui-pre-wgpu-0.3.7/MODIFICADO.md
 --- gpui-pre-wgpu-0.3.7/MODIFICADO.md
 +++ gpui-pre-wgpu-0.3.7/MODIFICADO.md
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +# Cópia do gpui-pre-wgpu 0.3.7
 +
 +Origem: crate `gpui-pre-wgpu` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -26,7 +26,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +dispositivo do próprio GPUI. Para isso `wgpu_context.rs` cria o dispositivo Vulkan com
 +`VK_EXT_image_drm_format_modifier` quando o adaptador suporta (`as_hal` + `open_with_callback` +
 +`create_device_from_hal`; senão, `request_device` como antes) e guarda uma cópia do par em
-+`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive). O renderer desenha
++`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive); quando cai no
++`request_device` por adaptador sem Vulkan ou sem a extensão, o motivo sai no log. O renderer desenha
 +`PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
 +superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
 +em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.
@@ -497,7 +498,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          Ok((
              device,
-@@ -439,6 +456,47 @@
+@@ -439,6 +456,53 @@
          ))
      }
  
@@ -509,11 +510,17 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +        desc: &wgpu::DeviceDescriptor<'_>,
 +    ) -> Option<(wgpu::Device, wgpu::Queue)> {
 +        const DRM_MODIFIER: &std::ffi::CStr = c"VK_EXT_image_drm_format_modifier";
-+        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
++        let Some(hal) = (unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }) else {
++            log::info!("wgpu adapter is not Vulkan: no DMA-BUF import (embedded browser unavailable)");
++            return None;
++        };
 +        if !hal
 +            .physical_device_capabilities()
 +            .supports_extension(DRM_MODIFIER)
 +        {
++            log::warn!(
++                "Vulkan adapter lacks {DRM_MODIFIER:?}: no DMA-BUF import (embedded browser unavailable)"
++            );
 +            return None;
 +        }
 +        let open = unsafe {

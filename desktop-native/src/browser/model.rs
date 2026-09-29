@@ -114,5 +114,9 @@ mod tests {
             let key = format!("native_browser_address_{key}");
             assert!(pt[&key].is_string() && en[&key].is_string(), "{key}");
         }
+        // O motor do Linux troca `{url}` no aviso de navegação bloqueada.
+        for messages in [&pt, &en] {
+            assert!(messages["native_browser_blocked"].as_str().is_some_and(|s| s.contains("{url}")));
+        }
     }
 }

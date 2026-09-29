@@ -675,7 +675,13 @@ impl Hangar {
     fn side_menu_git(&self) -> bool { self.selected.as_ref().is_some_and(|s| s.readable() && super::sidebar::has_git(s)) }
 
     // Nesta máquina o motor roda (no Linux, a biblioteca do WPE está instalada).
-    fn side_menu_browser(&self) -> bool { crate::browser::Engine::available().is_ok() }
+    fn side_menu_browser(&self) -> bool {
+        let available = crate::browser::Engine::available();
+        // A linha some sem dizer por quê: o motivo vai ao log, uma vez só (isto roda a cada desenho).
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        if let Err(error) = &available { LOGGED.call_once(|| eprintln!("navegador indisponível: {error}")); }
+        available.is_ok()
+    }
 
     /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
     pub(super) fn side_menu_shown(&self) -> bool {

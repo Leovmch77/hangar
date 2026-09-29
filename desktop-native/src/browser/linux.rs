@@ -34,6 +34,8 @@ type Texture = Arc<dyn std::any::Any + Send + Sync>;
 #[derive(Clone)]
 struct Frame {
     texture: Texture,
+    /// Device em que a textura foi importada: depois de uma perda de GPU ela não vale no device novo.
+    device: wgpu::Device,
     width: u32,
     height: u32,
     scale: f32,
@@ -138,7 +140,14 @@ impl Engine {
         }
         // Zera antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.shared.frame_pending.store(false, Ordering::SeqCst);
-        let frame = self.shared.frame.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let device = gpui_wgpu::WgpuContext::shared_device().map(|(device, _)| device);
+        let frame = {
+            let mut latest = self.shared.frame.lock().unwrap_or_else(PoisonError::into_inner);
+            if latest.as_ref().is_some_and(|frame| Some(&frame.device) != device.as_ref()) {
+                *latest = None;
+            }
+            latest.clone()
+        };
         if let Some(frame) = frame {
             // No tamanho em que foi renderizado: 1:1, nunca esticado durante um resize.
             let drawn = size(px(frame.width as f32 / frame.scale), px(frame.height as f32 / frame.scale));
@@ -195,6 +204,8 @@ impl Engine {
     }
 
     pub fn focus(&self, focused: bool) { self.post(Cmd::Focus(focused)); }
+    /// A página não tem foco do sistema próprio: o `focus(false)` do blur já basta.
+    pub fn release_focus(&self) {}
 }
 
 #[derive(Debug, PartialEq)]
@@ -403,8 +414,13 @@ extern "C" fn on_history_changed(_list: P, _added: P, _removed: P, _data: P) { w
 
 extern "C" fn on_load_changed(_web: P, event: c_int, _data: P) {
     with_web(|web| {
+        let started = event == ffi::WEBKIT_LOAD_STARTED;
+        if started {
+            // A carga nova limpa o erro; se o import seguir falhando, ele volta a aparecer.
+            web.import_failed.set(false);
+        }
         web.publish(|page| {
-            if event == ffi::WEBKIT_LOAD_STARTED {
+            if started {
                 page.error = None;
             }
         })
@@ -432,10 +448,16 @@ extern "C" fn on_decide_policy(_web: P, decision: P, kind: c_int, _data: P) -> c
     if kind == ffi::WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION {
         with_web(|web| {
             // Mesmo filtro do wry: fora de http(s)/about/blob/data não navega, nem em iframe.
-            if !web.request_uri(decision).is_some_and(|uri| model::allowed_request(&uri)) {
+            let (uri, gesture) = web.navigation(decision).unwrap_or_default();
+            if !model::allowed_request(&uri) {
                 // SAFETY: decisão viva durante o sinal.
                 unsafe { (web.api.webkit_policy_decision_ignore)(decision) };
                 blocked = true;
+                // O WPE não diz se a navegação é do quadro principal ou de um iframe; a pedida pelo usuário
+                // (clique, tecla) não pode sumir calada, a que a página dispara sozinha não vira aviso.
+                if gesture {
+                    web.publish(|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &uri)));
+                }
             }
         });
     }
@@ -468,12 +490,19 @@ impl Web {
                 Cmd::Resize { width, height, scale } => {
                     let toplevel = (api.wpe_view_get_toplevel)(view);
                     if toplevel.is_null() {
-                        eprintln!("navegador WPE: view sem toplevel, resize ignorado");
+                        self.fail("a view do WPE está sem toplevel; o tamanho da página não foi aplicado".into());
                     } else {
                         if (api.wpe_toplevel_get_scale)(toplevel) != scale {
                             (api.wpe_toplevel_scale_changed)(toplevel, scale);
                         }
-                        (api.wpe_toplevel_resize)(toplevel, width, height);
+                        // FALSE também quer dizer "já estava nesse tamanho": só é falha se o tamanho não bate.
+                        if (api.wpe_toplevel_resize)(toplevel, width, height) == 0 {
+                            let (mut w, mut h) = (0, 0);
+                            (api.wpe_toplevel_get_size)(toplevel, &mut w, &mut h);
+                            if (w, h) != (width, height) {
+                                self.fail(format!("o WPE recusou redimensionar a página para {width}x{height} (está em {w}x{h})"));
+                            }
+                        }
                         self.scale.set(scale as f32);
                     }
                     null_mut()
@@ -557,7 +586,14 @@ impl Web {
         let _ = self.shared.events.try_send(Event::State(next));
     }
 
-    fn request_uri(&self, decision: P) -> Option<String> {
+    /// Falha do motor: no log e na tela.
+    fn fail(&self, error: String) {
+        eprintln!("navegador WPE: {error}");
+        self.publish(|page| page.error = Some(error));
+    }
+
+    /// Endereço pedido e se veio de um gesto do usuário (clique, tecla).
+    fn navigation(&self, decision: P) -> Option<(String, bool)> {
         let api = self.api;
         // SAFETY: decisão de navegação viva durante o sinal; os getters devolvem ponteiros emprestados.
         unsafe {
@@ -569,23 +605,23 @@ impl Web {
             if request.is_null() {
                 return None;
             }
-            text((api.webkit_uri_request_get_uri)(request))
+            Some((text((api.webkit_uri_request_get_uri)(request))?, (api.webkit_navigation_action_is_user_gesture)(action) != 0))
         }
     }
 
     fn frame(&self, buffer: P) {
-        match self.import(buffer) {
-            Ok(frame) => {
-                self.import_failed.set(false);
-                *self.shared.frame.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
-                if !self.shared.frame_pending.swap(true, Ordering::SeqCst) {
-                    let _ = self.shared.events.try_send(Event::Frame);
-                }
-            }
-            Err(error) => {
+        let result = self.import(buffer);
+        let error = result.as_ref().err().cloned();
+        // Quadro que não importou apaga o anterior: a tela não mostra página velha como se fosse a atual.
+        *self.shared.frame.lock().unwrap_or_else(PoisonError::into_inner) = result.ok();
+        if !self.shared.frame_pending.swap(true, Ordering::SeqCst) {
+            let _ = self.shared.events.try_send(Event::Frame);
+        }
+        match error {
+            None => self.import_failed.set(false),
+            Some(error) => {
                 if !self.import_failed.replace(true) {
-                    eprintln!("navegador WPE: {error}");
-                    self.publish(|page| page.error = Some(error));
+                    self.fail(error);
                 }
             }
         }
@@ -623,11 +659,12 @@ impl Web {
         // SAFETY: fd emprestado pelo WebKit durante o sinal; ManuallyDrop impede fechar o dele.
         let inode = ManuallyDrop::new(unsafe { File::from_raw_fd(first) }).metadata().map_err(|e| e.to_string())?.ino();
         self.refresh_host()?;
+        let device = self.host.borrow().device.clone();
         let mut cache = self.cache.borrow_mut();
         if let Some((texture, w, h)) = cache.get(&inode)
             && (*w, *h) == (width, height)
         {
-            return Ok(Frame { texture: texture.clone(), width, height, scale: self.scale.get() });
+            return Ok(Frame { texture: texture.clone(), device, width, height, scale: self.scale.get() });
         }
         // Buffer novo (primeiro quadro ou swapchain recriado no resize): importa uma vez.
         if cache.len() >= 8 || cache.values().any(|(_, w, h)| (*w, *h) != (width, height)) {
@@ -656,7 +693,7 @@ impl Web {
         .map_err(|e| format!("import do quadro DMA-BUF falhou ({width}x{height}, modifier {modifier:#x}): {e}"))?;
         let texture: Texture = Arc::new(texture);
         cache.insert(inode, (texture.clone(), width, height));
-        Ok(Frame { texture, width, height, scale: self.scale.get() })
+        Ok(Frame { texture, device, width, height, scale: self.scale.get() })
     }
 
     /// A GPUI troca o device ao se recuperar de perda de GPU; textura do device antigo não pinta.

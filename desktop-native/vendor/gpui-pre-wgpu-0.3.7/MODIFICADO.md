@@ -22,7 +22,8 @@ Navegador embutido (Linux): o WPE WebKit entrega quadros em DMA-BUF, importados 
 dispositivo do próprio GPUI. Para isso `wgpu_context.rs` cria o dispositivo Vulkan com
 `VK_EXT_image_drm_format_modifier` quando o adaptador suporta (`as_hal` + `open_with_callback` +
 `create_device_from_hal`; senão, `request_device` como antes) e guarda uma cópia do par em
-`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive). O renderer desenha
+`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive); quando cai no
+`request_device` por adaptador sem Vulkan ou sem a extensão, o motivo sai no log. O renderer desenha
 `PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
 superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
 em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.

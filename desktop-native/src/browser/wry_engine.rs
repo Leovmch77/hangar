@@ -36,6 +36,7 @@ impl Engine {
         let (on_load, on_title) = ((state.clone(), events.clone()), (state.clone(), events.clone()));
         let view = WebViewBuilder::new_with_web_context(&mut context)
             .with_visible(false)
+            // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
             .with_navigation_handler(|url| model::allowed_request(&url))
             // ponytail: link com target=_blank não abre; carregar na mesma página quando fizer falta.
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
@@ -95,4 +96,6 @@ impl Engine {
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
     pub fn key(&self, _down: bool, _keystroke: &Keystroke) {}
     pub fn focus(&self, _focused: bool) {}
+    /// A janela filha guarda o foco do sistema depois de um clique nela; sem devolver, o que se digita na barra vai à página.
+    pub fn release_focus(&self) { self.report(self.view.focus_parent()); }
 }

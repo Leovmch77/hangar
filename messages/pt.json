@@ -4091,6 +4091,7 @@
   "native_browser_address_invalid": "Digite um site ou endereço localhost válido.",
   "native_browser_address_scheme": "Só endereços http e https são aceitos.",
   "native_browser_address_credentials": "Use um endereço sem usuário ou senha embutidos.",
+  "native_browser_blocked": "Endereço bloqueado: {url}",
   "native_auth_error": "Token recusado. Abra Conexão e confira a credencial.",
   "native_connection_not_saved": "Conectado, mas a conexão não foi guardada para a próxima abertura: {error}",
   "native_rate_limited": "Muitas tentativas. A conexão aguardará o prazo do servidor.",
