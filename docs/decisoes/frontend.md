@@ -631,4 +631,20 @@ confere o navegador nativo por esse pid, e o `navshell._chave` do backend acha o
   Electron.
 - **macOS e Linux não mudam**: um navegador por janela, sem controle pelo CLI.
 
-Medição: pendente — conferência no app com o usuário.
+Medição (29/09/2026, build debug, app rodando como Administrator, DevTools desligado):
+
+- **Navegador na tela:** viewport do tamanho do painel (1045×838); `click` chega com
+  `isTrusted=true`; `fill` com acento ("ação") ok; `press` ok; `shot` ~0,3 s; `layout mobile`
+  390×844 ok; `tema escuro` ok; dois comandos simultâneos entram em fila; console capturado; as
+  tools MCP (navshell) leem url e snapshot.
+- **Navegador escondido:** com `set_visible(false)` o Chromium parava de compor quadros —
+  `click`/`fill`/`press` não chegavam e o `shot` estourava 15 s. Regra: navegador escondido fica
+  visível para o Windows, estacionado fora da área do app (x=-3000 lógico, 1280×800). Medido
+  depois: `visibilityState=visible`, `click` com `isTrusted=true`, `shot` ~220–240 ms. Custo: cada
+  navegador escondido continua desenhando.
+- **Foco:** `Engine::focus(true)` passa o foco do teclado à página (WebView2 `MoveFocus`); sem
+  isso, digitar logo após o Enter na barra de endereço não chegava à página.
+- **App fechado:** `list` mostra MORTO e os verbos respondem "fora do ar"; ao reabrir, sidecars de
+  outro pid são apagados.
+- **Atalho `hangar-preview.cmd` + PowerShell 5.1** estragam aspas e `||` em `eval` (anterior a
+  este trabalho); pelo Git Bash funciona.
