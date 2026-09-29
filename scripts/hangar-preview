@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// hangar-preview — dirige o navegador embutido DA SUA SESSÃO no shell Electron do hangar.
+// hangar-preview — dirige o navegador embutido DA SUA SESSÃO no app desktop (Electron, ou o nativo no Windows).
 //
 //   hangar-preview open <url>             abre o navegador desta sessão com a url (o painel monta
 //                                          sozinho na tela do usuário; se a sessão estiver fora da
@@ -264,9 +264,11 @@ if (cmd === 'open') {
 }
 
 if (cmd === 'list') {
-  const vivos = await targets();
-  const linhas = lerSidecars().map((s) => {
-    const vivo = vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
+  const sidecars = lerSidecars();
+  // O app nativo grava o pid do dono no sidecar; o do Electron só se confere pelo alvo na porta 9223.
+  const vivos = sidecars.some((s) => !s.pid) ? await targets() : [];
+  const linhas = sidecars.map((s) => {
+    const vivo = s.pid ? pidVivo(s.pid) : vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
     // Sidecar de shell antigo não tem `abas`: vale como uma aba só, e a saída fica idêntica à de hoje.
     const sufixo = Array.isArray(s.abas) && s.abas.length > 1 ? `  (aba ${s.ativa} de ${s.abas.length})` : '';
     return `${s.chave}  ${s.url}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;

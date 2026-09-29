@@ -52,11 +52,12 @@ def _pasta_nav() -> Path:
     return Path.home() / ".hangar" / "nav"
 
 
-def alvo_da_sessao(name: str) -> Optional[dict[str, Any]]:
+def alvo_da_sessao(name: str, *, exige_alvo: bool = True) -> Optional[dict[str, Any]]:
     """Sidecar do navegador daquela sessão: `targetId` e `url`. `None` quando não há navegador.
 
     O shell grava um arquivo por navegador; a chave é `<servidor>::<sessão>`, e o mesmo casamento
     por sufixo que `GET /api/sessions/{name}/navegador` usa vale aqui.
+    `exige_alvo=False` aceita sidecar sem `targetId` (o do app nativo, que não expõe alvo CDP).
     """
     pasta = _pasta_nav()
     if not pasta.is_dir():
@@ -72,7 +73,7 @@ def alvo_da_sessao(name: str) -> Optional[dict[str, Any]]:
         if not isinstance(sc, dict):
             continue
         chave = str(sc.get("chave", ""))
-        if (chave == name or chave.endswith(f"::{name}")) and sc.get("targetId"):
+        if (chave == name or chave.endswith(f"::{name}")) and (sc.get("targetId") or not exige_alvo):
             return sc
     return None
 

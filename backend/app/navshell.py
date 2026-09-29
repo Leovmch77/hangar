@@ -39,7 +39,8 @@ def _servidor() -> dict[str, Any]:
 def _chave(name: str) -> Optional[str]:
     """A chave `<servidor>::<sessão>` que o shell usa, lida do sidecar daquele navegador."""
     from app.navsock import alvo_da_sessao
-    sc = alvo_da_sessao(name)
+    # O sidecar do app nativo não tem alvo CDP (`targetId` nulo); aqui só a chave importa.
+    sc = alvo_da_sessao(name, exige_alvo=False)
     return str(sc.get("chave")) if sc and sc.get("chave") else None
 
 
