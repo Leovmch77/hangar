@@ -58,7 +58,7 @@ Done when your sidecar carries the `gid` and the `orq` mark.
    orq init --auto --jev <shadow|on> --regex <shadow|on> --arbiter <you> --repo <repo> \
      --contract <regras path> --plan <user plan dir>/<user plan stem>.orq.md --untouchable <glob>…
    orq event execucao_inicio --plano <plan> --branch <branch> --gid <gid>
-   orq advance --dir ~/.hangar/orq/<date>-<gid>
+   orq advance
    ```
 
    Run `orq advance` right after, never wait for the watchdog: it releases the first wave. Its
