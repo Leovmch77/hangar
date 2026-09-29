@@ -710,8 +710,8 @@ impl Hangar {
         let wide = page == Page::Appearance && !self.settings_ui.live && window.viewport_size().width >= px(1400.);
         // Contas cabe em colunas (uma por janela de cota) quando sobra largura ao lado da navegação.
         let accounts_wide = page == Page::Accounts && window.viewport_size().width >= px(1320.);
-        // Servidores ganha o detalhe num painel ao lado da lista; estreita, o detalhe abre em diálogo.
-        let servers_wide = page == Page::Servers && window.viewport_size().width >= px(1320.);
+        // Servidores põe o detalhe num painel ao lado da lista: usa a largura que houver.
+        let servers_wide = page == Page::Servers;
         let body = match page {
             Page::Appearance => self.render_appearance(wide, cx),
             Page::General => self.render_general(cx),
@@ -722,7 +722,7 @@ impl Hangar {
             Page::Shortcuts => self.render_shortcuts_page(cx),
             Page::Harnesses => self.render_harness(cx),
             Page::Voice | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
-            Page::Servers => self.render_machines(servers_wide, cx),
+            Page::Servers => self.render_machines(window.viewport_size().width, cx),
             Page::Sync => self.render_sync(cx),
             Page::Windows => self.render_computer(cx),
         };
@@ -858,6 +858,18 @@ impl Hangar {
 
 pub(super) fn settings_box() -> Div {
     div().flex().flex_col().rounded(px(14.)).border_1().border_color(theme::border()).bg(theme::boxed()).overflow_hidden()
+}
+
+/// Cabeçalho de seção das Configurações: ícone no quadradinho de destaque, título e a linha que explica. É ele que faz as
+/// páginas parecerem da mesma família; seção nova usa este, não um desenho próprio.
+pub(super) fn section_head(icon: IconName, title: String, subtitle: Option<String>, extra: Option<AnyElement>, inset: Pixels) -> Div {
+    div().flex().items_center().gap(px(12.)).px(inset).py(px(14.))
+        .child(div().size(px(32.)).flex_shrink_0().rounded(px(9.)).bg(theme::accent_dim()).flex().items_center().justify_center()
+            .child(chrome::small_icon(icon, 17., theme::accent_text())))
+        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .when_some(subtitle, |el, s| el.child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(s))))
+        .children(extra)
 }
 
 /// Botão que abre e fecha um trecho (seção da Voz, "por quê?"): o `AccordionTrigger` do kit anuncia aberto/fechado, que o

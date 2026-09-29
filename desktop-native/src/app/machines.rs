@@ -11,7 +11,7 @@ use super::device::Remote;
 use add::{AddMachine, Found};
 use pair::Pair;
 use super::server_config::chip;
-use super::settings::{settings_box, Page};
+use super::settings::{section_head, settings_box, Page};
 use gpui_kit::component::{WindowExt, switch::Switch, tooltip::Tooltip};
 
 /// O web espera o serviço voltar por até 2 minutos, perguntando a cada 2 segundos.
@@ -69,11 +69,6 @@ fn tile(content: impl IntoElement, size: f32, fill: Hsla, dot: Option<(Hsla, boo
 }
 
 fn initial(name: &str) -> String { name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default() }
-
-/// Rótulo de um grupo da página, acima da caixa dele.
-fn group_label(text: String) -> Div {
-    div().px(px(6.)).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(text)
-}
 
 /// Ida e volta medidas: as duas máquinas nas pontas e o tempo de cada sentido na seta dele.
 fn two_way(here: &str, name: &str, going: i64, back: i64) -> Stateful<Div> {
@@ -464,8 +459,6 @@ pub(in crate::app) struct Machines {
     /// O diálogo Adicionar aberto.
     add: Option<Entity<AddMachine>>,
     pair: Pair,
-    /// A página tem o painel do detalhe ao lado da lista: abrir uma linha escolhe o que ele mostra, sem diálogo.
-    wide: bool,
 }
 
 impl Drop for Machines {
@@ -660,25 +653,15 @@ impl Hangar {
         });
     }
 
-    fn open_line_detail(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// O detalhe mora no painel ao lado da lista, como a Aparência: nada abre em diálogo.
+    fn open_line_detail(&mut self, key: String, _: &mut Window, cx: &mut Context<Self>) {
         // Abrir o detalhe mede de novo: o resultado de antes era de outra hora.
         let peer = self.machine_lines().into_iter().find(|l| l.open_key() == key).and_then(|l| l.peer);
         if let Some(peer) = peer { self.check_peer(&peer.id, cx); }
         let (m, id) = (&mut self.machines, key);
         (m.peer_open, m.peer_advanced) = (Some(id.clone()), false);
         if m.peer_error.as_ref().is_some_and(|(_, spot, _)| *spot != Spot::Row) { m.peer_error = None; }
-        if m.wide { cx.notify(); return; }
-        let hangar = cx.entity();
-        let detail = cx.new(|cx| PeerDetail { _observe: cx.observe(&hangar, |_, _, cx| cx.notify()), hangar: hangar.downgrade() });
-        let weak = hangar.downgrade();
-        // Fechado pela pessoa, o detalhe deixa de ser o diálogo do topo: um Remover que volta depois não fecha outro diálogo.
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (weak, id) = (weak.clone(), id.clone());
-            popup::dialog(dialog).w(px(600.)).child(detail.clone()).on_ok(enter_to_focused)
-                .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
-                    if this.machines.peer_open.as_deref() == Some(id.as_str()) { this.machines.peer_open = None; }
-                }); })
-        });
+        cx.notify();
     }
 
     fn peer_error_at(&self, id: &str, spot: Spot) -> Option<String> {
@@ -969,10 +952,7 @@ impl Hangar {
                             // Saiu pelo detalhe (rodapé ou recados): o detalhe dela fecha, como no web.
                             if matches!(spot, Spot::Footer | Spot::Messages) && m.peer_open.as_deref() == Some(id.as_str()) {
                                 m.peer_open = None;
-                                // No painel ao lado não há diálogo do detalhe: fechar um aqui levaria outro que estivesse aberto.
-                                if !m.wide { window.close_dialog(cx); }
-                                // O kit devolve o foco à linha que abriu o detalhe, e ela acabou de sair: sem isto, com a
-                                // resposta rápida o foco fica fora da árvore e o Esc não chega à página.
+                                // O botão focado saiu junto com o detalhe: sem isto o foco fica fora da árvore e o Esc não chega à página.
                                 if !window.has_active_dialog(cx) { self.root_focus.focus(window, cx); }
                             }
                         }
@@ -1084,16 +1064,9 @@ impl Hangar {
         });
     }
 
-    fn open_machine_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.machines.wide {
-            self.machines.peer_open = None;
-            cx.notify();
-            return;
-        }
-        let hangar = cx.entity();
-        let detail = cx.new(|cx| MachineDetail { _observe: cx.observe(&hangar, |_, _, cx| cx.notify()), hangar: hangar.downgrade() });
-        // Enter no diálogo é o "confirmar" do kit, que fecharia o detalhe; aqui Enter só salva o identificador (no campo dele).
-        window.open_dialog(cx, move |dialog, _, _| popup::dialog(dialog).w(px(600.)).child(detail.clone()).on_ok(enter_to_focused));
+    fn open_machine_detail(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.machines.peer_open = None;
+        cx.notify();
     }
 
     /// O resumo do cartão deste servidor: o endereço que responde mais rápido, e o farol dele.
@@ -1106,9 +1079,12 @@ impl Hangar {
         }
     }
 
-    /// `wide`: o detalhe da máquina escolhida fica num painel ao lado da lista; sem ele, cada linha abre o detalhe em diálogo.
-    pub(super) fn render_machines(&mut self, wide: bool, cx: &mut Context<Self>) -> AnyElement {
-        self.machines.wide = wide;
+    /// O detalhe da máquina escolhida fica num painel ao lado da lista; com a janela pequena demais para as duas colunas, ele
+    /// desce para baixo da lista. `width` é a largura da janela.
+    pub(super) fn render_machines(&mut self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let width = f32::from(width);
+        let wide = width >= 1320.;
+        let list_w = (width >= 1100.).then_some(if wide { 400. } else { 320. });
         let offline = self.api.is_none();
         // Os dois abrem diálogo: o foco volta a eles no Esc.
         let this = cx.entity().downgrade();
@@ -1127,25 +1103,24 @@ impl Hangar {
             .label(crate::i18n::tr_shared("convite_colar_titulo", &[])), open: Rc::new(move |window, cx| {
                 let _ = this.update(cx, |this, cx| this.open_invite_dialog(None, window, cx));
             }) };
-        let heading = div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
-            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(Page::Servers.title()))
-            .child(div().text_size(px(13.5)).text_color(theme::muted()).whitespace_normal().child(tr("machines_subtitle")));
-        let buttons = div().flex().flex_wrap().items_center().gap(px(8.))
-            .child(invite)
-            .child(self.mark(div().rounded(px(8.)).child(add), "machines_search_tailscale"))
-            .child(pair);
-        // Na coluna de 720px os três botões não cabem ao lado do título.
-        let top = if wide { div().flex().items_end().gap(px(16.)).child(heading).child(buttons) }
-            else { div().flex().flex_col().gap(px(14.)).child(heading).child(buttons) };
+        // Título em cima e botões embaixo, o topo de toda página das Configurações.
+        let top = div().flex().flex_col().gap(px(14.))
+            .child(div().flex().flex_col().gap(px(4.))
+                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(Page::Servers.title()))
+                .child(div().text_size(px(13.5)).text_color(theme::muted()).whitespace_normal().child(tr("machines_subtitle"))))
+            .child(div().flex().flex_wrap().items_center().gap(px(8.))
+                .child(invite)
+                .child(self.mark(div().rounded(px(8.)).child(add), "machines_search_tailscale"))
+                .child(pair));
         if self.api.is_none() {
             return div().flex().flex_col().child(top).child(div().mt_4().text_sm().text_color(theme::muted()).child(tr("settings_offline")))
                 .into_any_element();
         }
         // O painel mostra a máquina aberta; sem uma (ou se ela saiu da lista), este servidor.
-        let open_line = wide.then(|| self.machines.peer_open.clone()).flatten()
+        let open_line = self.machines.peer_open.clone()
             .and_then(|key| self.machine_lines().into_iter().find(|l| !l.this && l.open_key() == key));
-        let detail = wide.then(|| if open_line.is_some() { self.render_peer_detail(cx) } else { self.render_machine_detail(cx) });
-        let this_selected = wide && open_line.is_none();
+        let detail = if open_line.is_some() { self.render_peer_detail(cx) } else { self.render_machine_detail(cx) };
+        let this_selected = open_line.is_none();
         let open_key = open_line.as_ref().map(|l| l.open_key().to_owned());
 
         let m = &self.machines;
@@ -1167,7 +1142,7 @@ impl Hangar {
             .child(div().w_full().flex().items_center().gap(px(12.))
                 .child(tile(chrome::small_icon(IconName::Server, 19., theme::accent_text()), 38., theme::accent_dim(), Some(light.dot())))
                 .child(div().flex_1().min_w_0().flex().flex_col().items_start().gap(px(3.))
-                    .child(div().flex().items_center().gap(px(8.))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
                         .when(!id.is_empty(), |el| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(id.clone()))))
@@ -1180,10 +1155,11 @@ impl Hangar {
             let _ = this.update(cx, |this, cx| this.open_machine_detail(window, cx));
         }) };
         let card = self.mark(self.mark(div().rounded(px(10.)).child(card), "machines_id"), "server_term_origins");
-        let this_group = div().flex().flex_col().gap(px(8.)).child(group_label(tr("machines_this_server")))
-            .child(settings_box().p(px(6.)).child(card))
+        let this_group = settings_box()
+            .child(section_head(IconName::Plug, tr("machines_this_server"), Some(tr("machines_this_server_lead")), None, px(16.)))
+            .child(div().px(px(6.)).pb(px(6.)).child(card))
             .when_some(m.id.value.as_ref().and_then(|v| v.as_ref().err()).filter(|_| !m.id.loading).cloned(), |el, error| el.child(div()
-                .id("machines-id-read-error").role(Role::Alert).px(px(6.)).text_size(px(12.5)).text_color(theme::danger()).child(error)));
+                .id("machines-id-read-error").role(Role::Alert).px_4().pb(px(12.)).text_size(px(12.5)).text_color(theme::danger()).child(error)));
         let sign_out_error = m.leave_error.clone().filter(|(leave, _)| *leave == Leave::SignOut).map(|(_, error)| error);
         let actions = div().flex().flex_col().gap(px(8.))
             .when_some(sign_out_error, |el, error| el.child(div().id("machines-sign-out-error").role(Role::Alert)
@@ -1198,13 +1174,12 @@ impl Hangar {
             .child(this_group)
             .child(self.render_peers(open_key.as_deref(), cx))
             .child(actions);
-        let body = match detail {
-            Some(detail) => div().mt(px(24.)).flex().items_start().gap(px(24.))
-                .child(div().w(px(400.)).flex_shrink_0().child(list))
-                // Fundo mais fundo que as caixas do detalhe: no mesmo tom elas sumiriam dentro do painel.
-                .child(div().id("machines-detail-pane").flex_1().min_w_0().p(px(22.)).rounded(px(16.)).border_1().border_color(theme::border())
-                    .bg(theme::inset()).child(detail)),
-            None => div().mt(px(24.)).child(list),
+        // Fundo mais fundo que as caixas do detalhe: no mesmo tom elas sumiriam dentro do painel.
+        let pane = div().id("machines-detail-pane").flex_1().min_w_0().p(px(22.)).rounded(px(16.)).border_1().border_color(theme::border())
+            .bg(theme::inset()).child(detail);
+        let body = match list_w {
+            Some(w) => div().mt(px(24.)).flex().items_start().gap(px(24.)).child(div().w(px(w)).flex_shrink_0().child(list)).child(pane),
+            None => div().mt(px(24.)).flex().flex_col().gap(px(24.)).child(list).child(pane),
         };
         div().flex().flex_col().child(top).child(body).into_any_element()
     }
@@ -1221,7 +1196,9 @@ impl Hangar {
         // A falha do registro do servidor não esconde as máquinas guardadas aqui: ela aparece em cima delas.
         let error = m.peers.value.as_ref().and_then(|v| v.as_ref().err()).filter(|_| !m.peers.loading).cloned();
         let note = |text: String| div().px(px(10.)).py(px(12.)).text_size(px(12.5)).text_color(theme::muted()).child(text);
-        let list = settings_box().p(px(6.)).gap(px(2.))
+        let count = (total > 0).then(|| tr("machines_count").replace("{n}", &total.to_string()).replace("{m}", &showing.to_string()));
+        let head = self.mark(section_head(IconName::Server, tr("machines_others"), count, None, px(16.)), "machines_others");
+        let rows = div().px(px(6.)).pb(px(6.)).flex().flex_col().gap(px(2.))
             .when_some(error, |el, error| el.child(div().id("machines-peers-error").role(Role::Alert).flex().items_center().gap(px(10.)).px(px(10.)).py(px(10.))
                 .child(div().flex_1().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error))
                 .child(Button::new("machines-peers-retry").outline().small().label(tr("server_retry"))
@@ -1232,12 +1209,7 @@ impl Hangar {
             } else {
                 el.children(shown.iter().map(|(line, row)| self.peer_row(line, *row, false, open == Some(line.open_key()), cx)).collect::<Vec<_>>())
             });
-        let head = self.mark(div().flex().items_baseline().justify_between().gap(px(8.)).rounded(px(6.))
-            .child(group_label(tr("machines_others")))
-            .when(total > 0, |el| el.child(div().px(px(6.)).text_size(px(12.)).text_color(theme::muted())
-                .child(if showing == 0 { total.to_string() }
-                    else { tr("machines_count").replace("{n}", &total.to_string()).replace("{m}", &showing.to_string()) }))), "machines_others");
-        let list = div().flex().flex_col().gap(px(8.)).child(head).child(list)
+        let list = div().flex().flex_col().gap(px(8.)).child(settings_box().child(head).child(rows))
             .when(m.far_failed, |el| el.child(div().id("machines-far-failed").role(Role::Status).px(px(6.)).text_size(px(12.5)).text_color(theme::warning())
                 .whitespace_normal().child(tr("machines_remove_far_failed"))));
         let open_silent = m.silent_open;
@@ -1282,7 +1254,7 @@ impl Hangar {
             .child(div().w_full().flex().items_center().gap(px(12.))
                 .child(tile(face, 38., theme::raised(), Some(dot)))
                 .child(div().flex_1().min_w_0().flex().flex_col().items_start().gap(px(3.))
-                    .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(name))
+                    .child(div().flex().flex_wrap().items_center().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(name))
                         .when_some(chip, |el, chip| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(chip))))
                     .child(div().text_size(px(12.5)).text_color(color).whitespace_normal().child(phrase))
@@ -1331,10 +1303,8 @@ impl Hangar {
         };
         let busy = m.peer_busy.is_some();
         let next = tr("settings_next_version");
-        let section = |title: String| div().mt(px(22.)).mb(px(10.)).flex().items_center().gap(px(8.)).text_size(px(12.5))
-            .font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(title);
         let muted = |text: String| div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text);
-        let setting = |title: String, help: String| div().flex().items_center().gap(px(14.)).px_4().py(px(12.))
+        let setting = |title: String, help: String| div().border_t_1().border_color(theme::border()).flex().items_center().gap(px(14.)).px_4().py(px(12.))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(div().font_weight(FontWeight::MEDIUM).child(title)).child(muted(help)));
         let error = |id: &str, error: Option<String>| error.map(|error| div().id(SharedString::from(id.to_owned())).role(Role::Alert).px_4().pb(px(12.))
             .text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
@@ -1372,7 +1342,7 @@ impl Hangar {
                 .child(div().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).whitespace_normal()
                     .child(format!("{}{reason}", s.address)))
         }).collect::<Vec<_>>();
-        let device = settings_box().child(setting(tr("machines_peer_show_sessions"), legend).child(div().flex_shrink_0().child(follow)))
+        let device = settings_box().child(section_head(IconName::Monitor, tr("machines_peer_on_device"), None, None, px(16.))).child(setting(tr("machines_peer_show_sessions"), legend).child(div().flex_shrink_0().child(follow)))
             .children(error("machines-peer-adopt-error", adopt_error.clone()))
             .children(entries)
             .when(line.entries.len() > 1, |el| el.child(div().px_4().pb(px(12.)).text_size(px(12.5)).text_color(theme::warning()).whitespace_normal()
@@ -1456,6 +1426,7 @@ impl Hangar {
                     .disabled(card == Card::Testing).on_click(cx.listener(move |this, _, _, cx| this.check_peer(&id, cx)))))
             });
         let messages = settings_box()
+            .child(section_head(IconName::MessageSquare, tr("machines_peer_messages"), None, Some(scope().flex_shrink_0().into_any_element()), px(16.)))
             .child(setting(fill("machines_peer_messages_title"), fill(if card == Card::Off { "machines_peer_messages_off" } else { "machines_peer_messages_legend" }))
                 .child(div().flex_shrink_0().child(messages_switch)))
             .when(!has_id && registered, |el| el.child(div().px_4().pb(px(12.)).text_size(px(12.5)).text_color(theme::warning()).whitespace_normal()
@@ -1472,7 +1443,7 @@ impl Hangar {
             let address = |title: String, url: String| div().border_t_1().border_color(theme::border()).px_4().py(px(12.)).flex().flex_col().gap(px(2.))
                 .child(div().font_weight(FontWeight::MEDIUM).child(title))
                 .child(div().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(url));
-            div().mt(px(18.)).flex().flex_col().gap(px(10.))
+            div().flex().flex_col().gap(px(10.))
                 .child(div().flex().child(super::settings::Disclosure::new("machines-peer-advanced", advanced_open, tr("machines_advanced"), false)
                     .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.machines.peer_advanced = open; cx.notify(); }); })))
                 .when(advanced_open, |el| el.child(settings_box()
@@ -1503,7 +1474,7 @@ impl Hangar {
         let remove = FocusOnClick { id: key.into(), button: remove, open: Rc::new(move |window, cx| {
             let _ = this.update(cx, |this, cx| this.confirm_line_removal(&remove_line, Spot::Footer, window, cx));
         }) };
-        let footer = div().mt(px(22.)).flex().flex_col().items_end().gap(px(6.))
+        let footer = div().flex().flex_col().items_end().gap(px(6.))
             .children(peer_id.as_deref().and_then(|id| self.peer_error_at(id, Spot::Footer)).map(|error| div().id("machines-peer-remove-error")
                 .role(Role::Alert).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error)))
             .child(remove);
@@ -1515,17 +1486,15 @@ impl Hangar {
         };
         let face = if line.entry.as_ref().is_some_and(|e| e.invite) { chrome::small_icon(IconName::Link, 21., theme::muted()).into_any_element() }
             else { div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(initial(&name)).into_any_element() };
-        div().flex().flex_col().pb(px(8.))
-            .child(div().pr(px(28.)).mb(px(4.)).flex().items_center().gap(px(14.))
+        div().flex().flex_col().gap(px(16.)).pb(px(8.))
+            .child(div().mb(px(4.)).flex().items_center().gap(px(14.))
                 .child(tile(face, 46., theme::raised(), Some(head_dot)))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
                     .child(div().flex().items_center().gap(px(8.)).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
                         .when_some(chip_id, |el, id| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(id))))
                     .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tested))))
-            .child(section(tr("machines_peer_on_device")))
             .child(device)
-            .child(section(tr("machines_peer_messages")).child(scope()))
             .child(messages)
             .children(advanced)
             .child(footer)
@@ -1534,8 +1503,6 @@ impl Hangar {
     fn render_machine_detail(&mut self, cx: &mut Context<Self>) -> Div {
         let m = &self.machines;
         let id = m.id_loaded().to_owned();
-        let section = |key: &str| div().mt(px(22.)).mb(px(10.)).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme::muted())
-            .child(tr(key));
         let muted = |text: String| div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text);
 
         // Identificador: o CP_SERVER_ID do .env. Vazio, os outros servidores não conseguem registrar este.
@@ -1548,12 +1515,9 @@ impl Hangar {
             (_, _, Some(error)) => format!("{}. {error}", tr("machines_id")),
             _ => tr("machines_id"),
         };
+        // O título e o escopo moram no cabeçalho do cartão; a linha é a explicação e o campo.
         let id_row = div().flex().items_center().gap(px(12.))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                .child(div().flex().items_center().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(tr("machines_id")))
-                    .child(div().px(px(6.)).rounded_full().bg(theme::raised()).text_size(px(10.5)).font_weight(FontWeight::BOLD)
-                        .text_color(theme::muted()).child(tr("machines_scope_env"))))
-                .child(muted(if id.is_empty() { id_hint() } else { tr("machines_id_set").replace("{nome}", &id) })))
+            .child(div().flex_1().min_w_0().child(muted(if id.is_empty() { id_hint() } else { tr("machines_id_set").replace("{nome}", &id) })))
             .children(m.id_input.as_ref().map(|(input, _)| div().w(px(200.)).flex_shrink_0()
                 .child(Input::new(input).small().font_family(theme::MONO).disabled(!id_ready || m.id_saving).aria_label(id_label))));
         let id_state = if changed || m.id_saving {
@@ -1612,7 +1576,7 @@ impl Hangar {
             .to_vec(), ..Reach::default() };
         let reach = m.reach.ok().filter(|_| !m.reach.loading).cloned();
         let reach_error = m.reach.value.as_ref().and_then(|v| v.as_ref().err()).filter(|_| !m.reach.loading).cloned();
-        let addresses = settings_box().map(|el| match (&reach, &reach_error) {
+        let addresses = settings_box().child(section_head(IconName::Wifi, tr("machines_addresses"), None, None, px(16.))).map(|el| match (&reach, &reach_error) {
             (_, Some(error)) => el.child(div().id("machines-reach-error").role(Role::Alert).flex().items_center().gap(px(10.)).px_4().py(px(12.))
                 .child(div().flex_1().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error.clone()))
                 .child(Button::new("machines-reach-retry").outline().small().label(tr("server_retry"))
@@ -1645,7 +1609,7 @@ impl Hangar {
                 // Um cartão por caminho: quem alcança de fora e quem alcança no Wi-Fi, cada um com o sim ou não bem à vista.
                 let card = |icon: IconName, title: &str, ok: bool, rest: String| div().flex_1().min_w_0().p(px(14.)).rounded(px(12.)).border_1()
                     .border_color(if ok { theme::success().alpha(0.35) } else { theme::border() })
-                    .bg(if ok { theme::success().alpha(0.08) } else { theme::boxed() })
+                    .bg(if ok { theme::success().alpha(0.08) } else { theme::inset() })
                     .flex().flex_col().gap(px(6.))
                     .child(div().flex().items_center().gap(px(8.))
                         .child(chrome::small_icon(icon, 15., theme::muted()))
@@ -1662,11 +1626,9 @@ impl Hangar {
                     .when(lan.is_none() && reach.loopback, |el| el.child(muted(tr("machines_verdict_want_lan")
                         .replace("{variavel}", "CP_LAN_BIND_IP").replace("{valor}", "auto"))))
             };
-            let title = div().text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("machines_verdict"));
-            if isolated {
-                div().p(px(14.)).rounded(px(12.)).border_1().border_color(theme::danger()).bg(theme::inset()).flex().flex_col().gap(px(8.))
-                    .child(title).child(body)
-            } else { div().flex().flex_col().gap(px(10.)).child(title).child(body) }
+            settings_box().when(isolated, |el| el.border_color(theme::danger()))
+                .child(section_head(IconName::Globe, tr("machines_verdict"), None, None, px(16.)))
+                .child(div().px_4().pb_4().child(body))
         });
 
         // Reiniciar não é avançado: é o gesto que faz valer o identificador e as outras chaves do .env.
@@ -1720,7 +1682,7 @@ impl Hangar {
 
         let this = cx.entity().downgrade();
         let advanced_open = m.advanced;
-        let advanced = div().mt(px(18.)).flex().flex_col().gap(px(10.))
+        let advanced = div().flex().flex_col().gap(px(10.))
             .child(div().flex().child(super::settings::Disclosure::new("machines-advanced", advanced_open, tr("machines_advanced"), false)
                 .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.machines.advanced = open; cx.notify(); }); })))
             .when(advanced_open, |el| {
@@ -1735,14 +1697,14 @@ impl Hangar {
             });
 
         let remove_error = m.leave_error.clone().filter(|(leave, _)| *leave == Leave::Remove).map(|(_, error)| error);
-        let remove = div().mt(px(22.)).flex().flex_col().items_end().gap(px(6.))
+        let remove = div().flex().flex_col().items_end().gap(px(6.))
             .when_some(remove_error, |el, error| el.child(div().id("machines-remove-error").role(Role::Alert)
                 .text_size(px(12.5)).text_color(theme::danger()).child(error)))
             .child(Button::new("machines-remove").ghost().small().label(tr("machines_remove_here")).text_color(theme::danger())
                 .on_click(cx.listener(|this, _, window, cx| this.confirm_leave(Leave::Remove, window, cx))));
 
         let (summary, light) = self.reach_summary();
-        let head = div().pr(px(28.)).mb(px(18.)).flex().items_center().gap(px(14.))
+        let head = div().mb(px(2.)).flex().items_center().gap(px(14.))
             .child(tile(chrome::small_icon(IconName::Server, 22., theme::accent_text()), 46., theme::accent_dim(), Some(light.dot())))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
                 .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(self.server_label(cx)))
@@ -1750,14 +1712,15 @@ impl Hangar {
                     .child(format!("{} · {summary}", tr("machines_this_server")))))
             .when(!id.is_empty(), |el| el.child(div().flex_shrink_0().px(px(10.)).py(px(2.)).rounded_full().border_1().border_color(theme::border())
                 .font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(id.clone())));
-        div().flex().flex_col().pb(px(8.))
+        let scope_env = chip(tr("machines_scope_env"), theme::muted(), theme::raised()).flex_shrink_0().into_any_element();
+        div().flex().flex_col().gap(px(16.)).pb(px(8.))
             .child(head)
             .children(verdict)
-            .child(settings_box().mt(px(18.)).p(px(14.)).child(identifier))
-            .child(section("machines_addresses"))
+            .child(settings_box().child(section_head(IconName::Hash, tr("machines_id"), None, Some(scope_env), px(16.)))
+                .child(div().px_4().pb_4().child(identifier)))
             .child(addresses)
-            .child(section("machines_service"))
-            .child(settings_box().p(px(14.)).child(service))
+            .child(settings_box().child(section_head(IconName::RotateCw, tr("machines_service"), None, None, px(16.)))
+                .child(div().px_4().pb_4().child(service)))
             .child(advanced)
             .child(remove)
     }
@@ -1791,31 +1754,6 @@ impl RenderOnce for FocusOnClick {
             focus.focus(window, cx);
             open(window, cx);
         })
-    }
-}
-
-/// O corpo do diálogo do detalhe. O kit chama o construtor do diálogo na hora de abrir, com o `Hangar` ainda em
-/// atualização; esta vista só lê o `Hangar` ao desenhar, e redesenha quando ele muda.
-struct MachineDetail {
-    hangar: WeakEntity<Hangar>,
-    _observe: Subscription,
-}
-
-impl Render for MachineDetail {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.hangar.update(cx, |hangar, cx| hangar.render_machine_detail(cx)).unwrap_or_else(|_| div())
-    }
-}
-
-/// O corpo do diálogo de outra máquina, no mesmo desenho do `MachineDetail`.
-struct PeerDetail {
-    hangar: WeakEntity<Hangar>,
-    _observe: Subscription,
-}
-
-impl Render for PeerDetail {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.hangar.update(cx, |hangar, cx| hangar.render_peer_detail(cx)).unwrap_or_else(|_| div())
     }
 }
 

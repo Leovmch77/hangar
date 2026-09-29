@@ -14,7 +14,7 @@ use actions::{ActionReply, AddAccount, AddStep, Change, ChangeKind, SignIn};
 use codex::{CodexFlow, CodexReply, ResetOffer, ResetTry};
 use keys::{CookieForm, EngineForm, KeysReply};
 pub(super) use keys::ModelChoice;
-use super::settings::{Page, segments, settings_box};
+use super::settings::{Page, section_head, segments, settings_box};
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use gpui_kit::component::menu::DropdownMenu;
 use serde::Deserialize;
@@ -791,13 +791,7 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| this.open_add_account_at(AddStep::Catalog(true), window, cx))))),
             _ => None,
         };
-        let head = div().flex().items_center().gap(px(12.)).px_4().py(px(14.))
-            .child(div().size(px(32.)).flex_shrink_0().rounded(px(9.)).bg(theme::accent_dim()).flex().items_center().justify_center()
-                .child(chrome::small_icon(icon, 17., theme::accent_text())))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr(title)))
-                .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(tr(lead))))
-            .children(extra.map(|el| el.flex_shrink_0()));
+        let head = section_head(icon, tr(title), Some(tr(lead)), extra.map(|el| el.flex_shrink_0().into_any_element()), px(16.));
         let mut card = settings_box().mt(px(16.)).child(self.mark(head, title))
             .children(problem.map(|text| div().px_4().pb(px(12.)).child(banner(theme::danger(), IconName::TriangleAlert, text))));
         if section.rows.is_empty() {

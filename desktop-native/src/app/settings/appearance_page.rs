@@ -152,13 +152,7 @@ impl Hangar {
     fn section(&self, key: &'static str, icon: IconName, subtitle: Option<String>, extra: Option<AnyElement>, body: Div,
         cx: &mut Context<Self>) -> Div {
         let live = self.settings_ui.live;
-        let head = div().flex().items_center().gap(px(12.)).px(px(if live { 12. } else { 16. })).py(px(14.))
-            .child(div().size(px(32.)).flex_shrink_0().rounded(px(9.)).bg(theme::accent_dim()).flex().items_center().justify_center()
-                .child(chrome::small_icon(icon, 17., theme::accent_text())))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr(key)))
-                .when_some(subtitle, |el, s| el.child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(s))))
-            .children(extra);
+        let head = section_head(icon, tr(key), subtitle, extra, px(if live { 12. } else { 16. }));
         settings_box().mt(px(16.)).child(self.mark(head, key)).child(body)
             .capture_any_mouse_down(cx.listener(move |this, _, _, cx| if this.settings_ui.preview != Some(key) {
                 this.settings_ui.preview = Some(key);
@@ -618,18 +612,20 @@ impl Hangar {
         // A âncora da rolagem até os botões do topo é a faixa deles.
         let top_key = self.settings_ui.hit.filter(|k| matches!(*k, "settings_live" | "settings_reset")).unwrap_or("");
         let top = if live { div().pt(px(12.)).flex().justify_end().child(reset) } else {
-            div().flex().items_end().gap_2()
-                .child(div().flex_1().flex().flex_col()
+            // Título em cima e botões embaixo, como nas outras páginas: ao lado do título eles passavam por baixo da prévia.
+            div().flex().flex_col().gap(px(14.))
+                .child(div().flex().flex_col()
                     .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr("settings_page_appearance")))
-                    .child(div().mt(px(6.)).text_color(theme::muted()).child(tr("settings_appearance_lead"))))
-                .child(top_button("appearance-live", "settings_live", IconName::Eye).on_click(cx.listener(|this, _, window, cx| {
-                    this.settings_ui.live = true;
-                    this.settings_ui.hit = None;
-                    this.root_focus.focus(window, cx);
-                    cx.notify();
-                })))
-                .child(import)
-                .child(reset)
+                    .child(div().mt(px(6.)).text_color(theme::muted()).whitespace_normal().child(tr("settings_appearance_lead"))))
+                .child(div().flex().flex_wrap().items_center().gap_2()
+                    .child(top_button("appearance-live", "settings_live", IconName::Eye).on_click(cx.listener(|this, _, window, cx| {
+                        this.settings_ui.live = true;
+                        this.settings_ui.hit = None;
+                        this.root_focus.focus(window, cx);
+                        cx.notify();
+                    })))
+                    .child(import)
+                    .child(reset))
         };
         // Sem a coluna ao lado, o Estilo e a prévia ficam no corpo; a caixa ao vivo não repete a prévia, a conversa está atrás dela.
         let style = (!wide).then(|| settings_box().mt(px(18.)).child(self.row(IconName::Sparkles, "settings_style",
