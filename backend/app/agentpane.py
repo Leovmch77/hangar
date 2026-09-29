@@ -14,7 +14,7 @@ import time
 from typing import Optional
 
 from app import tmux
-from app.procinfo import _cmdline, _descendant_pids, _proc_children_map
+from app.procinfo import MAPA_TTL_ENVIO, _cmdline, _descendant_pids, _proc_children_map
 
 _log = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def pane_info(name: str) -> tuple[str, Optional[str]]:
         panes = tmux.list_panes_all().get(name)
         if not panes:
             return "claude", None
-        children = _proc_children_map()
+        children = _proc_children_map(MAPA_TTL_ENVIO)
         p = registry_mod.SessionRegistry._agent_pane(panes, children)
         return registry_mod.provider_of_pane(p["pid"], children), p.get("pane_id")
     except Exception as e:                       # noqa: BLE001

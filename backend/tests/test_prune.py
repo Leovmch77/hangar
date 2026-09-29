@@ -182,11 +182,38 @@ def test_tmp_orfao_no_active_que_a_poda_normal_nem_visita(tmp_path):
     f.write_text("x", encoding="utf-8")
     _mtime(f, _AGORA, 2)
     vivo = d / "bbb.json"
-    vivo.write_text("x", encoding="utf-8")
+    vivo.write_text(json.dumps({"jsonl": "/x.jsonl", "pid": os.getpid()}), encoding="utf-8")
     _mtime(vivo, _AGORA, 30)
     assert _total(prune._podar([base], {"viva"}, {"sessao"}, {"1"}, _AGORA)) == 1
     assert not f.exists()
-    assert vivo.exists()          # sidecar de verdade nao e assunto desta limpeza
+    assert vivo.exists()          # pid vivo: marcador fica, por mais velho que seja
+
+
+def test_active_velho_de_pid_morto_sai(tmp_path):
+    """`.hangar-active` prova vida pelo pid: velho e morto sai; novo, vivo ou de sessao viva fica."""
+    import subprocess
+    import sys
+    morto = subprocess.Popen([sys.executable, "-c", "pass"])
+    morto.wait()
+    base = tmp_path / "cfg"
+    d = base / ".hangar-active"
+    d.mkdir(parents=True)
+
+    def marcador(nome, pid, dias):
+        f = d / f"{nome}.json"
+        f.write_text(json.dumps({"jsonl": "/x.jsonl", "pid": pid}), encoding="utf-8")
+        _mtime(f, _AGORA, dias)
+        return f
+
+    velho_morto = marcador("velho-morto", morto.pid, 30)
+    sem_pid = marcador("sem-pid", None, 30)
+    novo_morto = marcador("novo-morto", morto.pid, 2)
+    velho_vivo = marcador("velho-vivo", os.getpid(), 30)
+    da_sessao_viva = marcador("viva", morto.pid, 30)
+    apagados = prune._podar([base], {"viva"}, {"sessao"}, {"1"}, _AGORA)
+    assert apagados[".hangar-active"] == 2
+    assert not velho_morto.exists() and not sem_pid.exists()
+    assert novo_morto.exists() and velho_vivo.exists() and da_sessao_viva.exists()
 
 
 def test_sidecar_de_verdade_nunca_casa_o_padrao_de_tmp():

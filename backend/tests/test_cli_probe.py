@@ -126,18 +126,18 @@ def test_cache_nao_re_sonda_dentro_do_ttl(tmp_path, monkeypatch):
     _make_sh(tmp_path, "claude", exit_code=0)
     monkeypatch.setattr(cli_probe, "_path_login", str(tmp_path))
     chamadas = {"n": 0}
-    orig_run = subprocess.run
+    orig_isfile = os.path.isfile
 
-    def fake_run(*a, **kw):
+    def fake_isfile(p):
         chamadas["n"] += 1
-        return orig_run(*a, **kw)
+        return orig_isfile(p)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os.path, "isfile", fake_isfile)
     # primeira sonda
     cli_probe.sondar_providers()
     n1 = chamadas["n"]
     assert n1 >= 1
-    # segunda sonda dentro do TTL não deve chamar subprocess de novo para --version
+    # segunda sonda dentro do TTL não deve olhar o PATH de novo
     # (o PATH também é cacheado, mas o ponto é o cache de 60s do resultado)
     cli_probe.sondar_providers()
     n2 = chamadas["n"]

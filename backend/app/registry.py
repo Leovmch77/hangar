@@ -259,6 +259,10 @@ def _newest_after_clear(projdir: Path, sid_jsonl: str, exclude: set[str]) -> str
     return best
 
 
+# pasta .hangar-active -> {nome: (mtime_ns, jsonl, pid, ts)}
+_marker_cache: dict[str, dict[str, tuple[int, Optional[str], object, float]]] = {}
+
+
 def _marker_by_pids(config_base: Path, pids: list[int], exclude: set[str]) -> Optional[str]:
     # Marcador do hook casado por PID: o state_hook grava {jsonl, ts, cwd, pid} onde pid = o REPL
     # claude que disparou o evento. Se esse pid e DESCENDENTE deste pane, o marcador e desta sessao
@@ -268,20 +272,35 @@ def _marker_by_pids(config_base: Path, pids: list[int], exclude: set[str]) -> Op
     pidset = set(pids)
     best: tuple[float, str] | None = None
     try:
-        files = list(d.glob("*.json"))
+        entries = list(os.scandir(d))
     except OSError:
         return None
-    for f in files:
-        try:
-            o = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    # Relido so o marcador cujo mtime mudou: com centenas deles, o json.loads de todos a cada tick
+    # da lista era o custo. O dict e refeito por chamada, entao marcador apagado sai dele.
+    anterior = _marker_cache.get(str(d), {})
+    atual: dict[str, tuple[int, Optional[str], object, float]] = {}
+    for e in entries:
+        if not e.name.endswith(".json"):
             continue
-        j, pid = o.get("jsonl"), o.get("pid")
+        try:
+            mtime = e.stat().st_mtime_ns
+        except OSError:
+            continue
+        hit = anterior.get(e.name)
+        if hit is None or hit[0] != mtime:
+            try:
+                with open(e.path, encoding="utf-8") as fh:
+                    o = json.loads(fh.read())
+                hit = (mtime, o.get("jsonl"), o.get("pid"), float(o.get("ts") or 0.0))
+            except (OSError, ValueError, AttributeError, TypeError):
+                continue
+        atual[e.name] = hit
+    _marker_cache[str(d)] = atual
+    for _mt, j, pid, ts in atual.values():
         if not j or pid not in pidset:
             continue
         if not os.path.exists(j) or os.path.realpath(j) in exclude:
             continue
-        ts = float(o.get("ts") or 0.0)
         if best is None or ts > best[0]:
             best = (ts, j)
     return best[1] if best else None

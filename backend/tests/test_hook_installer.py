@@ -159,7 +159,7 @@ def test_ensure_installed_targets_config_dirs(tmp_path, monkeypatch):
     d2.mkdir()
     monkeypatch.setattr(
         hook_installer, "list_config_dirs",
-        lambda: [ConfigDirInfo(path=str(d1), label="a", active=True)],
+        lambda **_: [ConfigDirInfo(path=str(d1), label="a", active=True)],
     )
     monkeypatch.setattr(hook_installer, "_backend_config_base", lambda: d2)
     touched = hook_installer.ensure_askq_hook_installed()
@@ -171,7 +171,7 @@ def test_ensure_installed_targets_config_dirs(tmp_path, monkeypatch):
 
 def test_ensure_installed_failsoft_when_discovery_raises(monkeypatch):
     # list_config_dirs estourando (ex: HOME ausente) NUNCA pode derrubar o startup -> retorna [].
-    def _boom():
+    def _boom(**_):
         raise RuntimeError("HOME nao setado")
     monkeypatch.setattr(hook_installer, "list_config_dirs", _boom)
     assert hook_installer.ensure_askq_hook_installed() == []
@@ -209,7 +209,7 @@ def test_pair_hook_entra_no_session_start_com_matcher(tmp_path, monkeypatch):
     import json
     from app import hook_installer as hi
     monkeypatch.setattr(hi, "_pair_command", lambda: f'"py" "{hi.PAIR_HOOK}" "/x/.hangar-pair" || exit 0')
-    monkeypatch.setattr(hi, "list_config_dirs", lambda: [])
+    monkeypatch.setattr(hi, "list_config_dirs", lambda **_: [])
     monkeypatch.setattr(hi, "_backend_config_base", lambda: tmp_path)
     (tmp_path / "settings.json").write_text("{}")
     assert hi.ensure_pair_hook_installed() == [str(tmp_path)]
@@ -222,7 +222,7 @@ def test_pair_hook_entra_no_session_start_com_matcher(tmp_path, monkeypatch):
 
 def test_nav_hook_entra_no_user_prompt_submit(tmp_path, monkeypatch):
     from app import hook_installer as hi
-    monkeypatch.setattr(hi, "list_config_dirs", lambda: [])
+    monkeypatch.setattr(hi, "list_config_dirs", lambda **_: [])
     monkeypatch.setattr(hi, "_backend_config_base", lambda: tmp_path)
     (tmp_path / "settings.json").write_text("{}")
     assert hi.ensure_nav_hook_installed() == [str(tmp_path)]

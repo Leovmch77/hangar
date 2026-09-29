@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import sqlite3
@@ -556,6 +557,9 @@ def _sincronizar(cli: str) -> str:
 def diagnosticar() -> list[dict]:
     home = Path.home()
     saida = []
+    # Enche o cache de versões em paralelo: os `--version` em série somavam segundos no painel.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(_versao, ("claude", "codex", "pi", "omp", "kimi", "tmux")))
 
     v = _versao("claude")
     itens = [_hooks_claude(Path(c.path)) for c in list_config_dirs() if Path(c.path, "settings.json").is_file()]

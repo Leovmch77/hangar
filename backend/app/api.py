@@ -417,6 +417,8 @@ async def _lifespan(app: FastAPI):
     # montar(). Sem aquecer aqui, o primeiro /api/costs depois de todo restart paga a coleta fria
     # (657ms medidos) MAIS até 3s de câmbio, contra o AbortSignal.timeout(4000) do cliente.
     threading.Thread(target=_usd_brl, name="usd-brl-warm", daemon=True).start()
+    # Catálogo do pi/omp em fundo: a primeira lista de modelos depois do restart levava segundos.
+    pi_catalog.warm()
     # Primeira coleta de custos/uso desta subida, em background e só depois de o boot assentar:
     # máquina nova varre 1 GB+ de transcript sem ninguém ter clicado, e a tela já abre pronta.
     costs_sources.agendar_aquecimento(30)

@@ -55,31 +55,34 @@ if not _TEM_PROC:
 # adiante); o que faltava era reuso ENTRE chamadas. Medido: 38 rotas chamam `registry.list()` direto,
 # sem passar pelo snapshot com TTL do api.py, e cada uma reconstruia o mapa — davam ~8 varreduras
 # completas do /proc por segundo, metade de todo o trabalho do backend. O mapa e o mesmo pra todos os
-# chamadores do mesmo instante, entao um TTL curto (a cadencia do poll e 1,5s) elimina a repeticao
-# sem que ninguem enxergue estado mais velho do que ja enxergava pelo snapshot.
-_MAPA_TTL = 1.0
+# chamadores do mesmo instante. O TTL fica acima da cadencia do poll (1,5s): abaixo dela cada tick
+# da lista achava o mapa vencido e varria de novo.
+_MAPA_TTL = 3.0
+# Caminho de ENVIO (agentpane.pane_info): logo apos criar a sessao o mapa de 3s pode nao conter o
+# agente e a resolucao cairia no provider errado.
+MAPA_TTL_ENVIO = 1.0
 _mapa_cache: Optional[tuple[float, dict[int, list[int]]]] = None
 _mapa_lock = threading.Lock()
 
 
 def _invalidar_children_map() -> None:
     """Descarta o mapa cacheado. Para quem PRECISA ver um processo que acabou de nascer — sem isto o
-    fallback de sessao recem-criada (api._guardar_snap com forcar) leria um mapa de ate 1s atras e
+    fallback de sessao recem-criada (api._guardar_snap com forcar) leria um mapa antigo e
     devolveria o mesmo 404 que ele existe pra evitar."""
     global _mapa_cache
     _mapa_cache = None
 
 
-def _proc_children_map() -> dict[int, list[int]]:
+def _proc_children_map(max_age: float = _MAPA_TTL) -> dict[int, list[int]]:
     global _mapa_cache
     cache = _mapa_cache
-    if cache is not None and time.monotonic() - cache[0] < _MAPA_TTL:
+    if cache is not None and time.monotonic() - cache[0] < max_age:
         return cache[1]
     with _mapa_lock:
         # Re-checa dentro do lock: sem isto N threads que erram juntas varrem o /proc N vezes, que e
         # exatamente o desperdicio que este cache existe pra tirar.
         cache = _mapa_cache
-        if cache is not None and time.monotonic() - cache[0] < _MAPA_TTL:
+        if cache is not None and time.monotonic() - cache[0] < max_age:
             return cache[1]
         mapa = _varrer_children_map()
         _mapa_cache = (time.monotonic(), mapa)
