@@ -148,6 +148,10 @@ impl Engine {
     pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
     pub fn key(&self, _down: bool, _keystroke: &Keystroke) {}
+    /// O WebView nasce sem foco no Windows: sem mover o foco aqui, o que se digita depois do Enter na barra não chega.
+    #[cfg(target_os = "windows")]
+    pub fn focus(&self, focused: bool) { if focused { self.report(self.view.focus()); } }
+    #[cfg(not(target_os = "windows"))]
     pub fn focus(&self, _focused: bool) {}
     /// A janela filha guarda o foco do sistema depois de um clique nela; sem devolver, o que se digita na barra vai à página.
     pub fn release_focus(&self) { self.report(self.view.focus_parent()); }
