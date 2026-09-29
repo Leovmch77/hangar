@@ -10,6 +10,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `packages`) — senão serve tela velha ou apaga edição local.
 - **Instalador com portão de prova por etapa**: essencial que falha para na hora; extra opcional
   que falha entra na lista e o fim nunca diz "Pronto". Nada é dado como feito sem prova.
+- **O backend escuta em `0.0.0.0` por padrão**, gravado pelo instalador e pelo `--update`/
+  `-Update` quando o `.env` está sem a chave ou em loopback; IP escolhido à mão fica. É o que
+  deixa os clientes usarem a rede local antes do Tailscale (`baseOf`, em
+  [plataforma.md](plataforma.md#rede-local-antes-do-tailscale-baseurl-é-identidade-a-rota-é-baseof)).
+  Nunca `auto`: tira o loopback de que o `tailscale serve` depende. Firewall do Windows no
+  `-Update` só sem UAC (já admin); senão vira pendência com o comando.
 - **Instalador guiado: duas perguntas, o resto é padrão.** Sem terminal, tudo é NÃO. O log nunca
   carrega o token.
 - **Atualizar pelo app faz tudo sozinho, mas nada é irreversível**: resgate antes de qualquer
