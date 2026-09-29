@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,19 +149,25 @@ def inventario(catalogo_claude=_modelos_claude_reduzidos) -> list[ContaInventari
             out.append(ContaInventario(prov, "pi", prov, None, tuple(ms)))
     except Exception:  # noqa: BLE001 — pi ausente/quebrado não cega as outras contas
         pass
+    def modelos_codex(c) -> tuple:
+        try:
+            return tuple({"id": m["id"], "name": m["name"], "efforts": m["efforts"]}
+                         for m in codex_models.listar(codex_home=None if c.is_default else c.home))
+        except (codex_models.CodexAusente, codex_models.CodexIndisponivel, codex_models.CodexRecusado,
+                codex_models.CodexRespostaInvalida, RuntimeError, OSError):
+            # model/list fora do ar deixa só "Padrão", não some a conta
+            _log.warning("catálogo Codex de %s indisponível", c.id, exc_info=True)
+            return ()
+
     try:
-        for c in codex_contas.list_visible_accounts():
+        contas_codex = codex_contas.list_visible_accounts()
+        # Um app-server por conta sem cache: em paralelo, a tela espera o mais lento, não a soma.
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(contas_codex)))) as pool:
+            catalogos = list(pool.map(modelos_codex, contas_codex))
+        for c, ms in zip(contas_codex, catalogos):
             # A padrão mantém o nome `openai-codex`: é o que as políticas já gravadas usam.
             chave = f"codex:{c.home.expanduser().resolve(strict=False)}"
             padrao = nomes.get("codex", "OpenAI Codex") if c.is_default else c.id
-            try:
-                ms = tuple({"id": m["id"], "name": m["name"], "efforts": m["efforts"]}
-                           for m in codex_models.listar(codex_home=None if c.is_default else c.home))
-            except (codex_models.CodexAusente, codex_models.CodexIndisponivel, codex_models.CodexRecusado,
-                    codex_models.CodexRespostaInvalida, RuntimeError, OSError):
-                # model/list fora do ar deixa só "Padrão", não some a conta
-                _log.warning("catálogo Codex de %s indisponível", c.id, exc_info=True)
-                ms = ()
             out.append(ContaInventario(CONTA_CODEX if c.is_default else c.id, "codex",
                                        nomes.get(chave) or padrao, None, ms))
     except Exception:  # noqa: BLE001 — pasta de conta Codex ilegível não cega as outras contas

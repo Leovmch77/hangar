@@ -635,12 +635,12 @@ class CodexContasLogin:
                 "has_settings": self._has_settings(account)}
 
     async def accounts_snapshot(self) -> list[dict]:
-        result = []
-        for account in accounts.list_visible_accounts():
+        async def one(account: accounts.Account) -> dict:
             sync = self.preparation_status(account)
-            result.append(await self.account_snapshot(
-                account, read_auth=sync.get("status") != "running", sync=sync))
-        return result
+            return await self.account_snapshot(
+                account, read_auth=sync.get("status") != "running", sync=sync)
+        # Uma leitura de auth por conta, em paralelo: em série a tela esperava a soma delas.
+        return list(await asyncio.gather(*(one(a) for a in accounts.list_visible_accounts())))
 
     async def close(self) -> None:
         attempts = list(self._attempts.values())
