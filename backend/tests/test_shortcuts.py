@@ -25,6 +25,13 @@ def _isolate(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_focus(monkeypatch):
+    # Sem isto o reuso chamaria o hyprctl da maquina de quem roda e puxaria janela de verdade.
+    from app import window_focus
+    monkeypatch.setattr(window_focus, "focus_tree", lambda root, env: False)
+
+
 @pytest.fixture
 def client():
     """Mesmo arranjo de test_api.py: sem armar o token, toda rota devolve 401."""
@@ -239,6 +246,27 @@ def test_hangar_second_click_from_other_session_reuses_the_copy(client, monkeypa
     assert second["terminal"]["id"] == first["terminal"]["id"]
     assert [(t["id"], t["owner"], t["key"], t["origin"], t["alive"]) for t in _hangar(client)] == [
         (first["terminal"]["id"], "", "global:k1", "a", True)]
+
+
+def test_hangar_reuse_reports_the_window_focus(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api, window_focus
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="a")
+    monkeypatch.setattr(window_focus, "focus_tree", lambda root, env: True)
+    second = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="b").json()
+    assert second["reused"] is True and second["focused"] is True
+
+
+def test_hangar_focus_route(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api, window_focus
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    assert client.post("/api/hangar-terminals/nao-existe/focus", headers=_auth()).status_code == 404
+    ident = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()["terminal"]["id"]
+    assert client.post(f"/api/hangar-terminals/{ident}/focus", headers=_auth()).json() == {"focused": False}
+    monkeypatch.setattr(window_focus, "focus_tree", lambda root, env: True)
+    assert client.post(f"/api/hangar-terminals/{ident}/focus", headers=_auth()).json() == {"focused": True}
 
 
 def test_hangar_concurrent_clicks_start_one_copy(client, monkeypatch, tmp_path, private_tmux):

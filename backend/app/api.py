@@ -6510,8 +6510,17 @@ def _shortcut_started(name: str, term: dict) -> dict:
                                          terminal={**public, "alive": False, "exit_code": code}))
 
 
+def _focus_hangar_terminal(row: dict | None) -> bool:
+    if not row or not row["alive"] or not row["pid"]:
+        return False
+    from app import window_focus
+    return window_focus.focus_tree(row["pid"], _shortcut_env())
+
+
 def _shortcut_reused(term: dict) -> dict:
-    return {"ok": True, "reused": True, "focused": False,
+    from app import shortcut_terminals
+    focused = _focus_hangar_terminal(shortcut_terminals.hangar_row(term["id"]))
+    return {"ok": True, "reused": True, "focused": focused,
             "terminal": {"id": term["id"], "label": term["label"], "alive": True, "exit_code": None}}
 
 
@@ -6598,6 +6607,15 @@ def hangar_terminal_close(ident: str):
 def hangar_terminal_answer(ident: str, body: ShortcutAnswerBody):
     from app import shortcut_terminals
     return _answer(shortcut_terminals.find_hangar(ident), body.text, _hangar_404())
+
+
+@app.post("/api/hangar-terminals/{ident}/focus", dependencies=[Depends(require_auth)])
+def hangar_terminal_focus(ident: str):
+    from app import shortcut_terminals
+    row = shortcut_terminals.hangar_row(ident)
+    if row is None:
+        raise _hangar_404()
+    return {"focused": _focus_hangar_terminal(row)}
 
 
 @app.post("/api/hangar-terminals/{ident}/restart", dependencies=[Depends(require_auth)], status_code=202)
