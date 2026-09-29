@@ -327,14 +327,17 @@ def _event_line(ev: dict) -> str:
     return " ".join(parts)
 
 
-def send(target: str, text: str, tmux: bool = False) -> None:
-    """Wakes a session through hangar-send, keeping the caller's identity. ORQ_SEND: tests."""
+def send(target: str, text: str, tmux: bool = False, painel: bool = False) -> None:
+    """Wakes a session through hangar-send, keeping the caller's identity; `painel` sends the text
+    as a panel notice instead, without the caller's `[de: …]`. ORQ_SEND: tests."""
     cmd = [os.environ.get("ORQ_SEND", "hangar-send")]
     if tmux:
         cmd.append("--tmux")
+    # Always explicit: a value inherited from the caller's environment must not relabel a session's message.
+    env = {**os.environ, "HANGAR_SEND_PAINEL": "1" if painel else "0"}
     try:
         r = subprocess.run(cmd + [target, text], capture_output=True, text=True,
-                           timeout=SEND_TIMEOUT_S)
+                           timeout=SEND_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
         raise OrqError(f"hangar-send {target} did not answer in {SEND_TIMEOUT_S}s") from None
     if r.returncode != 0:
@@ -1387,7 +1390,7 @@ def orchestrator_tag(d: Path) -> str:
 
 
 def _say(d: Path, target: str, text: str) -> None:
-    send(target, orchestrator_tag(d) + text)
+    send(target, orchestrator_tag(d) + text, painel=True)
 
 
 def _wake(d: Path, text: str, line: str, task: int | None = None, kind: str = "woke") -> None:

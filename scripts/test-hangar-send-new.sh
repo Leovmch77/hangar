@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Trava o que `hangar-send --new` manda no POST /api/sessions, contra um backend FALSO que só grava
-# o corpo. É shell, a suíte pytest não alcança; e o script de verdade é copiado (não colado aqui),
-# pra o teste quebrar junto com ele.
+# Trava o que o hangar-send manda ao backend — o POST /api/sessions do `--new` e o POST /input do
+# recado com HANGAR_SEND_PAINEL=1 —, contra um backend FALSO que só grava o corpo. É shell, a suíte
+# pytest não alcança; e o script de verdade é copiado (não colado aqui), pra o teste quebrar junto
+# com ele.
 #
 # Existe pelo --headless: só a tela de criar sessão abria sessão sem terminal, e o flag faltando no
 # script fazia quem orquestra por hangar-send cair calado numa sessão com terminal.
@@ -84,6 +85,25 @@ checa "--headless duas vezes: código" '2' "$?"
 # 5. O --help documenta o flag (a ajuda é o cabeçalho do script).
 bash "$REPO/scripts/hangar-send" --help 2>/dev/null | grep -q -- '--headless'
 checa "--help menciona --headless" '0' "$?"
+
+# 6. HANGAR_SEND_PAINEL=1: aviso de programa vai como está, sem [de: …] e sem procurar o remetente.
+rm -f "$TMP/corpo.json"
+HANGAR_SEND_PAINEL=1 bash "$TMP/scripts/hangar-send" alvo "[painel: orquestrador g1] oi" >/dev/null 2>&1
+checa "painel: código" '0' "$?"
+checa "painel: texto intacto" '"[painel: orquestrador g1] oi"' "$(campo text 2>/dev/null)"
+checa "painel: orienta o turno" 'true' "$(campo steer 2>/dev/null)"
+
+# 7. Sem o rótulo de painel, ou para outro servidor, recusa sem enviar nada.
+rm -f "$TMP/corpo.json"
+HANGAR_SEND_PAINEL=1 bash "$TMP/scripts/hangar-send" alvo "oi" >/dev/null 2>&1
+checa "painel sem [painel:]: código" '2' "$?"
+checa "painel sem [painel:]: nada enviado" 'ausente' "$([[ -e "$TMP/corpo.json" ]] && echo enviado || echo ausente)"
+HANGAR_SEND_PAINEL=1 bash "$TMP/scripts/hangar-send" srv::alvo "[painel: x] oi" >/dev/null 2>&1
+checa "painel para outro servidor: código" '2' "$?"
+
+# 8. O --help documenta a variável (a ajuda é o cabeçalho do script).
+bash "$REPO/scripts/hangar-send" --help 2>/dev/null | grep -q HANGAR_SEND_PAINEL
+checa "--help menciona HANGAR_SEND_PAINEL" '0' "$?"
 
 if [[ $falhas -gt 0 ]]; then echo "$falhas falha(s)"; exit 1; fi
 echo "tudo ok"

@@ -24,6 +24,9 @@ from pathlib import Path
 a = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(" ".join(a) + "\n")
+if os.environ.get("HANGAR_SEND_PAINEL") == "1":
+    with open(os.environ["FAKE_LOG"] + ".painel", "a") as f:
+        f.write(a[0] + "\n")
 if a[:1] == ["--new"]:
     opt = lambda k, dflt=None: a[a.index(k) + 1] if k in a else dflt
     side = Path.home() / ".hangar" / "claude-headless"
@@ -708,3 +711,13 @@ def test_a_crashing_pass_is_a_failed_step_reported_once(tmp_path, monkeypatch):
     assert [(x["passo"], x.get("task")) for x in events(d) if x["tipo"] == "advance_falhou"] == \
         [("advance", None)]
     assert len([s for s in sent(log) if "orq advance failed at advance" in s]) == 1
+
+
+def test_only_the_orchestrator_sends_as_a_panel_notice(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    started(e)
+    run(e, "notify", "[decisao] waiting for the arbiter")   # a session's message: keeps its [de: …]
+    close(d, 1, "deadbeef" * 5)                              # the orchestrator's wake
+    run(e, "advance")
+    assert sum(m.startswith("arb ") for m in sent(log)) == 2
+    assert (tmp_path / "sent.log.painel").read_text().splitlines() == ["arb"]
