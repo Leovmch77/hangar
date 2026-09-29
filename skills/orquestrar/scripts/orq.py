@@ -56,6 +56,8 @@ SEND_TIMEOUT_S = 30
 DISCARD_P = 0.85  # p of "nothing" (the choice's winner) needed to drop
 VETO_P = 0.40     # any alert above this keeps the arbiter awake
 JEV_VETOES = ("context", "user", "problem", "deviation")
+# `orq init --auto` without `--jev`: "on" only once these questions were measured with no wrong drop.
+AUTO_JEV_DEFAULT = "on"
 JEV_QUESTIONS = {
     "kind": {
         "type": "choice",
