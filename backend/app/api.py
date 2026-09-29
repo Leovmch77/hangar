@@ -6298,7 +6298,7 @@ def runner_pane(name: str):
 
 
 def _project_error(e: project_shortcuts.ProjectError) -> HTTPException:
-    return HTTPException(409, detail=erro("erro_project_shortcuts_projeto", str(e)))
+    return HTTPException(409, detail=erro("erro_project_shortcuts_projeto", str(e), detalhe=str(e)))
 
 
 @app.get("/api/sessions/{name}/project-shortcuts", dependencies=[Depends(require_auth)])
@@ -6319,7 +6319,7 @@ def put_project_shortcuts(name: str, body: ProjectShortcutsBody):
     except project_shortcuts.ProjectError as e:
         raise _project_error(e)
     except ValueError as e:
-        raise HTTPException(400, detail=erro("erro_project_shortcuts", str(e)))
+        raise HTTPException(400, detail=erro("erro_project_shortcuts", str(e), detalhe=str(e)))
     return {**project, "items": project_shortcuts.load_items(project["key"])}
 
 
@@ -6371,7 +6371,7 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
         except project_shortcuts.ProjectError as e:
             raise _project_error(e)
         except ValueError as e:
-            raise HTTPException(400, detail=erro("erro_shortcut_pasta", str(e)))
+            raise HTTPException(400, detail=erro("erro_shortcut_pasta", str(e), detalhe=str(e)))
     # Atalho importado com a credencial em branco: rodar mandaria o marcador literal pro programa.
     from app.shortcut_transfer import has_placeholder
     missing = has_placeholder(command)

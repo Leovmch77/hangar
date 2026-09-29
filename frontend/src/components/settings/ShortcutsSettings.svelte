@@ -6,18 +6,27 @@
   import * as m from '../../paraglide/messages';
   import {
     defaultShortcuts, getCommands, getSessions,
-    type Shortcut, type ShortcutInternalAction, type ShortcutSendText, type ShortcutShell,
+    type ProjectShortcut, type Shortcut, type ShortcutInternalAction, type ShortcutSendText, type ShortcutShell,
   } from '@hangar/core';
-  import { loadShortcuts, shortcutsFor, saveShortcuts } from '../../lib/shortcuts.svelte';
+  import {
+    loadShortcuts, shortcutsFor, saveShortcuts, loadProjectShortcuts, projectShortcutsFor, saveProjectShortcuts,
+  } from '../../lib/shortcuts.svelte';
   import ShortcutIcon, { GLYPHS } from '../icons/ShortcutIcon.svelte';
   import ShortcutTransfer from '../ShortcutTransfer.svelte';
-  import type { Server } from '../../lib/auth';
+  import { getActiveId, type Server } from '../../lib/auth';
 
   interface Props {
     apiTarget: Server | null;
+    // Sessão de onde a tela foi aberta: sem ela, não há projeto e a seção "Deste projeto" some.
+    session?: string | null;
   }
-  let { apiTarget }: Props = $props();
+  let { apiTarget, session = null }: Props = $props();
   const serverId = $derived(apiTarget?.id ?? null);
+  // As rotas do projeto falam com o servidor ATIVO: com outro alvo na tela, a seção editaria o
+  // projeto de uma máquina e mostraria como se fosse de outra.
+  const projectSession = $derived(session && (!serverId || serverId === getActiveId()) ? session : null);
+
+  type Scope = 'global' | 'project';
 
   let list = $state<Shortcut[]>([]);
   let loading = $state(true);
@@ -65,6 +74,55 @@
     }
   }
 
+  // ── Deste projeto: mesma edição, gravação própria (PUT da lista inteira do projeto). ──────────
+  let proj = $state<ProjectShortcut[]>([]);
+  let projName = $state('');
+  let projLoading = $state(false);
+  let projLoadError = $state('');
+  let projSaving = $state(false);
+  let projSaved = $state(false);
+  let projSaveError = $state('');
+  let projDirty = $state(false);
+
+  async function loadProject() {
+    const target = projectSession;
+    if (!target) return;
+    projLoading = true;
+    projLoadError = '';
+    try {
+      await loadProjectShortcuts(target);
+      if (target !== projectSession) return;
+      const p = projectShortcutsFor(target);
+      proj = (p?.items ?? []).map((s) => ({ ...s }));
+      projName = p?.name ?? '';
+      projDirty = false;
+    } catch (e) {
+      if (target !== projectSession) return;
+      projLoadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (target === projectSession) projLoading = false;
+    }
+  }
+  $effect(() => { projectSession; void loadProject(); });
+
+  async function saveProject() {
+    if (projSaving || !projectSession) return;
+    projSaving = true;
+    projSaveError = '';
+    try {
+      const r = await saveProjectShortcuts(projectSession, proj);
+      proj = r.items.map((s) => ({ ...s }));
+      projDirty = false;
+      projSaved = true;
+      setTimeout(() => (projSaved = false), 2500);
+    } catch (e) {
+      // Mensagem já traduzida pelo `code` do backend (errosApi).
+      projSaveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      projSaving = false;
+    }
+  }
+
   async function restoreDefaults() {
     if (saving) return;
     saving = true;
@@ -96,49 +154,57 @@
     (Object.keys(INTERNAL_LABEL) as ShortcutInternalAction[]).filter(
       (a) => !list.some((s) => s.type === 'internal' && s.action === a)));
 
-  function move(i: number, delta: -1 | 1) {
+  // As duas listas passam pelas mesmas operações; o escopo diz qual lista e qual "sujo" mudam.
+  function itemsOf(sc: Scope): Shortcut[] { return sc === 'global' ? list : proj; }
+  function setItems(sc: Scope, next: Shortcut[], isDirty = true) {
+    if (sc === 'global') { list = next; dirty = isDirty; }
+    else { proj = next as ProjectShortcut[]; projDirty = isDirty; }
+  }
+
+  function move(sc: Scope, i: number, delta: -1 | 1) {
+    const items = itemsOf(sc);
     const j = i + delta;
-    if (j < 0 || j >= list.length) return;
-    const next = [...list];
+    if (j < 0 || j >= items.length) return;
+    const next = [...items];
     [next[i], next[j]] = [next[j], next[i]];
-    list = next;
-    dirty = true;
+    setItems(sc, next);
   }
 
   // ── Arrastar pra reordenar. HTML5 DnD não responde ao toque em tablet (regra do repo), então
   // os botões ↑/↓ ficam — são a alternativa exigida pela WCAG 2.2 SC 2.5.7, não redundância. ──
   let dragIdx = $state<number | null>(null);
+  let dragScope = $state<Scope | null>(null);
   // A lista se reordena durante o arrasto; cancelado (Esc, soltar fora) ele volta a como estava.
-  let beforeDrag: { list: Shortcut[]; dirty: boolean } | null = null;
-  function dragStart(e: DragEvent, i: number) {
+  let beforeDrag: { items: Shortcut[]; dirty: boolean } | null = null;
+  function dragStart(e: DragEvent, sc: Scope, i: number) {
     dragIdx = i;
-    beforeDrag = { list, dirty };
+    dragScope = sc;
+    beforeDrag = { items: itemsOf(sc), dirty: sc === 'global' ? dirty : projDirty };
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', String(i));
     }
   }
-  function dragOver(e: DragEvent, i: number) {
+  function dragOver(e: DragEvent, sc: Scope, i: number) {
+    if (dragScope !== sc) return;   // sem preventDefault: soltar na outra lista é recusado
     e.preventDefault();       // sem isto o drop é recusado e o arrasto "volta"
     if (dragIdx === null || dragIdx === i) return;
-    const next = [...list];
+    const next = [...itemsOf(sc)];
     const [item] = next.splice(dragIdx, 1);
     next.splice(i, 0, item);
-    list = next;
+    setItems(sc, next);
     dragIdx = i;
-    dirty = true;
   }
   function dragEnd(e: DragEvent) {
-    if (e.dataTransfer?.dropEffect === 'none' && beforeDrag) {
-      list = beforeDrag.list;
-      dirty = beforeDrag.dirty;
+    if (e.dataTransfer?.dropEffect === 'none' && beforeDrag && dragScope) {
+      setItems(dragScope, beforeDrag.items, beforeDrag.dirty);
     }
     beforeDrag = null;
     dragIdx = null;
+    dragScope = null;
   }
-  function remove(i: number) {
-    list = list.filter((_, k) => k !== i);
-    dirty = true;
+  function remove(sc: Scope, i: number) {
+    setItems(sc, itemsOf(sc).filter((_, k) => k !== i));
   }
   function restoreNative(a: ShortcutInternalAction) {
     list = [...list, { id: a, type: 'internal', action: a }];
@@ -146,51 +212,57 @@
   }
 
   // ── Formulário (adicionar/editar customizado) ───────────────────────────────
-  let formOpen = $state(false);
+  // Um formulário só na tela; `formScope` diz em qual lista ele abriu (e grava).
+  let formScope = $state<Scope | null>(null);
   let editingIdx = $state<number | null>(null);   // índice na lista; null = novo
   let fType = $state<'send_text' | 'shell'>('send_text');
   let fLabel = $state('');
   let fGlyph = $state('bolt');
   let fEmoji = $state('');
   let fContent = $state('');
+  let fPasta = $state('');
   let fSendDirect = $state(true);
   let fConfirm = $state(false);
+  const formOpen = $derived(formScope !== null);
 
-  function openNew() {
+  function openNew(sc: Scope) {
     editingIdx = null;
     fType = 'send_text'; fLabel = ''; fGlyph = 'bolt'; fEmoji = '';
-    fContent = ''; fSendDirect = true; fConfirm = false;
-    formOpen = true;
+    fContent = ''; fPasta = ''; fSendDirect = true; fConfirm = false;
+    formScope = sc;
   }
-  function openEdit(i: number) {
-    const s = list[i];
+  function openEdit(sc: Scope, i: number) {
+    const s = itemsOf(sc)[i];
     if (s.type === 'internal') return;
     editingIdx = i;
     fType = s.type;
     fLabel = s.label;
     fContent = s.type === 'shell' ? s.command : s.text;
+    fPasta = s.type === 'shell' ? s.pasta ?? '' : '';
     fSendDirect = s.type === 'send_text' ? s.send_direct !== false : true;
     fConfirm = s.confirm === true;
     if (s.icon?.startsWith('emoji:')) { fEmoji = s.icon.slice(6); fGlyph = 'bolt'; }
     else { fEmoji = ''; fGlyph = s.icon?.startsWith('glifo:') ? s.icon.slice(6) : 'bolt'; }
-    formOpen = true;
+    formScope = sc;
   }
   const formValid = $derived(!!fLabel.trim() && !!fContent.trim());
   function submitForm() {
-    if (!formValid) return;
+    const sc = formScope;
+    if (!formValid || !sc) return;
     const icon = fEmoji.trim() ? `emoji:${fEmoji.trim()}` : `glifo:${fGlyph}`;
     const base = { label: fLabel.trim(), icon, ...(fConfirm ? { confirm: true } : {}) };
+    // Pasta só existe nos atalhos do projeto (a raiz a que ela se refere é a da cópia da sessão).
+    const pasta = sc === 'project' && fPasta.trim() ? { pasta: fPasta.trim() } : {};
     const shortcut: ShortcutSendText | ShortcutShell = fType === 'shell'
-      ? { id: formId(), type: 'shell', command: fContent.trim(), ...base }
-      : { id: formId(), type: 'send_text', text: fContent.trim(),
+      ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta, ...base }
+      : { id: formId(sc), type: 'send_text', text: fContent.trim(),
           ...(fSendDirect ? {} : { send_direct: false }), ...base };
-    if (editingIdx === null) list = [...list, shortcut];
-    else list = list.map((s, i) => (i === editingIdx ? shortcut : s));
-    dirty = true;
-    formOpen = false;
+    const items = itemsOf(sc);
+    setItems(sc, editingIdx === null ? [...items, shortcut] : items.map((s, i) => (i === editingIdx ? shortcut : s)));
+    formScope = null;
   }
-  function formId(): string {
-    if (editingIdx !== null) return list[editingIdx].id;
+  function formId(sc: Scope): string {
+    if (editingIdx !== null) return itemsOf(sc)[editingIdx].id;
     return `a-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   }
 
@@ -212,6 +284,7 @@
 </script>
 
 <div class="at">
+  {#if projectSession}<h3 class="titulo">{m.atalhos_globais_titulo()}</h3>{/if}
   <p class="sub">{m.atalhos_sub()}</p>
 
   {#if loading}
@@ -223,30 +296,7 @@
     {#if list.length === 0}
       <p class="estado">{m.atalhos_vazio()}</p>
     {/if}
-    <ul class="linhas">
-      {#each list as s, i (s.id)}
-        <li class="linha" class:arrastando={dragIdx === i} draggable="true"
-            ondragstart={(e) => dragStart(e, i)} ondragover={(e) => dragOver(e, i)}
-            ondragend={dragEnd}>
-          <span class="alca" aria-hidden="true">⠿</span>
-          <span class="ico"><ShortcutIcon icon={s.type === 'internal' ? INTERNAL_ICON[s.action] : s.icon} /></span>
-          <span class="txt">
-            <span class="rotulo">{s.type === 'internal' ? INTERNAL_LABEL[s.action]() : s.label}</span>
-            {#if s.type !== 'internal'}
-              <span class="detalhe">{s.type === 'shell' ? s.command : s.text}</span>
-            {/if}
-          </span>
-          <span class="acoes">
-            {#if s.type !== 'internal'}
-              <button class="mini" onclick={() => openEdit(i)} aria-label={m.atalhos_editar()}>✎</button>
-            {/if}
-            <button class="mini" onclick={() => move(i, -1)} disabled={i === 0} aria-label={m.atalhos_subir()}>↑</button>
-            <button class="mini" onclick={() => move(i, 1)} disabled={i === list.length - 1} aria-label={m.atalhos_descer()}>↓</button>
-            <button class="mini" onclick={() => remove(i)} aria-label={m.atalhos_remover()}>✕</button>
-          </span>
-        </li>
-      {/each}
-    </ul>
+    {@render rows('global', list)}
 
     {#if missingNatives.length}
       <div class="repor">
@@ -257,7 +307,92 @@
       </div>
     {/if}
 
-    {#if formOpen}
+    {#if formScope === 'global'}
+      {@render form()}
+    {:else}
+      <button class="btn" onclick={() => openNew('global')}>{m.atalhos_add()}</button>
+    {/if}
+
+    <div class="rodape">
+      <button class="btn" onclick={() => void restoreDefaults()} disabled={saving}
+              title={m.atalhos_restaurar_ajuda()}>{m.atalhos_restaurar()}</button>
+      <!-- Importar grava direto no servidor: com edição pendente, salvar depois sobrescreveria o que veio. -->
+      {#if !dirty}<ShortcutTransfer {serverId} onDone={() => void load()} />{/if}
+      <span class="feedback">
+        {#if saveError}<span class="erro">{saveError}</span>
+        {:else if saved}{m.atalhos_salvo()}{/if}
+      </span>
+      <button class="btn primario" onclick={() => void save()} disabled={!dirty || saving}>
+        {m.atalhos_salvar()}
+      </button>
+    </div>
+  {/if}
+
+  {#if projectSession}
+    <section class="projeto" aria-labelledby="atalhos-projeto-titulo">
+      <h3 id="atalhos-projeto-titulo" class="titulo">{projName ? m.atalhos_projeto_titulo({ nome: projName }) : m.atalhos_projeto_titulo_sem_nome()}</h3>
+      <p class="sub">{m.atalhos_projeto_sub()}</p>
+      {#if projLoading && !projName}
+        <p class="estado">{m.comum_carregando()}</p>
+      {:else if projLoadError}
+        <p class="estado erro">{projLoadError}</p>
+        <button class="btn" onclick={() => void loadProject()}>{m.config_server_tentar_de_novo()}</button>
+      {:else}
+        {#if proj.length === 0}
+          <p class="estado">{m.atalhos_projeto_vazio()}</p>
+        {:else}
+          {@render rows('project', proj)}
+        {/if}
+        {#if formScope === 'project'}
+          {@render form()}
+        {:else}
+          <button class="btn" onclick={() => openNew('project')}>{m.atalhos_add()}</button>
+        {/if}
+        <div class="rodape">
+          <span class="feedback">
+            {#if projSaveError}<span class="erro">{projSaveError}</span>
+            {:else if projSaved}{m.atalhos_salvo()}{/if}
+          </span>
+          <button class="btn primario" onclick={() => void saveProject()} disabled={!projDirty || projSaving}>
+            {m.atalhos_salvar()}
+          </button>
+        </div>
+      {/if}
+    </section>
+  {/if}
+</div>
+
+{#snippet rows(sc: Scope, items: Shortcut[])}
+  <ul class="linhas">
+    {#each items as s, i (s.id)}
+      <li class="linha" class:arrastando={dragScope === sc && dragIdx === i} draggable="true"
+          ondragstart={(e) => dragStart(e, sc, i)} ondragover={(e) => dragOver(e, sc, i)}
+          ondragend={dragEnd}>
+        <span class="alca" aria-hidden="true">⠿</span>
+        <span class="ico"><ShortcutIcon icon={s.type === 'internal' ? INTERNAL_ICON[s.action] : s.icon} /></span>
+        <span class="txt">
+          <span class="rotulo">{s.type === 'internal' ? INTERNAL_LABEL[s.action]() : s.label}</span>
+          {#if s.type !== 'internal'}
+            <span class="detalhe">{s.type === 'shell' ? s.command : s.text}</span>
+          {/if}
+          {#if s.type === 'shell' && s.pasta}
+            <span class="detalhe">{m.atalhos_pasta_linha({ pasta: s.pasta })}</span>
+          {/if}
+        </span>
+        <span class="acoes">
+          {#if s.type !== 'internal'}
+            <button class="mini" onclick={() => openEdit(sc, i)} aria-label={m.atalhos_editar()}>✎</button>
+          {/if}
+          <button class="mini" onclick={() => move(sc, i, -1)} disabled={i === 0} aria-label={m.atalhos_subir()}>↑</button>
+          <button class="mini" onclick={() => move(sc, i, 1)} disabled={i === items.length - 1} aria-label={m.atalhos_descer()}>↓</button>
+          <button class="mini" onclick={() => remove(sc, i)} aria-label={m.atalhos_remover()}>✕</button>
+        </span>
+      </li>
+    {/each}
+  </ul>
+{/snippet}
+
+{#snippet form()}
       <div class="form">
         <label class="campo">
           <span>{m.atalhos_tipo()}</span>
@@ -294,6 +429,13 @@
             </datalist>
           {/if}
         </label>
+        {#if fType === 'shell' && formScope === 'project'}
+          <label class="campo">
+            <span>{m.atalhos_pasta()}</span>
+            <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()} />
+            <small class="ajuda">{m.atalhos_pasta_dica()}</small>
+          </label>
+        {/if}
         {#if fType === 'send_text'}
           <label class="liga">
             <input type="checkbox" bind:checked={fSendDirect} />
@@ -306,29 +448,11 @@
           <span>{m.atalhos_confirm()}</span>
         </label>
         <div class="form-acoes">
-          <button class="btn" onclick={() => (formOpen = false)}>{m.comum_cancelar()}</button>
+          <button class="btn" onclick={() => (formScope = null)}>{m.comum_cancelar()}</button>
           <button class="btn primario" onclick={submitForm} disabled={!formValid}>{m.comum_confirmar()}</button>
         </div>
       </div>
-    {:else}
-      <button class="btn" onclick={openNew}>{m.atalhos_add()}</button>
-    {/if}
-
-    <div class="rodape">
-      <button class="btn" onclick={() => void restoreDefaults()} disabled={saving}
-              title={m.atalhos_restaurar_ajuda()}>{m.atalhos_restaurar()}</button>
-      <!-- Importar grava direto no servidor: com edição pendente, salvar depois sobrescreveria o que veio. -->
-      {#if !dirty}<ShortcutTransfer {serverId} onDone={() => void load()} />{/if}
-      <span class="feedback">
-        {#if saveError}<span class="erro">{saveError}</span>
-        {:else if saved}{m.atalhos_salvo()}{/if}
-      </span>
-      <button class="btn primario" onclick={() => void save()} disabled={!dirty || saving}>
-        {m.atalhos_salvar()}
-      </button>
-    </div>
-  {/if}
-</div>
+{/snippet}
 
 <style>
   /* Container query, não media query: quem aperta a linha é a largura do PAINEL (regra do repo). */
@@ -397,6 +521,13 @@
   .liga { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--space-2); align-items: center; font-size: var(--text-sm); color: var(--text-primary); }
   .liga small { grid-column: 2; color: var(--text-muted); font-size: var(--text-xs); }
   .form-acoes { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .ajuda { color: var(--text-muted); font-size: var(--text-xs); }
+
+  .projeto {
+    display: flex; flex-direction: column; gap: var(--space-3);
+    margin-top: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle);
+  }
+  .titulo { margin: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
 
   .btn {
     align-self: flex-start;

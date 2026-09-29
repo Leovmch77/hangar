@@ -5,6 +5,7 @@
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import type { CustomScoped } from '../lib/shortcuts.svelte';
 
   // Acoes que saíram da NavBar do CELULAR pro menu "⋯". Elas custavam 80px fixos da barra e sao de
   // uso raro; o nome da sessao, que e a informacao mais disputada ali, chegava a "clau…". No desktop
@@ -14,7 +15,9 @@
     onClose: () => void;
     // Atalhos CUSTOMIZADOS da fileira configurável: na barra estreita eles moram aqui (decisão da
     // sessão de grilling — a barra fica estável e o "⋯" já é o lugar do resto das ações).
-    shortcuts?: (ShortcutSendText | ShortcutShell)[];
+    shortcuts?: CustomScoped[];
+    projectName?: string;
+    projectError?: string;
     onShortcut?: (s: ShortcutSendText | ShortcutShell) => void;
     onEditShortcuts?: () => void;
     onRun: () => void;
@@ -38,7 +41,7 @@
   }
   let {
     open, onClose, onRun, runRunning = false,
-    shortcuts = [], onShortcut = undefined, onEditShortcuts = undefined,
+    shortcuts = [], projectName = '', projectError = '', onShortcut = undefined, onEditShortcuts = undefined,
     onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao, onShare,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
@@ -56,9 +59,9 @@
 
     <!-- Atalhos customizados em seção própria, em blocos que quebram linha: separados das ações
          fixas abaixo, como no painel do desktop e no app nativo. -->
-    {#if shortcuts.length && onShortcut}
+    {#if (shortcuts.length || projectError) && onShortcut}
       <div class="more-acoes">
-        <ShortcutTiles {shortcuts} onShortcut={(s) => pick(() => onShortcut?.(s))}
+        <ShortcutTiles {shortcuts} {projectName} {projectError} onShortcut={(s) => pick(() => onShortcut?.(s))}
                        onAdd={onEditShortcuts ? () => pick(onEditShortcuts) : undefined}>
           {#snippet extra()}<ShortcutTransfer compact />{/snippet}
         </ShortcutTiles>

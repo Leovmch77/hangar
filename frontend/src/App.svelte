@@ -621,6 +621,7 @@
       resolvedServer={alvoConfig}
       nomeAlvo={alvoConfig?.label ?? null}
       semServidor={!alvoConfig}
+      sessao={cfg.ses ?? null}
       onPickServer={pickConfigServer}
       {onLogout}
       onIrPara={irParaConfig}

@@ -9,6 +9,10 @@ describe('parseConfig', () => {
   it('le tela e servidor', () => {
     expect(parseConfig('#/chat/127/x?config=voz&srv=abc')).toEqual({ tela: 'voz', srv: 'abc' });
   });
+  it('leva a sessão de origem (seção "Deste projeto" dos Atalhos) ida e volta', () => {
+    const hash = comConfig('#/chat/x', 'atalhos', null, 'minha sessao');
+    expect(parseConfig(hash)).toEqual({ tela: 'atalhos', srv: null, ses: 'minha sessao' });
+  });
   it('srv ausente vira null, nao string vazia', () => {
     expect(parseConfig('#/?config=aparencia')).toEqual({ tela: 'aparencia', srv: null });
   });

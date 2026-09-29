@@ -121,6 +121,7 @@ vi.mock('../lib/auth', () => ({
   listOwnServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   getActiveId: vi.fn(() => 'srv-test'),
   getBaseUrl: vi.fn(() => 'http://x'),
+  isActiveInvite: vi.fn(() => false),
 }));
 vi.mock('../lib/sessionsStore.svelte', () => ({
   sessionsStore: {

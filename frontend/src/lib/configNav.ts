@@ -9,8 +9,8 @@ import { comConfig, type TelaConfig } from './configRoute';
 // O replaceState logo depois NAO navega: so carimba a profundidade NA ENTRADA que acabou de nascer,
 // pra ela viajar junto em back, forward e reload. DOIS argumentos: um terceiro `''` resolveria pra
 // base SEM fragmento e apagaria o endereco que acabamos de montar.
-export function abrirConfig(tela: TelaConfig, srv: string | null): void {
-  const destino = comConfig(window.location.hash, tela, srv);
+export function abrirConfig(tela: TelaConfig, srv: string | null, ses?: string | null): void {
+  const destino = comConfig(window.location.hash, tela, srv, ses);
   // Hash igual nao empilha entrada nenhuma (tocar duas vezes no mesmo item da lista lateral). Sem
   // esta saida, o replaceState abaixo incrementaria a profundidade da entrada CORRENTE e o ✕ passaria
   // a pular pra tras da conversa.

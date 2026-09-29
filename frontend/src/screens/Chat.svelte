@@ -74,10 +74,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { runShortcutShell, sendsDirect, shortcutMissingSecret } from '@hangar/core';
+  import { mergeProjectShortcuts, runShortcutShell, sendsDirect, shortcutMissingSecret } from '@hangar/core';
   import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals, focusShortcutTerminal } from '../lib/shortcutTerminals.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
-  import { shortcutsFor, loadShortcuts } from '../lib/shortcuts.svelte';
+  import {
+    shortcutsFor, loadShortcuts, projectShortcutsFor, projectShortcutsError, loadProjectShortcuts, customOf,
+  } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
   import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer, isActiveInvite } from '../lib/auth';
   import { getIdentificador } from '../lib/peers';
@@ -1513,8 +1515,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       action('navegador', m.ctx_navegador(), alternarNavegador),
       // Atalhos customizados da fileira: mesma ação do botão, acessível por teclado. O detail é
       // o conteúdo — diz exatamente o que o Enter dispara.
-      ...customShortcuts.map((s): WorkspaceAction => ({
-        id: `atalho-${s.id}`,
+      ...customShortcuts.map(({ shortcut: s, key }): WorkspaceAction => ({
+        id: `atalho-${key}`,
         title: s.label,
         detail: s.type === 'shell' ? s.command : s.text,
         keywords: ['atalho', 'shortcut', s.label],
@@ -2694,14 +2696,21 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
 
   // ── Atalhos configuráveis da fileira (lib/shortcuts.svelte.ts) ─────────────
-  const shortcuts = $derived(shortcutsFor());
+  // Globais e depois os do projeto da sessão (carregando ou com erro, ficam só os globais).
+  const projectShortcuts = $derived(projectShortcutsFor(sessionName));
+  const projectShortcutsErr = $derived(projectShortcutsError(sessionName));
+  const shortcuts = $derived(mergeProjectShortcuts(shortcutsFor(), projectShortcuts?.items));
   // Só os customizados: no celular os internos já têm os botões/entradas de sempre — duplicar
   // Terminal/Anexos dentro do "⋯" seria a mesma ação com dois nomes.
-  const customShortcuts = $derived(shortcuts.filter(
-    (s): s is ShortcutSendText | ShortcutShell => s.type !== 'internal'));
+  const customShortcuts = $derived(customOf(shortcuts));
   $effect(() => {
     // A fileira segue no conjunto nativo; o erro de verdade aparece ao abrir a tela de Atalhos.
     loadShortcuts().catch((err) => console.error('shortcuts load error:', err));
+  });
+  $effect(() => {
+    // O erro fica no store e aparece numa linha onde moram os blocos. Convite não tem a rota.
+    if (isActiveInvite()) return;
+    loadProjectShortcuts(sessionName).catch((err) => console.error('project shortcuts load error:', err));
   });
   // Atalho com a flag "confirmar antes": segura aqui e o ConfirmSheet decide.
   let pendingShortcut = $state<ShortcutSendText | ShortcutShell | null>(null);
@@ -2716,7 +2725,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function rodarAtalhoShell(s: ShortcutShell) {
     const key = atalhoKey;
     try {
-      const r = await runShortcutShell(sessionName, s.command, s.label);
+      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta);
       if (r.terminal) focusShortcutTerminal(key, r.terminal.id);
     } finally {
       const lista = await refreshShortcutTerminals(key).catch(() => null);
@@ -2930,8 +2939,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
       {shortcuts}
+      projectName={projectShortcuts?.name}
+      projectError={projectShortcutsErr}
       onShortcut={triggerShortcut}
-      onEditShortcuts={() => abrirConfig('atalhos', null)}
+      onEditShortcuts={() => abrirConfig('atalhos', null, sessionName)}
       onOpenActivity={hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined}
       {activity}
       processos={shellsVivos}
@@ -3319,7 +3330,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   <RunSheet open={runOpen} {sessionName} onClose={() => (runOpen = false)} onRunningChange={(r) => (runRunning = r)} />
   <MoreSheet open={moreOpen} onClose={() => (moreOpen = false)}
              shortcuts={customShortcuts} onShortcut={triggerShortcut}
-             onEditShortcuts={() => abrirConfig('atalhos', null)}
+             projectName={projectShortcuts?.name} projectError={projectShortcutsErr}
+             onEditShortcuts={() => abrirConfig('atalhos', null, sessionName)}
              onRun={() => (runOpen = true)} {runRunning}
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}

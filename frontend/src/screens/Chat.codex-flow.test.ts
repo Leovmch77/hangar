@@ -37,6 +37,7 @@ vi.mock('../lib/auth', () => ({
   listOwnServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   getActiveId: () => 'codex-flow',
   getBaseUrl: () => 'http://teste',
+  isActiveInvite: () => false,
 }));
 
 const sse = vi.hoisted(() => ({ handlers: new Map<string, (event: MessageEvent) => void>() }));

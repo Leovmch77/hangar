@@ -43,8 +43,10 @@
     onIrPara: (t: TelaConfig) => void;
     onVoltar: () => void;
     onFechar: () => void;
+    // Sessão de onde o painel foi aberto (`?ses=`): a tela de Atalhos mostra a seção do projeto dela.
+    sessao?: string | null;
   }
-  let { tela, alvo, nomeAlvo, semServidor, identidade, resolvedServer = null, onPickServer, onLogout, onIrPara, onVoltar, onFechar }: Props = $props();
+  let { tela, alvo, nomeAlvo, semServidor, identidade, resolvedServer = null, onPickServer, onLogout, onIrPara, onVoltar, onFechar, sessao = null }: Props = $props();
 
   const store = criarConfigServidor(() => alvo, () => identidade);
 
@@ -405,7 +407,7 @@
   {:else if telaAtual === 'voz'}
     <VozSettings {store} />
   {:else if telaAtual === 'atalhos'}
-    <ShortcutsSettings apiTarget={alvo} />
+    <ShortcutsSettings apiTarget={alvo} session={sessao} />
   {:else if telaAtual === 'computer'}
     <ComputerControlSettings apiTarget={alvo} />
   {:else}

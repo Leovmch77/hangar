@@ -17,6 +17,8 @@ export interface RotaConfig {
   tela: TelaConfig;
   /** ID do servidor alvo. So o ID: guardar o objeto prende base/token no que valia ao abrir. */
   srv: string | null;
+  /** Sessão de onde a tela foi aberta (só a de Atalhos usa, pra seção "Deste projeto"). */
+  ses?: string;
 }
 
 export function parseConfig(hash: string): RotaConfig | null {
@@ -28,14 +30,16 @@ export function parseConfig(hash: string): RotaConfig | null {
   // typo abrindo a Aparencia esconderia o erro do link.
   const alvo = RENOMEADAS[tela ?? ''] ?? tela;
   if (!alvo || !TELAS.includes(alvo as TelaConfig)) return null;
-  return { tela: alvo as TelaConfig, srv: p.get('srv') || null };
+  const ses = p.get('ses');
+  return { tela: alvo as TelaConfig, srv: p.get('srv') || null, ...(ses ? { ses } : {}) };
 }
 
-export function comConfig(hash: string, tela: TelaConfig | null, srv?: string | null): string {
+export function comConfig(hash: string, tela: TelaConfig | null, srv?: string | null, ses?: string | null): string {
   const caminho = (hash.split('?')[0] || '#/');
   if (!tela) return caminho;
   const p = new URLSearchParams();
   p.set('config', tela);
   if (srv) p.set('srv', srv);
+  if (ses) p.set('ses', ses);
   return `${caminho}?${p.toString()}`;
 }

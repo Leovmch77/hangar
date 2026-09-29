@@ -5,16 +5,20 @@
   import ShortcutIcon from './icons/ShortcutIcon.svelte';
   import { shortcutMissingSecret, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import type { Snippet } from 'svelte';
+  import type { CustomScoped } from '../lib/shortcuts.svelte';
   import * as m from '../paraglide/messages';
 
   interface Props {
-    shortcuts: (ShortcutSendText | ShortcutShell)[];
+    shortcuts: CustomScoped[];
     onShortcut: (s: ShortcutSendText | ShortcutShell) => void;
     onAdd?: () => void;
     // Controles extras do cabeçalho (menu de importar/exportar), à direita do "+".
     extra?: Snippet;
+    // Nome do projeto da sessão (dica da marca) e erro ao ler os atalhos dele (uma linha discreta).
+    projectName?: string;
+    projectError?: string;
   }
-  let { shortcuts, onShortcut, onAdd, extra }: Props = $props();
+  let { shortcuts, onShortcut, onAdd, extra, projectName = '', projectError = '' }: Props = $props();
 </script>
 
 <section class="acoes" aria-label={m.ctx_acoes()}>
@@ -31,16 +35,21 @@
     </span>
   </div>
   <div class="acoes-grade">
-    {#each shortcuts as s (s.id)}
+    {#each shortcuts as { shortcut: s, scope, key } (key)}
       {@const falta = shortcutMissingSecret(s)}
+      {@const rotulo = scope === 'project' ? m.atalhos_projeto_marca({ rotulo: s.label, nome: projectName }) : s.label}
       <!-- Credencial em branco (veio de uma importação): o bloco fica apagado e o clique avisa. -->
       <button type="button" class="acao-bloco" class:pendente={!!falta} onclick={() => onShortcut(s)}
-              aria-label={s.label} title={falta ? m.atalhos_segredo_falta({ nome: falta }) : s.label}>
+              aria-label={rotulo} title={falta ? m.atalhos_segredo_falta({ nome: falta }) : rotulo}>
+        {#if scope === 'project'}<span class="acao-projeto" aria-hidden="true"></span>{/if}
         <ShortcutIcon icon={s.icon} />
         <span class="acao-rotulo">{s.label}</span>
       </button>
     {/each}
   </div>
+  {#if projectError}
+    <p class="acoes-erro" title={projectError}>{m.atalhos_projeto_erro_fileira({ msg: projectError })}</p>
+  {/if}
 </section>
 
 <style>
@@ -65,7 +74,7 @@
   .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(max(88px, calc((100% - 24px) / 5)), 1fr)); gap: 6px; }
   @container (max-width: 200px) { .acoes-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .acao-bloco {
-    min-width: 0; min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    position: relative; min-width: 0; min-height: 58px; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 4px; padding: 8px 4px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
     background: transparent; color: var(--text-secondary); cursor: pointer;
     transition: background 160ms var(--ease-out), color 160ms var(--ease-out);
@@ -75,6 +84,15 @@
   .acao-bloco.pendente { opacity: 0.55; border-style: dashed; }
   .acao-bloco:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .acao-bloco :global(svg) { flex-shrink: 0; width: 18px; height: 18px; }
+  /* Marca de "deste projeto": ponto no canto, na cor de destaque apagada. */
+  .acao-projeto {
+    position: absolute; top: 5px; right: 5px; width: 6px; height: 6px;
+    border-radius: var(--radius-full); background: var(--accent); opacity: 0.7;
+  }
+  .acoes-erro {
+    margin: 0; font-size: var(--text-xs); color: var(--text-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   /* Duas linhas antes de cortar: rótulo curto demais escondia o que o atalho faz. */
   .acao-rotulo {
     max-width: 100%; font-size: 11px; font-weight: 600; line-height: 1.25; text-align: center;

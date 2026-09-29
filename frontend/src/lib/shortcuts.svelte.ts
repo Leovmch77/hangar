@@ -2,8 +2,10 @@
 // consomem a mesma lista (fileira do painel, "⋯" da NavBar, command palette) e o editor da
 // config grava nela — uma busca por montagem de Chat viraria três GETs e três verdades.
 import {
-  defaultShortcuts, getConfig, getConfigForServer, patchConfig, patchConfigForServer,
-  resolveShortcuts, serializeShortcuts, type Shortcut,
+  defaultShortcuts, getConfig, getConfigForServer, getProjectShortcuts, patchConfig, patchConfigForServer,
+  putProjectShortcuts, resolveShortcuts, serializeShortcuts,
+  type ProjectShortcut, type ProjectShortcuts, type ScopedShortcut, type Shortcut,
+  type ShortcutSendText, type ShortcutShell,
 } from '@hangar/core';
 import { getActiveId, listServers } from './auth';
 
@@ -56,4 +58,58 @@ export async function saveShortcuts(list: Shortcut[] | null, serverId?: string |
 export function reloadShortcuts(serverId?: string | null): Promise<void> {
   delete lists[keyFor(serverId)];
   return loadShortcuts(serverId);
+}
+
+// ── Atalhos do projeto da sessão, por servidor+sessão. As rotas de sessão falam com o servidor
+// ATIVO, então a chave usa ele. Carregar e falhar nunca mexem na lista global. ──────────────────
+const projects = $state<Record<string, ProjectShortcuts>>({});
+const projectErrors = $state<Record<string, string>>({});
+const projectInFlight = new Map<string, Promise<void>>();
+
+function projectKey(session: string): string {
+  return `${getActiveId() ?? ''}::${session}`;
+}
+
+export function projectShortcutsFor(session: string): ProjectShortcuts | null {
+  return projects[projectKey(session)] ?? null;
+}
+
+/** Mensagem (já traduzida pelo `code`) da última leitura que falhou; vazio = sem erro. */
+export function projectShortcutsError(session: string): string {
+  return projectErrors[projectKey(session)] ?? '';
+}
+
+/** Sempre relê: o arquivo é do projeto, e outra sessão/cliente pode ter gravado nele. A lista
+ * anterior fica na tela até a nova chegar. Falha rejeita e fica guardada pra fileira mostrar. */
+export function loadProjectShortcuts(session: string): Promise<void> {
+  const k = projectKey(session);
+  const pending = projectInFlight.get(k);
+  if (pending) return pending;
+  const load = (async () => {
+    try {
+      projects[k] = await getProjectShortcuts(session);
+      delete projectErrors[k];
+    } catch (err) {
+      projectErrors[k] = err instanceof Error ? err.message : String(err);
+      throw err;
+    }
+  })().finally(() => projectInFlight.delete(k));
+  projectInFlight.set(k, load);
+  return load;
+}
+
+/** Grava a lista inteira do projeto e guarda como o servidor devolveu. */
+export async function saveProjectShortcuts(session: string, items: ProjectShortcut[]): Promise<ProjectShortcuts> {
+  const k = projectKey(session);
+  const saved = await putProjectShortcuts(session, items);
+  projects[k] = saved;
+  delete projectErrors[k];
+  return saved;
+}
+
+/** Item da junção global+projeto que vira bloco (os internos ficam na fileira do topo). */
+export type CustomScoped = ScopedShortcut & { shortcut: ShortcutSendText | ShortcutShell };
+
+export function customOf(list: ScopedShortcut[]): CustomScoped[] {
+  return list.filter((s): s is CustomScoped => s.shortcut.type !== 'internal');
 }

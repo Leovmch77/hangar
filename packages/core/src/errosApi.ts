@@ -444,6 +444,10 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   config_sync_invalid_keys: () => m.config_sync_invalid_keys(),
   config_sync_invalid_bundle: () => m.config_sync_invalid_bundle(),
   config_sync_version: () => m.config_sync_version(),
+  // Atalhos do projeto (/api/sessions/{name}/project-shortcuts e shortcut-shell).
+  erro_project_shortcuts: (p) => m.erro_project_shortcuts({ detalhe: String(p.detalhe ?? '') }),
+  erro_project_shortcuts_projeto: (p) => m.erro_project_shortcuts_projeto({ detalhe: String(p.detalhe ?? '') }),
+  erro_shortcut_pasta: (p) => m.erro_shortcut_pasta({ detalhe: String(p.detalhe ?? '') }),
 };
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {

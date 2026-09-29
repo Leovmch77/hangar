@@ -117,12 +117,14 @@
       <span class="tr-lista" role="menu">
         <button type="button" role="menuitem" onclick={pickFile}>{m.atalhos_importar()}</button>
         <button type="button" role="menuitem" onclick={() => void doExport()}>{m.atalhos_exportar()}</button>
+        <span class="tr-escopo">{m.atalhos_transferir_so_globais()}</span>
       </span>
     {/if}
   </span>
 {:else}
   <button type="button" class="btn" onclick={pickFile}>{m.atalhos_importar()}</button>
   <button type="button" class="btn" onclick={() => void doExport()}>{m.atalhos_exportar()}</button>
+  <span class="tr-escopo">{m.atalhos_transferir_so_globais()}</span>
 {/if}
 
 {#if note}
@@ -171,6 +173,8 @@
     color: var(--text-primary); font-size: var(--text-sm); cursor: pointer;
   }
   .tr-lista button:hover { background: var(--bg-hover); }
+  .tr-escopo { font-size: var(--text-xs); color: var(--text-muted); }
+  .tr-lista .tr-escopo { padding: 4px 10px 2px; border-top: 1px solid var(--border-subtle); margin-top: 2px; }
   .tr-nota { font-size: var(--text-xs); color: var(--text-muted); }
   /* No cabeçalho da seção não há linha sobrando: o aviso flutua embaixo do "⋯". */
   .tr-nota.flutua {

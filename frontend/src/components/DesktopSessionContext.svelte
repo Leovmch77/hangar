@@ -25,7 +25,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import FilesPanel from './files/FilesPanel.svelte';
   import StateChip from './StateChip.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
-  import type { StatusFields, Shortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import type { StatusFields, ScopedShortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import { customOf } from '../lib/shortcuts.svelte';
   import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type SessionCostEstimate } from '@hangar/core';
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
@@ -74,7 +75,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     // Fileira configurável: a ORDEM e a presença dos botões vêm daqui (lib/shortcuts.svelte.ts,
     // via Chat); ausente = conjunto nativo. Interno sem handler continua sem botão — a lista
     // manda na ordem, os gates de headless/estado continuam mandando na existência.
-    shortcuts?: Shortcut[];
+    // Globais + os do projeto da sessão (mergeProjectShortcuts), cada um com escopo e chave própria.
+    shortcuts?: ScopedShortcut[];
+    projectName?: string;
+    projectError?: string;
     onShortcut?: (s: ShortcutSendText | ShortcutShell) => void;
     onEditShortcuts?: () => void;
     onOpenActivity?: () => void;
@@ -138,7 +142,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenNavegador = undefined,
     onOpenRun = undefined, runRunning = false,
     onOpenAttachments = undefined,
-    shortcuts = undefined, onShortcut = undefined, onEditShortcuts = undefined,
+    shortcuts = undefined, projectName = '', projectError = '', onShortcut = undefined, onEditShortcuts = undefined,
     onOpenActivity = undefined,
     activity = null, processos = [], abrirAgente = null,
     onExpandUsage = undefined, limited = false, limitReset = null,
@@ -155,7 +159,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // Só o que dá pra renderizar: interno cujo handler o Chat não passou (headless sem terminal,
   // por exemplo) sai da lista — a config diz a ordem, o gate diz a existência.
   // A fileira do topo leva só os internos; os customizados moram na seção "Ações" (ShortcutTiles).
-  const visibleShortcuts = $derived((shortcuts ?? defaultShortcuts()).filter((s) => {
+  const visibleShortcuts = $derived((shortcuts?.map((s) => s.shortcut) ?? defaultShortcuts()).filter((s) => {
     if (s.type !== 'internal') return false;
     switch (s.action) {
       case 'terminal': return !!onOpenTerminal;
@@ -166,8 +170,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     }
   }));
   const hasActions = $derived(visibleShortcuts.length > 0);
-  const customShortcuts = $derived((shortcuts ?? []).filter(
-    (s): s is ShortcutSendText | ShortcutShell => s.type !== 'internal'));
+  const customShortcuts = $derived(customOf(shortcuts ?? []));
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
   // botão da fileira ou o agente via hangar-preview open).
@@ -745,9 +748,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   {/if}
 
   <!-- AÇÕES: os atalhos customizados, seção própria em blocos que quebram linha (sem rolar). -->
-  {#if customShortcuts.length && onShortcut}
+  {#if (customShortcuts.length || projectError) && onShortcut}
   <section class="sec-break">
-    <ShortcutTiles shortcuts={customShortcuts} onShortcut={onShortcut} onAdd={onEditShortcuts}>
+    <ShortcutTiles shortcuts={customShortcuts} {projectName} {projectError} onShortcut={onShortcut} onAdd={onEditShortcuts}>
       {#snippet extra()}<ShortcutTransfer compact />{/snippet}
     </ShortcutTiles>
   </section>
