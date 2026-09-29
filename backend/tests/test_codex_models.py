@@ -282,3 +282,59 @@ def test_invalidar_catalogo_de_uma_conta_nao_apaga_as_outras(tmp_path, monkeypat
     cm.listar(codex_home=tmp_path / "b")
     cm.listar(codex_home=tmp_path / "a")
     assert calls == [str(tmp_path / "a"), str(tmp_path / "b"), str(tmp_path / "a")]
+
+
+# ------------------------------------------------------------------ rota HTTP (/codex/models)
+
+_LISTAR_HTTP = cm._listar_http
+
+# Recorte real de `/codex/models?client_version=0.159.0` (29/09/2026), já na ordem da resposta.
+_HTTP_MODELOS = {"models": [
+    {"slug": "gpt-5.5", "display_name": "GPT-5.5", "description": "Previous frontier model.",
+     "default_reasoning_level": "medium", "visibility": "list", "priority": 13,
+     "supported_reasoning_levels": [{"effort": e, "description": ""}
+                                    for e in ("low", "medium", "high", "xhigh")]},
+    {"slug": "gpt-5.6-codex-mini-internal", "display_name": "Interno", "description": "",
+     "default_reasoning_level": None, "visibility": "hide", "priority": 4,
+     "supported_reasoning_levels": []},
+    {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol",
+     "description": "Latest frontier agentic coding model.", "default_reasoning_level": "low",
+     "visibility": "list", "priority": 1,
+     "supported_reasoning_levels": [{"effort": e, "description": ""} for e in
+                                    ("low", "medium", "high", "xhigh", "max", "ultra")]},
+]}
+
+
+@pytest.fixture(autouse=True)
+def _sem_http(monkeypatch):
+    """Os testes do app-server não podem sair pela rede com o ~/.codex real da máquina."""
+    monkeypatch.setattr(cm, "_listar_http", lambda raiz: None)
+
+
+def _http(monkeypatch, tmp_path, status=200, corpo=_HTTP_MODELOS, config=""):
+    (tmp_path / "config.toml").write_text(config, encoding="utf-8")
+    pedidos = []
+    monkeypatch.setattr(cx, "versao", lambda: "0.159.0")
+    monkeypatch.setattr(cx, "backend_get",
+                        lambda caminho, **kw: (pedidos.append(caminho), (status, corpo))[1])
+    return pedidos
+
+
+def test_catalogo_http_igual_ao_do_app_server(monkeypatch, tmp_path):
+    pedidos = _http(monkeypatch, tmp_path)
+    assert _LISTAR_HTTP(tmp_path) == cm.parse(RESPOSTA)
+    assert pedidos == ["/codex/models?client_version=0.159.0"]
+
+
+@pytest.mark.parametrize("caso", ["401", "formato", "provedor"])
+def test_catalogo_http_que_nao_serve_volta_none(monkeypatch, tmp_path, caso):
+    kw = {"401": {"status": 401, "corpo": None}, "formato": {"corpo": {"data": []}},
+          "provedor": {"config": 'model_provider = "deepseek"\n'}}[caso]
+    _http(monkeypatch, tmp_path, **kw)
+    assert _LISTAR_HTTP(tmp_path) is None
+
+
+def test_listar_usa_o_http_antes_do_app_server(monkeypatch, tmp_path):
+    monkeypatch.setattr(cm, "_listar_http", lambda raiz: [{"id": "x"}])
+    monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("app-server chamado"))
+    assert cm.listar(fresco=True, codex_home=tmp_path) == [{"id": "x"}]

@@ -11,10 +11,17 @@ Os `efforts` de cada modelo vêm daqui e não de uma lista no código porque **v
 (medido: `gpt-5.6-sol` aceita `ultra`, `gpt-5.6-luna` não; `gpt-5.5` também não aceita `max`) — a
 mesma lição que o Pi já tinha ensinado.
 
-Cache pelo motivo do pi_catalog: é subprocess, e a lista muda de mês em mês.
+Antes do app-server, a lista vem do `/codex/models` do backend do ChatGPT por HTTP (`_listar_http`),
+a mesma rota de onde o app-server a tira; o processo efêmero fica de reserva. Ver "Cota e catálogo
+do Codex por HTTP" em docs/decisoes/harnesses.md.
+
+Cache pelo motivo do pi_catalog: a lista muda de mês em mês.
 """
 import hashlib
+import logging
 import time
+import tomllib
+import urllib.parse
 from pathlib import Path
 
 from app import codex_appserver
@@ -27,6 +34,7 @@ CodexIndisponivel = codex_appserver.CodexIndisponivel
 CodexRecusado = codex_appserver.CodexRecusado
 CodexRespostaInvalida = codex_appserver.CodexRespostaInvalida
 
+_log = logging.getLogger("hangar.codex_models")
 _TTL = 600.0
 _cache: dict[tuple[str, tuple], tuple[float, list[dict]]] = {}
 
@@ -93,14 +101,60 @@ def parse(result: dict) -> list[dict]:
     return out
 
 
+def _listar_http(raiz: Path) -> list[dict] | None:
+    """O `/codex/models` do backend do ChatGPT, que é de onde o próprio app-server tira o
+    `model/list`. None = este caminho não serve agora e o app-server responde no lugar."""
+    try:
+        config = tomllib.loads((raiz / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError):
+        config = None
+    try:
+        # Outro provedor ou outro backend: a lista não é a do ChatGPT, e quem sabe montá-la é o CLI.
+        if config is None or config.get("model_provider", "openai") != "openai" \
+                or "chatgpt_base_url" in config:
+            raise CodexIndisponivel("config fora do padrão")
+        versao = codex_appserver.versao()
+        status, corpo = codex_appserver.backend_get(
+            f"/codex/models?client_version={urllib.parse.quote(versao)}", codex_home=raiz)
+        brutos = corpo.get("models") if status == 200 and isinstance(corpo, dict) else None
+        if not isinstance(brutos, list):
+            raise CodexIndisponivel(f"http {status}")
+        data = []
+        # O app-server ordena por `priority`; sem isso o primeiro da tela mudaria.
+        for m in sorted((m for m in brutos if isinstance(m, dict)),
+                        key=lambda m: m.get("priority") if isinstance(m.get("priority"), int) else 1 << 30):
+            niveis = m.get("supported_reasoning_levels")
+            if not isinstance(niveis, list):
+                raise CodexIndisponivel("formato-desconhecido")
+            data.append({
+                "model": m.get("slug"), "displayName": m.get("display_name"),
+                "description": m.get("description"),
+                "hidden": m.get("visibility") != "list",
+                "supportedReasoningEfforts": [{"reasoningEffort": n.get("effort")}
+                                              for n in niveis if isinstance(n, dict)],
+                "defaultReasoningEffort": m.get("default_reasoning_level"),
+            })
+        modelos = parse({"data": data})
+    except (CodexIndisponivel, CodexRespostaInvalida) as e:
+        # info e não debug: cair calado no app-server é a regressão que ninguém veria.
+        _log.info("catalogo codex %s pelo app-server (http: %s)", raiz, e)
+        return None
+    _log.debug("catalogo codex %s por http", raiz)
+    return modelos
+
+
 def listar(fresco: bool = False, *, codex_home: str | Path | None = None) -> list[dict]:
     key = _cache_key(codex_home)
     cached = _cache.get(key)
     if cached and not fresco and time.monotonic() - cached[0] < _TTL:
         return cached[1]
-    result = (codex_appserver.perguntar("model/list") if codex_home is None else
-              codex_appserver.perguntar("model/list", codex_home=Path(key[0])))
-    modelos = parse(result)
+    modelos = _listar_http(Path(key[0]))
+    if modelos is None:
+        result = (codex_appserver.perguntar("model/list") if codex_home is None else
+                  codex_appserver.perguntar("model/list", codex_home=Path(key[0])))
+        modelos = parse(result)
     _cache[key] = (time.monotonic(), modelos)
     return modelos
 
