@@ -1,6 +1,6 @@
 //! Criar sessão (`CreateSessionSheet.svelte` + `FolderScanner.svelte` do web, no desenho de duas colunas do desktop): a pasta à
 //! esquerda, o formulário à direita. As escolhas finas moram em `choices`; continuar uma conversa antiga, em `resume`.
-mod choices;
+pub(super) mod choices;
 mod folder_git;
 mod resume;
 
@@ -934,7 +934,7 @@ fn alert(id: &'static str, text: String) -> Stateful<Div> {
 }
 
 /// Opção escolhível (raiz, provider, onde roda): a escolhida com o fundo de destaque suave dos segmentos das Configurações.
-fn choice(id: impl Into<ElementId>, on: bool, cx: &App) -> Button {
+pub(super) fn choice(id: impl Into<ElementId>, on: bool, cx: &App) -> Button {
     Button::new(id).custom(ButtonCustomVariant::new(cx).color(if on { theme::accent_dim() } else { transparent_black() })
         .foreground(if on { theme::accent_text() } else { theme::text() }).hover(theme::hover()).active(theme::hover()))
         .border_1().border_color(if on { theme::accent() } else { theme::border() }).when(on, |b| b.bg(theme::accent_dim()))

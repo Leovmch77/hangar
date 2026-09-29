@@ -45,6 +45,9 @@ pub struct SessionInfo {
     pub pair_task: Option<String>,
     /// Há convite ativo desta sessão (pendente ou já usado): o 🔗 da linha.
     #[serde(default)] pub shared: bool,
+    /// Task em andamento do plano que a sessão executa, e o total delas.
+    pub plan_task: Option<u32>,
+    pub plan_task_total: Option<u32>,
 }
 
 impl SessionInfo {

@@ -145,7 +145,10 @@ impl Hangar {
                     .child("⇄").when(on, |el| el.child(label)))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_send_to_group(cx)))
         });
-        div().flex_shrink_0().flex().items_center().gap(px(2.)).child(chip).children(both)
+        let orq = quiet("composer-orq").tooltip(web("orqcfg_titulo")).accessibility_label(web("orqcfg_titulo"))
+            .child(chrome::small_icon(IconName::Workflow, 13., theme::faint()))
+            .on_click(cx.listener(|this, _, window, cx| this.open_orq_roles(window, cx)));
+        div().flex_shrink_0().flex().items_center().gap(px(2.)).child(chip).children(both).child(orq)
     }
 
     // ── Painel ──
