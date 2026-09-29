@@ -10,6 +10,7 @@ refaz. Os `.json` do cache antigo na mesma pasta não são mais lidos.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import pickle
@@ -17,6 +18,7 @@ import sqlite3
 import threading
 import time
 import zlib
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import fields
 from pathlib import Path
@@ -90,6 +92,52 @@ def progresso_total() -> tuple[int, int]:
 
 def invalidar() -> None:
     """Nada do índice mora em memória; existe pra quem simulava restart do cache antigo."""
+    with _relatorios_lock:
+        _relatorios.clear()
+
+
+# -- relatórios prontos ------------------------------------------------------------------------
+
+# Sobe a cada gravação que mudou alguma linha. ponytail: contador do processo; só o backend
+# escreve no índice. Outro processo escrevendo exigiria um contador na tabela `meta`.
+_seq = itertools.count(1)
+_versao_dados = 0
+# Montar o /api/uso lê e agrega o histórico inteiro; a tela repete o mesmo pedido a cada troca
+# de aba ou filtro. Só entradas da versão corrente ficam, até `_RELATORIOS_MAX`: um relatório
+# de custos inteiro pesa megabytes em objetos.
+_RELATORIOS_MAX = 8
+_relatorios: OrderedDict = OrderedDict()
+_relatorios_lock = threading.Lock()
+
+
+def mudou() -> None:
+    """Invalida os relatórios prontos (dados ou o conjunto de escopos lidos mudaram)."""
+    global _versao_dados
+    _versao_dados = next(_seq)
+
+
+def _talvez_mudou(conn: sqlite3.Connection) -> None:
+    if conn.total_changes:
+        mudou()
+
+
+def relatorio(chave: tuple, montar: Callable[[], object]):
+    """`montar()` memorizado por `chave` + versão dos dados + mapa de áreas. A versão é lida
+    ANTES de montar: gravação no meio vira outra chave, nunca um relatório velho na nova."""
+    chave = (_versao_dados, uso_areas.assinatura(), *chave)
+    with _relatorios_lock:
+        pronto = _relatorios.get(chave)
+        if pronto is not None:
+            _relatorios.move_to_end(chave)
+            return pronto
+    r = montar()
+    with _relatorios_lock:
+        for velha in [k for k in _relatorios if k[0] != chave[0]]:
+            del _relatorios[velha]
+        _relatorios[chave] = r
+        while len(_relatorios) > _RELATORIOS_MAX:
+            _relatorios.popitem(last=False)
+    return r
 
 
 # -- conexão -----------------------------------------------------------------------------------
@@ -200,6 +248,20 @@ _INS_USO = f"INSERT INTO uso VALUES (?, {', '.join('?' * len(CAMPOS_USO))})"
 def _ler_novo(p: Path, st: os.stat_result, reg: tuple | None, nova_dobra: Callable[[Path], Dobra],
               versao: str):
     """Lê o que falta de `p` e devolve (offset, cauda, estado, saída, tamanho lido)."""
+    try:
+        return _ler(p, st, reg, nova_dobra, versao)
+    except OSError:
+        raise
+    except Exception:
+        if reg is None:
+            raise
+        # Dobra que despicklou mas não serve mais (classe mudou sem subir a versão): relê inteiro.
+        _log.warning("retomada de %s falhou; relendo do zero", p, exc_info=True)
+        return _ler(p, st, None, nova_dobra, versao)
+
+
+def _ler(p: Path, st: os.stat_result, reg: tuple | None, nova_dobra: Callable[[Path], Dobra],
+         versao: str):
     dobra = None
     offset = 0
     with open(p, "rb") as f:
@@ -240,23 +302,23 @@ def _areas_blob(entradas) -> bytes | None:
     return None if entradas is None else zlib.compress(pickle.dumps(entradas, protocol=pickle.HIGHEST_PROTOCOL), 1)
 
 
-def _gravar_arquivo(conn: sqlite3.Connection, p: Path, st: os.stat_result, reg: tuple | None,
-                    scope: str, versao: str, lido) -> None:
+def _gravar_arquivo(conn: sqlite3.Connection, p: Path, st: os.stat_result, scope: str,
+                    versao: str, lido, manter_escopo: bool = False) -> None:
     offset, cauda, estado, (custos, usos, entradas), tamanho = lido
     sig = uso_areas.assinatura()
-    valores = (scope, versao, *_identidade(st), tamanho, st.st_mtime_ns, offset, cauda, estado,
-               _areas_blob(entradas), sig)
-    if reg is None:
-        file_id = conn.execute(
-            "INSERT INTO files(scope, versao, dev, ino, size, mtime_ns, offset, cauda, estado, areas,"
-            " areas_sig, path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (*valores, str(p))).lastrowid
-    else:
-        file_id = reg[0]
-        conn.execute("DELETE FROM custo WHERE file_id=?", (file_id,))
-        conn.execute("DELETE FROM uso WHERE file_id=?", (file_id,))
-        conn.execute(
-            "UPDATE files SET scope=?, versao=?, dev=?, ino=?, size=?, mtime_ns=?, offset=?, cauda=?,"
-            " estado=?, areas=?, areas_sig=? WHERE id=?", (*valores, file_id))
+    # Upsert, não "INSERT se não conhecia": o custo de uma sessão (`sincronizar_arquivo`) grava
+    # fora da varredura e pode ter inserido o mesmo caminho entre a leitura e a escrita dela.
+    file_id = conn.execute(
+        "INSERT INTO files(scope, versao, dev, ino, size, mtime_ns, offset, cauda, estado, areas,"
+        " areas_sig, path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET"
+        " scope=IIF(?, files.scope, excluded.scope), versao=excluded.versao, dev=excluded.dev, ino=excluded.ino,"
+        " size=excluded.size, mtime_ns=excluded.mtime_ns, offset=excluded.offset,"
+        " cauda=excluded.cauda, estado=excluded.estado, areas=excluded.areas,"
+        " areas_sig=excluded.areas_sig RETURNING id",
+        (scope, versao, *_identidade(st), tamanho, st.st_mtime_ns, offset, cauda, estado,
+         _areas_blob(entradas), sig, str(p), manter_escopo)).fetchone()[0]
+    conn.execute("DELETE FROM custo WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM uso WHERE file_id=?", (file_id,))
     conn.executemany(_INS_CUSTO, [(file_id, *_linha_custo(r)) for r in custos])
     area = linhas_de_area(entradas) if entradas is not None else []
     conn.executemany(_INS_USO, [(file_id, *_linha_uso(l)) for l in (*usos, *area)])
@@ -331,10 +393,14 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
                 except OSError as e:
                     _log.warning("custos: %s não pôde ser lido: %r", p, e)
                     continue
+                except Exception:
+                    # Um arquivo que derruba o leitor não pode parar a varredura de todos.
+                    _log.warning("custos: %s não pôde ser lido", p, exc_info=True)
+                    continue
                 if not em_transacao:
                     conn.execute("BEGIN IMMEDIATE")
                     em_transacao, inicio_lote = True, time.monotonic()
-                _gravar_arquivo(conn, p, st, reg, scope, versao, lido)
+                _gravar_arquivo(conn, p, st, scope, versao, lido)
                 if time.monotonic() - inicio_lote > _LOTE_S:
                     conn.execute("COMMIT")
                     em_transacao = False
@@ -354,6 +420,7 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
             # Fica marcado como concluído (não some): a barra da tela soma todas as fontes.
             progresso[scope] = (len(lista), len(lista))
     finally:
+        _talvez_mudou(conn)
         conn.close()
 
 
@@ -371,7 +438,8 @@ def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: st
         lido = _ler_novo(p, st, reg, nova_dobra, versao)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            _gravar_arquivo(conn, p, st, reg, reg[1] if reg else scope, versao, lido)
+            # A varredura pode ter dado dono ao caminho enquanto este lia: o escopo dela vence.
+            _gravar_arquivo(conn, p, st, scope, versao, lido, manter_escopo=True)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -380,6 +448,30 @@ def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: st
     except OSError:
         return None
     finally:
+        _talvez_mudou(conn)
+        conn.close()
+
+
+def esquecer_fora(ativos: set[str]) -> None:
+    """Apaga do índice o arquivo que sumiu do disco e não está em nenhum escopo varrido (conta
+    removida, sessão avulsa apagada). Os escopos varridos já esquecem os seus em `sincronizar`."""
+    conn = _abrir()
+    try:
+        velhos = [(i,) for i, scope, path in conn.execute("SELECT id, scope, path FROM files")
+                  if scope not in ativos and not os.path.exists(path)]
+        if not velhos:
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany("DELETE FROM custo WHERE file_id=?", velhos)
+            conn.executemany("DELETE FROM uso WHERE file_id=?", velhos)
+            conn.executemany("DELETE FROM files WHERE id=?", velhos)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        _talvez_mudou(conn)
         conn.close()
 
 
@@ -388,7 +480,7 @@ def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: st
 def ler_custos(scope: str | None = None, desde: str | None = None, file_id: int | None = None) -> list[tuple]:
     """Linhas de custo (colunas `CAMPOS_CUSTO`, `ts` em ISO) de um escopo ou de um arquivo, na
     ordem em que cada arquivo as produziu. `desde` = primeiro dia (YYYY-MM-DD) incluído."""
-    sql = f"SELECT {', '.join('c.' + c for c in CAMPOS_CUSTO)} FROM custo c JOIN files f ON f.id = c.file_id"
+    sql = f"SELECT {', '.join('c.' + c for c in CAMPOS_CUSTO)} FROM custo c"
     where, args = _filtro(scope, desde, file_id, "c")
     conn = _abrir()
     try:
@@ -398,7 +490,7 @@ def ler_custos(scope: str | None = None, desde: str | None = None, file_id: int 
 
 
 def ler_usos(scope: str, conta: str, desde: str | None = None) -> list[UsoLinha]:
-    sql = f"SELECT {', '.join('u.' + c for c in CAMPOS_USO)} FROM uso u JOIN files f ON f.id = u.file_id"
+    sql = f"SELECT {', '.join('u.' + c for c in CAMPOS_USO)} FROM uso u"
     where, args = _filtro(scope, desde, None, "u")
     conn = _abrir()
     try:
@@ -411,12 +503,13 @@ def ler_usos(scope: str, conta: str, desde: str | None = None) -> list[UsoLinha]
 
 
 def _filtro(scope, desde, file_id, t: str) -> tuple[str, tuple]:
+    # Subconsulta em vez de JOIN: o plano lê só as linhas dos arquivos do escopo pelo índice.
     where, args = [], []
     if scope is not None:
-        where.append("f.scope = ?")
+        where.append(f"{t}.file_id IN (SELECT id FROM files WHERE scope = ?)")
         args.append(scope)
     if file_id is not None:
-        where.append("f.id = ?")
+        where.append(f"{t}.file_id = ?")
         args.append(file_id)
     if desde:
         where.append(f"{t}.dia >= ?")

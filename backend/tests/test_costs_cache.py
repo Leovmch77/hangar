@@ -204,3 +204,67 @@ def test_rollout_codex_retoma_do_offset(tmp_path, monkeypatch):
     assert [(r.input, r.output) for r in cs.custos_do_rollout(arq)] == [(15, 3)]
     assert novas == []
     assert cs.custos_do_rollout(arq) == cs._linhas_rollout_codex(arq, None)
+
+
+def test_estado_salvo_que_nao_serve_mais_e_relido_do_zero(tmp_path, monkeypatch):
+    """Dobra que despickla mas quebra ao continuar (classe mudou sem subir a versão)."""
+    import pickle
+    import zlib
+    raiz = tmp_path / "projects"
+    arq = raiz / "p" / "s.jsonl"
+    arq.parent.mkdir(parents=True)
+    arq.write_text(_linhas(_resposta("r1", 10, 1)), encoding="utf-8")
+    assert _soma(raiz) == (10, 1)
+    conn = cc._abrir()
+    conn.execute("UPDATE files SET estado=?", (zlib.compress(pickle.dumps(object())),))
+    conn.close()
+    _anexar(arq, _linhas(_resposta("r2", 5, 5)))
+    assert _soma(raiz) == (15, 6)
+
+
+def test_arquivo_gravado_fora_da_varredura_no_meio_dela_nao_quebra(tmp_path, monkeypatch):
+    """O custo da sessão aberta insere o caminho enquanto a varredura já o lia como novo."""
+    arq = tmp_path / "rollout-2026-09-10T12-00-00-x.jsonl"
+    arq.write_text(_linhas({"type": "session_meta", "payload": {"id": "s1", "cwd": "/r"}}), encoding="utf-8")
+    original = cc._ler_novo
+
+    def no_meio(p, st, reg, nova, versao):
+        lido = original(p, st, reg, nova, versao)
+        monkeypatch.setattr(cc, "_ler_novo", original)
+        cc.sincronizar_arquivo(p, cs._dobra_codex, "v", "codex:avulso")
+        return lido
+
+    monkeypatch.setattr(cc, "_ler_novo", no_meio)
+    cc.sincronizar("codex:conta", [arq], cs._dobra_codex, "v")
+    conn = cc._abrir()
+    assert conn.execute("SELECT scope FROM files").fetchall() == [("codex:conta",)]
+    conn.close()
+
+
+def test_arquivo_apagado_de_escopo_que_saiu_da_varredura_e_esquecido(tmp_path):
+    arq = tmp_path / "rollout-2026-09-10T12-00-00-x.jsonl"
+    fica = tmp_path / "rollout-2026-09-10T12-00-00-y.jsonl"
+    for p in (arq, fica):
+        p.write_text(_linhas({"type": "session_meta", "payload": {"id": p.stem, "cwd": "/r"}}), encoding="utf-8")
+        cc.sincronizar_arquivo(p, cs._dobra_codex, "v", "codex:avulso")
+    arq.unlink()
+    cc.esquecer_fora(set())
+    conn = cc._abrir()
+    assert conn.execute("SELECT path FROM files").fetchall() == [(str(fica),)]
+    conn.close()
+
+
+def test_relatorio_pronto_vale_ate_os_dados_mudarem(tmp_path):
+    montados = []
+
+    def montar():
+        montados.append(1)
+        return object()
+
+    a = cc.relatorio(("x", 1), montar)
+    assert cc.relatorio(("x", 1), montar) is a
+    cc.relatorio(("x", 2), montar)
+    assert len(montados) == 2
+    cc.mudou()
+    assert cc.relatorio(("x", 1), montar) is not a
+    assert len(cc._relatorios) == 1, "entradas da versão velha saem"

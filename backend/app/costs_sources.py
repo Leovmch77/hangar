@@ -693,25 +693,20 @@ def _pronto(fresco: bool, esperar: float | None) -> None:
         _refrescar_em_background()
 
 
+def preparar(fresco: bool = False, esperar: float = 3.0) -> None:
+    """O que o endpoint chama antes de ler o índice: levanta `Aquecendo` ou varre se pedido."""
+    _pronto(fresco, esperar)
+
+
 def coletar_ou_aquecendo(esperar: float = 3.0, *, fresco: bool = False,
                          desde: str | None = None) -> list[UsageRow]:
-    """O que o endpoint chama. `desde` (YYYY-MM-DD) corta no SQL o que o relatório jogaria fora."""
     _pronto(fresco, esperar)
     return _ler_custos(desde)
 
 
-def coletar_uso(esperar: float | None = 3.0, *, fresco: bool = False,
-                desde: str | None = None) -> tuple[list[UsoLinha], list[UsageRow]]:
-    """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas.
-
-    As de tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe
-    nas linhas de tokens. Mesmo índice, mesmo aquecimento e mesma varredura do `coletar()`.
-    """
-    _pronto(fresco, esperar)
-    return _ler_uso(desde)
-
-
 def _ler_uso(desde: str | None = None) -> tuple[list[UsoLinha], list[UsageRow]]:
+    """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas. As de
+    tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe nelas."""
     uso: list[UsoLinha] = []
     tokens: list[UsageRow] = []
     for raiz, account_id in _escopos["claude"]:
@@ -884,6 +879,12 @@ def _sincronizar() -> None:
     if kimi.is_dir():
         _sincronizar_kimi(kimi)
         escopos["kimi"] = kimi
+    costs_cache.esquecer_fora({
+        *(costs_claude_transcript.escopo(raiz) for raiz, _a in escopos["claude"]),
+        *escopos["codex"], *(f"{nome}:{raiz}" for raiz, nome in escopos["pi"]),
+        *([f"kimi:{kimi}"] if escopos["kimi"] is not None else [])})
+    if escopos != _escopos:
+        costs_cache.mudou()
     _escopos = escopos
 
 

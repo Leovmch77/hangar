@@ -14,9 +14,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from app import costs, pricing
-from app.costs_sources import (LOCAL, PROJETO_DESCONHECIDO, UsageRow, coletar_uso,
-                               rotulo_de_provedor)
+from app import costs, costs_cache, costs_sources, pricing
+from app.costs_sources import LOCAL, PROJETO_DESCONHECIDO, UsageRow, rotulo_de_provedor
 from app.models import Applied, UsoBucket, UsoReport
 from app.uso_claude import UsoLinha, plugin_de, skill_do_caminho
 
@@ -395,9 +394,15 @@ def report(period: str = "all", now: datetime | None = None, fresco: bool = Fals
     `filtros`: conta, projeto, modelo, plugin, foco (ver `montar`)."""
     now = now or datetime.now(LOCAL)
     dias = costs.PERIODOS.get(period)
-    uso, tokens = coletar_uso(fresco=fresco, desde=(now - timedelta(days=dias - 1)).strftime("%Y-%m-%d")
-                              if dias else None)
-    return montar(uso, tokens, period=period, now=now, origens=_origens_recentes(), **filtros)
+    desde = (now - timedelta(days=dias - 1)).strftime("%Y-%m-%d") if dias else None
+    costs_sources.preparar(fresco)
+    origens = _origens_recentes()
+    chave = ("uso", period, now.date(), pricing.geracao(), costs.chave_rotulos(), _origens_cache[0],
+             *((k, tuple(v) if isinstance(v, list) else v) for k, v in sorted(filtros.items())))
+    pronto = costs_cache.relatorio(
+        chave, lambda: montar(*costs_sources._ler_uso(desde), period=period, now=now,
+                              origens=origens, **filtros))
+    return pronto.model_copy(update={"usd_brl": costs.usd_brl()})
 
 
 _ORIGENS_TTL_S = 300

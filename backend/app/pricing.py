@@ -171,16 +171,23 @@ _minusculas: dict[str, str] | None = None
 # de vezes. Depende só do catálogo e dos overrides, então some junto com eles.
 _canon: dict = {}
 _tarifas: dict = {}
+# Sobe a cada troca de catálogo/override: relatório guardado com tarifa velha deixa de valer.
+_geracao = 0
+
+
+def geracao() -> int:
+    return _geracao
 
 
 def invalidar_cache() -> None:
-    global _cat, _overrides, _minusculas
+    global _cat, _overrides, _minusculas, _geracao
     with _lock:
         _cat = None
         _overrides = None
         _minusculas = None
         _canon.clear()
         _tarifas.clear()
+        _geracao += 1
 
 
 def catalogo_de_bruto(bruto: dict) -> dict[str, Rate]:
@@ -276,12 +283,19 @@ def canonizar(model: str) -> str:
         return _canon[model]
     except (KeyError, TypeError):
         pass
-    cat = _carregar()
+    g = _geracao
     r = _canonizar(model)
-    # Catálogo trocado no meio (download de fundo): não memoriza a resposta velha.
-    if isinstance(model, str) and _cat is cat:
-        _canon[model] = r
+    _memorizar(_canon, model, r, g)
     return r
+
+
+def _memorizar(memo: dict, model, r, g: int) -> None:
+    # Sob a trava do invalidar: catálogo trocado no meio (download de fundo) não pode deixar a
+    # resposta velha memorizada depois do clear.
+    if isinstance(model, str):
+        with _lock:
+            if _geracao == g:
+                memo[model] = r
 
 
 def _canonizar(model: str) -> str:
@@ -315,10 +329,9 @@ def rate_for(model: str) -> Rate | None:
         return _tarifas[model]
     except (KeyError, TypeError):
         pass
-    cat, ov = _carregar(), _carregar_overrides()
+    g = _geracao
     r = _rate_for(model)
-    if isinstance(model, str) and _cat is cat and _overrides is ov:
-        _tarifas[model] = r
+    _memorizar(_tarifas, model, r, g)
     return r
 
 

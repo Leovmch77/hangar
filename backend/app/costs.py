@@ -12,8 +12,8 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from app import pricing
-from app.costs_sources import LOCAL, UsageRow, coletar_ou_aquecendo, rotulo_de_provedor
+from app import costs_cache, costs_sources, pricing
+from app.costs_sources import LOCAL, UsageRow, rotulo_de_provedor
 from app.models import Applied, ComboRow, CostReport, DimBucket, KindBucket, RateInfo, SessaoCusto
 
 TIPOS = ("input", "output", "cache_write", "cache_read")
@@ -262,7 +262,17 @@ def report(period: str = "all", now: datetime | None = None, fresco: bool = Fals
     dias = PERIODOS.get(period)
     # Só o período e a janela anterior (mesmo tamanho) saem do índice.
     desde = (now - timedelta(days=dias * 2 - 1)).strftime("%Y-%m-%d") if dias else None
-    return montar(coletar_ou_aquecendo(fresco=fresco, desde=desde), period=period, now=now)
+    costs_sources.preparar(fresco)
+    pronto = costs_cache.relatorio(
+        ("costs", period, now.date(), pricing.geracao(), chave_rotulos()),
+        lambda: montar(costs_sources._ler_custos(desde), period=period, now=now))
+    # A cotação tem ciclo próprio: o relatório guardado não congela a dela.
+    return pronto.model_copy(update={"usd_brl": usd_brl()})
+
+
+def chave_rotulos() -> tuple:
+    """Rótulos de conta entram na chave: e-mail trocado muda a tela sem mudar dado do índice."""
+    return tuple(costs_sources._ROTULOS.items())
 
 
 # Cotação USD/BRL: cache em memória de 1h. Falha também "conta" como tentativa (atualiza o
