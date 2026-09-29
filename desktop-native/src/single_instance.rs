@@ -17,6 +17,15 @@ pub fn claim(link: Option<String>) -> Claim {
     }
 }
 
+/// O endereço desta janela, para a autoatualização devolver se a versão nova não subir.
+pub fn snapshot() -> Option<(PathBuf, String)> {
+    let file = port_file()?;
+    let text = std::fs::read_to_string(&file).ok()?;
+    Some((file, text))
+}
+
+pub fn restore((file, text): (PathBuf, String)) { let _ = std::fs::write(file, text); }
+
 fn forward(file: &Path, link: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(file) else { return false };
     let Some((port, nonce)) = text.split_once('\n') else { return false };

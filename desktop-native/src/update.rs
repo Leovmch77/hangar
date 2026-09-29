@@ -121,10 +121,13 @@ async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) ->
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &offer.sha256)).await.map_err(|e| e.to_string())??;
     let signal = sibling(&exe, ".alive");
     let _ = std::fs::remove_file(&signal);
+    // A versão nova assume o arquivo da janela única antes de provar que subiu.
+    let own_address = crate::single_instance::snapshot();
     let started = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
     let up = match started { Ok(mut child) => alive(&mut child, &signal).await, Err(_) => false };
     let _ = std::fs::remove_file(&signal);
     if up { return Ok(()); }
+    if let Some(address) = own_address { crate::single_instance::restore(address); }
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
     Err(tr("app_update_rolled_back"))
 }
