@@ -4,15 +4,14 @@ Binário por provider é constante; o PATH é o do shell de login do usuário (q
 CLI é o pane via ``$SHELL -c``, tmux.py:391), obtido via ``$SHELL -l -c 'printenv PATH'``
 (com ``printenv``, nunca ``echo $PATH`` — fish separa por espaço).
 
-Enumera TODOS os candidatos no PATH na mão (shutil.which só devolve o primeiro) e sonda
-cada um com ``[caminho, "--version"]`` e timeout de 2s. Classificação padrão Orca:
-timeout ou exit com qualquer código = instalado; FileNotFound/PermissionError/OSError = tenta
-próximo; nenhum bom = não instalado. Resultado cacheado por 60s (time.monotonic).
+Enumera TODOS os candidatos no PATH na mão (shutil.which só devolve o primeiro): arquivo
+executável = instalado; existe sem permissão = tenta o próximo e, se nenhum servir,
+``sem_permissao``. Não roda ``--version``: qualquer código de saída já contava como instalado, e
+os cinco em série custavam segundos. Resultado cacheado por 60s (time.monotonic).
 """
 
 from __future__ import annotations
 
-import errno
 import logging
 import os
 import subprocess
@@ -122,29 +121,16 @@ def _sondar_sem_cache() -> dict[str, dict]:
             else:
                 candidatos = [os.path.join(d, bin_name)]
             for caminho in candidatos:
-                try:
-                    r = subprocess.run([caminho, "--version"], timeout=2, capture_output=True)
-                    # exit com qualquer código = instalado
-                    disponivel = True
-                    motivo = None
-                    break
-                except subprocess.TimeoutExpired:
-                    disponivel = True
-                    motivo = None
-                    break
-                except PermissionError:
+                if not os.path.isfile(caminho):
+                    continue
+                # No Windows o X_OK e sempre verdadeiro; o nome sem extensao (script sh do npm)
+                # nao roda la, como antes o WinError 193 do `--version` provava.
+                sem_ext = os.name == "nt" and caminho == os.path.join(d, bin_name)
+                if sem_ext or not os.access(caminho, os.X_OK):
                     viu_sem_permissao = True
                     continue
-                except FileNotFoundError:
-                    continue
-                except OSError as e:
-                    # ENOEXEC (8) = arquivo não executável (ex: texto sem shebang + sem exec)
-                    # EACCES (13) = sem permissão
-                    if e.errno in (errno.EACCES, errno.ENOEXEC):
-                        viu_sem_permissao = True
-                    continue
-                except Exception:
-                    continue
+                disponivel = True
+                break
             if disponivel:
                 break
 
