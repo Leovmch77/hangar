@@ -399,7 +399,7 @@ def _backend(monkeypatch, rotas):
         if isinstance(r, int):
             raise urllib.error.HTTPError(req.full_url, r, "x", {}, None)
         return _Resp(json.dumps(r).encode())
-    monkeypatch.setattr(codex_appserver.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(codex_appserver._opener, "open", urlopen)
     return pedidos
 
 
@@ -434,9 +434,10 @@ def test_http_da_o_mesmo_resultado_que_o_app_server(monkeypatch, com_jwt):
 def test_sem_redefinicao_a_lista_que_falha_nao_derruba(monkeypatch, com_jwt):
     _sem_app_server(monkeypatch)
     uso = {**_USO, "rate_limit_reset_credits": {"available_count": 0}}
-    _backend(monkeypatch, {"/wham/usage": uso, "/wham/rate-limit-reset-credits": 500})
+    pedidos = _backend(monkeypatch, {"/wham/usage": uso, "/wham/rate-limit-reset-credits": 500})
     estado, _janelas, _motivo, redefinicoes = cotas._ler_codex_detalhada()
     assert estado == "lida" and redefinicoes.available_count == 0
+    assert [p.full_url.rsplit("/", 1)[1] for p in pedidos] == ["usage"], "sem redefinição, sem lista"
 
 
 @pytest.mark.parametrize("caso", ["vencido", "401", "403", "formato", "rede", "lista-falha"])
@@ -454,7 +455,7 @@ def test_http_que_nao_serve_cai_no_app_server(monkeypatch, tmp_path, caso):
     if caso == "rede":
         def sem_rede(req, timeout):
             raise urllib.error.URLError("offline")
-        monkeypatch.setattr(codex_appserver.urllib.request, "urlopen", sem_rede)
+        monkeypatch.setattr(codex_appserver._opener, "open", sem_rede)
     monkeypatch.setattr(cotas.codex_appserver, "perguntar", lambda m, **kw: _RATE_LIMITS)
     estado, janelas, motivo, _ = cotas._ler_codex_detalhada()
     assert (estado, motivo, [j.rotulo for j in janelas]) == ("lida", None, ["5h", "7d"])
@@ -467,3 +468,72 @@ def test_429_nao_cai_no_app_server_e_espera(monkeypatch, com_jwt):
     _sem_app_server(monkeypatch)
     _backend(monkeypatch, {"/wham/usage": 429, "/wham/rate-limit-reset-credits": _LISTA})
     assert cotas._ler_codex_detalhada() == ("indisponivel", [], "http-429", None)
+
+
+class _Servidor:
+    """Backend local de verdade: prova o comportamento do urllib, não o de um dublê."""
+
+    def __init__(self, responder):
+        import http.server
+        import threading
+
+        vistos = self.vistos = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                vistos.append((self.path, self.headers.get("Authorization")))
+                responder(self)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def fechar(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+def _servidor(monkeypatch, responder):
+    s = _Servidor(responder)
+    monkeypatch.setattr(codex_appserver, "_BACKEND", s.url)
+    return s
+
+
+def test_redirect_nao_leva_o_token_e_cai_no_app_server(monkeypatch, com_jwt):
+    def responder(h):
+        if h.path == "/wham/usage":
+            h.send_response(302)
+            h.send_header("Location", "/outro-host")
+            h.end_headers()
+        else:
+            h.send_response(200)
+            h.end_headers()
+            h.wfile.write(b"{}")
+    s = _servidor(monkeypatch, responder)
+    try:
+        with pytest.raises(codex_appserver.CodexIndisponivel, match="redirecionado"):
+            codex_appserver.backend_get("/wham/usage", codex_home=com_jwt / ".codex")
+    finally:
+        s.fechar()
+    assert [p for p, _ in s.vistos] == ["/wham/usage"]
+
+
+def test_resposta_cortada_vira_indisponivel(monkeypatch, com_jwt):
+    def responder(h):
+        h.send_response(200)
+        h.send_header("Content-Length", "100")
+        h.end_headers()
+        h.wfile.write(b'{"rate')
+    s = _servidor(monkeypatch, responder)
+    try:
+        with pytest.raises(codex_appserver.CodexIndisponivel, match="IncompleteRead"):
+            codex_appserver.backend_get("/wham/usage", codex_home=com_jwt / ".codex")
+    finally:
+        s.fechar()
+
+
+def test_janela_com_segundos_float(monkeypatch):
+    assert cotas._janela_http_codex({"limit_window_seconds": 18000.0})["windowDurationMins"] == 300

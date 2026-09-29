@@ -34,6 +34,7 @@ nem gastar a requisição; 401/403 caem no mesmo estado.
 """
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -555,7 +556,8 @@ def _janela_http_codex(o: object) -> dict | None:
         return None
     segundos = o.get("limit_window_seconds")
     return {"usedPercent": o.get("used_percent"), "resetsAt": o.get("reset_at"),
-            "windowDurationMins": segundos // 60 if isinstance(segundos, int) else None}
+            "windowDurationMins": int(segundos // 60) if isinstance(segundos, (int, float))
+            and not isinstance(segundos, bool) and math.isfinite(segundos) else None}
 
 
 class _Http429Codex(Exception):
@@ -577,9 +579,6 @@ def _rate_limits_http_codex(raiz: Path) -> dict | str | None:
             raise codex_appserver.CodexIndisponivel(f"http {status}")
         return corpo
 
-    # As duas rotas em paralelo: em série a leitura passava do app-server em tempo de parede.
-    ex = ThreadPoolExecutor(max_workers=2)
-    pedido_lista = ex.submit(get, "/wham/rate-limit-reset-credits")
     try:
         uso = get("/wham/usage")
         limites = uso.get("rate_limit")
@@ -593,8 +592,8 @@ def _rate_limits_http_codex(raiz: Path) -> dict | str | None:
         quantidade = resumo.get("available_count") if isinstance(resumo, dict) else None
         if isinstance(quantidade, int) and quantidade > 0:
             # A tela lista validade e estado de cada redefinição, e isso só vem nesta outra rota.
-            # Sem redefinição, falha nela não derruba a leitura.
-            lista = pedido_lista.result()
+            # Só é pedida quando o uso diz que há o que listar: o caso comum paga uma ida só.
+            lista = get("/wham/rate-limit-reset-credits")
             creditos = lista.get("credits")
             if not isinstance(creditos, list):
                 raise codex_appserver.CodexIndisponivel("formato-desconhecido")
@@ -611,8 +610,6 @@ def _rate_limits_http_codex(raiz: Path) -> dict | str | None:
         # info e não debug: cair calado no app-server é a regressão que ninguém veria.
         _log.info("cota: codex %s pelo app-server (http: %s)", raiz, e)
         return None
-    finally:
-        ex.shutdown(wait=False)
     _log.debug("cota: codex %s por http", raiz)
     return r
 

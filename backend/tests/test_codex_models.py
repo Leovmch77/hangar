@@ -336,6 +336,18 @@ def test_catalogo_http_que_nao_serve_volta_none(monkeypatch, tmp_path, caso):
     assert _LISTAR_HTTP(tmp_path) is None
 
 
+def test_catalogo_429_nao_cai_no_app_server(monkeypatch, tmp_path):
+    """O app-server bate no mesmo backend: com 429 fica o catálogo guardado, ou o erro."""
+    monkeypatch.setattr(cm, "_listar_http", _LISTAR_HTTP)
+    _http(monkeypatch, tmp_path, status=429, corpo=None)
+    monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("app-server chamado"))
+    cm._cache.clear()
+    with pytest.raises(cm.CodexIndisponivel):
+        cm.listar(fresco=True, codex_home=tmp_path)
+    cm._cache[cm._cache_key(tmp_path)] = (0.0, [{"id": "guardado"}])
+    assert cm.listar(fresco=True, codex_home=tmp_path) == [{"id": "guardado"}]
+
+
 def test_listar_usa_o_http_antes_do_app_server(monkeypatch, tmp_path):
     monkeypatch.setattr(cm, "_listar_http", lambda raiz: [{"id": "x"}])
     monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("app-server chamado"))

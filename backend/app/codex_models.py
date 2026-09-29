@@ -34,6 +34,10 @@ CodexIndisponivel = codex_appserver.CodexIndisponivel
 CodexRecusado = codex_appserver.CodexRecusado
 CodexRespostaInvalida = codex_appserver.CodexRespostaInvalida
 
+
+class CodexLimitado(CodexIndisponivel):
+    """O backend respondeu 429 ao catálogo."""
+
 _log = logging.getLogger("hangar.codex_models")
 _TTL = 600.0
 _cache: dict[tuple[str, tuple], tuple[float, list[dict]]] = {}
@@ -118,6 +122,8 @@ def _listar_http(raiz: Path) -> list[dict] | None:
         versao = codex_appserver.versao()
         status, corpo = codex_appserver.backend_get(
             f"/codex/models?client_version={urllib.parse.quote(versao)}", codex_home=raiz)
+        if status == 429:
+            raise CodexLimitado("http 429")
         brutos = corpo.get("models") if status == 200 and isinstance(corpo, dict) else None
         if not isinstance(brutos, list):
             raise CodexIndisponivel(f"http {status}")
@@ -138,6 +144,8 @@ def _listar_http(raiz: Path) -> list[dict] | None:
             })
         modelos = parse({"data": data})
     except (CodexIndisponivel, CodexRespostaInvalida) as e:
+        if isinstance(e, CodexLimitado):
+            raise
         # info e não debug: cair calado no app-server é a regressão que ninguém veria.
         _log.info("catalogo codex %s pelo app-server (http: %s)", raiz, e)
         return None
@@ -150,7 +158,16 @@ def listar(fresco: bool = False, *, codex_home: str | Path | None = None) -> lis
     cached = _cache.get(key)
     if cached and not fresco and time.monotonic() - cached[0] < _TTL:
         return cached[1]
-    modelos = _listar_http(Path(key[0]))
+    try:
+        modelos = _listar_http(Path(key[0]))
+    except CodexLimitado:
+        # O app-server bate no mesmo backend com o mesmo token: cair nele só renovaria o 429.
+        # Com catálogo guardado, ele vale por mais um TTL em vez de insistir.
+        if cached is None:
+            raise
+        _log.info("catalogo codex %s: http 429, mantendo o guardado", key[0])
+        _cache[key] = (time.monotonic(), cached[1])
+        return cached[1]
     if modelos is None:
         result = (codex_appserver.perguntar("model/list") if codex_home is None else
                   codex_appserver.perguntar("model/list", codex_home=Path(key[0])))

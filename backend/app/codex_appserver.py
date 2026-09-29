@@ -17,6 +17,7 @@ Só stdlib, de propósito: o `scripts/hangar-codex-tui` roda no `python3` do sis
 precisar disto.
 """
 import base64
+import http.client
 import json
 import os
 import shutil
@@ -192,12 +193,24 @@ def backend_get(caminho: str, *, codex_home: str | Path | None = None,
         "Authorization": f"Bearer {token}", "ChatGPT-Account-Id": conta, "User-Agent": "codex-cli",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise CodexIndisponivel(f"redirecionado: http {exc.code}") from exc
         return exc.code, None
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError,
+            http.client.HTTPException) as exc:
         raise CodexIndisponivel(f"sem resposta: {type(exc).__name__}") from exc
+
+
+class _SemRedirect(urllib.request.HTTPRedirectHandler):
+    # Seguir o redirect levaria o token e o id da conta para outro host.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_SemRedirect)
 
 
 def versao() -> str:
