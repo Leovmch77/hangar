@@ -23,7 +23,7 @@ impl<T> Remote<T> {
     }
     pub(super) fn ok(&self) -> Option<&T> { self.value.as_ref()?.as_ref().ok() }
     /// Valor que chegou por outro caminho e é mais novo que qualquer pedido em voo: esse pedido passa a ser descartado.
-    fn set(&mut self, value: Result<T, String>) { self.seq += 1; (self.loading, self.value) = (false, Some(value)); }
+    pub(super) fn set(&mut self, value: Result<T, String>) { self.seq += 1; (self.loading, self.value) = (false, Some(value)); }
     /// Volta ao vazio sem reusar o número: a resposta do pedido em voo passa a ser descartada.
     pub(super) fn reset(&mut self) { self.seq += 1; (self.loading, self.value) = (false, None); }
 }

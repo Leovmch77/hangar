@@ -216,14 +216,25 @@ impl Hangar {
     /// Linha Navegador do menu do painel: abre o navegador na primeira vez e leva à aba dele.
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let browser = self.side.browser.get_or_insert_with(|| cx.new(|cx| BrowserPanel::new(window, cx))).clone();
+        self.side.browser_open = true;
         self.choose_side_tab(SideTab::Browser, window, cx);
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
+    }
+
+    /// O × da aba Navegador: a aba sai e a página se esconde, mas o painel e o motor ficam para o "+" reabrir a mesma
+    /// página (no Linux um segundo motor no processo não nasce).
+    pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let showing = self.side_tab() == SideTab::Browser;
+        self.side.browser_open = false;
+        if let Some(browser) = self.side.browser.clone() { browser.update(cx, |panel, _| { panel.set_shown(false); }); }
+        if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
 
     /// No Windows e no macOS a página é uma janela filha, por cima de tudo o que a GPUI desenha: qualquer camada sobre o
     /// painel a esconde. Cobre o painel fora de vista (fechado, estreito, sem sessão, visor de arquivos expandido), outra
     /// aba à frente (menu, subagente), as páginas de Configurações e Custos, a caixa de configurações ao vivo, a conexão,
-    /// a busca, os painéis presos ao compositor e à barra do topo, os diálogos e folhas do kit e as notificações. No
+    /// a busca, os painéis presos ao compositor e à barra do topo, os diálogos e folhas do kit e as notificações. A aba
+    /// fechada no × sai de `side_tab`, então também esconde. No
     /// Linux a página é desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
     fn browser_visible(&self, window: &mut Window, cx: &mut App) -> bool {
         let covered = cfg!(not(target_os = "linux")) && (self.connection_dialog || self.search.open || self.popup_open()

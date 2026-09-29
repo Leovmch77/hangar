@@ -204,6 +204,9 @@ enum Reply {
     PlanPreview(bool),
     PreSelect(String),
     RunState,
+    /// Leitura e gravação dos atalhos do projeto, com o número do pedido.
+    ProjectShortcuts(u64),
+    ProjectSaved(u64),
 }
 
 pub struct Picked { name: String, bytes: Vec<u8> }
@@ -948,6 +951,7 @@ impl Hangar {
         (self.activity, self.pinned) = (Default::default(), HashSet::new());
         self.sync_activity(cx);
         self.load_run_state();
+        self.load_project_shortcuts();
         cx.notify();
     }
 
@@ -3428,6 +3432,7 @@ impl Hangar {
         else if self.mention_is_open(cx) { self.mention.close(); }
         else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
         else if self.close_popups() {}
+        else if self.side_menu_escape(cx) {}
         else if self.can_interrupt() { self.confirm = Some(Confirm::Stop); }
         else { return; }
         cx.stop_propagation();
@@ -5061,6 +5066,7 @@ impl Render for Hangar {
                     cx.notify();
                     return;
                 }
+                if this.side_menu_escape(cx) { cx.stop_propagation(); return; }
                 if this.files_escape(window, cx) { cx.stop_propagation(); return; }
                 if this.terminal.is_some() && (this.settings.is_none() || this.settings_live()) {
                     this.close_terminal(true, window, cx);

@@ -62,12 +62,21 @@ impl Failure {
 fn failure_detail(body: Option<Value>, status: u16) -> String {
     body.and_then(|value| value.get("detail").and_then(|detail| match detail {
         Value::String(message) => Some(message.clone()),
-        Value::Object(fields) => fields.get("code").and_then(Value::as_str)
-            // A busca depende de params.msg; sem transportar parâmetros, conserva a mensagem.
-            .filter(|code| (code.starts_with("erro_arq_") && *code != "erro_arq_busca_falhou") || code.starts_with("erro_git_folder_")
-                || code.starts_with("erro_convite_") || *code == "erro_fora_do_convite")
-            .or_else(|| fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty()))
-            .or_else(|| fields.get("code").and_then(Value::as_str)).map(str::to_owned),
+        Value::Object(fields) => {
+            let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
+            // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
+            if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
+                let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");
+                let params = std::collections::HashMap::from([("detalhe".to_owned(), reason.to_owned())]);
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
+            fields.get("code").and_then(Value::as_str)
+                // A busca depende de params.msg; sem transportar parâmetros, conserva a mensagem.
+                .filter(|code| (code.starts_with("erro_arq_") && *code != "erro_arq_busca_falhou") || code.starts_with("erro_git_folder_")
+                    || code.starts_with("erro_convite_") || *code == "erro_fora_do_convite")
+                .or(msg)
+                .or_else(|| fields.get("code").and_then(Value::as_str)).map(str::to_owned)
+        }
         // Recusa de validação (422): uma lista de `{msg}`, uma por campo.
         Value::Array(items) => Some(items.iter().filter_map(|item| item.get("msg").and_then(Value::as_str)).collect::<Vec<_>>().join("; "))
             .filter(|message| !message.is_empty()),
@@ -473,6 +482,11 @@ mod tests {
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}, "msg": "Nenhum turno ativo"}})), 409), "Nenhum turno ativo");
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}}})), 409), "turn_missing");
         assert_eq!(failure_detail(Some(json!({"detail": [{"msg": "at most 40 characters"}]})), 422), "at most 40 characters");
+        // Atalhos do projeto: a frase traduzida pelo código leva o motivo do backend, de `params.detalhe` ou do `msg`.
+        let pasta = failure_detail(Some(json!({"detail": {"code": "erro_shortcut_pasta", "params": {"detalhe": "pasta nao existe: /x"}, "msg": "pasta nao existe: /x"}})), 400);
+        assert!(pasta != "pasta nao existe: /x" && pasta.contains("pasta nao existe: /x"), "{pasta}");
+        let items = failure_detail(Some(json!({"detail": {"code": "erro_project_shortcuts", "params": {}, "msg": "item 1 (shell) com pasta vazia"}})), 400);
+        assert!(items != "item 1 (shell) com pasta vazia" && items.contains("item 1 (shell) com pasta vazia"), "{items}");
     }
 
     #[test]

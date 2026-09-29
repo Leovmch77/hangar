@@ -672,8 +672,8 @@ impl Hangar {
             SideTab::Files if readable => SideTab::Files,
             SideTab::Activity if self.has_activity() => SideTab::Activity,
             SideTab::Git if readable && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
-            // Lembrada de outra execução, a aba só volta depois que o navegador for aberto de novo.
-            SideTab::Browser if self.side.browser.is_some() => SideTab::Browser,
+            // Lembrada de outra execução ou fechada no ×, a aba só volta depois que o navegador for aberto de novo.
+            SideTab::Browser if self.side.browser_open => SideTab::Browser,
             _ => SideTab::Context,
         }
     }
@@ -701,6 +701,15 @@ impl Hangar {
         self.act.tab_error = None;
         if appearance::get().side_tab != tab { self.apply_appearance(appearance::Appearance { side_tab: tab, ..appearance::get() }, true, cx); }
         if self.side_tab() == SideTab::Files { self.show_tree(true, Some(window), cx); }
+        self.sync_activity(cx);
+        cx.notify();
+    }
+
+    /// O "+" da fileira de abas: mostra o menu de ferramentas (por cima da aba de subagente também), e de novo volta à
+    /// aba de antes.
+    pub(super) fn toggle_side_menu(&mut self, cx: &mut Context<Self>) {
+        self.side.menu = !self.side_menu_shown();
+        if self.side.menu { self.act.active_tab = None; }
         self.sync_activity(cx);
         cx.notify();
     }
@@ -938,12 +947,18 @@ impl Hangar {
     }
 
     /// Abas "Contexto | Arquivos | Atividade | Git" numa fileira, como o web: Atividade só com atividade e Git só com
-    /// repositório; Arquivos e Git pedem a sessão legível. Navegador só depois de aberto pelo menu.
+    /// repositório; Arquivos e Git pedem a sessão legível. Navegador de aberto pelo menu até fechado no × dele.
     pub(super) fn render_side_title(&self, cx: &mut Context<Self>) -> AnyElement {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         let git = readable && self.selected.as_ref().is_some_and(super::sidebar::has_git);
         let current = (self.act.active_tab.is_none() && !self.side_menu_shown()).then(|| self.side_tab());
-        let tab = |id: &'static str, label: String, which: SideTab, cx: &mut Context<Self>| {
+        let tab = |id: &'static str, label: String, which: SideTab, close: Option<Button>, cx: &mut Context<Self>| {
+            let text = div().min_w_0().truncate().text_size(px(12.)).child(label.clone());
+            // O × mora dentro do botão da aba, como o das abas de subagente: o clique dele para ali e não escolhe a aba.
+            let body = match close {
+                Some(close) => div().min_w_0().flex().items_center().gap(px(2.)).child(text).child(close).into_any_element(),
+                None => text.into_any_element(),
+            };
             let selected = current == Some(which);
             // Desenho da `.aba` do web: texto pequeno, só a cor e o sublinhado marcam a escolhida (negrito mudaria a largura
             // ao trocar). As quatro cabem a partir de ~300 px; mais estreito, cada uma encolhe com reticências, e o piso
@@ -954,15 +969,18 @@ impl Hangar {
                     // O Button não encolhe sozinho (flex_shrink_0 interno): acompanha a aba, que encolhe, e o rótulo
                     // corta com reticências. O tamanho do texto vai no rótulo porque o do Button é sobrescrito.
                     .w_full().h(px(28.)).px(px(8.)).rounded(px(6.))
-                    .accessibility_label(label.clone()).child(div().min_w_0().truncate().text_size(px(12.)).child(label))
+                    .accessibility_label(label).child(body)
                     .on_click(cx.listener(move |this, _, window, cx| this.choose_side_tab(which, window, cx))))
         };
+        let browser = self.side.browser_open.then(|| Button::new("side-tab-browser-close").ghost().xsmall().icon(TAB_CROSS)
+            .tooltip(tr("browser_close")).accessibility_label(tr("browser_close"))
+            .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.close_browser(window, cx); })));
         div().id("side-tabs").flex_1().h_full().min_w_0().flex().gap(px(2.)).overflow_hidden()
-            .child(tab("side-tab-context", tr("side_context"), SideTab::Context, cx))
-            .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, cx)))
-            .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, cx)))
-            .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, cx)))
-            .when(self.side.browser.is_some(), |el| el.child(tab("side-tab-browser", tr("browser"), SideTab::Browser, cx)))
+            .child(tab("side-tab-context", tr("side_context"), SideTab::Context, None, cx))
+            .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, None, cx)))
+            .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, None, cx)))
+            .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, None, cx)))
+            .when_some(browser, |el, close| el.child(tab("side-tab-browser", tr("browser"), SideTab::Browser, Some(close), cx)))
             .into_any_element()
     }
 

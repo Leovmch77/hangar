@@ -19,7 +19,7 @@ const DIFF_MAX: usize = 20_000;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Shortcut {
     Send { label: String, text: String, direct: bool, confirm: bool, icon: Option<String> },
-    Shell { label: String, command: String, confirm: bool, icon: Option<String> },
+    Shell { label: String, command: String, confirm: bool, icon: Option<String>, pasta: Option<String> },
     Attach,
     Run,
 }
@@ -48,7 +48,7 @@ impl Shortcut {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
-            "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon }),
+            "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon, pasta: item.pasta().map(str::to_owned) }),
             "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "rodar" => Some(Shortcut::Run),
             _ => None,
@@ -62,9 +62,42 @@ pub(super) struct GitFile { path: String, code: String, added: Option<i64>, remo
 #[derive(Clone, Debug)]
 struct Cost { usd: Option<f64>, has_usage: bool, missing: Vec<String> }
 
+/// `GET/PUT /project-shortcuts`: nome da pasta do projeto e os atalhos dele.
+#[derive(Clone, Debug)]
+pub(super) struct Project { pub(super) name: String, pub(super) items: Vec<shortcuts::Item> }
+
+impl Project {
+    pub(super) fn parse(value: &Value) -> Self {
+        Self { name: value.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), items: shortcuts::project_items(value.get("items")) }
+    }
+}
+
+/// Atalhos do projeto da sessão aberta. Troca de sessão ou de servidor descarta leitura e gravação em voo pelos números.
+#[derive(Default)]
+pub(super) struct ProjectShortcuts {
+    pub(super) owner: Option<SessionKey>,
+    pub(super) list: super::device::Remote<Project>,
+    /// Número da gravação em voo: outra só sai quando ela volta.
+    pub(super) saving: Option<u64>,
+    pub(super) save_seq: u64,
+    pub(super) save_error: Option<String>,
+}
+
+impl ProjectShortcuts {
+    fn reset(&mut self) {
+        self.list.reset();
+        (self.owner, self.saving, self.save_error) = (None, None, None);
+    }
+
+    /// A lista lida desta sessão; `None` enquanto carrega, com erro ou de outra sessão.
+    pub(super) fn of(&self, key: Option<&SessionKey>) -> Option<&Project> {
+        self.list.ok().filter(|_| key.is_some() && self.owner.as_ref() == key)
+    }
+}
+
 pub(super) struct Side {
     pub open: bool,
-    /// Painel aberto e nenhuma aba escolhida desde então: o corpo mostra o menu de ferramentas.
+    /// O corpo mostra o menu de ferramentas: aberto pelo "+" das abas, fecha ao escolher uma linha, no "+" ou com Esc.
     pub(super) menu: bool,
     width: f32,
     /// A aba Navegador tem largura própria, como no web: nasce larga e cresce além do teto das outras abas.
@@ -72,6 +105,7 @@ pub(super) struct Side {
     /// (x do início, largura do início, espaço que sobra para o painel).
     drag: Option<(f32, f32, f32)>,
     shortcuts: Option<Result<Vec<Shortcut>, String>>,
+    pub(super) project: ProjectShortcuts,
     // Custo do Codex: o último valor fica visível quando uma leitura falha; o erro vai junto.
     cost: Option<(SessionKey, Option<Cost>, Option<String>)>,
     cost_task: Option<(SessionKey, JoinHandle<()>)>,
@@ -91,12 +125,14 @@ pub(super) struct Side {
     pub(super) run: Option<(SessionKey, bool)>,
     /// Um navegador por execução do app: aberto uma vez, segue o mesmo ao trocar de sessão ou de servidor.
     pub(super) browser: Option<Entity<super::browser::BrowserPanel>>,
+    /// A aba Navegador está na fileira. Fechar só esconde a página: no Linux o motor não nasce duas vezes no processo.
+    pub(super) browser_open: bool,
 }
 
 impl Default for Side {
     fn default() -> Self {
-        Self { open: true, menu: true, width: 300., browser_width: None, drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None,
+        Self { open: true, menu: false, width: 300., browser_width: None, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0,
+            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None, browser_open: false,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
@@ -115,6 +151,7 @@ impl Side {
     }
 
     pub fn on_select(&mut self) {
+        self.project.reset();
         self.files = None;
         self.diff = None;
         self.git = None;
@@ -153,6 +190,14 @@ impl Side {
 
 /// A resolução do web (`shortcuts::resolve`), reduzida ao que o painel nativo roda.
 fn parse_shortcuts(raw: &str) -> Vec<Shortcut> { shortcuts::resolve(raw).iter().filter_map(Shortcut::from_item).collect() }
+
+/// Blocos do painel: os globais e depois os do projeto, com o id do bloco e se é do projeto. "Anexar" sai porque já é o
+/// clipe do compositor. O id do global é a posição e o do projeto leva o id do item: o mesmo id nas duas listas não colide.
+fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item]) -> Vec<(String, Shortcut, bool)> {
+    let globals = globals.iter().filter(|s| **s != Shortcut::Attach).enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
+    let own = project.iter().filter_map(|item| Some((format!("shortcut-p-{}", item.id()), Shortcut::from_item(item)?, true)));
+    globals.chain(own).collect()
+}
 
 /// Tokens como o painel web: milhar arredondado em "k", milhão com uma casa, menos de mil cru.
 pub(super) fn tokens(n: f64) -> String {
@@ -233,9 +278,20 @@ pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
 impl Hangar {
     pub(super) fn toggle_side(&mut self, cx: &mut Context<Self>) {
         self.side.open = !self.side.open;
-        if self.side.open { self.side.menu = true; } else { self.side.stop_cost(); }
+        // Abre nas abas; o menu de ferramentas fica atrás do "+".
+        self.side.menu = false;
+        if !self.side.open { self.side.stop_cost(); }
         self.sync_activity(cx);
         cx.notify();
+    }
+
+    /// Esc com o menu à vista volta à aba de antes.
+    pub(super) fn side_menu_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.side.open || !self.side_menu_shown() { return false; }
+        self.side.menu = false;
+        self.sync_activity(cx);
+        cx.notify();
+        true
     }
 
     pub(super) fn drag_side(&mut self, x: f32, pressed: bool, cx: &mut Context<Self>) {
@@ -283,6 +339,19 @@ impl Hangar {
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::GitFiles, result) }).await;
         });
         cx.notify();
+    }
+
+    /// Atalhos do projeto da sessão aberta: lidos ao escolher a sessão e ao abrir a página Atalhos.
+    pub(super) fn load_project_shortcuts(&mut self) {
+        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let project = &mut self.side.project;
+        if project.owner.as_ref() != Some(&key) { project.reset(); project.owner = Some(key.clone()); }
+        let seq = project.list.start();
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.read(&key.name, &["project-shortcuts"], &[], 15).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::ProjectShortcuts(seq), result) }).await;
+        });
     }
 
     // POST só de leitura: o backend confere que o caminho está na lista de alterados.
@@ -335,12 +404,14 @@ impl Hangar {
             }
             // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira
             // aba do painel, onde dá pra ver a saída e fechar o programa.
-            Shortcut::Shell { label, command, .. } => {
+            Shortcut::Shell { label, command, pasta, .. } => {
                 let Some(api) = self.api.clone() else { return; };
                 self.action_feedback.insert(key.clone(), (tr("shortcut_started").replace("{label}", &label), false));
                 let (connection, tx) = (self.connection, self.tx.clone());
+                let mut body = json!({"command": command, "label": label});
+                if let Some(pasta) = pasta { body["pasta"] = json!(pasta); }
                 self.runtime.spawn(async move {
-                    let result = api.act(&key.name, &["shortcut-shell"], Some(json!({"command": command, "label": label})), false, 30).await;
+                    let result = api.act(&key.name, &["shortcut-shell"], Some(body), false, 30).await;
                     let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Shell(label), result) }).await;
                 });
             }
@@ -427,6 +498,12 @@ impl Hangar {
                 self.action_feedback.insert(key, note);
             }
             Reply::RunState => self.receive_run_state(key, result),
+            Reply::ProjectShortcuts(seq) => {
+                let project = &mut self.side.project;
+                if project.owner.as_ref() != Some(&key) { return; }
+                project.list.finish(seq, result.map(|value| Project::parse(&value)).map_err(|error| Self::read_failure(&error)));
+            }
+            Reply::ProjectSaved(seq) => self.receive_project_saved(key, seq, result, window, cx),
             Reply::Reload => {
                 self.side.reloading.remove(&key);
                 let note = match result { Ok(_) => (tr("reload_sent"), false), Err(error) => (Self::failure(&error), true) };
@@ -633,21 +710,32 @@ impl Hangar {
     }
 
     fn render_shortcuts(&self, readable: bool, width: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // "Anexar" já é o clipe do compositor: sozinho na grade, o bloco não oferece nada novo.
-        let list = match self.side.shortcuts.as_ref()? {
-            Ok(list) => list.iter().filter(|s| **s != Shortcut::Attach).cloned().collect::<Vec<_>>(),
-            Err(reason) => return Some(div().text_xs().text_color(theme::warning())
-                .child(tr("side_shortcuts_failed").replace("{reason}", reason)).into_any_element()),
-        };
-        if list.is_empty() { return None; }
         let key = self.selected_key();
+        let failure = |text: String| div().text_xs().text_color(theme::warning()).child(text);
+        // Carregando ou com erro, os do projeto não escondem os globais: o erro vira uma linha discreta embaixo.
+        let project = self.side.project.of(key.as_ref());
+        let project_error = match &self.side.project.list.value {
+            Some(Err(reason)) if self.side.project.owner == key => Some(failure(tr("side_project_shortcuts_failed").replace("{reason}", reason))),
+            _ => None,
+        };
+        let (globals, global_error) = match self.side.shortcuts.as_ref() {
+            Some(Ok(list)) => (list.as_slice(), None),
+            Some(Err(reason)) => (&[][..], Some(failure(tr("side_shortcuts_failed").replace("{reason}", reason)))),
+            None => (&[][..], None),
+        };
+        let list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()));
+        if list.is_empty() {
+            let errors: Vec<Div> = global_error.into_iter().chain(project_error).collect();
+            return (!errors.is_empty()).then(|| div().flex().flex_col().gap_1().children(errors).into_any_element());
+        }
+        let project_tip = project.map(|p| tr("shortcuts_project_tip").replace("{name}", &p.name));
         let busy = key.as_ref().is_some_and(|key| self.uploading.contains_key(key));
         let running = self.side.run.as_ref().is_some_and(|(owner, on)| *on && Some(owner) == key.as_ref());
         // "Ações" do mock: grade de blocos iguais, ícone em cima e rótulo embaixo. As colunas saem da largura do painel
         // (mais colunas quando ele alarga, no máximo cinco), e cada bloco tem a largura exata da coluna: a grade fica no
         // mesmo recuo do título, sem sobra desigual no fim da linha.
         let (_, tile) = shortcut_grid(width - SIDE_PAD * 2.);
-        let buttons: Vec<Button> = list.into_iter().enumerate().map(|(n, shortcut)| {
+        let buttons: Vec<Button> = list.into_iter().map(|(id, shortcut, own)| {
             // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe e Rodar vira parada acesa com o run vivo.
             let icon = match &shortcut {
                 Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 16., theme::muted()).into_any_element(),
@@ -658,18 +746,21 @@ impl Hangar {
             let (label, tip) = match &shortcut {
                 Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
                 Shortcut::Run => (shortcut.label(), tr("run_project")),
+                _ if own => (shortcut.label(), project_tip.clone().unwrap_or_else(|| shortcut.label())),
                 _ => (shortcut.label(), shortcut.label()),
             };
             let missing = shortcut.missing_secret();
             let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
-            Button::new(SharedString::from(format!("shortcut-{n}")))
+            Button::new(SharedString::from(id))
                 .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
                     .hover(theme::hover()).active(theme::hover()))
                 .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
-                .child(div().w_full().flex().flex_col().items_center().gap(px(4.))
+                .child(div().relative().w_full().flex().flex_col().items_center().gap(px(4.))
+                    // Marca de "deste projeto", no canto: o bloco segue igual aos outros e o motivo está na dica.
+                    .when(own, |el| el.child(div().absolute().top(px(-4.)).right(px(0.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
                     .child(div().w_full().text_center().line_clamp(2).text_ellipsis().text_size(px(11.5)).line_height(px(14.)).child(label)))
@@ -682,7 +773,7 @@ impl Hangar {
         Some(div().flex().flex_col().gap(px(10.))
             .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions")))
                 .child(div().flex().items_center().gap(px(2.)).child(self.transfer_menu_button(cx)).child(add)))
-            .child(grid).children(self.transfer_note_element()).into_any_element())
+            .child(grid).children(global_error).children(project_error).children(self.transfer_note_element()).into_any_element())
     }
 
     // Mesma regra do botão de terminal do cabeçalho.
@@ -700,9 +791,12 @@ impl Hangar {
         available.is_ok()
     }
 
+    /// Alguma linha do menu vale para esta sessão; sem nenhuma, o "+" some.
+    fn side_tools(&self) -> bool { self.side_menu_browser() || self.side_menu_terminal() || self.side_menu_git() }
+
     /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
     pub(super) fn side_menu_shown(&self) -> bool {
-        self.side.menu && !self.subagent_tab_open() && (self.side_menu_browser() || self.side_menu_terminal() || self.side_menu_git())
+        self.side.menu && !self.subagent_tab_open() && self.side_tools()
     }
 
     /// Menu da superfície vazia do Zeron: uma linha por ferramenta, no meio do painel.
@@ -775,6 +869,9 @@ impl Hangar {
         let header = div().flex_shrink_0().h(px(44.)).relative().pl_2().pr_2().flex().items_center().gap_2()
             .child(div().absolute().left_0().right_0().bottom_0().h(px(1.)).bg(theme::border()))
             .child(self.render_side_title(cx))
+            .when(self.side_tools(), |el| el.child(chrome::icon_button("side-tools", IconName::Plus, tr("side_tools"), cx).flex_shrink_0()
+                .selected(menu).toggled(menu)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_side_menu(cx)))))
             .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx).flex_shrink_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))));
         let section = |body: AnyElement| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).child(body);
@@ -853,7 +950,7 @@ fn shortcut_grid(inner: f32) -> (usize, f32) {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{SHORTCUT_GAP, Shortcut, Side, duration, parse_shortcuts, shortcut_grid, tokens};
+    use super::{SHORTCUT_GAP, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
     use crate::appearance;
 
     #[test]
@@ -865,8 +962,23 @@ mod tests {
             {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
         assert_eq!(parse_shortcuts(raw), vec![
             Shortcut::Send { label: "Relatório".into(), text: "/relatorio".into(), direct: false, confirm: true, icon: None },
-            Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None },
+            Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None },
         ]);
+    }
+
+    #[test]
+    fn project_tiles_come_after_the_globals_with_their_own_ids() {
+        let globals = parse_shortcuts(r#"[{"id":"x","type":"internal","action":"anexos"},{"id":"d","type":"shell","label":"Global","command":"g"},
+            {"id":"r","type":"internal","action":"rodar"}]"#);
+        let project = crate::app::shortcuts::project_items(Some(&serde_json::json!([
+            {"id":"d","type":"shell","label":"Debug","command":"make debug","pasta":"backend"},
+            {"id":"t","type":"internal","action":"rodar"}])));
+        let tiles = merged_tiles(&globals, &project);
+        // Anexar sai, o interno do projeto não entra e o mesmo id "d" vira dois blocos com ids diferentes.
+        assert_eq!(tiles.iter().map(|(id, _, own)| (id.as_str(), *own)).collect::<Vec<_>>(),
+            [("shortcut-0", false), ("shortcut-1", false), ("shortcut-p-d", true)]);
+        assert_eq!(tiles[2].1, Shortcut::Shell { label: "Debug".into(), command: "make debug".into(), confirm: false, icon: None, pasta: Some("backend".into()) });
+        assert_eq!(tiles[1].1, Shortcut::Run);
     }
 
     #[test]

@@ -35,6 +35,8 @@ impl Item {
     pub(super) fn confirm(&self) -> bool { self.0.get("confirm") == Some(&Value::Bool(true)) }
     /// Ausente = envia direto; desligado pré-preenche o campo de mensagem.
     pub(super) fn sends_direct(&self) -> bool { self.0.get("send_direct") != Some(&Value::Bool(false)) }
+    /// Pasta do `shell` do projeto (absoluta ou relativa à raiz da cópia da sessão); ausente = a pasta da sessão.
+    pub(super) fn pasta(&self) -> Option<&str> { self.0.get("pasta").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) }
 
     fn native(action: &str) -> Self {
         Item(Map::from_iter([("id".into(), json!(action)), ("type".into(), json!("internal")), ("action".into(), json!(action))]))
@@ -49,13 +51,22 @@ impl Item {
         match o.get("type").and_then(Value::as_str) {
             Some("internal") => o.get("action").and_then(Value::as_str).is_some_and(|a| NATIVES.contains(&a)),
             Some("send_text") => filled("label") && filled("text"),
-            Some("shell") => filled("label") && filled("command"),
+            Some("shell") => filled("label") && filled("command") && optional("pasta", |p| p.as_str().is_some_and(|p| !p.trim().is_empty())),
             _ => false,
         }
     }
 }
 
 pub(super) fn defaults() -> Vec<Item> { NATIVES.map(Item::native).to_vec() }
+
+/// `items` de `GET/PUT /project-shortcuts`, na regra do `mergeProjectShortcuts` do web: só `send_text` e `shell` válidos
+/// (interno é do servidor inteiro), id repetido fica o primeiro.
+pub(super) fn project_items(items: Option<&Value>) -> Vec<Item> {
+    let mut seen = HashSet::new();
+    items.and_then(Value::as_array).into_iter().flatten()
+        .filter_map(|v| match v { Value::Object(o) if Item::valid(o) && o.get("type") != Some(&json!("internal")) => Some(Item(o.clone())), _ => None })
+        .filter(|item| seen.insert(item.id().to_owned())).collect()
+}
 
 /// `resolveShortcuts`: nunca falha. Vazio, JSON quebrado ou forma estranha voltam aos nativos; item inválido sai sozinho;
 /// id repetido fica o primeiro.
@@ -128,10 +139,13 @@ struct Form {
     editing: Option<String>,
     /// O objeto gravado do atalho editado.
     original: Option<Map<String, Value>>,
+    /// Atalho do projeto da sessão aberta: grava na hora (PUT) e o `shell` ganha a pasta.
+    project: bool,
     shell: bool,
     label: Entity<InputState>,
     emoji: Entity<InputState>,
     content: Entity<InputState>,
+    folder: Entity<InputState>,
     glyph: String,
     direct: bool,
     confirm: bool,
@@ -145,13 +159,14 @@ impl Form {
 }
 
 /// O que o formulário confirmou, já lido dos campos.
-struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool }
+struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool, pasta: String }
 
 impl Draft {
     /// Editar parte do objeto gravado: campo que esta versão não conhece continua lá; os do formulário são reescritos.
     fn into_item(self, original: Option<Map<String, Value>>, id: String) -> Item {
         let mut o = original.unwrap_or_default();
-        for key in ["send_direct", "confirm"] { o.remove(key); }
+        for key in ["send_direct", "confirm", "pasta"] { o.remove(key); }
+        if self.shell && !self.pasta.is_empty() { o.insert("pasta".into(), json!(self.pasta)); }
         o.insert("id".into(), json!(id));
         o.insert("type".into(), json!(if self.shell { "shell" } else { "send_text" }));
         o.insert((if self.shell { "command" } else { "text" }).into(), json!(self.content));
@@ -170,6 +185,12 @@ fn apply_edit(items: &mut Vec<Item>, editing: Option<&str>, item: Item) {
         Some(id) => if let Some(n) = items.iter().position(|i| i.id() == id) { items[n] = item; },
         None => items.push(item),
     }
+}
+
+/// Troca o atalho de lugar com o vizinho `delta` casas adiante; na ponta não muda nada.
+fn move_by(items: &mut [Item], id: &str, delta: isize) {
+    let Some(i) = items.iter().position(|item| item.id() == id) else { return };
+    if let Some(j) = i.checked_add_signed(delta).filter(|j| *j < items.len()) { items.swap(i, j); }
 }
 
 /// Atalho sendo arrastado: o id para achar a posição e o rótulo para o que segue o ponteiro.
@@ -233,6 +254,7 @@ impl Hangar {
         self.shortcuts = Shortcuts { save_seq, saving, ..Shortcuts::default() };
         self.shortcuts.load.seq = load;
         self.load_shortcuts(cx);
+        self.load_project_shortcuts();
     }
 
     fn load_shortcuts(&mut self, cx: &mut Context<Self>) {
@@ -256,6 +278,46 @@ impl Hangar {
             done(ShortcutsReply::Saved(seq, list, api.server_send(reqwest::Method::POST, &["config"], Some(body), 8).await)).await
         });
         cx.notify();
+    }
+
+    /// Grava a lista inteira do projeto (`PUT /project-shortcuts`): acrescentar, editar, mover e apagar são a mesma gravação.
+    /// A lista na tela só muda com a resposta, então o que se vê é sempre o que está gravado.
+    fn save_project_shortcuts(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
+        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let project = &mut self.side.project;
+        if project.saving.is_some() || project.owner.as_ref() != Some(&key) { return; }
+        project.save_seq += 1;
+        (project.saving, project.save_error) = (Some(project.save_seq), None);
+        let seq = project.save_seq;
+        let (connection, tx) = (self.connection, self.tx.clone());
+        let body = json!({"items": items.into_iter().map(|item| Value::Object(item.0)).collect::<Vec<_>>()});
+        self.runtime.spawn(async move {
+            let result = api.server_send(reqwest::Method::PUT, &["sessions", &key.name, "project-shortcuts"], Some(body), 15).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::ProjectSaved(seq), result) }).await;
+        });
+        cx.notify();
+    }
+
+    pub(super) fn receive_project_saved(&mut self, key: SessionKey, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let project = &mut self.side.project;
+        if project.owner.as_ref() != Some(&key) || project.saving != Some(seq) { return; }
+        project.saving = None;
+        match result {
+            Ok(value) => {
+                project.list.set(Ok(super::side::Project::parse(&value)));
+                // O formulário do projeto ficou aberto durante a gravação para não perder o que foi digitado se ela falhasse.
+                if self.shortcuts.form.as_ref().is_some_and(|form| form.project) { self.close_shortcut_form(window, cx); }
+            }
+            Err(error) => project.save_error = Some(Self::fetch_failure(&error)),
+        }
+    }
+
+    fn project_edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Vec<Item>)) {
+        let key = self.selected_key();
+        if self.side.project.saving.is_some() { return; }
+        let Some(mut items) = self.side.project.of(key.as_ref()).map(|p| p.items.clone()) else { return };
+        change(&mut items);
+        self.save_project_shortcuts(items, cx);
     }
 
     /// Sugestões de skill: comandos da primeira sessão viva deste servidor. Sem sessão, o campo fica livre.
@@ -326,7 +388,8 @@ impl Hangar {
 
     fn shortcut_position(&self, id: &str) -> Option<usize> { self.shortcuts.items.iter().position(|i| i.id() == id) }
 
-    fn move_shortcut(&mut self, id: &str, delta: isize, cx: &mut Context<Self>) {
+    fn move_shortcut(&mut self, id: &str, delta: isize, project: bool, cx: &mut Context<Self>) {
+        if project { self.project_edit(cx, |items| move_by(items, id, delta)); return; }
         let Some(i) = self.shortcut_position(id) else { return };
         let Some(j) = i.checked_add_signed(delta).filter(|j| *j < self.shortcuts.items.len()) else { return };
         self.shortcuts_edit(cx, |items| items.swap(i, j));
@@ -339,8 +402,10 @@ impl Hangar {
         self.shortcuts_edit(cx, |items| { let item = items.remove(i); items.insert(j, item); });
     }
 
-    fn open_shortcut_form(&mut self, editing: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let item = editing.as_deref().and_then(|id| self.shortcuts.items.iter().find(|i| i.id() == id)).cloned();
+    fn open_shortcut_form(&mut self, editing: Option<String>, project: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.selected_key();
+        let items = if project { self.side.project.of(key.as_ref()).map_or(&[][..], |p| p.items.as_slice()) } else { self.shortcuts.items.as_slice() };
+        let item = editing.as_deref().and_then(|id| items.iter().find(|i| i.id() == id)).cloned();
         if editing.is_some() && item.as_ref().is_none_or(|i| i.kind() == "internal") { return; }
         let shell = item.as_ref().is_some_and(|i| i.kind() == "shell");
         let field = |value: String, placeholder: String, window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| {
@@ -357,8 +422,9 @@ impl Hangar {
         let emoji = field(emoji, tr("shortcuts_emoji_hint"), window, cx);
         let content = field(item.as_ref().map(|i| i.content().to_owned()).unwrap_or_default(),
             tr(if shell { "shortcuts_command_hint" } else { "shortcuts_text_hint" }), window, cx);
+        let folder = field(item.as_ref().and_then(Item::pasta).unwrap_or_default().to_owned(), tr("shortcuts_folder_hint"), window, cx);
         let mut subscriptions = Vec::new();
-        for (input, max) in [(&label, Some(LABEL_MAX)), (&emoji, Some(EMOJI_MAX)), (&content, None)] {
+        for (input, max) in [(&label, Some(LABEL_MAX)), (&emoji, Some(EMOJI_MAX)), (&content, None), (&folder, None)] {
             subscriptions.push(cx.subscribe_in(input, window, move |this: &mut Hangar, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     if let Some(clipped) = max.and_then(|max| clip(&input.read(cx).value(), max)) {
@@ -371,7 +437,7 @@ impl Hangar {
             }));
         }
         label.update(cx, |state, cx| state.focus(window, cx));
-        self.shortcuts.form = Some(Form { editing, original: item.as_ref().map(|i| i.0.clone()), shell, label, emoji, content, glyph, direct: item.as_ref().is_none_or(Item::sends_direct),
+        self.shortcuts.form = Some(Form { editing, original: item.as_ref().map(|i| i.0.clone()), project, shell, label, emoji, content, folder, glyph, direct: item.as_ref().is_none_or(Item::sends_direct),
             confirm: item.as_ref().is_some_and(Item::confirm), _subscriptions: subscriptions });
         if !shell { self.load_suggestions(); }
         cx.notify();
@@ -379,14 +445,17 @@ impl Hangar {
 
     fn submit_shortcut_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Com um salvar em voo a lista não muda: o formulário fica aberto com o que foi digitado até ele terminar.
-        if self.shortcuts.saving { return; }
+        if self.shortcuts.saving || self.side.project.saving.is_some() { return; }
         let Some(form) = self.shortcuts.form.as_ref().filter(|f| f.valid(cx)) else { return };
         let emoji = Form::value(&form.emoji, cx);
         let icon = if emoji.is_empty() { format!("glifo:{}", form.glyph) } else { format!("emoji:{emoji}") };
+        let pasta = if form.project { Form::value(&form.folder, cx) } else { String::new() };
         let draft = Draft { shell: form.shell, label: Form::value(&form.label, cx), content: Form::value(&form.content, cx), icon,
-            direct: form.direct, confirm: form.confirm };
-        let editing = form.editing.clone();
+            direct: form.direct, confirm: form.confirm, pasta };
+        let (editing, project) = (form.editing.clone(), form.project);
         let item = draft.into_item(form.original.clone(), editing.clone().unwrap_or_else(new_id));
+        // O do projeto grava agora e o formulário só fecha com a gravação feita.
+        if project { self.project_edit(cx, |items| apply_edit(items, editing.as_deref(), item)); return; }
         self.close_shortcut_form(window, cx);
         self.shortcuts_edit(cx, |items| apply_edit(items, editing.as_deref(), item));
     }
@@ -427,7 +496,7 @@ impl Hangar {
         let mut list = settings_box().mt(px(24.));
         if count == 0 { list = list.child(note(tr("shortcuts_empty"), theme::muted())); }
         for (n, item) in s.items.iter().enumerate() {
-            list = list.child(self.render_shortcut_row(item, n, count, saving, cx));
+            list = list.child(self.render_shortcut_row(item, n, count, saving, false, cx));
         }
         let missing: Vec<&str> = NATIVES.into_iter().filter(|a| !s.items.iter().any(|i| i.kind() == "internal" && i.action() == *a)).collect();
         let restore_natives = (!missing.is_empty()).then(|| div().mt(px(12.)).flex().flex_wrap().items_center().gap(px(8.))
@@ -436,9 +505,9 @@ impl Hangar {
                 .icon(IconName::Plus).label(native_label(action)).disabled(saving)
                 .on_click(cx.listener(move |this, _, _, cx| this.shortcuts_edit(cx, |items| items.push(Item::native(action))))))));
         let form = match &s.form {
-            Some(form) => self.render_shortcut_form(form, cx),
-            None => self.mark(div().mt(px(16.)).flex(), "shortcuts_add").child(Button::new("shortcut-add").outline().small().icon(IconName::Plus).label(tr("shortcuts_add"))
-                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, window, cx)))),
+            Some(form) if !form.project => self.render_shortcut_form(form, cx),
+            _ => self.mark(div().mt(px(16.)).flex(), "shortcuts_add").child(Button::new("shortcut-add").outline().small().icon(IconName::Plus).label(tr("shortcuts_add"))
+                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, false, window, cx)))),
         };
         let feedback = match (&s.save_error, s.saved) {
             (Some(error), _) => Some(div().text_color(theme::danger()).child(error.clone())),
@@ -459,32 +528,78 @@ impl Hangar {
             .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback))
             .child(Button::new("shortcuts-save").primary().small().label(tr("shortcuts_save")).loading(saving).disabled(!s.dirty || saving)
                 .on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(false, cx))));
-        page.child(list).children(restore_natives).child(form).child(transfer).children(draft).child(footer).into_any_element()
+        let project = self.render_project_shortcuts(cx);
+        page.child(list).children(restore_natives).child(form).child(transfer).children(draft).child(footer).children(project).into_any_element()
     }
 
-    fn render_shortcut_row(&self, item: &Item, n: usize, count: usize, saving: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// Seção "Deste projeto": só com uma sessão aberta. Cada mudança grava na hora, sem o Salvar dos globais.
+    fn render_project_shortcuts(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let key = self.selected_key()?;
+        let p = &self.side.project;
+        if p.owner.as_ref() != Some(&key) { return None; }
+        let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
+        let heading = |text: String| div().mt(px(28.)).mb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
+        let section = div().id("project-shortcuts").flex().flex_col();
+        let project = match (&p.list.value, p.list.loading) {
+            (None, _) => return Some(section.child(heading(tr("shortcuts_project")))
+                .child(settings_box().mt(px(8.)).child(note(tr("shortcuts_project_loading"), theme::muted())))),
+            (Some(Err(error)), loading) => {
+                let retry = Button::new("project-shortcuts-retry").outline().small().icon(IconName::RefreshCw)
+                    .label(tr(if loading { "shortcuts_loading" } else { "shortcuts_retry" })).disabled(loading)
+                    .on_click(cx.listener(|this, _, _, cx| { this.load_project_shortcuts(); cx.notify(); }));
+                return Some(section.child(heading(tr("shortcuts_project"))).child(settings_box().mt(px(8.))
+                    .child(note(tr("shortcuts_project_failed").replace("{reason}", error), theme::danger()))
+                    .child(div().px_4().pb(px(16.)).flex().child(retry))));
+            }
+            (Some(Ok(project)), _) => project,
+        };
+        let saving = p.saving.is_some();
+        let count = project.items.len();
+        let mut list = settings_box().mt(px(16.));
+        if count == 0 { list = list.child(note(tr("shortcuts_project_empty"), theme::muted())); }
+        for (n, item) in project.items.iter().enumerate() {
+            list = list.child(self.render_shortcut_row(item, n, count, saving, true, cx));
+        }
+        let form = match &self.shortcuts.form {
+            Some(form) if form.project => self.render_shortcut_form(form, cx),
+            _ => div().mt(px(16.)).flex().child(Button::new("project-shortcut-add").outline().small().icon(IconName::Plus)
+                .label(tr("shortcuts_project_add")).loading(saving).disabled(saving)
+                .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx)))),
+        };
+        let error = p.save_error.clone().map(|error| div().mt(px(10.)).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
+        Some(section.child(heading(tr("shortcuts_project_named").replace("{name}", &project.name)))
+            .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_project_lead")))
+            .child(list).child(form).children(error))
+    }
+
+    /// Linha de um atalho; `project` = da seção "Deste projeto" (ids próprios, grava na hora, sem arrastar).
+    fn render_shortcut_row(&self, item: &Item, n: usize, count: usize, saving: bool, project: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let native = item.kind() == "internal";
         let (label, icon) = if native { (native_label(item.action()), Some(native_icon(item.action()))) } else { (item.label().to_owned(), item.icon()) };
         let id = item.id().to_owned();
-        let button = |key: &str, icon: IconName, tip: &str, off: bool| chrome::icon_button(SharedString::from(format!("shortcut-{key}-{id}")), icon, tr(tip), cx)
+        let prefix = if project { "project-shortcut" } else { "shortcut" };
+        let button = |key: &str, icon: IconName, tip: &str, off: bool| chrome::icon_button(SharedString::from(format!("{prefix}-{key}-{id}")), icon, tr(tip), cx)
             .small().disabled(off || saving);
         let (up, down, remove, edit) = (id.clone(), id.clone(), id.clone(), id.clone());
         let actions = div().flex().flex_shrink_0().gap(px(2.))
             .when(!native, |el| el.child(button("edit", IconName::Pencil, "shortcuts_edit", false)
-                .on_click(cx.listener(move |this, _, window, cx| this.open_shortcut_form(Some(edit.clone()), window, cx)))))
-            .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, cx))))
-            .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, cx))))
-            .child(button("remove", IconName::Close, "shortcuts_remove", false)
-                .on_click(cx.listener(move |this, _, _, cx| this.shortcuts_edit(cx, |items| items.retain(|i| i.id() != remove)))));
+                .on_click(cx.listener(move |this, _, window, cx| this.open_shortcut_form(Some(edit.clone()), project, window, cx)))))
+            .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, project, cx))))
+            .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, project, cx))))
+            .child(button("remove", IconName::Close, "shortcuts_remove", false).on_click(cx.listener(move |this, _, _, cx| {
+                let change = |items: &mut Vec<Item>| items.retain(|i| i.id() != remove);
+                if project { this.project_edit(cx, change) } else { this.shortcuts_edit(cx, change) }
+            })));
+        let content = match item.pasta() { Some(pasta) => format!("{} · {pasta}", item.content()), None => item.content().to_owned() };
         let text = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
             .child(div().font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
-            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::muted()).truncate().child(item.content().to_owned())));
+            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::muted()).truncate().child(content)));
         let dragged = Dragged { id: id.clone(), label };
         // A linha que saiu do lugar esmaece, como a `.linha.arrastando` do web.
-        let lifted = cx.has_active_drag() && self.shortcuts.dragging.as_deref() == Some(id.as_str());
+        let lifted = !project && cx.has_active_drag() && self.shortcuts.dragging.as_deref() == Some(id.as_str());
         let this = cx.entity().downgrade();
         // Divisória em cima de toda linha, como nas outras páginas; a da primeira some sob a borda da caixa.
-        div().id(SharedString::from(format!("shortcut-row-{id}"))).mt(px(-1.)).border_t_1().border_color(theme::border())
+        div().id(SharedString::from(format!("{prefix}-row-{id}"))).mt(px(-1.)).border_t_1().border_color(theme::border())
             .flex().items_center().gap(px(12.)).px_4().py(px(10.))
             .child(chrome::small_icon(IconName::GripVertical, 16., theme::faint()))
             .child(div().size(px(36.)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
@@ -492,7 +607,7 @@ impl Hangar {
             .child(text)
             .child(actions)
             .when(lifted, |el| el.opacity(0.45))
-            .when(!saving, |el| el.on_drag(dragged, move |d, _, _, cx| {
+            .when(!saving && !project, |el| el.on_drag(dragged, move |d, _, _, cx| {
                     this.update(cx, |this, cx| { this.shortcuts.dragging = Some(d.id.clone()); cx.notify(); }).ok();
                     cx.new(|_| d.clone())
                 })
@@ -548,29 +663,69 @@ impl Hangar {
             .child(div().pl(px(24.)).text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_send_direct_help"))));
         let confirm = Checkbox::new("shortcut-confirm").label(tr("shortcuts_confirm")).checked(form.confirm)
             .on_click(cx.listener(|this, on: &bool, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.confirm = *on; } cx.notify(); }));
+        let folder = (form.project && form.shell).then(|| field("shortcuts_folder", div().flex().flex_col().gap(px(6.))
+            .child(Input::new(&form.folder))
+            .child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_folder_help"))).into_any_element()));
+        let saving = if form.project { self.side.project.saving.is_some() } else { self.shortcuts.saving };
         settings_box().mt(px(16.)).p(px(16.)).gap(px(16.))
             .child(field("shortcuts_type", div().flex().child(kind).into_any_element()))
             .child(field("shortcuts_label", Input::new(&form.label).into_any_element()))
             .child(field("shortcuts_icon", glyphs.into_any_element()))
             .child(field(if form.shell { "shortcuts_command" } else { "shortcuts_text" }, content.into_any_element()))
+            .children(folder)
             .children(direct)
             .child(confirm)
             .child(div().flex().justify_end().gap(px(8.))
                 .child(Button::new("shortcut-form-cancel").ghost().small().label(tr("cancel"))
                     .on_click(cx.listener(|this, _, window, cx| this.close_shortcut_form(window, cx))))
-                .child(Button::new("shortcut-form-ok").primary().small().label(tr("shortcuts_form_ok")).disabled(!form.valid(cx) || self.shortcuts.saving)
+                .child(Button::new("shortcut-form-ok").primary().small().label(tr("shortcuts_form_ok")).loading(form.project && saving)
+                    .disabled(!form.valid(cx) || saving)
                     .on_click(cx.listener(|this, _, window, cx| this.submit_shortcut_form(window, cx)))))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Draft, Item, apply_edit, clip, defaults, resolve, serialize};
+    use super::{Draft, Item, apply_edit, clip, defaults, move_by, project_items, resolve, serialize};
+
+    #[test]
+    fn project_items_keep_only_valid_send_and_shell_with_their_folder() {
+        let value = serde_json::json!([
+            {"id":"d","type":"shell","label":"Debug","command":"make debug","pasta":" backend "},
+            {"id":"d","type":"shell","label":"dup","command":"x"},
+            {"id":"t","type":"internal","action":"terminal"},
+            {"id":"v","type":"shell","label":"Vazia","command":"x","pasta":"  "},
+            {"id":"s","type":"send_text","label":"Revisa","text":"/review"}]);
+        let items = project_items(Some(&value));
+        assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["d", "s"]);
+        assert_eq!((items[0].pasta(), items[1].pasta()), (Some("backend"), None));
+        assert!(project_items(Some(&serde_json::json!({"x": 1}))).is_empty() && project_items(None).is_empty());
+    }
+
+    #[test]
+    fn folder_is_written_only_for_a_shell_and_cleared_when_empty() {
+        let draft = |shell: bool, pasta: &str| Draft { shell, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(), direct: true, confirm: false, pasta: pasta.into() };
+        let original = project_items(Some(&serde_json::json!([{"id":"a","type":"shell","label":"L","command":"c","pasta":"old"}])))[0].0.clone();
+        assert_eq!(draft(true, "tools").into_item(Some(original.clone()), "a".into()).pasta(), Some("tools"));
+        assert_eq!(draft(true, "").into_item(Some(original), "a".into()).pasta(), None);
+        assert_eq!(draft(false, "tools").into_item(None, "b".into()).pasta(), None);
+    }
+
+    #[test]
+    fn move_by_swaps_with_the_neighbour_and_stops_at_the_ends() {
+        let mut items = project_items(Some(&serde_json::json!([
+            {"id":"a","type":"send_text","label":"A","text":"a"},{"id":"b","type":"send_text","label":"B","text":"b"}])));
+        move_by(&mut items, "a", 1);
+        assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["b", "a"]);
+        move_by(&mut items, "a", 1);
+        move_by(&mut items, "b", -1);
+        assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["b", "a"]);
+    }
 
     #[test]
     fn editing_keeps_unknown_fields_and_never_revives_a_removed_item() {
         let mut items = resolve(r#"[{"id":"a","type":"send_text","label":"R","text":"/r","send_direct":false,"confirm":true,"novo":1,"icon":"glifo:futuro"}]"#);
-        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false };
+        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false, pasta: String::new() };
         let edited = draft.into_item(Some(items[0].0.clone()), "a".into());
         // O campo desconhecido e o glifo que esta versão não conhece ficam; as marcas desligadas saem.
         assert_eq!(edited.0.get("novo"), Some(&serde_json::json!(1)));
