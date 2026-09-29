@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -489,10 +490,12 @@ async def sync_plugins(source: Account, target: Account, previous: dict) -> dict
     try:
         source_native = _NATIVO(Path.home(), source.home, account=source)
         target_native = _NATIVO(Path.home(), target.home, account=target)
-        source_items = _plugins(await source_native.plugins_instalados())
-        target_items = _plugins(await target_native.plugins_instalados())
-        source_markets = _marketplace_map(await _marketplaces(source_native))
-        target_markets = _marketplace_map(await _marketplaces(target_native))
+        # Quatro leituras independentes: juntas, o inventário custa a mais lenta, não a soma.
+        inventory = await asyncio.gather(
+            source_native.plugins_instalados(), target_native.plugins_instalados(),
+            _marketplaces(source_native), _marketplaces(target_native))
+        source_items, target_items = _plugins(inventory[0]), _plugins(inventory[1])
+        source_markets, target_markets = _marketplace_map(inventory[2]), _marketplace_map(inventory[3])
         source_config = _config(source)
     except (OSError, ValueError, RuntimeError, CodexNativoErro) as exc:
         issues.append(_issue("codex_account_plugin_inventory_failed", error=type(exc).__name__))
