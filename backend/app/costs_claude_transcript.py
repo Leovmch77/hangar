@@ -245,7 +245,8 @@ def _nova_dobra(raiz: Path):
     def nova(p: Path) -> DobraClaude:
         # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
         # (medido: 168 de 446 ids repetidos entre arquivos).
-        sid = str(p.relative_to(raiz).with_suffix(""))
+        # Barra `/` em todo SO: quem liga subagente ao pai procura `/subagents/` no id.
+        sid = p.relative_to(raiz).with_suffix("").as_posix()
         return DobraClaude(sid, subagente=_DIR_SUBAGENTE in p.parts,
                            subagente_uso=_DIR_SUBAGENTE in Path(sid).parts)
     return nova

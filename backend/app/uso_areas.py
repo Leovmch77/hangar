@@ -133,7 +133,11 @@ def area_do_alvo(alvo: str, regras: list[tuple[str, list[str]]]) -> str | None:
 
 
 def _dentro(p: str, raiz: str) -> bool:
-    return bool(raiz) and (p == raiz or p.startswith(raiz.rstrip(os.sep) + os.sep))
+    # O cwd chega cru (`C:/x`, caixa do transcript); no Windows barra e caixa não distinguem pasta.
+    if not raiz:
+        return False
+    p, raiz = os.path.normcase(os.path.normpath(p)), os.path.normcase(os.path.normpath(raiz))
+    return p == raiz or p.startswith(raiz.rstrip(os.sep) + os.sep)
 
 
 def area_do_caminho(caminho: str, cwd: str, regras: list[tuple[str, list[str]]]) -> str:
