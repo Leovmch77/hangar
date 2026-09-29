@@ -69,7 +69,7 @@ impl Source {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Pane { #[default] Changes, History, Commit }
+enum Pane { #[default] Changes, History, Commit }
 
 #[derive(Clone, Debug, Default)]
 struct Repo { files: Vec<(String, String)>, current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
@@ -404,7 +404,7 @@ impl GitPanel {
         self.load_log(window, cx);
     }
 
-    pub(super) fn set_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         self.pane = pane;
         if pane == Pane::History && self.log.value.is_none() && !self.log.loading { self.load_log(window, cx); }
         cx.notify();
@@ -1062,12 +1062,18 @@ impl Hangar {
     /// A faixa do compositor e o "Git" do menu abrem o diálogo grande, com diff e histórico inteiros; a aba Git do
     /// painel direito fica como a vista curta.
     pub(super) fn open_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_git_dialog(window, cx);
+        self.open_git_dialog(Pane::Changes, window, cx);
+    }
+
+    /// A aba Git do painel é a vista curta, sem histórico; o histórico só existe no diálogo grande.
+    pub(super) fn open_git_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_git_dialog(Pane::History, window, cx);
     }
 
     /// Diff e histórico no tamanho do painel expandido; ao fechar, a aba relê o que o diálogo pode ter mudado.
-    fn open_git_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_git_dialog(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = self.new_git_panel(None, window, cx) else { return };
+        if pane != Pane::Changes { panel.update(cx, |panel, cx| panel.set_pane(pane, window, cx)); }
         let side = self.side.git.as_ref().map(|(_, panel)| panel.downgrade());
         window.open_dialog(cx, move |dialog, window, _| {
             let width = (f32::from(window.viewport_size().width) * 0.92).min(MAX_W);
@@ -1082,7 +1088,7 @@ impl Hangar {
         let owner = self.session_owner()?;
         if let Some((key, panel)) = &self.side.git && key == &owner { return Some(panel.clone()); }
         let weak = cx.entity().downgrade();
-        let expand: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| { let _ = weak.update(cx, |this, cx| this.open_git_dialog(window, cx)); });
+        let expand: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| { let _ = weak.update(cx, |this, cx| this.open_git_dialog(Pane::Changes, window, cx)); });
         let panel = self.new_git_panel(Some(expand), window, cx)?;
         self.side.git = Some((owner, panel.clone()));
         Some(panel)

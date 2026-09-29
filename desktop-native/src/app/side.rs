@@ -677,11 +677,6 @@ impl Hangar {
         self.side.menu && !self.subagent_tab_open() && (self.side_menu_terminal() || self.side_menu_git())
     }
 
-    fn open_side_git(&mut self, pane: super::git::Pane, window: &mut Window, cx: &mut Context<Self>) {
-        self.choose_side_tab(SideTab::Git, window, cx);
-        if let Some(panel) = self.side_git(window, cx) { panel.update(cx, |panel, cx| panel.set_pane(pane, window, cx)); }
-    }
-
     /// Menu da superfície vazia do Zeron: uma linha por ferramenta, no meio do painel.
     fn render_side_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let (terminal, git) = (self.side_menu_terminal(), self.side_menu_git());
@@ -698,9 +693,9 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, window, cx| this.show_terminal(window, cx)))))
                 .when(git, |el| el
                     .child(row("side-menu-diffs", IconName::List, tr("git_changes"), cx)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_side_git(super::git::Pane::Changes, window, cx))))
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_side_tab(SideTab::Git, window, cx))))
                     .child(row("side-menu-history", IconName::GitBranch, tr("git_history"), cx)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_side_git(super::git::Pane::History, window, cx))))))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_git_history(window, cx))))))
             .into_any_element()
     }
 
