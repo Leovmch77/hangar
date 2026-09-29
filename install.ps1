@@ -1544,7 +1544,7 @@ if ($Update) {
     if (Get-NetFirewallRule -DisplayName 'hangar 8765' -ErrorAction SilentlyContinue) {
         Ok 'porta 8765 ja liberada no firewall'
     } elseif (EhAdmin) {
-        New-NetFirewallRule -DisplayName 'hangar 8765' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private | Out-Null
+        New-NetFirewallRule -DisplayName 'hangar 8765' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private -ErrorAction SilentlyContinue | Out-Null
         if (Get-NetFirewallRule -DisplayName 'hangar 8765' -ErrorAction SilentlyContinue) { Ok 'porta 8765 liberada (perfil Private)' }
         else { Falta 'nao consegui liberar a porta 8765 no firewall' }
     } else {
@@ -1635,6 +1635,7 @@ if (-not $script:cpPublicUrl) {
         }
         Nota 'O token do .env vira a UNICA tranca: quem estiver no Wi-Fi e souber o token roda comando como voce.'
     } else {
+        Set-EnvKey -Chave 'CP_LAN_BIND_IP' -Valor '127.0.0.1'
         Ok 'ficando so em 127.0.0.1'
     }
 }
