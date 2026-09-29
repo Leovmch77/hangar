@@ -764,12 +764,16 @@ impl Hangar {
                 .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
-                .child(div().relative().w_full().flex().flex_col().items_center().gap(px(4.))
+                .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().gap(px(4.))
                     // Marca de "deste projeto", no canto: o bloco segue igual aos outros e o motivo está na dica.
                     .when(own, |el| el.child(div().absolute().top(px(-4.)).right(px(0.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
-                    .child(div().w_full().text_center().line_clamp(2).text_ellipsis().text_size(px(11.5)).line_height(px(14.)).child(label)))
+                    // Sem `whitespace_normal` o rótulo não quebra: a caixa passa da largura do bloco e, centralizada, perde as
+                    // duas pontas ("car Review Au"). Altura fixa de duas linhas deixa todos os blocos iguais.
+                    .child(div().w_full().min_w_0().h(px(28.)).flex().items_center().justify_center()
+                        .child(div().w_full().whitespace_normal().text_center().line_clamp(2).text_ellipsis()
+                            .text_size(px(11.5)).line_height(px(14.)).child(label))))
                 .on_click(cx.listener(move |this, _, window, cx| this.run_shortcut(shortcut.clone(), false, window, cx)))
         }).collect();
         let grid = div().flex().flex_wrap().gap(px(SHORTCUT_GAP)).children(buttons);
