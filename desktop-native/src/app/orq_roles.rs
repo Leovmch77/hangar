@@ -285,7 +285,14 @@ impl OrqRoles {
         done: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static) {
         let job = self.runtime.spawn(job);
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(value) = job.await else { return };
+            let Ok(value) = job.await else {
+                // Tarefa que morreu não pode deixar os botões travados em "salvando" sem dizer nada.
+                let _ = this.update(cx, |this, cx| {
+                    (this.busy, this.starting, this.error) = (false, false, Some(tr("network_error")));
+                    cx.notify();
+                });
+                return;
+            };
             let _ = this.update_in(cx, |this, window, cx| { done(this, value, window, cx); cx.notify(); });
         }).detach();
     }
