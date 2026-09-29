@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -1027,7 +1028,8 @@ def _destination_paths(state: dict) -> set[str]:
 async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
     source = default_home()
     destination = account.home
-    cli_version = _cli_version()
+    # `--version` e subprocesso: fora do event loop.
+    cli_version = await asyncio.to_thread(_cli_version)
     if destination.is_symlink() or not destination.is_dir():
         return _status("error", issues=[_issue("codex_account_destination_invalid")])
     if _canonical(source) == _canonical(destination):
