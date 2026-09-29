@@ -417,6 +417,8 @@ pub fn provider(name: &str) -> (Hsla, &'static str) {
         "kimi" => (rgb(if colors().dark { 0xc7bdf5 } else { 0x7061c2 }).into(), "K"),
         "pi" => (rgb(0x8b5cf6).into(), "π"),
         "omp" => (rgb(0xf59e0b).into(), "Ω"),
+        // Sem marca de modelo: o orquestrador é código.
+        "orq" => (muted(), "◇"),
         _ => (muted(), "?"),
     }
 }

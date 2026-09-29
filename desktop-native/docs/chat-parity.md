@@ -135,6 +135,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Máquinas: estado das sessões por linha e cartão dos recados com a volta medida pelo token guardado aqui | implementado | aparecem, token recusado, falta o token, desligada aqui/no servidor, não respondeu; não exercitado na janela |
 | Máquinas: "Mostrar as sessões dele" liga e desliga a entrada guardada; sem entrada, usa o token que o servidor guarda | implementado | sem o campo para digitar o token quando o do servidor falha |
 | Máquinas: token digitado, trocar nome/token de uma entrada, tirar endereço repetido (também do servidor conectado), escolher o endereço da volta, cadastrar de novo, ligar recados de máquina só deste aparelho, identificador de outra máquina | pendente | o cartão mostra a frase do web sem o botão; o interruptor de recados de máquina só deste aparelho fica desligado com "próxima versão" |
+| Avançado: Endpoint e Modelo do Jev (`jev_endpoint`, `jev_model`) e rótulos próprios para os quatro campos do texto do Jev | implementado | mesma ordem e mesmos textos do `ServerSettings.svelte`; antes, os campos do texto apareciam com as chaves do Jev e os dois do Jev faltavam |
 
 ## Barra lateral: grupos de sessões
 
@@ -191,6 +192,14 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | "Liberar no Tailscale" (abre o `enable_url` e confere `GET /api/share/prereqs` a cada 3 s, por até 5 min, enquanto o diálogo está aberto; liberado, some o aviso e o "Gerar" volta) e "Copiar" só da linha do comando do operador | implementado | nos dois clientes; sem exercício na janela real |
 | "Autorizar" o operador com `pkexec tailscale set --operator=<usuário>` | diferença deliberada | só no nativo, no Linux e com o servidor ativo em loopback: o `pkexec` precisa do agente de senha da sessão gráfica, que o backend (serviço de systemd) não tem; o web mostra o comando com "Copiar" e a dica de que o app nativo desta máquina autoriza com um clique |
 | Campo do link selecionável e com seleção automática ao focar | pendente | o nativo mostra o link como texto (não selecionável), com "Copiar"; sem `Input` somente leitura no diálogo |
+## Orquestrador sem LLM (orquestrar-auto)
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Linha `orq` com o selo "Orquestrador · sem LLM" (`orq_row_badge`), no bloco do grupo do árbitro | implementado | barra e Conversas mostram o selo; no trilho ele vai na dica; nas abas do topo, só o glifo ◇ |
+| Conversa da linha do tempo sem compositor, com "Falar com o árbitro" (`orq_talk_to_arbiter`) abrindo o árbitro atual | implementado | o árbitro sai de `orq_arbiter` na lista a cada clique; fora da lista, o botão fica desligado; conversa vazia diz que o orquestrador não recebe mensagens |
+| Renomear, fechar, interromper e o terminal da sessão escondidos | implementado | o menu da linha tem só "Falar com o árbitro"; pressionar para renomear e o Esc não agem; o terminal abre só com shells; um 409 `erro_sessao_orq` que escape aparece com o texto do web |
+
 ## Como rodar a prova
 
 ```bash

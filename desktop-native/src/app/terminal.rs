@@ -147,7 +147,7 @@ fn failure_message(error: Failure) -> String {
 impl Hangar {
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.is_some() { self.close_terminal(true, window, cx); return; }
-        let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless)) else { return; };
+        let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless || s.orq())) else { return; };
         self.terminal_serial += 1;
         self.terminal = Some(Panel::new(self.terminal_serial, session.clone(), headless, cx));
         self.terminal.as_ref().unwrap().focus.focus(window, cx);
