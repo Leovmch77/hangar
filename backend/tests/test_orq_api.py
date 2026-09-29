@@ -116,9 +116,25 @@ def test_find_plan_ignora_exemplo_e_plano_terminado(tmp_path):
     (tmp_path / "doc.md").write_text("````md\n```\n### Task 1: x\n```\n### Task 2: y\n````\n", encoding="utf-8")
     feito = "### Task 1: x\n- [x] **Step 1: y**\n"
     (tmp_path / "feito.orq.md").write_text(f"Preparado: ontem · sha {orq.plan_sha(feito)}\n{feito}", encoding="utf-8")
-    assert orq.find_plan(tmp_path) == {}
+    assert orq.find_plan(tmp_path) == {"finished": str(tmp_path / "feito.orq.md")}
     (tmp_path / "aberto.md").write_text("### Task 1: x\n- [ ] **Step 1: y**\n", encoding="utf-8")
-    assert orq.find_plan(tmp_path) == {"path": str(tmp_path / "aberto.md"), "state": "tasks"}
+    assert orq.find_plan(tmp_path)["path"] == str(tmp_path / "aberto.md")
+
+
+def test_prontidao_nao_confunde_git_quebrado_com_sem_plano(tmp_path, monkeypatch):
+    """Git que falha (timeout, dono duvidoso) não é "não há plano": o recado de planejadora avisa
+    que não deu para ler, senão ela escreve um plano novo por cima de um que existe."""
+    import subprocess
+    from app import orq_start
+    orq = orq_start._orq()
+    real = subprocess.run
+    monkeypatch.setattr(orq.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 128, "", "fatal: detected dubious ownership") if a[0][:1] == ["git"] else real(*a, **k))
+    r = orq_start.readiness(str(tmp_path), False, True)
+    assert r["phase"] == "planner" and any("dubious ownership" in p for p in r["problems"])
+    assert "Não consegui ler tudo" in orq_start.kickoff(r, "/c/regras.md")
+    sem = orq_start.readiness(None, False, True)
+    assert sem["problems"] and "confira se já existe" in orq_start.kickoff(sem, "/c/regras.md")
 
 
 def test_comecar_parte_do_passo_que_falta(cli, tmp_path):

@@ -460,45 +460,61 @@ OPEN_STEP = re.compile(r"^\s*- \[ \] \*\*Step", re.MULTILINE)
 DONE_STEP = re.compile(r"^\s*- \[[xX]\] \*\*Step", re.MULTILINE)
 
 
-def _repo_files(repo: Path, *args: str) -> list[str]:
-    # `git grep` exits 1 on no match; a folder outside git has no plan to find.
+def _repo_files(repo: Path, problems: list[str], *args: str) -> list[str]:
+    # Exit 1 of `git grep` is "no match" and a folder outside git has no plan: both are empty, not
+    # errors. Anything else (timeout, dubious ownership, no git) is reported, never read as "no plan".
     try:
         r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
                            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as e:
+        problems.append(f"git {args[0]}: {e}")
         return []
-    return [line for line in r.stdout.splitlines() if line] if r.returncode == 0 else []
+    if r.returncode == 0:
+        return [line for line in r.stdout.splitlines() if line]
+    if not (r.returncode == 1 and args[0] == "grep") and "not a git repository" not in r.stderr:
+        problems.append(f"git {args[0]}: {r.stderr.strip()[:160]}")
+    return []
 
 
 def find_plan(repo: Path) -> dict:
     """The plan a run would start from, best first: stamped, stamped then edited, an unstamped
-    `.orq.md`, then any plan in the Task/Step format, newest first. `{}` = no plan."""
-    orq = _repo_files(repo, "ls-files", "-co", "--exclude-standard", "*.orq.md")
-    tasks = _repo_files(repo, "grep", "-l", "--untracked", "-E", r"^### Task [0-9]+:", "--", "*.md")
+    `.orq.md`, then any plan in the Task/Step format, newest first. `path`/`state` only when one
+    is found; `problems` = what could not be read (a plan may be hiding there); `finished` = the
+    newest plan with every step ticked."""
+    problems: list[str] = []
+    orq = _repo_files(repo, problems, "ls-files", "-co", "--exclude-standard", "*.orq.md")
+    tasks = _repo_files(repo, problems, "grep", "-l", "--untracked", "-E", r"^### Task [0-9]+:", "--", "*.md")
     # The superpowers plans folder is usually gitignored, so git sees none of it.
     kept = sorted(str(p.relative_to(repo)) for p in (repo / "docs/superpowers/plans").glob("*.md"))
     rank = {"stamped": 0, "changed": 1, "unstamped": 2, "tasks": 3}
-    found = []
+    found, done = [], []
     for rel in dict.fromkeys(orq + tasks + kept):
         path = repo / rel
         try:
             text, mtime = path.read_text(encoding="utf-8"), path.stat().st_mtime
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as e:
+            problems.append(f"{path}: {type(e).__name__}")
             continue
         m = PREPARADO.search(text)
         # A fenced `### Task` is a doc showing the format, not a plan; every step ticked is work done.
         body = FENCE.sub("", text)
         if DONE_STEP.search(body) and not OPEN_STEP.search(body):
+            done.append((mtime, str(path)))
             continue
         if not m and not rel.endswith(".orq.md") and not TASK_HEAD.search(body):
             continue
         state = ("stamped" if m.group(1) == plan_sha(text) else "changed") if m else \
             "unstamped" if rel.endswith(".orq.md") else "tasks"
         found.append((rank[state], -mtime, str(path), state))
-    if not found:
-        return {}
-    _, _, path, state = min(found)
-    return {"path": path, "state": state}
+    out: dict = {}
+    if found:
+        _, _, path, state = min(found)
+        out = {"path": path, "state": state}
+    if problems:
+        out["problems"] = problems
+    if done:
+        out["finished"] = max(done)[1]
+    return out
 
 
 def cmd_readiness(a) -> int:
