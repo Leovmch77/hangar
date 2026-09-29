@@ -2,6 +2,7 @@
 quando o arquivo deixou de ser o mesmo."""
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -268,3 +269,80 @@ def test_relatorio_pronto_vale_ate_os_dados_mudarem(tmp_path):
     cc.mudou()
     assert cc.relatorio(("x", 1), montar) is not a
     assert len(cc._relatorios) == 1, "entradas da versão velha saem"
+
+
+def _rollout(tmp_path: Path, nome: str) -> Path:
+    p = tmp_path / f"rollout-2026-09-10T12-00-00-{nome}.jsonl"
+    p.write_text(_linhas({"type": "session_meta", "payload": {"id": nome, "cwd": "/r"}}), encoding="utf-8")
+    return p
+
+
+def _n_files() -> int:
+    conn = cc._abrir()
+    try:
+        return conn.execute("SELECT count(*) FROM files").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_leitura_da_varredura_nao_segura_o_lock_de_escrita(tmp_path, monkeypatch):
+    arqs = [_rollout(tmp_path, n) for n in ("x", "y")]
+    original = cc._ler_novo
+    livre = []
+
+    def sonda(*a):
+        outro = sqlite3.connect(cc._CACHE_DIR / cc._ARQUIVO, timeout=0, isolation_level=None)
+        try:
+            outro.execute("BEGIN IMMEDIATE")
+            outro.execute("COMMIT")
+            livre.append(True)
+        except sqlite3.OperationalError:
+            livre.append(False)
+        finally:
+            outro.close()
+        return original(*a)
+
+    monkeypatch.setattr(cc, "_ler_novo", sonda)
+    cc.sincronizar("codex:conta", arqs, cs._dobra_codex, "v")
+    assert livre == [True, True]
+    assert _n_files() == 2
+
+
+def test_indice_ocupado_nao_derruba_o_custo_da_sessao(tmp_path, monkeypatch):
+    arq = _rollout(tmp_path, "x")
+    assert cc.sincronizar_arquivo(arq, cs._dobra_codex, "v", "codex:avulso") is not None
+    _anexar(arq, _linhas({"type": "event_msg", "payload": {"type": "outro"}}))
+    original = cc._abrir
+
+    def impaciente():
+        conn = original()
+        conn.execute("PRAGMA busy_timeout=50")
+        return conn
+
+    monkeypatch.setattr(cc, "_abrir", impaciente)
+    dono = sqlite3.connect(cc._CACHE_DIR / cc._ARQUIVO, isolation_level=None)
+    dono.execute("BEGIN IMMEDIATE")
+    try:
+        assert cc.sincronizar_arquivo(arq, cs._dobra_codex, "v", "codex:avulso") is None
+    finally:
+        dono.execute("ROLLBACK")
+        dono.close()
+
+
+def test_erro_passageiro_de_stat_nao_apaga_o_historico(tmp_path, monkeypatch):
+    arq = _rollout(tmp_path, "x")
+    cc.sincronizar("codex:conta", [arq], cs._dobra_codex, "v")
+    real = os.stat
+
+    def em_uso(p, *a, **kw):
+        if str(p) == str(arq):
+            raise PermissionError("em uso")
+        return real(p, *a, **kw)
+
+    monkeypatch.setattr(cc.os, "stat", em_uso)
+    cc.sincronizar("codex:conta", [arq], cs._dobra_codex, "v")
+    monkeypatch.setattr(cc.os, "stat", real)
+    assert _n_files() == 1
+    arq.unlink()
+    cc.sincronizar("codex:conta", [arq], cs._dobra_codex, "v")
+    assert _n_files() == 0, "sumiço de verdade continua esquecendo"

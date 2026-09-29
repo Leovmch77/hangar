@@ -396,8 +396,9 @@ def report(period: str = "all", now: datetime | None = None, fresco: bool = Fals
     dias = costs.PERIODOS.get(period)
     desde = (now - timedelta(days=dias - 1)).strftime("%Y-%m-%d") if dias else None
     costs_sources.preparar(fresco)
-    origens = _origens_recentes()
-    chave = ("uso", period, now.date(), pricing.geracao(), costs.chave_rotulos(), _origens_cache[0],
+    # Um retrato só: a thread de refresh troca o global entre montar e chavear.
+    origens_em, origens = _origens_recentes()
+    chave = ("uso", period, now.date(), pricing.geracao(), costs.chave_rotulos(), origens_em,
              *((k, tuple(v) if isinstance(v, list) else v) for k, v in sorted(filtros.items())))
     pronto = costs_cache.relatorio(
         chave, lambda: montar(*costs_sources._ler_uso(desde), period=period, now=now,
@@ -409,17 +410,18 @@ _ORIGENS_TTL_S = 300
 _origens_cache: tuple[float, dict[str, str]] = (float("-inf"), {})
 
 
-def _origens_recentes() -> dict[str, str]:
+def _origens_recentes() -> tuple[float, dict[str, str]]:
     """A varredura desce no cache de plugins inteiro (segundos); filtro e detalhe pedem o
     relatório de novo. Vencida, o pedido leva a anterior e a nova sai atrás; só o primeiro
     pedido do processo espera."""
     global _origens_cache
-    if _origens_cache[0] == float("-inf"):
-        _origens_cache = (time.monotonic(), origens_de_skill())
-    elif time.monotonic() - _origens_cache[0] > _ORIGENS_TTL_S:
-        _origens_cache = (time.monotonic(), _origens_cache[1])
+    atual = _origens_cache
+    if atual[0] == float("-inf"):
+        atual = _origens_cache = (time.monotonic(), origens_de_skill())
+    elif time.monotonic() - atual[0] > _ORIGENS_TTL_S:
+        atual = _origens_cache = (time.monotonic(), atual[1])
         threading.Thread(target=_atualizar_origens, name="uso-origens", daemon=True).start()
-    return _origens_cache[1]
+    return atual
 
 
 def _atualizar_origens() -> None:

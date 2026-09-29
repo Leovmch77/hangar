@@ -371,16 +371,38 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
             (scope,))}
         progresso[scope] = (0, len(lista))
         em_transacao = False
-        inicio_lote = 0.0
+        pendentes: list[tuple] = []
+        inicio_lote = time.monotonic()
+
+        def gravar_pendentes() -> None:
+            # A leitura fica fora da transação: segurar o lock de escrita enquanto se lê o
+            # próximo arquivo travaria o custo da sessão aberta (`sincronizar_arquivo`).
+            nonlocal em_transacao
+            if not pendentes:
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            em_transacao = True
+            for args in pendentes:
+                _gravar_arquivo(conn, *args)
+            conn.execute("COMMIT")
+            em_transacao = False
+            pendentes.clear()
+            mudou()
+
         try:
             for i, p in enumerate(lista):
                 progresso[scope] = (i, len(lista))
                 chave = str(p)
+                leve = conhecidos.pop(chave, None)
                 try:
                     st = os.stat(p)
-                except OSError:
+                except FileNotFoundError:
+                    if leve is not None:
+                        conhecidos[chave] = leve
                     continue
-                leve = conhecidos.pop(chave, None)
+                except OSError:
+                    # Falha passageira não é sumiço: apagar aqui jogaria fora o histórico dele.
+                    continue
                 if leve is not None and _em_dia(leve, st, versao):
                     continue
                 reg = conn.execute(_SEL_FILE + " WHERE path=?", (chave,)).fetchone()
@@ -397,16 +419,14 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
                     # Um arquivo que derruba o leitor não pode parar a varredura de todos.
                     _log.warning("custos: %s não pôde ser lido", p, exc_info=True)
                     continue
-                if not em_transacao:
-                    conn.execute("BEGIN IMMEDIATE")
-                    em_transacao, inicio_lote = True, time.monotonic()
-                _gravar_arquivo(conn, p, st, scope, versao, lido)
+                pendentes.append((p, st, scope, versao, lido))
                 if time.monotonic() - inicio_lote > _LOTE_S:
-                    conn.execute("COMMIT")
-                    em_transacao = False
-            if not em_transacao:
-                conn.execute("BEGIN IMMEDIATE")
-                em_transacao = True
+                    gravar_pendentes()
+                    inicio_lote = time.monotonic()
+            conn.execute("BEGIN IMMEDIATE")
+            em_transacao = True
+            for args in pendentes:
+                _gravar_arquivo(conn, *args)
             sumidos = [(v[0],) for v in conhecidos.values()]
             conn.executemany("DELETE FROM custo WHERE file_id=?", sumidos)
             conn.executemany("DELETE FROM uso WHERE file_id=?", sumidos)
@@ -436,7 +456,12 @@ def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: st
         if reg is not None and _em_dia(reg, st, versao):
             return reg[0]
         lido = _ler_novo(p, st, reg, nova_dobra, versao)
-        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as e:
+            # Índice ocupado além do timeout: estimativa indisponível agora, não erro 500.
+            _log.warning("custos: índice ocupado ao gravar %s: %s", p, e)
+            return None
         try:
             # A varredura pode ter dado dono ao caminho enquanto este lia: o escopo dela vence.
             _gravar_arquivo(conn, p, st, scope, versao, lido, manter_escopo=True)
