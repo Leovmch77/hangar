@@ -68,14 +68,53 @@ def test_live_auto_run_keeps_the_last_member(root):
     assert contrato.exists()
 
 
-@pytest.mark.parametrize("ended,alive", [(True, True), (False, False)])
-def test_group_dissolves_normally_once_the_run_is_over(root, monkeypatch, tmp_path, ended, alive):
-    monkeypatch.setattr(runs.orq_conductor, "watchdog", lambda d, units: {"alive": alive, "arbiter": "arb"})
-    gid, contrato = _solo_with_team(root, ended=ended)
+def test_group_dissolves_normally_once_the_run_is_over(root, tmp_path):
+    gid, contrato = _solo_with_team(root, ended=True)
     assert pair.leave("exec") == ["arb"]
     assert PairLink("arb").get() is None
     assert not contrato.exists()
     assert [p.name.startswith(f"regras-{gid}-") for p in (tmp_path / "arq").iterdir()] == [True]
+
+
+def test_a_watchdog_restart_does_not_dissolve_a_live_run(root, monkeypatch):
+    # Restart=always leaves a window with no heartbeat; the run itself is still alive.
+    monkeypatch.setattr(runs.orq_conductor, "watchdog", lambda d, units: {"alive": False, "arbiter": "arb"})
+    gid, contrato = _solo_with_team(root)
+    assert pair.leave("exec") == ["arb"]
+    assert PairLink("arb").get()["gid"] == gid
+    assert contrato.exists()
+
+
+def _end(root, gid):
+    with (root / f"2026-09-28-{gid}" / "eventos.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"tipo": "execucao_fim", "ts": "2026-09-28T12:00:00-03:00",
+                            "resultado": "ok"}) + "\n")
+
+
+def test_lone_orq_group_dissolves_when_its_run_ends(root, tmp_path, monkeypatch):
+    from app.registry import SessionRegistry
+    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
+    gid, contrato = _solo_with_team(root)
+    pair.leave("exec")
+    sweep = lambda: SessionRegistry.__new__(SessionRegistry)._varrer_pares_mortos({"arb"})
+    sweep()
+    assert PairLink("arb").get()["peers"] == []   # alive: kept
+    _end(root, gid)
+    sweep()   # the dead-pair sweep in list(): the hook reads the sidecar file, so it must go
+    assert PairLink("arb").get() is None and not PairLink("arb").path.exists()
+    assert not contrato.exists()
+    assert [p.name.startswith(f"regras-{gid}-") for p in (tmp_path / "arq").iterdir()] == [True]
+
+
+def test_lone_orq_group_before_its_run_starts_waits_for_the_launch():
+    import os, time
+    pair.join_group("arb", [], "obra", orq=True)   # the arbiter's step 2, before execucao_inicio
+    pair.dissolve_lone_orq()
+    assert PairLink("arb").get() is not None
+    old = time.time() - pair.ORQ_LAUNCH_GRACE_S - 1
+    os.utime(PairLink("arb").path, (old, old))       # launch abandoned
+    pair.dissolve_lone_orq()
+    assert PairLink("arb").get() is None
 
 
 def test_last_member_leaving_a_live_run_keeps_the_contract(root, tmp_path):

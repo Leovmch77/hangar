@@ -288,8 +288,8 @@ def leave(name: str) -> list[str]:
             return []
         peers = link["peers"]
         # Execução `orquestrar-auto` viva: o orquestrador fecha e abre as sessões das Tasks, e o
-        # grupo passa por trechos só com o árbitro. A linha `<gid>-orq` existe enquanto ela vive.
-        vivo = link["orq"] and orq_runs.find(f"{link['gid']}-orq") is not None
+        # grupo passa por trechos só com o árbitro.
+        vivo = link["orq"] and orq_runs.group_phase(link["gid"]) == "live"
         snap = {m: PairLink(m).get() for m in [name, *peers]}
         try:
             PairLink(name).clear()
@@ -311,6 +311,33 @@ def leave(name: str) -> list[str]:
         if len(peers) <= 1 and link.get("gid") and not vivo:
             _arquivar_contratos(link["gid"])
         return peers
+
+
+# Do `--pair --orq` do árbitro ao `execucao_inicio`: contrato, fechamento e `orq init` no meio.
+ORQ_LAUNCH_GRACE_S = 3600
+
+
+def dissolve_lone_orq() -> list[str]:
+    """Grupo `orq` de um membro só vive enquanto a execução `auto` dele vive. Acabada (ou nunca
+    iniciada depois da janela de lançamento), o sidecar sai e o contrato vai pro arquivo: o hook de
+    SessionStart lê o arquivo do sidecar e reinjetaria o protocolo pra sempre."""
+    out = []
+    with _LOCK:
+        for f in _pair_dir().glob("*.json"):
+            st = PairLink(f.stem).get()
+            if not st or st["peers"] or not st["orq"]:
+                continue
+            fase = orq_runs.group_phase(st["gid"])
+            try:
+                novo = time.time() - f.stat().st_mtime < ORQ_LAUNCH_GRACE_S
+            except OSError:
+                continue
+            if fase == "live" or (fase is None and novo):
+                continue
+            PairLink(f.stem).clear()
+            _arquivar_contratos(st["gid"])
+            out.append(f.stem)
+    return out
 
 
 def rename_pair(old: str, new: str) -> None:

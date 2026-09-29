@@ -2389,6 +2389,13 @@ class SessionRegistry:
         varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() chamam list()
         numa janela em que o nome está ausente de propósito, e só o tempo separa isso de morte.
         O aviso vai pela fila durável, nunca send-keys: isto roda dentro do list(), no tick do SSE."""
+        try:
+            sozinhos = pair.dissolve_lone_orq()
+        except Exception as e:
+            _log.warning("varredura de pares: grupo orq de um membro não dissolvido: %r", e)
+        else:
+            if sozinhos:
+                _log.info("varredura de pares: grupo orq sem execução viva dissolvido (%s)", sozinhos)
         if not vivos:
             return   # tmux fora = lista vazia; varrer aqui dissolveria todos os grupos
         agora = time.monotonic() if agora is None else agora

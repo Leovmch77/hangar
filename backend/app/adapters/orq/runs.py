@@ -27,7 +27,8 @@ def _text(v) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
-def _active_run(d: Path) -> dict | None:
+def _auto_run(d: Path) -> tuple[dict, str, bool] | None:
+    """(orq.json, gid, encerrada) de uma execução `auto` com início gravado."""
     try:
         cfg = json.loads((d / "orq.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -36,8 +37,25 @@ def _active_run(d: Path) -> dict | None:
         return None
     eventos = orq._le_eventos(d / "eventos.jsonl")
     gid = next((_text(e.get("gid")) for e in eventos if e["tipo"] == "execucao_inicio"), None)
-    if not gid or orq._current_end(eventos) is not None:
+    return (cfg, gid, orq._current_end(eventos) is not None) if gid else None
+
+
+def group_phase(gid: str) -> str | None:
+    """"live" / "ended" para a execução `auto` do grupo, None sem execução iniciada. O vigia fica
+    de fora: o reinício dele deixa uma janela sem batimento com a execução viva."""
+    try:
+        dirs = sorted(root().iterdir())
+    except OSError:
         return None
+    fases = {r[2] for d in dirs if (r := _auto_run(d)) and r[1] == gid}
+    return "live" if False in fases else "ended" if fases else None
+
+
+def _active_run(d: Path) -> dict | None:
+    run = _auto_run(d)
+    if not run or run[2]:
+        return None
+    cfg, gid, _ = run
     # Sem systemctl (units=None): isto roda a cada varredura da lista, e o batimento basta.
     wd = orq_conductor.watchdog(d, None)
     if not wd["alive"]:
