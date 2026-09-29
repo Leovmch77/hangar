@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from app import pricing
-from app.costs_sources import LOCAL, UsageRow, coletar_ou_aquecendo, rotulo_de_provedor
+from app import costs_cache, costs_sources, pricing
+from app.costs_sources import LOCAL, UsageRow, rotulo_de_provedor
 from app.models import Applied, ComboRow, CostReport, DimBucket, KindBucket, RateInfo, SessaoCusto
 
 TIPOS = ("input", "output", "cache_write", "cache_read")
@@ -257,7 +258,21 @@ def montar(linhas: list[UsageRow], period: str = "all",
 
 def report(period: str = "all", now: datetime | None = None, fresco: bool = False) -> CostReport:
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou."""
-    return montar(coletar_ou_aquecendo(fresco=fresco), period=period, now=now)
+    now = now or datetime.now(LOCAL)
+    dias = PERIODOS.get(period)
+    # Só o período e a janela anterior (mesmo tamanho) saem do índice.
+    desde = (now - timedelta(days=dias * 2 - 1)).strftime("%Y-%m-%d") if dias else None
+    costs_sources.preparar(fresco)
+    pronto = costs_cache.relatorio(
+        ("costs", period, now.date(), pricing.geracao(), chave_rotulos()),
+        lambda: montar(costs_sources._ler_custos(desde), period=period, now=now))
+    # A cotação tem ciclo próprio: o relatório guardado não congela a dela.
+    return pronto.model_copy(update={"usd_brl": usd_brl()})
+
+
+def chave_rotulos() -> tuple:
+    """Rótulos de conta entram na chave: e-mail trocado muda a tela sem mudar dado do índice."""
+    return tuple(costs_sources._ROTULOS.items())
 
 
 # Cotação USD/BRL: cache em memória de 1h. Falha também "conta" como tentativa (atualiza o
@@ -268,11 +283,23 @@ _rate_at: float = 0.0
 
 
 def usd_brl() -> float | None:
-    global _rate, _rate_at
+    """Cotação em cache. Vencida, devolve a última conhecida na hora e busca atrás: o relatório
+    não espera a rede. Só a primeira chamada do processo espera a busca."""
+    global _rate_at
     now = time.monotonic()
     if _rate_at and now - _rate_at < 3600:
         return _rate
+    primeira = not _rate_at
     _rate_at = now
+    if primeira:
+        _buscar_cotacao()
+    else:
+        threading.Thread(target=_buscar_cotacao, name="usd-brl", daemon=True).start()
+    return _rate
+
+
+def _buscar_cotacao() -> None:
+    global _rate
     try:
         with urllib.request.urlopen(_RATE_URL, timeout=3) as r:
             _rate = float(json.load(r)["USDBRL"]["bid"])
@@ -280,4 +307,3 @@ def usd_brl() -> float | None:
         # Mantém a última cotação conhecida (ou None) — front cai pra USD. O log distingue
         # timeout de mudança de schema da API (senão os dois falham idênticos pra sempre).
         logging.getLogger(__name__).warning("cotação USD/BRL falhou: %r", e)
-    return _rate

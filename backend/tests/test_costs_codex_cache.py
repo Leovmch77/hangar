@@ -14,14 +14,15 @@ def test_codex_cache_rele_so_rollout_alterado_e_remove_arquivo_ausente(tmp_path,
     monkeypatch.setattr(cs, "_rollouts_codex_por_conta", lambda _: {
         account.id: (account, {p for p in paths if p.exists()})})
     monkeypatch.setattr(cs, "_contas_codex", lambda: [account])
+    monkeypatch.setattr(cs.costs_cache, "_CACHE_DIR", tmp_path / "cache")
     calls = []
-    original = cs._linhas_rollout_codex
+    original = cs._dobra_codex
 
-    def read(path, account_id):
+    def read(path):
         calls.append(path)
-        return original(path, account_id)
+        return original(path)
 
-    monkeypatch.setattr(cs, "_linhas_rollout_codex", read)
+    monkeypatch.setattr(cs, "_dobra_codex", read)
 
     def write(path, tokens):
         events = [

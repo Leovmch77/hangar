@@ -167,14 +167,27 @@ _lock = threading.Lock()
 _cat: dict[str, Rate] | None = None
 _overrides: dict[str, dict] | None = None
 _minusculas: dict[str, str] | None = None
+# Memo por id de modelo: os relatórios perguntam o mesmo punhado de modelos dezenas de milhares
+# de vezes. Depende só do catálogo e dos overrides, então some junto com eles.
+_canon: dict = {}
+_tarifas: dict = {}
+# Sobe a cada troca de catálogo/override: relatório guardado com tarifa velha deixa de valer.
+_geracao = 0
+
+
+def geracao() -> int:
+    return _geracao
 
 
 def invalidar_cache() -> None:
-    global _cat, _overrides, _minusculas
+    global _cat, _overrides, _minusculas, _geracao
     with _lock:
         _cat = None
         _overrides = None
         _minusculas = None
+        _canon.clear()
+        _tarifas.clear()
+        _geracao += 1
 
 
 def catalogo_de_bruto(bruto: dict) -> dict[str, Rate]:
@@ -266,6 +279,26 @@ def canonizar(model: str) -> str:
     'deepseek/deepseek-v4-flash' — forma que EXISTE no catálogo (mesmo mecanismo de chave dupla).
     O laço tem teto porque a lista de prefixos é finita e cada volta encurta a string.
     """
+    try:
+        return _canon[model]
+    except (KeyError, TypeError):
+        pass
+    g = _geracao
+    r = _canonizar(model)
+    _memorizar(_canon, model, r, g)
+    return r
+
+
+def _memorizar(memo: dict, model, r, g: int) -> None:
+    # Sob a trava do invalidar: catálogo trocado no meio (download de fundo) não pode deixar a
+    # resposta velha memorizada depois do clear.
+    if isinstance(model, str):
+        with _lock:
+            if _geracao == g:
+                memo[model] = r
+
+
+def _canonizar(model: str) -> str:
     m = (model or "").strip()
     base = m
     mudou = True
@@ -292,6 +325,17 @@ def canonizar(model: str) -> str:
 
 
 def rate_for(model: str) -> Rate | None:
+    try:
+        return _tarifas[model]
+    except (KeyError, TypeError):
+        pass
+    g = _geracao
+    r = _rate_for(model)
+    _memorizar(_tarifas, model, r, g)
+    return r
+
+
+def _rate_for(model: str) -> Rate | None:
     if (model or "").strip() in IGNORADOS:
         return None
     mid = canonizar(model)

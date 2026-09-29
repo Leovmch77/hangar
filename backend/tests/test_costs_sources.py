@@ -361,9 +361,8 @@ def test_cache_relê_quando_o_arquivo_muda(tmp_path, monkeypatch):
 
 
 def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
-    """Os leitores de árvore (`linhas_claude`, `linhas_pi`) rodam a cada `coletar()`; quem
-    evita reler é o cache por arquivo do `costs_cache`: o parser de UM arquivo do Pi roda uma
-    vez só enquanto o arquivo não muda."""
+    """A árvore é varrida a cada `coletar()`; quem evita reler é o índice por arquivo do
+    `costs_cache`: cada arquivo é lido do zero uma vez só enquanto não muda."""
     cfg = tmp_path / ".claude"
     _transcript_claude(cfg, "s", "claude-opus-5", "/r", i=1, o=0)
     _escrever(tmp_path / "sessions" / "--r--" / "s.jsonl", [
@@ -379,31 +378,27 @@ def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "_config_dirs", lambda: [(str(cfg), "c")])
     cs.invalidar_cache()   # senão o estado de um teste anterior contamina a contagem
 
-    chamadas = {"claude": 0, "pi": 0, "pi_arquivo": 0}
-    claude_original, pi_original = cs.linhas_claude, cs.linhas_pi
-    pi_arquivo_original = cs._linhas_arquivo_pi
+    chamadas = {"claude": 0, "pi": 0}
+    claude_original, pi_original = ct._nova_dobra, cs._dobra_pi
 
-    def claude_contado(*a, **kw):
-        chamadas["claude"] += 1
-        return claude_original(*a, **kw)
+    def claude_contado(raiz):
+        fabrica = claude_original(raiz)
+
+        def nova(p):
+            chamadas["claude"] += 1
+            return fabrica(p)
+        return nova
 
     def pi_contado(*a, **kw):
         chamadas["pi"] += 1
         return pi_original(*a, **kw)
 
-    def pi_arquivo_contado(*a, **kw):
-        chamadas["pi_arquivo"] += 1
-        return pi_arquivo_original(*a, **kw)
+    monkeypatch.setattr(ct, "_nova_dobra", claude_contado)
+    monkeypatch.setattr(cs, "_dobra_pi", pi_contado)
 
-    monkeypatch.setattr(cs, "linhas_claude", claude_contado)
-    monkeypatch.setattr(cs, "linhas_pi", pi_contado)
-    monkeypatch.setattr(cs, "_linhas_arquivo_pi", pi_arquivo_contado)
-
-    cs.coletar()
-    cs.coletar()
-    # `pi` conta 4: `linhas_omp` passa por `linhas_pi` também (raiz do omp ausente → vazio).
-    assert chamadas == {"claude": 2, "pi": 4, "pi_arquivo": 1}, \
-        "árvore roda a cada coletar(); o arquivo do Pi é lido uma vez enquanto não muda"
+    assert sum(r.input for r in cs.coletar()) == 2
+    assert sum(r.input for r in cs.coletar()) == 2
+    assert chamadas == {"claude": 1, "pi": 1}, "cada arquivo é lido uma vez enquanto não muda"
 
 
 def test_linhas_omp_le_a_raiz_do_omp_com_source_omp_e_model_change_novo(tmp_path, monkeypatch):
@@ -434,8 +429,7 @@ def test_coletar_nao_conta_duas_vezes_quando_as_raizes_coincidem(tmp_path, monke
     monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "y")
     monkeypatch.setattr(cs, "_config_dirs", lambda: [])
     vistos = []
-    monkeypatch.setattr(cs, "linhas_pi", lambda raiz=None, source="pi": vistos.append(source) or [])
-    monkeypatch.setattr(cs, "linhas_omp", lambda: vistos.append("omp") or [])
+    monkeypatch.setattr(cs, "_sincronizar_pi", lambda raiz, source: vistos.append(source))
     cs.coletar()
     assert vistos == ["pi"]
 
