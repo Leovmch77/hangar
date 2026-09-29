@@ -78,6 +78,9 @@ const COLUMN: f32 = 780.;
 const FIRST_PAGE: usize = 60;
 const HISTORY_PAGE: usize = 400;
 
+/// Conexão, máquina e nome da sessão aberta (`session_owner`).
+pub(crate) type SessionOwner = (u64, String, String);
+
 /// Largura da tela sem sessão: a do mock vezes o ajuste de Aparência.
 fn column_width() -> f32 { COLUMN * crate::appearance::get().column as f32 / 100. }
 
@@ -316,6 +319,8 @@ pub struct Hangar {
     /// travada não congela a janela. Ausente ou `None` = segue pelo backend.
     local_dirs: HashMap<String, Option<std::path::PathBuf>>,
     selected: Option<SessionInfo>,
+    /// Máquina da sessão aberta quando não é a ativa: abrir uma sessão não troca o servidor das configurações.
+    open_api: Option<Api>,
     chat: Chat,
     list_task: Option<JoinHandle<()>>,
     session_task: Option<JoinHandle<()>>,
@@ -493,8 +498,10 @@ pub struct Hangar {
     servers_rev: u64,
     /// Servidores de convite cujo compartilhamento acabou (chave `servers::norm`).
     invite_ended: HashSet<String>,
-    /// Sessão de outra máquina clicada na barra: abre quando a lista da máquina, agora ativa, chegar.
+    /// Sessão aberta antes da troca do servidor ativo para a máquina dela: reabre quando a lista nova chegar.
     pending_open: Option<String>,
+    /// Sessão de outra máquina clicada antes da lista dela chegar (chave `servers::norm`, nome).
+    pending_remote: Option<(String, String)>,
     dictation: dictation::Dictation,
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
@@ -618,7 +625,7 @@ impl Hangar {
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
         Self {
-            runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), local_dirs: HashMap::new(), selected: None,
+            runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), local_dirs: HashMap::new(), selected: None, open_api: None,
             chat: Chat::default(), list_task: None, session_task: None, history_task: None,
             address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription,
             connection_dialog: true, list_online: false, chat_online: false, loading: false, history_started: false,
@@ -648,7 +655,7 @@ impl Hangar {
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
-            servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None,
+            servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -726,6 +733,15 @@ impl Hangar {
         if host.is_empty() { tr("connection") } else { host.to_owned() }
     }
 
+    /// Máquina da sessão aberta: a de outra máquina pelo nome da entrada dela, ou o host.
+    fn session_label(&self, cx: &App) -> String {
+        let Some(key) = self.open_key() else { return self.server_label(cx) };
+        match self.server_entry(&key) {
+            Some(entry) if !entry.label.is_empty() => entry.label.clone(),
+            _ => key.trim_start_matches("http://").trim_start_matches("https://").to_owned(),
+        }
+    }
+
     /// Texto da última resposta do agente na conversa aberta, para o atalho de copiar.
     fn last_reply(&self) -> Option<String> {
         self.chat.events.iter().rev().find(|e| e.kind == "assistant_msg").map(|e| e.body())
@@ -757,12 +773,30 @@ impl Hangar {
     }
 
     fn selected_key(&self) -> Option<SessionKey> {
-        SessionKey::new(self.server.as_deref()?, self.selected.as_ref()?)
+        SessionKey::new(&self.session_server()?, self.selected.as_ref()?)
+    }
+
+    /// Conexão da máquina da sessão aberta; sem sessão de outra máquina, a do servidor ativo.
+    pub(super) fn session_api(&self) -> Option<Api> { self.open_api.clone().or_else(|| self.api.clone()) }
+
+    pub(super) fn session_server(&self) -> Option<String> { self.open_api.as_ref().map(Api::identity).or_else(|| self.server.clone()) }
+
+    /// Conexão de `server` se ela ainda está aberta; `None` quando a sessão trocou de máquina no meio.
+    pub(super) fn api_for(&self, server: &str) -> Option<Api> {
+        if self.server.as_deref() == Some(server) { return self.api.clone(); }
+        self.open_api.clone().filter(|api| api.identity() == server)
     }
 
     /// Dono do que sobrevive a reabrir a mesma sessão (terminal, arquivos, ditado): `selection` muda até no clique na própria aba.
-    pub(super) fn session_owner(&self) -> Option<(u64, String)> {
-        self.selected.as_ref().map(|session| (self.connection, session.name.clone()))
+    /// A máquina entra porque `connection` não muda ao abrir sessão de outra, e o nome pode se repetir entre elas.
+    pub(super) fn session_owner(&self) -> Option<SessionOwner> {
+        Some((self.connection, self.session_server()?, self.selected.as_ref()?.name.clone()))
+    }
+
+    /// Lista da máquina `server`: a ativa ou a de outra máquina já lida.
+    pub(super) fn sessions_of(&self, server: &str) -> &[SessionInfo] {
+        if self.server.as_deref() == Some(server) { return &self.sessions; }
+        self.remote.get(&servers::norm(server)).map_or(&[], |list| &list.sessions)
     }
 
     fn open_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -788,6 +822,7 @@ impl Hangar {
         // Como o `cp_active` do web: a máquina que abriu vira a da próxima abertura.
         self.unsaved_connection = Some((address, token.clone()));
         if let Some(key) = self.selected_key() { self.drafts.insert(key, self.composer.read(cx).value().to_string()); }
+        let reopen = self.selected.clone().zip(self.session_server().map(|s| servers::norm(&s)));
         // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
         let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
             .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone()));
@@ -827,6 +862,12 @@ impl Hangar {
         self.refresh_desktop_palette(cx);
         let a = appearance::get();
         if a.background == appearance::Background::Desktop && a.wallpaper == appearance::Wallpaper::Glass { self.refresh_backdrop(window, cx); }
+        // A sessão aberta continua aberta, na máquina dela; a do servidor que acabou de conectar abre quando a lista chegar.
+        match reopen {
+            Some((session, key)) if Some(key.as_str()) == self.server.as_deref().map(servers::norm).as_deref() => self.pending_open = Some(session.name),
+            Some((session, key)) => self.select_on(&key, session, window, cx),
+            None => {}
+        }
         cx.notify();
     }
 
@@ -854,7 +895,7 @@ impl Hangar {
         self.revision += 1;
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
         self.leave_accounts();
-        self.selected = None;
+        (self.selected, self.open_api, self.pending_remote) = (None, None, None);
         self.sessions.clear();
         self.chat = Chat::default();
         self.turn_seen = None;
@@ -889,14 +930,36 @@ impl Hangar {
         self.computer = computer::Computer::default();
     }
 
+    /// Sessão da lista do servidor ativo.
     fn select(&mut self, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        // Escolher outra conversa desiste da de outra máquina que esperava a lista chegar.
+        self.pending_remote = None;
+        self.open_session(None, session, window, cx);
+    }
+
+    /// A mesma sessão de novo (Tentar de novo), na máquina em que ela já estava.
+    fn reselect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.selected.clone() { self.open_session(self.open_api.clone(), session, window, cx); }
+    }
+
+    /// Sessão de qualquer máquina da lista, sem trocar o servidor ativo.
+    pub(super) fn select_on(&mut self, key: &str, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if self.server.as_deref().map(servers::norm).as_deref() == Some(key) { return self.select(session, window, cx); }
+        let Some(api) = self.server_entry(key).and_then(|entry| Api::new(&entry.address, &entry.token).ok()) else { return };
+        self.pending_remote = None;
+        self.open_session(Some(api), session, window, cx);
+    }
+
+    fn open_session(&mut self, open_api: Option<Api>, session: SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
         api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
-        if self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
+        let same_server = self.open_api.as_ref().map(Api::identity) == open_api.as_ref().map(Api::identity);
+        if !same_server || self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
         }
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        self.open_api = open_api;
         // Com as abas no topo, a aba da sessão aberta entra na vista da faixa.
         if let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
@@ -925,7 +988,7 @@ impl Hangar {
         self.row_ids.clear();
         self.list_state.reset(0);
         self.follow_reset();
-        let draft = self.server.as_deref().and_then(|server| SessionKey::new(server, &session))
+        let draft = self.session_server().and_then(|server| SessionKey::new(&server, &session))
             .and_then(|key| self.drafts.get(&key).cloned()).unwrap_or_default();
         self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.confirm = None;
@@ -942,7 +1005,7 @@ impl Hangar {
         self.selected = Some(session.clone());
         self.refresh_shortcut_terms(&session.name);
         if session.readable() {
-            if let Some(api) = self.api.clone() {
+            if let Some(api) = self.session_api() {
                 let tx = self.tx.clone();
                 let connection = self.connection;
                 let selection = self.selection;
@@ -960,26 +1023,32 @@ impl Hangar {
     pub(super) fn go_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
-        if self.selected.is_some() {
-            self.close_terminal(false, window, cx);
-            if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
-            self.selection += 1;
-            if let Some(task) = self.session_task.take() { task.abort(); }
-            if let Some(task) = self.history_task.take() { task.abort(); }
-            self.selected = None;
-            self.opening = None;
-            self.chat = Chat::default();
-            self.turn_seen = None;
-            self.reset_details();
-            self.cancel_preview_drop();
-            self.clear_visible_preview();
-            self.error = None;
-            self.loading = false;
-            self.chat_online = false;
-            self.close_popups();
-            self.composer.update(cx, |input, cx| input.set_value("", window, cx));
-        }
+        self.pending_remote = None;
+        self.close_open_session(window, cx);
         self.composer.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Fecha a sessão aberta, guardando o rascunho dela.
+    pub(super) fn close_open_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() { return; }
+        self.close_terminal(false, window, cx);
+        if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        self.selection += 1;
+        if let Some(task) = self.session_task.take() { task.abort(); }
+        if let Some(task) = self.history_task.take() { task.abort(); }
+        (self.selected, self.open_api) = (None, None);
+        self.opening = None;
+        self.chat = Chat::default();
+        self.turn_seen = None;
+        self.reset_details();
+        self.cancel_preview_drop();
+        self.clear_visible_preview();
+        self.error = None;
+        self.loading = false;
+        self.chat_online = false;
+        self.close_popups();
+        self.composer.update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
     }
 
@@ -991,7 +1060,7 @@ impl Hangar {
     }
 
     fn load_history(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return; };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return; };
         if self.history_task.as_ref().is_some_and(|task| !task.is_finished()) { return; }
         self.history_started = true;
         self.loading = true;
@@ -1052,7 +1121,7 @@ impl Hangar {
                 return;
             }
             Payload::Reply(key, reply, result) => {
-                let lost = self.selected_key().as_ref() == Some(&key) && result.as_ref().err().is_some_and(|e| self.auth_lost(e));
+                let lost = self.selected_key().as_ref() == Some(&key) && result.as_ref().err().is_some_and(|e| self.chat_auth_lost(e));
                 if lost
                     && !matches!(reply, Reply::Diff(_)) { self.open_connection(window, cx); }
                 self.receive_reply(key, reply, result, window, cx);
@@ -1065,7 +1134,13 @@ impl Hangar {
             Payload::BackdropPicked(result) => { self.receive_picked_backdrop(result, window, cx); return; }
             Payload::BackdropRemoved(result) => { self.receive_removed_backdrop(result, window, cx); return; }
             // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
-            Payload::Remote(generation, key, update) => { self.receive_remote(generation, key, update, cx); return; }
+            Payload::Remote(generation, key, update) => {
+                if generation == self.remote_gen {
+                    self.receive_remote(generation, key.clone(), update, cx);
+                    self.remote_changed(&key, window, cx);
+                }
+                return;
+            }
             payload => payload,
         };
         if envelope.connection != self.connection { return; }
@@ -1113,11 +1188,11 @@ impl Hangar {
                 } else { self.list_online = true; }
             }
             Payload::Stream(Update::Offline(error)) => {
-                if self.auth_lost(&error) {
+                if if is_chat { self.chat_auth_lost(&error) } else { self.auth_lost(&error) } {
                     self.open_connection(window, cx);
                     self.error = Some(Self::failure(&error));
                 }
-                if is_chat { self.chat_online = false; self.error = Some(self.active_failure(&error)); }
+                if is_chat { self.chat_online = false; self.error = Some(self.chat_failure(&error)); }
                 else { self.list_online = false; self.list_error = Some(self.active_failure(&error)); }
             }
             Payload::Stream(Update::Frame(frame)) => {
@@ -1174,12 +1249,18 @@ impl Hangar {
                     }
                     Err(error) => {
                         if error.status == Some(404) {
-                            if let Some(api) = self.api.clone() {
+                            if let Some(api) = self.session_api() {
                                 let tx = self.tx.clone();
                                 let connection = self.connection;
+                                // Sessão de outra máquina: a lista relida é a dela, e a aberta a acompanha por `remote_changed`.
+                                let remote = self.open_key().map(|key| (self.remote_gen, key));
                                 self.runtime.spawn(async move {
                                     let result = api.sessions().await;
-                                    let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await;
+                                    let payload = match remote {
+                                        Some((generation, key)) => Payload::Remote(generation, key, servers::RemoteUpdate::Sessions(result)),
+                                        None => Payload::Sessions(result),
+                                    };
+                                    let _ = tx.send(Envelope { connection, selection: None, payload }).await;
                                 });
                             }
                         }
@@ -1298,7 +1379,7 @@ impl Hangar {
             }
         } else {
             if !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
-            if current && result.as_ref().err().is_some_and(|e| self.auth_lost(e)) {
+            if current && result.as_ref().err().is_some_and(|e| self.chat_auth_lost(e)) {
                 self.open_connection(window, cx);
             }
         }
@@ -1332,16 +1413,25 @@ impl Hangar {
                 None => self.root_focus.focus(window, cx),
             }
         }
-        if let Some(old) = old {
-            match self.sessions.iter().find(|s| s.name == old.name).cloned() {
-                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.select(new, window, cx),
+        if old.is_some() && self.open_api.is_none() {
+            let list = self.sessions.clone();
+            self.follow_open(&list, window, cx);
+        }
+        self.sidebar_sessions_changed(window, cx);
+    }
+
+    /// A sessão aberta acompanha a lista da máquina dela: dados novos, transcript trocado ou sumiço.
+    pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(old) = self.selected.clone() {
+            match list.iter().find(|s| s.name == old.name).cloned() {
+                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.open_session(self.open_api.clone(), new, window, cx),
                 Some(new) => self.selected = Some(new),
                 None => {
                     self.close_terminal(false, window, cx);
                     self.selection += 1;
                     if let Some(task) = self.session_task.take() { task.abort(); }
                     if let Some(task) = self.history_task.take() { task.abort(); }
-                    self.selected = None;
+                    (self.selected, self.open_api) = (None, None);
                     self.chat = Chat::default();
                     self.turn_seen = None;
                     self.reset_details();
@@ -1353,7 +1443,6 @@ impl Hangar {
                 }
             }
         }
-        self.sidebar_sessions_changed(window, cx);
     }
 
     /// Aplica um quadro do SSE da conversa. Devolve se ele valeu e o que mudou na tela.
@@ -1642,7 +1731,7 @@ impl Hangar {
     }
 
     fn commands_key(&self) -> Option<String> {
-        let (server, session) = (self.server.as_deref()?, self.selected.as_ref()?);
+        let (server, session) = (self.session_server()?, self.selected.as_ref()?);
         Some(format!("{server}|{}|{}", session.provider, session.name))
     }
 
@@ -1652,7 +1741,7 @@ impl Hangar {
 
     // Codex muda a lista conforme o modo: sempre relê. Os demais usam a lista já buscada.
     fn ensure_commands(&mut self, force: bool) {
-        let (Some(api), Some(session), Some(cache)) = (self.api.clone(), self.selected.clone(), self.commands_key()) else { return; };
+        let (Some(api), Some(session), Some(cache)) = (self.session_api(), self.selected.clone(), self.commands_key()) else { return; };
         if !force && session.provider != "codex" && self.commands.get(&cache).is_some_and(|r| r.is_ok()) { return; }
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -1670,11 +1759,15 @@ impl Hangar {
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_none() {
             let text = self.composer.read(cx).value().to_string();
-            if text.trim().is_empty() { return; }
+            let attached = self.attachments.get(&create::new_chat_key()).map(|list| list.iter()
+                .map(|a| (a.name.clone(), a.bytes.clone(), a.image.is_some() || composer::image_format(&a.name).is_some())).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if text.trim().is_empty() && attached.is_empty() { return; }
             if let Some(view) = self.new_chat.clone() {
                 let selection = self.selection;
-                view.update(cx, |view, cx| view.create(Some((selection, text.clone())), cx));
-                if view.read(cx).creating { self.begin_opening(view, text, window, cx); }
+                let names = attached.iter().map(|(name, ..)| name.clone()).collect();
+                view.update(cx, |view, cx| view.create(Some((selection, text.clone(), attached)), cx));
+                if view.read(cx).creating { self.begin_opening(view, text, names, window, cx); }
                 cx.notify();
             }
             return;
@@ -1709,7 +1802,7 @@ impl Hangar {
 
     /// `composed`: veio do campo, e com o "mandar pro grupo" ligado vai também aos membros.
     fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone().filter(|_| self.server.as_deref() == Some(key.server.as_str())) else {
+        let Some(api) = self.api_for(&key.server) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
             cx.notify();
             return;
@@ -1735,7 +1828,7 @@ impl Hangar {
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
     fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone().filter(|_| self.server.as_deref() == Some(key.server.as_str())) else { return; };
+        let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
         for attachment in list.iter_mut() {
@@ -1811,7 +1904,7 @@ impl Hangar {
 
     // Leitura do disco fora da janela; tamanho conferido antes de ler.
     fn read_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(key) = self.selected_key() else { return; };
+        let Some(key) = self.composer_key() else { return; };
         if paths.is_empty() || self.uploading.contains_key(&key) { return; }
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -1828,13 +1921,13 @@ impl Hangar {
     }
 
     fn pick_files(&mut self, cx: &mut Context<Self>) {
-        let Some(key) = self.selected_key() else { return; };
+        let Some(key) = self.composer_key() else { return; };
         let prompt = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: None });
         cx.spawn(async move |this, cx| {
             let chosen = prompt.await;
             let Some(this) = this.upgrade() else { return; };
             this.update(cx, |this, cx| match chosen {
-                Ok(Ok(Some(paths))) if this.selected_key().as_ref() == Some(&key) => this.read_paths(paths, cx),
+                Ok(Ok(Some(paths))) if this.composer_key().as_ref() == Some(&key) => this.read_paths(paths, cx),
                 Ok(Ok(_)) => {}
                 _ => { this.action_feedback.insert(key, (tr("picker_failed"), true)); cx.notify(); }
             });
@@ -1843,7 +1936,7 @@ impl Hangar {
 
     // Colar: imagem vira anexo e arquivo copiado vira anexo; texto segue para o campo.
     fn paste(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
-        let Some(key) = self.selected_key() else { return false; };
+        let Some(key) = self.composer_key() else { return false; };
         let mut paths = Vec::new();
         let mut took = false;
         let mut problems = Vec::new();
@@ -1866,7 +1959,7 @@ impl Hangar {
     }
 
     fn remove_attachment(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.selected_key() else { return; };
+        let Some(key) = self.composer_key() else { return; };
         if self.uploading.contains_key(&key) { return; }
         if let Some(list) = self.attachments.get_mut(&key) {
             let gone = list.iter().position(|a| a.id == id).and_then(|n| list.remove(n).image);
@@ -1877,7 +1970,7 @@ impl Hangar {
     }
 
     fn open_recent(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.recent.as_ref().is_some_and(|recent| recent.key == key) { self.recent = None; cx.notify(); return; }
         self.command_panel = false;
         self.close_controls();
@@ -1892,7 +1985,7 @@ impl Hangar {
 
     // Baixa de volta um anexo do cofre e o põe no campo como qualquer outro, sem citar caminho por presunção.
     fn reattach(&mut self, filename: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         self.recent = None;
         let (connection, tx, uploads) = (self.connection, self.tx.clone(), self.uploads_for(&key));
         self.runtime.spawn(async move {
@@ -1905,7 +1998,7 @@ impl Hangar {
     }
 
     fn ensure_media(&mut self, source: &Source) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let slot = (key.clone(), source.clone());
         if self.media.contains(&slot) { return; }
         self.media.start(slot);
@@ -1927,7 +2020,7 @@ impl Hangar {
 
     // Abrir grava uma cópia privada e entrega ao programa do sistema; salvar pergunta o destino. Nunca há token em URL.
     fn keep_file(&mut self, source: Source, name: String, open: bool, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let safe = composer::safe_name(&name);
         // Único ponto por onde os dois botões passam: só abre o que, com o nome gravado, é tipo passivo.
         if open && !composer::openable(&safe) {
@@ -1980,7 +2073,7 @@ impl Hangar {
     fn interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = None;
         if self.connection_dialog || !self.can_interrupt() { cx.notify(); return; }
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return; };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return; };
         let Some(key) = self.selected_key() else { return; };
         if self.stopping.contains(&key) { return; }
         let returned = self.delivery.take_unconfirmed(&key);
@@ -2115,7 +2208,7 @@ impl Hangar {
     // O instantâneo é o pedido que a pessoa viu ao clicar; se o atual difere, nada sai.
     fn act(&mut self, action: Action, snapshot: String, cx: &mut Context<Self>) {
         if self.connection_dialog || !self.chat_online || !self.history_installed { return; }
-        let (Some(api), Some(session), Some(key)) = (self.api.clone(), self.selected.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(session), Some(key)) = (self.session_api(), self.selected.clone(), self.selected_key()) else { return; };
         if self.current_snapshot(&action).as_deref() != Some(snapshot.as_str()) {
             self.action_feedback.insert(key, (tr("request_changed"), true));
             cx.notify();
@@ -2147,7 +2240,7 @@ impl Hangar {
         let current = self.selected_key().as_ref() == Some(&key);
         let note = match result {
             Err(error) => {
-                if current && self.auth_lost(&error) { self.open_connection(window, cx); }
+                if current && self.chat_auth_lost(&error) { self.open_connection(window, cx); }
                 // 5xx pode ter agido lá: mostra o motivo do servidor e a incerteza juntos.
                 let text = match (error.uncertain, error.status) {
                     (true, Some(_)) => format!("{} {}", tr(&error.detail), tr("action_uncertain")),
@@ -3240,7 +3333,9 @@ impl Hangar {
         let new_chat = self.selected.is_none() && self.new_chat.is_some();
         let creating = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).creating);
         let can_create = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).can_create(cx));
-        let key = self.selected_key();
+        let key = self.composer_key();
+        // A tela sem sessão anexa e dita antes de a sessão existir; os anexos sobem depois que ela nasce.
+        let attachable = readable || (new_chat && key.is_some());
         let text = self.composer.read(cx).value().to_string();
         let uploading = key.as_ref().and_then(|key| self.uploading.get(key)).map(|batch| {
             let done = key.as_ref().and_then(|key| self.attachments.get(key)).map(|list| list.iter()
@@ -3385,11 +3480,11 @@ impl Hangar {
                 }
                 cx.notify();
             }));
-        let attach = chrome::icon_button("attach", IconName::Paperclip, tr("attach"), cx).disabled(!readable || uploading.is_some())
+        let attach = chrome::icon_button("attach", IconName::Paperclip, tr("attach"), cx).disabled(!attachable || uploading.is_some())
             .on_click(cx.listener(|this, _, _, cx| this.pick_files(cx)));
         let recent_btn = popup::anchor(div(), "attach-recent").child(chrome::icon_button("attach-recent", IconName::RotateCcwClock, tr("attach_recent"), cx)
             .disabled(!readable || uploading.is_some()).selected(self.recent.is_some()).on_click(cx.listener(|this, _, _, cx| this.open_recent(cx))));
-        let (microphone, dictation_style, dictation_strip) = self.render_dictation(readable, cx);
+        let (microphone, dictation_style, dictation_strip) = self.render_dictation(attachable, cx);
         let control_row = div().flex().items_center().gap_1()
             .child(commands).child(attach).child(recent_btn).child(microphone).children(dictation_style)
             .child(div().flex_1())
@@ -3410,7 +3505,7 @@ impl Hangar {
         let landing = self.new_chat_screen();
         let frame = if landing { div().w_full().max_w(px(column_width())) } else { column_box(true) };
         div().id("composer").relative().flex_shrink_0().w_full().px(px(if landing { 36. } else { 12. })).pb(px(10.)).flex().justify_center()
-            .when(readable, |el| el.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(theme::accent_dim()))
+            .when(attachable, |el| el.drag_over::<ExternalPaths>(|style, _, _, _| style.bg(theme::accent_dim()))
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.read_paths(paths.paths().to_vec(), cx))))
             .child(popup::anchor(frame.relative().flex().flex_col(), "composer")
                 .when(!floating.is_empty(), |el| el.child(div().absolute().left_0().right_0().bottom(relative(1.)).pb_2().flex().flex_col().gap_2()
@@ -3941,7 +4036,7 @@ impl Hangar {
                 grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
                 grouping::ListRow::Session(session) => session,
             };
-            let selected = remote.is_none() && selected_name == Some(session.name.as_str());
+            let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
             let remote = remote.map(str::to_owned);
             children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
                 else { self.render_session_row(session.clone(), selected, mixed, remote, window, cx) });
@@ -4062,7 +4157,8 @@ impl Hangar {
         let weak = cx.entity().downgrade();
         let tabs = self.sessions.iter().filter(|s| !self.sidebar.hidden().contains(&s.name)).filter_map(|session| {
             let focus = self.tab_focus.get(&session.name)?.clone();
-            let on = selected_name == Some(session.name.as_str());
+            // As abas são da lista ativa: sessão de mesmo nome aberta em outra máquina não marca nenhuma.
+            let on = self.open_api.is_none() && selected_name == Some(session.name.as_str());
             let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
             // Nome, estado e perguntas por extenso: o ponto só diz o estado pela cor.
             let mut label = format!("{} · {}", session.name, tr(&format!("chip_{state}")));
@@ -4219,8 +4315,7 @@ impl Hangar {
             }))
             .map(|el| self.group_row(el, &session, remote.as_deref(), 8., cx))
             .map(|el| match remote {
-                Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
-                    .into_any_element(),
+                Some(key) => self.remote_row(el, key, session.name.clone(), cx),
                 None => el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
                     let hover = this.sidebar.hover.take();
                     this.start_menu(menu_name.clone(), cx);
@@ -4365,8 +4460,7 @@ impl Hangar {
             .children(menu_button)
             .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
             .map(|el| match remote {
-                Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx)))
-                    .into_any_element(),
+                Some(key) => self.remote_row(el, key, session.name.clone(), cx),
                 None => el.on_click(cx.listener(move |this, _, window, cx| {
                     this.hide_preview();
                     if this.take_long_press() { return; }
@@ -4856,7 +4950,7 @@ impl Hangar {
             .when_some(self.chat.state.problema_detalhe.clone().or_else(|| self.chat.state.problema.clone()), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
             .when_some(self.error.clone(), |el, error| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(error)
                 .child(Button::new("retry").small().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| {
-                    if let Some(session) = this.selected.clone() { this.select(session, window, cx); }
+                    this.reselect(window, cx);
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
@@ -4921,7 +5015,7 @@ impl Render for Hangar {
         let session_chip = matches!(header_state.as_str(), "working" | "idle" | "awaiting_input" | "dead");
         let limited_now = self.chat.state.limited.or(self.selected.as_ref().and_then(|s| s.limited)) == Some(true);
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
-        let place = self.selected.as_ref().map(|s| place(s, &self.server_label(cx)));
+        let place = self.selected.as_ref().map(|s| place(s, &self.session_label(cx)));
         let landing::Frame { drop, shown, rise } = self.landing_frame(window, cx);
         let opening = self.opening.clone().filter(|_| self.selected.is_none());
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
@@ -4967,7 +5061,7 @@ impl Render for Hangar {
         let slide = self.side_slide_frame(window, cx);
         let beside = beside_sidebar.then(|| self.side_width(window).filter(|_| !files_expanded)
             .or(slide.map(|(width, _)| width)).or_else(|| self.opening_side_width(window)).unwrap_or(0.));
-        let topbar = self.render_topbar(beside, cx);
+        let topbar = self.render_topbar(beside, window, cx);
         let (topbar, topbar_beside) = if beside_sidebar { (None, Some(chat_fill(div(), self, window).relative().flex_1().min_w_0().h_full().flex().flex_col().child(topbar))) }
             else { (Some(topbar), None) };
         let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))

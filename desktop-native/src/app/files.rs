@@ -11,7 +11,7 @@ const PICTURE_SIDE: u32 = 4096;
 const UNREADABLE_PICTURE: &str = "file_image_unreadable";
 
 pub(super) struct Files {
-    owner: Option<(u64, String)>,
+    owner: Option<SessionOwner>,
     hidden: bool,
     tabs: Vec<FileTab>,
     active: usize,
@@ -157,7 +157,7 @@ impl Hangar {
     }
 
     pub(super) fn open_file(&mut self, path: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         if !self.files_visible() {
             let owner = self.session_owner();
             if self.files.owner != owner { for tab in std::mem::take(&mut self.files.tabs) { release(tab, window, cx); } }
@@ -263,7 +263,7 @@ impl Hangar {
 
     fn save_file(&mut self, cx: &mut Context<Self>) {
         if !self.files_visible() { return; }
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let tab = &mut self.files.tabs[self.files.active];
         let Some(Ok(doc)) = &mut tab.content else { return };
         if doc.saving || !doc.editable() || !doc.dirty() { return; }

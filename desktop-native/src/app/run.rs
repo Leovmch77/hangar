@@ -260,7 +260,7 @@ impl Render for RunPanel {
 impl Hangar {
     /// O atalho Rodar: diálogo do projeto da sessão aberta; o estado dele acende o botão do painel.
     pub(super) fn open_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let hangar = cx.entity().downgrade();
         let owner = key.clone();
         let report: Rc<dyn Fn(bool, &mut App)> = Rc::new(move |on, cx| {
@@ -274,7 +274,7 @@ impl Hangar {
 
     /// O botão já nasce aceso quando há um run vivo no projeto, como o web ao abrir a conversa.
     pub(super) fn load_run_state(&mut self) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = api.read(&key.name, &["runners"], &[], 15).await;

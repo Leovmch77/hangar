@@ -808,7 +808,9 @@ impl Hangar {
                         }
                         let lost = self.sidebar.lost.as_deref() == Some(name.as_str());
                         if lost { self.sidebar.lost = None; }
-                        if self.selected.as_ref().is_some_and(|s| s.name == name) || (lost && self.selected.is_none()) {
+                        // Renomear é da lista ativa: a aberta de mesmo nome em outra máquina fica onde está.
+                        let open_here = self.open_api.is_none() && self.selected.as_ref().is_some_and(|s| s.name == name);
+                        if open_here || (lost && self.selected.is_none()) {
                             match self.sessions.iter().find(|s| s.name == new).cloned() {
                                 Some(s) => { self.error = None; self.select(s, window, cx); }
                                 None => self.sidebar.follow = Some(new),
@@ -916,6 +918,16 @@ pub(super) fn menu_style(menu: PopupMenu) -> PopupMenu {
 }
 
 /// O mesmo menu no clique direito da linha, no ⋯ e na aba.
+/// Sessão de um convite: o único gesto é parar de acompanhar deste aparelho, nunca fechar a sessão do dono.
+pub(super) fn invite_menu(hangar: WeakEntity<Hangar>, key: String, name: String) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    move |menu, _, _| {
+        let (hangar, key) = (hangar.clone(), key.clone());
+        menu_style(menu).min_w(px(240.)).label(name.clone())
+            .item(PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr_shared("convite_parar", &[])))
+                .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.stop_following(&key, window, cx)); }))
+    }
+}
+
 pub(super) fn session_menu(hangar: WeakEntity<Hangar>, session: SessionInfo) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     move |menu, window, cx| {
         let Some(entity) = hangar.upgrade() else { return menu };
@@ -1199,7 +1211,7 @@ impl Hangar {
         let mut rows: Vec<AnyElement> = Vec::new();
         let place = |layout: &Layout, remote: Option<&str>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
             for session in layout.waiting.iter().chain(layout.groups.iter().flat_map(|g| g.sessions.iter())) {
-                let selected = remote.is_none() && selected_name == Some(session.name.as_str());
+                let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
                 rows.push(self.render_rail_row((*session).clone(), selected, mixed, remote.map(str::to_owned), cx));
             }
         };
@@ -1280,7 +1292,7 @@ impl Hangar {
             .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
             .when(mixed && !session.orq(), |el| el.child(chrome::provider_badge(&session.provider)));
         match remote {
-            Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx))).into_any_element(),
+            Some(key) => self.remote_row(el, key, session.name.clone(), cx),
             None => {
                 let (weak, menu_session, menu_name) = (cx.entity().downgrade(), session.clone(), session.name.clone());
                 el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
@@ -1293,6 +1305,13 @@ impl Hangar {
                     .into_any_element()
             }
         }
+    }
+
+    /// Linha de sessão de outra máquina: clicar abre nela; num convite, o clique direito oferece parar de acompanhar.
+    pub(super) fn remote_row(&self, el: Stateful<Div>, key: String, name: String, cx: &mut Context<Self>) -> AnyElement {
+        let menu = self.server_entry(&key).is_some_and(|s| s.invite).then(|| invite_menu(cx.entity().downgrade(), key.clone(), name.clone()));
+        let el = el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, name.clone(), window, cx)));
+        match menu { Some(menu) => el.context_menu(menu).into_any_element(), None => el.into_any_element() }
     }
 }
 

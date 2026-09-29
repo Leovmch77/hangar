@@ -120,7 +120,7 @@ impl Hangar {
 
     /// Abre o resumo da sessão desta tela; lê só na primeira abertura, ou de novo depois de uma falha.
     fn open_dossier(&mut self, origin: String, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let dossier = match self.dossier.clone().filter(|d| d.read(cx).key == key) {
             Some(dossier) => dossier,
             None => { let dossier = cx.new(|_| Dossier { key: key.clone(), remote: Remote::default() }); self.dossier = Some(dossier.clone()); dossier }

@@ -124,31 +124,46 @@ impl Hangar {
 
     pub(super) fn server_entry(&self, key: &str) -> Option<&ServerEntry> { self.servers.iter().find(|s| norm(&s.address) == key) }
 
-    /// Clique numa sessão de outra máquina: ela vira a ativa (a lista dela já está na mão) e a sessão abre quando a lista chega.
+    /// Clique numa sessão de outra máquina: abre nela sem trocar o servidor ativo; lista ainda não lida abre quando chegar.
     pub(super) fn open_remote(&mut self, key: &str, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.server_entry(key).cloned() else { return };
-        self.pending_open = Some(name);
-        self.activate_server(entry, window, cx);
+        self.pending_remote = None;
+        match self.remote.get(key).filter(|l| l.loaded).and_then(|l| l.sessions.iter().find(|s| s.name == name).cloned()) {
+            Some(session) => {
+                self.select_on(key, session.clone(), window, cx);
+                self.focus_composer_for(&session, window, cx);
+            }
+            None => self.pending_remote = Some((key.to_owned(), name)),
+        }
     }
 
-    /// Troca o servidor ativo sem diálogo, como o `selectServer` do web. Sem sessão aberta, o texto do compositor fica.
+    /// Chave da máquina da sessão aberta quando ela não é a ativa.
+    pub(super) fn open_key(&self) -> Option<String> { self.open_api.as_ref().map(|api| norm(&api.identity())) }
+
+    /// Lista de outra máquina mudou: a sessão aberta dela acompanha, e a que esperava por ela abre.
+    pub(super) fn remote_changed(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(list) = self.remote.get(key).filter(|l| l.loaded).map(|l| l.sessions.clone()) else { return };
+        if self.open_key().as_deref() == Some(key) {
+            self.follow_open(&list, window, cx);
+            self.refresh_group_sheet(window, cx);
+        }
+        // Lista lida sem a sessão esperada: desiste, em vez de esperar a próxima para sempre.
+        if self.pending_remote.as_ref().is_some_and(|(want, _)| want == key)
+            && let Some((_, name)) = self.pending_remote.take()
+            && let Some(session) = list.into_iter().find(|s| s.name == name) {
+            self.select_on(key, session.clone(), window, cx);
+            self.focus_composer_for(&session, window, cx);
+        }
+    }
+
+    /// Troca o servidor ativo sem diálogo, como o `selectServer` do web. A sessão aberta continua aberta, na máquina dela.
     pub(super) fn activate_server(&mut self, entry: ServerEntry, window: &mut Window, cx: &mut Context<Self>) {
-        self.ready_sessions = self.remote.get(&norm(&entry.address)).filter(|l| l.loaded).map(|l| l.sessions.clone());
+        let target = norm(&entry.address);
+        self.ready_sessions = self.remote.get(&target).filter(|l| l.loaded).map(|l| l.sessions.clone());
         let draft = self.selected.is_none().then(|| self.composer.read(cx).value().to_string()).filter(|d| !d.is_empty());
         self.address.update(cx, |input, cx| input.set_value(entry.address, window, cx));
         self.token.update(cx, |input, cx| input.set_value(entry.token, window, cx));
         self.connect(window, cx);
         if let Some(draft) = draft { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
-    }
-
-    /// A sessão criada em outra máquina: ela vira a ativa uma vez, já com a sessão nova na lista guardada, para a lista que
-    /// chega primeiro não fechá-la.
-    pub(super) fn activate_for_created(&mut self, key: &str, session: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(entry) = self.server_entry(key).cloned() else { return };
-        if let Some(list) = self.remote.get_mut(key).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
-            list.sessions.push(session.clone());
-        }
-        self.activate_server(entry, window, cx);
     }
 
     /// Servidores trazidos de fora (o app Electron): entram na lista, gravada junto da conexão.

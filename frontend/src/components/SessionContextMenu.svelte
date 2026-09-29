@@ -291,7 +291,7 @@
     <DropdownMenu.Separator class="ctx-sep" />
     <DropdownMenu.Item onSelect={onDelete}>
       {#snippet child({ props })}
-        <button {...props} class="danger">{m.sessao_excluir_curto()}</button>
+        <button {...props} class="danger">{invite ? m.convite_parar() : m.sessao_excluir_curto()}</button>
       {/snippet}
     </DropdownMenu.Item>
   </DropdownMenu.Content>

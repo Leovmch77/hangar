@@ -18,9 +18,10 @@ pub(super) const OPENING: &str = "__opening__";
 /// pílulas de cima e de baixo no último desenho dela.
 pub(super) struct Landing { start: Instant, travel: f32, ghost: Entity<NewSession>, top: Option<Bounds<Pixels>>, bottom: Option<Bounds<Pixels>> }
 
-/// A mensagem mandada da tela sem sessão. `key` fica vazia até a sessão nascer.
+/// A mensagem mandada da tela sem sessão. `key` fica vazia até a sessão nascer. `text` é o do campo; `sent`, o que o
+/// transcript vai trazer (com os caminhos dos anexos), conhecido quando a sessão nasce; `files`, os nomes dos anexos.
 #[derive(Clone)]
-pub(super) struct Opening { pub text: String, pub name: String, pub provider: String, pub key: Option<SessionKey> }
+pub(super) struct Opening { pub text: String, pub sent: String, pub files: Vec<String>, pub name: String, pub provider: String, pub key: Option<SessionKey> }
 
 /// Um quadro: o quanto o compositor ainda está acima do lugar (`drop`), e a opacidade e o deslocamento de quem entra.
 pub(super) struct Frame { pub drop: f32, pub shown: f32, pub rise: f32 }
@@ -85,9 +86,9 @@ impl Hangar {
 
     /// Enviar na tela sem sessão, com a criação já pedida: a mensagem sai do campo e vai para a conversa, e a chegada
     /// começa agora, sem esperar a sessão.
-    pub(super) fn begin_opening(&mut self, home: Entity<NewSession>, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn begin_opening(&mut self, home: Entity<NewSession>, text: String, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let (name, provider) = { let view = home.read(cx); (view.opening_name(), view.provider().to_owned()) };
-        self.opening = Some(Opening { text, name, provider, key: None });
+        self.opening = Some(Opening { sent: text.clone(), text, files, name, provider, key: None });
         self.composer.update(cx, |input, cx| input.set_value("", window, cx));
         if !cx.reduce_motion() { self.start_landing(home, window); }
     }
@@ -105,7 +106,7 @@ impl Hangar {
         let Some(opening) = self.opening.as_ref() else { return false };
         if opening.key.is_none() || opening.key != self.selected_key() { return false; }
         let arrived = self.chat.events.iter().rev()
-            .any(|event| event.kind == "user_msg" && crate::delivery::matches_real(&display_body(event), &opening.text));
+            .any(|event| event.kind == "user_msg" && crate::delivery::matches_real(&display_body(event), &opening.sent));
         if arrived { self.opening = None; }
         !arrived
     }
@@ -113,7 +114,14 @@ impl Hangar {
     /// Antes de a sessão nascer, o painel direito aberto já ocupa o lugar dele: a conversa não muda de largura quando a
     /// sessão abre.
     pub(super) fn opening_side_width(&self, window: &Window) -> Option<f32> {
-        if self.opening.is_none() || self.selected.is_some() || !self.side.open { return None; }
+        self.opening.as_ref()?;
+        self.new_chat_side_width(window)
+    }
+
+    /// O lugar que o painel direito aberto vai tomar quando a sessão nascer. A tela sem sessão o deixa vazio, para o
+    /// compositor ficar no meio da mesma área da conversa, e não da janela inteira.
+    pub(super) fn new_chat_side_width(&self, window: &Window) -> Option<f32> {
+        if self.selected.is_some() || !self.side.open { return None; }
         self.side.fitted(f32::from(window.viewport_size().width), theme::is_floating(), self.nav_width(), false)
     }
 
@@ -133,8 +141,10 @@ impl Hangar {
 
     /// A mensagem enviada, na bolha do usuário e com o mesmo recuo da linha real, para a troca não mexer nada.
     pub(super) fn render_opening_bubble(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let text = self.opening.as_ref().map(|o| o.text.clone()).unwrap_or_default();
-        let view = self.text_view(OPENING, OPENING, safe_markdown(&text), cx);
+        // Os anexos ainda não subiram: a bolha diz os nomes, a miniatura vem com a mensagem real.
+        let text = self.opening.as_ref().map(|o| std::iter::once(safe_markdown(&o.text)).filter(|t| !t.trim().is_empty())
+            .chain(o.files.iter().map(|name| format!("📎 {}", safe_markdown(name)))).collect::<Vec<_>>().join("\n\n")).unwrap_or_default();
+        let view = self.text_view(OPENING, OPENING, text, cx);
         div().w_full().flex().flex_col().gap_2().items_end()
             .child(user_bubble(conversation_text(div().flex().flex_col().gap_2(), true).child(chat_text(&view, cx))))
             // A faixa de hora e copiar da linha real, vazia: a altura não muda quando ela chega.

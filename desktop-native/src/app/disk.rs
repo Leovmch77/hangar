@@ -229,9 +229,13 @@ pub(super) async fn retention(api: &Api) -> Option<i64> {
 impl Hangar {
     /// A sessão roda nesta máquina: servidor em loopback e a pasta dela existe aqui (o mesmo critério do painel de git).
     /// Fora do Unix tudo segue pelo backend: shell, pasta pessoal e separador de caminho mudam.
-    fn local_cwd(&self, name: &str) -> Option<(String, PathBuf)> {
-        if !cfg!(unix) || !self.api.as_ref()?.is_loopback() { return None; }
-        let cwd = self.sessions.iter().chain(self.selected.as_ref()).find(|s| s.name == name)?.cwd.clone()?;
+    /// `api` é a máquina dona da sessão: a aberta pode ser de outra que não a ativa.
+    fn local_cwd(&self, api: Option<Api>, name: &str) -> Option<(String, PathBuf)> {
+        let api = api?;
+        if !cfg!(unix) || !api.is_loopback() { return None; }
+        // A aberta vem antes: a lista ativa pode ter outra de mesmo nome quando ela é de outra máquina.
+        let open = self.selected.as_ref().filter(|s| s.name == name && self.session_server().as_deref() == Some(api.identity().as_str()));
+        let cwd = open.or_else(|| self.sessions.iter().find(|s| s.name == name))?.cwd.clone()?;
         let real = self.local_dirs.get(&cwd).cloned().flatten()?;
         Some((cwd, real))
     }
@@ -254,7 +258,7 @@ impl Hangar {
 
     /// Anexos da sessão aberta: da pasta desta máquina quando dá, senão pelo backend.
     pub(super) fn uploads_for(&self, key: &SessionKey) -> Uploads {
-        let local = self.local_cwd(&key.name).and_then(|(_, real)| {
+        let local = self.local_cwd(self.api_for(&key.server), &key.name).and_then(|(_, real)| {
             let id = if key.jsonl.is_empty() { Some(key.name.clone()) } else { session_id(&key.jsonl) }?;
             let dir = uploads_dir(&std::env::home_dir()?, &real, &id)?;
             Some(Uploads::Local { dir, cwd: real, jsonl: PathBuf::from(&key.jsonl) })
@@ -264,7 +268,8 @@ impl Hangar {
 
     /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor.
     pub(super) fn local_editor(&self, name: &str) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
-        let (cwd, _) = self.local_cwd(name)?;
+        // Chamado pelo menu da lista, que é do servidor ativo.
+        let (cwd, _) = self.local_cwd(self.api.clone(), name)?;
         let api = self.api.clone()?;
         Some(async move {
             let config = api.config().await?;

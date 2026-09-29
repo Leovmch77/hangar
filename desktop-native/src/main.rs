@@ -142,7 +142,8 @@ fn main() {
         cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, window_size(), cx))),
             app_id: Some("com.hangar.native".into()),
-            titlebar: Some(TitlebarOptions { title: Some("Hangar".into()), ..Default::default() }),
+            // No Windows a barra do app faz as vezes da do sistema, com os botões dela (`topbar::window_buttons`).
+            titlebar: Some(TitlebarOptions { title: Some("Hangar".into()), appears_transparent: cfg!(target_os = "windows"), ..Default::default() }),
             // A raiz pinta o fundo escolhido; o Vidro troca para Blurred no Windows e no macOS (`refresh_backdrop`).
             window_background: WindowBackgroundAppearance::Transparent,
             // Resposta chegando com o foco no outro monitor anda no ritmo da tela, não a 30 quadros.

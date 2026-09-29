@@ -5670,6 +5670,26 @@ async def transcribe_audio(name: str, request: Request, limpar: bool = False, es
         raise HTTPException(e.status, e.detail)
     if not limpar:
         return {"path": path, "text": text}
+    return {"path": path, **await _cleaned_dictation(text, estilo)}
+
+
+@app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
+async def transcribe_dictation(request: Request, estilo: str | None = None):
+    # Sem sessão: a tela de nova conversa dita antes de a sessão existir. Não há pasta onde guardar o
+    # áudio, então ele só é transcrito e limpo, como o microfone faz com `limpar=1`.
+    clen = request.headers.get("content-length")
+    if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
+        raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
+    data = await request.body()
+    filename = request.headers.get("x-filename") or request.query_params.get("name")
+    try:
+        text = await asyncio.to_thread(transcribe, data, filename)
+    except TranscribeError as e:
+        raise HTTPException(e.status, e.detail)
+    return await _cleaned_dictation(text, estilo)
+
+
+async def _cleaned_dictation(text: str, estilo: str | None) -> dict:
     # `estilo` = o que a PILL do composer mostrava quando a pessoa falou. Vence a config do
     # servidor (narrar.estilo_efetivo); ausente/desconhecido, a config manda como sempre.
     texto_limpo, aviso = await asyncio.to_thread(narrar.limpar_ditado, text, estilo)
@@ -5680,7 +5700,7 @@ async def transcribe_audio(name: str, request: Request, limpar: bool = False, es
     # quando limpar_ditado devolve o proprio texto sem tocar (ditado de menos de 5 palavras, ou
     # comecando com "/"): ali nao houve estilo nenhum, e dizer "prosa" seria a mesma mentira.
     aplicado = "cru" if (aviso or texto_limpo == text) else narrar.estilo_efetivo(text, estilo)
-    return {"path": path, "text": texto_limpo, "raw": text, "aviso": aviso,
+    return {"text": texto_limpo, "raw": text, "aviso": aviso,
             "estilo_aplicado": aplicado}
 
 

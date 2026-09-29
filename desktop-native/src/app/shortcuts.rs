@@ -302,7 +302,7 @@ impl Hangar {
     /// Grava a lista inteira do projeto (`PUT /project-shortcuts`): acrescentar, editar, mover e apagar são a mesma gravação.
     /// A lista na tela só muda com a resposta, então o que se vê é sempre o que está gravado.
     fn save_project_shortcuts(&mut self, items: Vec<Value>, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let project = &mut self.side.project;
         if project.saving.is_some() || project.owner.as_ref() != Some(&key) { return; }
         project.save_seq += 1;

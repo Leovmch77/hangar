@@ -90,7 +90,7 @@ impl Panel {
         let tabs = if headless { Vec::new() }
             else { vec![Slot::new(0, Kind::Session, session.clone(), true), Slot::new(1, Kind::Shell, String::new(), false)] };
         Self { id, tabs, next_uid: 2, session,
-            active: 0, focus: cx.focus_handle().tab_stop(true), height: 260., drag: None, maximized: false,
+            active: 0, focus: cx.focus_handle().tab_stop(true), height: appearance::get().terminal_height, drag: None, maximized: false,
             shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now() }
     }
 
@@ -172,7 +172,7 @@ impl Hangar {
 
     /// Terminais de atalho da sessão `name`, lidos do backend. A resposta atualiza a lista e as abas do painel.
     pub(super) fn refresh_shortcut_terms(&mut self, name: &str) {
-        let Some(api) = self.api.clone() else { return; };
+        let Some(api) = self.session_api() else { return; };
         let (connection, tx, name) = (self.connection, self.tx.clone(), name.to_owned());
         self.runtime.spawn(async move {
             let result = api.read(&name, &["shortcut-terminals"], &[], 10).await;
@@ -185,7 +185,7 @@ impl Hangar {
         let now = std::time::Instant::now();
         if self.side.shortcut_recheck.get(name).is_some_and(|at| now.duration_since(*at) < std::time::Duration::from_secs(5)) { return; }
         self.side.shortcut_recheck.insert(name.to_owned(), now);
-        let Some(api) = self.api.clone() else { return; };
+        let Some(api) = self.session_api() else { return; };
         let (connection, tx, name) = (self.connection, self.tx.clone(), name.to_owned());
         self.runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -214,7 +214,7 @@ impl Hangar {
     }
 
     fn close_shortcut(&mut self, id: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(panel)) = (self.api.clone(), self.terminal.as_ref()) else { return; };
+        let (Some(api), Some(panel)) = (self.session_api(), self.terminal.as_ref()) else { return; };
         let (connection, tx, name) = (self.connection, self.tx.clone(), panel.session.clone());
         self.runtime.spawn(async move {
             let result = api.act(&name, &["shortcut-terminals", &id, "close"], None, false, 15).await;
@@ -233,6 +233,7 @@ impl Hangar {
     }
 
     fn connect_terminal(&mut self, tab: usize) {
+        let api = self.session_api();
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some(slot) = panel.tabs.get_mut(tab) else { return; };
         if slot.fixture_error { return; }
@@ -241,7 +242,7 @@ impl Hangar {
         slot.generation += 1;
         slot.status = Status::Connecting;
         let (id, uid, generation, name) = (panel.id, slot.uid, slot.generation, slot.name.clone());
-        let Some(api) = self.api.clone() else {
+        let Some(api) = api else {
             slot.status = if slot.fixture_loaded { Status::Connected } else { Status::Failed(tr("term_disconnected")) };
             return;
         };
@@ -259,13 +260,19 @@ impl Hangar {
     }
 
     fn open_terminal_socket(&mut self, uid: u64, id: u64, generation: u64) {
-        let (Some(api), Some(panel)) = (self.api.as_ref(), self.terminal.as_mut()) else { return; };
+        // O token vai na URL do socket: é o da máquina da sessão aberta, não o do servidor ativo.
+        let token = match &self.open_api {
+            Some(api) => self.server_entry(&servers::norm(&api.identity())).map(|s| s.token.clone()).unwrap_or_default(),
+            None => self.active_token.clone(),
+        };
+        let (Some(api), Some(panel)) = (self.session_api(), self.terminal.as_mut()) else { return; };
+        let api = &api;
         let Some(tab) = panel.index(uid) else { return; };
         if panel.id != id || panel.tabs[tab].generation != generation { return; }
         let slot = &mut panel.tabs[tab];
         let (cols, rows) = slot.view.dimensions();
         let shortcut = slot.shortcut().map(|t| t.id.clone());
-        let socket = ws::Terminal::open(self.runtime.handle(), api, &slot.name, shortcut.as_deref(), self.active_token.clone(), cols, rows);
+        let socket = ws::Terminal::open(self.runtime.handle(), api, &slot.name, shortcut.as_deref(), token, cols, rows);
         let events = socket.events();
         slot.socket = Some(socket);
         let (connection, tx) = (self.connection, self.tx.clone());
@@ -278,6 +285,7 @@ impl Hangar {
     }
 
     fn show_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let api = self.session_api();
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some(shell) = panel.shell_index() else { return; };
         panel.active = shell;
@@ -287,7 +295,7 @@ impl Hangar {
             panel.shell_error = None;
             panel.shell_request += 1;
             let (id, request, name) = (panel.id, panel.shell_request, panel.session.clone());
-            if let Some(api) = self.api.clone() {
+            if let Some(api) = api {
                 let (connection, tx) = (self.connection, self.tx.clone());
                 self.runtime.spawn(async move {
                     let result = api.act(&name, &["shell"], None, false, 15).await;
@@ -419,17 +427,25 @@ impl Hangar {
     pub(super) fn drag_terminal(&mut self, y: f32, pressed: bool, window: &Window, cx: &mut Context<Self>) {
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some((start, height)) = panel.drag else { return; };
-        if !pressed { panel.drag = None; cx.notify(); return; }
+        if !pressed {
+            panel.drag = None;
+            // Grava só ao soltar, e vale para o próximo terminal aberto.
+            let mut next = appearance::get();
+            next.terminal_height = panel.height;
+            return self.apply_appearance(next, true, cx);
+        }
         panel.height = (height + start - y).clamp(120., (f32::from(window.viewport_size().height) - 120.).min(800.).max(120.));
         cx.notify();
     }
 
     pub(super) fn render_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panel = self.terminal.as_ref()?;
+        // Janela menor que a altura guardada: corta ao desenhar, sem mexer no guardado.
+        let height = panel.height.min((f32::from(window.viewport_size().height) - 120.).max(120.));
         // Abrindo, sobe do pé com a altura final: a conversa encolhe uma vez só, não a cada quadro.
         let rising = !panel.maximized && !cx.reduce_motion() && panel.opened.elapsed() < motion::RESIZE.total();
         if rising { motion::request_frame(window, cx); }
-        let below = if rising { panel.height * (1. - motion::RESIZE.ease(motion::RESIZE.raw(panel.opened))) } else { 0. };
+        let below = if rising { height * (1. - motion::RESIZE.ease(motion::RESIZE.raw(panel.opened))) } else { 0. };
         let tab = panel.active;
         let body = match panel.tabs.get(tab) {
             Some(slot) => self.terminal_body(panel, slot, cx),
@@ -490,15 +506,15 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| this.close_terminal(true, window, cx))));
         let terminal = div().id("terminal-panel")
             .when(panel.maximized, |el| el.absolute().inset_0().occlude())
-            .when(!panel.maximized, |el| el.h(px(panel.height)).flex_shrink_0())
+            .when(!panel.maximized, |el| el.h(px(height)).flex_shrink_0())
             .flex().flex_col().min_h_0().border_t_1().border_color(theme::border()).bg(theme::background())
             .when(!panel.maximized, |el| el.child(div().id("term-resize").h(px(6.)).flex_shrink_0().cursor_row_resize()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                    if let Some(panel) = this.terminal.as_mut() { panel.drag = Some((f32::from(event.position.y), panel.height)); cx.notify(); }
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    if let Some(panel) = this.terminal.as_mut() { panel.drag = Some((f32::from(event.position.y), height)); cx.notify(); }
                 }))))
             .child(header).child(body);
         Some(if rising {
-            div().h(px(panel.height)).flex_shrink_0().overflow_hidden().child(terminal.relative().top(px(below))).into_any_element()
+            div().h(px(height)).flex_shrink_0().overflow_hidden().child(terminal.relative().top(px(below))).into_any_element()
         } else { terminal.into_any_element() })
     }
 

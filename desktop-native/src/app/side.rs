@@ -120,7 +120,7 @@ pub(super) struct Side {
     diff: Option<(SessionKey, String, Option<Result<(String, bool), String>>)>,
     reloading: HashSet<SessionKey>,
     /// A aba Git da sessão aberta (dono = `session_owner`).
-    pub(super) git: Option<((u64, String), Entity<super::git::GitPanel>)>,
+    pub(super) git: Option<(SessionOwner, Entity<super::git::GitPanel>)>,
     /// Terminais dos atalhos shell por nome de sessão, e a aba que o painel deve trazer pra frente.
     pub(super) shortcut_terms: HashMap<String, Vec<super::terminal::ShortcutTerm>>,
     pub(super) shortcut_focus: HashMap<String, String>,
@@ -137,7 +137,8 @@ pub(super) struct Side {
 
 impl Default for Side {
     fn default() -> Self {
-        Self { open: true, menu: false, width: 300., browser_width: None, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0,
+        let saved = appearance::get();
+        Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0,
             files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None, browser_open: false,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
@@ -302,7 +303,7 @@ impl Hangar {
 
     pub(super) fn drag_side(&mut self, x: f32, pressed: bool, cx: &mut Context<Self>) {
         let Some((start_x, start_width, room)) = self.side.drag else { return; };
-        if !pressed { self.side.drag = None; cx.notify(); return; }
+        if !pressed { return self.end_drag(cx); }
         let wanted = start_width + start_x - x;
         // Preso ao espaço de agora: arrastar além dele não acumula largura que depois teria de ser desfeita.
         if self.side_browser() { self.side.browser_width = Some(wanted.clamp(BROWSER_MIN.min(room), room.max(MIN_WIDTH))); }
@@ -313,7 +314,11 @@ impl Hangar {
     pub(super) fn side_dragging(&self) -> bool { self.side.drag.is_some() }
 
     pub(super) fn end_drag(&mut self, cx: &mut Context<Self>) {
-        if self.side.drag.take().is_some() { cx.notify(); }
+        if self.side.drag.take().is_none() { return; }
+        // Grava só ao soltar: durante o arrasto a largura vive no `Side`.
+        let mut next = appearance::get();
+        (next.side_width, next.side_browser_width) = (self.side.width, self.side.browser_width);
+        self.apply_appearance(next, true, cx);
     }
 
     // Custo do Codex: só com o painel visível e a sessão aberta; troca de sessão cancela a leitura em curso.
@@ -321,7 +326,7 @@ impl Hangar {
         let want = self.selected_key().filter(|_| visible && self.provider().0 == "codex" && self.chat_online);
         if self.side.cost_task.as_ref().map(|(key, _)| key) == want.as_ref() { return; }
         self.side.stop_cost();
-        let (Some(key), Some(api)) = (want, self.api.clone()) else { return; };
+        let (Some(key), Some(api)) = (want, self.session_api()) else { return; };
         if self.side.cost.as_ref().is_some_and(|(owner, ..)| owner != &key) { self.side.cost = None; }
         let (connection, tx, generation, name) = (self.connection, self.tx.clone(), self.side.cost_gen, key.name.clone());
         let owner = key.clone();
@@ -336,7 +341,7 @@ impl Hangar {
     }
 
     pub(super) fn load_files(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         self.side.files = Some((key.clone(), None));
         self.side.diff = None;
         let (connection, tx) = (self.connection, self.tx.clone());
@@ -349,7 +354,7 @@ impl Hangar {
 
     /// Atalhos do projeto da sessão aberta: lidos ao escolher a sessão e ao abrir a página Atalhos.
     pub(super) fn load_project_shortcuts(&mut self) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let project = &mut self.side.project;
         if project.owner.as_ref() != Some(&key) { project.reset(); project.owner = Some(key.clone()); }
         let seq = project.list.start();
@@ -362,7 +367,7 @@ impl Hangar {
 
     // POST só de leitura: o backend confere que o caminho está na lista de alterados.
     fn open_diff(&mut self, path: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.side.diff.as_ref().is_some_and(|(owner, current, _)| owner == &key && current == &path) { self.side.diff = None; cx.notify(); return; }
         self.side.diff = Some((key.clone(), path.clone(), None));
         let (connection, tx) = (self.connection, self.tx.clone());
@@ -411,7 +416,7 @@ impl Hangar {
             // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira
             // aba do painel, onde dá pra ver a saída e fechar o programa.
             Shortcut::Shell { label, command, pasta, .. } => {
-                let Some(api) = self.api.clone() else { return; };
+                let Some(api) = self.api_for(&key.server) else { return; };
                 self.action_feedback.insert(key.clone(), (tr("shortcut_started").replace("{label}", &label), false));
                 let (connection, tx) = (self.connection, self.tx.clone());
                 let mut body = json!({"command": command, "label": label});
@@ -432,7 +437,7 @@ impl Hangar {
 
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
         if !self.reload_allowed() { cx.notify(); return; }
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         self.side.reloading.insert(key.clone());
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -917,7 +922,8 @@ impl Hangar {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        let server = self.address.read(cx).value().trim_start_matches("http://").trim_start_matches("https://").to_string();
+        // A linha fala da sessão: a máquina é a dela, não a do servidor ativo.
+        let server = self.session_label(cx);
         let floating = theme::is_floating();
         Some(div().w(px(width)).h_full().flex_shrink_0().relative()
             .child(chrome::glass_panel(div().size_full().flex().flex_col().bg(theme::chrome()).overflow_hidden()

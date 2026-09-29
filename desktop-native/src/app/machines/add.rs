@@ -1,5 +1,5 @@
 //! Adicionar servidor (AdicionarMaquina.svelte): o endereço é testado antes de gravar, e o registro dos recados vai às duas pontas
-//! (`registrarPeerDoisLados`). "Mostrar as sessões dele" pede uma entrada neste aparelho, que o nativo não tem: chega depois.
+//! (`registrarPeerDoisLados`). "Mostrar as sessões dele" grava a entrada neste aparelho (`addServer` do web).
 use super::*;
 use url::{Host, Url};
 
@@ -51,6 +51,13 @@ pub(super) fn normalize(raw: &str) -> Option<Target> {
 fn short_host(base: &str) -> String {
     let Some(host) = Url::parse(base).ok().and_then(|u| u.host_str().map(str::to_owned)) else { return base.to_owned() };
     if host.contains(':') || host.chars().all(|c| c.is_ascii_digit() || c == '.') { host } else { host.split('.').next().unwrap_or_default().to_owned() }
+}
+
+/// Entra na lista deste aparelho ou atualiza a de mesmo endereço. Falso quando o endereço é de um convite: ele fica intacto.
+fn place_machine(list: &mut Vec<ServerEntry>, entry: ServerEntry) -> bool {
+    if list.iter().any(|s| s.invite && servers::norm(&s.address) == servers::norm(&entry.address)) { return false; }
+    servers::upsert(list, entry);
+    true
 }
 
 fn host_of(url: &str) -> String { Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_lowercase)).unwrap_or_else(|| url.trim().to_lowercase()) }
@@ -175,6 +182,8 @@ pub(in crate::app) struct AddMachine {
     found: Option<Found>,
     /// "Recados entre sessões": é uma pergunta, quem quer marca.
     messages: bool,
+    /// "Mostrar as sessões dele": ligado por padrão, como no web; desligado com recados, a máquina fica só para recado.
+    follow: bool,
     /// Registrado aqui, mas uma das pontas não fechou: o resultado de cada uma fica à vista.
     sides: Option<(Going, Going)>,
     /// Busca no Tailscale, sob demanda e deste diálogo: `None` é "ainda não buscou".
@@ -202,7 +211,7 @@ impl AddMachine {
                 _ => {}
             }),
         ];
-        Self { hangar: hangar.downgrade(), seq: 0, address, token, name, busy: false, error: None, found: None, messages: false, sides: None,
+        Self { hangar: hangar.downgrade(), seq: 0, address, token, name, busy: false, error: None, found: None, messages: false, follow: true, sides: None,
             discover: Remote::default(), _subscriptions: subscriptions }
     }
 
@@ -243,7 +252,7 @@ impl AddMachine {
 
     /// Enter e o botão principal: testar, depois adicionar; com o resultado das pontas à vista, fechar.
     pub(super) fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sides.is_some() { self.close(window, cx); } else if self.found.is_some() { self.add(cx); } else { self.test(cx); }
+        if self.sides.is_some() { self.close(window, cx); } else if self.found.is_some() { self.add(window, cx); } else { self.test(cx); }
     }
 
     fn test(&mut self, cx: &mut Context<Self>) {
@@ -266,14 +275,37 @@ impl AddMachine {
         cx.notify();
     }
 
-    fn add(&mut self, cx: &mut Context<Self>) {
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(found) = self.found.clone().filter(|_| !self.busy) else { return };
         let Some(hangar) = self.hangar.upgrade() else { return };
-        let own_id = hangar.read(cx).machines.id_loaded().to_owned();
-        // Sem identificador aqui nenhum outro registra este, e a mesma máquina por outro endereço não vira linha nova.
-        if own_id.is_empty() || found.id == own_id { return; }
-        if !self.messages { self.error = Some(tr("machines_add_error_none")); cx.notify(); return; }
-        if found.id.is_empty() { self.error = Some(tr("machines_add_error_no_id")); cx.notify(); return; }
+        let (own_id, known, stuck) = {
+            let h = hangar.read(cx);
+            let known = h.known_machine(&found.id);
+            (h.machines.id_loaded().to_owned(), known.clone(), known.is_some_and(|k| h.moves_active(&k, &found.base)))
+        };
+        let typed = self.name.read(cx).value().trim().to_owned();
+        let label = if !typed.is_empty() { typed } else if !found.id.is_empty() { found.id.clone() } else { short_host(&found.base) };
+        // Mesma máquina por outro endereço: a entrada que já existe troca de endereço, continua uma linha só.
+        if let Some(entry) = known {
+            if stuck { return; }
+            if !hangar.update(cx, |hangar, cx| hangar.move_machine(&entry.id, &found, label, window, cx)) {
+                self.error = Some(tr("machines_add_error_invite"));
+                cx.notify();
+                return;
+            }
+            return self.close(window, cx);
+        }
+        // Sem identificador aqui nenhum outro registra este: só a entrada neste aparelho.
+        let messages = !own_id.is_empty() && self.messages;
+        if !messages && !self.follow { self.error = Some(tr("machines_add_error_none")); cx.notify(); return; }
+        if messages && found.id.is_empty() { self.error = Some(tr("machines_add_error_no_id")); cx.notify(); return; }
+        let entry = ServerEntry { id: servers::new_id(), label, address: found.base.clone(), token: found.token.clone(), disabled: false, invite: false };
+        if self.follow && !hangar.update(cx, |hangar, cx| hangar.save_machine(entry, window, cx)) {
+            self.error = Some(tr("machines_add_error_invite"));
+            cx.notify();
+            return;
+        }
+        if !messages { return self.close(window, cx); }
         self.seq += 1;
         (self.busy, self.error) = (true, None);
         let (me, seq) = (cx.entity_id(), self.seq);
@@ -288,7 +320,8 @@ impl AddMachine {
         self.busy = false;
         match result {
             Ok(found) => {
-                let name = if found.id.is_empty() { short_host(&found.base) } else { found.id.clone() };
+                let known = self.hangar.upgrade().and_then(|h| h.read(cx).known_machine(&found.id)).map(|k| k.label).filter(|l| !l.is_empty());
+                let name = known.unwrap_or_else(|| if found.id.is_empty() { short_host(&found.base) } else { found.id.clone() });
                 self.name.update(cx, |input, cx| input.set_value(name, window, cx));
                 self.found = Some(found);
             }
@@ -342,13 +375,15 @@ fn next_tip(id: &'static str, child: impl IntoElement) -> Stateful<Div> {
 impl Render for AddMachine {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(hangar) = self.hangar.upgrade() else { return div() };
-        let (here, own_id, own_url, online, known) = {
+        let (here, own_id, online, known, same, stuck) = {
             let h = hangar.read(cx);
             let m = &h.machines;
             let own_url = h.api.as_ref().map(|api| api.identity().trim_end_matches('/').to_owned()).unwrap_or_default();
             let mut known = m.peers.ok().map(|list| list.iter().map(|p| host_of(&p.url)).collect::<HashSet<_>>()).unwrap_or_default();
             known.insert(host_of(&own_url));
-            (h.server_label(cx), m.id_loaded().to_owned(), own_url, h.api.is_some(), known)
+            let same = self.found.as_ref().and_then(|f| h.known_machine(&f.id));
+            let stuck = same.as_ref().zip(self.found.as_ref()).is_some_and(|(s, f)| h.moves_active(s, &f.base));
+            (h.server_label(cx), m.id_loaded().to_owned(), h.api.is_some(), known, same, stuck)
         };
         let d = &self.discover;
         let searching = d.loading;
@@ -358,7 +393,7 @@ impl Render for AddMachine {
         let (busy, done) = (self.busy, self.sides.is_some());
         let locked = busy || done;
         let can_talk = !own_id.is_empty();
-        let repeated = self.found.as_ref().is_some_and(|f| !f.id.is_empty() && f.id == own_id);
+        let repeated = same.is_some();
         let peer_name = self.found.as_ref().map(|f| f.id.clone()).filter(|id| !id.is_empty()).unwrap_or_else(|| tr("machines_this_machine"));
         let fill = |key: &str| tr(key).replace("{este}", &here).replace("{nome}", &peer_name);
 
@@ -398,18 +433,16 @@ impl Render for AddMachine {
                 .child(format!("✓ {}", if f.id.is_empty() { tr("machines_add_answered_no_id") } else { tr("machines_add_answered").replace("{id}", &f.id) })))
             .when_some(f.id_error.clone(), |el, error| el.child(div().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal()
                 .child(tr("machines_add_id_failed").replace("{erro}", &error))))
-            .when(repeated, |el| el.child(muted(tr("machines_add_repeated").replace("{nome}", &here).replace("{endereco}", &own_url)))));
-        // O nome é o da entrada neste aparelho, que chega na próxima versão.
-        let name = self.found.as_ref().map(|_| div().flex().flex_col().gap(px(4.))
-            .child(div().text_size(px(13.)).text_color(theme::muted()).child(tr("machines_add_name")))
-            .child(next_tip("machines-add-name", Input::new(&self.name).disabled(true).aria_label(format!("{}. {next}", tr("machines_add_name")))))
-            .child(muted(format!("{} {next}", tr("machines_add_name_help")))));
+            .when_some(same.as_ref(), |el, s| el.child(muted(tr("machines_add_repeated")
+                .replace("{nome}", &if s.label.is_empty() { servers::default_label(&s.address) } else { s.label.clone() })
+                .replace("{endereco}", &s.address)))));
+        let name = self.found.as_ref().map(|_| field(tr("machines_add_name"), tr("machines_add_name_help"), Input::new(&self.name).disabled(locked)));
 
-        // Sem identificador aqui o web nem pergunta: adicionar seria só a entrada no aparelho.
+        // Sem identificador aqui o web nem pergunta: adicionar é só a entrada no aparelho.
         let switches = (can_talk && !repeated).then(|| div().flex().flex_col().gap(px(12.))
-            .child(toggle(tr("machines_peer_show_sessions"), format!("{} {next}", tr("machines_add_follow_help")),
-                next_tip("machines-add-follow", Switch::new("machines-add-follow-switch").checked(false).disabled(true)
-                    .accessibility_label(format!("{}. {next}", tr("machines_peer_show_sessions"))))))
+            .child(toggle(tr("machines_peer_show_sessions"), tr("machines_add_follow_help"),
+                Switch::new("machines-add-follow-switch").checked(self.follow).disabled(locked).accessibility_label(tr("machines_peer_show_sessions"))
+                    .on_click(cx.listener(|this, on: &bool, _, cx| { (this.follow, this.error) = (*on, None); cx.notify(); }))))
             .child(toggle(fill("machines_peer_messages_title"), fill("machines_add_messages_help"),
                 Switch::new("machines-add-messages").checked(self.messages).disabled(locked).accessibility_label(fill("machines_peer_messages_title"))
                     .on_click(cx.listener(|this, on: &bool, _, cx| { (this.messages, this.error) = (*on, None); cx.notify(); })))));
@@ -433,10 +466,11 @@ impl Render for AddMachine {
             Button::new("machines-add-close").primary().small().label(tr("close")).on_click(cx.listener(|this, _, window, cx| this.close(window, cx)))
                 .into_any_element()
         } else if self.found.is_some() {
-            let (label, blocked) = if repeated { (tr("machines_add_use_address"), true) } else { (tr("machines_add_add"), !can_talk) };
+            let label = tr(if repeated { "machines_add_use_address" } else { "machines_add_add" });
+            let blocked = stuck;
             let button = Button::new("machines-add-add").primary().small().label(label.clone()).loading(busy).disabled(blocked)
                 .on_click(cx.listener(|this, _, window, cx| this.primary(window, cx)));
-            // Os dois caminhos desligados são os da entrada neste aparelho.
+            // Trocar o endereço do servidor conectado pede reconectar, que este diálogo ainda não faz.
             if blocked { next_tip("machines-add-add-tip", button.accessibility_label(format!("{label}. {next}"))).into_any_element() } else { button.into_any_element() }
         } else {
             let can_test = !self.address.read(cx).value().trim().is_empty();
@@ -503,6 +537,62 @@ impl Hangar {
         true
     }
 
+    /// A entrada deste aparelho que já é a máquina deste identificador (`conhecidas` do web).
+    fn known_machine(&self, id: &str) -> Option<ServerEntry> {
+        if id.is_empty() { return None; }
+        let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
+        self.machine_lines().into_iter().find(|l| l.ident.as_deref() == Some(id)).and_then(|l| l.entry).filter(|e| !e.invite)
+            // O identificador das entradas chega depois de abrir a página; o do servidor conectado já está lido.
+            .or_else(|| (id == self.machines.id_loaded()).then(|| self.server_entry(&active).cloned()).flatten())
+    }
+
+    /// A entrada é a do servidor conectado e o endereço novo é outro.
+    fn moves_active(&self, entry: &ServerEntry, address: &str) -> bool {
+        let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
+        servers::norm(&entry.address) == active && servers::norm(address) != active
+    }
+
+    fn servers_changed(&mut self, cx: &mut Context<Self>) {
+        self.servers_rev += 1;
+        self.persist_servers();
+        self.start_remote_lists();
+        self.sync_updater(cx);
+        self.load_saved_ids(cx);
+    }
+
+    fn save_machine(&mut self, entry: ServerEntry, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = servers::norm(&entry.address);
+        if !place_machine(&mut self.servers, entry) { return false; }
+        self.servers_changed(cx);
+        self.reopen_edited(&[key.clone()], &key, window, cx);
+        true
+    }
+
+    /// Troca endereço, token e nome da entrada e a religa: adicionar de novo é pedir para ver. Outra entrada no endereço novo
+    /// sai, senão a mesma máquina teria duas listas.
+    fn move_machine(&mut self, entry_id: &str, found: &Found, label: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = servers::norm(&found.base);
+        if self.servers.iter().any(|s| s.invite && servers::norm(&s.address) == key) { return false; }
+        self.servers.retain(|s| s.id == entry_id || servers::norm(&s.address) != key);
+        let Some(entry) = self.servers.iter_mut().find(|s| s.id == entry_id) else { return false };
+        let old = servers::norm(&entry.address);
+        (entry.address, entry.token, entry.label, entry.disabled) = (found.base.clone(), found.token.clone(), label, false);
+        self.servers_changed(cx);
+        self.reopen_edited(&[old, key.clone()], &key, window, cx);
+        true
+    }
+
+    /// A sessão aberta era de uma entrada que mudou: reabre pela entrada nova; sem conexão possível, fica fechada.
+    fn reopen_edited(&mut self, old: &[String], key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(open), Some(session)) = (self.open_key(), self.selected.clone()) else { return };
+        if !old.contains(&open) { return; }
+        let draft = self.composer.read(cx).value().to_string();
+        self.close_open_session(window, cx);
+        self.select_on(key, session, window, cx);
+        // O rascunho foi guardado no endereço antigo.
+        if self.selected.is_some() && !draft.is_empty() { self.composer.update(cx, |input, cx| input.set_value(draft, window, cx)); }
+    }
+
     fn register_machine(&mut self, dialog: EntityId, seq: u64, found: Found, cx: &mut Context<Self>) -> bool {
         let Some(api) = self.api.clone() else { return false };
         let own_id = self.machines.id_loaded().to_owned();
@@ -517,7 +607,18 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Discovered, EntityId, Remote, Target, normalize, owns, short_host};
+    use super::{Discovered, EntityId, Remote, ServerEntry, Target, normalize, owns, place_machine, short_host};
+
+    #[test]
+    fn saving_updates_the_same_address_and_never_an_invite() {
+        let entry = |address: &str, token: &str, invite: bool| ServerEntry { id: token.into(), label: token.into(), address: address.into(),
+            token: token.into(), disabled: true, invite };
+        let mut list = vec![entry("http://casa:8765", "old", false), entry("https://h:8443", "guest", true)];
+        assert!(place_machine(&mut list, ServerEntry { disabled: false, ..entry("http://CASA:8765/", "new", false) }));
+        assert_eq!((list.len(), list[0].token.as_str(), list[0].disabled), (2, "new", false));
+        assert!(!place_machine(&mut list, entry("https://h:8443/", "own", false)));
+        assert_eq!((list.len(), list[1].token.as_str()), (2, "guest"));
+    }
 
     #[test]
     fn search_answer_reaches_only_its_dialog_and_last_request() {

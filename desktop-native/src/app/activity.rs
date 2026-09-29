@@ -679,7 +679,7 @@ impl Hangar {
     }
 
     fn activity_link(&self) -> Option<Link> {
-        Some(Link { api: self.api.clone()?, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection })
+        Some(Link { api: self.session_api()?, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection })
     }
 
     /// Depois de mudar conversa, estado, conta ou aba: a view recebe os dados e, se passou a aparecer, relê a lista.

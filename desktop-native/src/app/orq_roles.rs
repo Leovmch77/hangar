@@ -1104,7 +1104,7 @@ impl Render for OrqRoles {
 impl Hangar {
     /// Papéis do grupo da sessão aberta, num diálogo; as contas liberadas continuam em Configurações.
     pub(super) fn open_orq_roles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let (runtime, hangar) = (self.runtime.clone(), cx.entity());
         let panel = cx.new(|cx| OrqRoles::new(api, runtime, key.name.clone(), hangar, window, cx));
         window.open_dialog(cx, move |dialog, _, _| popup::dialog(dialog).w(px(1040.)).title(t("orqcfg_titulo")).child(panel.clone()));

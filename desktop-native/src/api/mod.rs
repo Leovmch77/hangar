@@ -181,9 +181,13 @@ impl Api {
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
     }
 
-    pub async fn transcribe(&self, name: &str, bytes: Vec<u8>, style: Option<&str>) -> Result<Value, Failure> {
+    /// Sem `name` (nova conversa, antes de a sessão existir) só transcreve, sem guardar o áudio numa sessão.
+    pub async fn transcribe(&self, name: Option<&str>, bytes: Vec<u8>, style: Option<&str>) -> Result<Value, Failure> {
         if bytes.len() as u64 > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
-        let mut url = self.endpoint(Some(name), Some("transcribe"));
+        let mut url = match name {
+            Some(name) => self.endpoint(Some(name), Some("transcribe")),
+            None => self.server_url(&["dictation", "transcribe"], &[]),
+        };
         url.query_pairs_mut().append_pair("limpar", "1");
         if let Some(style) = style.filter(|style| !style.is_empty()) { url.query_pairs_mut().append_pair("estilo", style); }
         let r = self.client.post(url).header(header::CONTENT_TYPE, "audio/wav").header("X-Filename", "ditado.wav")

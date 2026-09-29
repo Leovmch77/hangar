@@ -23,6 +23,8 @@ struct Feed { items: Vec<FeedItem>, missing: Vec<String> }
 
 pub(super) struct Sheet {
     session: String,
+    /// Máquina da sessão: pode não ser a ativa.
+    server: String,
     id: u64,
     /// Membros de quando carregou: grupo que muda com o painel aberto recomeça tudo, como o web.
     peers_key: String,
@@ -95,7 +97,10 @@ pub(super) fn group_delivery(me: &str, results: Vec<(String, Delivery, Option<St
 }
 
 impl Hangar {
-    fn live(&self, name: &str) -> Option<&SessionInfo> { self.sessions.iter().find(|s| s.name == name) }
+    /// Grupo é por máquina: os membros estão na lista da máquina da sessão aberta.
+    fn members_list(&self) -> &[SessionInfo] { self.session_server().map_or(&[], |server| self.sessions_of(&server)) }
+
+    fn live(&self, name: &str) -> Option<&SessionInfo> { self.members_list().iter().find(|s| s.name == name) }
 
     fn live_peers(&self, name: &str) -> Vec<String> { self.live(name).map(|s| s.peers().to_vec()).unwrap_or_default() }
 
@@ -154,12 +159,12 @@ impl Hangar {
     // ── Painel ──
 
     pub(super) fn open_group_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.selected.as_ref().map(|s| s.name.clone()) else { return };
+        let (Some(session), Some(server)) = (self.selected.as_ref().map(|s| s.name.clone()), self.session_server()) else { return };
         let task = cx.new(|cx| InputState::new(window, cx).placeholder(web("par_tarefa_placeholder")));
         let g = &mut self.sidebar.grouping;
         g.seq += 1;
         let id = g.seq;
-        g.sheet = Some(Sheet { session, id, peers_key: String::new(), picked: Vec::new(), task, adding: false, busy: false, error: None,
+        g.sheet = Some(Sheet { session, server, id, peers_key: String::new(), picked: Vec::new(), task, adding: false, busy: false, error: None,
             contract: Remote::default(), feed: Remote::default() });
         self.load_group_sheet(window, cx);
         let hangar = cx.entity();
@@ -198,6 +203,9 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Conexão da máquina do painel; `None` se ela saiu do ar no meio (o painel mostra falha de conexão).
+    fn sheet_api(&self) -> Option<Api> { self.sidebar.grouping.sheet.as_ref().and_then(|s| self.api_for(&s.server)) }
+
     /// Com grupo, quantos são; em voo; erro; as marcadas.
     fn sheet_frame(&self) -> Option<(bool, usize, bool, Option<String>, Vec<String>)> {
         let sheet = self.sidebar.grouping.sheet.as_ref()?;
@@ -207,7 +215,7 @@ impl Hangar {
 
     /// (Re)começa o painel pelos membros de agora: marcadas, tarefa e erro zeram; com grupo, contrato e conversa são relidos.
     fn load_group_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let api = self.api.clone();
+        let api = self.sheet_api();
         let tell = self.sidebar_tell();
         let Some(name) = self.sidebar.grouping.sheet.as_ref().map(|s| s.session.clone()) else { return };
         let peers = self.live_peers(&name);
@@ -253,7 +261,7 @@ impl Hangar {
 
     /// Criar grupo e adicionar membro são o mesmo pedido: o servidor une os grupos.
     fn pair_from_sheet(&mut self, cx: &mut Context<Self>) {
-        let api = self.api.clone();
+        let api = self.sheet_api();
         let tell = self.sidebar_tell();
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
         if sheet.busy || sheet.picked.is_empty() { return; }
@@ -268,7 +276,7 @@ impl Hangar {
     }
 
     fn leave_from_sheet(&mut self, cx: &mut Context<Self>) {
-        let api = self.api.clone();
+        let api = self.sheet_api();
         let tell = self.sidebar_tell();
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
         if sheet.busy { return; }
@@ -282,9 +290,9 @@ impl Hangar {
     /// Membro escolhido: o painel fecha e a conversa dele abre no lugar desta.
     fn open_member(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.live(name).cloned() else { return };
-        self.sidebar.grouping.sheet = None;
+        let Some(server) = self.sidebar.grouping.sheet.take().map(|s| s.server) else { return };
         window.close_dialog(cx);
-        self.select(session, window, cx);
+        self.select_on(&servers::norm(&server), session, window, cx);
     }
 
     pub(super) fn receive_sheet(&mut self, reply: SheetReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -358,7 +366,7 @@ impl Hangar {
         let muted = |text: String| div().text_sm().text_color(theme::muted()).whitespace_normal().child(text);
         let heading = |text: String| div().mt(px(8.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
         // Candidatas a entrar: vivas, fora desta e do grupo dela.
-        let candidates: Vec<SessionInfo> = self.sessions.iter().filter(|s| s.name != me && s.state != "dead" && !peers.contains(&s.name)).cloned().collect();
+        let candidates: Vec<SessionInfo> = self.sessions_of(&sheet.server).iter().filter(|s| s.name != me && s.state != "dead" && !peers.contains(&s.name)).cloned().collect();
         let (picked, adding, busy, task) = (sheet.picked.clone(), sheet.adding, sheet.busy, sheet.task.clone());
         let pick_list = |this: &Self, aria: &str, empty: &str, cx: &mut Context<Self>| {
             if candidates.is_empty() { return muted(web(empty)).py_2(); }

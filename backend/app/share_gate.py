@@ -63,7 +63,10 @@ def guest_allowed(method: str, path: str, session: str) -> bool:
         return rest == ["term"]
     if name != session:
         return False
-    return not rest or rest[0] not in _BLOCKED
+    # Fechar mata a sessão do dono; o convidado só para de acompanhar do lado dele.
+    if not rest:
+        return method != "DELETE"
+    return rest[0] not in _BLOCKED
 
 
 def _life(name: str, fresh: bool = False) -> str | None:

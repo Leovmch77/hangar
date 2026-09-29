@@ -70,13 +70,19 @@ impl Hangar {
         if !self.accounts.list.loading { self.load_accounts(false, cx); }
     }
 
+    /// Conta da sessão aberta. A lista de contas é a do servidor ativo: sessão de outra máquina cai na padrão dele, em vez
+    /// de procurar ali uma conta que é de lá e sumir com a pílula.
+    fn focused_conta(&self) -> Option<&str> {
+        self.selected.as_ref().filter(|_| self.open_api.is_none()).and_then(|s| s.conta.as_deref())
+    }
+
     /// A conta da sessão em foco para a pílula da barra do topo: provider, nome e a janela mais cheia, com o rótulo dela
     /// (o `piorJanela` do web). Sem sessão, o Claude; conta ausente (servidor sem o campo) é a padrão do provider.
     /// `None` antes da lista chegar ou sem conta daquele provider.
     pub(in crate::app) fn focused_account(&self) -> Option<(String, String, Option<(String, f64)>)> {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
-        let conta = session.and_then(|s| s.conta.as_deref());
+        let conta = self.focused_conta();
         let c = self.accounts.list.ok()?.iter().find(|c| c.kind == kind && conta.map_or(c.active, |id| id == c.id))?;
         let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
         let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
@@ -93,7 +99,7 @@ impl Hangar {
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
         let name = match kind { "claude" => "Claude Code", "codex" => "Codex", other => other };
         // A conta da sessão; sem sessão, ou servidor sem esse campo, cai na conta padrão do provider.
-        let conta = session.and_then(|s| s.conta.as_deref());
+        let conta = self.focused_conta();
         let in_use = |c: &Credential| conta.map_or(c.active, |id| id == c.id);
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
         let body = match (&self.accounts.list.value, self.accounts.list.ok()) {

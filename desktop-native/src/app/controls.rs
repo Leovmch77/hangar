@@ -214,7 +214,7 @@ impl Hangar {
     // Catálogo lido no gesto de abrir. O ciclo do Claude com terminal e a permissão do Codex com
     // terminal mexem na TUI para ler: esses só com um segundo clique explícito.
     pub(super) fn open_ctl(&mut self, ctl: Ctl, probe: bool, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if !probe && self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) { self.controls.open = None; cx.notify(); return; }
         self.command_panel = false;
         self.recent = None;
@@ -253,7 +253,7 @@ impl Hangar {
     /// Alt+Shift+P e Shift+Tab no campo do Claude, como o web: o próximo modo do ciclo que a sessão aceita. Ciclo ainda
     /// não lido é lido com a sonda, como a pílula, e o modo é aplicado quando a leitura chega.
     pub(super) fn cycle_permission(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.provider().0 != "claude" || self.controls.busy.contains_key(&key) || self.controls.cycle_after_read.is_some() { return; }
         let known = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned();
         if known.as_ref().is_some_and(|v| v.get("modes").and_then(Value::as_array).is_some_and(|m| !m.is_empty())) {
@@ -396,7 +396,7 @@ impl Hangar {
     }
 
     fn apply_ctl(&mut self, ctl: Ctl, path: Vec<&'static str>, body: Value, label: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.controls.busy.contains_key(&key) || !self.chat_online { return; }
         self.controls.busy.insert(key.clone(), ctl);
         self.action_feedback.remove(&key);
@@ -788,7 +788,7 @@ impl Hangar {
 
     // Sai do modo plano para o modo anterior, pede a implementação e, se o pedido falhar, tenta voltar ao plano.
     fn implement_headless(&mut self, id: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.headless_plan().map(|(current, _)| current) != Some(id) {
             self.action_feedback.insert(key, (tr("request_changed"), true));
             cx.notify();
@@ -848,7 +848,7 @@ impl Hangar {
 
     /// Plano do Claude com terminal: só leitura do arquivo pelo `/plan-preview` (metadados na descoberta, conteúdo no gesto).
     pub(super) fn discover_plan(&mut self) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.provider() != ("claude", false) { return; }
         self.controls.plan = Some((key.clone(), None, None));
         let (connection, tx) = (self.connection, self.tx.clone());
@@ -859,7 +859,7 @@ impl Hangar {
     }
 
     fn open_plan_preview(&mut self, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let Some((owner, _, body)) = self.controls.plan.as_mut() else { return; };
         if owner != &key { return; }
         if body.is_some() { *body = None; cx.notify(); return; }
@@ -916,7 +916,7 @@ impl Hangar {
     /// Codex antes da thread: a pergunta (aprovação dos hooks) vem da lista e sai por `/select`.
     pub(super) fn prethread_key(&self) -> Option<SessionKey> {
         let session = self.selected.as_ref().filter(|s| !s.readable() && s.provider == "codex")?;
-        Some(SessionKey { server: self.server.clone()?, name: session.name.clone(), jsonl: String::new() })
+        Some(SessionKey { server: self.session_server()?, name: session.name.clone(), jsonl: String::new() })
     }
 
     fn prethread_snapshot(&self) -> Option<String> {
@@ -925,7 +925,7 @@ impl Hangar {
     }
 
     fn preselect(&mut self, option: usize, snapshot: String, cx: &mut Context<Self>) {
-        let (Some(api), Some(key)) = (self.api.clone(), self.prethread_key()) else { return; };
+        let (Some(api), Some(key)) = (self.session_api(), self.prethread_key()) else { return; };
         if self.controls.preselect.is_some() { return; }
         if self.prethread_snapshot().as_deref() != Some(snapshot.as_str()) {
             self.action_feedback.insert(key, (tr("request_changed"), true));

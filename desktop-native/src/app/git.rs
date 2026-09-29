@@ -1048,7 +1048,7 @@ impl Render for GitPanel {
 impl Hangar {
     /// O git da sessão aberta, lido do disco ou pelas rotas; `expand` faz dele a lista estreita da aba.
     fn new_git_panel(&self, expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<GitPanel>> {
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.clone()) else { return None };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return None };
         let title = folder_name(&session).unwrap_or_else(|| session.name.clone());
         let runtime = self.runtime.clone();
         // Servidor nesta máquina e a pasta existe aqui: o git roda direto no disco, pela pasta real da sessão.

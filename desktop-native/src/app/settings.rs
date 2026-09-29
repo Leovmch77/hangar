@@ -622,6 +622,39 @@ impl Hangar {
             })))
     }
 
+    /// Máquina que o grupo Servidor configura; troca como o seletor do web (convite e desligada ficam fora).
+    fn render_server_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = servers::norm(&self.address.read(cx).value());
+        let eligible: Vec<ServerEntry> = self.servers.iter().filter(|s| !s.invite && !s.disabled).cloned().collect();
+        let active = self.servers.iter().find(|s| servers::norm(&s.address) == current);
+        let label = active.map(|s| s.label.clone()).unwrap_or_else(|| self.server_label(cx));
+        let dot = |id: &str| div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::server_color(id));
+        let text = div().min_w_0().truncate().text_size(px(12.5)).text_color(theme::text()).child(label);
+        if !eligible.iter().any(|s| servers::norm(&s.address) != current) {
+            return div().ml_auto().max_w(px(140.)).flex().items_center().gap(px(6.))
+                .children(active.map(|s| dot(&s.id))).child(text).into_any_element();
+        }
+        let weak = cx.entity().downgrade();
+        Button::new("settings-server-picker").ghost().xsmall().ml_auto().max_w(px(160.))
+            .accessibility_label(tr("settings_switch_server")).tooltip(tr("settings_switch_server"))
+            .child(div().min_w_0().flex().items_center().gap(px(6.))
+                .children(active.map(|s| dot(&s.id))).child(text)
+                .child(chrome::small_icon(IconName::ChevronDown, 12., theme::muted())))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let mut menu = sidebar::menu_style(menu).min_w(px(220.)).label(tr("settings_group_server"));
+                for entry in eligible.clone() {
+                    let (weak, on, id, name) = (weak.clone(), servers::norm(&entry.address) == current, entry.id.clone(), entry.label.clone());
+                    menu = menu.item(PopupMenuItem::element(move |_, _| div().w_full().flex().items_center().gap(px(8.))
+                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::server_color(&id)))
+                            .child(div().flex_1().min_w_0().truncate().child(name.clone())))
+                        .checked(on)
+                        .on_click(move |_, window, cx| { let _ = weak.update(cx, |this, cx| this.activate_server(entry.clone(), window, cx)); }));
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_settings(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // `fade-quick` do kit: a tela ao abrir e o corpo a cada página.
         let shown = motion::enter("settings-screen", motion::FADE_QUICK, window, cx);
@@ -646,8 +679,8 @@ impl Hangar {
         let searching = !self.settings_ui.search.read(cx).value().trim().is_empty();
         let group = |label: String| div().px(px(10.)).pt(px(12.)).pb(px(6.)).flex().items_center().gap_2()
             .text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(label);
-        let server = self.server_label(cx);
-        let nav = div().w(px(284.)).flex_shrink_0().h_full().flex().flex_col().px(px(10.)).bg(theme::chrome())
+        let server = self.render_server_picker(cx);
+        let nav =div().w(px(284.)).flex_shrink_0().h_full().flex().flex_col().px(px(10.)).bg(theme::chrome())
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).shadow(theme::panel_shadow()) }
                 else { el.border_r_1().border_color(theme::border()) })
             .child(div().h(px(44.)).flex_shrink_0().px(px(6.)).flex().items_center().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("settings")))
@@ -663,8 +696,7 @@ impl Hangar {
                 div().id("settings-nav").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(px(2.))
                     .child(group(tr("settings_group_device")))
                     .children(Page::DEVICE.map(|p| nav_item(p, page, cx)))
-                    .child(group(tr("settings_group_server"))
-                        .child(div().ml_auto().max_w(px(140.)).truncate().text_size(px(12.5)).text_color(theme::text()).child(server)))
+                    .child(group(tr("settings_group_server")).child(server))
                     .children(Page::SERVER.map(|p| nav_item(p, page, cx)))
             })
             .child(div().h(px(48.)).flex_shrink_0().mx(px(-10.)).px(px(10.)).border_t_1().border_color(theme::border()).flex().items_center()

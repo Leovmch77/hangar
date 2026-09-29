@@ -16,6 +16,12 @@ use super::chrome::Skeleton;
 use serde::Deserialize;
 use std::{future::Future, pin::Pin, rc::Rc};
 
+/// Anexo da primeira mensagem: nome, bytes e se vai como imagem. Sobe depois que a sessão nasce, que é quem tem pasta.
+pub(super) type FirstFile = (String, Arc<Vec<u8>>, bool);
+
+/// Chave dos anexos da tela sem sessão (`composer_key`); nenhuma sessão real tem nome vazio.
+pub(super) fn new_chat_key() -> SessionKey { SessionKey { server: String::new(), name: String::new(), jsonl: String::new() } }
+
 /// Os providers do web, na ordem dele.
 const PROVIDERS: [&str; 5] = ["claude", "codex", "pi", "kimi", "omp"];
 /// O web pergunta o passo da criação a cada 800 ms.
@@ -117,7 +123,8 @@ pub(super) enum CreateReply {
     /// Passo da criação em voo; `None` é consulta que falhou, e o passo anterior fica.
     Step(u64, Option<String>),
     Created(u64, Result<Opened, String>),
-    CreatedWithInput(u64, u64, String, Result<Delivery, Failure>, Result<Opened, String>),
+    /// Seleção, o texto do campo, a mensagem que saiu (com os caminhos dos anexos) e a entrega dela.
+    CreatedWithInput(u64, u64, String, String, Result<Delivery, Failure>, Result<Opened, String>),
     /// O catálogo de modelos e o último modelo e esforço lembrados para a chave dele.
     Models(u64, Result<Value, Failure>, (String, String)),
     Engines(u64, Result<Value, Failure>),
@@ -673,7 +680,7 @@ impl NewSession {
                 && !self.checkout.loading))
     }
 
-    pub(super) fn create(&mut self, first: Option<(u64, String)>, cx: &mut Context<Self>) {
+    pub(super) fn create(&mut self, first: Option<(u64, String, Vec<FirstFile>)>, cx: &mut Context<Self>) {
         if !self.can_create(cx) || self.compact != first.is_some() { return; }
         let Some(cwd) = self.picked.clone() else { return };
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
@@ -760,9 +767,19 @@ impl NewSession {
                 }
             };
             match (first, opened) {
-                (Some((selection, text)), Ok(opened)) => {
-                    let result = api.send(&opened.session.name, &text).await;
-                    send(CreateReply::CreatedWithInput(seq, selection, text, result, Ok(opened))).await;
+                (Some((selection, text, files)), Ok(opened)) => {
+                    // Os anexos sobem pela rota do servidor, na sessão que acabou de nascer; um que falhe segura a mensagem.
+                    let mut uploads = Vec::new();
+                    let mut failed = None;
+                    for (file, bytes, image) in files {
+                        match api.upload(&opened.session.name, &file, composer::mime_for(&file), bytes.to_vec()).await {
+                            Ok(up) => uploads.push((image, up)),
+                            Err(error) => { failed = Some(error); break; }
+                        }
+                    }
+                    let message = composer::compose_prompt(&text, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
+                    let result = match failed { Some(error) => Err(error), None => api.send(&opened.session.name, &message).await };
+                    send(CreateReply::CreatedWithInput(seq, selection, text, message, result, Ok(opened))).await;
                 }
                 (_, opened) => send(CreateReply::Created(seq, opened)).await,
             }
@@ -843,7 +860,7 @@ impl NewSession {
                 if seq != self.create_seq || !self.creating { return None; }
                 if let Some(step) = step { self.step = step; }
             }
-            CreateReply::Created(seq, result) | CreateReply::CreatedWithInput(seq, _, _, _, result) => {
+            CreateReply::Created(seq, result) | CreateReply::CreatedWithInput(seq, _, _, _, _, result) => {
                 if seq != self.create_seq || !self.creating { return None; }
                 (self.creating, self.resuming, self.started, self.clock) = (false, false, None, None);
                 match result { Ok(opened) => return Some(opened), Err(error) => self.error = Some(error) }
@@ -1522,6 +1539,17 @@ impl Hangar {
     /// Sem sessão escolhida e com servidor: a faixa de baixo vira a tela de nova conversa.
     pub(super) fn new_chat_screen(&self) -> bool { self.selected.is_none() && self.api.is_some() }
 
+    /// Onde o compositor guarda anexos: a sessão aberta ou, na tela sem sessão antes do Enviar, a conversa por nascer.
+    /// Com a criação em voo não há onde pôr: o que já foi anexado segue com ela.
+    pub(super) fn composer_key(&self) -> Option<SessionKey> {
+        self.selected_key().or_else(|| (self.new_chat_screen() && self.opening.is_none()).then(new_chat_key))
+    }
+
+    /// A máquina escolhida nos chips da tela sem sessão, que é onde a conversa vai nascer.
+    pub(super) fn new_chat_api(&self, cx: &App) -> Option<Api> {
+        self.new_chat.as_ref().filter(|_| self.new_chat_screen()).map(|view| view.read(cx).link.api.clone())
+    }
+
     /// O provider que a tela sem sessão vai criar (o texto do campo diz a quem se escreve).
     pub(super) fn new_chat_provider(&self, cx: &App) -> &'static str {
         self.new_chat.as_ref().map(|view| view.read(cx).provider).unwrap_or("claude")
@@ -1554,11 +1582,14 @@ impl Hangar {
         let view = self.new_chat.clone().unwrap();
         if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
         let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
+        // Anexo recusado (grande demais, ilegível) avisa aqui, onde a tela sem sessão mostra os avisos dela.
+        let note = self.action_feedback.get(&new_chat_key()).cloned().or(note);
         let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
         // A tela chega como um objeto só, descendo 10 px até o lugar (o `settle-down` do kit, no tempo do `fade-in`).
         let settle = motion::enter("new-chat-in", motion::FADE_IN, window, cx);
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
-        div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
+        let reserved = self.new_chat_side_width(window).unwrap_or(0.);
+        div().id("new-chat").size_full().pr(px(reserved)).overflow_y_scroll().flex().flex_col()
             .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
                 .child(landing_column(popup::anchor(top, super::landing::TOP)))
                 .child(composer)
@@ -1594,7 +1625,7 @@ impl Hangar {
         let Some(entity) = self.new_session.iter().chain(self.new_chat.iter()).find(|d| d.entity_id() == dialog).cloned() else { return };
         let compact = entity.read(cx).compact;
         let first = match &reply {
-            CreateReply::CreatedWithInput(_, selection, text, result, _) => Some((*selection, text.clone(), result.clone())),
+            CreateReply::CreatedWithInput(_, selection, text, message, result, _) => Some((*selection, text.clone(), message.clone(), result.clone())),
             _ => None,
         };
         let finished = matches!(&reply, CreateReply::Created(..) | CreateReply::CreatedWithInput(..));
@@ -1606,23 +1637,30 @@ impl Hangar {
         // A mensagem enviada da tela sem sessão segue na conversa da sessão nova; a chegada já começou no Enviar.
         let opening = if compact { self.opening.take() } else { None };
         // Criar não desfaz a escolha de outra conversa feita enquanto o pedido estava em voo.
-        let current = first.as_ref().is_none_or(|(selection, _, _)| *selection == self.selection && self.selected.is_none());
-        // Nasceu em outra máquina: ela vira a ativa agora, uma vez, e o resto segue como se sempre tivesse sido ela.
-        let target = super::servers::norm(&entity.read(cx).link.api.identity());
-        if current && self.server.as_deref().map(super::servers::norm) != Some(target.clone()) {
-            self.activate_for_created(&target, &session, window, cx);
+        let current = first.as_ref().is_none_or(|(selection, ..)| *selection == self.selection && self.selected.is_none());
+        // Nasceu em outra máquina: abre lá sem trocar o servidor ativo. A lista guardada já a inclui, para a leitura
+        // que chega primeiro não fechá-la.
+        let server = entity.read(cx).link.api.identity();
+        let target = super::servers::norm(&server);
+        if let Some(list) = self.remote.get_mut(&target).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
+            list.sessions.push(session.clone());
         }
         // Chaves e seleção valem só na máquina onde a sessão nasceu.
-        let here = self.server.as_deref().map(super::servers::norm) == Some(target);
-        let current = current && here;
-        if let Some((_, text, result)) = first.as_ref().filter(|_| here)
-            && let Some(key) = self.server.as_deref().and_then(|server| SessionKey::new(server, &session)) {
+        if let Some((_, text, message, result)) = first.as_ref()
+            && let Some(key) = SessionKey::new(&server, &session) {
             self.drafts.entry(key.clone()).or_insert_with(|| text.clone());
             if result.is_err() && self.selected_key().as_ref() == Some(&key) && self.composer.read(cx).value().is_empty() {
                 self.composer.update(cx, |input, cx| input.set_value(text.clone(), window, cx));
             }
-            self.delivery.begin(key.clone(), text.clone(), HashSet::new());
-            self.receive_sent(key, text.clone(), text.clone(), result.clone(), window, cx);
+            self.delivery.begin(key.clone(), message.clone(), HashSet::new());
+            self.receive_sent(key.clone(), message.clone(), text.clone(), result.clone(), window, cx);
+            // Não entregues, os anexos da tela sem sessão ficam no campo da sessão nova, para mandar de novo.
+            if result.is_err() && let Some(list) = self.attachments.remove(&new_chat_key()) {
+                self.attachments.entry(key).or_default().extend(list);
+            }
+        }
+        if first.is_some() && let Some(list) = self.attachments.remove(&new_chat_key()) {
+            for image in list.into_iter().filter_map(|a| a.image) { release_image(image, window, cx); }
         }
         let home = if compact { self.new_chat.take() } else {
             self.new_session = None;
@@ -1630,13 +1668,14 @@ impl Hangar {
             None
         };
         let readable = session.readable();
-        let key = self.server.as_deref().and_then(|server| SessionKey::new(server, &session));
-        if current { self.select(session, window, cx); }
-        let sent = first.as_ref().is_some_and(|(_, _, result)| result.is_ok());
+        let key = SessionKey::new(&server, &session);
+        if current { self.select_on(&target, session, window, cx); }
+        let sent = first.as_ref().is_some_and(|(.., result)| result.is_ok());
         match opening.filter(|_| current) {
             // O envio que falhou volta ao campo pelo rascunho, com o aviso da entrega; a bolha não fica.
             Some(opening) => if sent {
-                self.opening = Some(super::landing::Opening { key, ..opening });
+                let sent = first.as_ref().map(|(_, _, message, _)| message.clone()).unwrap_or_default();
+                self.opening = Some(super::landing::Opening { key, sent, ..opening });
                 self.sync_rows(cx);
             },
             None => if let Some(home) = home.filter(|_| current && !cx.reduce_motion()) { self.start_landing(home, window); },

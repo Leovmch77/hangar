@@ -191,7 +191,7 @@ fn wav_pcm(bytes: &[u8]) -> Option<&[u8]> {
 #[derive(Default)]
 pub(super) struct Dictation {
     seq: u64,
-    owner: Option<(u64, String)>,
+    owner: Option<SessionOwner>,
     recorder: Option<Recorder>,
     request: Option<JoinHandle<()>>,
     started: Option<Instant>,
@@ -252,10 +252,28 @@ impl Dictation {
 impl Drop for Dictation { fn drop(&mut self) { self.cancel(); } }
 
 impl Hangar {
+    /// Dono do ditado: a sessão aberta ou, sem ela, a tela sem sessão (nome vazio) antes do Enviar.
+    fn dictation_owner(&self) -> Option<SessionOwner> {
+        self.session_owner().or_else(|| (self.new_chat_screen() && self.opening.is_none()).then(|| (self.connection, String::new(), String::new())))
+    }
+
+    fn dictation_ready(&self) -> bool {
+        if self.selected.is_none() { return self.new_chat_screen() && self.opening.is_none(); }
+        self.selected_key().is_some() && self.chat_online && self.history_installed
+    }
+
+    /// Para onde vai o áudio: a sessão aberta, ou a máquina escolhida nos chips da tela sem sessão, sem sessão ainda.
+    fn dictation_target(&self, cx: &App) -> Option<(Api, Option<String>)> {
+        match self.selected_key() {
+            Some(key) => Some((self.session_api()?, Some(key.name))),
+            None => Some((self.new_chat_api(cx)?, None)),
+        }
+    }
+
     pub(super) fn watch_dictation(_window: &Window, cx: &mut Context<Self>) {
         let mut style_connection = None;
         cx.observe_self(move |this, cx| {
-            if this.dictation.owner.is_some() && this.dictation.owner != this.session_owner() {
+            if this.dictation.owner.is_some() && this.dictation.owner != this.dictation_owner() {
                 this.dictation.cancel();
                 this.redraw(panes::Area::Bottom, cx);
             }
@@ -332,11 +350,11 @@ impl Hangar {
             return;
         }
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
-        if self.selected_key().is_none() || !self.chat_online || !self.history_installed { return; }
+        if !self.dictation_ready() { return; }
         self.dictation.cancel();
         match Recorder::start() {
             Ok(recorder) => {
-                self.dictation.owner = self.session_owner();
+                self.dictation.owner = self.dictation_owner();
                 self.dictation.hands_free = appearance::get().hands_free;
                 self.dictation.recorder = Some(recorder);
                 self.dictation.started = Some(Instant::now());
@@ -386,7 +404,7 @@ impl Hangar {
 
     fn stop_dictation(&mut self, silence: bool, timed_out: bool, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { self.dictation.cancel(); return; };
+        let Some((api, session)) = self.dictation_target(cx) else { self.dictation.cancel(); return; };
         self.dictation.auto_send = silence && self.dictation.hands_free;
         self.dictation.timed_out = timed_out;
         let audio_cache = self.dictation.audio.clone();
@@ -398,7 +416,7 @@ impl Hangar {
             let result = match audio {
                 Ok(bytes) => {
                     *audio_cache.lock().unwrap() = bytes.clone();
-                    api.transcribe(&key.name, bytes, style).await
+                    api.transcribe(session.as_deref(), bytes, style).await
                 },
                 Err(error) => Err(error),
             };
@@ -416,7 +434,7 @@ impl Hangar {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
                 let keep = this.update_in(cx, |this, window, cx| {
                     if this.dictation.seq != seq || this.dictation.countdown != Some(deadline)
-                        || this.dictation.owner.is_none() || this.dictation.owner != this.session_owner() { return false; }
+                        || this.dictation.owner.is_none() || this.dictation.owner != this.dictation_owner() { return false; }
                     if Instant::now() < deadline {
                         this.redraw(panes::Area::Bottom, cx);
                         cx.notify();
@@ -424,7 +442,11 @@ impl Hangar {
                     }
                     this.dictation.countdown = None;
                     let key = this.selected_key();
-                    if !this.can_send() || key.as_ref().is_none_or(|key| this.delivery.pending(key)
+                    // Sem sessão, enviar é criar: deu certo quando a abertura começou.
+                    if this.selected.is_none() {
+                        this.submit(false, false, window, cx);
+                        if this.opening.is_none() { this.dictation.error = Some(tr("dictation_auto_send_failed")); }
+                    } else if !this.can_send() || key.as_ref().is_none_or(|key| this.delivery.pending(key)
                         || this.uploading.contains_key(key) || this.attachments.get(key).is_some_and(|files| !files.is_empty())) {
                         this.dictation.error = Some(tr("dictation_auto_send_failed"));
                     } else {
@@ -446,7 +468,7 @@ impl Hangar {
 
     fn revise_dictation(&mut self, style: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.request.is_some() || self.dictation.recorder.is_some()
-            || self.dictation.owner.is_none() || self.dictation.owner != self.session_owner() { return; }
+            || self.dictation.owner.is_none() || self.dictation.owner != self.dictation_owner() { return; }
         if !self.dictation.draft_matches(&self.composer.read(cx).value()) {
             self.dictation.error = Some(tr("dictation_draft_changed"));
             cx.notify();
@@ -457,8 +479,8 @@ impl Hangar {
             self.receive_dictation(self.dictation.seq, Ok(value), window, cx);
             return;
         }
-        let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return; };
-        let raw = self.dictation.result.as_ref().and_then(|v| v.get("raw")).and_then(Value::as_str).unwrap_or("").to_owned();
+        let Some((api, session)) = self.dictation_target(cx) else { return; };
+        let raw =self.dictation.result.as_ref().and_then(|v| v.get("raw")).and_then(Value::as_str).unwrap_or("").to_owned();
         let audio = self.dictation.audio.lock().unwrap().clone();
         if (style.is_some() && raw.is_empty()) || (style.is_none() && audio.is_empty()) { return; }
         self.dictation.seq += 1;
@@ -473,14 +495,14 @@ impl Hangar {
                         fields.insert("raw".into(), json!(raw));
                         Ok(value)
                     })
-            } else { api.transcribe(&key.name, audio, recording_style).await };
+            } else { api.transcribe(session.as_deref(), audio, recording_style).await };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Dictation(seq, result) }).await;
         }));
         cx.notify();
     }
 
     pub(super) fn receive_dictation(&mut self, seq: u64, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dictation.seq != seq || self.dictation.owner.is_none() || self.dictation.owner != self.session_owner() { return; }
+        if self.dictation.seq != seq || self.dictation.owner.is_none() || self.dictation.owner != self.dictation_owner() { return; }
         let auto_send = std::mem::take(&mut self.dictation.auto_send);
         let timed_out = std::mem::take(&mut self.dictation.timed_out);
         self.dictation.request = None;
@@ -500,7 +522,7 @@ impl Hangar {
                     self.dictation.error = Some(tr("dictation_draft_changed"));
                 } else {
                     let draft_still_empty = self.composer.read(cx).value().trim().is_empty()
-                        && self.selected_key().is_some_and(|key| self.attachments.get(&key).is_none_or(Vec::is_empty));
+                        && self.composer_key().is_some_and(|key| self.attachments.get(&key).is_none_or(Vec::is_empty));
                     let previous = self.dictation.inserted.as_ref().map(|(_, range)| range.clone());
                     let inserted = self.composer.update(cx, |input, cx| {
                         let draft = input.value().to_string();
@@ -544,11 +566,11 @@ impl Hangar {
                 .child(div().size_3().rounded_sm().bg(theme::danger()))
         } else { chrome::icon_button("dictation-toggle", IconName::Mic, label.clone(), cx) };
         let mic = mic.accessibility_label(label.clone())
-            .disabled(transcribing || (!recording && (!readable || !self.chat_online || !self.history_installed)))
+            .disabled(transcribing || (!recording && (!readable || !self.dictation_ready())))
             .loading(transcribing)
             .tooltip(format!("{label} · {}", tr("dictation_shortcut")))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
-        let owner = self.dictation.owner.is_some() && self.dictation.owner == self.session_owner();
+        let owner = self.dictation.owner.is_some() && self.dictation.owner == self.dictation_owner();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
         let entity = cx.entity().downgrade();
         // Gravando, some: trocar no meio não muda nada (o backend lê o estilo no fim) e o espaço é do botão de parar.
@@ -686,7 +708,7 @@ mod tests {
         assert_eq!(state.style(1), None);
         state.style = Some((1, "limpar"));
         assert_eq!(state.style(2), None);
-        state.owner = Some((1, "s".into()));
+        state.owner = Some((1, "m".into(), "s".into()));
         let mut draft = "antes ação depois".to_owned();
         state.inserted = Some((draft.clone(), 6..12));
         assert!(!state.text_in_field(""));
@@ -723,7 +745,7 @@ mod tests {
             assert_eq!(result, expected);
         }
         let mut state = Dictation::default();
-        state.owner = Some((1, "s".into()));
+        state.owner = Some((1, "m".into(), "s".into()));
         let old = state.seq;
         state.cancel();
         assert_ne!(state.seq, old);

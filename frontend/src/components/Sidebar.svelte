@@ -6,7 +6,7 @@ import * as m from '../paraglide/messages';
   import IconFolder from './icons/IconFolder.svelte';
   import IconWorktree from './icons/IconWorktree.svelte';
   import { createSession, gitAction, checkoutBranch, getHistoryTailForServer } from '@hangar/core';
-  import { getActiveId, serverColor, withServer } from '../lib/auth';
+  import { getActiveId, removeServer, serverColor, withServer } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { abrirConfig } from '../lib/configNav';
   import CreateSessionSheet from './CreateSessionSheet.svelte';
@@ -528,6 +528,14 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   }
   function menuDelete() {
     if (!menu) return;
+    // Convite: sai só deste aparelho; a sessão do dono continua viva.
+    if (servers.find((x) => x.id === menu!.serverId)?.invite) {
+      const wasActive = menu.serverId === getActiveId();
+      removeServer(menu.serverId);
+      closeMenu();
+      if (wasActive) window.location.reload(); else sessionsStore.refreshServers();
+      return;
+    }
     model.requestDelete(menu.name, menu.serverId);
     closeMenu();
   }

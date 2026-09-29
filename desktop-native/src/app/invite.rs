@@ -161,6 +161,35 @@ impl Hangar {
     pub(super) fn active_failure(&self, error: &Failure) -> String {
         if self.active_invite() && matches!(error.status, Some(401 | 410)) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
     }
+
+    fn open_invite(&self) -> bool {
+        self.open_api.as_ref().and_then(|api| self.server_entry(&servers::norm(&api.identity()))).is_some_and(|s| s.invite)
+    }
+
+    /// Falha na sessão aberta. Numa sessão de outra máquina o login do servidor ativo não tem culpa: nunca abre a conexão.
+    pub(super) fn chat_auth_lost(&mut self, error: &Failure) -> bool {
+        let Some(key) = self.open_api.as_ref().map(|api| servers::norm(&api.identity())) else { return self.auth_lost(error) };
+        if self.open_invite() && matches!(error.status, Some(401 | 410)) { self.invite_ended.insert(key); }
+        false
+    }
+
+    pub(super) fn chat_failure(&self, error: &Failure) -> String {
+        if self.open_api.is_none() { return self.active_failure(error); }
+        if self.open_invite() && matches!(error.status, Some(401 | 410)) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
+    }
+
+    /// Parar de acompanhar um convite: sai só deste aparelho; a sessão do dono continua viva.
+    pub(super) fn stop_following(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.server_entry(key).is_some_and(|s| s.invite) || self.server.as_deref().map(servers::norm).as_deref() == Some(key) { return; }
+        if self.open_key().as_deref() == Some(key) { self.close_open_session(window, cx); }
+        if self.pending_remote.as_ref().is_some_and(|(want, _)| want == key) { self.pending_remote = None; }
+        self.servers.retain(|s| servers::norm(&s.address) != key);
+        self.invite_ended.remove(key);
+        self.servers_rev += 1;
+        self.persist_servers();
+        self.start_remote_lists();
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

@@ -226,6 +226,11 @@ pub struct Appearance {
     pub sidebar_compact: bool,
     /// Caixa do "Ver ao vivo": distância da borda direita e da de baixo da janela, em px lógicos.
     pub live_corner: [f32; 2],
+    /// Larguras arrastadas do painel lateral (abas comuns e Navegador; `None` no Navegador segue a fração da janela) e
+    /// altura do terminal do rodapé. O que a janela de agora não comporta é cortado ao desenhar, sem mexer no guardado.
+    pub side_width: f32,
+    pub side_browser_width: Option<f32>,
+    pub terminal_height: f32,
     pub tool_look: ToolLook,
     /// Lista de tarefas do agente (TaskCreate/TaskUpdate) como um bloco de progresso na conversa.
     pub task_list: bool,
@@ -254,6 +259,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
     navigation: Navigation::Sidebar, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
+    side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
@@ -276,6 +282,7 @@ impl Appearance {
             surface_material: self.surface_material,
             background: self.background, background_effect: self.background_effect, background_scope: self.background_scope, wallpaper: self.wallpaper, tool_look: self.tool_look, task_list: self.task_list,
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
+            side_width: self.side_width, side_browser_width: self.side_browser_width, terminal_height: self.terminal_height,
             language: self.language, currency: self.currency, hands_free: self.hands_free, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
             code_font: self.code_font, terminal_font: self.terminal_font,
             ..Self::default() }
@@ -317,6 +324,9 @@ impl Appearance {
         self.terminal_size = self.terminal_size.clamp(8, 24);
         // O limite de cima depende da janela e é aplicado ao desenhar; aqui só o que nunca vale.
         for v in &mut self.live_corner { *v = if v.is_finite() { v.max(0.) } else { 16. }; }
+        if !self.side_width.is_finite() { self.side_width = DEFAULT.side_width; }
+        self.side_browser_width = self.side_browser_width.filter(|v| v.is_finite());
+        self.terminal_height = if self.terminal_height.is_finite() { self.terminal_height.clamp(120., 800.) } else { DEFAULT.terminal_height };
         self
     }
 }
@@ -572,6 +582,10 @@ mod tests {
         // Arquivo de antes do campo continua abrindo.
         let old: Appearance = serde_json::from_str(r#"{"navigation":"conversations"}"#).unwrap();
         assert_eq!(old.sidebar_width, None);
+        assert_eq!((old.side_width, old.side_browser_width, old.terminal_height), (300., None, 260.));
+        let panels = Appearance { side_width: 410., side_browser_width: Some(700.), terminal_height: 500., ..Appearance::default() };
+        let kept = panels.reset_keeping_choices();
+        assert_eq!((kept.side_width, kept.side_browser_width, kept.terminal_height), (410., Some(700.), 500.));
     }
 
     #[test]

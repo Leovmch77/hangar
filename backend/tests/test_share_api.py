@@ -114,6 +114,12 @@ def test_prereqs_fora_da_porta_do_convidado():
     assert guest_allowed("GET", "/api/share/prereqs", "proj") is False
 
 
+def test_convidado_nao_fecha_a_sessao_do_dono():
+    from app.share_gate import guest_allowed
+    assert guest_allowed("DELETE", "/api/sessions/proj", "proj") is False
+    assert guest_allowed("GET", "/api/sessions/proj", "proj") is True
+
+
 def test_fechar_sessao_revoga(cli, syncs, monkeypatch):
     cli.post("/api/sessions/proj/share", headers=AUTH)
     monkeypatch.setattr(api.registry, "kill", lambda name: None)

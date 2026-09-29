@@ -24,7 +24,7 @@ struct Row { path: String, name: String, depth: usize, kind: RowKind }
 
 pub(super) struct Tree {
     pub open: bool,
-    owner: Option<(u64, String)>,
+    owner: Option<SessionOwner>,
     generation: u64,
     source: Option<FileSource>,
     picking: Option<Failure>,
@@ -100,7 +100,7 @@ impl Tree {
         dirs
     }
 
-    pub fn local_root(&self, owner: &Option<(u64, String)>) -> Option<PathBuf> {
+    pub fn local_root(&self, owner: &Option<SessionOwner>) -> Option<PathBuf> {
         self.source.as_ref().filter(|_| &self.owner == owner).and_then(FileSource::root).map(Path::to_path_buf)
     }
 }
@@ -144,7 +144,7 @@ impl Hangar {
         if !self.tree.open || self.tree.owner == owner { return; }
         self.tree_stop();
         self.tree.owner = owner;
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return };
         let (name, cwd, generation) = (session.name.clone(), session.cwd.clone(), self.tree.generation);
         let pick = self.runtime.spawn(FileSource::pick(api, name, cwd));
         cx.spawn(async move |this, cx| {

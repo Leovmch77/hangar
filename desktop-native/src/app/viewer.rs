@@ -322,7 +322,7 @@ impl Render for Viewer {
 impl Hangar {
     /// Abre o visor em `sources[index]`; `sources` são as imagens da mensagem, na ordem em que aparecem.
     pub(super) fn open_image(&mut self, key: SessionKey, sources: Vec<Source>, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.api_for(&key.server) else { return };
         if index >= sources.len() { return; }
         let (hangar, runtime, uploads, full) = (cx.entity().downgrade(), self.runtime.clone(), self.uploads_for(&key), self.full_images.clone());
         let viewer = cx.new(|cx| {

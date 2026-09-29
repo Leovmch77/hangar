@@ -46,7 +46,7 @@ impl Hangar {
         self.redraw(panes::Area::Bottom, cx);
         if !snapshot.3.is_empty() { return; }
         let Some((range, query)) = composer::mention_query(&snapshot.2, snapshot.3.end) else { return; };
-        let (Some(api), Some(session)) = (self.api.clone(), self.selected.as_ref()) else { return; };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return; };
         self.mention.range = Some(range);
         if query.is_empty() { return; }
         let (query, name) = (query.to_owned(), session.name.clone());

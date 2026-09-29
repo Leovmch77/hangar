@@ -1,7 +1,7 @@
 //! Barra do app acima de tudo, igual em qualquer tela: no meio o campo "Buscar conversas" que abre a paleta (Ctrl+K),
 //! à direita o botão de Custos e a engrenagem das Configurações. A barra vazia arrasta a janela e o
-//! duplo clique maximiza, como a barra de título do Zeron e do Zed: a janela não tem decoração no Linux. No Windows e no
-//! macOS a janela tem a barra do sistema, com os botões dela; aqui não se desenha nenhum.
+//! duplo clique maximiza, como a barra de título do Zeron e do Zed: a janela não tem decoração no Linux. No Windows a
+//! barra do sistema some e os botões dela são desenhados aqui; no macOS fica a do sistema.
 //!
 //! Colados, ela é a barra de título do Zeron: sem linha embaixo e o conteúdo um pouco abaixo do meio. Com a barra
 //! lateral à esquerda, a lateral sobe até o topo e esta começa na borda dela, com a cor do chat; nas abas e nas páginas
@@ -31,6 +31,28 @@ fn control(el: impl IntoElement) -> Div {
     div().flex_shrink_0().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(el)
 }
 
+/// Controle que cede espaço na janela estreita (busca, conta): encolhe e corta o texto em vez de cobrir o vizinho.
+fn shrinking(el: impl IntoElement) -> Div {
+    div().min_w_0().flex_shrink(1.).flex().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(el)
+}
+
+/// Minimizar, maximizar e fechar do Windows, desenhados na barra do app. A área de cada um é marcada para o sistema, que
+/// cuida do clique e do menu de encaixe do Windows 11; por isso não há `on_click` aqui.
+fn window_buttons(window: &Window, floating: bool) -> Div {
+    let button = |id: &'static str, icon: IconName, area: WindowControlArea, close: bool| div().id(id)
+        .w(px(46.)).h_full().flex().items_center().justify_center().text_color(theme::muted())
+        .hover(move |el| if close { el.bg(gpui::rgb(0xc42b1c)).text_color(gpui::white()) } else { el.bg(theme::hover()).text_color(theme::text()) })
+        .window_control_area(area)
+        .child(Icon::new(icon).size(px(14.)));
+    let max = if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize };
+    // Encostados no canto da janela, como os do sistema: desfazem o respiro da barra à direita e em cima.
+    div().flex_shrink_0().self_stretch().flex().ml(px(4.))
+        .mr(px(if floating { -8. } else { -6. })).mt(px(if floating { 0. } else { -TOPBAR_TOP_PAD }))
+        .child(button("window-min", IconName::WindowMinimize, WindowControlArea::Min, false))
+        .child(button("window-max", max, WindowControlArea::Max, false))
+        .child(button("window-close", IconName::WindowClose, WindowControlArea::Close, true))
+}
+
 impl Hangar {
     pub(super) fn schedule_account_refresh(&mut self, cx: &mut Context<Self>) {
         self.topbar.account_tick += 1;
@@ -45,13 +67,13 @@ impl Hangar {
     }
 
     /// `beside`: ao lado da barra lateral, com a largura do painel direito aberto (0 fechado); a busca fica no meio do chat.
-    pub(super) fn render_topbar(&mut self, beside: Option<f32>, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_topbar(&mut self, beside: Option<f32>, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
         let online = self.api.is_some();
         let settings_open = self.settings.is_some() && !self.settings_live();
         let search = Button::new("topbar-search")
             .custom(ButtonCustomVariant::new(cx).color(theme::inset()).foreground(theme::muted()).hover(theme::hover()).active(theme::hover()))
-            .w(px(420.)).max_w_full().h(px(26.)).px(px(10.)).rounded(px(8.)).border_1().border_color(theme::border()).disabled(!online)
+            .w(px(420.)).max_w_full().min_w_0().h(px(26.)).px(px(10.)).rounded(px(8.)).border_1().border_color(theme::border()).disabled(!online)
             .accessibility_label(web("lista_buscar"))
             .child(div().w_full().flex().items_center().gap(px(8.))
                 .child(chrome::small_icon(IconName::Search, 14., theme::faint()))
@@ -71,7 +93,7 @@ impl Hangar {
                 None => format!("{} · {name}", tr("no_data")),
             };
             Button::new("topbar-account").ghost().small().selected(self.accounts.card && self.accounts.card_top).disabled(!online)
-                .h(px(26.)).px(px(8.)).rounded_full().max_w(px(280.))
+                .h(px(26.)).px(px(8.)).rounded_full().max_w(px(280.)).min_w_0()
                 .child(div().min_w_0().flex().items_center().gap(px(6.)).text_size(px(12.5))
                     .child(chrome::provider_glyph(&kind, 14.))
                     .child(chrome::ring(window.as_ref().map(|w| w.1)))
@@ -123,7 +145,7 @@ impl Hangar {
             })
             .map(|el| {
                 let controls = div().flex().justify_end().gap(px(6.))
-                    .children(account.map(|account| control(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
+                    .children(account.map(|account| shrinking(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
                     .child(control(pill))
                     .children(outdated.map(control))
                     .children(updater.map(control))
@@ -131,11 +153,12 @@ impl Hangar {
                 match beside {
                     // Com o painel direito aberto, a busca centra no chat e os controles ficam sobre o painel; mais largos que
                     // ele, invadem o vazio do chat sem empurrar a busca.
-                    Some(side) if side > 0. => el.child(div().flex_1().min_w_0().flex().child(div().flex_1()).child(control(search)).child(div().flex_1()))
+                    Some(side) if side > 0. => el.child(div().flex_1().min_w_0().flex().child(div().flex_1()).child(shrinking(search).min_w(px(140.))).child(div().flex_1()))
                         .child(controls.flex_shrink_0().w(px(side))),
-                    _ => el.child(div().flex_1()).child(control(search)).child(controls.flex_1().min_w_0()),
+                    _ => el.child(div().flex_1()).child(shrinking(search).min_w(px(140.))).child(controls.flex_1().min_w_0()),
                 }
-            });
+            })
+            .when(cfg!(target_os = "windows"), |el| el.child(window_buttons(window, floating)));
         if floating || beside.is_some() { bar.into_any_element() } else { chrome::glass_panel(bar, px(0.)) }
     }
 }
