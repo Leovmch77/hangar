@@ -178,6 +178,18 @@ def test_commands_route(monkeypatch, tmp_path):
     assert "argumentHint" in data[0]
 
 
+def test_frontmatter_cache_rele_quando_o_arquivo_muda(tmp_path):
+    import os
+    from app import commands
+    md = tmp_path / "x.md"
+    md.write_text("---\ndescription: antes\n---\n", encoding="utf-8")
+    assert commands._frontmatter_of(md)["description"] == "antes"
+    md.write_text("---\ndescription: depois\n---\n", encoding="utf-8")
+    st = md.stat()
+    os.utime(md, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert commands._frontmatter_of(md)["description"] == "depois"
+
+
 def test_commands_route_requires_auth():
     settings.auth_token = "secret"
     from app.api import app

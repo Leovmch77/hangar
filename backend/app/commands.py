@@ -66,16 +66,38 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
 def _parse_frontmatter(text: str) -> dict:
     # Extrai o frontmatter do topo. Qualquer erro de YAML -> {} (segue sem ele).
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}
     try:
-        data = yaml.safe_load(m.group(1))
+        data = yaml.load(m.group(1), Loader=_YAML_LOADER)
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# path -> ((mtime_ns, size), frontmatter). A lista roda a cada abertura do menu e relia e
+# reparseava centenas de SKILL.md que quase nunca mudam.
+_fm_cache: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def _frontmatter_of(path: Path) -> dict:
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    chave = (st.st_mtime_ns, st.st_size)
+    hit = _fm_cache.get(str(path))
+    if hit and hit[0] == chave:
+        return hit[1]
+    fm = _parse_frontmatter(_read_text(path))
+    _fm_cache[str(path)] = (chave, fm)
+    return fm
 
 
 def _clean(value) -> Optional[str]:
@@ -94,7 +116,7 @@ def _scan_project_commands(commands_dir: Path) -> list[dict]:
     for md in sorted(commands_dir.glob("*.md")):
         if not md.is_file():
             continue
-        fm = _parse_frontmatter(_read_text(md))
+        fm = _frontmatter_of(md)
         name = _clean(fm.get("name")) or md.stem
         if not name:
             continue
@@ -118,7 +140,7 @@ def _scan_skills(skills_dir: Path) -> list[dict]:
         skill_md = sub / "SKILL.md"
         if not skill_md.is_file():
             continue
-        fm = _parse_frontmatter(_read_text(skill_md))
+        fm = _frontmatter_of(skill_md)
         name = _clean(fm.get("name")) or sub.name
         if not name:
             continue
@@ -161,7 +183,7 @@ def _scan_plugins(plugins_dir: Path) -> list[dict]:
                 for md in sorted(cmd_dir.glob("*.md")):
                     if not md.is_file():
                         continue
-                    fm = _parse_frontmatter(_read_text(md))
+                    fm = _frontmatter_of(md)
                     stem = _clean(fm.get("name")) or md.stem
                     if not stem:
                         continue
@@ -180,7 +202,7 @@ def _scan_plugins(plugins_dir: Path) -> list[dict]:
                     skill_md = sub / "SKILL.md"
                     if not skill_md.is_file():
                         continue
-                    fm = _parse_frontmatter(_read_text(skill_md))
+                    fm = _frontmatter_of(skill_md)
                     stem = _clean(fm.get("name")) or sub.name
                     if not stem:
                         continue
