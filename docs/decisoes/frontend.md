@@ -610,7 +610,7 @@ O plano original da troca, mantido como registro:
 - Antes: fechar ou aceitar por escrito as linhas `pendente` de `chat-parity.md` e os módulos
   listados ali como fora do nativo (terminal, navegador, Git completo, voz, Board/Canvas).
 
-## Navegador do app nativo: CDP dentro do processo no Windows
+## Navegador do app nativo: CDP dentro do processo no Windows (29/09/2026)
 
 29/09/2026. No Windows o app nativo (`desktop-native/`) atende o `hangar-preview` e as tools MCP de
 navegador sem o Electron. Cada sessão tem o seu WebView2, e o app o dirige por CDP dentro do

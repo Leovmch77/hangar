@@ -207,6 +207,8 @@ No `batch` cada linha pode levar o seu `--aba`, e linhas `tab ...` valem normalm
 
 **No app nativo (Windows) não há abas**: é um navegador por sessão, e `tab ...` e `--aba` respondem
 `erro: o app nativo ainda nao tem abas: e um navegador por sessao`. Use os comandos sem `--aba`.
+Ali o `open` só funciona com o servidor ativo do app nesta máquina (loopback) e não monta o painel
+Navegador na tela sozinho: não diga ao usuário que "o painel montou na sua tela".
 
 ## Se um comando falhar
 

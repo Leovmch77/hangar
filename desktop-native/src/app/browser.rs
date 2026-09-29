@@ -82,6 +82,9 @@ impl BrowserPanel {
     /// Navega, ou faz o motor nascer e navega quando ele ficar pronto.
     pub(super) fn go(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         self.invalid = None;
+        // No Windows o WebView2 pode nascer de novo: motor que falhou volta a ser tentado no próximo `open`.
+        #[cfg(target_os = "windows")]
+        if matches!(self.engine, Some(Err(_))) { self.engine = None; }
         if self.engine.is_some() {
             self.navigate(url, window, cx);
         } else if self.starting.replace(url).is_none() {

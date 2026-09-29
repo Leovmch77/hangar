@@ -1,6 +1,6 @@
 //! Verbos do hangar-preview sobre CDP, portados de `shell/preview_ctl.cjs`. Um controlador por navegador: é ele quem
 //! guarda refs, tema, layout e os registros de console e rede entre um comando e outro.
-use std::{cell::RefCell, collections::{HashMap, HashSet, VecDeque}, future::Future, time::Instant};
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, future::Future, time::Instant};
 
 use futures::{future::{Either, select}, lock::Mutex};
 use serde_json::{Value, json};
@@ -48,6 +48,8 @@ pub struct Controller<P: Page> {
     state: RefCell<State>,
     /// Um verbo por vez: dois clientes (agente e tool MCP) não intercalam eventos.
     turn: Mutex<()>,
+    /// Último `hidden` pedido: quem pega o `turn` aplica este, não o seu, porque a fila do `turn` não garante ordem.
+    wanted_hidden: Cell<bool>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -57,7 +59,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P) -> Self {
-        Self { page, turn: Mutex::new(()), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(false), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, navigated: false, enabled: HashSet::new() }) }
     }
@@ -68,8 +70,9 @@ impl<P: Page> Controller<P> {
     }
 
     pub async fn set_hidden(&self, hidden: bool) {
+        self.wanted_hidden.set(hidden);
         let _turn = self.turn.lock().await;
-        self.state.borrow_mut().hidden = hidden;
+        self.state.borrow_mut().hidden = self.wanted_hidden.get();
         let layout = self.state.borrow().layout;
         let _ = self.apply_layout(layout).await;
     }
@@ -519,6 +522,22 @@ mod tests {
         let last = c.page.calls.borrow().iter().rev().find(|(m, _)| m == "Emulation.setDeviceMetricsOverride").cloned();
         assert_eq!(last.map(|(_, p)| (p["width"].clone(), p["height"].clone())), Some((json!(1280), json!(800))));
         block_on(c.set_hidden(false));
+        assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
+    }
+
+    #[test]
+    fn late_hidden_request_never_overrides_a_newer_one() {
+        let c = ctl(|_, _| Ok(json!({})));
+        let busy = block_on(c.turn.lock());
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let (mut hide, mut show) = (Box::pin(c.set_hidden(true)), Box::pin(c.set_hidden(false)));
+        assert!(hide.as_mut().poll(&mut cx).is_pending() && show.as_mut().poll(&mut cx).is_pending());
+        drop(busy);
+        // O pedido antigo pega o `turn` por último e ainda assim aplica o mais novo (visível).
+        block_on(show);
+        block_on(hide);
+        assert!(!c.state.borrow().hidden);
         assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
     }
 

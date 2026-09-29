@@ -50,6 +50,25 @@ pub fn remove_sidecar(key: &str) {
     if let Some(dir) = nav_dir() { let _ = std::fs::remove_file(dir.join(format!("{}.json", sidecar_name(key)))); }
 }
 
+/// Só o app nativo grava `pid`: sidecar do Electron (sem `pid`) nunca é tocado.
+fn is_stale_native_sidecar(value: &Value, pid: u32) -> bool {
+    value.get("pid").is_some_and(|p| p.as_u64() != Some(u64::from(pid)))
+}
+
+/// O app não apaga os sidecars ao sair; sem isto, cada reinício deixa navegadores fantasmas para o CLI e o backend.
+fn drop_stale_sidecars() {
+    let Some(dir) = nav_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with(['_', '.']) || !name.ends_with(".json") { continue; }
+        let Some(value) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        if is_stale_native_sidecar(&value, std::process::id()) && let Err(e) = std::fs::remove_file(&path) {
+            eprintln!("[nav] sidecar antigo {name} nao apagado: {e}");
+        }
+    }
+}
+
 fn same(a: &[u8], b: &[u8]) -> bool { a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 }
 
 fn new_token() -> std::io::Result<String> {
@@ -96,6 +115,7 @@ pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = new_token()?;
+    drop_stale_sidecars();
     write_json("_srv", &json!({"porta": port, "token": token, "pid": std::process::id(), "ts": now_ms()}))?;
     let token: Arc<str> = token.into();
     runtime.spawn(async move {
@@ -210,6 +230,13 @@ mod tests {
         assert_eq!(parse_body(br#"{"verbo":"snapshot"}"#).err(), Some("erro: corpo invalido".into()));
         let with_tab = parse_body(br#"{"chave":"k","verbo":"url","aba":2}"#).unwrap();
         assert_eq!((with_tab.tab, with_tab.args.len()), (Some(2), 0));
+    }
+
+    #[test]
+    fn only_native_sidecars_of_another_pid_are_stale() {
+        assert!(is_stale_native_sidecar(&json!({"chave": "s::a", "pid": 10}), 20));
+        assert!(!is_stale_native_sidecar(&json!({"chave": "s::a", "pid": 20}), 20));
+        assert!(!is_stale_native_sidecar(&json!({"chave": "s::a", "url": "http://x/"}), 20));
     }
 
     #[test]
