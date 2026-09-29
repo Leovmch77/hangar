@@ -92,27 +92,39 @@ def forget(alive_targets: set[str]) -> None:
             del _LAST[target]
 
 
+def logical_line(screen: list[str], y: int, width: int) -> str:
+    """A linha que o programa escreveu, terminando na linha `y` do cursor. O terminal quebra linha
+    longa em varias linhas da tela: cada linha anterior que encheu a largura e continuacao. O
+    `capture-pane` tira o espaco do fim, entao quebra logo depois de um espaco deixa `width - 1`
+    caracteres e o espaco volta na juncao."""
+    line = screen[y] if y < len(screen) else ""
+    while 0 < y <= len(screen) and width > 1 and len(screen[y - 1]) >= width - 1:
+        y -= 1
+        line = screen[y] + (" " if len(screen[y]) == width - 1 else "") + line
+    return line
+
+
 def pending_question(target: str, pane_pid: int | None) -> dict | None:
     if not pane_pid:
         return None
     # Linux: o /proc e barato e descarta quase tudo antes dos dois forks do tmux.
     if os.name != "nt" and not _reading_tty(pane_pid):
         return None
-    cp = tmux._run(["tmux", "display", "-p", "-t", f"={target}:", "#{cursor_y}"])
-    y = cp.stdout.strip()
-    if cp.returncode != 0 or not y.isdigit():
+    cp = tmux._run(["tmux", "display", "-p", "-t", f"={target}:", "#{cursor_y},#{pane_width}"])
+    y, _, width = cp.stdout.strip().partition(",")
+    if cp.returncode != 0 or not y.isdigit() or not width.isdigit():
         return None
+    y, width = int(y), int(width)
     raw = tmux._run(["tmux", "capture-pane", "-p", "-t", f"={target}:"]).stdout
     screen = raw.split("\n")
-    line = screen[int(y)] if int(y) < len(screen) else ""
-    question = parse_prompt(line)
+    question = parse_prompt(logical_line(screen, y, width))
     if question is None:
         with _LAST_LOCK:
             _LAST.pop(target, None)
         return None
     if os.name == "nt" and not _idle_windows(target, pane_pid, raw):
         return None
-    tail = [l.rstrip() for l in screen[: int(y) + 1] if l.strip()][-_SCREEN_LINES:]
+    tail = [l.rstrip() for l in screen[: y + 1] if l.strip()][-_SCREEN_LINES:]
     return {**question, "screen": tail}
 
 

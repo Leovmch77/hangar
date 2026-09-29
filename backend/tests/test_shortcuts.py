@@ -156,6 +156,10 @@ def _run_hangar(client, monkeypatch, cwd, command, key="global:k1", name="s", **
 
 
 def _hangar(client):
+    # A checagem de "esperando o teclado" le a arvore de processos, que o backend cacheia por 1 s:
+    # sem descartar, o teste enxergaria o estado de antes do processo que ele acabou de criar.
+    from app import procinfo
+    procinfo._invalidar_children_map()
     return client.get("/api/hangar-terminals", headers=_auth()).json()["terminals"]
 
 
@@ -568,7 +572,10 @@ def test_session_terminal_question_respects_ask(client, monkeypatch, tmp_path, p
     monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
     _run(client, monkeypatch, tmp_path, 'read -r -p "Porta [3000]: " p; sleep 30', name="a", ask=True)
     _run(client, monkeypatch, tmp_path, 'read -r -p "Porta [3000]: " p; sleep 30', name="b", ask=False)
-    listed = lambda n: client.get(f"/api/sessions/{n}/shortcut-terminals", headers=_auth()).json()["terminals"]
+    def listed(n):
+        from app import procinfo
+        procinfo._invalidar_children_map()
+        return client.get(f"/api/sessions/{n}/shortcut-terminals", headers=_auth()).json()["terminals"]
     assert _wait_for(lambda: listed("a")[0]["question"])["default"] == "3000"
     assert listed("b")[0]["question"] is None
     ident = listed("a")[0]["id"]
@@ -580,9 +587,14 @@ def test_running_program_is_not_a_question(client, monkeypatch, tmp_path, home, 
     from app import api
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
-    _run_hangar(client, monkeypatch, tmp_path, "printf 'Porta: '; sleep 30")
+    from app import shortcut_terminals, terminal_prompt, tmux
+    ident = _run_hangar(client, monkeypatch, tmp_path, "printf 'Porta: '; sleep 30").json()["terminal"]["id"]
     time.sleep(0.5)
+    # A tela tem um texto que parece pergunta: so o estado do processo (dormindo, nao lendo o tty) a barra.
+    target = shortcut_terminals.find_hangar(ident)
+    assert tmux.capture_pane(target).strip().endswith("Porta:")
     assert [t["question"] for t in _hangar(client)] == [None]
+    assert terminal_prompt.parse_prompt("Porta:") is not None
 
 
 def test_answer_rejects_line_breaks(client, monkeypatch, tmp_path, home, private_tmux):
@@ -617,3 +629,22 @@ def test_answer_text_reaches_the_terminal_untouched(client, monkeypatch, tmp_pat
     assert sent == [(text, True), ("Enter", False)]
     assert _wait_file(tmp_path / "resposta.txt") == f"[{text}]"
     assert not (tmp_path / "invadido").exists()
+
+
+def test_prompt_longer_than_the_pane_width_keeps_text_and_default(client, monkeypatch, tmp_path, private_tmux):
+    # O terminal quebra a linha em duas: a linha do cursor sozinha e so o fim ("-02]:").
+    from app import api
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("read -p precisa de bash")
+    monkeypatch.setenv("SHELL", bash)
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.3)
+    prompt = "Destino SSH da VM (usuario@host ou alias do ~/.ssh/config) [Administrator@delphi-02]: "
+    assert len(prompt) > 80
+    script = f'read -r -p "{prompt}" p; echo "$p" > resposta.txt; sleep 30'
+    ident = _run_hangar(client, monkeypatch, tmp_path, script, home=False).json()["terminal"]["id"]
+    question = _wait_for(lambda: next((t["question"] for t in _hangar(client) if t["id"] == ident), None))
+    assert question["text"] == "Destino SSH da VM (usuario@host ou alias do ~/.ssh/config)"
+    assert question["default"] == "Administrator@delphi-02"
+    assert client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": "vm@x"}, headers=_auth()).status_code == 200
+    assert _wait_file(tmp_path / "resposta.txt") == "vm@x"
