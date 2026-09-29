@@ -2,6 +2,7 @@
 // o `baseUrl` (Tailscale). `baseUrl` continua sendo a identidade da entrada; só a rede muda.
 import { apiEnv } from './apiEnv';
 import { registrar as registrarDiag } from './diag';
+import { hmacSha256Hex } from './hmac';
 import type { LanInfo, Server } from './servers';
 
 // Rede local responde em poucos ms; fora dela o IP não existe ou é outra máquina.
@@ -48,11 +49,26 @@ async function aprender(s: Server): Promise<LanInfo | null> {
   return lan;
 }
 
+function desafio(): string {
+  const b = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(b);
+  else for (let i = 0; i < b.length; i++) b[i] = Math.floor(Math.random() * 256);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+// Mesmo IP em outra rede pode ser outra máquina: o token só vai pro endereço local depois de ele
+// provar que conhece o token (HMAC do desafio) e dizer o mesmo nome.
 async function testarLan(s: Server, lan: LanInfo | null | undefined): Promise<boolean> {
   if (!lan?.url || !lan.id || !lanPermitida(lan.url)) return false;
-  const r = await perguntar(lan.url, s.token, PRAZO_LAN_MS);
-  // Mesmo IP em outra rede pode ser outra máquina: só vale se ela disser o mesmo nome.
-  if (r?.identificador !== lan.id) return false;
+  const d = desafio();
+  let r: { identificador?: string; prova?: string } | null = null;
+  try {
+    const res = await fetch(`${lan.url}/api/peers/prova?desafio=${d}`, { signal: AbortSignal.timeout(PRAZO_LAN_MS) });
+    r = res.ok ? (await res.json()) as { identificador?: string; prova?: string } : null;
+  } catch {
+    return false;
+  }
+  if (r?.identificador !== lan.id || r.prova !== hmacSha256Hex(s.token, `${d}|${lan.id}`)) return false;
   rotas.set(s.id, lan.url);
   return true;
 }
@@ -65,7 +81,8 @@ async function decidir(s: Server): Promise<void> {
   if (!(await testarLan(s, lan))) {
     rotas.set(s.id, s.baseUrl);
     // O IP local pode ter mudado (DHCP) ou o bind ter sido aberto depois: atualiza para a próxima.
-    if (s.lan !== undefined) void aprender(s);
+    if (s.lan !== undefined) void aprender(s).catch((e: unknown) => registrarDiag({ evento: 'rota.falhou',
+      nivel: 'erro', codigo: e instanceof Error ? e.name : 'erro' }, s.baseUrl));
   }
   const agora = rotas.get(s.id)!;
   if (agora !== anterior) {
@@ -82,7 +99,10 @@ export function decidirRota(s: Server): Promise<void> {
   }
   let p = emCurso.get(s.id);
   if (!p) {
-    p = decidir(s).catch(() => { rotas.set(s.id, s.baseUrl); }).finally(() => emCurso.delete(s.id));
+    p = decidir(s).catch((e: unknown) => {
+      rotas.set(s.id, s.baseUrl);
+      registrarDiag({ evento: 'rota.falhou', nivel: 'erro', codigo: e instanceof Error ? e.name : 'erro' }, s.baseUrl);
+    }).finally(() => emCurso.delete(s.id));
     emCurso.set(s.id, p);
   }
   return p;

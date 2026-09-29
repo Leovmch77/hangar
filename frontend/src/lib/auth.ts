@@ -4,7 +4,7 @@
 
 import { normalizeBaseUrl } from './url';
 import * as m from '../paraglide/messages';
-import { type Server, type InviteRedeemResult, type LanInfo, serverColor, registrarDiag, baseOf } from '@hangar/core';
+import { type Server, type InviteRedeemResult, type LanInfo, serverColor, registrarDiag, baseOf, esquecerRota } from '@hangar/core';
 export { serverColor };
 export type { Server };
 
@@ -418,7 +418,12 @@ export function updateServer(id: string, patch: { token?: string; baseUrl?: stri
   // silenciosamente, e o formulario tem os dois campos.
   const token = patch.token?.trim() || list[i].token;
   const baseUrl = patch.baseUrl?.trim() ? normalizeBaseUrl(patch.baseUrl) : list[i].baseUrl;
-  list[i] = { ...list[i], token, baseUrl };
+  if (baseUrl !== list[i].baseUrl || token !== list[i].token) {
+    // Outro endereço ou token pode ser outra máquina: a rede local aprendida não vale mais.
+    const { lan: _lan, ...resto } = list[i];
+    list[i] = { ...resto, token, baseUrl };
+    esquecerRota(id);
+  }
   writeServers(list);
   // Cookie: ATIVO **ou** SAME-ORIGIN. O renameServer nao precisa disto (label nao autentica), mas
   // token sim — sem o resync, trocar o token gravava no storage e seguia mandando o ANTIGO.

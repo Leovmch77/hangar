@@ -216,6 +216,17 @@ def test_identificador_leitura(env_tmp, cli):
     assert r.json() == {"identificador": "", "lan_url": ""}
 
 
+def test_prova_sem_credencial_e_hmac_do_token(cli, monkeypatch):
+    import hashlib
+    import hmac
+    monkeypatch.setattr(settings, "server_id", "maq")
+    r = cli.get("/api/peers/prova", params={"desafio": "a" * 32})
+    assert r.status_code == 200
+    esperado = hmac.new(settings.auth_token.encode(), f"{'a' * 32}|maq".encode(), hashlib.sha256).hexdigest()
+    assert r.json() == {"identificador": "maq", "prova": esperado}
+    assert cli.get("/api/peers/prova", params={"desafio": "curto"}).status_code == 400
+
+
 def test_lan_url_so_com_bind_fora_do_loopback(monkeypatch):
     from app import peers_api
     monkeypatch.setattr(peers_api, "detect_lan_ip", lambda: "192.168.77.142")

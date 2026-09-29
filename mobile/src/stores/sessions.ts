@@ -144,8 +144,8 @@ function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => voi
     const igual =
       next.length === serversCache.length &&
       next.every((s, i) => s.id === serversCache[i]?.id && s.baseUrl === serversCache[i]?.baseUrl && s.token === serversCache[i]?.token);
-    if (igual) return;
     serversCache = next.slice();
+    if (igual) return;
     if (refs > 0) connect(serversCache, get, set);
     else recompute(set);
   });

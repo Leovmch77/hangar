@@ -345,7 +345,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   fixos e reconecta todos na volta.
 - **Rede local antes do Tailscale: `baseUrl` é identidade, a rota é `baseOf(s)`.** Toda URL de
   chamada a um servidor sai por `baseOf` (ou `getBaseUrl` do `ApiEnv`); `s.baseUrl` cru ignora a
-  rede local calado. O endereço local só vale se responder o mesmo identificador.
+  rede local calado. O token só vai ao endereço local depois da prova HMAC (`/api/peers/prova`).
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
 - **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
   vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O

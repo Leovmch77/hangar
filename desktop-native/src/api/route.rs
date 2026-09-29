@@ -99,9 +99,24 @@ async fn ask(api: &Api, mut url: Url, timeout: Duration) -> Option<Value> {
     r.json().await.ok()
 }
 
-// Mesmo IP em outra rede pode ser outra máquina: só vale se ela disser o mesmo nome.
+// Mesmo IP em outra rede pode ser outra máquina: o token só vai pro endereço local depois de ele
+// provar que conhece o token (HMAC do desafio) e dizer o mesmo nome. Por isso o cliente sem token.
 async fn same_machine(api: &Api, route: &Url, id: &str) -> bool {
-    ask(api, route.clone(), LAN_TIMEOUT).await.is_some_and(|v| v.get("identificador").and_then(Value::as_str) == Some(id))
+    let mut raw = [0u8; 16];
+    if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw).is_err() { return false; }
+    let challenge: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let mut url = route.clone();
+    let Ok(mut segments) = url.path_segments_mut() else { return false };
+    segments.pop_if_empty().extend(["api", "peers", "prova"]);
+    drop(segments);
+    url.query_pairs_mut().append_pair("desafio", &challenge);
+    let Ok(r) = api.plain.get(url).timeout(LAN_TIMEOUT).send().await else { return false };
+    let Ok(v) = r.error_for_status().map(|r| r.json::<Value>()) else { return false };
+    let Ok(v) = v.await else { return false };
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, api.token.as_bytes());
+    let expected: String = ring::hmac::sign(&key, format!("{challenge}|{id}").as_bytes())
+        .as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    v.get("identificador").and_then(Value::as_str) == Some(id) && v.get("prova").and_then(Value::as_str) == Some(expected.as_str())
 }
 
 async fn learn(api: &Api) -> Option<Lan> {

@@ -7,6 +7,8 @@ aqui dentro, sem tocar em api.py.
 Nome do módulo: `peers_api` de propósito — `app/peers.py` já é a lógica de pareamento
 cross-server, e o módulo de rota não pode ocupar o nome dela.
 """
+import hashlib
+import hmac
 import logging
 import os
 import tempfile
@@ -137,6 +139,17 @@ def descobrir_maquinas() -> list[dict]:
 @peers_router.get("/identificador", dependencies=[Depends(require_auth)])
 def get_identificador() -> dict:
     return {"identificador": settings.server_id or "", "lan_url": lan_url(settings)}
+
+
+@peers_router.get("/prova")
+def get_prova(desafio: str) -> dict:
+    """Sem credencial de propósito: o cliente confere quem responde no endereço local ANTES de
+    mandar o token. Só quem tem o token calcula o HMAC do desafio."""
+    if not 16 <= len(desafio) <= 128:
+        raise HTTPException(400, detail=erro("peers_desafio_invalido", "desafio inválido"))
+    ident = settings.server_id or ""
+    mac = hmac.new(settings.auth_token.encode(), f"{desafio}|{ident}".encode(), hashlib.sha256)
+    return {"identificador": ident, "prova": mac.hexdigest()}
 
 
 def lan_url(s) -> str:

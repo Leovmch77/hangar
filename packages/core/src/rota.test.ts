@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createHmac } from 'node:crypto';
 import { configureApi, _resetApiEnvForTests } from './apiEnv';
+import { hmacSha256Hex } from './hmac';
 import { baseOf, decidirRota, esquecerRota, _resetRotasForTests } from './rota';
 import type { LanInfo, Server } from './servers';
 
@@ -15,20 +17,29 @@ function env(origin: string | null, lembrados: Record<string, LanInfo> = {}) {
   return lembrados;
 }
 
-// Cada endereço responde um identificador (ou falha, com `null`).
-function rede(respostas: Record<string, { identificador: string; lan_url?: string } | null>) {
-  const chamadas: string[] = [];
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    const base = url.replace('/api/peers/identificador', '');
-    chamadas.push(base);
-    const r = respostas[base];
-    if (!r) throw new TypeError('rede');
-    return new Response(JSON.stringify(r), { status: 200 });
+// Cada endereço é uma máquina com nome e token (ou nada no ar, com `null`).
+type Maquina = { identificador: string; token: string; lan_url?: string } | null;
+function rede(maquinas: Record<string, Maquina>) {
+  const chamadas: { url: string; auth: string | null }[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
+    chamadas.push({ url, auth });
+    const u = new URL(url);
+    const m = maquinas[u.origin];
+    if (!m) throw new TypeError('rede');
+    if (u.pathname === '/api/peers/prova') {
+      const d = u.searchParams.get('desafio')!;
+      const prova = createHmac('sha256', m.token).update(`${d}|${m.identificador}`).digest('hex');
+      return new Response(JSON.stringify({ identificador: m.identificador, prova }));
+    }
+    if (auth !== `Bearer ${m.token}`) return new Response('{}', { status: 401 });
+    return new Response(JSON.stringify({ identificador: m.identificador, lan_url: m.lan_url ?? '' }));
   }));
   return chamadas;
 }
 
 const srv = (lan?: LanInfo): Server => ({ id: 's1', label: 'maq', baseUrl: TS, token: 't', lan });
+const maq = { identificador: 'maq', token: 't', lan_url: LAN };
 
 beforeEach(() => { _resetRotasForTests(); _resetApiEnvForTests(); });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -36,25 +47,32 @@ afterEach(() => { vi.unstubAllGlobals(); });
 describe('rota até o servidor', () => {
   it('primeira vez: aprende o endereço local pelo principal e já nasce nele', async () => {
     const lembrados = env(null);
-    rede({ [TS]: { identificador: 'maq', lan_url: LAN }, [LAN]: { identificador: 'maq' } });
+    rede({ [TS]: maq, [LAN]: maq });
     await decidirRota(srv());
     expect(baseOf(srv())).toBe(LAN);
     expect(lembrados.s1).toEqual({ url: LAN, id: 'maq' });
   });
 
-  it('mesmo IP respondendo outro nome é outra máquina: fica no principal', async () => {
+  it('o token nunca vai pro endereço local antes da prova', async () => {
     env(null);
-    rede({ [TS]: { identificador: 'maq', lan_url: LAN }, [LAN]: { identificador: 'outra' } });
+    const chamadas = rede({ [TS]: maq, [LAN]: maq });
+    await decidirRota(srv({ url: LAN, id: 'maq' }));
+    expect(chamadas.filter((c) => c.url.startsWith(LAN)).every((c) => c.auth === null)).toBe(true);
+  });
+
+  it('outra máquina no mesmo IP, mesmo dizendo o nome certo, não prova o token: fica no principal', async () => {
+    env(null);
+    rede({ [TS]: maq, [LAN]: { identificador: 'maq', token: 'outro' } });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
   });
 
   it('fora da rede local cai no principal; depois da falha decide de novo', async () => {
     env(null);
-    rede({ [TS]: { identificador: 'maq', lan_url: LAN } });
+    rede({ [TS]: maq });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
-    rede({ [TS]: { identificador: 'maq', lan_url: LAN }, [LAN]: { identificador: 'maq' } });
+    rede({ [TS]: maq, [LAN]: maq });
     esquecerRota('s1');
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(LAN);
@@ -62,9 +80,13 @@ describe('rota até o servidor', () => {
 
   it('página HTTPS nem tenta o http:// local (o navegador bloquearia)', async () => {
     env('https://pocket.exemplo');
-    const chamadas = rede({ [TS]: { identificador: 'maq', lan_url: LAN }, [LAN]: { identificador: 'maq' } });
+    const chamadas = rede({ [TS]: maq, [LAN]: maq });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
-    expect(chamadas).not.toContain(LAN);
+    expect(chamadas.some((c) => c.url.startsWith(LAN))).toBe(false);
+  });
+
+  it('HMAC confere com o do Node', () => {
+    expect(hmacSha256Hex('k'.repeat(70), 'x|maq')).toBe(createHmac('sha256', 'k'.repeat(70)).update('x|maq').digest('hex'));
   });
 });

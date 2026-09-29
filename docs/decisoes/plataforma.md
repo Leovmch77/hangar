@@ -723,9 +723,11 @@ nome das outras sessões (campos `pair`/`then`). O nativo guarda um convite por 
 delphi-02; em casa, o PC de casa) e pelo Tailscale, e o caminho local evita a volta pelo relay.
 O servidor informa o próprio endereço local em `GET /api/peers/identificador` (`lan_url`, vazio
 quando o bind é só loopback). O cliente guarda `lan: {url, id}` na entrada e, a cada conexão da
-lista, testa o local com prazo de 800 ms. Só usa se a resposta trouxer o MESMO identificador: o
-mesmo `192.168.x.y` em outra rede é outra máquina, e o token é igual em todas as máquinas do
-usuário. Conexão que cai esquece a rota, e é assim que a troca de rede é percebida.
+lista, testa o local com prazo de 800 ms por `GET /api/peers/prova?desafio=`, SEM credencial: a
+máquina devolve o HMAC-SHA256 de `desafio|identificador` com o token. Só usa o local se a prova
+bater e o identificador for o mesmo. O mesmo `192.168.x.y` em outra rede é outro aparelho, e
+mandar o token antes da prova o entregaria a ele (achado da revisão); o identificador sozinho não
+basta porque o token é igual em todas as máquinas do usuário. Conexão que cai esquece a rota, e é assim que a troca de rede é percebida.
 
 `baseUrl` segue sendo a identidade (dedupe, sincronização, agrupamento, diário, endereço mandado
 ao par). Chamada nova sai por `baseOf(s)` ou pelo `getBaseUrl` do `ApiEnv`; `s.baseUrl` cru numa

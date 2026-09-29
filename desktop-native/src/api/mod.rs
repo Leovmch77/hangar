@@ -41,7 +41,7 @@ pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remo
 
 // `plain` busca mídia de terceiros: nunca leva o token do servidor.
 #[derive(Clone)]
-pub struct Api { client: Client, plain: Client, base: Url }
+pub struct Api { client: Client, plain: Client, base: Url, token: String }
 
 #[derive(Clone, Debug)]
 pub struct Failure {
@@ -102,7 +102,7 @@ impl Api {
             .redirect(reqwest::redirect::Policy::none()).build().map_err(|_| Failure::local("network_error"))?;
         let plain = Client::builder().connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::limited(3))
             .build().map_err(|_| Failure::local("network_error"))?;
-        Ok(Self { client, plain, base })
+        Ok(Self { client, plain, base, token: token.trim().to_owned() })
     }
 
     /// O endereço salvo, mesmo quando os pedidos vão pela rede local (`route`).
