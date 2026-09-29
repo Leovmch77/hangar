@@ -719,6 +719,9 @@ def cmd_event(a) -> int:
                            "never edits code; restore the round and judge again")
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
+    # Before the notices: a failed send must not cost the orchestrator its trigger.
+    if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
+        spawn_advance(d)
     _after_event(d, ev)
     print("ok")
     return 0
@@ -1128,6 +1131,12 @@ def cmd_commit(a) -> int:
         extra = _queue_proof(d, a.task, full)
     except OrqError as e:
         extra = f" (proof queue skipped: {e})"
+    if cfg.get("auto"):
+        # The orchestrator integrates and releases the next Task; the arbiter wakes only if it cannot.
+        journal_append(d, f"commit T{a.task}: orq advance started{extra}")
+        spawn_advance(d)
+        print("ok")
+        return 0
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
                               f"{len(files)} file(s), tip = hash, matches the approved round. "
                               "Release the next ready Task(s)." + extra)
@@ -1965,8 +1974,23 @@ def advance(d: Path) -> list[str]:
     return acts
 
 
+def spawn_advance(d: Path) -> None:
+    """`orq advance` in its own session, output in <dir>/advance.log: the caller's turn never waits
+    on merges and checks, and a run that dies is picked up by the watchdog's next cycle."""
+    with (d / "advance.log").open("a", encoding="utf-8") as log:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d), "advance"],
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                         start_new_session=True)
+
+
 def cmd_advance(a) -> int:
-    for line in advance(base_dir(a.dir)):
+    d = base_dir(a.dir)
+    if not config(d).get("auto"):
+        return 0
+    if a.detach:
+        spawn_advance(d)
+        return 0
+    for line in advance(d):
         print(line)
     return 0
 
@@ -2037,7 +2061,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("log", help="a decision entry in the journal")
     s.add_argument("--task", type=int)
     s.add_argument("text")
-    sub.add_parser("advance", help="the orchestrator's pass: integrate, open, announce (auto runs only)")
+    s = sub.add_parser("advance", help="the orchestrator's pass: integrate, open, announce (auto runs only)")
+    s.add_argument("--detach", action="store_true", help="run in the background (the watchdog's call)")
     return p
 
 

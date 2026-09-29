@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -629,3 +630,47 @@ def test_prove_born_reads_the_sidecar_then_the_pane(tmp_path, monkeypatch):
         "s2: pane started `claude --session-id u")
     pane["rc"] = 1
     assert m.prove_born("s2", row) == "s2: no sidecar and no tmux pane to prove what was born"
+
+
+def wait_for(pred, timeout=15):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _commit_task_1(d, r, g, e):
+    """Round 1 of Task 1 delivered, approved and committed through `orq commit`."""
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex1", "--par", "rev1")
+    (r / "a.txt").write_text("x\n")
+    g("add", "a.txt")
+    h = g("stash", "create")
+    g("stash", "store", "-m", "task-1 round 1", h)
+    run(e, "event", "entrega", "--task", "1", "--rodada", "1", "--commit", h)
+    run(e, "event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova", "--sessao", "rev1")
+    g("commit", "-qm", "t1")
+    run(e, "commit", "--task", "1", "--hash", g("rev-parse", "HEAD"))
+
+
+def test_auto_commit_starts_advance_instead_of_waking_the_arbiter(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    _commit_task_1(d, r, g, e)
+    assert wait_for(lambda: any(x["tipo"] == "integrada" for x in events(d))), \
+        (d / "advance.log").read_text()
+    assert not any("Release the next ready Task" in m for m in sent(log))
+    assert "orq advance started" in (d / "registro.md").read_text()
+
+
+def test_non_auto_commit_still_wakes_the_arbiter_and_starts_nothing(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    cfg = json.loads((d / "orq.json").read_text())
+    cfg.pop("auto")
+    (d / "orq.json").write_text(json.dumps(cfg))
+    _commit_task_1(d, r, g, e)
+    assert any(m.startswith("arb [decisao] Task 1 closed and checked") and
+               m.endswith("Release the next ready Task(s).") for m in sent(log))
+    assert run(e, "advance", "--detach").stdout == ""
+    time.sleep(0.5)
+    assert not (d / "advance.log").exists() and not (d / "advance.lock").exists()

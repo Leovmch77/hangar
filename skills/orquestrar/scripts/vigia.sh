@@ -40,6 +40,7 @@
 #      the list follows `orq ball` every cycle. Each cycle it also writes <dir>/vigia.json (the
 #      panel's heartbeat), closes the sessions `orq done` lists after 10 idle minutes and joins
 #      `orq team` to the arbiter's group; --no-housekeeping turns the closing and the joining off.
+#      In an auto run (`orq init --auto`) each cycle also starts `orq advance --detach`.
 #
 # Confirming it LIVES (is-active right after the systemd-run answers `active` because it was just
 # born, not because it reads the API — a watchdog once sat `active` for hours with no log line):
@@ -544,6 +545,10 @@ for i in $(seq 1 "$CICLOS"); do
     continue
   fi
   mudos=0
+  # Auto runs: the orchestrator's pass, detached (a merge and its checks outlast a cycle) and single
+  # by its own lock; a no-op in any other run. Only with the API answering: a backend down would
+  # turn every step into a failure the arbiter clears by hand.
+  [ -n "$ORQD" ] && ORQ_DIR="$ORQD" python3 "$ORQ" advance --detach >/dev/null 2>>"${CP_VIGIA_LOG:-/dev/stderr}"
   if [ -n "$ORQD" ] && [ "$HOUSEKEEPING" -eq 1 ]; then
     close_finished
     join_team

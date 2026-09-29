@@ -351,4 +351,65 @@ printf 'python3 %q --dir %q event entrega --task 1 --rodada 1 --commit abc >/dev
 CICLOS=4 vigia
 n=$(grep -c "YOUR context is at 60%" "$t/sent.log" || true)
 [ "$n" -eq 1 ] || fail "alarme de contexto repetiu na troca de vez ($n)"
+# Execução auto: cada volta solta `orq advance`. A Task fechada é integrada uma vez só; um passo que
+# falha grava um advance_falhou e acorda o árbitro uma vez só, por mais voltas que passem.
+novo_auto() {  # $1 = cenário, $2 = hash fechado da Task 1 (vazio = HEAD do repositório)
+  d="$t/$1"; mkdir -p "$d"
+  : > "$t/sent.log"; : > "$t/urls"; : > "$t/err"
+  rm -f "$t/falha" "$t/api-down" "$t/history.json" "$t/close-fails" "$t/close-404" "$t/pair-fails"
+  ra="$t/repo-$1"; mkdir -p "$ra"; echo 1 > "$ra/a.txt"
+  git -C "$ra" init -q -b main
+  git -C "$ra" add a.txt
+  git -C "$ra" -c user.email=t@t -c user.name=t commit -qm base
+  cat > "$t/plano-$1.md" <<'MD'
+# Orchestration plan — t
+
+## Projeto
+Checagens: —
+Integração: `test -f a.txt`
+Prova: por-task
+Paralelo: sequencial
+Revisão: sessão
+Correção pelo revisor: até 0 linhas
+
+## Tasks
+| # | What it is | Where in their plan | Files | Verification | Wave | Roteiro |
+|---|---|---|---|---|---|---|
+| 1 | t | §1 | `a.txt` | `true` | 1 | — |
+MD
+  python3 "$ORQPY" plan-check "$t/plano-$1.md" --repo "$ra" --stamp >/dev/null
+  orq init --arbiter arb --repo "$ra" --contract "$t/regras.md" --plan "$t/plano-$1.md" --auto
+  orq event execucao_inicio --plano "$t/plano-$1.md" --branch main --gid g1
+  orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
+  printf '{"ts":"%s","task":1,"hash":"%s"}\n' "$(date -Iseconds)" "${2:-$(git -C "$ra" rev-parse HEAD)}" > "$d/closed.jsonl"
+}
+espera() {  # $1 = trecho do eventos.jsonl; o advance roda destacado, então até 10 s
+  for _ in $(seq 100); do grep -q "$1" "$d/eventos.jsonl" && return 0; sleep 0.1; done
+  fail "o advance não gravou '$1'"
+}
+# jev_config() leria a chave real do runtime-config.json da máquina.
+export CLAUDE_CONFIG_DIR="$t/cfg" TYPESAFE_API_KEY=
+printf '%s' '[{"name":"exec1","state":"idle"},{"name":"arb","state":"idle"}]' > "$t/sessions.json"
+novo_auto auto-integra
+INTERVALO=1 CICLOS=3 vigia
+espera '"tipo": "integrada"'
+sleep 1
+[ "$(grep -c '"tipo": "integrada"' "$d/eventos.jsonl")" -eq 1 ] || fail "a Task foi integrada mais de uma vez"
+
+novo_auto auto-falha deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+INTERVALO=1 CICLOS=3 vigia
+espera '"tipo": "advance_falhou"'
+sleep 1
+[ "$(grep -c '"tipo": "advance_falhou"' "$d/eventos.jsonl")" -eq 1 ] || fail "o passo que falhou foi repetido"
+[ "$(grep -c '^orq: arb \[painel: orquestrador g1\] \[decisao\] orq advance failed at integrate T1' "$t/sent.log")" -eq 1 ] \
+  || fail "a falha não acordou o árbitro exatamente uma vez"
+
+# Sem a marca auto o vigia não solta nada.
+novo sem-auto
+orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
+printf '{"ts":"%s","task":1,"hash":"%s"}\n' "$(date -Iseconds)" "$(git -C "$raiz" rev-parse HEAD)" > "$d/closed.jsonl"
+vigia
+sleep 1
+[ ! -e "$d/advance.log" ] || fail "o vigia soltou o advance numa execução sem auto"
+if grep -q '"tipo": "integrada"' "$d/eventos.jsonl"; then fail "execução sem auto foi integrada"; fi
 echo ok
