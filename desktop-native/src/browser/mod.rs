@@ -2,6 +2,7 @@
 //! Windows/macOS usam o webview do sistema (wry) como janela filha; Linux, WPE.
 pub mod model;
 pub mod preview_fmt;
+pub mod control;
 #[cfg(target_os = "windows")]
 pub mod cdp;
 

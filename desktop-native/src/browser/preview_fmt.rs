@@ -1,7 +1,5 @@
 //! Lógica pura do hangar-preview no app nativo, espelho de `shell/preview_fmt.cjs`. O texto sai igual ao do
 //! Electron porque o agente e o Jev leem esse formato.
-// Consumido pelo controlador do hangar-preview.
-#![cfg_attr(not(test), allow(dead_code))]
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
@@ -100,6 +98,7 @@ pub fn parse_layout(args: &[String]) -> Result<Layout, String> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sidecar_name(key: &str) -> String {
     let mut out = String::new();
     let mut gap = false;
