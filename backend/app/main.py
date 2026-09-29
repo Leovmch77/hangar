@@ -142,10 +142,12 @@ def _tcp_socket(host: str, port: int) -> socket.socket:
 
 
 def _guest_socket() -> socket.socket | None:
-    # Só loopback: quem expõe é o Funnel. Porta ocupada (outra instância nesta máquina) não
-    # derruba o boot; só este backend fica sem compartilhar sessão.
+    # Pela internet quem expõe é o Funnel (fala com 127.0.0.1); com o backend aberto pra rede, a
+    # porta do convite também escuta nela, pro convite funcionar na mesma rede sem Tailscale.
+    # Porta ocupada (outra instância nesta máquina) não derruba o boot; só fica sem compartilhar.
+    host = "127.0.0.1" if resolve_bind_ip(settings) in LOOPBACK else "0.0.0.0"
     try:
-        return _tcp_socket("127.0.0.1", GUEST_PORT)
+        return _tcp_socket(host, GUEST_PORT)
     except OSError as e:
         print(f"[hangar] AVISO: porta do convite {GUEST_PORT} indisponível ({e}); "
               "compartilhar sessão fica desligado")

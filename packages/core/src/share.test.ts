@@ -38,6 +38,14 @@ describe('parseInviteLink', () => {
     expect(parseInviteLink('https://dono.ts.net:8443/convite/')).toBeNull();
     expect(parseInviteLink('K7P29QX4')).toBeNull();
   });
+  it('aceita http só com IP da rede local (convite local), nos dois formatos', () => {
+    expect(parseInviteLink('http://192.168.77.142:8766/convite/K7P2'))
+      .toEqual({ address: 'http://192.168.77.142:8766', code: 'K7P2' });
+    expect(parseInviteLink('hangar://convite/10.0.0.5:8766/K7P2'))
+      .toEqual({ address: 'http://10.0.0.5:8766', code: 'K7P2' });
+    expect(parseInviteLink('http://8.8.8.8:8766/convite/K7P2')).toBeNull();
+    expect(parseInviteLink('http://172.32.0.1:8766/convite/K7P2')).toBeNull();
+  });
   it('recusa credencial embutida no endereço', () => {
     expect(parseInviteLink('https://a@b/convite/X')).toBeNull();
     expect(parseInviteLink('https://a:p@b:8443/convite/X')).toBeNull();

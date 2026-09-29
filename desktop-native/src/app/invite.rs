@@ -6,12 +6,16 @@ use super::machines::enter_to_focused;
 /// Endereço e código do link `https://host:porta/convite/CÓDIGO` ou `hangar://convite/host:porta/CÓDIGO`.
 pub(super) fn parse_invite_link(raw: &str) -> Option<(String, String)> {
     let raw = raw.trim().trim_end_matches('/');
+    // Convite pela rede local vem em http://IP-privado:8766; http para qualquer outro host não passa.
+    let private = |host: &str| host.split_once(':').map_or(host, |(h, _)| h).parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|ip| ip.is_private());
     let (address, code) = if let Some(rest) = raw.strip_prefix("hangar://convite/") {
         let (host, code) = rest.rsplit_once('/')?;
-        (format!("https://{host}"), code.to_owned())
+        (format!("{}://{host}", if private(host) { "http" } else { "https" }), code.to_owned())
     } else {
         let url = url::Url::parse(raw).ok()?;
-        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() { return None; }
+        let local_http = url.scheme() == "http" && url.host_str().is_some_and(private);
+        if (url.scheme() != "https" && !local_http) || !url.username().is_empty() || url.password().is_some() { return None; }
         let mut parts = url.path_segments()?;
         let (Some("convite"), Some(code), None) = (parts.next(), parts.next(), parts.next()) else { return None };
         (url.origin().ascii_serialization(), code.to_owned())

@@ -70,21 +70,36 @@ export function inviteAllows(path: string): boolean {
     || INVITE_GLOBAL_PATHS.includes(p) || INVITE_GLOBAL_PREFIXES.some((x) => p.startsWith(x));
 }
 
-const HTTPS_LINK = /^https:\/\/([^/\s?#]+)\/convite\/([A-Za-z0-9_-]+)\/?$/;
+const HTTP_LINK = /^(https?):\/\/([^/\s?#]+)\/convite\/([A-Za-z0-9_-]+)\/?$/;
 const APP_LINK = /^hangar:\/\/convite\/([^/\s?#]+)\/([A-Za-z0-9_-]+)\/?$/;
+
+// Convite pela rede local vem em http://IP-privado:8766; http para qualquer outro host não passa.
+function ipPrivado(host: string): boolean {
+  const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
 
 export function parseInviteLink(text: string): { address: string; code: string } | null {
   const t = text.trim();
-  const hit = HTTPS_LINK.exec(t) ?? APP_LINK.exec(t);
-  if (!hit) return null;
+  const web = HTTP_LINK.exec(t);
+  const app = web ? null : APP_LINK.exec(t);
+  const hostPorta = web?.[2] ?? app?.[1];
+  const code = web?.[3] ?? app?.[2];
+  if (!hostPorta || !code) return null;
   // O endereço vira baseUrl de servidor: `a@b` (credencial embutida) ou host torto não passam.
+  let u: URL;
   try {
-    const u = new URL(`https://${hit[1]}`);
+    u = new URL(`https://${hostPorta}`);
     if (u.username || u.password || u.pathname !== '/') return null;
   } catch {
     return null;
   }
-  return { address: `https://${hit[1]}`, code: hit[2] };
+  const local = ipPrivado(u.hostname);
+  if (web?.[1] === 'http' && !local) return null;
+  const esquema = web ? web[1] : local ? 'http' : 'https';
+  return { address: `${esquema}://${hostPorta}`, code };
 }
 
 // Forma mínima do corpo de erro do resgate: envelope `{detail:{params:{reason}}}` ou `{reason}` cru.

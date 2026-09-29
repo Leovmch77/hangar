@@ -307,6 +307,9 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   convite" volta.
 - **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
   `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
+  Na mesma rede, sem Tailscale: "Gerar link local" dá `http://<ip-da-rede>:8766/convite/<código>`,
+  que só abre de quem está naquela rede (a máquina precisa de `CP_LAN_BIND_IP=0.0.0.0`). No PWA
+  aberto por `https` o navegador bloqueia o link `http`; use o app nativo ou o desktop.
 - **Receber:** no app nativo, clique no link (ou "Entrar em sessão compartilhada" na página Máquinas
   e cole). No web/PWA, Configurações → Máquinas → "Colar convite". No Linux, abrir o app pelo `hangar://`
   depende da versão nativa nova (o `install-linux.sh` do pacote registra o esquema); no Windows o

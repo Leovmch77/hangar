@@ -77,7 +77,7 @@
     timer = id;
   }
 
-  async function gerar() {
+  async function gerar(local = false) {
     if (gerando) return;
     gerando = true;
     erroGerar = '';
@@ -85,7 +85,7 @@
     copiado = false;
     comandoCopiado = false;
     try {
-      criado = await withServer(serverId, () => createShare(name));
+      criado = await withServer(serverId, () => createShare(name, local));
       void carregar();
     } catch (e) {
       if (e instanceof SharePrerequisiteError) preRequisito = { missing: e.missing, fix: e.fix, enable_url: e.enableUrl };
@@ -156,9 +156,13 @@
         </div>
       </div>
     {:else}
-      <button type="button" class="share-btn primario" onclick={gerar} disabled={gerando || conferindo}>
+      <button type="button" class="share-btn primario" onclick={() => gerar()} disabled={gerando || conferindo}>
         {gerando ? m.compartilhar_gerando() : m.compartilhar_gerar()}
       </button>
+      <button type="button" class="share-btn" onclick={() => gerar(true)} disabled={gerando || conferindo}>
+        {m.compartilhar_gerar_local()}
+      </button>
+      <span class="share-sub">{m.compartilhar_gerar_local_dica()}</span>
     {/if}
 
     {#if preRequisito}

@@ -3,7 +3,7 @@ import html
 import socket
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -51,22 +51,32 @@ class RedeemBody(BaseModel):
     device: str = ""
 
 
+def _local_host(request: Request) -> str | None:
+    """IP da rede por onde o convidado chegou; None quando veio pelo Funnel (que fala com 127.0.0.1)."""
+    host = (request.scope.get("server") or ("", 0))[0]
+    return None if host in ("", "127.0.0.1", "::1") else host
+
+
 @router.get("/convite/{code}", response_class=HTMLResponse)
-def invite_page(code: str):
+def invite_page(code: str, request: Request):
     # GET nunca gasta o código: o WhatsApp abre o link sozinho pra montar a prévia.
     try:
         share = share_store.peek(code)
     except share_store.ShareError as e:
         corpo = f"<h1>Convite indisponível</h1><p>{html.escape(_REASONS[e.reason][1])}.</p>"
     else:
-        try:
-            host = share_tunnel.host()
-        except share_tunnel.TunnelError:
-            return HTMLResponse(
-                _PAGE.format(corpo="<h1>Convite indisponível</h1>"
-                                   "<p>O convite está indisponível por instantes. Tente de novo.</p>"),
-                status_code=503, headers={"Cache-Control": "no-store"})
-        app_link = f"hangar://convite/{host}:{share_tunnel.FUNNEL_PORT}/{quote(code, safe='')}"
+        local = _local_host(request)
+        if local:
+            host = f"{local}:{share_tunnel.GUEST_PORT}"
+        else:
+            try:
+                host = f"{share_tunnel.host()}:{share_tunnel.FUNNEL_PORT}"
+            except share_tunnel.TunnelError:
+                return HTMLResponse(
+                    _PAGE.format(corpo="<h1>Convite indisponível</h1>"
+                                       "<p>O convite está indisponível por instantes. Tente de novo.</p>"),
+                    status_code=503, headers={"Cache-Control": "no-store"})
+        app_link = f"hangar://convite/{host}/{quote(code, safe='')}"
         corpo = (
             f"<h1>{html.escape(_owner())} compartilhou uma sessão</h1>"
             f"<p>Sessão <b>{html.escape(share.session)}</b>. Abra no teu Hangar para ela "
@@ -80,10 +90,12 @@ def invite_page(code: str):
 
 
 @router.post("/api/guest/redeem")
-def redeem(body: RedeemBody):
+def redeem(body: RedeemBody, request: Request):
     # O endereço sai ANTES do resgate: túnel fora do ar não pode queimar um código já gasto.
+    local = _local_host(request)
     try:
-        address = f"https://{share_tunnel.host()}:{share_tunnel.FUNNEL_PORT}"
+        address = (f"http://{local}:{share_tunnel.GUEST_PORT}" if local
+                   else f"https://{share_tunnel.host()}:{share_tunnel.FUNNEL_PORT}")
     except share_tunnel.TunnelError:
         raise HTTPException(503, detail=erro("erro_sessao_indisponivel",
                                              "a sessão compartilhada está indisponível por instantes"))
