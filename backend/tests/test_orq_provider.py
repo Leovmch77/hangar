@@ -94,6 +94,22 @@ def test_list_with_state_reads_activity_and_never_touches_tmux(root, tmp_path):
         assert state().state == "working"
 
 
+def test_a_held_advance_lock_is_working_whatever_its_age(tmp_path):
+    # A merge plus the plan's Integração: outlasts ACTIVE_S; the lock is held the whole time.
+    import fcntl
+    tl = tmp_path / "timeline-x.jsonl"
+    tl.write_text("", encoding="utf-8")
+    lock = tmp_path / "advance.lock"
+    lock.write_text("1\n", encoding="utf-8")
+    old = time.time() - 600
+    for p in (tl, lock):
+        os.utime(p, (old, old))
+    with lock.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert runs.activity(str(tl))[0] == "working"
+    assert runs.activity(str(tl))[0] == "idle"
+
+
 def test_state_monitor_follows_the_timeline(tmp_path):
     tl = tmp_path / "timeline-x.jsonl"
     tl.write_text("", encoding="utf-8")

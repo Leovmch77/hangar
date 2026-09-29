@@ -404,6 +404,19 @@ sleep 1
 [ "$(grep -c '^orq: arb \[painel: orquestrador g1\] \[decisao\] orq advance failed at integrate T1' "$t/sent.log")" -eq 1 ] \
   || fail "a falha não acordou o árbitro exatamente uma vez"
 
+# advance.lock preso = o orquestrador integrando (merge + Integração: passam de um ciclo): alguém
+# tem a bola, e "ninguém com a bola" não dispara. Solta a trava, o alarme volta.
+printf '%s' '[{"name":"exec1","state":"idle"},{"name":"arb","state":"idle"}]' > "$t/sessions.json"
+novo_auto auto-integrando
+: > "$d/closed.jsonl"
+exec 9>>"$d/advance.lock"
+flock -n 9 || fail "não peguei a trava do advance"
+M=2 CICLOS=3 vigia
+exec 9>&-
+if grep -q "Nobody has had the ball" "$t/sent.log"; then fail "alarmou ninguém-com-a-bola com o advance rodando"; fi
+M=2 CICLOS=3 vigia
+grep -q "Nobody has had the ball" "$t/sent.log" || fail "sem a trava o alarme não voltou"
+
 # Sem a marca auto o vigia não solta nada.
 novo sem-auto
 orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1

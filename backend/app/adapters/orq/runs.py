@@ -61,14 +61,28 @@ def find(name: str) -> dict | None:
     return next((r for r in active() if r["name"] == name), None)
 
 
+def _held(lock: Path) -> bool:
+    """Trava presa por alguém, lida em /proc/locks: pegar a trava para testar faria um `advance`
+    que está começando desistir. Fora do Linux fica só a regra do mtime."""
+    try:
+        ino = lock.stat().st_ino
+        locks = Path("/proc/locks").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return False
+    return any(len(f := l.split()) > 5 and f[1] == "FLOCK" and f[5].endswith(f":{ino}")
+               for l in locks.splitlines())
+
+
 def activity(timeline: str) -> tuple[str, float | None]:
-    """(estado, última atividade): trabalhando se a linha do tempo ou a trava do `advance`
-    mudaram nos últimos ACTIVE_S."""
+    """(estado, última atividade): trabalhando com a trava do `advance` presa (merge e
+    `Integração:` passam de ACTIVE_S), ou se ela ou a linha do tempo mudaram nos últimos ACTIVE_S."""
+    lock = Path(timeline).parent / "advance.lock"
     marks = []
-    for p in (Path(timeline), Path(timeline).parent / "advance.lock"):
+    for p in (Path(timeline), lock):
         try:
             marks.append(p.stat().st_mtime)
         except OSError:
             pass
     last = max(marks, default=None)
-    return ("working" if last is not None and time.time() - last < ACTIVE_S else "idle"), last
+    busy = _held(lock) or (last is not None and time.time() - last < ACTIVE_S)
+    return ("working" if busy else "idle"), last
