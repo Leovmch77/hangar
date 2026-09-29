@@ -195,9 +195,16 @@ save() {
 # sessao. Volta pro save nao-vazio mais recente e apaga os vazios.
 fix_last() {
   local dir last f; dir=$(dirname "$MAP"); last="$dir/last"
+  # A última sessão foi fechada de propósito: este start não é volta de queda, não restaura nada.
+  if [ -e "$dir/closed-on-purpose" ]; then
+    rm -f "$dir/closed-on-purpose"
+    tmux set -g @continuum-restore off 2>/dev/null || true
+    echo "$(date '+%F %T') fix-last: last session was closed on purpose -> no restore" >> "$LOG"
+    return 0
+  fi
   [ -s "$last" ] && return 0
   find "$dir" -maxdepth 1 -name 'tmux_resurrect_2*.txt' -empty -delete
-  f=$(ls -t "$dir"/tmux_resurrect_2*.txt 2>/dev/null | head -1)
+  f=$(ls -t "$dir"/tmux_resurrect_2*.txt 2>/dev/null | head -1 || true)
   [ -n "$f" ] || return 0
   ln -fs "$(basename "$f")" "$last"
   echo "$(date '+%F %T') fix-last: last was empty -> $(basename "$f")" >> "$LOG"
@@ -262,9 +269,21 @@ restore() {
   done < "$MAP"
 }
 
+# Hook `session-closed`: sessão fechada não volta no próximo restore. Sobrou alguma, a foto é refeita
+# sem ela; não sobrou nenhuma (o servidor vai sair), fica a marca que o fix-last consome no start.
+closed() {
+  local dir; dir=$(dirname "$MAP")
+  if [ -n "$(tmux list-sessions -F x 2>/dev/null)" ]; then
+    "$HOME/.tmux/plugins/tmux-resurrect/scripts/save.sh" quiet
+  else
+    mkdir -p "$dir" && : > "$dir/closed-on-purpose"
+  fi
+}
+
 case "${1:-}" in
   save) save ;;
   restore) restore ;;
   fix-last) fix_last ;;
-  *) echo "usage: $0 save|restore|fix-last" >&2; exit 2 ;;
+  closed) closed ;;
+  *) echo "usage: $0 save|restore|fix-last|closed" >&2; exit 2 ;;
 esac

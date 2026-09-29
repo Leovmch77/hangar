@@ -101,6 +101,19 @@ run-shell '$RESUME_SH fix-last'
 EOF
 fi
 
+# 2c. Closing a session on purpose must not bring it back on the next tmux start: the hook re-saves
+# without it, or marks the start after the last one closed as "no restore" (see `closed` in RESUME_SH).
+if ! grep -qF "tmux-claude-resume.sh closed" "$CONF"; then
+  log "Appending session-closed hook to $CONF"
+  cat >> "$CONF" <<EOF
+# >>> hangar closed hook >>>
+# run-shell without -b: a background job never runs when the LAST session closes (the server exits
+# first). setsid -f returns at once, so the hook doesn't hold tmux while the save runs.
+set-hook -g 'session-closed[42]' 'run-shell "setsid -f $RESUME_SH closed"'
+# <<< hangar closed hook <<<
+EOF
+fi
+
 # 3. systemd user timer + service (auto-save every 15 min)
 log "Installing systemd user timer (socket: $SOCKET)"
 mkdir -p "$SD_DIR"
