@@ -189,17 +189,6 @@ _list_registry = SessionRegistry()
 
 _log = logging.getLogger("hangar.sse")
 
-# Snapshot compartilhado de registry.list() pros LOOPS do SSE (jsonl_watcher de cada conexao de chat
-# + list_events): cada um re-varria o /proc inteiro + tmux no proprio ciclo -> N conexoes = N
-# varreduras completas a cada ~2s. Com TTL < poll dos consumidores, vira no maximo ~1 varredura/s no
-# total, sem atraso percebido. Endpoints request/response seguem chamando registry.list() fresco.
-# ponytail: check-then-set sem lock (dois callers no vencimento do TTL = 2 scans, igual a hoje);
-# lock de asyncio aqui arriscaria bind em event loop errado nos testes.
-_LIST_TTL = 1.0
-_list_snap: dict = {"t": 0.0, "infos": None}
-_list_lock = asyncio.Lock()
-
-
 # "Abrir o navegador embutido" vindo do AGENTE (POST /api/sessions/<nome>/nav, via CLI
 # hangar-preview open). É um MARCADOR por sessão {url, ts}, não uma fila: cada conexão SSE (a do
 # chat da sessão e a da lista) o entrega UMA vez e ele fica, até o desktop confirmar que criou o
@@ -288,19 +277,13 @@ def nav_novos(vistos: dict[str, float], name: str | None = None) -> list[tuple[s
 
 
 async def _cached_list():
-    now = time.monotonic()
-    if _list_snap["infos"] is not None and now - _list_snap["t"] < _LIST_TTL:
-        return _list_snap["infos"]
-    # Single-flight, pelo mesmo motivo do api._guardar_snap: o `await` cede o loop, entao os loops
-    # de todas as conexoes SSE erram o cache juntos e disparam um `registry.list()` cada. Com o
-    # lock, um varre e os outros aproveitam.
-    async with _list_lock:
-        if _list_snap["infos"] is not None and time.monotonic() - _list_snap["t"] < _LIST_TTL:
-            return _list_snap["infos"]
-        infos = await asyncio.to_thread(_registry.list)
-        _list_snap["infos"] = infos
-        _list_snap["t"] = time.monotonic()
-        return infos
+    # Um snapshot só no processo: o do api (`_guardar_snap`, single-flight e invalidado na criação
+    # e no rename). Dois caches eram duas varreduras de /proc + tmux por segundo pro mesmo dado.
+    from app import api  # api importa este módulo
+    snap = api._list_snap["snap"]
+    if snap is not None and time.monotonic() - snap[0] < api._LIST_TTL:
+        return snap[1]
+    return await asyncio.to_thread(api._guardar_snap)
 
 
 # Reducao ESTAVEL da statusline pro dedup da lista: modelo, contexto em baldes de 5%, ⚡5h% e 📅7d%.
@@ -417,6 +400,7 @@ class _ListRefresher:
         self.sig: str | None = None
         self.version = 0
         self.errored = False
+        self.latest: tuple[float, list] | None = None
         self._task: asyncio.Task | None = None
         self._refs = 0
         self._loop = None
@@ -433,6 +417,7 @@ class _ListRefresher:
             self.sig = None
             self.version = 0
             self.errored = False
+            self.latest = None
             self._refs = 0
             # O produtor atende todas as conexões, não pertence ao primeiro assinante.
             context = contextvars.copy_context()
@@ -444,8 +429,10 @@ class _ListRefresher:
             try:
                 snap = [i.model_copy() for i in await _cached_list()]
                 infos = await _list_registry.list_with_state(snap)
-                data = json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
                 sig = _list_sig(infos)
+                # Serializar a lista inteira só quando vai ser publicada (a sig decide, como antes).
+                data = (json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
+                        if sig != self.sig or self.errored else None)
             except Exception:
                 # Decoracao/raspagem falhou -> MANTEM o snapshot anterior (stale > morto), nunca derruba
                 # a conexao. Loga (padrao da casa) E sinaliza 'list_error' UMA vez (na transicao) pras
@@ -473,8 +460,11 @@ class _ListRefresher:
                         self._cond.notify_all()
                 await asyncio.sleep(self.poll)
                 continue
+            # A cada tique, mesmo sem mudança na sig: o /api/sessions serve daqui campos que a sig
+            # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
+            self.latest = (time.monotonic(), infos)
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
-            if sig != self.sig or self.errored:
+            if data is not None:
                 if self.errored:
                     diag.registrar("lista.recuperada", quantidade=len(infos))
                 async with self._cond:
@@ -499,6 +489,14 @@ class _ListRefresher:
 
 
 _list_refresher = _ListRefresher()
+
+
+def recent_list(max_age: float) -> list | None:
+    """Última lista decorada do refresher, se viva e com no máximo `max_age` s. Só leitura."""
+    latest = getattr(_list_refresher, "latest", None)
+    if latest is None or time.monotonic() - latest[0] > max_age:
+        return None
+    return latest[1]
 
 
 async def list_events(ping_secs: float = 8.0, only=None):
