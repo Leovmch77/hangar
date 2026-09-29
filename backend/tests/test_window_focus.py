@@ -34,3 +34,10 @@ def test_focuses_the_window_of_a_grandchild(tmp_path):
         assert log.read_text().strip() == f"dispatch focuswindow pid:{grandchild}"
     finally:
         child.kill()
+
+
+def test_a_failure_in_the_windows_branch_falls_back_to_not_focused(monkeypatch):
+    # No Linux nao ha ctypes.WinDLL: o AttributeError real do ramo Windows tem que virar False, nao 500.
+    from types import SimpleNamespace
+    monkeypatch.setattr(window_focus, "os", SimpleNamespace(name="nt"))
+    assert window_focus.focus_tree(os.getpid(), {}) is False
