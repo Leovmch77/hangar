@@ -718,32 +718,44 @@ async def run_tmux(fn, *args):
 # Último quadro de texto puro por sessão: monitor de estado e prévia olham o MESMO pane, e cada um
 # capturando no seu ritmo eram ~8 forks/s por chat trabalhando. Quem precisa de quadro aceita um
 # recente dentro da sua idade máxima; captura já em voo é aguardada em vez de repetida.
-# ponytail: entrada de sessão que some sem passar por `dead` fica (~16 KB); limpar por idade se crescer.
 _frames: dict[str, tuple[float, str]] = {}
-_frames_inflight: dict[str, asyncio.Future] = {}
+# nome -> (início, captura em voo)
+_frames_inflight: dict[str, tuple[float, asyncio.Future]] = {}
+# Sessão que morre fora do monitor (kill por outra rota, sumiço do tmux) não passa por forget_frame.
+_FRAME_EVICT_AGE = 60.0
 
 
-async def _capture_and_store(name: str) -> str:
+async def _capture_and_store(name: str, started: float) -> str:
     # Idade conta do INÍCIO da captura: o quadro pode ser até isso mais velho, nunca mais novo.
-    started = time.monotonic()
     # Um argumento só, como antes: há dublê de teste com essa assinatura.
     pane = await run_tmux(tmux.capture_pane, name)
     if pane:
-        _frames[name] = (started, pane)
+        prev = _frames.get(name)
+        if prev is None or prev[0] <= started:   # captura antiga que terminou depois não sobrescreve
+            _frames[name] = (started, pane)
+        for n in [n for n, (t, _) in _frames.items() if started - t > _FRAME_EVICT_AGE]:
+            _frames.pop(n, None)
     return pane
 
 
 async def shared_capture(name: str, max_age: float) -> str:
     """Quadro do pane com no máximo `max_age` s; senão captura (ou espera a captura em voo)."""
+    now = time.monotonic()
     hit = _frames.get(name)
-    if hit is not None and time.monotonic() - hit[0] <= max_age:
+    if hit is not None and now - hit[0] <= max_age:
         return hit[1]
-    fut = _frames_inflight.get(name)
-    if fut is None or fut.done() or fut.get_loop() is not asyncio.get_running_loop():
-        fut = asyncio.ensure_future(_capture_and_store(name))
-        _frames_inflight[name] = fut
+    inflight = _frames_inflight.get(name)
+    # Captura em voo que começou antes da janela pedida (max_age=0 depois de um wake do plugin)
+    # traria o pane de antes do evento: começa outra.
+    if (inflight is None or inflight[0] < now - max_age or inflight[1].done()
+            or inflight[1].get_loop() is not asyncio.get_running_loop()):
+        fut = asyncio.ensure_future(_capture_and_store(name, now))
+        _frames_inflight[name] = (now, fut)
         fut.add_done_callback(
-            lambda f: _frames_inflight.pop(name, None) if _frames_inflight.get(name) is f else None)
+            lambda f: _frames_inflight.pop(name, None)
+            if (_frames_inflight.get(name) or (0, None))[1] is f else None)
+    else:
+        fut = inflight[1]
     # shield: quem desiste (conexão caiu) não cancela a captura que o outro consumidor espera.
     return await asyncio.shield(fut)
 

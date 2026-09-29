@@ -45,6 +45,27 @@ def test_fresh_frame_reused_stale_recaptured(monkeypatch):
     asyncio.run(run())
 
 
+def test_max_age_zero_does_not_join_older_inflight(monkeypatch):
+    # Depois de um wake do plugin o pane de antes do evento não serve: nova captura.
+    calls = []
+    monkeypatch.setattr(state.tmux, "capture_pane", _fake_capture(calls, delay=0.05))
+
+    async def run():
+        primeira = asyncio.ensure_future(state.shared_capture("s", 0.5))
+        await asyncio.sleep(0.01)
+        await asyncio.gather(primeira, state.shared_capture("s", 0))
+
+    asyncio.run(run())
+    assert calls == ["s", "s"]
+
+
+def test_old_frames_are_evicted_on_store(monkeypatch):
+    monkeypatch.setattr(state.tmux, "capture_pane", _fake_capture([], delay=0))
+    state._frames["morta"] = (time.monotonic() - state._FRAME_EVICT_AGE - 1, "x")
+    asyncio.run(state.shared_capture("viva", 0))
+    assert "morta" not in state._frames and "viva" in state._frames
+
+
 def test_empty_frame_is_not_shared(monkeypatch):
     # Pane vazio leva o monitor ao has-session; reaproveitar "" esconderia a sessão voltando.
     calls = []
