@@ -15,9 +15,9 @@ constante; refazer a medição do Step 6 da Task 2 antes de confiar neles de nov
 REGRA DE ACUMULAÇÃO: aqui é SOMA por turno. O `costs.jsonl` era cumulativo (última linha
 vence). Trocar a regra entre as fontes não quebra nada e devolve número plausível e errado.
 
-CACHE EM DISCO, e POR RAIZ (`costs_cache`): a varredura fria mede 13,6s sobre 3.202 arquivos e
-5,2 GB, contra o `AbortSignal.timeout(4000)` do cliente. Cache só em memória pagaria isso a cada
-restart; um cache global de raiz única seria apagado pela segunda conta configurada.
+ÍNDICE EM DISCO, e POR RAIZ (`costs_cache`): a leitura é retomável (`DobraClaude`), então um
+transcript que cresceu só tem o fim lido. Cada raiz é um escopo próprio: a segunda conta
+configurada não apaga a primeira.
 """
 from __future__ import annotations
 
@@ -27,22 +27,22 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import costs_cache, pricing, uso_areas, uso_claude
+from app import costs_cache, pricing, uso_claude
 from app.uso_claude import UsoLinha
 
 # `LOCAL` é cópia proposital: `costs_sources` vai importar ESTE módulo, então importar de lá
 # fecharia ciclo. Não "arrume" unificando — quebra o import.
 LOCAL = timezone(timedelta(hours=-3))
 
-# Suba isto ao mudar o formato do resumo, senão o cache velho é servido pra sempre.
-CACHE_VERSAO = 11
+# Suba isto ao mudar o que a dobra produz ou guarda, senão o índice velho é servido pra sempre.
+CACHE_VERSAO = 12
 
 # Marcador do subagente. O caminho é `<projeto>/<sessionId>/subagents/agent-*.jsonl`.
 # Medido em 01/08/2026: 2.714 arquivos assim, contra 446 de conversa — cresce toda semana.
 _DIR_SUBAGENTE = "subagents"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UsoSessao:
     session_id: str       # id ÚNICO, derivado do CAMINHO relativo (ver `varrer`)
     ts: datetime          # Primeira resposta deste segmento diário.
@@ -85,13 +85,9 @@ def _int(v) -> int:
 @dataclass(frozen=True)
 class Leitura:
     """As duas leituras de um transcript, feitas numa passada só: tokens (custo) e uso
-    (tools/skills/contexto). Uma entrada de cache por arquivo guarda as duas."""
+    (tools/skills/contexto)."""
     usos: list[UsoSessao]
     uso: list[UsoLinha]
-
-
-def ler_transcript(path: Path) -> list[UsoSessao]:
-    return ler_completo(path).usos
 
 
 def _quando(ts) -> datetime | None:
@@ -103,152 +99,185 @@ def _quando(ts) -> datetime | None:
         return None
 
 
-def ler_completo(path: Path) -> Leitura:
+class DobraClaude:
     """Uso por resposta, separado por dia/modelo; blocos da mesma resposta não somam novamente.
-    Na mesma passada, o acumulador de uso vê toda linha de assistant/user/attachment."""
-    respostas: dict[tuple, UsoSessao] = {}
-    # Respostas depois das quais a próxima gravação grande é esperada, não perda de cache: a
-    # primeira do arquivo e a primeira depois de compactar.
-    depois_de_compactar: set[tuple] = set()
-    compactou = False
-    acumulador = uso_claude.Acumulador()
+    Na mesma passada, o acumulador de uso vê toda linha de assistant/user/attachment. Retomável:
+    o `costs_cache` guarda o objeto e continua do offset salvo."""
+
+    def __init__(self, session_id: str = "", subagente: bool = False,
+                 subagente_uso: bool = False) -> None:
+        self.session_id = session_id
+        self.subagente = subagente
+        self.subagente_uso = subagente_uso
+        self.numero = 0
+        # Última versão de cada resposta, na ordem da primeira aparição: um bloco que chega
+        # numa coleta posterior substitui o valor sem mudar a posição.
+        self.respostas: dict[tuple, UsoSessao] = {}
+        # Respostas depois das quais a próxima gravação grande é esperada, não perda de cache:
+        # a primeira do arquivo e a primeira depois de compactar.
+        self.depois_de_compactar: set[tuple] = set()
+        self.compactou = False
+        self.acumulador = uso_claude.Acumulador()
+
+    def linha(self, bruta: bytes) -> None:
+        numero = self.numero
+        self.numero += 1
+        # Pré-filtro barato: a maior parte das linhas (progresso, fila, títulos) não tem nem uso
+        # nem tool nem attachment; sem isto o json.loads roda em tudo.
+        if (b'"usage"' not in bruta and b'"user"' not in bruta and b'"attachment"' not in bruta
+                and b'"compact_boundary"' not in bruta):
+            return
+        try:
+            d = json.loads(bruta.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            return
+        if not isinstance(d, dict):
+            return
+        quando = _quando(d.get("timestamp"))
+        msg = d.get("message")
+        m = msg.get("model") if isinstance(msg, dict) else None
+        if isinstance(m, str) and m.strip() in pricing.IGNORADOS:
+            return
+        self.acumulador.linha(d, quando.strftime("%Y-%m-%d") if quando else "")
+        if d.get("subtype") == "compact_boundary":
+            self.compactou = True
+        if d.get("type") != "assistant":
+            return
+        u = msg.get("usage") if isinstance(msg, dict) else None
+        if not isinstance(u, dict) or quando is None:
+            return
+        # Sem identidade não há prova de repetição: preserva as linhas antigas.
+        key = (d.get("requestId"), msg["id"]) if msg.get("id") else (numero,)
+        if self.compactou and key not in self.respostas:
+            self.depois_de_compactar.add(key)
+            self.compactou = False
+        criacao = u.get("cache_creation")
+        cache_1h = _int(criacao.get("ephemeral_1h_input_tokens")) if isinstance(criacao, dict) else 0
+        self.respostas[key] = UsoSessao(
+            session_id=self.session_id, ts=quando, model=m or "?", cwd=d.get("cwd") or "",
+            subagente=self.subagente,
+            input=_int(u.get("input_tokens")), output=_int(u.get("output_tokens")),
+            cache_write=_int(u.get("cache_creation_input_tokens")),
+            cache_read=_int(u.get("cache_read_input_tokens")),
+            cache_write_1h=min(max(0, cache_1h), max(0, _int(u.get("cache_creation_input_tokens")))),
+            fast=u.get("speed") == "fast")
+
+    def usos(self) -> list[UsoSessao]:
+        grupos: dict[tuple, UsoSessao] = {}
+        contexto_antes = None
+        for chave, uso in self.respostas.items():
+            # Perdido = o contexto da resposta anterior que NÃO veio do cache e teve de ser
+            # gravado de novo. Comparar com o cache lido da própria resposta confundia conteúdo
+            # novo grande (arquivo lido, diff) com cache expirado.
+            if contexto_antes is not None and chave not in self.depois_de_compactar and uso.cache_write:
+                perdido = min(uso.cache_write, max(0, contexto_antes - uso.cache_read))
+                # Expirar leva o prefixo quase inteiro; sobra pequena é lembrete que mudou no meio.
+                if perdido * 2 >= contexto_antes:
+                    uso = replace(uso, regravado=perdido,
+                                  regravado_1h=uso.cache_write_1h * perdido // uso.cache_write)
+            contexto_antes = uso.input + uso.cache_write + uso.cache_read
+            # `fast` entra na chave porque é o que decide a TARIFA: somado com o padrão, o grupo
+            # inteiro seria cobrado por uma das duas e a outra metade sairia errada.
+            key = (uso.ts.date(), uso.model, uso.cwd, uso.fast)
+            antes = grupos.get(key)
+            grupos[key] = uso if antes is None else replace(
+                antes, input=antes.input + uso.input, output=antes.output + uso.output,
+                cache_write=antes.cache_write + uso.cache_write,
+                cache_read=antes.cache_read + uso.cache_read,
+                cache_write_1h=antes.cache_write_1h + uso.cache_write_1h,
+                regravado=antes.regravado + uso.regravado,
+                regravado_1h=antes.regravado_1h + uso.regravado_1h)
+        return sorted(grupos.values(), key=lambda u: (u.ts, u.model, u.cwd))
+
+    def _uso(self, linhas: list[UsoLinha]) -> list[UsoLinha]:
+        if not self.session_id:
+            return linhas
+        return [replace(l, session_id=self.session_id, subagente=self.subagente_uso) for l in linhas]
+
+    def fechar(self):
+        entradas = self.acumulador.entradas_de_area()
+        if self.session_id:
+            entradas = ({"session_id": self.session_id, "subagente": self.subagente_uso}, entradas[1])
+        custos = [_linha_custo(u) for u in self.usos()]
+        return custos, self._uso(self.acumulador.linhas_sem_area()), entradas
+
+
+def _linha_custo(u: UsoSessao):
+    # Mesmo formato das outras fontes no índice; provedor e conta entram na leitura.
+    from app.costs_sources import UsageRow
+    return UsageRow(ts=u.ts, source="claude", provider="", model=u.model, project=u.cwd,
+                    session_id=u.session_id, input=u.input, output=u.output,
+                    cache_write=u.cache_write, cache_read=u.cache_read, subagente=u.subagente,
+                    cache_write_1h=u.cache_write_1h, fast=u.fast, regravado=u.regravado,
+                    regravado_1h=u.regravado_1h)
+
+
+def _ler(path: Path, dobra: DobraClaude) -> DobraClaude:
     try:
-        f = path.open(encoding="utf-8", errors="replace")
+        f = path.open("rb")
     except OSError:
-        return Leitura([], [])
+        return dobra
     with f:
-        for numero, linha in enumerate(f):
-            # Pré-filtro barato: a maior parte das linhas (progresso, fila, títulos) não tem
-            # nem uso nem tool nem attachment; sem isto o json.loads roda em tudo.
-            if ('"usage"' not in linha and '"user"' not in linha and '"attachment"' not in linha
-                    and '"compact_boundary"' not in linha):
-                continue
-            try:
-                d = json.loads(linha)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(d, dict):
-                continue
-            quando = _quando(d.get("timestamp"))
-            msg = d.get("message")
-            m = msg.get("model") if isinstance(msg, dict) else None
-            if isinstance(m, str) and m.strip() in pricing.IGNORADOS:
-                continue
-            acumulador.linha(d, quando.strftime("%Y-%m-%d") if quando else "")
-            if d.get("subtype") == "compact_boundary":
-                compactou = True
-            if d.get("type") != "assistant":
-                continue
-            u = msg.get("usage") if isinstance(msg, dict) else None
-            if not isinstance(u, dict) or quando is None:
-                continue
-            # Sem identidade não há prova de repetição: preserva as linhas antigas.
-            key = (d.get("requestId"), msg["id"]) if msg.get("id") else (numero,)
-            if compactou and key not in respostas:
-                depois_de_compactar.add(key)
-                compactou = False
-            criacao = u.get("cache_creation")
-            cache_1h = _int(criacao.get("ephemeral_1h_input_tokens")) if isinstance(criacao, dict) else 0
-            respostas[key] = UsoSessao(
-                session_id="", ts=quando, model=m or "?", cwd=d.get("cwd") or "",
-                subagente=(_DIR_SUBAGENTE in path.parts),
-                input=_int(u.get("input_tokens")), output=_int(u.get("output_tokens")),
-                cache_write=_int(u.get("cache_creation_input_tokens")),
-                cache_read=_int(u.get("cache_read_input_tokens")),
-                cache_write_1h=min(max(0, cache_1h), max(0, _int(u.get("cache_creation_input_tokens")))),
-                fast=u.get("speed") == "fast")
-    grupos: dict[tuple, UsoSessao] = {}
-    contexto_antes = None
-    for chave, uso in respostas.items():
-        # Perdido = o contexto da resposta anterior que NÃO veio do cache e teve de ser gravado de
-        # novo. Comparar com o cache lido da própria resposta confundia conteúdo novo grande
-        # (arquivo lido, diff) com cache expirado.
-        if contexto_antes is not None and chave not in depois_de_compactar and uso.cache_write:
-            perdido = min(uso.cache_write, max(0, contexto_antes - uso.cache_read))
-            # Expirar leva o prefixo quase inteiro; sobra pequena é lembrete que mudou no meio.
-            if perdido * 2 >= contexto_antes:
-                uso = replace(uso, regravado=perdido,
-                              regravado_1h=uso.cache_write_1h * perdido // uso.cache_write)
-        contexto_antes = uso.input + uso.cache_write + uso.cache_read
-        # `fast` entra na chave porque é o que decide a TARIFA: somado com o padrão, o grupo
-        # inteiro seria cobrado por uma das duas e a outra metade sairia errada.
-        key = (uso.ts.date(), uso.model, uso.cwd, uso.fast)
-        antes = grupos.get(key)
-        grupos[key] = uso if antes is None else replace(
-            antes, input=antes.input + uso.input, output=antes.output + uso.output,
-            cache_write=antes.cache_write + uso.cache_write,
-            cache_read=antes.cache_read + uso.cache_read,
-            cache_write_1h=antes.cache_write_1h + uso.cache_write_1h,
-            regravado=antes.regravado + uso.regravado,
-            regravado_1h=antes.regravado_1h + uso.regravado_1h)
-    return Leitura(sorted(grupos.values(), key=lambda u: (u.ts, u.model, u.cwd)),
-                   acumulador.resultado())
+        for bruta in f:
+            dobra.linha(bruta)
+    return dobra
+
+
+def ler_completo(path: Path) -> Leitura:
+    """O arquivo inteiro, sem índice (teste e diagnóstico)."""
+    dobra = _ler(path, DobraClaude(subagente=_DIR_SUBAGENTE in path.parts))
+    return Leitura(dobra.usos(), dobra.acumulador.resultado())
+
+
+def ler_transcript(path: Path) -> list[UsoSessao]:
+    return ler_completo(path).usos
 
 
 def invalidar_cache() -> None:
     costs_cache.invalidar()
 
 
-def _serializar_leitura(le: Leitura) -> dict:
-    return {"usos": [_serializar(u) for u in le.usos], "uso": [l.para_dict() for l in le.uso]}
+def escopo(raiz: Path) -> str:
+    return f"claude:{raiz}"
 
 
-def _desserializar_leitura(d: dict) -> Leitura | None:
-    try:
-        usos = [_desserializar(x) for x in d["usos"]]
-        uso = [UsoLinha.de_dict(x) for x in d["uso"]]
-    except (KeyError, TypeError):
-        return None
-    if any(x is None for x in usos) or any(x is None for x in uso):
-        return None
-    return Leitura(usos, uso)
+def _nova_dobra(raiz: Path):
+    def nova(p: Path) -> DobraClaude:
+        # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
+        # (medido: 168 de 446 ids repetidos entre arquivos).
+        sid = str(p.relative_to(raiz).with_suffix(""))
+        return DobraClaude(sid, subagente=_DIR_SUBAGENTE in p.parts,
+                           subagente_uso=_DIR_SUBAGENTE in Path(sid).parts)
+    return nova
 
 
-def _serializar(u: UsoSessao) -> dict:
-    return {"ts": u.ts.isoformat(), "model": u.model, "cwd": u.cwd,
-            "subagente": u.subagente, "input": u.input, "output": u.output,
-            "cache_write": u.cache_write, "cache_read": u.cache_read,
-            "cache_write_1h": u.cache_write_1h, "fast": u.fast,
-            "regravado": u.regravado, "regravado_1h": u.regravado_1h}
-
-
-def _desserializar(d: dict) -> UsoSessao | None:
-    try:
-        return UsoSessao(session_id="", ts=datetime.fromisoformat(d["ts"]),
-                         model=d["model"], cwd=d.get("cwd", ""),
-                         subagente=bool(d.get("subagente")),
-                         input=int(d["input"]), output=int(d["output"]),
-                         cache_write=int(d["cache_write"]), cache_read=int(d["cache_read"]),
-                         cache_write_1h=int(d.get("cache_write_1h", 0)),
-                         fast=bool(d.get("fast")),
-                         regravado=int(d.get("regravado", 0)),
-                         regravado_1h=int(d.get("regravado_1h", 0)))
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def _varrer(raiz: Path) -> list[tuple[str, Leitura]]:
+def sincronizar(raiz: Path) -> None:
+    """Atualiza o índice desta raiz de projetos. Nunca vai à rede."""
     if not raiz.is_dir():
-        return []
-    # `ler_completo` resolvido na chamada, não capturado: o teste prova o cache trocando o
-    # nome no módulo e contando chamadas.
-    pares = costs_cache.varrer_cacheado(
-        "transcripts", raiz, raiz.rglob("*.jsonl"), lambda p: [ler_completo(p)],
-        # O mapa de áreas entra na versão: a área é gravada no cache junto com a leitura.
-        _serializar_leitura, _desserializar_leitura,
-        f"{CACHE_VERSAO}:{uso_areas.assinatura()}")
-    # Identidade pelo CAMINHO relativo: o `sessionId` do subagente é o do PAI
-    # (medido: 168 de 446 ids repetidos entre arquivos).
-    return [(str(p.relative_to(raiz).with_suffix("")), le) for p, leituras in pares
-            for le in leituras]
+        return
+    costs_cache.sincronizar(escopo(raiz), costs_cache.listar(raiz, lambda n: n.endswith(".jsonl")),
+                            _nova_dobra(raiz), f"claude:{CACHE_VERSAO}")
+
+
+def _usos_do_indice(raiz: Path) -> list[UsoSessao]:
+    return [UsoSessao(session_id=t[5], ts=datetime.fromisoformat(t[0]), model=t[3], cwd=t[4],
+                      subagente=bool(t[10]), input=t[6], output=t[7], cache_write=t[8],
+                      cache_read=t[9], cache_write_1h=t[13], fast=bool(t[14]), regravado=t[15],
+                      regravado_1h=t[16])
+            for t in costs_cache.ler_custos(escopo(raiz))]
 
 
 def varrer(raiz: Path) -> list[UsoSessao]:
     """Uso de tokens de todas as sessões de UMA raiz de projetos. Nunca vai à rede."""
-    return [replace(u, session_id=sid) for sid, le in _varrer(raiz) for u in le.usos]
+    if not raiz.is_dir():
+        return []
+    sincronizar(raiz)
+    return _usos_do_indice(raiz)
 
 
 def varrer_uso(raiz: Path) -> list[UsoLinha]:
-    """Uso de tools/skills/contexto da mesma raiz — mesma passada, mesmo cache."""
-    return [replace(l, session_id=sid, subagente=_DIR_SUBAGENTE in Path(sid).parts)
-            for sid, le in _varrer(raiz) for l in le.uso]
+    """Uso de tools/skills/contexto da mesma raiz — mesma passada, mesmo índice."""
+    if not raiz.is_dir():
+        return []
+    sincronizar(raiz)
+    return costs_cache.ler_usos(escopo(raiz), "")

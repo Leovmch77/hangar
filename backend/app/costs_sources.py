@@ -15,11 +15,11 @@ import logging
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import codex_contas, costs_cache, costs_claude_transcript, pricing, uso_areas, uso_codex
+from app import codex_contas, costs_cache, costs_claude_transcript, pricing, uso_codex
 from app.uso_claude import UsoLinha
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
@@ -34,7 +34,7 @@ _log = logging.getLogger("hangar.costs")
 _AVISOU_RAIZ_UNICA: set[str] = set()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UsageRow:
     ts: datetime
     source: str        # "claude" | "codex" | "pi" | "omp" | "kimi"
@@ -54,18 +54,6 @@ class UsageRow:
     # Parte do cache_write gravada de novo porque o cache tinha expirado (só o Claude sabe).
     regravado: int = 0
     regravado_1h: int = 0
-
-    def para_dict(self) -> dict:
-        d = asdict(self)
-        d["ts"] = self.ts.isoformat()
-        return d
-
-    @classmethod
-    def de_dict(cls, d: dict) -> "UsageRow | None":
-        try:
-            return cls(**{**d, "ts": datetime.fromisoformat(d["ts"])})
-        except (KeyError, TypeError, ValueError):
-            return None
 
 
 def _ler_jsonl(path: Path) -> Iterator[dict]:
@@ -90,6 +78,24 @@ def _ler_jsonl(path: Path) -> Iterator[dict]:
                 continue
             if isinstance(d, dict):
                 yield d
+
+
+def _dict_da_linha(bruta: bytes) -> dict | None:
+    """Mesma regra do `_ler_jsonl`, para uma linha crua lida pelo índice."""
+    bruta = bruta.strip()
+    if not bruta:
+        return None
+    try:
+        d = json.loads(bruta.decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _usage_row(t: tuple) -> UsageRow:
+    """Linha do índice (`costs_cache.CAMPOS_CUSTO`) -> UsageRow."""
+    return UsageRow(datetime.fromisoformat(t[0]), t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8],
+                    t[9], bool(t[10]), t[11], bool(t[12]), t[13], bool(t[14]), t[15], t[16])
 
 
 def _quando(iso: str | None) -> datetime | None:
@@ -120,26 +126,34 @@ def linhas_claude(config_dir: Path, account_id: str) -> list[UsageRow]:
     de configuração, e ignorar o argumento leria a mesma raiz N vezes.
     """
     raiz = costs_claude_transcript.raiz_projetos(config_dir)
+    costs_claude_transcript.sincronizar(raiz)
+    return _linhas_claude_do_indice(raiz, account_id)
+
+
+def _linhas_claude_do_indice(raiz: Path, account_id: str, desde: str | None = None,
+                             carimbar_conta: bool = False) -> list[UsageRow]:
     out: list[UsageRow] = []
-    for u in costs_claude_transcript.varrer(raiz):
-        modelo = (u.model or "").strip()
+    provedores: dict[str, str] = {}
+    for t in costs_cache.ler_custos(costs_claude_transcript.escopo(raiz), desde):
+        modelo = (t[3] or "").strip()
         if modelo in pricing.IGNORADOS:
             continue
-        prov = pricing.canonizar_provedor(pricing.provider_for(modelo) or "")
-        # Modelo da própria Anthropic (ou sem tarifa) -> a conta é o provedor.
-        # Outro provedor -> é sessão de motor, e o modelo é quem entrega, porque o
-        # CP_ENGINE só existe em processo vivo.
-        if not prov or prov == "anthropic":
-            prov = account_id
+        prov = provedores.get(modelo)
+        if prov is None:
+            prov = pricing.canonizar_provedor(pricing.provider_for(modelo) or "")
+            # Modelo da própria Anthropic (ou sem tarifa) -> a conta é o provedor.
+            # Outro provedor -> é sessão de motor, e o modelo é quem entrega, porque o
+            # CP_ENGINE só existe em processo vivo.
+            if not prov or prov == "anthropic":
+                prov = account_id
+            provedores[modelo] = prov
         out.append(UsageRow(
-            ts=u.ts, source="claude", provider=prov, model=modelo,
-            project=u.cwd or PROJETO_DESCONHECIDO, session_id=u.session_id,
-            input=u.input, output=u.output,
-            cache_write=u.cache_write, cache_read=u.cache_read,
-            cache_write_1h=u.cache_write_1h,
-            regravado=u.regravado, regravado_1h=u.regravado_1h,
-            subagente=u.subagente,
-            fast=u.fast,
+            ts=datetime.fromisoformat(t[0]), source="claude", provider=prov, model=modelo,
+            project=t[4] or PROJETO_DESCONHECIDO, session_id=t[5],
+            input=t[6], output=t[7], cache_write=t[8], cache_read=t[9],
+            cache_write_1h=t[13], regravado=t[15], regravado_1h=t[16],
+            subagente=bool(t[10]), fast=bool(t[14]),
+            account_id=account_id if carimbar_conta else None,
         ))
     return out
 
@@ -175,129 +189,147 @@ def linhas_codex(home: Path | str | None = None, account_id: str | None = None,
     return out
 
 
-def respostas_por_turno_codex(arq: Path, account_id: str) -> dict[str, list[UsageRow]]:
-    """Uso de cada resposta do rollout, por turn_id, já sem o que veio herdado de um fork."""
-    cwd = prov = modelo = turno = ""
-    sid = arq.stem
-    inicio = None
-    subagente = False
-    meta_lida = False
-    herdado = False
-    anterior = {k: 0 for k in ("input_tokens", "cached_input_tokens",
-                               "cache_write_input_tokens", "output_tokens")}
-    respostas: dict[str, list[UsageRow]] = {}
-    legado: dict[str, list[UsageRow]] = {}
-    vistos: set[str] = set()
-    for d in _ler_jsonl(arq):
+class RespostasCodex:
+    """Uso de cada resposta do rollout, por turn_id, já sem o que veio herdado de um fork.
+    Lê registro a registro e é retomável (vai no pickle da `DobraCodex`)."""
+
+    def __init__(self, sid: str, account_id: str | None) -> None:
+        self.account_id = account_id
+        self.cwd = self.prov = self.modelo = self.turno = ""
+        self.sid = sid
+        self.inicio = None
+        self.subagente = False
+        self.meta_lida = False
+        self.herdado = False
+        self.anterior = {k: 0 for k in ("input_tokens", "cached_input_tokens",
+                                        "cache_write_input_tokens", "output_tokens")}
+        self.respostas: dict[str, list[UsageRow]] = {}
+        self.legado: dict[str, list[UsageRow]] = {}
+        self.vistos: set[str] = set()
+
+    def registro(self, d: dict) -> None:
         p = d.get("payload")
         if not isinstance(p, dict):
-            continue
+            return
         tipo = d.get("type")
-        if tipo == "session_meta" and meta_lida:
+        if tipo == "session_meta" and self.meta_lida:
             identidade = p.get("id") or p.get("session_id")
             if identidade:
-                herdado = identidade != sid
-        if tipo == "session_meta" and not meta_lida:
+                self.herdado = identidade != self.sid
+        if tipo == "session_meta" and not self.meta_lida:
             # Forks também contêm a metadata do pai; só a primeira identifica este arquivo.
-            meta_lida = True
-            sid = p.get("id") or p.get("session_id") or sid
-            cwd = p.get("cwd") or ""
-            prov = p.get("model_provider") or ""
-            inicio = _quando(d.get("timestamp"))
+            self.meta_lida = True
+            self.sid = p.get("id") or p.get("session_id") or self.sid
+            self.cwd = p.get("cwd") or ""
+            self.prov = p.get("model_provider") or ""
+            self.inicio = _quando(d.get("timestamp"))
             source = p.get("source")
-            subagente = (isinstance(source, dict) and "subagent" in source) or source == "subagent"
+            self.subagente = (isinstance(source, dict) and "subagent" in source) or source == "subagent"
         if tipo == "turn_context":
             contexto_ts = _quando(d.get("timestamp"))
-            if herdado and inicio and contexto_ts and contexto_ts >= inicio:
-                herdado = False
-            turno = p.get("turn_id") or turno
+            if self.herdado and self.inicio and contexto_ts and contexto_ts >= self.inicio:
+                self.herdado = False
+            self.turno = p.get("turn_id") or self.turno
             if isinstance(p.get("model"), str):
-                modelo = p["model"]
-        ts = _quando(d.get("timestamp")) or inicio
+                self.modelo = p["model"]
+        ts = _quando(d.get("timestamp")) or self.inicio
         if ts is None:
-            continue
+            return
         if tipo == "token_usage_record":
-            if p.get("thread_id") and p["thread_id"] != sid:
-                respostas.setdefault(p.get("turn_id") or turno, [])
-                continue
-            if p.get("thread_id") == sid:
-                herdado = False
+            if p.get("thread_id") and p["thread_id"] != self.sid:
+                self.respostas.setdefault(p.get("turn_id") or self.turno, [])
+                return
+            if p.get("thread_id") == self.sid:
+                self.herdado = False
             u = p.get("usage")
             if not isinstance(u, dict):
-                continue
+                return
             response_id = p.get("response_id")
-            if response_id and response_id in vistos:
-                continue
+            if response_id and response_id in self.vistos:
+                return
             if response_id:
-                vistos.add(response_id)
-            destino = respostas.setdefault(p.get("turn_id") or turno, [])
+                self.vistos.add(response_id)
+            destino = self.respostas.setdefault(p.get("turn_id") or self.turno, [])
         elif tipo == "event_msg" and p.get("type") == "token_count":
             info = p.get("info")
             total = info.get("total_token_usage") if isinstance(info, dict) else None
             if not isinstance(total, dict):
-                continue
+                return
+            anterior = self.anterior
             atual = {k: max(0, _int(total.get(k))) for k in anterior}
             if atual == anterior:
-                continue
+                return
             # Retomar pode reiniciar os contadores: a primeira resposta do trecho é uso novo.
             reiniciou = any(atual[k] < anterior[k] for k in anterior)
             u = {k: atual[k] - (0 if reiniciou else anterior[k]) for k in anterior}
-            anterior = atual
-            if herdado:
-                continue
-            destino = legado.setdefault(turno, [])
+            self.anterior = atual
+            if self.herdado:
+                return
+            destino = self.legado.setdefault(self.turno, [])
         else:
-            continue
+            return
         entrada = max(0, _int(u.get("input_tokens")))
         cache = min(entrada, max(0, _int(u.get("cached_input_tokens"))))
         escrita = min(entrada - cache, max(0, _int(u.get("cache_write_input_tokens"))))
         destino.append(UsageRow(
-            ts=ts, source="codex", provider=pricing.canonizar_provedor(prov) or "openai",
-            model=modelo or "?", project=cwd or PROJETO_DESCONHECIDO, session_id=sid,
+            ts=ts, source="codex", provider=pricing.canonizar_provedor(self.prov) or "openai",
+            model=self.modelo or "?", project=self.cwd or PROJETO_DESCONHECIDO, session_id=self.sid,
             input=entrada - cache - escrita, output=max(0, _int(u.get("output_tokens"))),
-            cache_write=escrita, cache_read=cache, subagente=subagente, account_id=account_id,
-            codex_long_context=entrada > 272_000,
+            cache_write=escrita, cache_read=cache, subagente=self.subagente,
+            account_id=self.account_id, codex_long_context=entrada > 272_000,
         ))
-    campos = ("input", "cache_read", "cache_write", "output")
 
-    def assinatura(r: UsageRow) -> tuple:
-        return (r.model, *(getattr(r, campo) for campo in campos))
+    def por_turno(self) -> dict[str, list[UsageRow]]:
+        """Não muda o estado: pode ser chamada a cada retomada."""
+        respostas, legado = self.respostas, self.legado
+        campos = ("input", "cache_read", "cache_write", "output")
 
-    por_turno: dict[str, list[UsageRow]] = {}
-    for key in legado.keys() | respostas.keys():
-        modernos = respostas.get(key, [])
-        linhas = por_turno.setdefault(key, [])
-        linhas.extend(modernos)
-        if key in respostas and not modernos:
-            continue
-        # Registros por resposta podem chegar depois do contador; só retiramos o uso coberto.
-        cobertos: dict[tuple, int] = {}
-        for r in modernos:
-            sig = assinatura(r)
-            cobertos[sig] = cobertos.get(sig, 0) + 1
-        pendentes = []
-        for r in legado.get(key, []):
-            sig = assinatura(r)
-            if cobertos.get(sig, 0):
-                cobertos[sig] -= 1
-            else:
-                pendentes.append(r)
-        saldo = {campo: sum(sig[i + 1] * n for sig, n in cobertos.items())
-                 for i, campo in enumerate(campos)}
-        for r in pendentes:
-            valores = {}
-            for campo in campos:
-                abatido = min(getattr(r, campo), saldo[campo])
-                saldo[campo] -= abatido
-                valores[campo] = getattr(r, campo) - abatido
-            if any(valores.values()):
-                linhas.append(replace(r, **valores))
-    return por_turno
+        def assinatura(r: UsageRow) -> tuple:
+            return (r.model, *(getattr(r, campo) for campo in campos))
+
+        por_turno: dict[str, list[UsageRow]] = {}
+        for key in legado.keys() | respostas.keys():
+            modernos = respostas.get(key, [])
+            linhas = por_turno.setdefault(key, [])
+            linhas.extend(modernos)
+            if key in respostas and not modernos:
+                continue
+            # Registros por resposta podem chegar depois do contador; só retiramos o uso coberto.
+            cobertos: dict[tuple, int] = {}
+            for r in modernos:
+                sig = assinatura(r)
+                cobertos[sig] = cobertos.get(sig, 0) + 1
+            pendentes = []
+            for r in legado.get(key, []):
+                sig = assinatura(r)
+                if cobertos.get(sig, 0):
+                    cobertos[sig] -= 1
+                else:
+                    pendentes.append(r)
+            saldo = {campo: sum(sig[i + 1] * n for sig, n in cobertos.items())
+                     for i, campo in enumerate(campos)}
+            for r in pendentes:
+                valores = {}
+                for campo in campos:
+                    abatido = min(getattr(r, campo), saldo[campo])
+                    saldo[campo] -= abatido
+                    valores[campo] = getattr(r, campo) - abatido
+                if any(valores.values()):
+                    linhas.append(replace(r, **valores))
+        return por_turno
 
 
-def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
+def respostas_por_turno_codex(arq: Path, account_id: str) -> dict[str, list[UsageRow]]:
+    """Uso de cada resposta do rollout, por turn_id, já sem o que veio herdado de um fork."""
+    leitor = RespostasCodex(arq.stem, account_id)
+    for d in _ler_jsonl(arq):
+        leitor.registro(d)
+    return leitor.por_turno()
+
+
+def _agrupar_rollout(por_turno: dict[str, list[UsageRow]]) -> list[UsageRow]:
     agrupadas: dict[tuple, UsageRow] = {}
-    for r in (r for linhas in respostas_por_turno_codex(arq, account_id).values() for r in linhas):
+    for r in (r for linhas in por_turno.values() for r in linhas):
         key = (r.ts.date(), r.model, r.codex_long_context)
         antes = agrupadas.get(key)
         agrupadas[key] = r if antes is None else replace(
@@ -305,6 +337,30 @@ def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
             cache_read=antes.cache_read + r.cache_read,
             cache_write=antes.cache_write + r.cache_write)
     return sorted(agrupadas.values(), key=lambda r: (r.ts, r.model))
+
+
+class DobraCodex:
+    """Custo e uso de um rollout numa passada só: cada linha é decodificada uma vez e vai aos
+    dois leitores. Linhas de custo saem sem conta; ela entra na leitura, pela dona do escopo."""
+
+    def __init__(self, arq: Path) -> None:
+        self.respostas = RespostasCodex(arq.stem, None)
+        self.uso = uso_codex.AcumuladorCodex()
+
+    def linha(self, bruta: bytes) -> None:
+        d = _dict_da_linha(bruta)
+        if d is not None:
+            self.respostas.registro(d)
+            self.uso.registro(d)
+
+    def fechar(self):
+        por_turno = self.respostas.por_turno()
+        return (_agrupar_rollout(por_turno), self.uso.linhas_sem_area_codex(),
+                self.uso.entradas_de_area_codex(por_turno))
+
+
+def _linhas_rollout_codex(arq: Path, account_id: str) -> list[UsageRow]:
+    return _agrupar_rollout(respostas_por_turno_codex(arq, account_id))
 
 
 def raiz_pi() -> Path:
@@ -332,50 +388,80 @@ def linhas_pi(raiz: Path | None = None, source: str = "pi") -> list[UsageRow]:
     raiz = raiz if raiz is not None else raiz_pi()
     if not raiz.is_dir():
         return []
-    pares = costs_cache.varrer_cacheado(
-        source, raiz, raiz.rglob("*.jsonl"), lambda arq: _linhas_arquivo_pi(arq, raiz, source),
-        UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
-    return [r for _, linhas in pares for r in linhas]
+    _sincronizar_pi(raiz, source)
+    return [_usage_row(t) for t in costs_cache.ler_custos(f"{source}:{raiz}")]
 
 
-def _linhas_arquivo_pi(arq: Path, raiz: Path, source: str) -> list[UsageRow]:
-    cwd = modelo = prov = ""
-    ts = None
-    acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-    viu = False
-    for d in _ler_jsonl(arq):
+def _sincronizar_pi(raiz: Path, source: str) -> None:
+    costs_cache.sincronizar(f"{source}:{raiz}", costs_cache.listar(raiz, lambda n: n.endswith(".jsonl")),
+                            lambda arq: _dobra_pi(arq, raiz, source), f"pi:{CACHE_VERSAO}")
+
+
+class DobraPi:
+    def __init__(self, sid: str, source: str) -> None:
+        self.sid, self.source = sid, source
+        self.cwd = self.modelo = self.prov = ""
+        self.ts = None
+        self.acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        self.viu = False
+
+    def linha(self, bruta: bytes) -> None:
+        d = _dict_da_linha(bruta)
+        if d is None:
+            return
         t = d.get("type")
         if t == "session":
-            cwd = d.get("cwd") or cwd
-            ts = _quando(d.get("timestamp")) or ts
+            self.cwd = d.get("cwd") or self.cwd
+            self.ts = _quando(d.get("timestamp")) or self.ts
         elif t == "model_change":
             # Pi: provider + modelId separados. omp: um campo só, "provider/id".
             if d.get("model") and "/" in str(d["model"]):
-                prov, modelo = str(d["model"]).split("/", 1)
+                self.prov, self.modelo = str(d["model"]).split("/", 1)
             else:
-                prov = d.get("provider") or prov
-                modelo = d.get("modelId") or modelo
+                self.prov = d.get("provider") or self.prov
+                self.modelo = d.get("modelId") or self.modelo
         elif t == "message":
             msg = d.get("message")
             u = msg.get("usage") if isinstance(msg, dict) else None
             if isinstance(u, dict):
-                viu = True
-                for k in acc:
-                    acc[k] += _int(u.get(k))
-    if not viu or ts is None:
-        return []
+                self.viu = True
+                for k in self.acc:
+                    self.acc[k] += _int(u.get(k))
+
+    def fechar(self):
+        if not self.viu or self.ts is None:
+            return [], [], None
+        acc = self.acc
+        return [UsageRow(
+            ts=self.ts, source=self.source, provider=pricing.canonizar_provedor(self.prov) or "?",
+            model=self.modelo or "?",
+            project=self.cwd or PROJETO_DESCONHECIDO, session_id=self.sid,
+            input=acc["input"], output=acc["output"],
+            cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
+        )], [], None
+
+
+def _dobra_pi(arq: Path, raiz: Path, source: str) -> DobraPi:
     # session_id pelo caminho RELATIVO, não pelo `arq.stem`: todo subagente se chama
     # `session.jsonl`, então o stem seria a string "session" para TODOS eles, de todas as
     # sessões — indistinguíveis. Hoje não corrompe soma (não há dedup entre linhas do Pi),
     # mas deixaria o campo inútil pra qualquer drill-down.
-    sid = str(arq.relative_to(raiz).with_suffix(""))
-    return [UsageRow(
-        ts=ts, source=source, provider=pricing.canonizar_provedor(prov) or "?",
-        model=modelo or "?",
-        project=cwd or PROJETO_DESCONHECIDO, session_id=sid,
-        input=acc["input"], output=acc["output"],
-        cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
-    )]
+    return DobraPi(str(arq.relative_to(raiz).with_suffix("")), source)
+
+
+def _ler_inteiro(arq: Path, dobra):
+    try:
+        f = arq.open("rb")
+    except OSError:
+        return dobra.fechar()
+    with f:
+        for bruta in f:
+            dobra.linha(bruta)
+    return dobra.fechar()
+
+
+def _linhas_arquivo_pi(arq: Path, raiz: Path, source: str) -> list[UsageRow]:
+    return _ler_inteiro(arq, _dobra_pi(arq, raiz, source))[0]
 
 
 def linhas_omp() -> list[UsageRow]:
@@ -414,51 +500,75 @@ def linhas_kimi() -> list[UsageRow]:
     raiz = raiz_kimi()
     if not raiz.is_dir():
         return []
-    pares = costs_cache.varrer_cacheado(
-        "kimi", raiz, raiz.rglob("wire.jsonl"), _linhas_wire_kimi,
-        UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
-    # O projeto vem do session_index, não do wire — aplicado DEPOIS do cache, senão uma linha
+    _sincronizar_kimi(raiz)
+    return _linhas_kimi_do_indice(raiz)
+
+
+def _sincronizar_kimi(raiz: Path) -> None:
+    costs_cache.sincronizar(f"kimi:{raiz}", costs_cache.listar(raiz, lambda n: n == "wire.jsonl"),
+                            _dobra_kimi, f"kimi:{CACHE_VERSAO}")
+
+
+def _linhas_kimi_do_indice(raiz: Path, desde: str | None = None) -> list[UsageRow]:
+    # O projeto vem do session_index, não do wire — aplicado na LEITURA, senão uma linha
     # gravada antes de o índice conhecer a sessão ficaria "desconhecido" até o wire mudar.
     index = _kimi_index()
     return [replace(r, project=index.get(r.session_id) or PROJETO_DESCONHECIDO)
-            for _, linhas in pares for r in linhas]
+            for r in map(_usage_row, costs_cache.ler_custos(f"kimi:{raiz}", desde))]
 
 
-def _linhas_wire_kimi(arq: Path) -> list[UsageRow]:
-    acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-    modelo = ""
-    ts = None
-    viu = False
-    for d in _ler_jsonl(arq):
-        if d.get("type") != "usage.record":
-            continue
+class DobraKimi:
+    def __init__(self, sid: str, subagente: bool) -> None:
+        self.sid, self.subagente = sid, subagente
+        self.acc = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+        self.modelo = ""
+        self.ts = None
+        self.viu = False
+
+    def linha(self, bruta: bytes) -> None:
+        if b"usage.record" not in bruta:
+            return
+        d = _dict_da_linha(bruta)
+        if d is None or d.get("type") != "usage.record":
+            return
         u = d.get("usage")
         if not isinstance(u, dict):
-            continue
-        viu = True
-        modelo = d.get("model") or modelo
+            return
+        self.viu = True
+        self.modelo = d.get("model") or self.modelo
         t = d.get("time")
         if isinstance(t, (int, float)):
-            ts = datetime.fromtimestamp(t / 1000.0, LOCAL)
+            self.ts = datetime.fromtimestamp(t / 1000.0, LOCAL)
+        acc = self.acc
         acc["input"] += _int(u.get("inputOther"))
         acc["output"] += _int(u.get("output"))
         acc["cacheRead"] += _int(u.get("inputCacheRead"))
         acc["cacheWrite"] += _int(u.get("inputCacheCreation"))
-    if not viu or ts is None:
-        return []
+
+    def fechar(self):
+        if not self.viu or self.ts is None:
+            return [], [], None
+        modelo, acc = self.modelo, self.acc
+        # Modelo vem como ALIAS ("apikey/k3"); o provedor e o prefixo. Canoniza como os demais.
+        prov = modelo.split("/", 1)[0] if "/" in modelo else ""
+        return [UsageRow(
+            ts=self.ts, source="kimi", provider=pricing.canonizar_provedor(prov) or prov or "?",
+            model=modelo or "?",
+            project=PROJETO_DESCONHECIDO, session_id=self.sid,
+            input=acc["input"], output=acc["output"],
+            cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
+            subagente=self.subagente,
+        )], [], None
+
+
+def _dobra_kimi(arq: Path) -> DobraKimi:
     # session_id = nome do sessionDir (session_<uuid>) — o stem seria "wire" pra TODOS
     # (mesmo caso do session.jsonl do Pi, ver linhas_pi).
-    sid = arq.parent.parent.parent.name
-    # Modelo vem como ALIAS ("apikey/k3"); o provedor e o prefixo. Canoniza como os demais.
-    prov = modelo.split("/", 1)[0] if "/" in modelo else ""
-    return [UsageRow(
-        ts=ts, source="kimi", provider=pricing.canonizar_provedor(prov) or prov or "?",
-        model=modelo or "?",
-        project=PROJETO_DESCONHECIDO, session_id=sid,
-        input=acc["input"], output=acc["output"],
-        cache_write=acc["cacheWrite"], cache_read=acc["cacheRead"],
-        subagente=kimi_sessions.is_subagent_wire(str(arq)),
-    )]
+    return DobraKimi(arq.parent.parent.parent.name, kimi_sessions.is_subagent_wire(str(arq)))
+
+
+def _linhas_wire_kimi(arq: Path) -> list[UsageRow]:
+    return _ler_inteiro(arq, _dobra_kimi(arq))[0]
 
 
 # Suba ao mudar o UsageRow ou a regra de um leitor, senão o cache velho é servido pra sempre.
@@ -494,22 +604,18 @@ _aquecedor: threading.Thread | None = None
 _agendado: threading.Timer | None = None
 _aquecer_lock = threading.Lock()
 
-# Última leitura pronta, servida na hora. Sessões vivas reescrevem transcripts de dezenas de MB
-# a cada turno, e reler tudo no pedido custava 1,7–2,6 s por abertura mesmo com cache. A tela
-# abre com o que já existe (no máximo `_FRESCOR_S` de idade); passou disso, o pedido ainda
-# recebe a última e uma coleta nova roda atrás. "Atualizar dados" pede `fresco=True`.
+# O pedido lê o índice como está, na hora. Passado `_FRESCOR_S` desde a última varredura, uma
+# nova roda atrás; "Atualizar dados" pede `fresco=True` e varre antes de ler.
 _FRESCOR_S = 30.0
-_ultimo_custos: tuple[float, list[UsageRow]] | None = None
-_ultimo_uso: tuple[float, tuple[list[UsoLinha], list[UsageRow]]] | None = None
+_ultima_coleta: float | None = None
 _refrescador: threading.Thread | None = None
+# Escopos da última varredura: a leitura usa os mesmos, sem refazer o walk nem reler
+# `.claude.json` a cada pedido.
+_escopos: dict = {"claude": [], "codex": [], "pi": [], "kimi": None}
 
 
 def _coletar_tudo() -> None:
-    """Custos e uso, nesta ordem: a primeira já deixa o cache do transcript pronto pra segunda."""
-    global _ultimo_custos, _ultimo_uso
-    linhas = coletar()
-    _ultimo_custos = (time.monotonic(), linhas)
-    _ultimo_uso = (time.monotonic(), _coletar_uso())
+    sincronizar_tudo()
 
 
 def _aquecer() -> None:
@@ -573,77 +679,71 @@ def cancelar_aquecimento() -> None:
         _agendado = None
 
 
-def coletar_ou_aquecendo(esperar: float = 3.0, *, fresco: bool = False) -> list[UsageRow]:
-    """O que o endpoint chama: antes da primeira coleta terminar, dispara o aquecimento e
-    responde `Aquecendo` na hora — o pedido nunca paga a varredura fria. Depois, responde com
-    a última leitura e atualiza atrás; `fresco` (botão Atualizar) coleta agora."""
-    global _ultimo_custos
+def _pronto(fresco: bool, esperar: float | None) -> None:
+    """Antes da primeira varredura terminar, dispara o aquecimento e responde `Aquecendo` na
+    hora — o pedido nunca paga a varredura fria. Depois, o pedido lê o índice e uma varredura
+    velha é refeita atrás; `fresco` (botão Atualizar) varre antes de ler."""
     if not _aquecido.is_set():
         aquecer_em_background()
         raise Aquecendo(*costs_cache.progresso_total())
-    if not fresco and _ultimo_custos is not None:
-        if not _fresco(_ultimo_custos[0]):
-            _refrescar_em_background()
-        return _ultimo_custos[1]
-    linhas = coletar(esperar)
-    _ultimo_custos = (time.monotonic(), linhas)
-    return linhas
+    if fresco or _ultima_coleta is None:
+        # Sem varredura que tenha terminado (o aquecimento falhou): o erro aparece no pedido.
+        sincronizar_tudo(esperar)
+    elif not _fresco(_ultima_coleta):
+        _refrescar_em_background()
 
 
-def coletar_uso(esperar: float | None = 3.0, *, fresco: bool = False) -> tuple[list[UsoLinha], list[UsageRow]]:
+def coletar_ou_aquecendo(esperar: float = 3.0, *, fresco: bool = False,
+                         desde: str | None = None) -> list[UsageRow]:
+    """O que o endpoint chama. `desde` (YYYY-MM-DD) corta no SQL o que o relatório jogaria fora."""
+    _pronto(fresco, esperar)
+    return _ler_custos(desde)
+
+
+def coletar_uso(esperar: float | None = 3.0, *, fresco: bool = False,
+                desde: str | None = None) -> tuple[list[UsoLinha], list[UsageRow]]:
     """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas.
 
     As de tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe
-    nas linhas de tokens. Mesma trava, mesmo aquecimento e mesma última-leitura do `coletar()`:
-    o cache é o mesmo arquivo — a primeira coleta de custos já deixou o uso pronto.
+    nas linhas de tokens. Mesmo índice, mesmo aquecimento e mesma varredura do `coletar()`.
     """
-    global _ultimo_uso
-    if not _aquecido.is_set():
-        aquecer_em_background()
-        raise Aquecendo(*costs_cache.progresso_total())
-    if not fresco and _ultimo_uso is not None:
-        if not _fresco(_ultimo_uso[0]):
-            _refrescar_em_background()
-        return _ultimo_uso[1]
-    if not _cache_lock.acquire(timeout=-1 if esperar is None else esperar):
-        raise Aquecendo(*costs_cache.progresso_total())
-    try:
-        resultado = _coletar_uso_sem_trava()
-    finally:
-        _cache_lock.release()
-    _ultimo_uso = (time.monotonic(), resultado)
-    return resultado
+    _pronto(fresco, esperar)
+    return _ler_uso(desde)
 
 
-def _coletar_uso() -> tuple[list[UsoLinha], list[UsageRow]]:
-    with _cache_lock:
-        return _coletar_uso_sem_trava()
-
-
-def _coletar_uso_sem_trava() -> tuple[list[UsoLinha], list[UsageRow]]:
+def _ler_uso(desde: str | None = None) -> tuple[list[UsoLinha], list[UsageRow]]:
     uso: list[UsoLinha] = []
     tokens: list[UsageRow] = []
-    for caminho, account_id in _config_dirs():
-        raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
-        uso.extend(replace(l, conta=account_id)
-                   for l in costs_claude_transcript.varrer_uso(raiz))
+    for raiz, account_id in _escopos["claude"]:
+        uso.extend(costs_cache.ler_usos(costs_claude_transcript.escopo(raiz), account_id, desde))
         # `account_id` carimbado aqui (o custo usa `provider`, que em sessão de motor é o
         # provedor do modelo, não a conta): o filtro por conta precisa da conta.
-        tokens.extend(replace(r, account_id=account_id)
-                      for r in linhas_claude(Path(caminho), account_id))
-    for owner, caminhos in _rollouts_codex_por_conta(_contas_codex()).values():
-        home = owner.home.expanduser().absolute().resolve(strict=False)
-        identidade = f"codex:{home}"
-        _ROTULOS[identidade] = f"Codex · {owner.id}"
-
-        def ler(path: Path, identidade: str = identidade) -> list[UsoLinha]:
-            return uso_codex.ler_rollout(path, respostas_por_turno_codex(path, identidade))
-
-        pares = costs_cache.varrer_cacheado(
-            f"codex-uso-{owner.id}", home, sorted(caminhos), ler, UsoLinha.para_dict,
-            UsoLinha.de_dict, f"{_USO_CODEX_VERSAO}:{uso_areas.assinatura()}")
-        uso.extend(replace(l, conta=identidade) for _, linhas in pares for l in linhas)
+        tokens.extend(_linhas_claude_do_indice(raiz, account_id, desde, carimbar_conta=True))
+    for identidade in _escopos["codex"]:
+        uso.extend(costs_cache.ler_usos(identidade, identidade, desde))
     return uso, tokens
+
+
+def _codex_do_indice(identidade: str, desde: str | None = None) -> list[UsageRow]:
+    out = []
+    for t in costs_cache.ler_custos(identidade, desde):
+        r = _usage_row(t)
+        out.append(replace(r, account_id=identidade,
+                           provider=identidade if r.provider == "openai" else r.provider))
+    return out
+
+
+def _ler_custos(desde: str | None = None) -> list[UsageRow]:
+    out: list[UsageRow] = []
+    for raiz, account_id in _escopos["claude"]:
+        out.extend(_linhas_claude_do_indice(raiz, account_id, desde))
+    for identidade in _escopos["codex"]:
+        out.extend(_codex_do_indice(identidade, desde))
+    for raiz, source in _escopos["pi"]:
+        out.extend(map(_usage_row, costs_cache.ler_custos(f"{source}:{raiz}", desde)))
+    if _escopos["kimi"] is not None:
+        out.extend(_linhas_kimi_do_indice(_escopos["kimi"], desde))
+    return out
 
 
 def account_info(config_dir: Path, fallback_label: str) -> tuple[str, str | None, str]:
@@ -711,7 +811,7 @@ def _rollouts_codex_por_conta(accounts: list[codex_contas.Account]) \
         for raiz in (viva, viva.parent / "archived_sessions"):
             if not raiz.is_dir():
                 continue
-            for path in raiz.rglob("rollout-*.jsonl"):
+            for path in costs_cache.listar(raiz, lambda n: n.startswith("rollout-") and n.endswith(".jsonl")):
                 try:
                     canonical = path.resolve(strict=True)
                     owner = codex_contas.account_for_rollout(canonical)
@@ -725,45 +825,50 @@ def _rollouts_codex_por_conta(accounts: list[codex_contas.Account]) \
 
 
 def coletar(esperar: float | None = None) -> list[UsageRow]:
-    """Todas as linhas das quatro fontes. NUNCA vai à rede.
+    """Todas as linhas das quatro fontes, depois de uma varredura. NUNCA vai à rede."""
+    sincronizar_tudo(esperar)
+    return _ler_custos()
 
-    `esperar` é quanto tempo aceitar ficar na fila atrás de outra coleta: o endpoint passa uns
-    segundos e recebe `Aquecendo` se a primeira varredura (máquina nova) ainda estiver rodando;
-    o aquecimento de boot passa None e espera o que precisar.
+
+def sincronizar_tudo(esperar: float | None = None) -> None:
+    """Uma varredura de todas as fontes: custo e uso saem da mesma leitura de cada arquivo.
+
+    `esperar` é quanto tempo aceitar ficar na fila atrás de outra varredura: o endpoint passa
+    uns segundos e recebe `Aquecendo` se a primeira (máquina nova) ainda estiver rodando; o
+    aquecimento de boot passa None e espera o que precisar.
     """
+    global _ultima_coleta
     if not _cache_lock.acquire(timeout=-1 if esperar is None else esperar):
         raise Aquecendo(*costs_cache.progresso_total())
     try:
-        return _coletar()
+        _sincronizar()
+        _ultima_coleta = time.monotonic()
     finally:
         _cache_lock.release()
 
 
-def _coletar() -> list[UsageRow]:
-    out: list[UsageRow] = []
-    costs_cache.zerar_progresso()
-    # Cada fonte cacheia por RAIZ e por ARQUIVO no costs_cache; aqui só se junta.
-    for caminho, account_id in _config_dirs():
-        out.extend(linhas_claude(Path(caminho), account_id))
+def _dobra_codex(arq: Path) -> DobraCodex:
+    return DobraCodex(arq)
 
-    por_conta = _rollouts_codex_por_conta(_contas_codex())
-    for owner, caminhos in por_conta.values():
+
+def _sincronizar() -> None:
+    global _escopos
+    escopos: dict = {"claude": [], "codex": [], "pi": [], "kimi": None}
+    costs_cache.zerar_progresso()
+    for caminho, account_id in _config_dirs():
+        raiz = costs_claude_transcript.raiz_projetos(Path(caminho))
+        costs_claude_transcript.sincronizar(raiz)
+        escopos["claude"].append((raiz, account_id))
+
+    for owner, caminhos in _rollouts_codex_por_conta(_contas_codex()).values():
         home = owner.home.expanduser().absolute().resolve(strict=False)
         identidade = f"codex:{home}"
         _ROTULOS[identidade] = f"Codex · {owner.id}"
+        costs_cache.sincronizar(identidade, sorted(caminhos), _dobra_codex,
+                                f"codex:{CACHE_VERSAO}:{_USO_CODEX_VERSAO}")
+        escopos["codex"].append(identidade)
 
-        def ler(path: Path, identidade: str = identidade) -> list[UsageRow]:
-            return [replace(r, provider=identidade) if r.provider == "openai" else r
-                    for r in _linhas_rollout_codex(path, identidade)]
-
-        pares = costs_cache.varrer_cacheado(
-            f"codex-{owner.id}", home, sorted(caminhos), ler,
-            UsageRow.para_dict, UsageRow.de_dict, CACHE_VERSAO)
-        out.extend(r for _, linhas in pares for r in linhas)
-
-    for nome, raiz, leitor in (("pi", raiz_pi(), linhas_pi),
-                               ("omp", raiz_omp(), linhas_omp),
-                               ("kimi", raiz_kimi(), linhas_kimi)):
+    for nome, raiz in (("pi", raiz_pi()), ("omp", raiz_omp())):
         if nome == "omp" and raiz == raiz_pi():
             # PI_CODING_AGENT_DIR aponta pra árvore do pi-coding-agent: os dois caem na
             # MESMA pasta, e contar de novo como "omp" dobraria o gasto. Avisa uma vez:
@@ -772,5 +877,20 @@ def _coletar() -> list[UsageRow]:
                 _AVISOU_RAIZ_UNICA.add(str(raiz))
                 _log.warning("custos: omp e pi na mesma raiz (%s) — gasto do omp somado como pi", raiz)
             continue
-        out.extend(leitor())
-    return out
+        if raiz.is_dir():
+            _sincronizar_pi(raiz, nome)
+            escopos["pi"].append((raiz, nome))
+    kimi = raiz_kimi()
+    if kimi.is_dir():
+        _sincronizar_kimi(kimi)
+        escopos["kimi"] = kimi
+    _escopos = escopos
+
+
+def custos_do_rollout(path: Path) -> list[UsageRow]:
+    """Linhas de custo de UM rollout, pelo índice: só o que cresceu desde a última leitura é
+    lido. A conta não entra (quem pede quer só o valor da sessão)."""
+    file_id = costs_cache.sincronizar_arquivo(path, _dobra_codex,
+                                              f"codex:{CACHE_VERSAO}:{_USO_CODEX_VERSAO}",
+                                              "codex:avulso")
+    return [] if file_id is None else [_usage_row(t) for t in costs_cache.ler_custos(file_id=file_id)]

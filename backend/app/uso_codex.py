@@ -20,7 +20,7 @@ from pathlib import Path
 
 from app import uso_areas
 from app.costs_claude_transcript import LOCAL
-from app.uso_claude import Acumulador, UsoLinha, _int, comando_bash
+from app.uso_claude import Acumulador, UsoLinha, _int, _ordem, comando_bash, linhas_de_area
 
 _CHAMADA = re.compile(r"tools\.(\w+)\(")
 _TEXTO_JS = r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"""
@@ -76,7 +76,7 @@ class AcumuladorCodex(Acumulador):
         self._inicio: datetime | None = None
         self._herdado = False
         self._turno = ""
-        self._areas_turno: dict[str, dict[str, int]] = {}
+        self._areas_turno: dict[str, list[tuple]] = {}      # turno -> registros das tools
         self._cwd_turno: dict[str, str] = {}
         self._scripts: dict[str, list[tuple[str, dict]]] = {}
         self._contador = None
@@ -144,18 +144,18 @@ class AcumuladorCodex(Acumulador):
 
     def _tool_codex(self, nome: str, info: dict) -> None:
         self._somar("tool", nome, chamadas=1)
-        regras = uso_areas.regras_de(self._cwd)
-        areas: set[str] = set()
+        reg = None
         if nome == "exec_command" and info.get("cmd"):
             self._somar("bash", comando_bash(info["cmd"]), chamadas=1)
-            areas = uso_areas.areas_do_comando(info["cmd"], info.get("workdir") or self._cwd, regras)
+            reg = ("C", self._cwd, info.get("workdir") or self._cwd,
+                   uso_areas.candidatos_do_comando(info["cmd"]))
         elif nome == "apply_patch":
-            areas = {uso_areas.area_do_caminho(a, self._cwd, regras) for a in info.get("arquivos", [])}
+            reg = ("P", self._cwd, self._cwd, tuple(info.get("arquivos", [])))
         elif nome == "view_image" and info.get("path"):
             self._somar("imagem", "lida:view_image", chamadas=1)
-        pesos = self._areas_turno.setdefault(self._turno, {})
-        for a in areas:
-            pesos[a] = pesos.get(a, 0) + 1
+        registros = self._areas_turno.setdefault(self._turno, [])
+        if reg:
+            registros.append(reg)
 
     def _saida(self, chamadas: list[tuple[str, dict]], chars: int) -> None:
         if not chamadas:
@@ -170,23 +170,26 @@ class AcumuladorCodex(Acumulador):
             if cmd:
                 self._somar("bash", comando_bash(cmd), ctx_chars=parte)
 
-    def resultado_codex(self, por_turno: dict[str, list]) -> list[UsoLinha]:
+    def entradas_de_area_codex(self, por_turno: dict[str, list]) -> tuple[dict, list]:
+        """Mesmo formato do `Acumulador.entradas_de_area`: aqui cada resposta é um grupo, com os
+        tokens que o leitor de custos resolveu pra ela."""
+        cwd = self._cwd
+        turnos = []
         for turno, respostas in por_turno.items():
-            contadas = self._areas_turno.get(turno) or {}
-            pesos = contadas or {uso_areas.CONVERSA: 1}
-            self._cwd = self._cwd_turno.get(turno, self._cwd)
-            for i, r in enumerate(respostas):
-                self._dia = r.ts.astimezone(LOCAL).strftime("%Y-%m-%d")
-                self._model = r.model
-                partes = {campo: uso_areas.repartir(getattr(r, campo), pesos)
-                          for campo in ("input", "output", "cache_write", "cache_read")}
-                for a in pesos:
-                    self._somar("area", a, chamadas=contadas.get(a, 0) if i == 0 else 0, usage={
-                        "input_tokens": partes["input"][a], "output_tokens": partes["output"][a],
-                        "cache_creation_input_tokens": partes["cache_write"][a],
-                        "cache_read_input_tokens": partes["cache_read"][a]})
-        return sorted((replace(l, fonte="codex", session_id=self._sid, subagente=self._subagente) for l in self._linhas.values()),
-                      key=lambda l: (l.dia, l.tipo, l.nome, l.detalhe))
+            # Turno sem turn_context herda o cwd do turno anterior da lista.
+            cwd = self._cwd_turno.get(turno, cwd)
+            turnos.append((tuple(self._areas_turno.get(turno) or ()), [
+                (r.ts.astimezone(LOCAL).strftime("%Y-%m-%d"), cwd, r.model, False,
+                 r.input, r.output, r.cache_write, r.cache_read, 0) for r in respostas]))
+        return {"fonte": "codex", "session_id": self._sid, "subagente": self._subagente}, turnos
+
+    def linhas_sem_area_codex(self) -> list[UsoLinha]:
+        return sorted((replace(l, fonte="codex", session_id=self._sid, subagente=self._subagente)
+                       for l in self._linhas.values()), key=_ordem)
+
+    def resultado_codex(self, por_turno: dict[str, list]) -> list[UsoLinha]:
+        return sorted(self.linhas_sem_area_codex()
+                      + linhas_de_area(self.entradas_de_area_codex(por_turno)), key=_ordem)
 
 
 def _quando(iso) -> datetime | None:

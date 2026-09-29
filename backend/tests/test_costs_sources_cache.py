@@ -17,16 +17,16 @@ def _limpo(tmp_path, monkeypatch):
     cs.invalidar_cache()
 
 
-def _isolar(monkeypatch) -> None:
-    """Estado do aquecimento/última leitura zerado, e a coleta de uso falsa — a real varreria o
-    `~/.claude` da máquina de dentro da thread e o teste esperaria minutos."""
+def _isolar(monkeypatch, varrer, ler=lambda desde=None: []) -> None:
+    """Estado do aquecimento/última varredura zerado, varredura e leitura falsas — a real
+    varreria o `~/.claude` da máquina de dentro da thread e o teste esperaria minutos."""
     import threading
     monkeypatch.setattr(cs, "_aquecido", threading.Event())
     monkeypatch.setattr(cs, "_aquecedor", None)
     monkeypatch.setattr(cs, "_refrescador", None)
-    monkeypatch.setattr(cs, "_ultimo_custos", None)
-    monkeypatch.setattr(cs, "_ultimo_uso", None)
-    monkeypatch.setattr(cs, "_coletar_uso", lambda: ([], []))
+    monkeypatch.setattr(cs, "_ultima_coleta", None)
+    monkeypatch.setattr(cs, "_sincronizar", varrer)
+    monkeypatch.setattr(cs, "_ler_custos", ler)
 
 
 def _escrever(p: Path, linhas: list[dict]) -> None:
@@ -55,13 +55,13 @@ def test_pi_sobrevive_ao_restart_e_rele_so_o_arquivo_que_mudou(tmp_path, monkeyp
     _sessao_pi(a, 10)
     _sessao_pi(b, 20)
     chamadas: list[Path] = []
-    original = cs._linhas_arquivo_pi
+    original = cs._dobra_pi
 
     def contado(arq, raiz_, source):
         chamadas.append(arq)
         return original(arq, raiz_, source)
 
-    monkeypatch.setattr(cs, "_linhas_arquivo_pi", contado)
+    monkeypatch.setattr(cs, "_dobra_pi", contado)
     assert sum(r.input for r in cs.linhas_pi(raiz)) == 30
     assert sorted(chamadas) == [a, b]
     cs.invalidar_cache()  # processo novo: memória zerada, disco intacto
@@ -77,74 +77,67 @@ def test_pi_sobrevive_ao_restart_e_rele_so_o_arquivo_que_mudou(tmp_path, monkeyp
 
 def test_pedido_antes_da_primeira_coleta_dispara_aquecimento_e_responde_aquecendo(monkeypatch):
     """O pedido nunca paga a varredura fria: dispara a thread e devolve `Aquecendo`; depois
-    que ela termina, o mesmo pedido coleta (incremental) e responde."""
+    que ela termina, o pedido lê o índice e responde."""
     import threading
 
-    _isolar(monkeypatch)
     segurar = threading.Event()
     chamadas = []
 
-    def coletar_lento(esperar=None):
-        chamadas.append(esperar)
+    def varrer_lento():
+        chamadas.append(1)
         segurar.wait(5)
-        return []
 
-    monkeypatch.setattr(cs, "coletar", coletar_lento)
+    _isolar(monkeypatch, varrer_lento)
     with pytest.raises(cs.Aquecendo):
         cs.coletar_ou_aquecendo()
     assert cs._aquecedor is not None and cs._aquecedor.is_alive()
     with pytest.raises(cs.Aquecendo):
         cs.coletar_ou_aquecendo()   # segunda chamada não abre outra thread
-    assert chamadas == [None]
+    assert chamadas == [1]
     segurar.set()
     cs._aquecedor.join(5)
     assert cs._aquecido.is_set()
     assert cs.coletar_ou_aquecendo(esperar=1.0) == []
-    assert chamadas == [None]                       # aquecida: serve a leitura do aquecimento
+    assert chamadas == [1]                          # aquecida: lê sem varrer
     assert cs.coletar_ou_aquecendo(esperar=1.0, fresco=True) == []
-    assert chamadas == [None, 1.0]
+    assert chamadas == [1, 1]
 
 
-def test_depois_de_aquecido_o_pedido_recebe_a_ultima_leitura_e_atualiza_atras(monkeypatch):
-    """Tela abre na hora com a leitura anterior; passado o frescor, o pedido ainda recebe a
-    anterior e uma coleta nova roda em thread. `fresco` (Atualizar dados) coleta no pedido."""
+def test_depois_de_aquecido_o_pedido_le_na_hora_e_atualiza_atras(monkeypatch):
+    """Tela abre na hora com o índice como está; passado o frescor, uma varredura nova roda em
+    thread. `fresco` (Atualizar dados) varre no pedido."""
     import threading
 
-    _isolar(monkeypatch)
-    import threading
     n = {"v": 0}
     segurar = threading.Event()
 
-    def coletar_contado(esperar=None):
+    def varrer_contado():
         n["v"] += 1
         if n["v"] == 2:
-            segurar.wait(5)   # a coleta de fundo demora: o pedido não pode esperar por ela
-        return [n["v"]]
+            segurar.wait(5)   # a varredura de fundo demora: o pedido não pode esperar por ela
 
-    monkeypatch.setattr(cs, "coletar", coletar_contado)
+    _isolar(monkeypatch, varrer_contado, lambda desde=None: ["lido"])
     with pytest.raises(cs.Aquecendo):
         cs.coletar_ou_aquecendo()
     cs._aquecedor.join(5)
-    assert cs.coletar_ou_aquecendo() == [1]          # fresca: serve sem coletar
-    assert cs.coletar_ou_aquecendo() == [1]
+    assert cs.coletar_ou_aquecendo() == ["lido"]     # fresca: lê sem varrer
+    assert cs.coletar_ou_aquecendo() == ["lido"]
     assert n["v"] == 1
     monkeypatch.setattr(cs, "_FRESCOR_S", 0.0)       # envelheceu
-    assert cs.coletar_ou_aquecendo() == [1]          # ainda responde a anterior na hora…
+    assert cs.coletar_ou_aquecendo() == ["lido"]     # responde na hora, sem esperar a varredura…
     assert cs._refrescador is not None and cs._refrescador.is_alive()
     segurar.set()
     cs._refrescador.join(5)
-    assert n["v"] == 2                               # …e a nova rodou atrás
-    assert cs.coletar_ou_aquecendo(fresco=True) == [3]
+    assert n["v"] == 2                               # …que rodou atrás
+    assert cs.coletar_ou_aquecendo(fresco=True) == ["lido"]
     assert n["v"] == 3
 
 
 def test_aquecimento_que_falha_nao_prende_a_tela_em_aquecendo(monkeypatch):
-    _isolar(monkeypatch)
-
-    def explode(esperar=None):
+    def explode():
         raise OSError("disco")
 
-    monkeypatch.setattr(cs, "coletar", explode)
+    _isolar(monkeypatch, explode)
     with pytest.raises(cs.Aquecendo):
         cs.coletar_ou_aquecendo()
     cs._aquecedor.join(5)

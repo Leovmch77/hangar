@@ -12,8 +12,9 @@ Mapa editável em `~/.hangar/uso-areas.json` (opcional; sem ele vale `PADRAO`):
 - Projeto = caminho absoluto (prefixo do cwd) ou nome de uma pasta do cwd.
 - Padrão é `fnmatch` sobre o caminho relativo à raiz do repositório e casa em qualquer nível
   (`migrations/*` pega `backend/migrations/x.sql`). `skill:<nome>` casa a chamada de skill.
-- O mapa é lido UMA vez por processo e entra na versão do cache dos transcripts: editou,
-  reinicie o backend e a tela relê tudo (mostra "aquecendo").
+- O mapa é lido UMA vez por processo. O cache guarda os ALVOS de cada turno (caminhos, comandos,
+  skills), não a área: editou, reinicie o backend e a próxima coleta refaz só as linhas de área
+  a partir do cache, sem reler transcript.
 Só stdlib.
 """
 from __future__ import annotations
@@ -90,6 +91,7 @@ def assinatura() -> str:
 def recarregar() -> None:
     _mapa.cache_clear()
     raiz_do_repo.cache_clear()
+    areas_do_registro.cache_clear()
 
 
 @lru_cache(maxsize=4096)
@@ -148,17 +150,46 @@ def area_do_caminho(caminho: str, cwd: str, regras: list[tuple[str, list[str]]])
     return area_do_alvo(os.path.relpath(p, raiz).replace(os.sep, "/"), regras) or OUTROS
 
 
-def areas_do_comando(cmd: str, cwd: str, regras: list[tuple[str, list[str]]]) -> set[str]:
-    """Áreas dos caminhos citados num comando Bash. Palavra que não parece caminho (sem `/` nem
-    extensão) é ignorada, e o que cai em `outros` também: `2>/dev/null` não é área."""
-    out = set()
+def candidatos_do_comando(cmd: str) -> tuple[str, ...]:
+    """Palavras de um comando que parecem caminho (com `/` ou extensão). Não depende do mapa:
+    é o que o cache guarda do comando."""
+    out = []
     for tok in cmd.replace("=", " ").split():
         t = tok.strip("'\"();&|<>")
         if not t or t.startswith("-") or "://" in t or "$" in t:
             continue
         if "/" not in t and "." not in t.lstrip("."):
             continue
-        a = area_do_caminho(t, cwd, regras)
-        if a != OUTROS:
-            out.add(a)
+        out.append(t)
+    return tuple(out)
+
+
+def areas_do_comando(cmd: str, cwd: str, regras: list[tuple[str, list[str]]]) -> set[str]:
+    """Áreas dos caminhos citados num comando Bash. Palavra que não parece caminho é ignorada,
+    e o que cai em `outros` também: `2>/dev/null` não é área."""
+    return {a for t in candidatos_do_comando(cmd) if (a := area_do_caminho(t, cwd, regras)) != OUTROS}
+
+
+# Registro de uma tool num turno, guardado no cache no lugar da área já resolvida:
+#   ("P", cwd_regras, cwd, caminhos)    arquivos tocados; fora do repositório conta `outros`
+#   ("C", cwd_regras, cwd, candidatos)  comando; `outros` não conta
+#   ("S", cwd_regras, alvo)             skill (`skill:<nome>`)
+@lru_cache(maxsize=65536)
+def areas_do_registro(reg: tuple) -> frozenset[str]:
+    regras = regras_de(reg[1])
+    if reg[0] == "S":
+        a = area_do_alvo(reg[2], regras)
+        return frozenset((a,) if a else ())
+    areas = {area_do_caminho(c, reg[2], regras) for c in reg[3]}
+    if reg[0] == "C":
+        areas.discard(OUTROS)
+    return frozenset(areas)
+
+
+def contar_areas(registros) -> dict[str, int]:
+    """Cada tool conta 1 em cada área distinta que tocou."""
+    out: dict[str, int] = {}
+    for reg in registros:
+        for a in areas_do_registro(reg):
+            out[a] = out.get(a, 0) + 1
     return out
