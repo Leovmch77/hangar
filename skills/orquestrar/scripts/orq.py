@@ -721,7 +721,8 @@ def cmd_event(a) -> int:
     journal_append(d, _event_line(ev))
     # Before the notices: a failed send must not cost the orchestrator its trigger.
     if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
-        spawn_advance(d)
+        if err := spawn_advance(d):
+            journal_append(d, f"{ev['tipo']} T{ev.get('task')}: orq advance not started: {err}")
     _after_event(d, ev)
     print("ok")
     return 0
@@ -1133,8 +1134,9 @@ def cmd_commit(a) -> int:
         extra = f" (proof queue skipped: {e})"
     if cfg.get("auto"):
         # The orchestrator integrates and releases the next Task; the arbiter wakes only if it cannot.
-        journal_append(d, f"commit T{a.task}: orq advance started{extra}")
-        spawn_advance(d)
+        err = spawn_advance(d)
+        journal_append(d, f"commit T{a.task}: orq advance "
+                          + (f"not started ({err})" if err else "started") + extra)
         print("ok")
         return 0
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
@@ -1320,7 +1322,7 @@ JEV_RED = {"red": {"type": "choice", "instructions": (
     }}}
 RED_PT = {"back": "devolver à Task", "retry": "rodar de novo", "wake": "acordar o árbitro"}
 PASSO_PT = {"integrate": "integrar", "open": "abrir", "batch": "anunciar o lote de prova",
-            "final": "pedir a revisão final"}
+            "final": "pedir a revisão final", "advance": "rodar a passada"}
 
 
 def _at_or_after(ts, ref) -> bool:
@@ -1970,17 +1972,29 @@ def advance(d: Path) -> list[str]:
         # trigger (the watchdog's cycle at worst).
         while again.exists() and not state(d)["ended"]:
             again.unlink()
-            _pass(d, cfg, acts)
+            try:
+                _pass(d, cfg, acts)
+            except Exception as e:  # noqa: BLE001 — a crash must reach the arbiter, once
+                since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+                if not _failed_since(events(d), "advance", None, since):
+                    acts.append(_fail(d, "advance", None, f"{type(e).__name__}: {e}"))
     return acts
 
 
-def spawn_advance(d: Path) -> None:
+def spawn_advance(d: Path) -> str | None:
     """`orq advance` in its own session, output in <dir>/advance.log: the caller's turn never waits
-    on merges and checks, and a run that dies is picked up by the watchdog's next cycle."""
-    with (d / "advance.log").open("a", encoding="utf-8") as log:
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d), "advance"],
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                         start_new_session=True)
+    on merges and checks, and a run that dies is picked up by the watchdog's next cycle. None when
+    started; otherwise the error, already warned on stderr (the watchdog's cycle retries)."""
+    try:
+        with (d / "advance.log").open("a", encoding="utf-8") as log:
+            # cwd: the caller may sit in a worktree that the pass itself removes.
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d), "advance"],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=True, cwd=str(d))
+    except OSError as e:
+        print(f"orq: warning: orq advance not started: {e}", file=sys.stderr)
+        return str(e)
+    return None
 
 
 def cmd_advance(a) -> int:
@@ -1988,8 +2002,7 @@ def cmd_advance(a) -> int:
     if not config(d).get("auto"):
         return 0
     if a.detach:
-        spawn_advance(d)
-        return 0
+        return 1 if spawn_advance(d) else 0
     for line in advance(d):
         print(line)
     return 0

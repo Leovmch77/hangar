@@ -674,3 +674,37 @@ def test_non_auto_commit_still_wakes_the_arbiter_and_starts_nothing(tmp_path):
     assert run(e, "advance", "--detach").stdout == ""
     time.sleep(0.5)
     assert not (d / "advance.log").exists() and not (d / "advance.lock").exists()
+
+
+def test_a_spawn_that_fails_is_journaled_and_never_a_traceback(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    (d / "advance.log").mkdir()   # opening the log fails: spawn_advance raises OSError
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex1", "--par", "rev1")
+    (r / "a.txt").write_text("x\n")
+    g("add", "a.txt")
+    h = g("stash", "create")
+    g("stash", "store", "-m", "task-1 round 1", h)
+    ev = run(e, "event", "entrega", "--task", "1", "--rodada", "1", "--commit", h)
+    assert ev.stdout == "ok\n" and "Traceback" not in ev.stderr and "orq advance" in ev.stderr
+    v = run(e, "event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova",
+            "--sessao", "rev1")
+    assert v.stdout == "ok\n" and "Traceback" not in v.stderr
+    assert any(m.startswith("ex1 APROVA Task 1") for m in sent(log))   # the notice still went out
+    g("commit", "-qm", "t1")
+    c = run(e, "commit", "--task", "1", "--hash", g("rev-parse", "HEAD"))
+    assert c.stdout == "ok\n" and "Traceback" not in c.stderr and "orq advance" in c.stderr
+    reg = (d / "registro.md").read_text()
+    assert "orq advance started" not in reg and "commit T1: orq advance not started" in reg
+
+
+def test_a_crashing_pass_is_a_failed_step_reported_once(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+    monkeypatch.setattr(m, "_pass", lambda *a: {}["boom"])
+    assert m.advance(d) == ["failed advance: KeyError: 'boom'"]
+    assert m.advance(d) == []
+    assert [(x["passo"], x.get("task")) for x in events(d) if x["tipo"] == "advance_falhou"] == \
+        [("advance", None)]
+    assert len([s for s in sent(log) if "orq advance failed at advance" in s]) == 1
