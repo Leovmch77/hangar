@@ -970,7 +970,8 @@ class PromptQueue:
         # yield_on_timeout: cobre entrada gravada entre o emit_new acima e o watcher armar (senao so
         # apareceria no proximo write da fila). O dir e COMPARTILHADO por todas as sessoes -> filtra:
         # so recarrega quando o toque e no NOSSO arquivo (ou no timeout do heartbeat).
-        async for changes in awatch(self.path.parent, yield_on_timeout=True, rust_timeout=5000):
+        async for changes in awatch(self.path.parent, yield_on_timeout=True, rust_timeout=5000,
+                                    recursive=False):
             if changes and not any(Path(p).name == self.path.name for _, p in changes):
                 continue
             for ev in await asyncio.to_thread(emit_new):

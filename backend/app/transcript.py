@@ -879,8 +879,10 @@ class TranscriptTailer:
                 await asyncio.sleep(_ESPERA_PASTA_S)
                 continue
             try:
+                # recursive=False: o transcript mora direto na pasta; as subpastas
+                # (<uuid>/subagents/) so acordavam o watch a toa a cada escrita de subagente.
                 async for changes in awatch(self.path.parent, yield_on_timeout=True,
-                                            rust_timeout=5000):
+                                            rust_timeout=5000, recursive=False):
                     # O watch e do DIRETORIO (o proprio arquivo pode nem existir ainda), mas escrita de
                     # jsonl IRMAO (ex: subagente gravando o proprio transcript ao lado) acordava todos os
                     # tailers -> so rele quando o toque e no NOSSO arquivo (ou no timeout do heartbeat).
