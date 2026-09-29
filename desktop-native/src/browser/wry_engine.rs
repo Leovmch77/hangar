@@ -54,8 +54,11 @@ impl Starter {
         let mut context = WebContext::new(crate::appearance::dir().map(|dir| dir.join("browser")));
         let state = Rc::new(RefCell::new(model::PageState::default()));
         let (on_load, on_title) = ((state.clone(), events.clone()), (state.clone(), events.clone()));
-        let view = WebViewBuilder::new_with_web_context(&mut context)
-            .with_visible(false)
+        let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false);
+        // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
+        #[cfg(target_os = "windows")]
+        let builder = builder.with_focused(false);
+        let view = builder
             // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
             .with_navigation_handler(|url| model::allowed_request(&url))
             // ponytail: link com target=_blank não abre; carregar na mesma página quando fizer falta.
@@ -79,7 +82,10 @@ impl Starter {
             })
             .build_as_child(&self)
             .map_err(|e| e.to_string())?;
-        Ok(Engine { view, _context: context, state, events, placed: Cell::new(None) })
+        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None) };
+        #[cfg(target_os = "windows")]
+        engine.park();
+        Ok(engine)
     }
 }
 
@@ -116,8 +122,22 @@ impl Engine {
         if hidden { self.report(self.view.set_visible(true)); }
     }
 
+    /// Escondido de verdade (`SW_HIDE`), o WebView2 para de gerar quadros e o CDP perde clique, tecla e `shot`.
+    /// Fica visível para o Chromium, mas fora da área do pai, que recorta a janela filha: ninguém a vê.
+    #[cfg(target_os = "windows")]
+    fn park(&self) {
+        self.report(self.view.set_bounds(Rect {
+            position: LogicalPosition::new(-20_000.0, 0.0).into(),
+            size: LogicalSize::new(1280.0, 800.0).into(),
+        }));
+        self.report(self.view.set_visible(true));
+    }
+
     pub fn hide(&self) {
         if self.placed.take().is_some() {
+            #[cfg(target_os = "windows")]
+            self.park();
+            #[cfg(not(target_os = "windows"))]
             self.report(self.view.set_visible(false));
             // Página escondida com o foco do sistema deixaria o teclado sem dono.
             self.release_focus();
