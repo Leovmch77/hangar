@@ -68,22 +68,30 @@ async function testarLan(s: Server, lan: LanInfo | null | undefined): Promise<bo
   } catch {
     return false;
   }
-  if (r?.identificador !== lan.id || r.prova !== hmacSha256Hex(s.token, `${d}|${lan.id}`)) return false;
-  rotas.set(s.id, lan.url);
-  return true;
+  return r?.identificador === lan.id && r.prova === hmacSha256Hex(s.token, `${d}|${lan.id}`);
 }
 
+// O endereço local ganha só se provar a identidade ANTES de o principal responder: o mesmo IP
+// alcançado por VPN de outra rede responde, mas mais devagar que o Tailscale.
 async function decidir(s: Server): Promise<void> {
   const anterior = rotas.get(s.id);
   let lan: LanInfo | null | undefined = s.lan;
-  // Primeira vez: pergunta pelo principal antes de conectar, pra já nascer na rota local.
-  if (lan === undefined) lan = await aprender(s);
-  if (!(await testarLan(s, lan))) {
-    rotas.set(s.id, s.baseUrl);
-    // O IP local pode ter mudado (DHCP) ou o bind ter sido aberto depois: atualiza para a próxima.
-    if (s.lan !== undefined) void aprender(s).catch((e: unknown) => registrarDiag({ evento: 'rota.falhou',
-      nivel: 'erro', codigo: e instanceof Error ? e.name : 'erro' }, s.baseUrl));
+  let principalEm = Infinity;
+  const inicio = Date.now();
+  if (lan === undefined) {
+    // Primeira vez: pergunta pelo principal antes de conectar, pra já nascer na rota certa.
+    lan = await aprender(s);
+    if (lan) principalEm = Date.now() - inicio;
+  } else {
+    // A mesma pergunta mede o principal e atualiza o IP local (DHCP, bind aberto depois).
+    void aprender(s).then((l) => { if (l) principalEm = Math.min(principalEm, Date.now() - inicio); }, (e: unknown) =>
+      registrarDiag({ evento: 'rota.falhou', nivel: 'erro', codigo: e instanceof Error ? e.name : 'erro' }, s.baseUrl));
   }
+  const inicioLan = Date.now();
+  const lanOk = await testarLan(s, lan);
+  const lanEm = Date.now() - inicioLan;
+  const venceu = lanOk && (s.lan === undefined ? lanEm <= principalEm : principalEm === Infinity);
+  rotas.set(s.id, venceu ? lan!.url : s.baseUrl);
   const agora = rotas.get(s.id)!;
   if (agora !== anterior) {
     registrarDiag({ evento: 'rota.escolhida', detalhe: agora === s.baseUrl ? 'principal' : 'rede_local' }, s.baseUrl);

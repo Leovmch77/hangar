@@ -1,8 +1,9 @@
 //! Rota até cada servidor, como o `rota.ts` do web: o endereço da rede local quando ele responde como a MESMA máquina,
 //! senão o salvo. O salvo continua sendo a identidade (`Api::identity`); só o caminho da rede muda.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use serde_json::Value;
 use url::Url;
 use super::Api;
@@ -74,17 +75,35 @@ pub async fn ensure(api: &Api) {
     // Lista e conversas da mesma máquina reconectam juntas: uma decide, as outras aproveitam.
     let _turn = gate.lock().await;
     let Some(saved) = with(|t| t.get(&key).filter(|k| k.route.is_none()).map(|k| k.lan.clone())) else { return };
-    // Primeira vez: pergunta pelo salvo antes de conectar, pra já nascer na rota local.
-    let lan = match &saved { Some(lan) => Some(lan.clone()), None => learn(api).await };
-    if let Some(lan) = &lan && let Some(route) = lan_url(lan) && same_machine(api, &route, &lan.id).await {
-        return set_route(&key, route);
-    }
-    set_route(&key, api.base.clone());
-    // O IP local pode ter mudado (DHCP) ou o bind ter sido aberto depois: atualiza para a próxima.
-    if saved.is_some() {
-        let api = api.clone();
-        tokio::spawn(async move { learn(&api).await; });
-    }
+    // O local ganha só se provar a identidade ANTES de o salvo responder: o mesmo IP alcançado por
+    // VPN de outra rede responde, mas mais devagar que o Tailscale.
+    let saved_answered = Arc::new(AtomicBool::new(false));
+    let (lan, saved_took) = match saved {
+        // Primeira vez: pergunta pelo salvo antes de conectar, pra já nascer na rota certa.
+        None => {
+            let start = Instant::now();
+            let lan = learn(api).await;
+            let took = lan.as_ref().map(|_| start.elapsed());
+            (lan, took)
+        }
+        // A mesma pergunta mede o salvo e atualiza o IP local (DHCP, bind aberto depois).
+        Some(lan) => {
+            let (api, answered) = (api.clone(), saved_answered.clone());
+            tokio::spawn(async move { if learn(&api).await.is_some() { answered.store(true, Ordering::SeqCst); } });
+            (Some(lan), None)
+        }
+    };
+    let lan_start = Instant::now();
+    let proven = match lan.as_ref().and_then(|lan| lan_url(lan).map(|route| (route, lan.id.clone()))) {
+        Some((route, id)) if same_machine(api, &route, &id).await => Some(route),
+        _ => None,
+    };
+    let lan_took = lan_start.elapsed();
+    let wins = proven.filter(|_| match saved_took {
+        Some(took) => lan_took <= took,
+        None => !saved_answered.load(Ordering::SeqCst),
+    });
+    set_route(&key, wins.unwrap_or_else(|| api.base.clone()));
 }
 
 fn lan_url(lan: &Lan) -> Option<Url> {

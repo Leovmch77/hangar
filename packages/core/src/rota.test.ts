@@ -17,8 +17,8 @@ function env(origin: string | null, lembrados: Record<string, LanInfo> = {}) {
   return lembrados;
 }
 
-// Cada endereço é uma máquina com nome e token (ou nada no ar, com `null`).
-type Maquina = { identificador: string; token: string; lan_url?: string } | null;
+// Cada endereço é uma máquina com nome, token e atraso em ms (ou nada no ar, com `null`).
+type Maquina = { identificador: string; token: string; lan_url?: string; atraso?: number } | null;
 function rede(maquinas: Record<string, Maquina>) {
   const chamadas: { url: string; auth: string | null }[] = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -27,6 +27,7 @@ function rede(maquinas: Record<string, Maquina>) {
     const u = new URL(url);
     const m = maquinas[u.origin];
     if (!m) throw new TypeError('rede');
+    await new Promise((r) => setTimeout(r, m.atraso ?? 0));
     if (u.pathname === '/api/peers/prova') {
       const d = u.searchParams.get('desafio')!;
       const prova = createHmac('sha256', m.token).update(`${d}|${m.identificador}`).digest('hex');
@@ -39,7 +40,9 @@ function rede(maquinas: Record<string, Maquina>) {
 }
 
 const srv = (lan?: LanInfo): Server => ({ id: 's1', label: 'maq', baseUrl: TS, token: 't', lan });
-const maq = { identificador: 'maq', token: 't', lan_url: LAN };
+// O Tailscale leva 30 ms; a rede local de verdade responde na hora.
+const maq = { identificador: 'maq', token: 't', lan_url: LAN, atraso: 30 };
+const maqLocal = { ...maq, atraso: 0 };
 
 beforeEach(() => { _resetRotasForTests(); _resetApiEnvForTests(); });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -47,7 +50,7 @@ afterEach(() => { vi.unstubAllGlobals(); });
 describe('rota até o servidor', () => {
   it('primeira vez: aprende o endereço local pelo principal e já nasce nele', async () => {
     const lembrados = env(null);
-    rede({ [TS]: maq, [LAN]: maq });
+    rede({ [TS]: maq, [LAN]: maqLocal });
     await decidirRota(srv());
     expect(baseOf(srv())).toBe(LAN);
     expect(lembrados.s1).toEqual({ url: LAN, id: 'maq' });
@@ -55,7 +58,7 @@ describe('rota até o servidor', () => {
 
   it('o token nunca vai pro endereço local antes da prova', async () => {
     env(null);
-    const chamadas = rede({ [TS]: maq, [LAN]: maq });
+    const chamadas = rede({ [TS]: maq, [LAN]: maqLocal });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(chamadas.filter((c) => c.url.startsWith(LAN)).every((c) => c.auth === null)).toBe(true);
   });
@@ -72,15 +75,26 @@ describe('rota até o servidor', () => {
     rede({ [TS]: maq });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
-    rede({ [TS]: maq, [LAN]: maq });
+    rede({ [TS]: maq, [LAN]: maqLocal });
     esquecerRota('s1');
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(LAN);
   });
 
+  it('mesmo IP alcançado por VPN, mais lento que o Tailscale: fica no principal', async () => {
+    env(null);
+    rede({ [TS]: maq, [LAN]: { ...maq, atraso: 80 } });
+    await decidirRota(srv({ url: LAN, id: 'maq' }));
+    expect(baseOf(srv())).toBe(TS);
+    esquecerRota('s1');
+    _resetRotasForTests();
+    await decidirRota(srv());
+    expect(baseOf(srv())).toBe(TS);
+  });
+
   it('página HTTPS nem tenta o http:// local (o navegador bloquearia)', async () => {
     env('https://pocket.exemplo');
-    const chamadas = rede({ [TS]: maq, [LAN]: maq });
+    const chamadas = rede({ [TS]: maq, [LAN]: maqLocal });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
     expect(chamadas.some((c) => c.url.startsWith(LAN))).toBe(false);

@@ -729,6 +729,11 @@ bater e o identificador for o mesmo. O mesmo `192.168.x.y` em outra rede é outr
 mandar o token antes da prova o entregaria a ele (achado da revisão); o identificador sozinho não
 basta porque o token é igual em todas as máquinas do usuário. Conexão que cai esquece a rota, e é assim que a troca de rede é percebida.
 
+Provar a identidade não basta para ganhar: o local só vence se provar ANTES de o principal
+responder (os dois são perguntados juntos). Medido em 29/09/2026, de casa: o `192.168.77.142` da
+delphi-02 respondia pela VPN do trabalho (`wg0`) em 412 ms para 5 chamadas, contra 309 ms pelo
+Tailscale — "sempre o local" escolhia o caminho mais lento.
+
 `baseUrl` segue sendo a identidade (dedupe, sincronização, agrupamento, diário, endereço mandado
 ao par). Chamada nova sai por `baseOf(s)` ou pelo `getBaseUrl` do `ApiEnv`; `s.baseUrl` cru numa
 URL de chamada ignora a rede local sem erro nenhum.
