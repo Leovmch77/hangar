@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -72,17 +73,27 @@ async def sweep_loop() -> None:
         await asyncio.sleep(_SWEEP_INTERVAL)
 
 
+def _escuta(ip: str, port: int) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def _create(name: str, local: bool = False) -> dict:
     life = session_life(name)
     if life is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
     if local:
-        # Mesma rede, sem Tailscale: a porta do convite escuta na rede quando o backend escuta.
-        if resolve_bind_ip(settings) in ("127.0.0.1", "localhost", "::1") or detect_lan_ip() == "127.0.0.1":
+        # Mesma rede, sem Tailscale: só com a porta do convite de fato escutando no IP da rede
+        # (bind 0.0.0.0, porta livre no boot). Senão o link sairia sem ninguém atendendo.
+        ip = detect_lan_ip()
+        if resolve_bind_ip(settings) not in ("0.0.0.0", "::") or not _escuta(ip, share_tunnel.GUEST_PORT):
             raise HTTPException(409, detail=erro(
                 "erro_compartilhar_sem_rede_local",
                 "esta máquina só escuta em 127.0.0.1: grave CP_LAN_BIND_IP=0.0.0.0 no backend/.env e reinicie"))
-        base = f"http://{detect_lan_ip()}:{share_tunnel.GUEST_PORT}"
+        base = f"http://{ip}:{share_tunnel.GUEST_PORT}"
     else:
         try:
             base = share_tunnel.ensure_on()

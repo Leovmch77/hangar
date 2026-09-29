@@ -217,6 +217,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_nao_autorizado: () => m.erro_nao_autorizado(),
   erro_compartilhar_pre_requisito: () => m.erro_compartilhar_pre_requisito(),
   erro_compartilhamento_inexistente: () => m.erro_compartilhamento_inexistente(),
+  erro_compartilhar_sem_rede_local: () => m.erro_compartilhar_sem_rede_local(),
   erro_fora_do_convite: () => m.erro_fora_do_convite(),
   erro_convite_encerrado: () => m.erro_convite_encerrado(),
   erro_convite_usado: () => m.erro_convite_usado(),

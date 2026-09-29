@@ -145,7 +145,7 @@ def _guest_socket() -> socket.socket | None:
     # Pela internet quem expõe é o Funnel (fala com 127.0.0.1); com o backend aberto pra rede, a
     # porta do convite também escuta nela, pro convite funcionar na mesma rede sem Tailscale.
     # Porta ocupada (outra instância nesta máquina) não derruba o boot; só fica sem compartilhar.
-    host = "127.0.0.1" if resolve_bind_ip(settings) in LOOPBACK else "0.0.0.0"
+    host = "0.0.0.0" if resolve_bind_ip(settings) in ("0.0.0.0", "::") else "127.0.0.1"
     try:
         return _tcp_socket(host, GUEST_PORT)
     except OSError as e:

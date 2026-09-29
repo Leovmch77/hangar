@@ -135,5 +135,9 @@ export async function redeemInvite(
   if (res.status === 503) throw new InviteRedeemError('unavailable');
   if (!res.ok) throw new InviteRedeemError('unknown');
   const r = (await res.json()) as InviteRedeemResult;
-  return { ...r, address: r.address || alvo.address };
+  // O endereço devolvido vira o servidor que recebe o token: só vale se for o mesmo host do convite.
+  const mesmoHost = (() => {
+    try { return new URL(r.address).host === new URL(alvo.address).host; } catch { return false; }
+  })();
+  return { ...r, address: mesmoHost ? r.address : alvo.address };
 }

@@ -119,7 +119,15 @@ impl Hangar {
     fn redeem_invite(&mut self, dialog: WeakEntity<InviteDialog>, address: String, code: String, window: &mut Window, cx: &mut Context<Self>) {
         let device = device_label();
         let (done, result) = tokio::sync::oneshot::channel();
-        self.runtime.spawn(async move { let _ = done.send(api::redeem_invite(&address, &code, &device).await); });
+        self.runtime.spawn(async move {
+            // O endereço devolvido vira o servidor que recebe o token: só vale se for o mesmo host do convite.
+            let host = |a: &str| url::Url::parse(a).ok().map(|u| (u.host_str().map(str::to_owned), u.port_or_known_default()));
+            let result = api::redeem_invite(&address, &code, &device).await.map(|mut r| {
+                if host(&r.address).is_none() || host(&r.address) != host(&address) { r.address = address.clone(); }
+                r
+            });
+            let _ = done.send(result);
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = result.await.unwrap_or_else(|_| Err(Failure::local("network_error")));
             let _ = this.update_in(cx, |this, window, cx| match result {
