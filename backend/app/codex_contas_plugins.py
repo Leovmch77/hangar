@@ -23,6 +23,8 @@ _NATIVO = CodexNativo
 _REPO = Path(__file__).resolve().parents[2]
 _BUNDLED_MARKERS = (".tmp", "bundled-marketplaces")
 _MARKETPLACE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+# Recusa do `marketplace add` quando o clone existe mas o marketplace não está listado.
+_ORPHAN_CLONE = "is already added from a different source"
 
 
 def _issue(code: str, **params) -> dict:
@@ -354,7 +356,15 @@ async def _ensure_marketplace(native, entry: dict, plugin: dict,
                 args.extend(["--sparse", path])
     args.append("--json")
     try:
-        await native.cli(args)
+        try:
+            await native.cli(args, esperado=_ORPHAN_CLONE)
+        except CodexNativoErro as exc:
+            if _ORPHAN_CLONE not in str((exc.data or {}).get("stderr", "")):
+                raise
+            # Clone que o config perdeu: o `add` recusa pra sempre e cada preparo pagava um clone
+            # de rede em vão. O `remove` nativo apaga o clone órfão; o `add` volta a funcionar.
+            await native.cli(["plugin", "marketplace", "remove", name, "--json"])
+            await native.cli(args)
         current = _marketplace_map(await _marketplaces(native))
     except (OSError, ValueError, RuntimeError, CodexNativoErro):
         issues.append(_issue("codex_account_plugin_marketplace_add_failed", marketplace=name))

@@ -101,8 +101,15 @@ class FakeNative:
         assert method == "hooks/list"
         return copy.deepcopy(self.state.get("hooks", {"data": []}))
 
-    async def cli(self, args: list[str]) -> dict:
+    async def cli(self, args: list[str], *, esperado: str = "") -> dict:
         self.calls.append((str(self.codex_home), "cli", list(args)))
+        if args[:3] == ["plugin", "marketplace", "remove"]:
+            self.state.pop("orphan", None)
+            return {"marketplaceName": args[3]}
+        if args[:3] == ["plugin", "marketplace", "add"] and self.state.get("orphan"):
+            from app.codex_importador import CodexNativoErro
+            raise CodexNativoErro("falhou", data={"stderr": "Error: marketplace 'x' is already "
+                                                            "added from a different source; remove it"})
         if args[:4] == ["plugin", "marketplace", "list", "--json"]:
             config_path = self.codex_home / "config.toml"
             config = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
@@ -255,6 +262,25 @@ async def test_instala_somente_plugins_da_fonte_e_preserva_exclusivos(contas, fa
     assert next(item for item in target_state["plugins"]
                 if item["pluginId"] == "sample@accounts-local")["enabled"] is False
     assert not any(call[2] == "exclusive@other" for call in FakeNative.calls if call[1] == "install")
+
+
+async def test_clone_orfao_do_marketplace_e_removido_e_readicionado(contas, fake_native):
+    _, source, target, marketplace = contas
+    source_state = FakeNative.states[str(source.home)]
+    source_state["marketplaces"] = [{
+        "name": "accounts-local", "root": str(marketplace),
+        "marketplaceSource": {"sourceType": "local", "source": str(marketplace)},
+    }]
+    source_state["plugins"] = [_entry(marketplace)]
+    FakeNative.states[str(target.home)]["orphan"] = True
+
+    result = await sync_plugins(source, target, {})
+
+    assert not result["issues"], result
+    comandos = [call[2][:3] for call in FakeNative.calls
+                if call[0] == str(target.home) and call[1] == "cli" and call[2][2] != "list"]
+    assert comandos == [["plugin", "marketplace", "add"], ["plugin", "marketplace", "remove"],
+                        ["plugin", "marketplace", "add"]]
 
 
 async def test_plugin_remote_ja_instalado_nao_exige_marketplace_homonimo(contas, fake_native):
