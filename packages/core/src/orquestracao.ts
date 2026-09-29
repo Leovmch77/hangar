@@ -148,6 +148,10 @@ export interface OrqReadiness {
   plan: { path: string; state: 'stamped' | 'changed' | 'unstamped' | 'tasks' } | null;
   group: boolean;
   roles: boolean;
+  /** O que não deu para ler; sem plano achado, ele pode estar ali. */
+  problems?: string[];
+  /** Plano mais recente com todos os Steps marcados. */
+  finished?: string | null;
 }
 
 // Conta que está na tabela "O que pode" = liberada. Fora dela = proibida (não existe "desligada

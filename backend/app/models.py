@@ -154,6 +154,9 @@ class SessionInfo(BaseModel):
     pair_peers: Optional[list[str]] = None
     pair_gid: Optional[str] = None   # id estável do grupo — cluster da lista agrupa por ele
     pair_task: Optional[str] = None  # rótulo do grupo (ex: ABC-1234) pro header do cluster
+    # Só na linha do orquestrador sem LLM (provider "orq"): a sessão do árbitro atual, para onde
+    # vai o botão "Falar com o árbitro".
+    orq_arbiter: Optional[str] = None
     # Loop runner (harness bloco A): estado do loop autonomo desta sessao, decorado em list_with_state
     # (app.loop.LoopLink). Sem loop -> tudo None (sem badge). Entram no sig do SSE de lista (sse.py)
     # pra o badge nao congelar quando so o loop muda com a sessao parada em idle.

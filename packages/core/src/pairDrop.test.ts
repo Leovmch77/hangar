@@ -40,6 +40,13 @@ describe('canPair', () => {
     expect(canPair(local, comPeerRemoto)).toEqual({ ok: false, reason: 'cross_server' });
   });
 
+  it('recusa a linha do orquestrador, tanto na origem quanto no alvo', () => {
+    const comum = s({ name: 'a' });
+    const orq = s({ name: 'orq-x', provider: 'orq' });
+    expect(canPair(orq, comum)).toEqual({ ok: false, reason: 'orq' });
+    expect(canPair(comum, orq)).toEqual({ ok: false, reason: 'orq' });
+  });
+
   it('aceita o caso feliz', () => {
     expect(canPair(s({ name: 'a' }), s({ name: 'b' }))).toEqual({ ok: true });
   });
@@ -48,6 +55,10 @@ describe('canPair', () => {
 describe('canLeave', () => {
   it('true com pair_gid mesmo sem peers (sidecar legado sem gid vem de outro caminho)', () => {
     expect(canLeave(s({ pair_gid: 'g1', pair_peers: null }))).toBe(true);
+  });
+
+  it('false para a linha do orquestrador, mesmo com grupo', () => {
+    expect(canLeave(s({ provider: 'orq', pair_gid: 'g1', pair_peers: ['b'] }))).toBe(false);
   });
 
   it('true com pair_peers mesmo sem gid (par cross-server)', () => {

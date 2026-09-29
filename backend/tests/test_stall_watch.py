@@ -285,3 +285,21 @@ def test_auto_resume_requires_master_switch(monkeypatch):
 
     asyncio.run(stall_watch._tick(list_fn))
     assert armed == []  # mestre desligado -> nao arma, mesmo com auto_resume ON + fila + reset bons
+
+
+def test_tick_ignores_the_orchestrator_row(monkeypatch):
+    # A linha `orq` some quando a execução termina ou o vigia para: não é sessão que caiu.
+    monkeypatch.setattr(stall_watch.push, "notify_stalled", lambda *a, **k: None)
+    dead = []
+    monkeypatch.setattr(stall_watch.push, "notify_dead", dead.append)
+    orq_row = _Info("g1-orq", True)
+    orq_row.provider = "orq"
+    seq = [[orq_row, _Info("cc", False)], []]
+
+    async def list_fn():
+        return seq.pop(0)
+
+    asyncio.run(stall_watch._tick(list_fn))
+    asyncio.run(stall_watch._tick(list_fn))
+    assert dead == ["cc"]
+    assert "g1-orq" not in stall_watch._notified

@@ -5,12 +5,14 @@ from .questions import response
 
 
 class AsyncQuestions:
-    def __init__(self, thread_id: str):
+    def __init__(self, thread_id: str, skipped=()):
         self.thread_id = thread_id
         self._pending: dict[str, dict] = {}
         self._seen: set[str] = set()
         self._during_load: list[dict] | None = []
-        self._resolved: set[str] = set()
+        # O Codex não tem evento de descarte: o "Pular" só existe aqui e o histórico não o registra.
+        self.skipped: set[str] = set(skipped)
+        self._resolved: set[str] = set(self.skipped)
         self._local_answers: dict[str, str] = {}
         self._echoes: Counter[str] = Counter()
 
@@ -63,7 +65,7 @@ class AsyncQuestions:
         return before != tuple(self._pending)
 
     def hydrate(self, thread: dict) -> None:
-        restored = AsyncQuestions(self.thread_id)
+        restored = AsyncQuestions(self.thread_id, self.skipped)
         restored._during_load = None
         for turn in thread.get("turns") or []:
             for item in turn.get("items") or []:
@@ -79,6 +81,12 @@ class AsyncQuestions:
     def resolve(self, request_id: str) -> None:
         self._pending.pop(request_id, None)
         self._resolved.add(request_id)
+
+    def skip(self, request_id: str) -> None:
+        if request_id not in self._pending:
+            raise ValueError("A pergunta já foi respondida ou pertence a outra conversa.")
+        self.skipped.add(request_id)
+        self.resolve(request_id)
 
     def record_answer(self, request_id: str, text: str) -> None:
         self._local_answers[request_id] = text

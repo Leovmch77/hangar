@@ -76,13 +76,16 @@ def main() -> None:
     chave = re.sub(r"[^A-Za-z0-9_.-]", "-", nome)
     with open(os.path.join(pair_dir, chave + ".json"), encoding="utf-8") as fh:
         d = json.load(fh)
-    peers = [p for p in (d.get("peers") or []) if p] if isinstance(d, dict) else []
-    if not peers:
+    if not isinstance(d, dict):
         return
+    # Grupo de orquestração vale mesmo sem peers: o árbitro do orquestrar-auto nasce sozinho nele.
     if d.get("orq") is True:
         texto = texto_grupo_orq(d.get("task", ""))
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                  "additionalContext": texto}}))
+        return
+    peers = [p for p in (d.get("peers") or []) if p]
+    if not peers:
         return
     gid = d.get("gid") or ""
     cross = any("::" in p for p in peers)

@@ -68,6 +68,7 @@ from app.terminal_input import TerminalInput, drain
 from app.adapters import CLAUDE_HEADLESS, get_adapter
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
+from app.adapters.orq import runs as orq_runs
 from app.sse import merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
@@ -2292,6 +2293,7 @@ async def kill_session(name: str, by: str | None = None):
     # na varredura seguinte, sem fila e sem pareamento (ver SessionRegistry.kill).
     # Os peers são lidos ANTES do kill: registry.kill -> _clear_pair já limpa o sidecar, e depois
     # dele ninguém sabe quem ficou.
+    await asyncio.to_thread(_recusa_orq, name)
     link = await asyncio.to_thread(lambda: PairLink(name).get())
     try:
         await asyncio.to_thread(registry.kill, name)
@@ -2475,6 +2477,7 @@ async def rename_session(name: str, body: RenameBody):
 
 def _rename_session(name: str, body: RenameBody):
     from app import tmux
+    _recusa_orq(name)
     # tmux nao aceita espaco/./: no nome -> sanitiza. O transcript NAO depende do nome (resolve por
     # /proc), entao renomear nao quebra o historico. Migra so o sidecar da fila (keyed por nome).
     new = sanitize_session_name(body.new)
@@ -3684,6 +3687,14 @@ def _session_exists(name: str) -> bool:
     return codex_sessions.exists(name) or headless_sessions.exists(name) or tmux.has_session(name)
 
 
+def _recusa_orq(name: str) -> None:
+    """O orquestrador não tem pane nem processo: sem esta recusa, entrada, nome, fim e interrupção
+    cairiam no tmux de uma sessão que não existe."""
+    if orq_runs.find(name):
+        raise HTTPException(409, detail=erro("erro_sessao_orq",
+                                             "o orquestrador não recebe mensagens; fale com o árbitro"))
+
+
 def _headless(name: str) -> bool:
     """Sessão Claude SEM terminal (sidecar do adapter headless). Provider continua "claude"; só o
     transporte muda — quem ramifica por isto é a entrada, o interrupt, a opção e a resposta."""
@@ -3698,6 +3709,7 @@ async def input_prompt(name: str, body: InputBody):
     # (nao o default do asyncio, que a decoracao — git_summary/capture_pane — pode ocupar). Assim um
     # git status pendurado + refine (60s, pool do anyio) + check (600s, thread propria) nao seguram
     # o POST /input. Ver _send_thread.
+    await _send_thread(_recusa_orq, name)
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, detail=erro("erro_sessao_recado_nao_enfileirado", "sessão não encontrada — recado NÃO enfileirado"))
     provider = _provider_of(name)
@@ -3888,10 +3900,14 @@ async def pair_session(name: str, body: PairBody):
     em CADA membro o prompt do grupo atualizado — a partir daí trocam recados via hangar-send por
     iniciativa própria, dentro do escopo da tarefa. Badge `pair_peers` aparece na lista."""
     others = [p for p in dict.fromkeys(body.peers or ([body.peer] if body.peer else [])) if p]
-    if not others:
+    # Sem peer só o grupo de orquestração: o árbitro do `orquestrar-auto` precisa do gid antes do
+    # `orq init`, e o time só chega depois, aberto pelo orquestrador.
+    if not others and not body.orq:
         raise HTTPException(400, detail=erro("erro_peer_nao_informado", "informe peer ou peers"))
     if name in others:
         raise HTTPException(400, detail=erro("erro_autopareamento", "não dá pra parear uma sessão com ela mesma"))
+    for n in (name, *others):
+        await asyncio.to_thread(_recusa_orq, n)
     if any(peers.is_remote(o) for o in others):
         # Cross-server é 1:1 puro (um peer remoto, sem misturar grupo local) — grupo cross-server de
         # N fica pra fase 2. ponytail: 1:1 cobre "trabalhar junto entre máquinas"; N quando doer.
@@ -3939,7 +3955,7 @@ async def pair_session(name: str, body: PairBody):
                             f"pareamento desfeito: falha ao avisar as sessões "
                             f"({'; '.join(f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs)})",
                             avisos=errs))
-    return {"ok": True, "members": members,
+    return {"ok": True, "members": members, "gid": link.get("gid"),
             "warning": erro("erro_pareamento_aviso_parcial",
                             "aviso falhou em: " + "; ".join(
                                 f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
@@ -4012,6 +4028,7 @@ async def pair_remote(name: str, body: PairRemoteBody):
     via peers.call, autenticado pelo token do peers.json."""
     if not peers.is_remote(body.initiator):
         raise HTTPException(400, detail=erro("erro_initiator_invalido", "initiator precisa ser qualificado (srv::nome)"))
+    await asyncio.to_thread(_recusa_orq, name)
     harness = {s.name: s.provider for s in await asyncio.to_thread(registry.list)}
     if name not in harness:
         raise HTTPException(404, detail=erro("erro_sessao_nao_encontrada_detalhe", f"sessão não encontrada: {name}", detalhe=name))
@@ -4510,6 +4527,7 @@ async def unpair_session(name: str):
     """`name` SAI do grupo (os demais membros continuam entre si; grupo restante de 1 dissolve).
     Avisa quem saiu e quem ficou. Idempotente. Aviso que falhar NÃO refaz o vínculo (fora do grupo
     é o estado desejado) — só reporta no result."""
+    await asyncio.to_thread(_recusa_orq, name)
     expeers = await asyncio.to_thread(pair.leave, name)   # nome próprio: 'peers' é o módulo importado
     if not expeers:
         return {"ok": True, "warning": None}
@@ -4764,6 +4782,7 @@ def select_submit(name: str):
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth)])
 async def interrupt(name: str, clear: bool = False):
+    await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
         if not await get_adapter("codex").interrupt(name):
@@ -7151,6 +7170,25 @@ def _pi_answer_fallback_text(a: dict) -> str:
     # aqui que o usuario ve isso. O que ele ve e a propria resposta virando mensagem no chat, que ja
     # diz "foi por texto" sem precisar de aviso.
     return f"Respondendo à pergunta: {resp}"
+
+
+class SkipQuestionBody(_StrictBody):
+    request_id: str
+
+
+@app.post("/api/sessions/{name}/question/skip", dependencies=[Depends(require_auth)])
+def skip_question(name: str, body: SkipQuestionBody):
+    if getattr(_cached_info_sync(name), "provider", "claude") != "codex":
+        raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente."))
+    if _loop_servidor is None or not _loop_servidor.is_running():
+        raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex."))
+    future = asyncio.run_coroutine_threadsafe(
+        get_adapter("codex").skip_question(name, body.request_id), _loop_servidor)
+    try:
+        future.result(timeout=10)
+    except ValueError as exc:
+        raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
+    return {"ok": True}
 
 
 @app.post("/api/sessions/{name}/answer", dependencies=[Depends(require_auth)])

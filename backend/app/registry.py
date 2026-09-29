@@ -26,6 +26,7 @@ from app import pair
 from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
+from app.adapters.orq import runs as orq_runs
 from app import codex_contas
 from app.askquestion import clear_pending_askq, pergunta_aberta
 from app.state import (classify, _live_spinner, rate_limit_reset, corrige_ocioso_kimi,
@@ -1303,6 +1304,17 @@ class SessionRegistry:
                 pair_gid=(PairLink(meta["name"]).get() or {}).get("gid"),
                 pair_task=(PairLink(meta["name"]).get() or {}).get("task"),
             ))
+        # Orquestrações `auto` vivas: sem pane nem processo. A linha do tempo da execução é o
+        # transcript, e o grupo do árbitro põe a linha no bloco dele.
+        try:
+            orq_ativas = orq_runs.active()
+        except Exception:
+            _log.warning("orq: leitura das orquestrações falhou (lista segue)", exc_info=True)
+            orq_ativas = []
+        for run in orq_ativas:
+            out.append(SessionInfo(
+                name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
+                tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
         try:
             self._varrer_pares_mortos({i.name for i in out})
         except Exception as e:
@@ -1340,8 +1352,17 @@ class SessionRegistry:
         # snapshot ja resolvido (ex: cache compartilhado dos pollers do SSE) pula a re-resolucao.
         if infos is None:
             infos = await asyncio.to_thread(self.list)
+        # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
+        # linha do tempo, e a linha fica fora de tudo abaixo (captura de pane, marcador, radar).
+        orqs = [i for i in infos if getattr(i, "provider", "claude") == "orq"]
+        if orqs:
+            def _orq_state():
+                for i in orqs:
+                    i.state, i.last_activity = orq_runs.activity(i.jsonl)
+            await asyncio.to_thread(_orq_state)
+            infos = [i for i in infos if getattr(i, "provider", "claude") != "orq"]
         if not infos:
-            return infos
+            return orqs
         # Estado pela marca dos hooks quando existe (custo ~0); senao cai no pane (fallback).
         # NOTA: o sweep de STATUSLINE (mais abaixo) captura pane mesmo de sessao com marcador —
         # a statusline nao tem outra fonte. O "custo ~0" continua valendo pra CLASSIFICACAO; o
@@ -1723,7 +1744,7 @@ class SessionRegistry:
         ativos = share_store.active_sessions()
         for info in infos:
             info.shared = info.name in ativos
-        return infos
+        return infos + orqs
 
     @diag.rastrear("sessao.criar")
     def create(self, name: str, cwd: str, config_dir: str | None = None,
@@ -2368,6 +2389,13 @@ class SessionRegistry:
         varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() chamam list()
         numa janela em que o nome está ausente de propósito, e só o tempo separa isso de morte.
         O aviso vai pela fila durável, nunca send-keys: isto roda dentro do list(), no tick do SSE."""
+        try:
+            sozinhos = pair.dissolve_lone_orq()
+        except Exception as e:
+            _log.warning("varredura de pares: grupo orq de um membro não dissolvido: %r", e)
+        else:
+            if sozinhos:
+                _log.info("varredura de pares: grupo orq sem execução viva dissolvido (%s)", sozinhos)
         if not vivos:
             return   # tmux fora = lista vazia; varrer aqui dissolveria todos os grupos
         agora = time.monotonic() if agora is None else agora

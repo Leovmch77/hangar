@@ -79,13 +79,14 @@ git merge --no-ff <work>-t2
 - Merge conflict → the regions overlapped. Don't resolve it yourself: the losing Task gets a
   correction round on the merged base, same executor — a new worktree from the merged tip, its
   approved diff as reference, only its own region redone. Exception: a positional conflict in a
-  file the plan declared additive — resolve it at the merge by merge strategy and prove it by
+  file the plan's `Aditivos:` line declares — resolve it at the merge by merge strategy and prove it by
   content (key counts on each side before and after, zero values changed).
 - The plan's `Integração:` after each merge. Red → back to that Task's executor even
   with its isolated `APROVA`: fix on the main line, reviewer judges before the commit — dirty
   tree, frozen round, `APROVA`, then the commit.
 - While any round is open on the main line (a post-merge fix, or a serial Task beside the batch),
-  stop merging. Git refusing the merge on a dirty tree is the rule. Only the reviewer's `APROVA`
+  stop merging: git merges over uncommitted changes it does not touch, so merge only when
+  `git status --porcelain --untracked-files=no` is empty. Only the reviewer's `APROVA`
   closes a gate.
 - Batch done: trail check first — `grep -rl "<worktree path>" ~/.local/bin <agent config dirs>
   <service unit dir>` — then `git worktree remove` on each. No orphan worktree.

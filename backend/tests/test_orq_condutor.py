@@ -25,7 +25,8 @@ def env(tmp_path):
     fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
     fake.chmod(0o755)
     e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "ORQ_JEV": "off",
-         "HOME": str(tmp_path), "TYPESAFE_API_KEY": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
+         "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+         "TYPESAFE_API_KEY": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
     return d, log, e
 
 
@@ -56,11 +57,12 @@ def plano(tmp_path) -> str:
     return str(p)
 
 
-def init(e, tmp_path, contract="", untouchable=()):
+def init(e, tmp_path, contract="", untouchable=(), flags=()):
     c = tmp_path / "regras.md"
     c.write_text(contract)
     extra = [x for u in untouchable for x in ("--untouchable", u)]
-    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path), *extra)
+    run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c), "--plan", plano(tmp_path),
+        *extra, *flags)
 
 
 def test_event_valida_anexa_e_escreve_no_registro(env, tmp_path):
@@ -692,6 +694,88 @@ def test_settings_json_que_nao_e_objeto_acorda_o_arbitro(env, tmp_path, jev_serv
     assert json.loads((d / "jev-shadow.jsonl").read_text())["error"] == "no key"
 
 
+@pytest.fixture
+def jev_cfg(tmp_path, monkeypatch):
+    """jev_config() com o ambiente limpo e o CLAUDE_CONFIG_DIR num tmp; devolve (módulo, pasta)."""
+    for k in ("TYPESAFE_API_KEY", "ORQ_JEV_URL", "JEV_ENDPOINT", "JEV_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    conta = tmp_path / "conta"
+    conta.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(conta))
+    spec = importlib.util.spec_from_file_location("orq_cfg", ORQ)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m, conta
+
+
+def _runtime(conta, **campos):
+    (conta / "runtime-config.json").write_text(json.dumps(campos))
+
+
+def test_jev_config_sem_nada_e_a_typesafe_sem_chave(jev_cfg):
+    m, _ = jev_cfg
+    assert m.jev_config(auto=True) == {"key": "", "url": m.JEV_URL, "model": m.JEV_MODEL}
+
+
+def test_execucao_comum_ignora_o_runtime_config(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="https://rc/v1", jev_model="rc-model")
+    assert m.jev_config() == {"key": "", "url": m.JEV_URL, "model": m.JEV_MODEL}
+
+
+def test_jev_config_le_o_runtime_config_da_conta(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="tk", jev_endpoint="https://jev.local/v1", jev_model="m1")
+    assert m.jev_config(auto=True) == {"key": "tk", "url": "https://jev.local/v1", "model": "m1"}
+
+
+def test_jev_config_sem_config_dir_le_o_da_home(jev_cfg, tmp_path, monkeypatch):
+    m, _ = jev_cfg
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    (tmp_path / ".claude").mkdir()
+    _runtime(tmp_path / ".claude", jev_api_key="da-home")
+    assert m.jev_config(auto=True)["key"] == "da-home"
+
+
+def test_chave_openrouter_sem_endereco_usa_o_da_openrouter(jev_cfg):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="", jev_model="")
+    assert m.jev_config(auto=True) == {"key": "sk-or-v1-x", "url": "https://openrouter.ai/api/alpha/decisions",
+                              "model": "typesafe/jev-1.13-20260917"}
+
+
+def test_ambiente_vence_o_runtime_config(jev_cfg, monkeypatch):
+    m, conta = jev_cfg
+    _runtime(conta, jev_api_key="sk-or-v1-x", jev_endpoint="https://rc/v1", jev_model="rc-model")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "env-key")
+    monkeypatch.setenv("JEV_ENDPOINT", "https://env/v1")
+    monkeypatch.setenv("JEV_MODEL", "env-model")
+    assert m.jev_config(auto=True) == {"key": "env-key", "url": "https://env/v1", "model": "env-model"}
+    monkeypatch.setenv("ORQ_JEV_URL", "http://127.0.0.1:1/t")
+    assert m.jev_config(auto=True)["url"] == "http://127.0.0.1:1/t"
+
+
+def test_runtime_config_torto_vale_como_ausente(jev_cfg):
+    m, conta = jev_cfg
+    (conta / "runtime-config.json").write_text("[]")
+    assert m.jev_config(auto=True)["key"] == ""
+    (conta / "runtime-config.json").write_text("{torto")
+    assert m.jev_config(auto=True)["key"] == ""
+
+
+def test_notify_comum_nao_le_a_chave_do_runtime_config(env, tmp_path, jev_server):
+    d, log, e = env
+    init(e, tmp_path)
+    (tmp_path / ".claude").mkdir()
+    _runtime(tmp_path / ".claude", jev_api_key="rc-key")
+    jev_server["resp"] = _answers("act", 0.9)
+    run({**_jev_env(e, jev_server, "shadow"), "TYPESAFE_API_KEY": ""}, "notify", "x")
+    assert jev_server["body"] is None
+    assert sent(log) == ["arb x"]
+    assert json.loads((d / "jev-shadow.jsonl").read_text())["error"] == "no key"
+
+
 def test_alarme_acorda_sem_consultar_o_jev(env, tmp_path, jev_server):
     d, log, e = env
     init(e, tmp_path)
@@ -991,3 +1075,137 @@ def test_prova_grava_o_stash_inteiro_mesmo_com_prefixo(env, repo, tmp_path):
     run(e, "event", "entrega", "--task", "1", "--rodada", "2", "--fase", "prova", "--commit", h[:6])
     ev = json.loads((d / "eventos.jsonl").read_text().splitlines()[-1])
     assert ev["fase"] == "prova" and ev["commit"] == h
+
+
+# ── orquestrar-auto: init --auto, linha do tempo e triagem ──────────────────
+
+def _orq_mod():
+    spec = importlib.util.spec_from_file_location("orq_auto", ORQ)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def linha_do_tempo(d):
+    p = d / f"timeline-{d.name}.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_init_auto_grava_a_marca_e_os_modos(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path, flags=("--auto",))
+    cfg = json.loads((d / "orq.json").read_text())
+    assert (cfg["auto"], cfg["jev"], cfg["regex"]) == (True, _orq_mod().AUTO_JEV_DEFAULT, "shadow")
+    init(e, tmp_path, flags=("--auto", "--jev", "on", "--regex", "on"))
+    cfg = json.loads((d / "orq.json").read_text())
+    assert (cfg["jev"], cfg["regex"]) == ("on", "on")
+    assert "auto jev=on regex=on" in (d / "registro.md").read_text()
+
+
+def test_modo_sem_auto_e_recusado_e_init_comum_nao_ganha_marca(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path)
+    c = tmp_path / "regras.md"
+    r = run(e, "init", "--arbiter", "arb", "--repo", str(tmp_path), "--contract", str(c),
+            "--plan", plano(tmp_path), "--regex", "on", check=False)
+    assert r.returncode == 2 and "only apply with --auto" in r.stderr
+    assert set(json.loads((d / "orq.json").read_text())) == {"arbiter", "repo", "contract", "untouchables", "plan"}
+
+
+def test_execucao_comum_nao_usa_regex_nem_linha_do_tempo(env, tmp_path):
+    d, log, e = env
+    init(e, tmp_path)
+    run(e, "notify", "janela de prova fechada")
+    assert sent(log) == ["arb janela de prova fechada"]
+    assert not list(d.glob("timeline-*"))
+
+
+def test_auto_sem_chave_regex_so_anotando_acorda_e_marca_teria_descartado(env, tmp_path):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto",))
+    run(e, "notify", "janela de prova fechada")
+    assert sent(log) == ["arb janela de prova fechada"]
+    [t] = linha_do_tempo(d)
+    assert t["kind"] == "would_drop" and t["task"] is None
+    assert t["text"] == "teria descartado (regex: janela); acordou o árbitro: janela de prova fechada"
+
+
+def test_auto_regex_ligada_descarta_com_texto_inteiro(env, tmp_path):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto", "--regex", "on"))
+    run(e, "notify", "T4 rodada 2 entregue ao revisor")
+    run(e, "notify", "Peço a tela")
+    assert sent(log) == ["arb Peço a tela"]
+    assert "(regex: no action) T4 rodada 2 entregue ao revisor" in _corpo_do_registro(d)
+    assert [(t["kind"], t["text"]) for t in linha_do_tempo(d)] == [
+        ("dropped", "recado registrado sem acordar o árbitro (regex: entrega): T4 rodada 2 entregue ao revisor"),
+        ("woke", "acordou o árbitro: Peço a tela"),
+    ]
+
+
+def test_auto_marcado_e_alarme_acordam_sem_triagem(env, tmp_path):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto", "--regex", "on"))
+    run(e, "notify", "[decisao] janela de prova fechada")
+    run(e, "notify", "--alarm", "[vigia] janela de prova fechada")
+    assert sent(log) == ["arb [decisao] janela de prova fechada", "--tmux arb [vigia] janela de prova fechada"]
+    assert [t["kind"] for t in linha_do_tempo(d)] == ["woke", "woke"]
+
+
+def test_auto_com_chave_o_jev_decide_no_modo_do_orq_json(env, tmp_path, jev_server):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto", "--jev", "on"))
+    jev_server["resp"] = _answers()
+    # ORQ_JEV do ambiente não manda no modo da execução auto: só "off" desliga o Jev.
+    run(_jev_env(e, jev_server, "shadow"), "notify", "Peço a tela")
+    assert sent(log) == []
+    assert "(jev: no action) Peço a tela" in _corpo_do_registro(d)
+    assert linha_do_tempo(d)[-1]["text"] == "recado registrado sem acordar o árbitro (jev): Peço a tela"
+    init(e, tmp_path, flags=("--auto", "--jev", "shadow"))
+    run(_jev_env(e, jev_server, "on"), "notify", "ok")
+    assert sent(log) == ["arb ok"]
+    assert linha_do_tempo(d)[-1]["text"] == "teria descartado (jev); acordou o árbitro: ok"
+
+
+def test_auto_usa_a_chave_do_runtime_config(env, tmp_path, jev_server):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto", "--jev", "shadow"))
+    (tmp_path / ".claude").mkdir()
+    _runtime(tmp_path / ".claude", jev_api_key="rc-key")
+    jev_server["resp"] = _answers("act", 0.9)
+    run({**_jev_env(e, jev_server, "shadow"), "TYPESAFE_API_KEY": ""}, "notify", "x")
+    assert jev_server["auth"] == "Bearer rc-key"
+    assert linha_do_tempo(d)[-1]["kind"] == "woke"
+
+
+def test_auto_jev_com_erro_cai_na_regex(env, tmp_path, jev_server):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto", "--jev", "on", "--regex", "on"))
+    jev_server["status"] = 529
+    run(_jev_env(e, jev_server, "on"), "notify", "janela de prova fechada")
+    assert sent(log) == []
+    assert linha_do_tempo(d)[-1]["text"].startswith("recado registrado sem acordar o árbitro (regex: janela)")
+    assert json.loads((d / "jev-shadow.jsonl").read_text())["error"].startswith("HTTPError")
+
+
+def test_auto_envio_falho_vira_falha_na_linha_do_tempo(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path, flags=("--auto",))
+    falho = tmp_path / "send-falho"
+    falho.write_text("#!/bin/sh\nexit 3\n")
+    falho.chmod(0o755)
+    r = run({**e, "ORQ_SEND": str(falho)}, "notify", "Peço a tela", check=False)
+    assert r.returncode == 2
+    [t] = linha_do_tempo(d)
+    assert t["kind"] == "failed" and t["text"].endswith(": Peço a tela")
+
+
+def test_timeline_recusa_tipo_desconhecido_e_so_escreve_em_auto(tmp_path):
+    m = _orq_mod()
+    with pytest.raises(ValueError):
+        m.timeline(tmp_path, "sei-la", "x")
+    m.timeline(tmp_path, "notice", "sem orq.json")
+    (tmp_path / "orq.json").write_text(json.dumps({"auto": True}))
+    m.timeline(tmp_path, "advance", "T1 integrada", task=1)
+    [t] = [json.loads(l) for l in (tmp_path / f"timeline-{tmp_path.name}.jsonl").read_text().splitlines()]
+    assert (t["kind"], t["text"], t["task"]) == ("advance", "T1 integrada", 1) and "ts" in t

@@ -13,6 +13,9 @@ interface Props {
   name: string;
   /** Recicla o processo da sessão Claude sem terminal (relê MCP/hooks/settings). Ausente = não se aplica. */
   recarregar?: { bloqueado: boolean; onPress: () => void };
+  /** Linha do orquestrador: sem pane nem entrada, então Terminal, resposta e anexos não têm o que abrir;
+   *  o grupo é montado pelo orq, então parear à mão também sai. */
+  orq?: boolean;
 }
 
 type Item = {
@@ -24,7 +27,7 @@ type Item = {
   disabled?: boolean;
 };
 
-export function MoreSheet({ open, onClose, serverId, name, recarregar }: Props) {
+export function MoreSheet({ open, onClose, serverId, name, recarregar, orq }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
 
@@ -37,12 +40,12 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar }: Props) 
       onPress: recarregar.onPress,
       disabled: recarregar.bloqueado,
     }] : []),
-    { icon: 'CircleHelp', label: m.askq_sua_resposta(), route: 'ask' },
+    ...(orq ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
     { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
-    { icon: 'Users', label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' },
+    ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },
-    { icon: 'Terminal', label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' },
-    { icon: 'Paperclip', label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' },
+    ...(orq ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
+    ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),
     { icon: 'Gauge', label: m.codex_limites_titulo(), sub: m.ctx_limites(), route: 'codex-limits' },
     { icon: 'Flag', label: m.bastao_dossie_titulo(), sub: m.bastao_dossie_sub(), route: 'bastao' },
   ];

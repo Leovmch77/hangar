@@ -3,7 +3,7 @@ import {
   abbrevNum, attentionFeed, countAwaiting, effectiveGroupBy, fmtWhen, groupSelectedByServer, initials, nextAwaiting,
   pedeMarcacao,
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
-  clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag,
+  clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
   untrackedReason,
   summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, toolVerbo,
   rotuloEstado,
@@ -660,6 +660,22 @@ describe('providerTag', () => {
 
   it('provider desconhecido não vira um chip "Claude" mentiroso', () => {
     expect(providerTag('gemini' as any)).toBeNull();
+  });
+});
+
+describe('isOrq', () => {
+  it('reconhece só a linha do orquestrador sem LLM', () => {
+    expect(isOrq({ provider: 'orq' })).toBe(true);
+    expect(isOrq({ provider: 'claude' })).toBe(false);
+    expect(isOrq({ provider: 'codex' })).toBe(false);
+    expect(isOrq({ provider: undefined })).toBe(false);
+    expect(isOrq({ provider: null })).toBe(false);
+    expect(isOrq({})).toBe(false);
+  });
+
+  it('o orquestrador tem nome próprio, não cai no "Claude"', () => {
+    expect(providerName('orq')).toBe('Orq');
+    expect(providerTag('orq')).toBe('Orq');
   });
 });
 

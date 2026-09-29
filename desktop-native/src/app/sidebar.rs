@@ -480,7 +480,7 @@ impl Hangar {
     }
 
     pub(super) fn start_session_rename(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sessions.iter().any(|s| s.name == name) { return; }
+        if !self.sessions.iter().any(|s| s.name == name && !s.orq()) { return; }
         let inline = appearance::get().navigation == appearance::Navigation::Sidebar;
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name.clone()));
         let old = name.clone();
@@ -919,6 +919,14 @@ pub(super) fn menu_style(menu: PopupMenu) -> PopupMenu {
 pub(super) fn session_menu(hangar: WeakEntity<Hangar>, session: SessionInfo) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
     move |menu, window, cx| {
         let Some(entity) = hangar.upgrade() else { return menu };
+        // Sem nome, processo nem turno próprios para renomear, fechar ou interromper: o menu do orquestrador só leva ao árbitro.
+        if session.orq() {
+            let missing = entity.read(cx).arbiter_of(&session.name).is_none();
+            let (hangar, name) = (hangar.clone(), session.name.clone());
+            return menu_style(menu).min_w(px(240.)).label(session.name.clone())
+                .item(PopupMenuItem::new(tr_shared("orq_talk_to_arbiter", &[])).disabled(missing)
+                    .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.open_arbiter(&name, window, cx)); }));
+        }
         // As outras sessões deste servidor, na ordem da barra sem o filtro, são as candidatas do encadear (web: `chainCandidates`,
         // que lê os grupos inteiros).
         let others = |hangar: &Hangar, name: &str| -> Vec<String> {
@@ -1186,7 +1194,7 @@ impl Hangar {
     pub(super) fn render_nav_rail(&self, selected_name: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let a = appearance::get();
         let fit_content = a.panels == appearance::Panels::Floating && a.sidebar_height == appearance::SidebarHeight::Content;
-        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
+        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         let local = self.sidebar_layout(cx);
         let mut rows: Vec<AnyElement> = Vec::new();
         let place = |layout: &Layout, remote: Option<&str>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
@@ -1249,6 +1257,7 @@ impl Hangar {
         let questions = session.pending_questions;
         let mut tip = format!("{} · {host} · {}", session.name, tr(&format!("chip_{}", if limited { "limited" } else { state })));
         if questions > 0 { tip.push_str(&format!(" · ? {questions}")); }
+        if session.orq() { tip.push_str(&format!(" · {}", tr_shared("orq_row_badge", &[]))); }
         // Trabalhando é a marca animada da lista aberta, pintada fora da lista guardada; os outros estados são um ponto na cor
         // deles, e quem espera resposta ganha o halo (parado: pulsar redesenharia a janela o tempo todo).
         let status = if state == "working" && !limited {
@@ -1269,7 +1278,7 @@ impl Hangar {
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(if awaiting { theme::warning() } else { theme::text() }).child(top))
                 .child(div().min_h(px(10.)).text_color(theme::faint()).child(bottom)))
             .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
-            .when(mixed, |el| el.child(chrome::provider_badge(&session.provider)));
+            .when(mixed && !session.orq(), |el| el.child(chrome::provider_badge(&session.provider)));
         match remote {
             Some(key) => el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, session.name.clone(), window, cx))).into_any_element(),
             None => {
@@ -1278,7 +1287,7 @@ impl Hangar {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.hide_preview();
                         this.select(session.clone(), window, cx);
-                        if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                        this.focus_composer_for(&session, window, cx);
                     }))
                     .context_menu(session_menu(weak, menu_session))
                     .into_any_element()

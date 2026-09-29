@@ -32,7 +32,7 @@ import * as m from './paraglide/messages';
 // (`provider === 'codex' ? 'Codex' : 'Claude'`) e, quando o Pi entrou como terceiro provider, toda
 // sessão Pi aparecia rotulada como "Claude". Um lugar só -> um provider novo não volta a mentir.
 // Ausente/desconhecido -> "Claude", que é o default do backend (SessionInfo.provider).
-const PROVIDER_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi', kimi: 'Kimi', omp: 'OMP' };
+const PROVIDER_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi', kimi: 'Kimi', omp: 'OMP', orq: 'Orq' };
 
 export function providerName(p: SessionInfo['provider'] | null | undefined): string {
   return PROVIDER_NAMES[p ?? 'claude'] ?? 'Claude';
@@ -46,6 +46,12 @@ export function providerName(p: SessionInfo['provider'] | null | undefined): str
 export function providerTag(p: SessionInfo['provider'] | null | undefined): string | null {
   const name = providerName(p);
   return name === PROVIDER_NAMES.claude ? null : name;
+}
+
+// Linha do orquestrador sem LLM: não recebe texto, não se renomeia, não se fecha e não se
+// interrompe. O backend recusa essas ações; a tela nem oferece.
+export function isOrq(s: { provider?: string | null }): boolean {
+  return s.provider === 'orq';
 }
 
 // Por que a linha está "sem id" — a causa (e a saída) mudam por provider, e as duas views mostram

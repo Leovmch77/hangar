@@ -60,8 +60,8 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   // Mesmo shape do real: itens do cluster são {session} (ou {kind:'header',...}); o template lê
   // item.session — sessão crua no lugar certo quebraria na chave do each.
   clusterByPair: (s: unknown[]) => s.map((x) => ({ session: x })),
-  untrackedReason: () => '', providerName: () => 'claude',
-  providerTag: () => null,
+  untrackedReason: () => '', providerName: vi.fn(() => 'claude'),
+  providerTag: vi.fn(() => null),
   cwdParts: (c: string | undefined) => ({ prefix: '', base: c ?? '' }),
  loopBadge: () => null, LOOP_TONE_COLOR: {},
 }));
@@ -1032,4 +1032,98 @@ it.each(['none', 'server'] as const)('convite encerrado aparece como encerrado, 
     storeState.rows.splice(0, Infinity, ...previous.rows);
     storeState.byServer.splice(0, Infinity, ...previous.byServer);
   }
+});
+
+describe('Sidebar — linha do orquestrador sem LLM', () => {
+  function comOrq() {
+    storeState.servers.length = 0;
+    storeState.servers.push({ id: 'srv-a', label: 'Servidor A', baseUrl: 'http://a', token: 'x' });
+    storeState.byServer.length = 0;
+    storeState.byServer.push({
+      server: { id: 'srv-a', label: 'Servidor A' },
+      sessions: [{ name: 'g1-orq', serverId: 'srv-a', state: 'idle', provider: 'orq', orq_arbiter: 'arb' }],
+      error: null, loaded: true,
+    });
+  }
+
+  it('mostra o selo na linha', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    expect(document.querySelector('.orq-badge')?.textContent?.trim()).toBe(m.orq_row_badge());
+    // Toque longo desligado: o title não promete renomear.
+    expect(document.querySelector('.sess-main')!.getAttribute('title')).toBe(m.orq_row_badge());
+    unmount(t.comp);
+  });
+
+  it('sem glifo de provider quando a lista mistura agentes', async () => {
+    comOrq();
+    const sessions = (storeState.byServer[0] as { sessions: unknown[] }).sessions;
+    sessions.push(
+      { name: 'c1', serverId: 'srv-a', state: 'idle' },
+      { name: 'x1', serverId: 'srv-a', state: 'idle', provider: 'codex' },
+    );
+    // showProviderTags lê as rows do store, não os grupos.
+    storeState.rows.push(...sessions);
+    vi.mocked(api.providerName).mockImplementation((p) => p ?? 'claude');
+    const t = montar();
+    await tick();
+    const mains = [...document.querySelectorAll('.sess-main')];
+    const orqMain = mains.find((b) => b.querySelector('.orq-badge'))!;
+    expect(document.querySelectorAll('.prov-rail').length).toBe(2);
+    expect(orqMain.querySelector('.prov-rail')).toBeNull();
+    unmount(t.comp);
+    storeState.rows.length = 0;
+    vi.mocked(api.providerName).mockImplementation(() => 'claude');
+  });
+
+  it('no trilho recolhido o title da linha não nomeia provider', async () => {
+    comOrq();
+    const sessions = (storeState.byServer[0] as { sessions: unknown[] }).sessions;
+    sessions.push(
+      { name: 'c1', serverId: 'srv-a', state: 'idle' },
+      { name: 'x1', serverId: 'srv-a', state: 'idle', provider: 'codex' },
+    );
+    storeState.rows.push(...sessions);
+    vi.mocked(api.providerName).mockImplementation((p) => p ?? 'claude');
+    vi.mocked(api.providerTag).mockImplementation((p) => (p === 'codex' ? 'Codex' : 'Orq'));
+    navMode.mode = 'rail';
+    sidebarPin.setUser(true);   // trilho recolhido
+    const t = montar();
+    await tick();
+    const titles = [...document.querySelectorAll('.sess-main')].map((b) => b.getAttribute('title') ?? '');
+    expect(titles.find((x) => x.startsWith('g1-orq'))).not.toContain('Orq');
+    expect(titles.find((x) => x.startsWith('x1'))).toContain('Codex');
+    unmount(t.comp);
+    sidebarPin.setUser(false);
+    storeState.rows.length = 0;
+    vi.mocked(api.providerName).mockImplementation(() => 'claude');
+    vi.mocked(api.providerTag).mockImplementation(() => null);
+  });
+
+  it('seleção múltipla não aceita a linha', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    document.querySelector<HTMLButtonElement>('.select-toggle-btn')!.click();
+    await tick();
+    document.querySelector<HTMLElement>('.sess-main')!.click();
+    await tick();
+    expect(document.querySelector('.sess-main')!.getAttribute('aria-pressed')).toBe('false');
+    unmount(t.comp);
+  });
+
+  it('botão direito (e o menu das abas) não abre renomear/fechar', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    sidebarBridge.openSessionMenu(
+      new MouseEvent('contextmenu', { clientX: 5, clientY: 5 }),
+      { name: 'g1-orq', serverId: 'srv-a', provider: 'orq' } as unknown as AggSession,
+      'srv-a',
+    );
+    await tick();
+    expect(document.querySelector('.ctx-menu')).toBeNull();
+    unmount(t.comp);
+  });
 });

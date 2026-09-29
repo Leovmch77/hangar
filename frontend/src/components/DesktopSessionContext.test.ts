@@ -7,6 +7,7 @@ import { mount, unmount, tick } from 'svelte';
 import DesktopSessionContext from './DesktopSessionContext.svelte';
 import { ctxPanel, LARGURA_MIN, LARGURA_ABERTO } from '../lib/ctxPanel.svelte';
 import { overwriteGetLocale } from '../paraglide/runtime';
+import * as m from '../paraglide/messages';
 import { listFiles, configureLocale } from '@hangar/core';
 
 // Stubs dos componentes internos pesados (PlanRing/PlanPanel renderizam SVG/estado de plano).
@@ -402,6 +403,18 @@ describe('DesktopSessionContext — topo vivo e rodapé', () => {
     await tick();
     expect(document.querySelectorAll('.arq-linha').length).toBe(0);
     unmount(limpo);
+  });
+
+  // O Chat não passa onOpenPair para a linha do orquestrador: sem ele, nada de "parear".
+  it('sem onOpenPair e sem pares, não oferece parear', async () => {
+    const sem = montarCom({});
+    await tick();
+    expect(document.querySelector(`[aria-label="${m.ctx_parear_outra()}"]`)).toBeNull();
+    unmount(sem);
+    const com = montarCom({ onOpenPair: vi.fn() });
+    await tick();
+    expect(document.querySelector(`[aria-label="${m.ctx_parear_outra()}"]`)).not.toBeNull();
+    unmount(com);
   });
 
   it('execução fica no rodapé, fora do scroller', async () => {

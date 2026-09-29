@@ -39,6 +39,7 @@ does.
    ## Projeto
    Checagens: `<cmd>` · `<cmd>`          (or —)
    Integração: `<cmd>`                   (or —)
+   Aditivos: `<file or glob>` · …        (or —: files where two Tasks insert at declared anchors)
    Prova: <answer>
    Paralelo: <answer>
    Revisão: <answer>

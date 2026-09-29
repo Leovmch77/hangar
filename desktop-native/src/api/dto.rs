@@ -45,6 +45,8 @@ pub struct SessionInfo {
     pub pair_task: Option<String>,
     /// Há convite ativo desta sessão (pendente ou já usado): o 🔗 da linha.
     #[serde(default)] pub shared: bool,
+    /// Só na linha `orq`: a sessão do árbitro atual, que o "Falar com o árbitro" abre.
+    pub orq_arbiter: Option<String>,
     /// Task em andamento do plano que a sessão executa, e o total delas.
     pub plan_task: Option<u32>,
     pub plan_task_total: Option<u32>,
@@ -53,6 +55,15 @@ pub struct SessionInfo {
 impl SessionInfo {
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
     pub fn peers(&self) -> &[String] { self.pair_peers.as_deref().unwrap_or_default() }
+    /// O orquestrador sem LLM: tem linha do tempo, mas não recebe mensagem, nome novo, fechar nem interromper.
+    pub fn orq(&self) -> bool { self.provider == "orq" }
+    /// Tem compositor: a linha `orq` lê a linha do tempo, mas ninguém escreve nela.
+    pub fn takes_messages(&self) -> bool { self.readable() && !self.orq() }
+    /// O árbitro que esta linha `orq` aponta, entre as sessões da mesma lista.
+    pub fn arbiter<'a>(&self, sessions: &'a [SessionInfo]) -> Option<&'a SessionInfo> {
+        let name = self.orq_arbiter.as_deref()?;
+        sessions.iter().find(|s| s.name == name)
+    }
 }
 
 /// Resposta de juntar ou sair do grupo (`POST|DELETE …/pair`): o vínculo já mudou; `warning` diz quem não recebeu o aviso.
@@ -184,6 +195,7 @@ pub struct AskPayload {
     pub provider: Option<String>,
     // Valor cru: o Codex recusa id com outro tipo JSON (número × texto).
     pub request_id: Option<Value>,
+    #[serde(default)] pub is_async: bool,
     #[serde(default)] pub questions: Vec<AskItem>,
 }
 
@@ -231,4 +243,32 @@ pub struct Steered {
     #[serde(default)] pub promoted: bool,
     #[serde(default)] pub confirmed: u32,
     #[serde(default)] pub queued_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionInfo;
+    use serde_json::json;
+
+    #[test]
+    fn orq_row_reads_the_arbiter_and_finds_it_in_the_list() {
+        let orq: SessionInfo = serde_json::from_value(json!({"name": "g1-orq", "provider": "orq", "jsonl": "/r/timeline-x.jsonl",
+            "orq_arbiter": "arb"})).unwrap();
+        assert!(orq.orq() && orq.readable(), "a linha do tempo é lida como conversa");
+        let list = [SessionInfo { name: "arb".into(), ..Default::default() }, orq.clone()];
+        assert_eq!(orq.arbiter(&list).map(|s| s.name.as_str()), Some("arb"));
+        let old: SessionInfo = serde_json::from_value(json!({"name": "a", "provider": "claude"})).unwrap();
+        assert!(!old.orq() && old.orq_arbiter.is_none(), "backend sem o campo continua lendo");
+        let gone = SessionInfo { orq_arbiter: Some("sumiu".into()), ..orq };
+        assert!(gone.arbiter(&list).is_none(), "árbitro fora da lista: o botão fica desligado");
+    }
+
+    #[test]
+    fn only_readable_non_orq_rows_take_the_composer_focus() {
+        let orq = SessionInfo { provider: "orq".into(), jsonl: Some("/r/t.jsonl".into()), ..Default::default() };
+        assert!(orq.readable() && !orq.takes_messages(), "o compositor da linha `orq` não é desenhado");
+        let chat = SessionInfo { provider: "claude".into(), ..orq.clone() };
+        assert!(chat.takes_messages());
+        assert!(!SessionInfo { jsonl: None, ..chat }.takes_messages());
+    }
 }

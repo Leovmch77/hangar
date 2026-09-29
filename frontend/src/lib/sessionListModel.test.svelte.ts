@@ -289,6 +289,17 @@ describe('seleção, broadcast e comparar (divergência #6 e #15)', () => {
     expect([...m1.selected]).toEqual(['srv-a:a1']);
     expect(m1.selectMode).toBe(true);
   });
+  it('orquestrador fica fora da seleção (clique e "enviar p/ todas")', () => {
+    comServidores([
+      { id: 'srv-a', label: 'Alfa', sessions: [sess('a1', 'srv-a'), sess('g1-orq', 'srv-a', { provider: 'orq' })] },
+    ]);
+    const m1 = createSessionListModel(opts('mobile'));
+    // Um servidor só: a lista não agrupa por servidor e o grupo único não tem rótulo.
+    m1.selectGroupForBroadcast(m1.groups.find((g) => g.sessions.some((s) => s.name === 'a1'))!);
+    expect([...m1.selected]).toEqual(['srv-a:a1']);
+    m1.toggleSelected('srv-a:g1-orq');
+    expect(m1.selected.has('srv-a:g1-orq')).toBe(false);
+  });
   it('slash-command e seleção vazia desabilitam o envio; comparar pede 2+', () => {
     const m1 = createSessionListModel(opts('desktop'));
     m1.toggleSelectMode();

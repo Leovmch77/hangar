@@ -25,7 +25,7 @@ export function ChatHeader({
   onBack: () => void;
   onMore: () => void;
   onTitlePress: () => void;
-  onTerminal: () => void;
+  onTerminal?: () => void;
   contextPct?: number | null;
   chipLoop?: React.ReactNode;
   chipPlan?: React.ReactNode;
@@ -56,15 +56,17 @@ export function ChatHeader({
         </Pressable>
         <ContextRing pct={contextPct} />
         {state ? <StatePill state={state} /> : null}
-        <Pressable
-          onPress={onTerminal}
-          hitSlop={8}
-          style={styles.more}
-          accessibilityRole="button"
-          accessibilityLabel={m.term_titulo()}
-        >
-          <Icon name="Terminal" size={20} color={theme.tokens.text.primary} />
-        </Pressable>
+        {onTerminal ? (
+          <Pressable
+            onPress={onTerminal}
+            hitSlop={8}
+            style={styles.more}
+            accessibilityRole="button"
+            accessibilityLabel={m.term_titulo()}
+          >
+            <Icon name="Terminal" size={20} color={theme.tokens.text.primary} />
+          </Pressable>
+        ) : null}
         <Pressable
           onPress={onMore}
           hitSlop={8}

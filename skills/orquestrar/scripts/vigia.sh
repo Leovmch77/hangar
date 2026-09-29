@@ -40,6 +40,7 @@
 #      the list follows `orq ball` every cycle. Each cycle it also writes <dir>/vigia.json (the
 #      panel's heartbeat), closes the sessions `orq done` lists after 10 idle minutes and joins
 #      `orq team` to the arbiter's group; --no-housekeeping turns the closing and the joining off.
+#      In an auto run (`orq init --auto`) each cycle also starts `orq advance --detach`.
 #
 # Confirming it LIVES (is-active right after the systemd-run answers `active` because it was just
 # born, not because it reads the API — a watchdog once sat `active` for hours with no log line):
@@ -438,6 +439,19 @@ for n in team:
         print(f"join\t{n}\t{json.dumps(body, ensure_ascii=False)}")
 PY
 orq_log() { ORQ_DIR="$ORQD" python3 "$ORQ" log "$1" >/dev/null 2>>"$CP_VIGIA_LOG"; }
+# The orchestrator mid-pass (merge + Integração: outlast a cycle) holds advance.lock. Read from
+# /proc/locks, never by taking the lock: a probe holding it makes a starting pass give up.
+# The pass touches the lock before each merge and check, each bounded by orq.py's 900 s: a lock
+# untouched for twice that is a stuck pass, and "nobody has the ball" must fire again.
+# ponytail: matched by inode only; add the device if two filesystems ever collide.
+ADVANCE_STUCK_S=${CP_VIGIA_ADVANCE_STUCK_S:-1800}
+advance_running() {
+  local ino mt
+  ino=$(stat -c %i "$ORQD/advance.lock" 2>/dev/null) || return 1
+  mt=$(stat -c %Y "$ORQD/advance.lock" 2>/dev/null) || return 1
+  [ $(( $(date +%s) - mt )) -lt "$ADVANCE_STUCK_S" ] || return 1
+  grep -q "^[0-9]*: FLOCK .*:${ino} " /proc/locks 2>/dev/null
+}
 # A leading [aviso] makes notify only journal it, as `aviso:` (the panel feed's prefix).
 orq_warn() { ORQ_DIR="$ORQD" python3 "$ORQ" notify "[aviso] $1" >/dev/null 2>>"$CP_VIGIA_LOG" || echo "[aviso] $1" >&2; }
 attempt_failed() {  # $1 = close:<name> | join:<name>, $2 = what failed (starts with the journal prefix)
@@ -544,6 +558,10 @@ for i in $(seq 1 "$CICLOS"); do
     continue
   fi
   mudos=0
+  # Auto runs: the orchestrator's pass, detached (a merge and its checks outlast a cycle) and single
+  # by its own lock; a no-op in any other run. Only with the API answering: a backend down would
+  # turn every step into a failure the arbiter clears by hand.
+  [ -n "$ORQD" ] && ORQ_DIR="$ORQD" python3 "$ORQ" advance --detach >/dev/null 2>>"${CP_VIGIA_LOG:-/dev/stderr}"
   if [ -n "$ORQD" ] && [ "$HOUSEKEEPING" -eq 1 ]; then
     close_finished
     join_team
@@ -569,6 +587,7 @@ for i in $(seq 1 "$CICLOS"); do
   for e in "${ESTADOS[@]}"; do
     case "$e" in idle|awaiting_input|gone|noquota|stuck) ;; *) quieto=0 ;; esac
   done
+  [ -n "$ORQD" ] && advance_running && quieto=0
 
   # PER SESSION: any one of the pair stopped for LIMITE straight readings warns ON ITS OWN,
   # without waiting for the whole team to stop. The collective firing below ("nobody has the

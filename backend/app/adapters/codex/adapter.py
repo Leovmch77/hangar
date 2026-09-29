@@ -602,7 +602,9 @@ class CodexAdapter:
                 "state": "idle", "in_progress": False,
                 "model": model, "effort": effort,
                 "default_model": default_model, "default_effort": default_effort,
-                "subscribed": subscribed, "ouvintes": [], "async_questions": AsyncQuestions(thread_id)}
+                "subscribed": subscribed, "ouvintes": [],
+                "async_questions": AsyncQuestions(
+                    thread_id, (codex_sessions.load(name) or {}).get("skipped_async_questions") or ())}
         self._sessions[name] = sess
         if subscribed:
             sess["async_questions"].hydrate({})
@@ -1396,6 +1398,16 @@ class CodexAdapter:
         questions = sess["async_questions"]
         first = questions.pending()
         return questions.count, first["questions"][0]["question"] if first else None
+
+    async def skip_question(self, name: str, request_id: str) -> None:
+        sess = self._sessions.get(name)
+        if sess is None:
+            raise ValueError("A sessão não está disponível.")
+        questions = sess["async_questions"]
+        questions.skip(request_id)
+        await asyncio.to_thread(codex_sessions.update, name, skipped_async_questions=sorted(questions.skipped))
+        for listener in sess.get("ouvintes", []):
+            listener.put_nowait(self._question_state(name, sess))
 
     async def answer_questions(self, name: str, request_id: int | str | None, answers: list[dict]) -> None:
         from .questions import pending, response

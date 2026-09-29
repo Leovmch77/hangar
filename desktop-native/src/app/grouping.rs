@@ -11,7 +11,7 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Por que soltar a origem sobre o alvo não agrupa (`DropReason` do web).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Refusal { Same, OtherServer, Dead, SameGroup, CrossServer }
+pub(super) enum Refusal { Same, OtherServer, Dead, SameGroup, CrossServer, Orq }
 
 impl Refusal {
     pub(super) fn text(self) -> String {
@@ -21,6 +21,7 @@ impl Refusal {
             Refusal::Dead => "grupo_recusa_dead",
             Refusal::SameGroup => "grupo_recusa_same_group",
             Refusal::CrossServer => "grupo_recusa_cross_server",
+            Refusal::Orq => "grupo_recusa_orq",
         })
     }
 }
@@ -31,6 +32,8 @@ fn remote_peer(s: &SessionInfo) -> bool { s.peers().iter().any(|p| p.contains(":
 pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: bool) -> Result<(), Refusal> {
     if !same_server { return Err(Refusal::OtherServer); }
     if origin.name == target.name { return Err(Refusal::Same); }
+    // O grupo da orquestração é montado pelo orq; agrupar a linha dele à mão desfaz a execução.
+    if origin.orq() || target.orq() { return Err(Refusal::Orq); }
     if origin.state == "dead" || target.state == "dead" { return Err(Refusal::Dead); }
     if origin.pair_gid.is_some() && origin.pair_gid == target.pair_gid { return Err(Refusal::SameGroup); }
     if remote_peer(origin) || remote_peer(target) { return Err(Refusal::CrossServer); }
@@ -38,7 +41,7 @@ pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: 
 }
 
 /// `canLeave` do web: o par de outro servidor não tem `pair_gid`, por isso os pares também contam.
-pub(super) fn can_leave(s: &SessionInfo) -> bool { s.pair_gid.is_some() || !s.peers().is_empty() }
+pub(super) fn can_leave(s: &SessionInfo) -> bool { !s.orq() && (s.pair_gid.is_some() || !s.peers().is_empty()) }
 
 pub(super) enum ListRow<'a> {
     Header { gid: String, label: String, members: Vec<&'a SessionInfo> },
@@ -574,6 +577,9 @@ mod tests {
         assert_eq!(can_pair(&s("a", Some("g"), &["b"]), &s("b", Some("g"), &["a"]), true), Err(Refusal::SameGroup));
         assert_eq!(can_pair(&s("a", Some("g"), &["b"]), &s("c", Some("h"), &["d"]), true), Ok(()), "grupos diferentes se fundem");
         assert_eq!(can_pair(&a, &s("b", None, &["srv::x"]), true), Err(Refusal::CrossServer));
+        let orq = SessionInfo { provider: "orq".into(), ..s("o", None, &[]) };
+        assert_eq!(can_pair(&orq, &b, true), Err(Refusal::Orq));
+        assert_eq!(can_pair(&a, &orq, true), Err(Refusal::Orq));
     }
 
     #[test]
@@ -581,6 +587,7 @@ mod tests {
         assert!(!can_leave(&s("a", None, &[])));
         assert!(can_leave(&s("a", Some("g"), &["b"])));
         assert!(can_leave(&s("a", None, &["srv::x"])), "par de outro servidor não tem gid");
+        assert!(!can_leave(&SessionInfo { provider: "orq".into(), ..s("o", Some("g"), &["b"]) }), "o grupo do orq é dele");
     }
 
     #[test]

@@ -16,6 +16,8 @@
 #                                        QUALQUER posição entre os tokens de tarefa.
 #                                        --orq: grupo de orquestração (skill orquestrar); o
 #                                        pareamento não manda aviso a ninguém, o kick-off traz tudo
+#   hangar-send --pair --orq [tarefa...]  grupo de orquestração só com ESTA sessão (árbitro do
+#                                        orquestrar-auto, que nasce antes do time); imprime o gid
 #   hangar-send --unpair               tira esta sessão do grupo (só ela é avisada)
 #   hangar-send --close <sessao>       fecha OUTRA sessão desta máquina, com ou sem terminal
 #                                  (sai do grupo dela sem aviso). Nunca a própria.
@@ -67,6 +69,10 @@
 #
 # Remetente é detectado pelo sidecar no modo sem terminal ou pelo tmux e prefixado como "[de: X]",
 # pra sessão destino saber a origem e pra onde responder.
+#
+# HANGAR_SEND_PAINEL=1 (só recado 1:1, desta máquina): o texto vai como está, sem "[de: X]" e sem
+# procurar o remetente. É o aviso de um programa (o orquestrador do orq), não de uma sessão: o
+# modelo responde a quem assina. O texto tem de começar com "[painel:"; senão sai 2 sem enviar.
 #
 # Cross-server: backend/peers.json (ver peers.json.example; NUNCA commitar — tem token) mapeia
 # id -> {base_url, token} dos outros servidores, e CP_SERVER_ID no backend/.env é o id DESTA
@@ -287,7 +293,10 @@ if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
 fi
 
 if [[ "$1" == "--pair" ]]; then
-    peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa] [--orq]}"; shift 2
+    # `--pair --orq [tarefa...]`, sem sessão: grupo de orquestração só com esta (o `--orq` fica em "$@").
+    peer=""
+    if [[ "${2:-}" == "--orq" ]]; then shift
+    else peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa] [--orq] | --pair --orq [tarefa...]}"; shift 2; fi
     substituir=false
     orq=false
     tarefa=""
@@ -301,8 +310,11 @@ if [[ "$1" == "--pair" ]]; then
     # peer local (nome cru) OU remoto (servidor::sessao) — o backend local resolve o remoto via
     # peers.json + CP_SERVER_ID e registra o vínculo dos dois lados (/pair-remote). Cross-server é 1:1.
     body=$(python3 -c 'import json,sys; print(json.dumps({"peer": sys.argv[1], "task": sys.argv[2], "replace_task": sys.argv[3] == "true", "orq": sys.argv[4] == "true"}))' "$peer" "$tarefa" "$substituir" "$orq")
-    api POST "/api/sessions/$(me)/pair" "$body" >/dev/null
-    if $orq; then
+    resp=$(api POST "/api/sessions/$(me)/pair" "$body")
+    if [[ -z "$peer" ]]; then
+        gid=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("gid") or "")' "$resp")
+        echo "grupo de orquestração criado: $(me), sozinha, gid $gid (ninguém recebe aviso; o time entra depois)"
+    elif $orq; then
         echo "pareado: $(me) <-> $peer (grupo de orquestração: ninguém recebe aviso; o kick-off traz o protocolo)"
     else
         echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
@@ -557,36 +569,49 @@ if [[ "${1:-}" == "--tmux" ]]; then forcar_tmux=1; shift; fi
 target="$1"; shift
 [[ $# -ge 1 ]] || { echo "uso: hangar-send [--tmux] <sessao|servidor::sessao> <mensagem...>" >&2; exit 2; }
 
-eu=$(me 2>/dev/null)
-if [[ "$target" == "$eu" || ( -n "$SERVER_ID" && "$target" == "$SERVER_ID::$eu" ) ]]; then
-    echo "recusado: '$target' é esta sessão — o recado voltaria pra você. Quem é quem: hangar-send --list" >&2
-    exit 1
-fi
-
 # O transporte é decisão do backend (socket nativo do Claude → plugin → tmux → fila), nunca do
 # modelo: este script só entrega e diz o que aconteceu. `--tmux` fica aceito por compatibilidade.
 
-sender=$(me)
-curto="$sender"
-sess="$target"
-if [[ "$target" == *::* ]]; then
-    # Destino em OUTRO servidor: resolve base/token no peers.json e qualifica o remetente —
-    # sem [de: <este-servidor>::<sessao>] o outro lado não teria endereço de resposta.
-    srv="${target%%::*}"; sess="${target#*::}"
-    if [[ -z "$SERVER_ID" ]]; then
-        echo "erro: CP_SERVER_ID ausente no backend/.env — obrigatório pra envio cross-server (endereço de resposta [de: <id>::$sender])" >&2
+if [[ "${HANGAR_SEND_PAINEL:-}" == "1" ]]; then
+    # Com "[de: X]" na frente, o destino responderia a X achando que foi X quem escreveu.
+    text="$*"
+    if [[ "$text" != "[painel:"* ]]; then
+        echo "erro: HANGAR_SEND_PAINEL=1 exige texto começando com [painel: …]" >&2
+        exit 2
+    fi
+    if [[ "$target" == *::* ]]; then
+        echo "erro: aviso de painel só vai a sessão desta máquina" >&2
+        exit 2
+    fi
+    sess="$target"
+else
+    eu=$(me 2>/dev/null)
+    if [[ "$target" == "$eu" || ( -n "$SERVER_ID" && "$target" == "$SERVER_ID::$eu" ) ]]; then
+        echo "recusado: '$target' é esta sessão — o recado voltaria pra você. Quem é quem: hangar-send --list" >&2
         exit 1
     fi
-    cfg=$(peer_cfg "$srv")
-    IFS=$'\t' read -r BASE rtok <<< "$cfg"
-    AUTH="Authorization: Bearer $rtok"
-    sender="${SERVER_ID}::${sender}"
+    sender=$(me)
+    curto="$sender"
+    sess="$target"
+    if [[ "$target" == *::* ]]; then
+        # Destino em OUTRO servidor: resolve base/token no peers.json e qualifica o remetente —
+        # sem [de: <este-servidor>::<sessao>] o outro lado não teria endereço de resposta.
+        srv="${target%%::*}"; sess="${target#*::}"
+        if [[ -z "$SERVER_ID" ]]; then
+            echo "erro: CP_SERVER_ID ausente no backend/.env — obrigatório pra envio cross-server (endereço de resposta [de: <id>::$sender])" >&2
+            exit 1
+        fi
+        cfg=$(peer_cfg "$srv")
+        IFS=$'\t' read -r BASE rtok <<< "$cfg"
+        AUTH="Authorization: Bearer $rtok"
+        sender="${SERVER_ID}::${sender}"
+    fi
+    # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro — nem com o nome
+    # curto num envio pra outro servidor, onde o remetente já virou "<servidor>::<eu>".
+    msg="$*"
+    for p in "$sender" "$curto"; do msg="${msg#"[de: $p] "}"; msg="${msg#"[de: $p]"}"; done
+    text="[de: $sender] $msg"
 fi
-# Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro — nem com o nome
-# curto num envio pra outro servidor, onde o remetente já virou "<servidor>::<eu>".
-msg="$*"
-for p in "$sender" "$curto"; do msg="${msg#"[de: $p] "}"; msg="${msg#"[de: $p]"}"; done
-text="[de: $sender] $msg"
 
 body=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1], "steer": True}))' "$text")
 resp=$(api POST "/api/sessions/$sess/input" "$body")

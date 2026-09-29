@@ -61,6 +61,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     getWorkflows,
     getSubagents,
     answerQuestions,
+    skipQuestion,
     getRunners,
     isAbortError,
     isTimeoutError,
@@ -88,7 +89,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
-  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors } from '@hangar/core';
+  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors, isOrq } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
   import * as diag from '../lib/diag';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
@@ -923,6 +924,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // "claude" e o caso comum e some do header; os demais ganham badge (providerBadge abaixo) e o
   // "codex" alem disso esconde controles Claude-only.
   const sessionProvider = $derived(allSessions.find((s) => s.name === sessionName)?.provider);
+  // Orquestrador sem LLM: não recebe texto nem interrupção. O rodapé leva ao árbitro atual.
+  const orqSession = $derived(isOrq({ provider: sessionProvider }));
+  const orqArbiter = $derived(allSessions.find((s) => s.name === sessionName)?.orq_arbiter ?? null);
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
   // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
@@ -1370,6 +1374,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   function closeAsk() {
     if (askPiId) askPiDismissed = askPiId;
     askOpen = false;
+    // Pergunta assíncrona do Codex não tem descarte nativo: sem isto ela volta a cada recarga.
+    const id = askPayload?.request_id;
+    if (askPayload?.is_async && typeof id === 'string') {
+      skipQuestion(sessionName, id).catch((err) => { askOpen = true; mostrarAviso(err); });
+    }
   }
   function openMirror() { mirrorOpen = true; }
   // "Voltar ao chat" = SO esconde o espelho. NAO manda Escape -> a TUI fica como esta (nao fecha o
@@ -1389,7 +1398,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // ganha o botão de terminal quando existe pelo menos um.
   const atalhoKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
   const temTerminalDeAtalho = $derived(shortcutTerminalsOf(atalhoKey).length > 0);
-  const botaoTerminal = $derived(!sessionHeadless || temTerminalDeAtalho);
+  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho));
   $effect(() => {
     const key = atalhoKey;
     refreshShortcutTerminals(key).catch(() => { /* servidor sem a rota ou fora: sem botão extra */ });
@@ -1507,8 +1516,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!desktop || !publishWorkspaceActions || !publish) return;
     publish([
       action('git', m.sessao_git(), () => (gitOpen = true)),
-      action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
-      action('run', m.chat_executar_workflow(), () => (runOpen = true)),
+      // Orquestrador não tem pane: parear e rodar workflow não têm onde agir.
+      ...(orqSession ? [] : [
+        action('pair', m.chat_parear_sessao(), () => (pairOpen = true)),
+        action('run', m.chat_executar_workflow(), () => (runOpen = true)),
+      ]),
       ...(botaoTerminal ? [action('terminal', m.ctx_terminal(), abrirTerminalReal)] : []),
       ...(modoTrocavel ? [action('modo', sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal(), trocarModo)] : []),
       ...(recarregavel ? [action('recarregar', m.recarregar_sessao(), recarregar)] : []),
@@ -2897,7 +2909,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   {/if}
   <div class="navbar-mount" bind:this={navEl}>
     {#if !splitTab}
-    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
+    <NavBar title={sessionName} subtitle={desktop ? null : serverLabel || null} conta={desktop ? null : contaChip} showBack={!desktop} onBack={onBack} onTitleTap={desktop ? undefined : openSwitcher} {crumbs} state={desktop ? currentState : undefined} {status} onExpandUsage={() => (usageOpen = true)} limited={stateEvent?.limited ?? false} limitReset={stateEvent?.limit_reset ?? null} onOpenActivity={desktop && hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined} {activityBadge} {activityRunning} onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined} terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen} onOpenNavegador={desktop ? alternarNavegador : undefined} onOpenRun={desktop && !orqSession ? () => (runOpen = true) : undefined} {runRunning} onMenu={desktop ? undefined : () => (moreOpen = true)} onOpenAttachments={desktop ? () => (anexosOpen = true) : undefined} working={currentState === 'working'} providerLabel={providerBadge} onProviderTap={isCodex ? () => (limitsOpen = true) : undefined} loopLabel={loopChip?.label ?? null} loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']} onLoopTap={() => (loopSheetOpen = true)} />
     {/if}
   </div>
 
@@ -2935,7 +2947,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       modoBloqueado={!modoLivre || trocandoModo}
       onOpenNavegador={alternarNavegador}
       terminalAlert={tuiOverlay && !mirrorOpen && !xtermOpen && !terminalPanelOpen}
-      onOpenRun={() => (runOpen = true)}
+      onOpenRun={orqSession ? undefined : () => (runOpen = true)}
       {runRunning}
       onOpenAttachments={() => (anexosOpen = true)}
       {shortcuts}
@@ -2955,7 +2967,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']}
       onLoopTap={() => (loopSheetOpen = true)}
       onProviderTap={isCodex ? () => (limitsOpen = true) : undefined}
-      onOpenPair={() => (pairOpen = true)}
+      onOpenPair={orqSession ? undefined : () => (pairOpen = true)}
       onOpenOrq={() => (orqOpen = true)}
       onOpenPeerChat={nested ? undefined : (peer) => (peerChat = peer)}
       onOpenGit={() => (gitOpen = true)}
@@ -3202,6 +3214,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         <p class="dead-text">{m.chat_sessao_encerrada()}</p>
         <button class="back-btn" onclick={onBack}>{'← '}{m.comum_voltar()}</button>
       </div>
+    {:else if orqSession}
+      <!-- Mesmo desenho do rodapé de sessão encerrada: o foco de teclado do resize
+           já procura `.dead-footer .back-btn`, e aqui ele cai no botão do árbitro. -->
+      <div class="dead-footer orq-footer">
+        <p class="dead-text">{m.orq_row_badge()}</p>
+        <button class="back-btn" disabled={!orqArbiter}
+                onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
+      </div>
     {:else}
       <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor
            de recusar uma sessão que só ainda não começou — em cima do cartão que resolve isso. -->
@@ -3332,7 +3352,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
              shortcuts={customShortcuts} onShortcut={triggerShortcut}
              projectName={projectShortcuts?.name} projectError={projectShortcutsErr}
              onEditShortcuts={() => abrirConfig('atalhos', null, sessionName)}
-             onRun={() => (runOpen = true)} {runRunning}
+             onRun={orqSession ? undefined : () => (runOpen = true)} {runRunning}
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
              onBastao={passarBastaoDaqui}

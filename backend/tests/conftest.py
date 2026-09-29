@@ -116,6 +116,20 @@ def _sem_compartilhamento_real(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _sem_orquestracoes_reais(tmp_path_factory):
+    # A lista de sessões lê ~/.hangar/orq: uma orquestração `auto` viva na máquina viraria linha
+    # extra em todo teste que conta sessões.
+    from app.adapters.orq import runs
+    original = runs.root
+    pasta = tmp_path_factory.mktemp("orq")
+    runs.root = lambda: pasta
+    try:
+        yield
+    finally:
+        runs.root = original
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sem_git_dir_no_ambiente_de_teste():
     # git_ops._run passa os.environ inteiro pro subprocess: dentro de um hook (pre-push, p.ex.) o
     # processo herda GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE do git que roda o hook, e qualquer teste

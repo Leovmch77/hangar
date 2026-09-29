@@ -108,6 +108,9 @@ impl Sel {
 
 type Pick = (Entity<SelectState<SearchableVec<ModelChoice>>>, Subscription);
 
+#[derive(Clone, Copy, PartialEq)]
+enum Field { Conta, Modelo, Esforco, Permissao, Motor, Subagente, Janela, QuickConta, QuickModelo }
+
 #[derive(Default)]
 struct Picks { conta: Option<Pick>, modelo: Option<Pick>, esforco: Option<Pick>, permissao: Option<Pick>, motor: Option<Pick>,
     subagente: Option<Pick>, janela: Option<Pick> }
@@ -282,7 +285,14 @@ impl OrqRoles {
         done: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static) {
         let job = self.runtime.spawn(job);
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(value) = job.await else { return };
+            let Ok(value) = job.await else {
+                // Tarefa que morreu não pode deixar os botões travados em "salvando" sem dizer nada.
+                let _ = this.update(cx, |this, cx| {
+                    (this.busy, this.starting, this.error) = (false, false, Some(tr("network_error")));
+                    cx.notify();
+                });
+                return;
+            };
             let _ = this.update_in(cx, |this, window, cx| { done(this, value, window, cx); cx.notify(); });
         }).detach();
     }
@@ -329,6 +339,9 @@ impl OrqRoles {
             }
             // Linha que sumiu do contrato (vez trocada, removida por fora) não deixa o formulário apontando para o nada.
             if this.sel.as_ref().is_some_and(|sel| matches!(sel, Sel::Row(key) if this.original(key).is_none())) { this.sel = None; }
+            // Rascunho de linha que sumiu do contrato recriaria a linha no próximo Salvar, sem aparecer nas mudanças.
+            let keys: Vec<String> = this.rows().iter().map(|r| r.role.key()).collect();
+            this.drafts.retain(|key, _| key == NEW || keys.contains(key));
             this.stale = true;
         });
         cx.notify();
@@ -463,11 +476,16 @@ impl OrqRoles {
         cx.notify();
     }
 
-    fn pick(choices: Vec<ModelChoice>, value: &str, on: impl Fn(&mut Self, String) + 'static, window: &mut Window, cx: &mut Context<Self>) -> Pick {
+    fn pick(field: Field, choices: Vec<ModelChoice>, value: &str, on: impl Fn(&mut Self, String) + 'static, window: &mut Window,
+        cx: &mut Context<Self>) -> Pick {
         let at = choices.iter().position(|c| c.id == value);
         let state = cx.new(|cx| SelectState::new(SearchableVec::new(choices), at.map(IndexPath::new), window, cx));
-        let subscription = cx.subscribe_in(&state, window, move |this, _, event: &SelectEvent<SearchableVec<ModelChoice>>, _, cx| {
-            if let SelectEvent::Confirm(Some(id)) = event { on(this, id.clone()); this.stale = true; cx.notify(); }
+        let subscription = cx.subscribe_in(&state, window, move |this, _, event: &SelectEvent<SearchableVec<ModelChoice>>, window, cx| {
+            if let SelectEvent::Confirm(Some(id)) = event {
+                on(this, id.clone());
+                this.build_picks(Some(field), window, cx);
+                cx.notify();
+            }
         });
         (state, subscription)
     }
@@ -492,61 +510,76 @@ impl OrqRoles {
         list
     }
 
-    fn build_picks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Refaz os seletores a partir do rascunho. O que acabou de ser escolhido (`keep`) fica o mesmo: recriá-lo tiraria o foco
+    /// de quem está no teclado, e as opções dele não dependem do próprio valor.
+    fn build_picks(&mut self, keep: Option<Field>, window: &mut Window, cx: &mut Context<Self>) {
         self.stale = false;
-        self.picks = Picks::default();
+        let mut old = std::mem::take(&mut self.picks);
+        let (mut old_quick_conta, mut old_quick_modelo) = match self.quick_picks.take() {
+            Some((key, conta, modelo)) if self.quick.as_ref() == Some(&key) => (Some(conta), Some(modelo)),
+            _ => (None, None),
+        };
+        let kept = |slot: &mut Option<Pick>, field: Field| slot.take().filter(|_| keep == Some(field));
         if let Some(key) = self.quick.clone() {
             self.quick_picks = self.role_of(&key).map(|role| {
                 let (k1, k2) = (key.clone(), key.clone());
-                let conta = Self::pick(self.account_choices(&role.provider), &role.conta, move |this, v| {
-                    let Some(role) = this.role_of(&k1) else { return };
-                    // O modelo acompanha a conta nova quando ela o libera.
-                    let follow = this.model_follows(&role.provider, &v, &role.modelo);
-                    this.edit_key(&k1, |r| { r.conta = v; r.modelo = follow; });
-                }, window, cx);
-                let modelo = Self::pick(self.model_choices(&role), &role.modelo, move |this, v| this.edit_key(&k2, |r| r.modelo = v), window, cx);
+                let conta = kept(&mut old_quick_conta, Field::QuickConta).unwrap_or_else(|| Self::pick(Field::QuickConta,
+                    self.account_choices(&role.provider), &role.conta, move |this, v| {
+                        let Some(role) = this.role_of(&k1) else { return };
+                        // O modelo acompanha a conta nova quando ela o libera.
+                        let follow = this.model_follows(&role.provider, &v, &role.modelo);
+                        this.edit_key(&k1, |r| { r.conta = v; r.modelo = follow; });
+                    }, window, cx));
+                let modelo = kept(&mut old_quick_modelo, Field::QuickModelo).unwrap_or_else(|| Self::pick(Field::QuickModelo,
+                    self.model_choices(&role), &role.modelo, move |this, v| this.edit_key(&k2, |r| r.modelo = v), window, cx));
                 (key, conta, modelo)
             });
-        } else { self.quick_picks = None; }
+        }
         let Some(role) = self.current() else { return };
         if !self.allowed(&role.provider).is_empty() {
-            self.picks.conta = Some(Self::pick(self.account_choices(&role.provider), &role.conta, |this, v| {
-                let Some(role) = this.current() else { return };
-                let follow = this.model_follows(&role.provider, &v, &role.modelo);
-                this.edit(|r| { r.conta = v; r.modelo = follow; });
-            }, window, cx));
+            self.picks.conta = kept(&mut old.conta, Field::Conta).or_else(|| Some(Self::pick(Field::Conta, self.account_choices(&role.provider),
+                &role.conta, |this, v| {
+                    let Some(role) = this.current() else { return };
+                    let follow = this.model_follows(&role.provider, &v, &role.modelo);
+                    this.edit(|r| { r.conta = v; r.modelo = follow; });
+                }, window, cx)));
         }
-        self.picks.modelo = Some(Self::pick(self.model_choices(&role), &role.modelo, |this, v| this.edit(|r| {
-            r.modelo = v;
-        }), window, cx));
+        self.picks.modelo = kept(&mut old.modelo, Field::Modelo).or_else(|| Some(Self::pick(Field::Modelo, self.model_choices(&role),
+            &role.modelo, |this, v| this.edit(|r| r.modelo = v), window, cx)));
         let levels = self.levels(&role);
         if !levels.is_empty() {
             let choices = std::iter::once(Self::choice("", t("criar_padrao"), String::new()))
                 .chain(levels.iter().map(|l| Self::choice(l, l.clone(), String::new()))).collect();
-            self.picks.esforco = Some(Self::pick(choices, &role.esforco, |this, v| this.edit(|r| r.esforco = v), window, cx));
+            self.picks.esforco = kept(&mut old.esforco, Field::Esforco).or_else(|| Some(Self::pick(Field::Esforco, choices, &role.esforco,
+                |this, v| this.edit(|r| r.esforco = v), window, cx)));
         }
         if let Some(modes) = Self::permissions(&role) {
             let choices = std::iter::once(Self::choice("", tr("create_permission_default"), String::new()))
                 .chain(modes.iter().map(|m| Self::choice(m, (*m).to_owned(), String::new()))).collect();
-            self.picks.permissao = Some(Self::pick(choices, &role.permissao, |this, v| this.edit(|r| r.permissao = v), window, cx));
+            self.picks.permissao = kept(&mut old.permissao, Field::Permissao).or_else(|| Some(Self::pick(Field::Permissao, choices,
+                &role.permissao, |this, v| this.edit(|r| r.permissao = v), window, cx)));
         }
         if role.provider == "claude" && !self.engines.is_empty() {
             let choices = std::iter::once(Self::choice("", tr("create_own_account"), String::new()))
                 .chain(self.engines.iter().map(|(name, label)| Self::choice(name, label.clone(), String::new()))).collect();
-            self.picks.motor = Some(Self::pick(choices, &role.motor, |this, v| this.edit(|r| r.motor = v), window, cx));
+            self.picks.motor = kept(&mut old.motor, Field::Motor).or_else(|| Some(Self::pick(Field::Motor, choices, &role.motor,
+                |this, v| this.edit(|r| r.motor = v), window, cx)));
         }
         let models = self.models(&role.provider, &role.conta);
         if role.provider == "claude" && role.motor.is_empty() && !models.is_empty() {
             let choices = std::iter::once(Self::choice("", tr("create_subagent_default"), String::new()))
                 .chain(models.into_iter().map(|m| Self::choice(&m.id, m.name.unwrap_or_else(|| m.id.clone()), String::new()))).collect();
-            self.picks.subagente = Some(Self::pick(choices, &role.subagente, |this, v| this.edit(|r| r.subagente = v), window, cx));
+            self.picks.subagente = kept(&mut old.subagente, Field::Subagente).or_else(|| Some(Self::pick(Field::Subagente, choices,
+                &role.subagente, |this, v| this.edit(|r| r.subagente = v), window, cx)));
         }
         let choices = std::iter::once(Self::choice("", t1("orqcfg_janela_padrao", "pct", "50"), String::new()))
             .chain(WINDOWS.iter().map(|n| Self::choice(n, format!("{n}%"), String::new()))).collect();
-        self.picks.janela = Some(Self::pick(choices, &role.janela, |this, v| this.edit(|r| r.janela = v), window, cx));
+        self.picks.janela = kept(&mut old.janela, Field::Janela).or_else(|| Some(Self::pick(Field::Janela, choices, &role.janela,
+            |this, v| this.edit(|r| r.janela = v), window, cx)));
     }
 
-    fn set_provider(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+    fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        self.perfil_input.update(cx, |input, cx| input.set_value("", window, cx));
         let conta = self.allowed(provider).first().map(|a| a.conta.clone()).unwrap_or_default();
         // O Jev vale em qualquer provider; o resto da abertura é por provider e volta ao padrão.
         self.edit(|r| {
@@ -616,7 +649,16 @@ impl OrqRoles {
     }
 
     fn save(&mut self, back_to_list: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let items: Vec<Role> = self.drafts.iter().filter(|(_, r)| !r.papel.trim().is_empty() && !r.conta.is_empty()).map(|(key, r)| {
+        // Linha sem conta não grava: recusa o lote inteiro e diz qual, em vez de salvar o resto e apagar essa edição.
+        let mut missing: Vec<String> = self.drafts.values().filter(|r| !r.papel.trim().is_empty() && r.conta.is_empty())
+            .map(|r| r.papel.trim().to_owned()).collect();
+        if !missing.is_empty() {
+            missing.sort();
+            self.error = Some(format!("{}: {}", missing.join(", "), t("orqcfg_fila_sem_conta")));
+            cx.notify();
+            return;
+        }
+        let items: Vec<Role> = self.drafts.iter().filter(|(_, r)| !r.papel.trim().is_empty()).map(|(key, r)| {
             let mut r = r.clone();
             r.papel = r.papel.trim().to_owned();
             if key == NEW && r.sessao.trim().is_empty() { r.sessao = self.derived_session(&r.papel); }
@@ -720,7 +762,7 @@ impl OrqRoles {
     fn field(&self, role: &Role, field: &str) -> String {
         let text = |v: &str| if v.is_empty() { t("criar_padrao") } else { v.to_owned() };
         match field {
-            "provider" => role.provider.clone(),
+            "provider" => provider_name(&role.provider).to_owned(),
             "conta" => if role.conta.is_empty() { t("criar_padrao") } else { self.account_label(&role.conta) },
             "modelo" => if role.modelo.is_empty() { t("criar_padrao") } else { model_label(&role.modelo) },
             "esforco" => text(&role.esforco),
@@ -768,7 +810,7 @@ impl OrqRoles {
             t1("orqcfg_rodando_em", "v", &parts.join(" · "))
         });
         let open = Button::new(SharedString::from(format!("orq-row-{key}"))).ghost().flex_1().min_w_0().justify_start().h_auto().py(px(6.))
-            .accessibility_label(format!("{label}: {dot_text}"))
+            .accessibility_label(format!("{label} · {who} · {dot_text}"))
             .child(div().w_full().min_w_0().flex().flex_col().gap(px(2.))
                 .child(div().flex().items_center().gap(px(6.)).min_w_0()
                     .child(div().truncate().font_weight(FontWeight::MEDIUM).child(label))
@@ -780,7 +822,7 @@ impl OrqRoles {
                         .child(format!("· {}", t1("orqcfg_cota_pct", "pct", &pct.round().to_string())))))
                     .when(shared > 1, |el| el.child(div().whitespace_nowrap().child(format!("· {}", t1("orqcfg_conta_dividida", "n", &shared.to_string())))))))
             .on_click(cx.listener(move |this, _, window, cx| this.choose(Sel::Row(k_open.clone()), window, cx)));
-        let model = chrome::pill_button(SharedString::from(format!("orq-quick-{key}")), cx).gap(px(5.)).selected(quick_open)
+        let model = chrome::pill_button(SharedString::from(format!("orq-quick-{key}")), cx).gap(px(5.)).selected(quick_open).disabled(self.busy)
             .tooltip(t("orqcfg_trocar_rapido"))
             .child(chrome::provider_glyph(&role.provider, 13.))
             .child(div().max_w(px(130.)).truncate().text_xs().child(self.model_name(&role)))
@@ -790,14 +832,15 @@ impl OrqRoles {
                 this.stale = true;
                 cx.notify();
             }));
-        let dot = div().id(SharedString::from(format!("orq-state-{key}"))).role(A11y::Status).aria_label(dot_text)
+        // O estado já vai no rótulo da linha: um `Status` por linha faria o leitor anunciar cada mudança de todas.
+        let dot = div().id(SharedString::from(format!("orq-state-{key}")))
             .size(px(8.)).flex_shrink_0().rounded_full()
             .map(|el| if live.is_some() { el.bg(dot_color) } else { el.border_1().border_color(dot_color) });
         let quick = self.quick_picks.as_ref().filter(|(k, ..)| quick_open && *k == key).map(|(_, conta, modelo)| {
             let locked = self.policy_of(&role.provider, &role.conta).is_some_and(|p| !p.trocar);
             div().flex().gap_2().px(px(8.)).pb(px(6.))
-                .child(div().flex_1().min_w_0().child(Select::new(&conta.0).small().accessibility_label(t("orqcfg_conta"))))
-                .child(div().flex_1().min_w_0().child(Select::new(&modelo.0).small().disabled(locked).accessibility_label(t("composer_modelo"))))
+                .child(div().flex_1().min_w_0().child(Select::new(&conta.0).small().disabled(self.busy).accessibility_label(t("orqcfg_conta"))))
+                .child(div().flex_1().min_w_0().child(Select::new(&modelo.0).small().disabled(locked || self.busy).accessibility_label(t("composer_modelo"))))
         });
         div().rounded(px(8.)).border_1().border_color(if selected { theme::accent() } else { theme::border() })
             .when(selected, |el| el.bg(theme::accent_dim()))
@@ -936,7 +979,7 @@ impl OrqRoles {
             .children(PROVIDERS.iter().map(|&p| choice(SharedString::from(format!("orq-provider-{p}")), role.provider == p, cx).small()
                 .disabled(self.allowed(p).is_empty() || self.busy)
                 .child(div().flex().items_center().gap(px(6.)).child(chrome::provider_glyph(p, 14.)).child(provider_name(p)))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_provider(p, cx)))));
+                .on_click(cx.listener(move |this, _, window, cx| this.set_provider(p, window, cx)))));
         form = form.child(field(t("comum_provider"), providers.into_any_element()));
         form = form.child(match select(&self.picks.conta, t("orqcfg_conta"), false) {
             Some(el) => el,
@@ -1011,7 +1054,12 @@ impl OrqRoles {
             .child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::faint()).truncate().child(t1("orqcfg_rodape_papel", "arquivo", &file)))
                 .child(Button::new("orq-discard").ghost().small().label(t("orqcfg_descartar")).disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| { this.drafts.clear(); this.stale = true; cx.notify(); })))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.drafts.clear();
+                        // Os campos de texto também voltam ao que o contrato tem.
+                        match this.sel.clone() { Some(sel) => this.choose(sel, window, cx), None => this.stale = true }
+                        cx.notify();
+                    })))
                 .child(Button::new("orq-save-next").outline().small().label(t("orqcfg_salvar_continuar")).disabled(self.busy || self.conflict)
                     .on_click(cx.listener(|this, _, window, cx| this.save(true, window, cx))))
                 .child(Button::new("orq-save").primary().small().label(t(if self.busy { "orqcfg_salvando" } else { "orqcfg_salvar" }))
@@ -1023,7 +1071,7 @@ impl OrqRoles {
 
 impl Render for OrqRoles {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.stale { self.build_picks(window, cx); }
+        if self.stale { self.build_picks(None, window, cx); }
         let sessions = self.sessions(cx);
         let header = |gid: Option<String>, cx: &mut Context<Self>| div().flex().items_center().gap_2()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(t("orqcfg_aba_papeis")))

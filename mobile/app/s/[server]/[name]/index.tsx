@@ -13,13 +13,14 @@ import { PlanChip } from '../../../../src/features/plan/PlanChip';
 import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
+import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
 import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, parseStatusLine, selectOption, interrupt, recarregarSessao } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, parseStatusLine, selectOption, interrupt, recarregarSessao } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -135,6 +136,7 @@ export default function ChatScreen() {
     };
   }, [ready, servidorSumiu, serverId, name]);
   const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
+  const orq = isOrq({ provider });
   const wasPreThread = useRef(false);
   useEffect(() => {
     if (wasPreThread.current && currentSession?.tracked) chat.retry();
@@ -211,7 +213,7 @@ export default function ChatScreen() {
         }}
         onMore={() => setMoreOpen(true)}
         onTitlePress={() => setPickerOpen(true)}
-        onTerminal={() => router.push(`/s/${serverId}/${name}/terminal` as never)}
+        onTerminal={orq ? undefined : () => router.push(`/s/${serverId}/${name}/terminal` as never)}
         contextPct={parseStatusLine(statusLine)?.ctxPct ?? null}
         chipPlan={planSession ? <PlanChip session={planSession} onPress={() => router.push(`/s/${serverId}/${name}/activity` as never)} /> : null}
         chipLoop={
@@ -225,7 +227,7 @@ export default function ChatScreen() {
           ) : null
         }
       />
-      <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name}
+      <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
                  recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
@@ -319,7 +321,11 @@ export default function ChatScreen() {
         ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
         {!servidorSumiu && recarregavel ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
-        {!servidorSumiu && !codexPreThread && fetchedSession !== null ? <Composer serverId={serverId} name={name} draft={draft} sessionProvider={provider} /> : null}
+        {!servidorSumiu && !codexPreThread && fetchedSession !== null
+          ? orq
+            ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
+            : <Composer serverId={serverId} name={name} draft={draft} sessionProvider={provider} />
+          : null}
       </KeyboardAvoidingView>
     </Screen>
   );

@@ -735,6 +735,7 @@ impl Hangar {
         match error.status {
             // Rota fora da sessão do convite não é login perdido: o convidado segue autenticado.
             Some(403) if error.detail == "erro_fora_do_convite" => tr_shared("erro_fora_do_convite", &[]),
+            Some(409) if error.detail == "erro_sessao_orq" => tr_shared("erro_sessao_orq", &[]),
             Some(401 | 403) => tr("auth_error"), Some(410) => tr_shared("convite_encerrado", &[]), Some(429) => tr("rate_limited"),
             _ if error.uncertain => tr("delivery_uncertain"),
             _ => tr(&error.detail),
@@ -1660,7 +1661,10 @@ impl Hangar {
         });
     }
 
-    fn can_send(&self) -> bool { !self.connection_dialog && self.chat_online && self.history_installed }
+    // O orquestrador recusa mensagem (409): nada que envie pela conversa dele sai daqui.
+    fn can_send(&self) -> bool {
+        !self.connection_dialog && self.chat_online && self.history_installed && !self.selected.as_ref().is_some_and(SessionInfo::orq)
+    }
 
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1961,8 +1965,9 @@ impl Hangar {
     }
 
     fn can_interrupt(&self) -> bool {
-        let (_, headless) = self.provider();
-        self.chat_online && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input")
+        let (provider, headless) = self.provider();
+        // O orquestrador não tem turno para parar: o Esc e o botão de parar não se oferecem.
+        provider != "orq" && self.chat_online && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input")
     }
 
     fn request_stop(&mut self, cx: &mut Context<Self>) {
@@ -2084,7 +2089,7 @@ impl Hangar {
 
     fn current_snapshot(&self, action: &Action) -> Option<String> {
         match action {
-            Action::Answer => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
+            Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
             Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
             Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}") && e.desistiu == Some(true)).then(|| id.clone()),
@@ -2118,6 +2123,8 @@ impl Hangar {
         }
         let body = match &action {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
+            Action::Skip => match self.chat.ask.as_ref().and_then(|ask| ask.payload.request_id.clone()) {
+                Some(id) => Some(json!({"request_id": id})), None => return },
             Action::Select(option) => Some(json!({"option": option})),
             _ => None,
         };
@@ -2158,6 +2165,13 @@ impl Hangar {
                         self.ask_form = AskForm::default();
                     }
                     (tr(if value.get("fallback").and_then(Value::as_bool) == Some(true) { "ask_fallback" } else { "ask_sent" }), false)
+                }
+                Action::Skip => {
+                    if current && self.chat.ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot) {
+                        self.chat.ask = None;
+                        self.ask_form = AskForm::default();
+                    }
+                    (tr("ask_skipped"), false)
                 }
                 Action::Select(_) | Action::Submit => (tr("option_sent"), false),
                 Action::Cancel => (tr("stop_requested"), false),
@@ -2858,6 +2872,11 @@ impl Hangar {
                 .child(escapes));
         }
         let ready = self.answer_body(cx).is_some();
+        let skip = ask.payload.is_async.then(|| {
+            let fp = fingerprint.clone();
+            Button::new("ask-skip").ghost().label(tr("ask_skip")).disabled(busy)
+                .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Skip, fp.clone(), cx)))
+        });
         let fp = fingerprint.clone();
         let sending = busy && self.selected_key().and_then(|key| self.flight.running(&key).cloned()) == Some(Action::Answer);
         let scroll_key = format!("{fingerprint}#{tab}");
@@ -2867,6 +2886,7 @@ impl Hangar {
         Some(self.interaction_card(tr("ask_title"), body,
             div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().text_color(theme::muted()).child(tr(if ready { "ask_ready" } else { "ask_incomplete" })))
+                .children(skip)
                 .child(if tab + 1 < total {
                     // Troca de aba só pelo botão ou pela faixa: pular sozinho no clique desorienta.
                     Button::new("ask-next").primary().label(tr("ask_next")).disabled(busy)
@@ -3910,7 +3930,7 @@ impl Hangar {
             .when_some(count, |el, n| el.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(n.to_string())));
         let mut children: Vec<AnyElement> = Vec::new();
         // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
-        let mixed = self.sessions.iter().map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
+        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let session = match row {
@@ -4070,7 +4090,7 @@ impl Hangar {
                     .child(format!("? {}", session.pending_questions))))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select(pick.clone(), window, cx);
-                    if !this.connection_dialog && pick.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                    this.focus_composer_for(&pick, window, cx);
                 }))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -4166,6 +4186,7 @@ impl Hangar {
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
+            .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
@@ -4210,7 +4231,7 @@ impl Hangar {
                     this.hide_preview();
                     this.sidebar.hover = hover;
                     this.select(session.clone(), window, cx);
-                    if !this.connection_dialog && session.readable() { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
+                    this.focus_composer_for(&session, window, cx);
                 }))
                 .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element(),
             })
@@ -4222,6 +4243,8 @@ impl Hangar {
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
     fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // O orquestrador não roda agente: selo de provider nele seria mentira.
+        let mixed = mixed && !session.orq();
         let local = remote.is_none();
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
@@ -4282,6 +4305,7 @@ impl Hangar {
                 .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{name}"))).flex_shrink_0().flex().opacity(0.72)
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("create_mode_headless")).build(window, cx))
                     .child(chrome::no_terminal_mark(12., theme::muted()))))
+                .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
                 .when(session.shared, |el| el.child(div().id(SharedString::from(format!("row-shared-{name}"))).flex_shrink_0().flex()
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr_shared("sessao_compartilhada", &[])).build(window, cx))
                     .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
@@ -4348,9 +4372,7 @@ impl Hangar {
                     if this.take_long_press() { return; }
                     this.select(session.clone(), window, cx);
                     // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
-                    if !this.connection_dialog && session.readable() {
-                        this.composer.update(cx, |input, cx| input.focus(window, cx));
-                    }
+                    this.focus_composer_for(&session, window, cx);
                 }))
                 .context_menu(sidebar::session_menu(weak, menu_session))
                 .into_any_element(),
@@ -4703,12 +4725,42 @@ impl Hangar {
                 Some(logo) => el.child(logo),
                 None => el.text_size(px(20.)).font_weight(FontWeight::BOLD).child(glyph),
             });
+        // Sem compositor, o convite a escrever vira o caminho até quem recebe.
+        let hint = if self.selected.as_ref().is_some_and(SessionInfo::orq) { tr_shared("erro_sessao_orq", &[]) }
+            else { tr("empty_chat_hint").replace("{agent}", agent_name(provider)) };
         div().flex_1().px_6().pb_6().flex().flex_col().items_center().justify_center().gap_3()
             .child(mark)
             .child(div().flex().flex_col().items_center().gap_1()
                 .child(div().text_base().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(tr("empty_chat")))
                 .child(div().max_w(px(360.)).text_sm().text_center().text_color(theme::muted())
-                    .child(tr("empty_chat_hint").replace("{agent}", agent_name(provider)))))
+                    .child(hint)))
+    }
+
+    /// Rodapé da linha `orq`, como o do web: sem campo de digitar, o selo e o botão que abre o árbitro da orquestração.
+    fn render_orq_footer(&self, orq: &str, cx: &mut Context<Self>) -> Div {
+        let target = orq.to_owned();
+        div().w_full().py_3().flex().flex_col().items_center().gap_2()
+            .child(div().text_sm().text_color(theme::muted()).child(tr_shared("orq_row_badge", &[])))
+            .child(Button::new("orq-talk-to-arbiter").small().label(tr_shared("orq_talk_to_arbiter", &[]))
+                .disabled(self.arbiter_of(orq).is_none())
+                .on_click(cx.listener(move |this, _, window, cx| this.open_arbiter(&target, window, cx))))
+    }
+
+    /// Lido da lista atual, não da linha guardada ao abrir: a sucessão troca o árbitro sem trocar a linha `orq`.
+    fn arbiter_of(&self, orq: &str) -> Option<&SessionInfo> {
+        self.sessions.iter().find(|s| s.name == orq).and_then(|s| s.arbiter(&self.sessions))
+    }
+
+    /// Abre o árbitro com o campo focado, como o clique na linha dele.
+    fn open_arbiter(&mut self, orq: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(arbiter) = self.arbiter_of(orq).cloned() else { return };
+        self.select(arbiter.clone(), window, cx);
+        self.focus_composer_for(&arbiter, window, cx);
+    }
+
+    /// Foco no campo depois de escolher uma conversa, só se ela tem compositor desenhado.
+    fn focus_composer_for(&mut self, session: &SessionInfo, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.connection_dialog && session.takes_messages() { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
     }
 
     /// Entre o cabeçalho e a faixa de baixo: o cartão de antes da conversa, a lista ou o aviso de vazio.
@@ -4780,6 +4832,7 @@ impl Hangar {
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
         let card = if readable { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, cx)) } else { None };
         let plan_bar = if readable && card.is_none() {
             self.render_plan_bar(busy, cx).or_else(|| self.render_headless_plan(cx)).or_else(|| self.render_plan_preview(cx))
@@ -4807,7 +4860,11 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .when(self.selected.is_some() || self.api.is_some(), |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx)));
+            .map(|el| match orq {
+                Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
+                None => el.when(self.selected.is_some() || self.api.is_some(),
+                    |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx))),
+            });
         self.measured_bottom(content.into_any_element())
     }
 
@@ -4883,8 +4940,7 @@ impl Render for Hangar {
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
                     .selected(self.side.open).on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx)))))
-                // Sessão sem pane só tem terminal quando um atalho abriu um.
-                .when(self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms(), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
+                .when(self.selected.as_ref().is_some_and(|s| terminal::terminal_offered(s, self.has_shortcut_terms())), |el| el.child(chrome::icon_button("terminal-show", IconName::SquareTerminal,
                         tr("term_toggle"), cx).selected(self.terminal.is_some())
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))))))
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
@@ -4998,7 +5054,7 @@ impl Render for Hangar {
             .font_family(theme::SANS)
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some();
-                if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(|s| s.readable())
+                if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(SessionInfo::takes_messages)
                     || this.selected.is_none() && this.api.is_some()) {
                     this.composer.update(cx, |input, cx| input.focus(window, cx));
                 }
@@ -5174,6 +5230,15 @@ mod tests {
             session.state = state.into();
             assert_eq!(conversation_row_state(&session, None, false), expected);
         }
+    }
+
+    #[test]
+    fn orq_texts_come_from_the_web_keys() {
+        use crate::{api::Failure, i18n::tr_shared};
+        let refused = Failure { status: Some(409), detail: "erro_sessao_orq".into(), retry_after: None, uncertain: false };
+        assert_eq!(super::Hangar::failure(&refused), "O orquestrador não recebe mensagens; fale com o árbitro.");
+        assert_eq!(tr_shared("orq_row_badge", &[]), "Orquestrador · sem LLM");
+        assert_eq!(tr_shared("orq_talk_to_arbiter", &[]), "Falar com o árbitro");
     }
 
     #[test]

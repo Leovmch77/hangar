@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from app import atomico
+from app.adapters.orq import runs as orq_runs
 from app.config import settings
 from app.models import dumps_safe
 
@@ -82,7 +83,9 @@ class PairLink:
         if "peers" not in data and data.get("peer"):
             data["peers"] = [data["peer"]]
         peers = [p for p in (data.get("peers") or []) if p]
-        if not peers:
+        # Sem peers só o grupo de orquestração existe: o árbitro do `orquestrar-auto` nasce sozinho
+        # e o time chega depois, pelo orquestrador.
+        if not peers and data.get("orq") is not True:
             return None
         harness = data.get("harness")
         return {"peers": peers, "task": data.get("task", ""),
@@ -273,9 +276,9 @@ def _arquivar_contratos(gid: str) -> None:
 
 def leave(name: str) -> list[str]:
     """`name` sai do grupo. Devolve os ex-companheiros (pra notificação). Grupo restante de 1
-    também é dissolvido (grupo de 1 não existe). Idempotente. Escrita parcial (ex: OSError no
-    2º companheiro) restaura o estado anterior e propaga — sem isto sobrava companheiro-fantasma
-    apontando pra quem já saiu.
+    também é dissolvido (grupo de 1 não existe), salvo o de orquestração com execução `auto` viva.
+    Idempotente. Escrita parcial (ex: OSError no 2º companheiro) restaura o estado anterior e
+    propaga — sem isto sobrava companheiro-fantasma apontando pra quem já saiu.
 
     Grupo dissolvido de vez (ninguém mais dentro) arquiva o contrato em `~/.hangar/pair-arquivo/`
     (sem sidecar apontando pra ele, no lugar original seria órfão; apagar perdia decisões)."""
@@ -284,10 +287,13 @@ def leave(name: str) -> list[str]:
         if not link:
             return []
         peers = link["peers"]
+        # Execução `orquestrar-auto` viva: o orquestrador fecha e abre as sessões das Tasks, e o
+        # grupo passa por trechos só com o árbitro. Ilegível conta como viva: desfazer não tem volta.
+        vivo = link["orq"] and orq_runs.group_phase(link["gid"]) in ("live", "unknown")
         snap = {m: PairLink(m).get() for m in [name, *peers]}
         try:
             PairLink(name).clear()
-            if len(peers) == 1:
+            if len(peers) == 1 and not vivo:
                 PairLink(peers[0]).clear()
             else:
                 for p in peers:
@@ -301,9 +307,37 @@ def leave(name: str) -> list[str]:
             raise
         # Fora do try: arquivar contrato é faxina, best-effort — falha aqui não pode desfazer um
         # unpair que já deu certo (restore ressuscitaria o par).
-        if len(peers) == 1 and link.get("gid"):
+        # Com a execução viva o orquestrador ainda lê o `regras-<gid>.md` a cada kick-off.
+        if len(peers) <= 1 and link.get("gid") and not vivo:
             _arquivar_contratos(link["gid"])
         return peers
+
+
+# Do `--pair --orq` do árbitro ao `execucao_inicio`: contrato, fechamento e `orq init` no meio.
+ORQ_LAUNCH_GRACE_S = 3600
+
+
+def dissolve_lone_orq() -> list[str]:
+    """Grupo `orq` de um membro só vive enquanto a execução `auto` dele vive. Acabada (ou nunca
+    iniciada depois da janela de lançamento), o sidecar sai e o contrato vai pro arquivo: o hook de
+    SessionStart lê o arquivo do sidecar e reinjetaria o protocolo pra sempre."""
+    out = []
+    with _LOCK:
+        for f in _pair_dir().glob("*.json"):
+            st = PairLink(f.stem).get()
+            if not st or st["peers"] or not st["orq"]:
+                continue
+            fase = orq_runs.group_phase(st["gid"])
+            try:
+                novo = time.time() - f.stat().st_mtime < ORQ_LAUNCH_GRACE_S
+            except OSError:
+                continue
+            if fase in ("live", "unknown") or (fase is None and novo):
+                continue
+            PairLink(f.stem).clear()
+            _arquivar_contratos(st["gid"])
+            out.append(f.stem)
+    return out
 
 
 def rename_pair(old: str, new: str) -> None:

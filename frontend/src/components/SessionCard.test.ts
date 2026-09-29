@@ -7,6 +7,7 @@ import { mount, unmount, tick } from 'svelte';
 import SessionCard from './SessionCard.svelte';
 import type { AggSession, SessionInfo } from '@hangar/core';
 import { fecharNav, marcarNavAberto } from '../lib/navegadorPanel.svelte';
+import * as m from '../paraglide/messages';
 
 function sessao(over: Partial<SessionInfo>): SessionInfo {
   return { name: 's1', state: 'idle', ...over } as SessionInfo;
@@ -150,5 +151,27 @@ describe('SessionCard: diff stats e tempo (referência super.engineering)', () =
     expect(chipClaude?.querySelector('.sr-only')?.textContent).toContain('Claude');
     unmount(comp);
     unmount(comp2);
+  });
+});
+
+describe('SessionCard: orquestrador sem LLM', () => {
+  it('mostra o selo e não oferece Excluir (nem na trilha, nem pelo teclado)', () => {
+    const { el, comp } = montar(sessao({ provider: 'orq', orq_arbiter: 'arb' }));
+    expect(el.querySelector('.orq-badge')?.textContent?.trim()).toBe(m.orq_row_badge());
+    expect(el.querySelector('.del')).toBeNull();
+    unmount(comp);
+  });
+
+  it('sem glifo de provider mesmo quando a lista mistura agentes', () => {
+    const { el, comp } = montar(sessao({ provider: 'orq', orq_arbiter: 'arb' }), { showProvider: true });
+    expect(el.querySelector('.prov-chip')).toBeNull();
+    unmount(comp);
+  });
+
+  it('sessão comum continua com Excluir e sem selo', () => {
+    const { el, comp } = montar(sessao({ provider: 'claude' }));
+    expect(el.querySelector('.orq-badge')).toBeNull();
+    expect(el.querySelector('.del')).not.toBeNull();
+    unmount(comp);
   });
 });

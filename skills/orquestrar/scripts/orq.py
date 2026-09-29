@@ -19,11 +19,15 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
+from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -41,18 +45,27 @@ PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova":
                 "paralelo": "Paralelo", "correcao": "Correção pelo revisor", "revisao": "Revisão"}
 SUBAGENT = "subagente"   # `--par` of a Task reviewed by a subagent: a name, never a session
 CHECK_TIMEOUT_S = 900
+# The merge commit runs the repo's hooks, which may run checks of their own.
+MERGE_TIMEOUT_S = CHECK_TIMEOUT_S
+TIMELINE_KINDS = ("advance", "woke", "dropped", "would_drop", "failed", "notice")
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
                     "de", "para", "plano", "branch", "gid", "fase", "patch")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
+# The same Jev served by OpenRouter, for a `sk-or-` key with no endpoint configured.
+OPENROUTER_JEV_URL = "https://openrouter.ai/api/alpha/decisions"
+OPENROUTER_JEV_MODEL = "typesafe/jev-1.13-20260917"
 JEV_TIMEOUT_S = 5
 # A hung backend cannot hang the session that called orq.
 SEND_TIMEOUT_S = 30
+SEND_TRIES = 3   # failed wakes of the batch or final step before it counts as failed
 # Calibrated on real arbiter messages: changing a word or a threshold means measuring again.
 DISCARD_P = 0.85  # p of "nothing" (the choice's winner) needed to drop
 VETO_P = 0.40     # any alert above this keeps the arbiter awake
 JEV_VETOES = ("context", "user", "problem", "deviation")
+# `orq init --auto` without `--jev`: "on" only once these questions were measured with no wrong drop.
+AUTO_JEV_DEFAULT = "on"
 JEV_QUESTIONS = {
     "kind": {
         "type": "choice",
@@ -95,6 +108,10 @@ class OrqError(Exception):
     pass
 
 
+class SendError(OrqError):
+    """hangar-send did not deliver: the step may be tried again."""
+
+
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -129,6 +146,31 @@ def journal_append(d: Path, text: str) -> None:
                      encoding="utf-8")
     with j.open("a", encoding="utf-8") as f:
         f.write(line)
+
+
+def is_auto(d: Path) -> bool:
+    """An orquestrar-auto run; any unreadable orq.json is a plain run."""
+    try:
+        cfg = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and cfg.get("auto") is True
+
+
+def timeline(d: Path, kind: str, text: str, task: int | None = None) -> None:
+    """One pt-BR line of what the orchestrator did, shown by Hangar's orq row. Auto runs only;
+    the file name carries the run so two runs never share an SSE id."""
+    if kind not in TIMELINE_KINDS:
+        raise ValueError(f"unknown timeline kind: {kind}")
+    if not is_auto(d):
+        return
+    line = json.dumps({"ts": now(), "kind": kind, "text": text, "task": task}, ensure_ascii=False)
+    try:
+        with (d / f"timeline-{d.resolve().name}.jsonl").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        # A view of the run: losing a line never costs the arbiter a message.
+        print(f"orq: timeline not written: {e}", file=sys.stderr)
 
 
 def _validator():
@@ -293,18 +335,21 @@ def _event_line(ev: dict) -> str:
     return " ".join(parts)
 
 
-def send(target: str, text: str, tmux: bool = False) -> None:
-    """Wakes a session through hangar-send, keeping the caller's identity. ORQ_SEND: tests."""
+def send(target: str, text: str, tmux: bool = False, painel: bool = False) -> None:
+    """Wakes a session through hangar-send, keeping the caller's identity; `painel` sends the text
+    as a panel notice instead, without the caller's `[de: …]`. ORQ_SEND: tests."""
     cmd = [os.environ.get("ORQ_SEND", "hangar-send")]
     if tmux:
         cmd.append("--tmux")
+    # Always explicit: a value inherited from the caller's environment must not relabel a session's message.
+    env = {**os.environ, "HANGAR_SEND_PAINEL": "1" if painel else "0"}
     try:
         r = subprocess.run(cmd + [target, text], capture_output=True, text=True,
-                           timeout=SEND_TIMEOUT_S)
+                           timeout=SEND_TIMEOUT_S, env=env)
     except subprocess.TimeoutExpired:
-        raise OrqError(f"hangar-send {target} did not answer in {SEND_TIMEOUT_S}s") from None
+        raise SendError(f"hangar-send {target} did not answer in {SEND_TIMEOUT_S}s") from None
     if r.returncode != 0:
-        raise OrqError(f"hangar-send {target} failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
+        raise SendError(f"hangar-send {target} failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
 
 
 def _send_after_event(target: str, text: str, arbiter: str) -> None:
@@ -431,8 +476,8 @@ def plan_tasks(text: str) -> list[dict]:
     if len(rows) < 2:
         return []
     head = [c.strip().lower() for c in rows[0].strip().strip("|").split("|")]
-    col = {name: head.index(name) for name in ("#", "files", "verification", "wave", "roteiro")
-           if name in head}
+    col = {name: head.index(name) for name in ("#", "what it is", "files", "verification", "wave",
+                                               "risk", "roteiro") if name in head}
     out = []
     for row in rows[2:]:
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
@@ -440,8 +485,11 @@ def plan_tasks(text: str) -> list[dict]:
         if not get("#").isdigit():
             continue
         rot = get("roteiro").strip("`")
-        out.append({"n": int(get("#")), "files": re.findall(r"`([^`]+)`", get("files")),
+        risk = get("risk").strip("`").lower()
+        out.append({"n": int(get("#")), "title": get("what it is"),
+                    "files": re.findall(r"`([^`]+)`", get("files")),
                     "verification": get("verification"), "wave": get("wave"),
+                    "risk": "" if risk in ("", "—", "-") else risk,
                     "roteiro": "" if rot in ("", "—", "-") else rot})
     return out
 
@@ -453,47 +501,68 @@ def plan_sha(text: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
-TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
-FENCE = re.compile(r"^(```|~~~).*?^\1", re.MULTILINE | re.DOTALL)
+PLAN_TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
+# Closing fence: same character, at least as long, up to 3 spaces of indent (CommonMark).
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[`~]*[ \t]*$", re.MULTILINE | re.DOTALL)
 OPEN_STEP = re.compile(r"^\s*- \[ \] \*\*Step", re.MULTILINE)
 DONE_STEP = re.compile(r"^\s*- \[[xX]\] \*\*Step", re.MULTILINE)
 
 
-def _repo_files(repo: Path, *args: str) -> list[str]:
-    # `git grep` exits 1 on no match; a folder outside git has no plan to find.
-    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
-                       capture_output=True, text=True)
-    return [line for line in r.stdout.splitlines() if line] if r.returncode == 0 else []
+def _repo_files(repo: Path, problems: list[str], *args: str) -> list[str]:
+    # Exit 1 of `git grep` is "no match" and a folder outside git has no plan: both are empty, not
+    # errors. Anything else (timeout, dubious ownership, no git) is reported, never read as "no plan".
+    try:
+        r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", str(repo), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        problems.append(f"git {args[0]}: {e}")
+        return []
+    if r.returncode == 0:
+        return [line for line in r.stdout.splitlines() if line]
+    if not (r.returncode == 1 and args[0] == "grep") and "not a git repository" not in r.stderr:
+        problems.append(f"git {args[0]}: {r.stderr.strip()[:160]}")
+    return []
 
 
 def find_plan(repo: Path) -> dict:
     """The plan a run would start from, best first: stamped, stamped then edited, an unstamped
-    `.orq.md`, then any plan in the Task/Step format, newest first. `{}` = no plan."""
-    orq = _repo_files(repo, "ls-files", "-co", "--exclude-standard", "*.orq.md")
-    tasks = _repo_files(repo, "grep", "-l", "--untracked", "-E", r"^### Task [0-9]+:", "--", "*.md")
+    `.orq.md`, then any plan in the Task/Step format, newest first. `path`/`state` only when one
+    is found; `problems` = what could not be read (a plan may be hiding there); `finished` = the
+    newest plan with every step ticked."""
+    problems: list[str] = []
+    orq = _repo_files(repo, problems, "ls-files", "-co", "--exclude-standard", "*.orq.md")
+    tasks = _repo_files(repo, problems, "grep", "-l", "--untracked", "-E", r"^### Task [0-9]+:", "--", "*.md")
     # The superpowers plans folder is usually gitignored, so git sees none of it.
     kept = sorted(str(p.relative_to(repo)) for p in (repo / "docs/superpowers/plans").glob("*.md"))
     rank = {"stamped": 0, "changed": 1, "unstamped": 2, "tasks": 3}
-    found = []
+    found, done = [], []
     for rel in dict.fromkeys(orq + tasks + kept):
         path = repo / rel
         try:
             text, mtime = path.read_text(encoding="utf-8"), path.stat().st_mtime
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as e:
+            problems.append(f"{path}: {type(e).__name__}")
             continue
         m = PREPARADO.search(text)
         # A fenced `### Task` is a doc showing the format, not a plan; every step ticked is work done.
         body = FENCE.sub("", text)
-        if not m and not rel.endswith(".orq.md") and (not TASK_HEAD.search(body) or
-                                                      (DONE_STEP.search(body) and not OPEN_STEP.search(body))):
+        if DONE_STEP.search(body) and not OPEN_STEP.search(body):
+            done.append((mtime, str(path)))
+            continue
+        if not m and not rel.endswith(".orq.md") and not PLAN_TASK_HEAD.search(body):
             continue
         state = ("stamped" if m.group(1) == plan_sha(text) else "changed") if m else \
             "unstamped" if rel.endswith(".orq.md") else "tasks"
         found.append((rank[state], -mtime, str(path), state))
-    if not found:
-        return {}
-    _, _, path, state = min(found)
-    return {"path": path, "state": state}
+    out: dict = {}
+    if found:
+        _, _, path, state = min(found)
+        out = {"path": path, "state": state}
+    if problems:
+        out["problems"] = problems
+    if done:
+        out["finished"] = max(done)[1]
+    return out
 
 
 def cmd_readiness(a) -> int:
@@ -507,11 +576,13 @@ def plan_of(d: Path) -> dict:
     return projeto(plan_text(p)) if p else {}
 
 
-def run_checks(repo: str, cmds: list[str], log: Path) -> tuple[bool, str]:
-    """Each declared command in the repo, output to `log`; (ok, first failure's line)."""
+def run_checks(repo: str, cmds: list[str], log: Path, beat: Path | None = None) -> tuple[bool, str]:
+    """Each declared command in the repo, output to `log`; (ok, first failure's line). `beat` is
+    touched before each command, so its age tells a slow pass from a stuck one."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as f:
         for c in cmds:
+            _touch(beat)
             f.write(f"$ {c}\n")
             f.flush()
             try:
@@ -581,6 +652,20 @@ def cmd_init(a) -> int:
         raise OrqError(too_big)
     cfg = {"arbiter": a.arbiter, "repo": str(Path(a.repo).expanduser().resolve()),
            "contract": str(contract), "untouchables": a.untouchable}
+    try:
+        old = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    old = old if isinstance(old, dict) else None
+    # A re-init that forgets --auto must not turn the run plain: the orchestrator would stop.
+    auto = a.auto or (old or {}).get("auto") is True
+    if auto:
+        if not a.plan:
+            raise OrqError("--auto needs --plan: the orchestrator reads the Tasks from it")
+        cfg.update(auto=True, jev=a.jev or (old or {}).get("jev") or AUTO_JEV_DEFAULT,
+                   regex=a.regex or (old or {}).get("regex") or "shadow")
+    elif a.jev or a.regex:
+        raise OrqError("--jev and --regex only apply with --auto")
     if a.plan:
         plan = Path(a.plan).expanduser().resolve()
         ptext = plan_text(plan)
@@ -594,15 +679,12 @@ def cmd_init(a) -> int:
         cfg["plan"] = str(plan)
     else:
         # Only a run started before plans were stamped re-inits without one, and stays plan-less.
-        try:
-            old = json.loads((d / "orq.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            old = None
-        if not isinstance(old, dict) or "plan" in old:
+        if old is None or "plan" in old:
             raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
                            "started without a plan re-inits without one")
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}")
+    journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
+                      + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if auto else ""))
     print("ok")
     return 0
 
@@ -723,6 +805,11 @@ def cmd_event(a) -> int:
                            "never edits code; restore the round and judge again")
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
+    # Before the notices: a failed send must not cost the orchestrator its trigger.
+    if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
+        if err := spawn_advance(d):
+            _journal_or_warn(d, f"{ev['tipo']} T{ev.get('task')}: orq advance not started: {err}")
+            _advance_not_started(d, f"{ev['tipo']} T{ev.get('task')}", ev.get("task"), err)
     _after_event(d, ev)
     print("ok")
     return 0
@@ -834,10 +921,44 @@ def cmd_lock(a) -> int:
 MARK = re.compile(r"^\s*\[(aviso|decis[aã]o)\]", re.IGNORECASE)
 
 
-def git(repo: str, *args: str) -> str:
+def _touch(p: Path | None) -> None:
+    if p is None:
+        return
+    try:
+        os.utime(p)
+    except OSError:
+        pass   # a heartbeat, not a step: the vigia alarms late at worst
+
+
+def _run_bounded(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """subprocess.run with the whole process group killed on timeout: a hook's child keeping the
+    pipe open would otherwise hold run() past its timeout forever."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          start_new_session=True) as p:
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass   # the group ended between the timeout and the kill
+            try:
+                p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # A process outside the group still holds the pipe: drop it, never wait forever.
+                p.stdout.close()
+                p.stderr.close()
+            raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def git(repo: str, *args: str, timeout: float | None = None) -> str:
     # Unquoted paths: an escaped accented name would slip past the untouchables glob.
-    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", repo, *args],
-                       capture_output=True, text=True)
+    cmd = ["git", "-c", "core.quotePath=false", "-C", repo, *args]
+    try:
+        r = _run_bounded(cmd, timeout) if timeout else subprocess.run(cmd, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        raise OrqError(f"git {' '.join(args)}: timed out after {timeout}s, killed") from None
     if r.returncode != 0:
         raise OrqError(f"git {' '.join(args)}: {r.stderr.strip()[:200]}")
     return r.stdout
@@ -1128,10 +1249,25 @@ def cmd_commit(a) -> int:
         f.write(json.dumps({"ts": now(), "task": a.task, "hash": full}) + "\n")
     journal_append(d, f"commit T{a.task} {full[:12]} checked ({len(files)} file(s))")
     # closed.jsonl is already written: an unreadable plan must not swallow the close notice.
+    queue_err = None
     try:
         extra = _queue_proof(d, a.task, full)
     except OrqError as e:
-        extra = f" (proof queue skipped: {e})"
+        extra, queue_err = f" (proof queue skipped: {e})", str(e)
+    if cfg.get("auto"):
+        # The orchestrator integrates and releases the next Task; the arbiter wakes only if it cannot.
+        if queue_err:
+            _wake_or_journal(d, f"[decisao] Task {a.task} closed, but its proof was NOT queued "
+                                f"({queue_err}): no batch will carry it. Run it by hand or take it "
+                                "to the user.",
+                             f"falhou ao enfileirar a prova da T{a.task}: {queue_err[:200]}", a.task)
+        err = spawn_advance(d)
+        journal_append(d, f"commit T{a.task}: orq advance "
+                          + (f"not started ({err})" if err else "started") + extra)
+        if err:
+            _advance_not_started(d, f"commit T{a.task}", a.task, err)
+        print("ok")
+        return 0
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
                               f"{len(files)} file(s), tip = hash, matches the approved round. "
                               "Release the next ready Task(s)." + extra)
@@ -1139,45 +1275,63 @@ def cmd_commit(a) -> int:
     return 0
 
 
-def cmd_batch(a) -> int:
-    d = base_dir(a.dir)
-    pend = pending_proofs(d)
+def take_batch(d: Path, dry: bool = False, pend: list[dict] | None = None) -> str | None:
+    """The pending proofs (or `pend`) become the next batch; its line, or None when nothing is
+    pending. `dry`: the line only, nothing recorded."""
+    pend = pending_proofs(d) if pend is None else pend
     if not pend:
-        print("no pending proof")
-        return 0
+        return None
     # Plan-relative in the plan; the proof session runs elsewhere and needs a path it can open.
     base = Path(config(d)["plan"]).expanduser().resolve().parent
     n = len(_jsonl(d / "prova-lotes.jsonl")) + 1
-    with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
-    journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
-    print(f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend))
+    if not dry:
+        with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
+        journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
+    return f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend)
+
+
+def cmd_batch(a) -> int:
+    print(take_batch(base_dir(a.dir)) or "no pending proof")
     return 0
 
 
-def jev_key() -> str:
-    k = os.environ.get("TYPESAFE_API_KEY", "")
-    if k:
-        return k
+def _json_object(p: Path) -> dict:
     try:
-        loaded = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        v = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
-    env = loaded.get("env") if isinstance(loaded, dict) else None
-    v = env.get("TYPESAFE_API_KEY") if isinstance(env, dict) else None
-    return v if isinstance(v, str) else ""
+        return {}
+    return v if isinstance(v, dict) else {}
 
 
-def jev_ask(text: str) -> dict:
-    """{'choice', 'p', 'veto'} or {'error'}; never raises — any failure wakes the arbiter."""
-    key = jev_key()
-    if not key:
+def jev_config(auto: bool = False) -> dict:
+    """The Jev's key, url and model. The environment wins; an auto run then reads the server's
+    runtime-config.json, where the Hangar settings screen writes them, and an OpenRouter key alone
+    implies its endpoint. A plain run keeps the environment-only lookup: orquestrar stays as it was."""
+    rc = _json_object(Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+                      / "runtime-config.json") if auto else {}
+    env = _json_object(Path.home() / ".claude" / "settings.json").get("env")
+    legacy = env.get("TYPESAFE_API_KEY") if isinstance(env, dict) else None
+
+    def first(*vals) -> str:
+        return next((v.strip() for v in vals if isinstance(v, str) and v.strip()), "")
+
+    key = first(os.environ.get("TYPESAFE_API_KEY"), rc.get("jev_api_key"), legacy)
+    url = first(os.environ.get("ORQ_JEV_URL"), os.environ.get("JEV_ENDPOINT"), rc.get("jev_endpoint"))
+    model = first(os.environ.get("JEV_MODEL"), rc.get("jev_model"))
+    if auto and not url and key.startswith("sk-or-"):
+        url, model = OPENROUTER_JEV_URL, model or OPENROUTER_JEV_MODEL
+    return {"key": key, "url": url or JEV_URL, "model": model or JEV_MODEL}
+
+
+def jev_ask(text: str, auto: bool = False) -> dict:
+    """{'choice', 'p', 'veto'} or {'error'}; never raises — an error never lets the Jev drop a message."""
+    c = jev_config(auto)
+    if not c["key"]:
         return {"error": "no key"}
-    model = os.environ.get("JEV_MODEL", "").strip() or JEV_MODEL
-    body = json.dumps({"model": model, "state": text[-20_000:], "questions": JEV_QUESTIONS}).encode()
-    url = os.environ.get("ORQ_JEV_URL") or os.environ.get("JEV_ENDPOINT", "").strip() or JEV_URL
-    req = urllib.request.Request(url, data=body,
-                                 headers={"authorization": f"Bearer {key}",
+    body = json.dumps({"model": c["model"], "state": text[-20_000:], "questions": JEV_QUESTIONS}).encode()
+    req = urllib.request.Request(c["url"], data=body,
+                                 headers={"authorization": f"Bearer {c['key']}",
                                           "content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
@@ -1199,17 +1353,47 @@ def triage(d: Path, text: str, alarm: bool) -> str:
     mode = os.environ.get("ORQ_JEV", "shadow")
     if mode == "off" or alarm:
         return "wake"
-    r = jev_ask(text)
-    would_drop = ("error" not in r and r["choice"] == "nothing" and r["p"] >= DISCARD_P
-                  and all(v <= VETO_P for v in r["veto"].values()))  # NaN never drops
+    r = _jev_record(d, text, mode)
+    return "drop" if mode == "on" and r["would_drop"] else "wake"
+
+
+def _jev_record(d: Path, text: str, mode: str, auto: bool = False) -> dict:
+    """Asks the Jev and appends the answer to jev-shadow.jsonl; the answer gains `would_drop`."""
+    r = jev_ask(text, auto)
+    r["would_drop"] = ("error" not in r and r["choice"] == "nothing" and r["p"] >= DISCARD_P
+                       and all(v <= VETO_P for v in r["veto"].values()))  # NaN never drops
     try:
         with (d / "jev-shadow.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": now(), "mode": mode, "alarm": alarm, "text": text[:500], **r,
-                                "would_drop": would_drop}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"ts": now(), "mode": mode, "alarm": False, "text": text[:500], **r},
+                               ensure_ascii=False) + "\n")
     except OSError as e:
         # Losing the shadow record never costs the arbiter the message.
         print(f"orq: jev-shadow.jsonl not written: {e}", file=sys.stderr)
-    return "drop" if mode == "on" and would_drop else "wake"
+    return r
+
+
+def _regex():
+    spec = importlib.util.spec_from_file_location("orq_triage", HERE / "orq_triage.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def triage_auto(d: Path, cfg: dict, text: str) -> tuple[str, str, str]:
+    """Auto runs: the Jev decides when it has a key and answers; without a key or on an error the
+    measured regex does. Returns (verdict, source, why): verdict "drop", "would_drop" (the mode
+    only records) or "wake"; source "jev" or "regex"; why names the regex category."""
+    if os.environ.get("ORQ_JEV") != "off" and jev_config(auto=True)["key"]:
+        mode = cfg.get("jev", "shadow")
+        r = _jev_record(d, text, mode, auto=True)
+        if "error" not in r:
+            if not r["would_drop"]:
+                return "wake", "jev", "jev"
+            return ("drop" if mode == "on" else "would_drop"), "jev", "jev"
+    verdict, category = _regex().decide(text)
+    if verdict == "wake":
+        return "wake", "regex", "regex"
+    return ("drop" if cfg.get("regex", "shadow") == "on" else "would_drop"), "regex", f"regex: {category}"
 
 
 def cmd_notify(a) -> int:
@@ -1219,7 +1403,17 @@ def cmd_notify(a) -> int:
         journal_append(d, f"aviso: {a.text}")
         print("journal")
         return 0
-    if not m and triage(d, a.text, a.alarm) == "drop":
+    kind, line = "woke", f"acordou o árbitro: {a.text}"
+    if not m and not a.alarm and is_auto(d):
+        verdict, source, why = triage_auto(d, config(d), a.text)
+        if verdict == "drop":
+            journal_append(d, f"({source}: no action) {a.text}")
+            timeline(d, "dropped", f"recado registrado sem acordar o árbitro ({why}): {a.text}")
+            print(f"journal ({source})")
+            return 0
+        if verdict == "would_drop":
+            kind, line = "would_drop", f"teria descartado ({why}); acordou o árbitro: {a.text}"
+    elif not m and triage(d, a.text, a.alarm) == "drop":
         journal_append(d, f"(jev: no action) {a.text}")
         print("journal (jev)")
         return 0
@@ -1230,7 +1424,9 @@ def cmd_notify(a) -> int:
         send(state(d)["arbiter"], a.text, tmux=a.alarm)
     except OrqError as e:
         journal_append(d, f"notify FAILED: {e}")
+        timeline(d, "failed", f"recado ao árbitro não entregue ({e}): {a.text}")
         raise
+    timeline(d, kind, line)
     print("arbiter woken")
     return 0
 
@@ -1239,6 +1435,832 @@ def cmd_log(a) -> int:
     d = base_dir(a.dir)
     journal_append(d, (f"T{a.task} " if a.task is not None else "") + a.text)
     print("ok")
+    return 0
+
+
+# ---- orq advance: the orchestrator of an `auto` run -------------------------------------------
+
+JEV_PICK_P = 0.85  # below it the rule decides; not calibrated yet, like the triage thresholds were
+JEV_RED = {"red": {"type": "choice", "instructions": (
+    "A software team merged a finished Task into its main line and ran the integration commands. "
+    "They failed; the failing command and the end of its output follow. What should happen?"),
+    "criteria": {
+        "back": "the failure comes from the merged change: the Task goes back to its executor to fix",
+        "retry": ("the failure is transient and unrelated to the change (network, timeout, a busy "
+                  "port or device): run the same commands once more"),
+        "wake": "it needs a person: the environment is broken, or it is unclear whose failure it is",
+        "none": "none of these",
+    }}}
+RED_PT = {"back": "devolver à Task", "retry": "rodar de novo", "wake": "acordar o árbitro"}
+PASSO_PT = {"integrate": "integrar", "open": "abrir", "batch": "anunciar o lote de prova",
+            "final": "pedir a revisão final", "advance": "rodar a passada"}
+
+
+def _at_or_after(ts, ref) -> bool:
+    """`ts` at or after `ref`; ts has second precision, so the same second counts. A ref missing
+    or that does not parse lets every event count."""
+    if ref is None:
+        return True
+    try:
+        return datetime.fromisoformat(ts) >= datetime.fromisoformat(ref)
+    except (TypeError, ValueError):
+        return True
+
+
+def _closes(d: Path) -> dict[int, dict]:
+    """Task → its latest closed.jsonl line, ordered by when it closed: the merge order."""
+    out: dict[int, dict] = {}
+    for c in _jsonl(d / "closed.jsonl"):
+        if isinstance(c.get("task"), int) and c.get("hash"):
+            out.pop(c["task"], None)
+            out[c["task"]] = c
+    return out
+
+
+def _outcome(evs: list[dict], n: int, close: dict) -> str | None:
+    """How integrating this close ended, None while not tried. A new close (the fix of a red
+    integration, or a correction after a conflict) starts over."""
+    out = None
+    for ev in evs:
+        if ev.get("task") != n or not _at_or_after(ev.get("ts"), close.get("ts")):
+            continue
+        t = ev.get("tipo")
+        if t in ("integrada", "conflito", "integracao_vermelha") or (
+                t == "advance_falhou" and ev.get("passo") == "integrate"):
+            out = t
+    return out
+
+
+def _integrated(d: Path, evs: list[dict]) -> set[int]:
+    return {n for n, c in _closes(d).items() if _outcome(evs, n, c) == "integrada"}
+
+
+def _failed_since(evs: list[dict], passo: str, task: int | None, since) -> bool:
+    return any(ev.get("tipo") == "advance_falhou" and ev.get("passo") == passo
+               and ev.get("task") == task and _at_or_after(ev.get("ts"), since) for ev in evs)
+
+
+def additive_files(text: str) -> list[str]:
+    """The optional `Aditivos:` line of `## Projeto`: globs of files where Tasks insert at declared
+    anchors, whose positional conflicts the orchestrator resolves by union."""
+    for line in _section(text, "Projeto"):
+        k, sep, v = line.partition(":")
+        if sep and k.strip().lower() == "aditivos":
+            return re.findall(r"`([^`]+)`", v)
+    return []
+
+
+def orchestrator_tag(d: Path) -> str:
+    """The panel's notice form: nobody answers it as if it were a session."""
+    return f"[painel: orquestrador {_gid(d)}] "
+
+
+def _gid(d: Path) -> str:
+    return _run_start(d).get("gid") or d.name
+
+
+def _run_start(d: Path) -> dict:
+    return next((ev for ev in reversed(events(d)) if ev.get("tipo") == "execucao_inicio"), {})
+
+
+def _notice_once(d: Path, text: str, task: int | None = None) -> None:
+    """A wait the orchestrator keeps passing over: one timeline line per episode, not per pass."""
+    last = (_jsonl(d / f"timeline-{d.resolve().name}.jsonl") or [{}])[-1]
+    if last.get("text") != text:
+        timeline(d, "notice", text, task)
+
+
+def _off_branch(d: Path, repo: str) -> str | None:
+    """Why the main checkout is not where the run merges and opens, in pt-BR; None = it is. The
+    user may switch the checkout mid-run, and a merge would land on whatever is checked out."""
+    want = _run_start(d).get("branch")
+    cur = git(repo, "branch", "--show-current").strip()
+    if cur and (not want or cur == want):
+        return None
+    where = f"na branch {cur}" if cur else "em HEAD destacado"
+    return (f"o checkout principal está {where}, não na {want or 'branch'} da execução; integrar "
+            "e abrir Tasks esperam ele voltar")
+
+
+def _say(d: Path, target: str, text: str) -> None:
+    send(target, orchestrator_tag(d) + text, painel=True)
+
+
+def _wake(d: Path, text: str, line: str, task: int | None = None, kind: str = "woke") -> None:
+    """The arbiter, from the orchestrator. Journal and timeline first: a failed send still leaves
+    the trail."""
+    journal_append(d, f"orchestrator → arbiter: {text}")
+    timeline(d, kind, line, task)
+    _say(d, state(d)["arbiter"], text)
+
+
+def _fail(d: Path, passo: str, task: int | None, err: str) -> str:
+    """A step that broke: recorded and the arbiter woken, once. Callers skip a (step, Task) that
+    already failed, so it never repeats in a loop."""
+    ev = {"tipo": "advance_falhou", "passo": passo, "motivo": err[:1200]}
+    if task is not None:
+        ev["task"] = task
+    event_append(d, ev)
+    where = passo + (f" T{task}" if task is not None else "")
+    try:
+        _wake(d, f"[decisao] orq advance failed at {where}: {err[:1200]}. It will not retry this "
+                 "step: do it by hand or take it to the user.",
+              f"falhou ao {PASSO_PT[passo]}" + (f" a T{task}" if task is not None else "")
+              + f": {err[:200]}", task, kind="failed")
+    except OrqError as e:
+        journal_append(d, f"advance: arbiter not woken about {where}: {e}")
+    return f"failed {where}: {err}"
+
+
+def jev_pick(text: str, questions: dict) -> str | None:
+    """The winner of the one choice question in `questions`, when sure; None on doubt, `none`, no
+    key or any failure — the caller's rule decides then."""
+    jc = jev_config(auto=True)
+    if not jc.get("key"):
+        return None
+    (qname,) = questions
+    body = json.dumps({"model": jc.get("model"), "state": text[-20_000:],
+                       "questions": questions}).encode()
+    req = urllib.request.Request(jc.get("url") or JEV_URL, data=body,
+                                 headers={"authorization": f"Bearer {jc['key']}",
+                                          "content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
+            ans = json.load(r)["answers"][qname]
+        choice = ans.get("choice")
+        p = float((ans.get("probabilities") or {}).get(choice, 0.0))
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError,
+            TypeError, AttributeError):
+        return None
+    ok = choice in questions[qname]["criteria"] and choice != "none" and p >= JEV_PICK_P
+    return choice if ok else None
+
+
+def _red_choice(d: Path, cfg: dict, n: int, why: str, log: Path) -> str:
+    """The code builds the options and the Jev picks. No key, an error, doubt or shadow mode →
+    the rule: back to the Task, never run again."""
+    if not jev_config(auto=True).get("key"):
+        return "back"
+    try:
+        tail = log.read_text(encoding="utf-8", errors="replace")[-8000:]
+    except OSError:
+        tail = ""
+    pick = jev_pick(f"{why}\n\n{tail}", JEV_RED)
+    if cfg.get("jev") == "on":
+        return pick or "back"
+    if pick:
+        timeline(d, "notice", f"T{n}: o Jev escolheria \"{RED_PT[pick]}\"; só anotando, a regra "
+                              "devolve à Task", n)
+    return "back"
+
+
+def _prove_additive(path: str, base: bytes, ours: bytes, theirs: bytes, merged: bytes) -> str | None:
+    """A union is accepted only by content, against the base (empty when both sides added the
+    file): a JSON object holds exactly the keys of both sides minus what either side deleted, each
+    with its value; any other file holds exactly base + each side's changes, so an old line kept
+    beside its edited version is refused."""
+    if path.endswith(".json"):
+        try:
+            b = json.loads(base) if base.strip() else {}
+            o, t, m = (json.loads(x) for x in (ours, theirs, merged))
+        except ValueError as e:
+            return f"{path}: the union is not valid JSON ({e})"
+        if not all(isinstance(x, dict) for x in (b, o, t, m)):
+            return f"{path}: not a JSON object"
+        want = (set(o) | set(t)) - (set(b) - set(o)) - (set(b) - set(t))
+        if set(m) != want:
+            return f"{path}: keys {sorted(set(m) ^ want)} differ from both sides' changes"
+        changed = sorted(k for k in m if (k in o and m[k] != o[k]) or (k in t and m[k] != t[k]))
+        return f"{path}: values changed for {changed}" if changed else None
+    b, o, t, m = (Counter(x.decode("utf-8", "replace").splitlines())
+                  for x in (base, ours, theirs, merged))
+    want = o + t - b
+    if m != want:
+        return (f"{path}: the union holds {sum((m - want).values())} line(s) too many and misses "
+                f"{sum((want - m).values())}")
+    return None
+
+
+def _union_resolve(repo: str, path: str) -> str | None:
+    """A positional conflict in a declared additive file: both sides kept (`git merge-file
+    --union`), staged only when the content proves it. None = resolved; else why not."""
+    sides = {}
+    for stage in (1, 2, 3):
+        r = subprocess.run(["git", "-C", repo, "show", f":{stage}:{path}"], capture_output=True)
+        sides[stage] = r.stdout if r.returncode == 0 else None
+    if sides[2] is None or sides[3] is None:
+        return f"{path}: deleted on one side, no union"
+    with tempfile.TemporaryDirectory() as tmp:
+        names = []
+        for stage in (2, 1, 3):  # current, base, other
+            p = Path(tmp) / str(stage)
+            p.write_bytes(sides[stage] or b"")  # no base: both sides added the file
+            names.append(str(p))
+        r = subprocess.run(["git", "merge-file", "-p", "--union", *names], capture_output=True)
+    if r.returncode != 0:
+        return f"{path}: git merge-file failed ({r.stderr.decode(errors='replace').strip()[:120]})"
+    why = _prove_additive(path, sides[1] or b"", sides[2], sides[3], r.stdout)
+    if why:
+        return why
+    (Path(repo) / path).write_bytes(r.stdout)
+    git(repo, "add", "--", path)
+    return None
+
+
+def _journal_or_warn(d: Path, text: str) -> None:
+    """A journal that cannot be written must not cost the caller its next step."""
+    try:
+        journal_append(d, text)
+    except OSError as e:
+        print(f"orq: warning: journal not written ({e}): {text}", file=sys.stderr)
+
+
+def _wake_or_journal(d: Path, text: str, line: str, task: int | None = None) -> None:
+    """A failure only the arbiter can act on; a send that fails too stays in the journal. Never
+    raises: the caller still has its notice or its advance to run."""
+    try:
+        _wake(d, text, line, task, kind="failed")
+    except (OrqError, OSError, ValueError, KeyError) as e:
+        _journal_or_warn(d, f"arbiter not woken: {e}")
+
+
+def _advance_not_started(d: Path, after: str, task: int | None, err: str) -> None:
+    """Nobody else integrates or releases the next Task, so the arbiter hears of it."""
+    _wake_or_journal(d, f"[decisao] After {after}: orq advance did not start ({err}). The watchdog's "
+                        "next cycle retries it; if this repeats, run `orq advance` by hand.",
+                     f"não consegui iniciar o orq advance depois de {after}: {err[:200]}", task)
+
+
+def _abort_merge(repo: str) -> None:
+    """The user's checkout never stays half-merged; an abort that fails is raised, never hidden."""
+    if subprocess.run(["git", "-C", repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                      capture_output=True).returncode != 0:
+        return
+    r = subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OrqError(f"git merge --abort failed, the main line is mid-merge: "
+                       f"{(r.stderr or r.stdout).strip()[:200]}")
+
+
+def _undo_killed_merge(repo: str, before: str) -> None:
+    """A merge killed before writing MERGE_HEAD can leave its files in the tree, where
+    `merge --abort` does not reach."""
+    if git(repo, "status", "--porcelain") == before:
+        return
+    r = subprocess.run(["git", "-C", repo, "reset", "--merge"], capture_output=True, text=True)
+    if r.returncode != 0:
+        left = subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True,
+                              text=True).stdout.strip()
+        raise OrqError(f"git reset --merge failed after a killed merge "
+                       f"({(r.stderr or r.stdout).strip()[:200]}); the main line is dirty: {left[:600]}")
+
+
+def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
+    """`git merge --no-ff` of the verified commit. None = merged (additive conflicts resolved);
+    else the conflicting files and the reason, with the merge aborted."""
+    before = git(repo, "status", "--porcelain")
+    try:
+        r = _run_bounded(["git", "-C", repo, "merge", "--no-ff", "-m", f"Merge Task {n} ({h[:12]})", h],
+                         MERGE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _abort_merge(repo)
+        _undo_killed_merge(repo, before)
+        raise OrqError(f"git merge {h[:12]}: timed out after {MERGE_TIMEOUT_S}s, killed and "
+                       "aborted") from None
+    if r.returncode == 0:
+        return None
+    merged = False
+    try:
+        files = git(repo, "diff", "--name-only", "--diff-filter=U").splitlines()
+        if not files:  # not a conflict: a bad hash, or a hook that refused the merge commit
+            raise OrqError(f"git merge {h[:12]}: {(r.stderr or r.stdout).strip()[:300]}")
+        plan = config(d).get("plan")
+        pats = additive_files(plan_text(plan)) if plan else []
+        others = [f for f in files if not any(fnmatch.fnmatch(f, p) for p in pats)]
+        whys = [] if others else [w for f in files if (w := _union_resolve(repo, f))]
+        if others or whys:
+            return others or files, "; ".join(whys)
+        git(repo, "commit", "--no-edit", timeout=MERGE_TIMEOUT_S)
+        merged = True
+    finally:
+        if not merged:
+            _abort_merge(repo)
+    journal_append(d, f"T{n}: additive conflict in {', '.join(files)} resolved by union, "
+                      "proven by content")
+    return None
+
+
+def _collided_with(d: Path, files: list[str], n: int) -> int | None:
+    """The latest integrated Task whose plan Files cover a conflicting file."""
+    plan = config(d).get("plan")
+    owned = {t["n"]: t["files"] for t in plan_tasks(plan_text(plan))} if plan else {}
+    for ev in reversed(events(d)):
+        t = ev.get("task")
+        if ev.get("tipo") != "integrada" or t == n:
+            continue
+        if any(f == p or f.startswith(p.rstrip("/") + "/") for f in files for p in owned.get(t, [])):
+            return t
+    return None
+
+
+def _back_to_executor(d: Path, repo: str, n: int, why: str, log: Path) -> None:
+    """The page's rule for a red integration: the Task goes back to its executor, who fixes it on
+    the main line; the reviewer judges before the new commit."""
+    ini = next((ev for ev in reversed(events(d))
+                if ev.get("tipo") == "task_inicio" and ev.get("task") == n), None)
+    roles = state(d)["roles"].get(n, {})  # after swaps
+    if not ini or not roles.get("executor"):
+        raise OrqError(f"Task {n} has no task_inicio: executor unknown")
+    close_ts = _closes(d)[n].get("ts")
+    # A task_inicio in the close's own second would not reopen the Task (second precision).
+    deadline = time.time() + 1.5
+    while close_ts and now() <= close_ts and time.time() < deadline:
+        time.sleep(0.2)
+    ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": ini.get("titulo") or f"Task {n}",
+                          "executor": roles["executor"], "par": roles.get("par")})
+    journal_append(d, _event_line(ev))
+    _say(d, roles["executor"], f"[decisao] Integration red after Task {n} was merged: {why} (log "
+                               f"{log}). Fix it on the main line, {repo}, not in a worktree: freeze "
+                               "the round and deliver it to your reviewer as usual; the commit closes "
+                               f"with `orq commit --task {n} --hash <hash>`, without --repo.")
+    timeline(d, "advance", f"T{n}: integração vermelha → devolvida ao executor {roles['executor']}", n)
+
+
+def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
+    """Merge when the commit is not on the main line yet (a worktree Task), then the plan's
+    `Integração:`. True = green, or a conflict that left the main line untouched; False = the main
+    line waits for someone."""
+    repo = cfg["repo"]
+    # Git merges over uncommitted changes it does not touch, and Integração: would test them too.
+    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+        _notice_once(d, f"T{n}: a linha principal tem mudanças não commitadas; a integração espera "
+                        "a árvore limpa", n)
+        return False
+    needs_merge = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
+                                 capture_output=True).returncode != 0
+    beat = d / "advance.lock"
+    if needs_merge:
+        _touch(beat)
+        conflict = _merge(d, repo, n, h)
+        if conflict:
+            files, why = conflict
+            other = _collided_with(d, files, n)
+            en, pt, names = (f"T{other}" if other else "the main line",
+                             f"T{other}" if other else "a linha principal", ", ".join(files))
+            event_append(d, {"tipo": "conflito", "task": n,
+                             "motivo": f"{names} with {en}" + (f" ({why})" if why else "")})
+            acts.append(f"conflict T{n}: {names}")
+            try:
+                _wake(d, f"[decisao] T{n} conflicted with {en} in {names}" + (f" ({why})" if why else "")
+                         + ". Merge aborted: the main line is as before.",
+                      f"acordou o árbitro: T{n} conflitou com {pt} em {names}", n)
+            except OrqError as e:
+                journal_append(d, f"advance: arbiter not woken about the T{n} conflict: {e}")
+            return True
+    head = git(repo, "rev-parse", "HEAD").strip()
+    cmds = plan_of(d).get("integracao") or []
+    log = d / "checks" / f"integration-t{n}-{head[:12]}.log"
+    ok, why = run_checks(repo, cmds, log, beat)
+    choice = "back"
+    if not ok:
+        choice = _red_choice(d, cfg, n, why, log)
+        if choice == "retry":
+            timeline(d, "advance", f"T{n}: integração vermelha, rodando de novo uma vez", n)
+            log = log.with_name(log.stem + "-retry.log")
+            ok, why = run_checks(repo, cmds, log, beat)
+            choice = "back"  # a second red never runs again
+    if ok:
+        event_append(d, {"tipo": "integrada", "task": n, "commit": head})
+        journal_append(d, f"integrated T{n} at {head[:12]}" + (" (merge)" if needs_merge else ""))
+        timeline(d, "advance", f"T{n} fechada → " + ("merge → " if needs_merge else "") + "integração verde", n)
+        acts.append(f"integrated T{n} {head[:12]}")
+        return True
+    event_append(d, {"tipo": "integracao_vermelha", "task": n, "motivo": str(log)})
+    journal_append(d, f"integration red after T{n}: {why}")
+    if choice == "wake":
+        _wake(d, f"[decisao] Integration red after T{n}: {why}. The main line keeps the merge; "
+                 "decide: back to its executor, run again, or something else.",
+              f"acordou o árbitro: integração vermelha depois da T{n} (o Jev pediu)", n)
+        acts.append(f"red T{n}: arbiter woken")
+        return False
+    _back_to_executor(d, repo, n, why, log)
+    acts.append(f"red T{n}: back to its executor")
+    return False
+
+
+def _integrate_all(d: Path, cfg: dict, acts: list[str]) -> bool:
+    """Every closed Task not integrated yet, in closing order. False = the main line waits (red, or
+    a failed step) and nothing else moves."""
+    evs = events(d)
+    for n, close in _closes(d).items():
+        out = _outcome(evs, n, close)
+        if out in ("integrada", "conflito"):
+            continue
+        if out is not None:
+            return False
+        try:
+            if not _integrate(d, cfg, n, close["hash"], acts):
+                return False
+        except (OrqError, OSError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, "integrate", n, str(e)))
+            return False
+    return True
+
+
+KICKOFF_DIR = Path(os.environ.get("ORQ_KICKOFF_DIR")
+                   or HERE.parents[1] / "orquestrar-auto" / "references")
+
+
+def render_kickoff(role: str, ctx: dict) -> str:
+    if role not in ("executor", "revisor"):
+        raise OrqError(f"no kick-off mold for role {role!r}")
+    path = KICKOFF_DIR / f"kickoff-{role}.md"
+    try:
+        mold = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise OrqError(f"kick-off mold missing: {path}") from None
+    try:
+        return mold.format_map(ctx)
+    except (KeyError, IndexError, ValueError) as e:
+        raise OrqError(f"kick-off mold {path.name}: bad placeholder {e}") from None
+
+
+def _norm(cell: str) -> str:
+    """Compared the way backend/app/orq_md.py does: no accents, no markdown, lower case."""
+    s = unicodedata.normalize("NFKD", cell.strip().strip("`").replace("**", "").strip())
+    return re.sub(r"\s+", " ", "".join(c for c in s if not unicodedata.combining(c))).lower()
+
+
+TEAM_KEYS = ("papel", "vez", "sessao", "provider", "conta", "modelo", "esforco", "janela", "abertura")
+
+
+def team_rows(text: str) -> list[dict]:
+    """`## Quem é quem`, read as backend/app/orq_papeis.py reads it: orq stays stdlib and runs
+    outside the backend. Keys without accents, `-` read as empty."""
+    lines = [l for l in _section(text, "Quem é quem") if l.strip().startswith("|")]
+    if len(lines) < 2:
+        return []
+    cells = lambda l: [c.strip() for c in l.strip().strip("|").split("|")]
+    head = [_norm(c) for c in cells(lines[0])]
+    out = []
+    for l in lines[2:]:
+        # orq_md.limpar: bold, then backticks; `-` is empty.
+        vals = [re.sub(r"^\*\*(.*)\*\*$", r"\1", c).strip().strip("`").strip() for c in cells(l)]
+        row = dict.fromkeys(TEAM_KEYS, "") | {h: ("" if v in ("-", "—") else v) for h, v in zip(head, vals)}
+        if row["papel"]:
+            out.append(row)
+    return out
+
+
+def role_row(rows: list[dict], role: str, n: int, risk: str) -> dict:
+    """The role's row for Task N: numeric `vez` rotates by (N-1) % total; low/high follows the
+    Task's Risk (arbitro-lancamento.md, "A rotating role")."""
+    mine = [r for r in rows if _norm(r["papel"]) == role]
+    if not mine:
+        raise OrqError(f"no '{role}' row in ## Quem é quem")
+    if len(mine) == 1:
+        return mine[0]
+    vez = [r.get("vez", "") for r in mine]
+    if all(v.isdigit() for v in vez):
+        return mine[(n - 1) % len(mine)]
+    hit = [r for r in mine if r.get("vez", "").lower() == risk]
+    if len(hit) == 1:
+        return hit[0]
+    raise OrqError(f"cannot pick the {role} row for Task {n} (vez {vez}, Risk {risk or 'none'})")
+
+
+def session_name(pattern: str, n: int) -> str:
+    """One session per Task: `x-t*` → `x-t4`; a fixed name gets the Task as suffix, so two Tasks of
+    a wave never share a session."""
+    if not pattern:
+        raise OrqError("a row without a session name")
+    raw = pattern.replace("*", str(n)) if "*" in pattern else f"{pattern}-t{n}"
+    # backend/app/names.py: the name the session really gets, so events, sends and the sidecar
+    # lookup all use it.
+    ascii_name = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Za-z0-9_-]", "-", ascii_name.strip()).strip("-")
+
+
+def open_flags(row: dict, read_only: bool) -> list[str]:
+    """The row as `hangar-send --new` flags (arbitro-lancamento.md, "Opening a session"); the
+    `abertura` cell goes last, as written."""
+    prov = (row.get("provider") or "claude").lower()
+    flags = ["--provider", prov]
+    conta = row.get("conta", "")
+    if prov in ("claude", "codex") and conta not in ("", "padrao", "default"):
+        flags += ["--conta", conta]
+    if row.get("modelo") not in (None, "", "default"):
+        flags += ["--model", row["modelo"]]
+    if row.get("esforco") and prov != "kimi":
+        flags += ["--effort", row["esforco"]]
+    extra = shlex.split(row.get("abertura", ""))
+    # The backend refuses read-only on a session without terminal.
+    if read_only and "--read-only" not in extra and "--headless" not in extra:
+        flags.append("--read-only")
+    # Only auto runs open sessions: the key the settings screen wrote counts too.
+    if jev_config(auto=True).get("key") and not {"--jev", "--sem-jev"} & set(extra):
+        flags.append("--jev")
+    return flags + extra
+
+
+def _model_matches(want: str, got: str | None) -> bool:
+    """`opus[1m]` is born as `opus` plus a context window, and a live session may carry the full
+    id: the base name on either side is enough."""
+    base = re.sub(r"\[.*?\]$", "", want).lower()
+    return bool(got) and (base in got.lower() or got.lower() in base)
+
+
+def prove_born(name: str, row: dict) -> str | None:
+    """What was born, never what was asked: the sidecar of a session without terminal, or the
+    pane's start command, carries the row's provider and model. None = it matches."""
+    prov = (row.get("provider") or "claude").lower()
+    want = row.get("modelo") if row.get("modelo") not in (None, "", "default") else ""
+    for sub, dflt in (("claude-headless", "claude"), ("codex-sessions", "codex")):
+        f = Path.home() / ".hangar" / sub / f"{name}.json"
+        if f.exists():
+            sc = json.loads(f.read_text(encoding="utf-8"))
+            got = sc.get("provider") or dflt
+            if got != prov:
+                return f"{name}: born on {got}, row says {prov}"
+            if want and not _model_matches(want, sc.get("model")):
+                return f"{name}: born on model {sc.get('model')}, row says {want}"
+            return None
+    r = subprocess.run(["tmux", "display", "-p", "-t", f"={name}:", "#{pane_start_command}"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"{name}: no sidecar and no tmux pane to prove what was born"
+    cmd = r.stdout.strip()
+    if prov not in cmd or (want and not _model_matches(want, cmd)):
+        return f"{name}: pane started `{cmd[:160]}`, row says {prov} {want}".rstrip()
+    return None
+
+
+def hangar_new(name: str, cwd: str, flags: list[str]) -> None:
+    cmd = [os.environ.get("ORQ_SEND", "hangar-send"), "--new", name, cwd, *flags]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=SEND_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise OrqError(f"hangar-send --new {name} did not answer in {SEND_TIMEOUT_S}s") from None
+    if r.returncode != 0:
+        raise OrqError(f"hangar-send --new {name} failed (rc={r.returncode}): "
+                       f"{(r.stderr or r.stdout).strip()[:300]}")
+
+
+def _open_task(d: Path, cfg: dict, pj: dict, t: dict) -> str:
+    """Worktree (in a wave), executor and reviewer from `## Quem é quem`, proof of what was born,
+    `task_inicio`, then the kick-offs: the arbiter's handoff order (arbitro.md, step 2)."""
+    n, repo = t["n"], cfg["repo"]
+    title = t["title"] or f"Task {n}"
+    rows = team_rows(Path(cfg["contract"]).read_text(encoding="utf-8"))
+    ex_row = role_row(rows, "executor", n, t["risk"])
+    rev_row = None if pj.get("revisao") == "subagente" else role_row(rows, "revisor", n, t["risk"])
+    ex = session_name(ex_row.get("sessao", ""), n)
+    rev = session_name(rev_row.get("sessao", ""), n) if rev_row else SUBAGENT
+    branch = git(repo, "branch", "--show-current").strip()
+    if not branch:
+        raise OrqError(f"{repo} is on a detached HEAD: no branch to work on")
+    wave = (pj.get("paralelo") or 1) > 1
+    # The gid keeps a later run on the same branch from meeting this run's leftovers.
+    gid = _gid(d)
+    cwd = str(Path(repo).parent / f"{Path(repo).name}-{gid}-t{n}") if wave else repo
+    if wave:
+        branch = f"{branch}-{gid}-t{n}"
+    # The executor's Expected HEAD: the main line after the merges so far, and the wave's base.
+    base = git(repo, "rev-parse", "HEAD").strip()
+    ctx = {"task": n, "title": title, "worktree": cwd, "branch": branch, "run_dir": str(d),
+           "plan": cfg["plan"], "contract": cfg["contract"], "executor": ex, "reviewer": rev,
+           "arbiter": state(d)["arbiter"], "base": base,
+           # One by one, never "the ones in the contract" (arbitro-lancamento.md, "Kick-off").
+           "untouchables": "\n".join(f"- {u}" for u in cfg.get("untouchables") or []) or "- none"}
+    # Rendered before anything opens: a broken mold costs no session.
+    kicks = [(role, target, render_kickoff(role, ctx))
+             for role, target in (("revisor", rev), ("executor", ex)) if target != SUBAGENT]
+    made: list[str] = []
+    recorded = False
+    try:
+        if wave:
+            git(repo, "worktree", "add", cwd, "-b", branch, base)
+            made.append(f"worktree {cwd} on branch {branch}")
+            journal_append(d, f"T{n} worktree {cwd}, branch {branch}, base {base[:12]}")
+        for name, row, read_only in ((ex, ex_row, False), (rev, rev_row, True)):
+            if row is None:
+                continue
+            hangar_new(name, cwd, open_flags(row, read_only))
+            made.append(f"session {name} in {cwd}")
+            why = prove_born(name, row)
+            if why:
+                raise OrqError(f"born wrong: {why}")
+        ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": title, "executor": ex, "par": rev})
+        recorded = True
+        journal_append(d, _event_line(ev))
+        for role, target, text in kicks:
+            path = d / "kickoffs" / f"task{n}-{role}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            made.append(f"kick-off {path} (not yet sent to {target})")
+            _say(d, target, text)
+            made[-1] = f"kick-off {path} sent to {target}"
+    except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+        if not made and not recorded:
+            raise
+        # Like _send_after_event: the arbiter finishes or undoes by hand, knowing what exists.
+        left = [x for x in made if not x.startswith("kick-off")]
+        left.append("task_inicio recorded" if recorded else "task_inicio NOT recorded")
+        left += [x for x in made if x.startswith("kick-off")] or ["no kick-off written"]
+        raise OrqError(f"{e}. Left behind (finish or clean by hand): {'; '.join(left)}") from None
+    who = [f"{name} ({row.get('provider') or 'claude'}, {row.get('modelo') or 'modelo padrão'})"
+           for name, row in ((ex, ex_row), (rev, rev_row)) if row]
+    timeline(d, "advance", f"T{n}: abriu {' e '.join(who)} e entregou o kick-off", n)
+    return f"opened T{n}: {ex} + {rev}"
+
+
+def _open_ready(d: Path, cfg: dict, acts: list[str]) -> None:
+    """The current wave — the first with a Task not integrated — opens its Tasks while
+    `Paralelo:` has room; a later wave waits for the whole wave before it."""
+    ptext = plan_text(cfg["plan"])
+    pj, tasks = projeto(ptext), plan_tasks(ptext)
+    evs = events(d)
+    started = {ev.get("task") for ev in evs if ev.get("tipo") == "task_inicio"}
+    done = _integrated(d, evs)
+    in_wave = lambda t, w: t["wave"].isdigit() and int(t["wave"]) == w
+    waves = sorted({int(t["wave"]) for t in tasks if t["wave"].isdigit()})
+    wave = next((w for w in waves if any(t["n"] not in done for t in tasks if in_wave(t, w))), None)
+    if wave is None:
+        return
+    # A failed opening keeps its slot: the arbiter may open it by hand at any time.
+    failed = {ev.get("task") for ev in evs if ev.get("tipo") == "advance_falhou" and ev.get("passo") == "open"}
+    room = (pj.get("paralelo") or 1) - len((started | failed) - done)
+    for t in tasks:
+        if room <= 0:
+            return
+        if not in_wave(t, wave) or t["n"] in started or _failed_since(evs, "open", t["n"], None):
+            continue
+        room -= 1
+        try:
+            acts.append(_open_task(d, cfg, pj, t))
+        except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, "open", t["n"], str(e)))
+
+
+def _announce_batch(d: Path, cfg: dict, acts: list[str]) -> None:
+    """`Prova: lote(N)`: the batch goes out full, or when a wave is over, and only on integrated
+    code; the arbiter opens the proof session (prova-lote.md)."""
+    prova = plan_of(d).get("prova")
+    pend = pending_proofs(d)
+    if not prova or prova[0] != "lote" or not pend:
+        return
+    if any(p.get("task") not in _integrated(d, events(d)) for p in pend):
+        return
+    tasks = plan_tasks(plan_text(cfg["plan"]))
+    wave = {t["n"]: t["wave"] for t in tasks}
+    closed = _closed(d)
+    wave_over = any(all(t["n"] in closed for t in tasks if t["wave"] == wave.get(p.get("task")))
+                    for p in pend)
+    if len(pend) < prova[1] and not wave_over:
+        return
+    # Taken only once the arbiter heard of it: a failed send keeps the proofs pending.
+    line = take_batch(d, dry=True, pend=pend)
+    names = ", ".join(f"T{p['task']}" for p in pend)
+    _wake(d, f"[decisao] Proof batch ready — {line}. Open one proof session for those roteiros on "
+             "the integrated code (prova-lote.md).",
+          f"acordou o árbitro: lote de prova pronto ({names})")
+    take_batch(d, pend=pend)   # the Tasks announced, even if a commit queued one meanwhile
+    acts.append(f"batch: {line}")
+
+
+def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
+    tasks = plan_tasks(plan_text(cfg["plan"]))
+    evs = events(d)
+    if not tasks or any(ev.get("tipo") == "tudo_integrado" for ev in evs):
+        return
+    if not {t["n"] for t in tasks} <= _integrated(d, evs):
+        return
+    _wake(d, "[decisao] Every Task of the plan is integrated: your turn for the final review "
+             "(arbitro-encerramento.md, \"Phase 4\").",
+          "acordou o árbitro: todas as Tasks integradas, hora da revisão final")
+    # After the send: recorded first, a failed send would never be tried again.
+    event_append(d, {"tipo": "tudo_integrado"})
+    acts.append("all integrated: arbiter woken for the final review")
+
+
+def _send_retry(d: Path, passo: str) -> bool:
+    """True = a failed wake of this step is tried again on a later pass; the SEND_TRIES-th failure
+    is final and resets the count."""
+    f = d / f"send-tries-{passo}"
+    try:
+        n = int(f.read_text(encoding="utf-8")) + 1
+    except (OSError, ValueError):
+        n = 1
+    if n >= SEND_TRIES:
+        f.unlink(missing_ok=True)
+        return False
+    f.write_text(str(n), encoding="utf-8")
+    return True
+
+
+def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
+    """Integration first: nothing opens or goes to proof on a main line that is red or waiting."""
+    off = _off_branch(d, cfg["repo"])
+    if off:
+        _notice_once(d, off)
+        return
+    if not _integrate_all(d, cfg, acts):
+        return
+    evs = events(d)
+    # A step that failed as a whole waits for a new close before it is tried again; a failed
+    # opening of one Task carries its number and is skipped inside _open_ready.
+    since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+    for passo, step in (("batch", _announce_batch), ("open", _open_ready), ("final", _final_review)):
+        if _failed_since(evs, passo, None, since):
+            continue
+        try:
+            step(d, cfg, acts)
+            (d / f"send-tries-{passo}").unlink(missing_ok=True)
+        except SendError as e:
+            if _send_retry(d, passo):
+                acts.append(f"{passo}: arbiter not reached ({e}), retried on the next pass")
+            else:
+                acts.append(_fail(d, passo, None, str(e)))
+        except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+            acts.append(_fail(d, passo, None, str(e)))
+
+
+def advance(d: Path) -> list[str]:
+    """The orchestrator's pass: every step the rule knows, each one an event, a journal line and a
+    timeline line. Single by a file lock; a caller that finds it held leaves a mark, and the holder
+    runs one more pass for it."""
+    import fcntl  # POSIX only: the other commands keep working without it
+    cfg = config(d)
+    if not cfg.get("auto"):
+        return []
+    again = d / "advance.again"
+    again.touch()
+    acts: list[str] = []
+    # "a", not "w": a caller that finds it held must not wipe the holder's pid.
+    with (d / "advance.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return []
+        # The pid shows who holds it; the lock's mtime is what Hangar reads as "working".
+        lock.truncate(0)
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
+        # ponytail: a mark left between the holder's last check and its unlock waits for the next
+        # trigger (the watchdog's cycle at worst).
+        while again.exists():
+            again.unlink()
+            _touch(d / "advance.lock")
+            try:
+                if state(d)["ended"]:
+                    break
+                # A crashed pass waits for a new close, like any failed step: the arbiter was told
+                # it will not be retried and may be doing it by hand.
+                since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+                if _failed_since(events(d), "advance", None, since):
+                    break
+                _pass(d, cfg, acts)
+            except Exception as e:  # noqa: BLE001 — a crash must reach the arbiter
+                acts.append(_fail(d, "advance", None, f"{type(e).__name__}: {e}"))
+                break
+    return acts
+
+
+def spawn_advance(d: Path) -> str | None:
+    """`orq advance` in its own session, output in <dir>/advance.log: the caller's turn never waits
+    on merges and checks, and a run that dies is picked up by the watchdog's next cycle. None when
+    started; otherwise the error, already warned on stderr (the watchdog's cycle retries)."""
+    try:
+        with (d / "advance.log").open("a", encoding="utf-8") as log:
+            # cwd: the run dir, never the caller's: a Task worktree removed at the end of the run
+            # must not be the working directory of a pass still running.
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d.resolve()),
+                              "advance"],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                             start_new_session=True, cwd=str(d))
+    except OSError as e:
+        print(f"orq: warning: orq advance not started: {e}", file=sys.stderr)
+        return str(e)
+    return None
+
+
+def cmd_advance(a) -> int:
+    d = base_dir(a.dir)
+    if not config(d).get("auto"):
+        return 0
+    if a.detach:
+        return 1 if spawn_advance(d) else 0
+    try:
+        lines = advance(d)
+    except Exception as e:  # noqa: BLE001 — outside the pass (lock, recording a failure): still the arbiter's to know
+        err = f"{type(e).__name__}: {e}"
+        try:
+            print(_fail(d, "advance", None, err))
+        except Exception as e2:  # noqa: BLE001
+            print(f"orq: advance failed ({err}) and the arbiter was not told: {e2}", file=sys.stderr)
+        return 1
+    for line in lines:
+        print(line)
     return 0
 
 
@@ -1252,6 +2274,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--contract", required=True)
     s.add_argument("--untouchable", action="append", default=[])
     s.add_argument("--plan", help="required, except to re-init a run started without a plan")
+    s.add_argument("--auto", action="store_true", help="an orquestrar-auto run: the orchestrator does the routine")
+    s.add_argument("--jev", choices=["on", "shadow"], help="with --auto: Jev drops (on) or only records (shadow)")
+    s.add_argument("--regex", choices=["on", "shadow"], help="with --auto and no Jev key: same, for the regex")
     s = sub.add_parser("readiness", help="which plan a run starts from, and whether it is stamped (JSON)")
     s.add_argument("--repo", required=True)
     s = sub.add_parser("plan-check", help="check the orchestration plan's structure; --stamp marks it prepared")
@@ -1307,13 +2332,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("log", help="a decision entry in the journal")
     s.add_argument("--task", type=int)
     s.add_argument("text")
+    s = sub.add_parser("advance", help="the orchestrator's pass: integrate, open, announce (auto runs only)")
+    s.add_argument("--detach", action="store_true", help="run in the background (the watchdog's call)")
     return p
 
 
 CMDS = {"init": cmd_init, "readiness": cmd_readiness, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
-        "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package}
+        "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package,
+        "advance": cmd_advance}
 
 
 def main(argv: list[str] | None = None) -> int:

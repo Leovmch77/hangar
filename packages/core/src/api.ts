@@ -2025,6 +2025,12 @@ export function answerQuestions(name: string, answers: AnswerItem[], requestId?:
   });
 }
 
+export function skipQuestion(name: string, requestId: string): Promise<{ ok: boolean }> {
+  return apiFetch<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(name)}/question/skip`, {
+    method: 'POST', body: JSON.stringify({ request_id: requestId }),
+  });
+}
+
 // clear=true tambem limpa o input do terminal (2o Esc no backend). So passar quando havia msg pendente.
 export async function interrupt(name: string, clear = false): Promise<void> {
   const q = clear ? '?clear=true' : '';
