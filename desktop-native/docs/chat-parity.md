@@ -76,6 +76,7 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Recolher e redimensionar | conferido | 240–480 px; some sozinho se a conversa ficaria abaixo de 540 px |
 | Fileira de abas (Contexto, Arquivos, Atividade, Git) no desenho da `.abas` do web | conferido | régua de ponta a ponta, sublinhado na escolhida, texto de 12 px; rótulo da primeira na margem de 16 px das seções; as quatro inteiras a 300 px, reticências a 240 px. Diferenças: o recolher mora na mesma fileira (o web o põe no cabeçalho com nome e estado, que aqui ficam no cabeçalho da conversa) e Git é aba, não o botão que abre a coluna do web |
 | Menu de ferramentas do painel recém-aberto (Terminal, Alterações, Histórico) | pendente | o web não tem esse menu no painel vazio; recurso do painel nativo, o web não foi feito neste trabalho |
+| Navegador como ferramenta do painel lateral | pendente | no nativo é a linha "Navegador" do menu do painel (WPE WebKit no Linux, só aparece com a biblioteca instalada; WebView2 no Windows; WKWebView no macOS); no web/Electron o navegador embutido é o do `hangar-preview`, painel próprio da sessão com abas e comando por CLI, fora do painel lateral |
 
 ## Ciclo e planos
 

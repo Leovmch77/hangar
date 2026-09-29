@@ -9,6 +9,8 @@ Parts of the native app are adapted from Zeron (https://github.com/zeronsh/zeron
   (crates/ui/src/transcript.rs).
 - src/app/side.rs (`render_side_menu`): the tool menu of the empty side panel (crates/ui/src/shell.rs, the empty
   surface cards).
+- src/browser/model.rs: address normalization and page state (crates/ui/src/browser/model.rs).
+- src/app/browser.rs: the browser toolbar (crates/ui/src/browser/view.rs).
 
 MIT License
 
