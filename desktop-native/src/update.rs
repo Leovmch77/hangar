@@ -129,6 +129,8 @@ async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) ->
     Err(tr("app_update_rolled_back"))
 }
 
+pub fn relaunched() -> bool { std::env::var_os(ALIVE_ENV).is_some() }
+
 /// Chamado pelo processo novo quando a janela abriu: é a prova de vida que o antigo espera.
 pub fn report_alive() {
     if let Some(path) = std::env::var_os(ALIVE_ENV) { let _ = std::fs::write(path, std::process::id().to_string()); }

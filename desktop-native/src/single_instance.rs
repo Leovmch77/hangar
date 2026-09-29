@@ -9,6 +9,8 @@ fn port_file() -> Option<PathBuf> { Some(crate::appearance::dir()?.join("instanc
 
 pub fn claim(link: Option<String>) -> Claim {
     match port_file() {
+        // Aberto pela autoatualização: o antigo ainda está no ar esperando esta prova de vida e fecha em seguida.
+        Some(file) if crate::update::relaunched() => take_over(&file, link),
         Some(file) => claim_at(&file, link),
         // Sem pasta de configuração não há como achar a outra instância: abre sozinha, como antes.
         None => { let (tx, rx) = async_channel::unbounded(); if let Some(link) = link { let _ = tx.try_send(link); } Claim::Primary(tx, rx) }
@@ -30,6 +32,10 @@ fn forward(file: &Path, link: &str) -> bool {
 pub fn claim_at(file: &Path, link: Option<String>) -> Claim {
     // Sem link a segunda execução também só avisa: a primeira vem para a frente.
     if forward(file, link.as_deref().unwrap_or("")) { return Claim::Forwarded; }
+    take_over(file, link)
+}
+
+fn take_over(file: &Path, link: Option<String>) -> Claim {
     let (tx, rx) = async_channel::unbounded();
     if let Some(link) = link { let _ = tx.try_send(link); }
     let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) else { return Claim::Primary(tx, rx) };
@@ -61,7 +67,7 @@ pub fn claim_at(file: &Path, link: Option<String>) -> Claim {
 
 #[cfg(test)]
 mod tests {
-    use super::{Claim, claim_at, invite_arg};
+    use super::{Claim, claim_at, invite_arg, take_over};
     use core::prelude::v1::test;
 
     #[test]
@@ -81,6 +87,17 @@ mod tests {
         // Arquivo velho de outra execução (nonce que ninguém escuta): a nova vira a primária.
         std::fs::write(&file, "1\nnonce-velho").unwrap();
         assert!(matches!(claim_at(&file, None), Claim::Primary(..)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn relaunch_by_the_updater_takes_over_while_the_old_one_is_still_up() {
+        let dir = std::env::temp_dir().join(format!("hangar-si-up-{}", std::process::id()));
+        let file = dir.join("instance");
+        let Claim::Primary(..) = claim_at(&file, None) else { panic!("first launch must be primary") };
+        let Claim::Primary(_, rx) = take_over(&file, None) else { panic!("relaunch must not forward") };
+        assert!(matches!(claim_at(&file, Some("hangar://convite/h:8443/AB".into())), Claim::Forwarded));
+        assert_eq!(rx.recv_blocking().unwrap(), "hangar://convite/h:8443/AB");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
