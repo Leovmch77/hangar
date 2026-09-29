@@ -2950,7 +2950,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       loopColor={LOOP_TONE_COLOR[loopChip?.tone ?? 'muted']}
       onLoopTap={() => (loopSheetOpen = true)}
       onProviderTap={isCodex ? () => (limitsOpen = true) : undefined}
-      onOpenPair={() => (pairOpen = true)}
+      onOpenPair={orqSession ? undefined : () => (pairOpen = true)}
       onOpenOrq={() => (orqOpen = true)}
       onOpenPeerChat={nested ? undefined : (peer) => (peerChat = peer)}
       onOpenGit={() => (gitOpen = true)}
@@ -3334,7 +3334,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   <MoreSheet open={moreOpen} onClose={() => (moreOpen = false)}
              shortcuts={customShortcuts} onShortcut={triggerShortcut}
              onEditShortcuts={() => abrirConfig('atalhos', null)}
-             onRun={() => (runOpen = true)} {runRunning}
+             onRun={orqSession ? undefined : () => (runOpen = true)} {runRunning}
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
              onBastao={passarBastaoDaqui}

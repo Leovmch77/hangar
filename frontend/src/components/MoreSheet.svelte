@@ -17,7 +17,7 @@
     shortcuts?: (ShortcutSendText | ShortcutShell)[];
     onShortcut?: (s: ShortcutSendText | ShortcutShell) => void;
     onEditShortcuts?: () => void;
-    onRun: () => void;
+    onRun?: () => void;           // ausente = sessão sem workflow (orquestrador)
     runRunning?: boolean;
     onActivity?: () => void;      // ausente = sessao sem atividade pra mostrar
     onAttachments: () => void;
@@ -65,19 +65,21 @@
       </div>
     {/if}
 
-    <button class="item" onclick={() => pick(onRun)}>
-      <span class="ico" class:on={runRunning} aria-hidden="true">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-          {#if runRunning}<rect x="6" y="6" width="12" height="12" rx="2" />{:else}<path d="M8 5v14l11-7z" />{/if}
-        </svg>
-      </span>
-      <span class="txt">
-        <span class="label">{runRunning ? m.ctx_rodando() : m.ctx_rodar_projeto()}</span>
-        <span class="sub">{runRunning ? m.more_abrir_saida_processo() : m.more_detecta_comando_repo()}</span>
-      </span>
-      {#if runRunning}<span class="pill on">{m.servidor_ativo()}</span>{/if}
-      <span class="chev" aria-hidden="true">›</span>
-    </button>
+    {#if onRun}
+      <button class="item" onclick={() => pick(onRun)}>
+        <span class="ico" class:on={runRunning} aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            {#if runRunning}<rect x="6" y="6" width="12" height="12" rx="2" />{:else}<path d="M8 5v14l11-7z" />{/if}
+          </svg>
+        </span>
+        <span class="txt">
+          <span class="label">{runRunning ? m.ctx_rodando() : m.ctx_rodar_projeto()}</span>
+          <span class="sub">{runRunning ? m.more_abrir_saida_processo() : m.more_detecta_comando_repo()}</span>
+        </span>
+        {#if runRunning}<span class="pill on">{m.servidor_ativo()}</span>{/if}
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+    {/if}
 
     <button class="item" onclick={() => onActivity && pick(onActivity)} disabled={!onActivity}>
       <span class="ico" class:on={activityRunning} aria-hidden="true">

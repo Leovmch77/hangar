@@ -855,7 +855,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
               oncontextmenu={(e) => { if (!model.selectMode) openMenu(e, s, s.serverId); }}
               onclick={() => {
                 hpLeave();   // clique nao move o mouse -> sem mouseleave; fecha a espiada na mao
-                if (model.selectMode) { if (s.tracked !== false && !isOrq(s)) model.toggleSelected(selKey); return; }
+                if (model.selectMode) { if (s.tracked !== false) model.toggleSelected(selKey); return; }
                 onMainClick(s.name, s.serverId, s.tracked, s.provider);
               }}
             >

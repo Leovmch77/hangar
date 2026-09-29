@@ -216,13 +216,15 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   }
   function openSelectMode() { if (!selectMode) toggleSelectMode(); }
   function toggleSelected(key: string) {
+    // Orquestrador não recebe mensagem: fora do envio em massa em qualquer lista.
+    if (allSessions.some((s) => isOrq(s) && selectionKey(s) === key)) return;
     const next = new Set(selected);
     if (next.has(key)) next.delete(key); else next.add(key);
     selected = next;
   }
   function selectGroupForBroadcast(g: Group) {
     selectMode = true;
-    selected = new Set(g.sessions.filter((s) => s.tracked !== false).map(selectionKey));
+    selected = new Set(g.sessions.filter((s) => s.tracked !== false && !isOrq(s)).map(selectionKey));
   }
   function openCompare() {
     const order = rules.compareOrder === 'groups' ? allSessions : rows;
