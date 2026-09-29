@@ -410,8 +410,7 @@ mod tests {
 }
 
 impl Render for SubConversation {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::panes::rendered(cx.entity_id(), window, cx);
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
         list(self.list.clone(), move |i, _, cx| view.update(cx, |this, cx| this.render_row(i, cx)).unwrap_or_else(|_| div().into_any_element()))
             .size_full()

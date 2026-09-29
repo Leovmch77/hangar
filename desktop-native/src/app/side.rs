@@ -747,9 +747,9 @@ impl Hangar {
                 .child(header)
                 .children(self.render_subagent_tabs(cx))
                 .child(div().flex_1().min_h_0().flex().flex_col().opacity(tab_in).child(match tab {
-                    None => div().flex_1().min_h_0().children(self.subagent_tab_view(cx)).into_any_element(),
+                    None => div().flex_1().min_h_0().children(self.subagent_tab_view()).into_any_element(),
                     Some(SideTab::Files) => div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element(),
-                    Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view(cx)).into_any_element(),
+                    Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
                     Some(SideTab::Context) => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element(),
                 }))

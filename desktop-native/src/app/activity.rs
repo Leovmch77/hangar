@@ -448,13 +448,12 @@ fn shell_row(prefix: &str, line: &ShellLine) -> AnyElement {
 }
 
 impl ActivityPanel {
-    /// Views guardadas dentro desta, para quem guarda esta (`panes::cached_selectable`).
+    /// Views guardadas dentro desta, que redesenham junto na troca de aba (`side_tab_in`).
     pub(super) fn views(&self) -> Vec<EntityId> { vec![self.conversation.entity_id()] }
 }
 
 impl Render for ActivityPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        super::panes::rendered(cx.entity_id(), window, cx);
         self.marks.borrow_mut().clear();
         if self.opened.is_some() { return self.render_detail(window, cx); }
         let lines = &self.lines;
@@ -577,7 +576,7 @@ impl ActivityPanel {
         let running = !opened.done && !run.failed && !run.unreadable;
         let body = if !opened.loaded { empty(tr("subagent_loading")) }
             else if opened.has_events {
-                let conversation = super::panes::cached_selectable(self.conversation.clone().into(), Vec::new(), StyleRefinement::default().size_full());
+                let conversation = super::panes::cached_selectable(self.conversation.clone().into(), StyleRefinement::default().size_full());
                 // Como o `Spinner` que o web põe sob a conversa do subagente enquanto ele roda.
                 div().size_full().flex().flex_col().child(div().flex_1().min_h_0().child(conversation))
                     .when(running, |el| el.child(div().flex_shrink_0().px_4().h(px(38.)).flex().items_center().gap(px(8.))
@@ -863,9 +862,9 @@ impl Hangar {
             }).into_any_element()
     }
 
-    pub(super) fn subagent_tab_view(&self, cx: &App) -> Option<AnyElement> {
+    pub(super) fn subagent_tab_view(&self) -> Option<AnyElement> {
         let tab = self.act.tabs.iter().find(|t| Some(t.id) == self.act.active_tab)?;
-        Some(super::panes::cached_selectable(tab.view.clone().into(), tab.view.read(cx).views(), StyleRefinement::default().size_full()))
+        Some(super::panes::cached_selectable(tab.view.clone().into(), StyleRefinement::default().size_full()))
     }
 
     pub(super) fn render_subagent_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -922,12 +921,11 @@ impl Hangar {
         shown
     }
 
-    pub(super) fn activity_view(&self, cx: &App) -> AnyElement {
-        let nested = self.act.view.read(cx).views();
-        super::panes::cached_selectable(self.act.view.clone().into(), nested, StyleRefinement::default().size_full())
+    pub(super) fn activity_view(&self) -> AnyElement {
+        super::panes::cached_selectable(self.act.view.clone().into(), StyleRefinement::default().size_full())
     }
 
-    /// A aba Atividade e as views guardadas dentro dela, que o painel guardado leva junto.
+    /// A aba Atividade e as views guardadas dentro dela.
     pub(super) fn activity_views(&self, cx: &App) -> Vec<EntityId> {
         let view = self.act.tabs.iter().find(|t| Some(t.id) == self.act.active_tab).map(|t| &t.view).unwrap_or(&self.act.view);
         let mut views = view.read(cx).views();

@@ -1,11 +1,11 @@
 // Áreas da janela em views próprias: o que se mexe numa área (streaming, rolagem, digitação, animação do diálogo) não
 // redesenha as outras. O estado continua no `Hangar`; cada view só guarda o desenho dela entre quadros.
 use std::{cell::{Cell, RefCell}, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
-use gpui_kit::{component::Root, prelude::FluentBuilder, *};
+use gpui_kit::{prelude::FluentBuilder, *};
 use super::Hangar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Area { Nav, Conversation, Bottom, Side, Overlay }
+pub(super) enum Area { Nav, Conversation, Bottom, Side }
 
 pub(super) struct Pane { hangar: WeakEntity<Hangar>, area: Area, _observe: Option<Subscription> }
 
@@ -14,7 +14,6 @@ pub(super) struct Panes {
     pub conversation: Entity<Pane>,
     pub bottom: Entity<Pane>,
     pub side: Entity<Pane>,
-    pub overlay: Entity<Pane>,
     /// Altura medida da faixa de baixo: a view guardada precisa de altura definida, e o compositor cresce com o texto.
     pub bottom_height: Rc<Cell<f32>>,
     /// Lugares que as áreas guardadas deixaram para o que anima dentro delas (`MarkPlace`).
@@ -39,12 +38,12 @@ impl Panes {
         let mut pane = |area: Area| cx.new(|cx| Pane {
             hangar: hangar.downgrade(), area,
             // A view guardada não enxerga o `notify` do `Hangar`, que é ancestral dela: sem isto, o que mudou nele não
-            // chegaria à área. O diálogo não é guardado e roda em todo desenho da janela.
-            _observe: (area != Area::Overlay).then(|| cx.observe(&hangar, |_, _, cx| cx.notify())),
+            // chegaria à área.
+            _observe: Some(cx.observe(&hangar, |_, _, cx| cx.notify())),
         });
         Self {
             nav: pane(Area::Nav), conversation: pane(Area::Conversation), bottom: pane(Area::Bottom), side: pane(Area::Side),
-            overlay: pane(Area::Overlay), bottom_height: Rc::new(Cell::new(120.)), marks: Rc::default(),
+            bottom_height: Rc::new(Cell::new(120.)), marks: Rc::default(),
         }
     }
 }
@@ -60,7 +59,6 @@ impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area;
         let started = count_frames().then(Instant::now);
-        rendered(cx.entity_id(), window, cx);
         let Some(hangar) = self.hangar.upgrade() else { return div().into_any_element() };
         let element = hangar.update(cx, |this, cx| {
             this.panes.marks.borrow_mut().retain(|place| place.area != area);
@@ -89,23 +87,14 @@ impl Hangar {
                 self.side.open = open;
                 side.unwrap_or_else(|| div().into_any_element())
             }
-            Area::Overlay => div().absolute().inset_0()
-                .children(Root::render_dialog_layer(window, cx))
-                .children(Root::render_notification_layer(window, cx))
-                .into_any_element(),
         }
     }
 
-    /// A área guardada entre quadros; o diálogo não, porque lê o estado do `Root`, que não o avisa.
-    pub(super) fn pane_element(&self, area: Area, style: StyleRefinement, cx: &App) -> AnyElement {
+    /// A área guardada entre quadros.
+    pub(super) fn pane_element(&self, area: Area, style: StyleRefinement) -> AnyElement {
         let pane = match area {
             Area::Nav => &self.panes.nav, Area::Conversation => &self.panes.conversation, Area::Bottom => &self.panes.bottom,
             Area::Side => &self.panes.side,
-            Area::Overlay => {
-                let mut frame = div();
-                frame.style().refine(&style);
-                return frame.child(self.panes.overlay.clone()).into_any_element();
-            }
         };
         // Na chegada da primeira mensagem a conversa, o painel e a faixa de baixo (que, antes de a sessão nascer, desenha a
         // conversa por vir) desenham a cada quadro: a cópia guardada não acompanha a opacidade de quem a envolve.
@@ -114,16 +103,14 @@ impl Hangar {
             frame.style().refine(&style);
             return frame.child(AnyView::from(pane.clone())).into_any_element();
         }
-        // O painel mostra a aba Atividade, que tem views próprias com texto selecionável dentro dele.
-        let nested = if area == Area::Side { self.activity_views(cx) } else { Vec::new() };
-        cached_selectable(pane.clone().into(), nested, style)
+        cached_selectable(pane.clone().into(), style)
     }
 
     /// Redesenha uma área só, sem acordar as outras: para o que muda só nela (texto chegando, rolagem, digitação).
     pub(super) fn redraw(&self, area: Area, cx: &mut Context<Self>) {
         let pane = match area {
             Area::Nav => &self.panes.nav, Area::Conversation => &self.panes.conversation, Area::Bottom => &self.panes.bottom,
-            Area::Side => &self.panes.side, Area::Overlay => &self.panes.overlay,
+            Area::Side => &self.panes.side,
         };
         pane.update(cx, |_, cx| cx.notify());
     }
@@ -143,24 +130,11 @@ impl Hangar {
     }
 }
 
-/// Guarda uma view entre quadros sem perder o texto selecionável dela. A seleção do kit apaga, no fim do quadro, o texto
-/// que não se pintou, e a view reusada não pinta: o `canvas` depois dela avisa o kit que ela e as views de dentro dela
-/// (`nested`) continuam na tela. Toda view guardada assim chama `rendered` no próprio `render`.
-pub(super) fn cached_selectable(view: AnyView, nested: Vec<EntityId>, style: StyleRefinement) -> AnyElement {
-    let mut ids = nested;
-    ids.push(view.entity_id());
+/// Guarda uma view entre quadros; o kit mantém selecionável o texto de uma view reusada sem repintar.
+pub(super) fn cached_selectable(view: AnyView, style: StyleRefinement) -> AnyElement {
     let mut frame = div().relative();
     frame.style().refine(&style);
-    frame.child(view.cached(StyleRefinement::default().size_full()))
-        .child(canvas(|_, _, _| {}, move |_, _, window, cx| {
-            for id in ids { base::TextSelection::retain_cached_view(id, window, cx); }
-        }).absolute().size_0())
-        .into_any_element()
-}
-
-/// A view guardada desenhou de novo: o texto dela que não se pintou sai da seleção.
-pub(super) fn rendered(view: EntityId, window: &Window, cx: &mut App) {
-    base::TextSelection::view_rendered(view, window, cx);
+    frame.child(view.cached(StyleRefinement::default().size_full())).into_any_element()
 }
 
 /// Largura do lugar dos segundos: cabe "59m 59s" sem a linha mudar de medida a cada tique.

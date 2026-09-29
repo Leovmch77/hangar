@@ -4880,21 +4880,21 @@ impl Render for Hangar {
             // Cada área é uma view própria, guardada entre quadros quando pode (`panes.rs`).
             // Sem sessão, a faixa de baixo ocupa a área toda: o compositor fica no meio da tela.
             .when(!self.new_chat_screen(), |el| el.child(self.pane_element(panes::Area::Conversation,
-                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown).top(px(rise)), cx)))
+                StyleRefinement::default().w_full().flex_1().min_h_0().opacity(shown).top(px(rise)))))
             // Entre a conversa e a faixa de baixo: o que a faixa abre por cima (comandos, sugestões) cobre a marca. Sem a
             // conversa na tela, os lugares dela são do último desenho, de outra sessão.
             .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
             .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
-                else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }, cx))
+                else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(cx));
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
         let nav = if page.is_some() || costs_page || files_expanded { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
-                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) }
+                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
-                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }), cx)) };
+                .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };
         self.sync_side_cost(window);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
         let slide = self.side_slide_frame(window, cx);
@@ -4905,7 +4905,7 @@ impl Render for Hangar {
             else { (Some(topbar), None) };
         let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
             .when(chat_background, |el| el.bg(theme::background().alpha(1.)))
-            .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0(), cx))
+            .child(self.pane_element(panes::Area::Side, StyleRefinement::default().w(px(width)).h_full().flex_shrink_0()))
             // Só com a aba à vista: fora dela a view não redesenha e não limpa os próprios lugares.
             .when(self.activity_tab(), |el| el.child(self.activity_mark_float(cx)))
             .child(self.subagent_mark_float(cx)).into_any_element())
@@ -5115,9 +5115,8 @@ impl Render for Hangar {
             .children(self.render_landing_ghost(cx))
             .children(self.render_popup(window, cx))
             .children(self.render_search(window, cx))
-            // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto.
-            .child(self.panes.overlay.clone())
             .child(ticker)
+            // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto: adiada, fica acima dos diálogos do kit.
             .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
                 .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if this.api.is_some() {

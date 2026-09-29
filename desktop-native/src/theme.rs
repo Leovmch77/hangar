@@ -488,8 +488,8 @@ fn build_conversation_markdown(kit: &Theme, radius: Pixels) -> gpui_kit::base::T
         .with_dark(kit.is_dark())
         .with_paragraph_gap(rems(0.75))
         // Em relação ao texto da resposta, como os `em` do `.prose` do web; lido no desenho, o tamanho muda sem refazer o estilo.
-        .with_heading_font_size(|level, _| px(17. * appearance::get().text_size as f32 / 100.
-            * match level { 1 => 1.4, 2 => 1.25, 3 => 1.1, _ => 1. }))
+        .with_heading(|level| StyleRefinement::default().text_size(px(17. * appearance::get().text_size as f32 / 100.
+            * match level { 1 => 1.4, 2 => 1.25, 3 => 1.1, _ => 1. })))
         .with_inline_code(HighlightStyle { color: Some(accent_text()), background_color: Some(accent_dim()), ..Default::default() })
         .with_code_block(code_block)
         .with_table(table)

@@ -1,0 +1,5 @@
+# Cópia do gpui-pre-macos 0.3.7
+
+Origem: crate `gpui-pre-macos` 0.3.7 do crates.io, checksum `5a43af845b260b09393e923c4f1e1a67a10fcfc847b4815192bbfd02ed9fe725`, licença Apache-2.0.
+
+Nenhum arquivo de origem foi alterado. Esta cópia entra no build por `[patch.crates-io]` e usa a cópia modificada de `gpui-pre-apple`.

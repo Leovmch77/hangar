@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gpui-kit = { version = "=0.6.6", features = [
+gpui-kit = { version = "=0.7.0", features = [
     "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-csharp",
     "tree-sitter-css", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java",
     "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown",
@@ -35,14 +35,14 @@ notify-rust = "=4.18.0"
 embed-resource = "=3.0.11"
 
 [patch.crates-io]
-gpui-component = { path = "vendor/gpui-component-0.6.6" }
-gpui-base = { path = "vendor/gpui-base-0.6.6" }
-gpui-pre = { path = "vendor/gpui-pre-0.3.6" }
-gpui-pre-linux = { path = "vendor/gpui-pre-linux-0.3.6" }
-gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu-0.3.6" }
-gpui-pre-macos = { path = "vendor/gpui-pre-macos-0.3.6" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple-0.3.6" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows-0.3.6" }
+gpui-component = { path = "vendor/gpui-component-0.7.0" }
+gpui-base = { path = "vendor/gpui-base-0.7.0" }
+gpui-pre = { path = "vendor/gpui-pre-0.3.7" }
+gpui-pre-linux = { path = "vendor/gpui-pre-linux-0.3.7" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu-0.3.7" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos-0.3.7" }
+gpui-pre-apple = { path = "vendor/gpui-pre-apple-0.3.7" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows-0.3.7" }
 
 [profile.dev]
 debug = 0
