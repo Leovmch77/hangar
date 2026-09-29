@@ -2,6 +2,7 @@ export * from './api';
 export * from './esfriamento';
 export * from './sessions';
 export * from './servers';
+export * from './rota';
 export * from './share';
 export { configureApi } from './apiEnv';
 export { configureDiag, registrar as registrarDiag, novoReq as novoReqDiag } from './diag';

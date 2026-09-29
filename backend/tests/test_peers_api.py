@@ -213,7 +213,19 @@ def env_tmp(tmp_path, monkeypatch):
 def test_identificador_leitura(env_tmp, cli):
     r = cli.get("/api/peers/identificador", headers=AUTH)
     assert r.status_code == 200
-    assert r.json() == {"identificador": ""}
+    assert r.json() == {"identificador": "", "lan_url": ""}
+
+
+def test_lan_url_so_com_bind_fora_do_loopback(monkeypatch):
+    from app import peers_api
+    monkeypatch.setattr(peers_api, "detect_lan_ip", lambda: "192.168.77.142")
+    monkeypatch.setattr(settings, "port", 8765)
+    monkeypatch.setattr(settings, "lan_bind_ip", "127.0.0.1")
+    assert peers_api.lan_url(settings) == ""
+    monkeypatch.setattr(settings, "lan_bind_ip", "0.0.0.0")
+    assert peers_api.lan_url(settings) == "http://192.168.77.142:8765"
+    monkeypatch.setattr(settings, "lan_bind_ip", "10.0.0.5")
+    assert peers_api.lan_url(settings) == "http://10.0.0.5:8765"
 
 
 def test_identificador_leitura_sem_credencial_e_401(cli):

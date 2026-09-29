@@ -7,7 +7,7 @@
 // consumidor ficar permanentemente montado, considerar um keep-alive com delay no release.
 import * as m from '../paraglide/messages';
 import type { EventSourceLike } from '@hangar/core';
-import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer } from '@hangar/core';
+import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
 import { getActiveId, listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
 import { getIdentificador } from './peers';
@@ -149,6 +149,10 @@ function createSessionsStore() {
       }
       clearTimeout(retryTimers.get(s.id)); retryTimers.delete(s.id);
       if (estaDesligado(s.id)) slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      if (!rotaDecidida(s.id)) {
+        void decidirRota(s).then(() => { if (refs > 0 && servers.some((x) => x.id === s.id)) connect(servers, s.id); });
+        continue;
+      }
       const req = novoReqDiag();
       const es = openSessionsStream(s, req);
       streams.set(s.id, es);
@@ -183,7 +187,7 @@ function createSessionsStore() {
         if (!quedas.has(s.id)) quedas.set(s.id, Date.now());
         registrarDiag({ evento: 'lista.falhou', nivel: 'aviso', tela: 'lista', req,
           codigo, tentativa, espera_ms }, s.baseUrl);
-        if (!jaContou) { jaContou = true; registrarFalha(s.id); }
+        if (!jaContou) { jaContou = true; registrarFalha(s.id); esquecerRota(s.id); }
       };
       const arm = () => {
         if (!isCurrent()) return;
@@ -371,6 +375,7 @@ function createSessionsStore() {
         codigo: 'stream_mudo' }, servidor.baseUrl);
       es.close();
       streams.delete(id);
+      esquecerRota(id);
       clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
       clearTimeout(primeiros.get(id)); primeiros.delete(id);
     }

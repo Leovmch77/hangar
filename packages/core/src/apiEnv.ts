@@ -16,6 +16,8 @@ export interface ApiEnv {
   isInvite?(): boolean;
   /** Um servidor de convite respondeu 410: o dono revogou ou a sessão acabou. */
   onInviteEnded?(serverId: string | null): void;
+  /** Guarda o endereço da rede local aprendido para um servidor. Ausente = só em memória. */
+  rememberLan?(serverId: string, lan: import('./servers').LanInfo): void;
 }
 let _env: ApiEnv | null = null;
 export function configureApi(env: ApiEnv): void { _env = env; }

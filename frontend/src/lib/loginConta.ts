@@ -2,8 +2,8 @@
 // cancelar. O módulo da casa (lib/api.ts) está fechado neste lote — cada módulo novo cria o
 // seu fetch no padrão de servidor explícito (mesmo de lib/peers.ts). Este módulo é a ÚNICA
 // porta do front pro login: a tela (ContasSettings.svelte) não chama fetch direto.
-import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { errorDetail, isTimeoutError } from '@hangar/core';
+import { getRouteBaseUrl, getToken, dropActiveServer, type Server } from './auth';
+import { baseOf, errorDetail, isTimeoutError } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 // Erros de rede: "Failed to fetch" cru nao chega a tela (regra da casa: e.message cru e
@@ -27,7 +27,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
   let res: Response;
   try {
-    res = await fetch(`${getBaseUrl()}${path}`, {
+    res = await fetch(`${getRouteBaseUrl()}${path}`, {
       ...init,
       headers: {
         'Content-Type': 'application/json',
@@ -63,7 +63,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 async function reqEm<T>(s: Server, path: string, init?: RequestInit, timeoutMs = 8000): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${s.baseUrl}${path}`, {
+    res = await fetch(`${baseOf(s)}${path}`, {
       signal: AbortSignal.timeout(timeoutMs),
       ...init,
       headers: {

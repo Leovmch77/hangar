@@ -2,7 +2,7 @@
 // e o identificador desta máquina. A CREDENCIAL nunca volta inteira — o backend devolve
 // mascarada; este módulo só exibe. Módulo próprio porque o cliente da casa (lib/api.ts) está
 // fechado para as Tasks deste plano — cada uma cria o seu, no mesmo padrão.
-import { dropActiveServer, getBaseUrl, getToken, type Server } from './auth';
+import { dropActiveServer, getRouteBaseUrl, getToken, type Server } from './auth';
 import { errorDetail, probeServerResponse } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
@@ -17,7 +17,7 @@ export interface PeerView {
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${path}`, {
+  const res = await fetch(`${getRouteBaseUrl()}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',

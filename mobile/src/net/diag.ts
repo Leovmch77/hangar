@@ -1,5 +1,5 @@
 import { AppState, Platform } from 'react-native';
-import { configureDiag, criarTransporteDiag, type EventoDiag } from '@hangar/core';
+import { baseOf, configureDiag, criarTransporteDiag, type EventoDiag } from '@hangar/core';
 import { useServers } from '../stores/servers';
 
 let iniciado = false;
@@ -11,7 +11,7 @@ export function iniciarDiag(): void {
   let seq = 0;
   const destinos = new Set<string>();
   const transporte = criarTransporteDiag((destino) => useServers.getState().servers
-    .find((s) => s.baseUrl.replace(/\/+$/, '') === destino)?.token);
+    .find((s) => s.baseUrl.replace(/\/+$/, '') === destino || baseOf(s) === destino)?.token);
   const registrar = (evento: EventoDiag, destino = useServers.getState().active()?.baseUrl) => {
     if (!destino) return;
     const base = destino.replace(/\/+$/, '');

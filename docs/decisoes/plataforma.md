@@ -716,3 +716,21 @@ Revogar corta SSE e WebSocket abertos em cerca de 5 s (WebSocket fecha com 4410)
 nunca conta como o app aberto do dono (o dono continua recebendo push) e a lista dele esconde o
 nome das outras sessões (campos `pair`/`then`). O nativo guarda um convite por endereço de dono
 (o mais novo vence; endereço que já é servidor próprio recusa o resgate).
+
+## Rede local antes do Tailscale: `baseUrl` é identidade, a rota é `baseOf`
+
+(29/09/2026, pedido do usuário.) A mesma máquina é alcançável pela rede local (no trabalho, a
+delphi-02; em casa, o PC de casa) e pelo Tailscale, e o caminho local evita a volta pelo relay.
+O servidor informa o próprio endereço local em `GET /api/peers/identificador` (`lan_url`, vazio
+quando o bind é só loopback). O cliente guarda `lan: {url, id}` na entrada e, a cada conexão da
+lista, testa o local com prazo de 800 ms. Só usa se a resposta trouxer o MESMO identificador: o
+mesmo `192.168.x.y` em outra rede é outra máquina, e o token é igual em todas as máquinas do
+usuário. Conexão que cai esquece a rota, e é assim que a troca de rede é percebida.
+
+`baseUrl` segue sendo a identidade (dedupe, sincronização, agrupamento, diário, endereço mandado
+ao par). Chamada nova sai por `baseOf(s)` ou pelo `getBaseUrl` do `ApiEnv`; `s.baseUrl` cru numa
+URL de chamada ignora a rede local sem erro nenhum.
+
+Página HTTPS (PWA pelo `*.ts.net` ou pela VPS) não tenta o `http://` local: o navegador bloqueia
+conteúdo misto. Valem o app nativo, o desktop nativo e o Electron (página em `http://127.0.0.1`).
+A máquina precisa escutar fora do loopback (`CP_LAN_BIND_IP=0.0.0.0`); o token continua exigido.

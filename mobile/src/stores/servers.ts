@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
-import type { Server } from '@hangar/core';
+import type { LanInfo, Server } from '@hangar/core';
 
 const KEY = 'cp_servers_v1';
 
@@ -36,6 +36,7 @@ export interface ServersState {
   markInvalid(id: string): void;
   ensureActive(id: string): boolean;
   limparAviso(): void;
+  rememberLan(id: string, lan: LanInfo): void;
 }
 
 export const useServers = create<ServersState>((set, get) => ({
@@ -89,6 +90,11 @@ export const useServers = create<ServersState>((set, get) => ({
   },
   limparAviso() {
     set({ aviso: null });
+  },
+  rememberLan(id, lan) {
+    const servers = get().servers.map((s) => (s.id === id ? { ...s, lan } : s));
+    void persistir(set, { servers, activeId: get().activeId });
+    set({ servers });
   },
 }));
 

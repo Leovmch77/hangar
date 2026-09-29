@@ -4,7 +4,7 @@ import App from './App.svelte';
 import { applyTheme, getThemePref, getTextoDoDesktop } from './lib/theme';
 import { buscarPaleta, aplicarPaleta, ligarAtualizacaoAoFocar } from './lib/desktopTheme';
 import { applyBg, applyAppearance, applyLiquid } from './lib/background';
-import { ensureCookie, getBaseUrl, getToken, handleUnauthorized, isActiveInvite, markInviteEnded, getActiveId } from './lib/auth';
+import { ensureCookie, getRouteBaseUrl, getToken, handleUnauthorized, isActiveInvite, markInviteEnded, getActiveId, rememberLan } from './lib/auth';
 import { localeAtual } from './lib/locale';
 import { configureApi, configureLocale, configureDiag } from '@hangar/core';
 import { registrar as registrarDiag, novoReq } from './lib/diag';
@@ -14,8 +14,9 @@ configureLocale({ getLocale: localeAtual });
 // registro, o `apiFetch` segue funcionando e não grava nada.
 configureDiag({ registrar: registrarDiag, novoReq });
 configureApi({
-  getBaseUrl,
+  getBaseUrl: getRouteBaseUrl,
   getToken,
+  rememberLan,
   onUnauthorized: () => { if (handleUnauthorized()) window.location.reload(); },
   origin: window.location.origin,
   createEventSource: (url, { withCredentials }) =>

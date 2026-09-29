@@ -4,8 +4,8 @@
 // lib/api.ts está fechado neste lote: o fetch segue o MESMO padrão dele (authHeaders +
 // ensureOk com 401 → dropActiveServer + reload), sem tocar no arquivo. `errorDetail` vem de
 // api.ts, que é exportado — importar não é editar.
-import { getBaseUrl, getToken, dropActiveServer, isActiveInvite, type Server } from './auth';
-import { errorDetail, inviteAllows } from '@hangar/core';
+import { getRouteBaseUrl, getToken, dropActiveServer, isActiveInvite, type Server } from './auth';
+import { baseOf, errorDetail, inviteAllows } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 export type EstadoLogin = {
@@ -38,7 +38,7 @@ export interface ContaEstado {
 // servidor atrás de VPN não recusa conexão, pendura — sem prazo a lista ficava "Carregando…".
 async function req<T>(path: string): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${path}`, {
+  const res = await fetch(`${getRouteBaseUrl()}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   // Mesmo contrato do ensureOk do api.ts: 401 com token salvo = credencial velha, deslogar.
@@ -52,7 +52,7 @@ async function req<T>(path: string): Promise<T> {
 }
 
 async function reqEm<T>(s: Server, path: string): Promise<T> {
-  const res = await fetch(`${s.baseUrl}${path}`, {
+  const res = await fetch(`${baseOf(s)}${path}`, {
     signal: AbortSignal.timeout(8000),
     headers: { Authorization: `Bearer ${s.token}` },
   });

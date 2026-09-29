@@ -1,5 +1,6 @@
 pub mod dto;
 mod local;
+pub mod route;
 pub mod sse;
 
 use std::time::Duration;
@@ -104,10 +105,11 @@ impl Api {
         Ok(Self { client, plain, base })
     }
 
+    /// O endereço salvo, mesmo quando os pedidos vão pela rede local (`route`).
     pub fn identity(&self) -> String { self.base.as_str().to_owned() }
 
     pub fn endpoint(&self, session: Option<&str>, action: Option<&str>) -> Url {
-        let mut url = self.base.clone();
+        let mut url = self.route();
         let mut parts = url.path_segments_mut().expect("validated HTTP base");
         parts.pop_if_empty().push("api").push("sessions");
         if let Some(name) = session { parts.push(name); }
@@ -329,7 +331,7 @@ impl Api {
     }
 
     pub async fn config(&self) -> Result<Value, Failure> {
-        let mut url = self.base.clone();
+        let mut url = self.route();
         url.path_segments_mut().expect("validated HTTP base").pop_if_empty().extend(["api", "config"]);
         let r = self.client.get(url).timeout(Duration::from_secs(15)).send().await.map_err(|_| Failure::transport(false))?;
         Self::checked(r, false).await?.json().await.map_err(|_| Failure::local("invalid_response"))
@@ -337,7 +339,7 @@ impl Api {
 
     /// `/api/<path>` do servidor (fora de uma sessão), com o método pedido.
     fn server_url(&self, path: &[&str], query: &[(&str, &str)]) -> Url {
-        let mut url = self.base.clone();
+        let mut url = self.route();
         url.path_segments_mut().expect("validated HTTP base").pop_if_empty().push("api").extend(path);
         if !query.is_empty() { url.query_pairs_mut().extend_pairs(query); }
         url
@@ -392,7 +394,7 @@ impl Api {
     /// Paleta do papel de parede desta máquina. O backend só responde a pedidos locais: ligado a outro
     /// servidor volta 403, e 404 quer dizer que o desktop não gera paleta.
     pub async fn desktop_palette(&self) -> Result<Value, Failure> {
-        let mut url = self.base.clone();
+        let mut url = self.route();
         url.path_segments_mut().expect("validated HTTP base").pop_if_empty().extend(["api", "desktop", "palette"]);
         let r = self.client.get(url).timeout(Duration::from_secs(10)).send().await.map_err(|_| Failure::transport(false))?;
         Self::checked(r, false).await?.json().await.map_err(|_| Failure::local("invalid_response"))
@@ -401,7 +403,7 @@ impl Api {
     /// Foto do papel de parede desta máquina, para o fundo Desktop em Vidro. Mesma regra da paleta: 403 fora
     /// do loopback, 404 sem papel de parede.
     pub async fn desktop_wallpaper(&self) -> Result<Vec<u8>, Failure> {
-        let mut url = self.base.clone();
+        let mut url = self.route();
         url.path_segments_mut().expect("validated HTTP base").pop_if_empty().extend(["api", "desktop", "wallpaper"]);
         let r = self.client.get(url).timeout(Duration::from_secs(20)).send().await.map_err(|_| Failure::transport(false))?;
         let r = Self::checked(r, false).await?;

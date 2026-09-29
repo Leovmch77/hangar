@@ -14,6 +14,9 @@ pub(crate) struct ServerEntry {
     /// Servidor que só existe por um convite: nenhuma chamada geral do servidor, e 410 é "compartilhamento encerrado".
     #[serde(default)]
     pub invite: bool,
+    /// Rede local aprendida pelo endereço salvo; ausente = nunca perguntado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<api::route::Lan>,
 }
 
 pub(crate) enum RemoteUpdate { Sessions(Result<Vec<SessionInfo>, Failure>), Stream(Update) }
@@ -53,6 +56,7 @@ pub(crate) fn new_id() -> String {
 
 async fn run_list(api: Api, key: String, generation: u64, tx: async_channel::Sender<Envelope>) {
     let send = |update| Envelope { connection: 0, selection: None, payload: Payload::Remote(generation, key.clone(), update) };
+    api::route::ensure(&api).await;
     let first = api.sessions().await;
     let fatal = first.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403 | 410)));
     if tx.send(send(RemoteUpdate::Sessions(first))).await.is_err() || fatal { return; }
@@ -73,6 +77,7 @@ impl Hangar {
         let active = self.server.as_deref().map(norm).unwrap_or_default();
         let wanted: Vec<ServerEntry> = self.servers.iter().filter(|s| !s.disabled && norm(&s.address) != active).cloned().collect();
         self.remote.retain(|key, _| wanted.iter().any(|s| &norm(&s.address) == key));
+        for s in &self.servers { api::route::seed(&s.address, s.invite, s.lan.as_ref()); }
         for entry in wanted {
             let key = norm(&entry.address);
             let list = self.remote.entry(key.clone()).or_default();
@@ -264,6 +269,14 @@ impl Hangar {
         }).detach();
     }
 
+    /// Rede local nova de uma máquina (`api::route`): fica na entrada para a próxima abertura já nascer nela.
+    pub(super) fn remember_lan(&mut self, address: &str, lan: api::route::Lan) {
+        let Some(entry) = self.servers.iter_mut().find(|s| norm(&s.address) == norm(address)) else { return };
+        if entry.lan.as_ref() == Some(&lan) { return; }
+        entry.lan = Some(lan);
+        self.persist_servers();
+    }
+
     pub(super) fn persist_servers(&self) {
         let active = Some((self.server.clone().unwrap_or_default(), self.active_token.clone())).filter(|(a, t)| !a.is_empty() && !t.is_empty());
         let (servers, connection, tx) = (self.servers.clone(), self.connection, self.tx.clone());
@@ -330,7 +343,7 @@ mod tests {
 
     #[test]
     fn upsert_matches_same_machine_and_keeps_label() {
-        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite: false };
+        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite: false, lan: None };
         let mut list = vec![entry("PC", "http://127.0.0.1:8765", "a")];
         upsert(&mut list, entry("", "http://127.0.0.1:8765/", "b"));
         upsert(&mut list, entry("notebook", "https://notebook.ts.net", "c"));
@@ -342,10 +355,10 @@ mod tests {
     #[test]
     fn invite_flag_survives_the_plain_upsert_of_the_first_connection() {
         let mut list = vec![ServerEntry { id: "i".into(), label: "Convite · Jefferson".into(), address: "https://h:8443".into(),
-            token: "g".into(), disabled: false, invite: true }];
+            token: "g".into(), disabled: false, invite: true, lan: None }];
         // O `Sessions(Ok)` da conexão faz upsert sem a marca: ela não pode cair.
         upsert(&mut list, ServerEntry { id: "x".into(), label: String::new(), address: "https://h:8443/".into(),
-            token: "g".into(), disabled: false, invite: false });
+            token: "g".into(), disabled: false, invite: false, lan: None });
         assert!(list[0].invite);
         let old: ServerEntry = serde_json::from_str(r#"{"id":"a","label":"PC","address":"http://127.0.0.1:8765","token":"t"}"#).unwrap();
         assert!(!old.invite);

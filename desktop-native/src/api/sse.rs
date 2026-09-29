@@ -22,6 +22,7 @@ pub async fn run(api: Api, name: Option<String>, tx: Sender<Update>) {
     let mut cursor = String::new();
     let mut attempt = 0u32;
     loop {
+        super::route::ensure(&api).await;
         let connected_at = tokio::time::Instant::now();
         let outcome = async {
             let response = api.stream(name.as_deref(), &cursor).await?;
@@ -54,6 +55,7 @@ pub async fn run(api: Api, name: Option<String>, tx: Sender<Update>) {
         }.await;
         if tx.is_closed() { return; }
         let failure = match outcome { Ok(()) => return, Err(e) => e };
+        super::route::forget(&api);
         // 410 é convite encerrado: tentar de novo não o traz de volta.
         let stop = matches!(failure.status, Some(401 | 403 | 410));
         if connected_at.elapsed() >= Duration::from_secs(10) { attempt = 0; }

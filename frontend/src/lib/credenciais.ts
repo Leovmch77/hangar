@@ -7,8 +7,8 @@
 //
 // O fetch segue o mesmo par do contaEstado.ts: `null` = servidor ATIVO (401 desloga), Server
 // explícito = máquina do ?srv= (401 de outra máquina não pode apagar a credencial ativa).
-import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { consumeCodexRateLimitReset, consumeCodexRateLimitResetForServer, errorDetail, comTeto,
+import { getRouteBaseUrl, getToken, dropActiveServer, type Server } from './auth';
+import { baseOf, consumeCodexRateLimitReset, consumeCodexRateLimitResetForServer, errorDetail, comTeto,
   type CodexAccount, type CodexResetOutcome } from '@hangar/core';
 import * as m from '../paraglide/messages';
 export { listarCredenciais, credentialAuth, credentialGroup, codexAccountMessage } from '@hangar/core';
@@ -16,7 +16,7 @@ export type { Credencial, CotaResumo, TipoCredencial, AuthMethod, CodexAccount, 
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
-  const res = await fetch(`${getBaseUrl()}${path}`, {
+  const res = await fetch(`${getRouteBaseUrl()}${path}`, {
     ...init,
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
@@ -33,7 +33,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function reqEm<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
-  const res = await fetch(`${s.baseUrl}${path}`, {
+  const res = await fetch(`${baseOf(s)}${path}`, {
     ...init,
     signal: comTeto(init?.signal ?? undefined, prazoMs),
     headers: {

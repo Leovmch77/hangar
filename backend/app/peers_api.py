@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app import atomico, descoberta, peers, peers_check, runtime_config
 from app.auth import require_auth
-from app.config import settings
+from app.config import detect_lan_ip, resolve_bind_ip, settings
 from app.mensagens import erro
 
 peers_router = APIRouter(prefix="/api/peers")
@@ -136,7 +136,17 @@ def descobrir_maquinas() -> list[dict]:
 
 @peers_router.get("/identificador", dependencies=[Depends(require_auth)])
 def get_identificador() -> dict:
-    return {"identificador": settings.server_id or ""}
+    return {"identificador": settings.server_id or "", "lan_url": lan_url(settings)}
+
+
+def lan_url(s) -> str:
+    """Endereço direto na rede local, que o cliente prefere ao Tailscale quando alcança.
+    Vazio com bind só local: a porta não aceita conexão de fora desta máquina."""
+    bind = resolve_bind_ip(s)
+    if bind in ("127.0.0.1", "localhost", "::1"):
+        return ""
+    host = detect_lan_ip() if bind in ("0.0.0.0", "::") else bind
+    return "" if host == "127.0.0.1" else f"http://{host}:{s.port}"
 
 
 @peers_router.put("/identificador", dependencies=[Depends(require_auth)])

@@ -1,6 +1,6 @@
 // getBaseUrl/getToken vivem em auth.ts; o api.ts so as IMPORTA (api.ts:1) e nao reexporta.
 import type { Server } from './auth';
-import { fetchSessionsForServer } from '@hangar/core';
+import { baseOf, fetchSessionsForServer } from '@hangar/core';
 
 // Coalescencia do resize: arrastar a borda emite dezenas de eventos, e cada um redesenha a janela do
 // tmux inteira — o capture-pane concorrente devolveria quadros meio-pintados pro preview e pro
@@ -28,7 +28,7 @@ export async function sessionExistsOnServer(s: Server, name: string): Promise<bo
 // `shortcut`: terminal de atalho da sessao `name` — o backend resolve o alvo tmux pelo dono.
 export function termUrlForServer(s: Server, name: string, cols: number, rows: number,
                                  extra?: { shortcut?: string }): string {
-  const base = (s.baseUrl || location.origin).replace(/^http/, 'ws');
+  const base = (baseOf(s) || location.origin).replace(/^http/, 'ws');
   const qs = new URLSearchParams({ token: s.token, cols: String(cols), rows: String(rows) });
   if (extra?.shortcut) qs.set('shortcut', extra.shortcut);
   return `${base}/api/sessions/${encodeURIComponent(name)}/term?${qs}`;

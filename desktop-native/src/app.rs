@@ -149,6 +149,8 @@ enum Payload {
     Media(SessionKey, Source, Result<Option<Arc<RenderImage>>, Failure>),
     Saved(SessionKey, bool, Result<PathBuf, String>),
     ConnectionNotSaved(String),
+    // Rede local aprendida para a máquina deste endereço salvo.
+    Lan(String, api::route::Lan),
     AppearanceSaved(Result<(), String>),
     // Paleta do papel de parede pedida à conexão atual (`GET /api/desktop/palette`), com o número do pedido.
     DesktopPalette(u64, Result<Value, Failure>),
@@ -548,7 +550,7 @@ impl Hangar {
         if let Some((address, token)) = &saved
             && !known_servers.iter().any(|s| servers::norm(&s.address) == servers::norm(address)) {
             known_servers.insert(0, servers::ServerEntry { id: servers::new_id(), label: servers::default_label(address),
-                address: address.clone(), token: token.clone(), disabled: false, invite: false });
+                address: address.clone(), token: token.clone(), disabled: false, invite: false, lan: None });
         }
         let (saved_address, saved_token) = saved.clone().unwrap_or_else(|| ("http://127.0.0.1:8765".into(), String::new()));
         let address = cx.new(|cx| InputState::new(window, cx).default_value(saved_address).placeholder(tr("server")));
@@ -601,6 +603,11 @@ impl Hangar {
         // A busca mora no painel de comandos, sobre o compositor.
         cx.subscribe(&command_search, |this, _, _: &InputEvent, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         let (tx, rx) = async_channel::bounded::<Envelope>(256);
+        let learned = tx.clone();
+        // ponytail: fila cheia perde o aviso; a rede local é reaprendida na próxima decisão.
+        api::route::on_learned(move |address, lan| {
+            let _ = learned.try_send(Envelope { connection: 0, selection: None, payload: Payload::Lan(address, lan) });
+        });
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(envelope) = rx.recv().await {
                 if this.update_in(cx, |this, window, cx| this.receive(envelope, window, cx)).is_err() { break; }
@@ -856,6 +863,7 @@ impl Hangar {
         let connection = self.connection;
         let ready_sessions = self.ready_sessions.take();
         self.list_task = Some(self.runtime.spawn(async move {
+            api::route::ensure(&api).await;
             let result = match ready_sessions { Some(sessions) => Ok(sessions), None => api.sessions().await };
             let fatal = result.as_ref().err().is_some_and(|e| matches!(e.status, Some(401 | 403 | 410)));
             if tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await.is_err() || fatal { return; }
@@ -1162,6 +1170,7 @@ impl Hangar {
             Payload::Backdrop(seq, result) => { self.receive_backdrop(seq, result, window, cx); return; }
             Payload::BackdropPicked(result) => { self.receive_picked_backdrop(result, window, cx); return; }
             Payload::BackdropRemoved(result) => { self.receive_removed_backdrop(result, window, cx); return; }
+            Payload::Lan(address, lan) => { self.remember_lan(&address, lan); return; }
             // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
             Payload::Remote(generation, key, update) => {
                 if generation == self.remote_gen {
@@ -1188,7 +1197,7 @@ impl Hangar {
                 if let Some((address, token)) = self.unsaved_connection.take() {
                     let known = self.servers.iter().any(|s| servers::norm(&s.address) == servers::norm(&address));
                     let label = if known { String::new() } else { servers::default_label(&address) };
-                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false, invite: false });
+                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false, invite: false, lan: None });
                     // Disco fora da thread da janela; só a falha volta.
                     self.persist_servers();
                     self.sync_updater(cx);
@@ -1376,7 +1385,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }

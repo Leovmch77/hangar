@@ -1,4 +1,4 @@
-import { configureApi, configureLocale } from '@hangar/core';
+import { baseOf, configureApi, configureLocale } from '@hangar/core';
 import { getLocales } from 'expo-localization';
 import { overwriteGetLocale } from '../paraglide/runtime';
 import { useServers } from '../stores/servers';
@@ -15,7 +15,11 @@ export function configureCore() {
     return getLocales()[0]?.languageCode === 'pt' ? 'pt' : 'en';
   };
   configureApi({
-    getBaseUrl: () => useServers.getState().active()?.baseUrl ?? '',
+    getBaseUrl: () => {
+      const a = useServers.getState().active();
+      return a ? baseOf(a) : '';
+    },
+    rememberLan: (id, lan) => useServers.getState().rememberLan(id, lan),
     getToken: () => useServers.getState().active()?.token ?? null,
     onUnauthorized: () => {
       const a = useServers.getState().active();

@@ -1,5 +1,6 @@
 import { apiEnv, type EventSourceLike } from './apiEnv';
 import type { Server } from './servers';
+import { baseOf } from './rota';
 import type { CodexAccount, CodexIntegracaoEstado, CodexLoginAttempt, CodexResetOutcome, Credencial } from './credenciais';
 import * as m from './paraglide/messages';
 import { localeAtual } from './i18n';
@@ -58,7 +59,7 @@ export interface CodexOpcoes {
 }
 
 export function codexVoiceUrlForServer(server: Server, name: string, origin: string): string {
-  const base = (server.baseUrl || origin).replace(/\/$/, '').replace(/^http/, 'ws');
+  const base = (baseOf(server) || origin).replace(/\/$/, '').replace(/^http/, 'ws');
   return `${base}/api/sessions/${encodeURIComponent(name)}/codex/voice?${new URLSearchParams({ token: server.token })}`;
 }
 
@@ -227,7 +228,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
 async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false): Promise<Response> {
-  const base = server?.baseUrl ?? apiEnv().getBaseUrl();
+  const destino = server?.baseUrl ?? apiEnv().getBaseUrl();
+  const base = server ? baseOf(server) : destino;
   // Servidor de convite só atende a sessão compartilhada e as rotas do chat: o resto nem sai
   // daqui, senão cada tela aberta enche a rede e o diário de 403.
   const convite = server ? server.invite === true : apiEnv().isInvite?.() === true;
@@ -273,11 +275,11 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
     if (!isAbortError(e) || timedOut) {
       const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
       const poll = rota.startsWith('GET ');
-      if (!poll || !_semRede.has(`${base}|${rota}`)) {
+      if (!poll || !_semRede.has(`${destino}|${rota}`)) {
         registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota,
-          codigo: timedOut || (e instanceof Error && e.name === 'TimeoutError') ? 'timeout' : 'rede' }, base);
+          codigo: timedOut || (e instanceof Error && e.name === 'TimeoutError') ? 'timeout' : 'rede' }, destino);
       }
-      if (poll) _semRede.add(`${base}|${rota}`);
+      if (poll) _semRede.add(`${destino}|${rota}`);
       // Só falha de REDE esfria (o `isAbortError` acima já tirou o cancelamento de quem chamou).
       if (server) registrarFalha(server.id);
     }
@@ -291,8 +293,8 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   if (convite && (res.status === 410 || res.status === 401)) apiEnv().onInviteEnded?.(server?.id ?? null);
   {
     const rota = `${(init?.method ?? 'GET').toUpperCase()} ${rotaGenerica(path)}`;
-    if (_semRede.delete(`${base}|${rota}`)) {
-      registrarDiag({ evento: 'api.voltou', nivel: 'ok', ms: Date.now() - t0, req, detalhe: rota }, base);
+    if (_semRede.delete(`${destino}|${rota}`)) {
+      registrarDiag({ evento: 'api.voltou', nivel: 'ok', ms: Date.now() - t0, req, detalhe: rota }, destino);
     }
   }
   // O que entra no diário, e por quê:
@@ -323,7 +325,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
       ms: Date.now() - t0,
       req,
       detalhe: [`${metodo} ${rotaGenerica(path)}`, motivo].filter(Boolean).join(' — '),
-    }, base);
+    }, destino);
   }
   return res;
 }
@@ -940,7 +942,7 @@ export async function sairConta(alvo: Server | null, nome: string): Promise<void
 
 // Web Push: chave VAPID publica deste servidor (applicationServerKey). Vazia = push desligado la.
 export async function getVapidKey(s: Server): Promise<string> {
-  const res = await fetch(`${s.baseUrl}/api/push/vapid`, {
+  const res = await fetch(`${baseOf(s)}/api/push/vapid`, {
     headers: { Authorization: `Bearer ${s.token}` },
   });
   if (!res.ok) throw new Error(`vapid ${res.status}`);
@@ -958,7 +960,7 @@ export interface PushSubscriptionJSON {
 // e o idioma escolhido na tela Geral — o backend renderiza a notificacao no idioma da inscricao
 // (app/push.py); inscricao antiga sem o campo cai em pt.
 export async function subscribePush(s: Server, subscription: PushSubscriptionJSON): Promise<void> {
-  const res = await fetch(`${s.baseUrl}/api/push/subscribe`, {
+  const res = await fetch(`${baseOf(s)}/api/push/subscribe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ subscription, label: s.label, serverId: s.id, locale: localeAtual() }),
@@ -1273,7 +1275,7 @@ export async function askHistoryForServer(
   s: Server,
   question: string,
 ): Promise<{ answer: string; hits: SearchHit[] }> {
-  const res = await fetch(`${s.baseUrl}/api/ask-history`, {
+  const res = await fetch(`${baseOf(s)}/api/ask-history`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ question }),
@@ -1285,7 +1287,7 @@ export async function askHistoryForServer(
 
 export async function searchTranscriptsForServer(s: Server, q: string): Promise<SearchHit[]> {
   // 30s: a busca varre as conversas de todas as contas; um termo raro percorre tudo antes de parar.
-  const res = await fetch(`${s.baseUrl}/api/search?q=${encodeURIComponent(q)}`, {
+  const res = await fetch(`${baseOf(s)}/api/search?q=${encodeURIComponent(q)}`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     signal: AbortSignal.timeout(30000),
   });
@@ -1507,7 +1509,7 @@ export async function getPlan(name: string): Promise<PlanDetail | null> {
 // malha, e a sessão executora dela pode não estar no servidor ativo. `fetch` cru pelo mesmo motivo
 // do getPlan acima: 404 aqui é "sem plano ativo", não falha.
 export async function getPlanForServer(s: Server, name: string): Promise<PlanDetail | null> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/plan`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/plan`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     signal: AbortSignal.timeout(8000),
   });
@@ -2347,12 +2349,13 @@ export function disableSyncForServer(server: Server): Promise<SyncSetup> {
 // cada um tem o seu, falha isolada.
 export function openSessionsStream(s: Server, req = novoReq()): EventSourceLike {
   const o = apiEnv().origin;
-  const isSameOrigin = !!o && (!s.baseUrl || s.baseUrl === o);
+  const base = baseOf(s);
+  const isSameOrigin = !!o && (!base || base === o);
   const params = new URLSearchParams();
   if (!isSameOrigin) params.set('token', s.token);
   if (req) params.set('diag_req', req);
   const qs = params.toString();
-  const url = `${s.baseUrl}/api/sessions/events${qs ? `?${qs}` : ''}`;
+  const url = `${base}/api/sessions/events${qs ? `?${qs}` : ''}`;
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
@@ -2363,12 +2366,13 @@ export function openSessionsStream(s: Server, req = novoReq()): EventSourceLike 
 export function openEventStreamForServer(s: Server, name: string, req = novoReq()): EventSourceLike {
   const path = `/api/sessions/${encodeURIComponent(name)}/events`;
   const o = apiEnv().origin;
-  const isSameOrigin = !!o && (!s.baseUrl || s.baseUrl === o);
+  const base = baseOf(s);
+  const isSameOrigin = !!o && (!base || base === o);
   const params = new URLSearchParams();
   if (!isSameOrigin) params.set('token', s.token);
   if (req) params.set('diag_req', req);
   const qs = params.toString();
-  const url = `${s.baseUrl}${path}${qs ? `?${qs}` : ''}`;
+  const url = `${base}${path}${qs ? `?${qs}` : ''}`;
   return apiEnv().createEventSource(url, { withCredentials: isSameOrigin });
 }
 
@@ -2694,7 +2698,7 @@ export function setPermissionMode(name: string, mode: string): Promise<{ mode: s
 
 // Obtem o estado atual de um loop (ou null se nao existe) e sugestoes de próximas ações.
 export async function getLoopForServer(s: Server, name: string): Promise<{ loop: LoopState | null; suggestions: string[] }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/loop`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/loop`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     signal: AbortSignal.timeout(8000),
   });
@@ -2704,7 +2708,7 @@ export async function getLoopForServer(s: Server, name: string): Promise<{ loop:
 
 // Cria um novo loop com goal, check_cmd opcional, max_iters e require_branch.
 export async function createLoopForServer(s: Server, name: string, body: { goal: string; check_cmd?: string | null; max_iters?: number; require_branch?: boolean }): Promise<{ loop: LoopState }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/loop`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/loop`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify(body),
@@ -2722,7 +2726,7 @@ export async function refineLoopForServer(
   goal: string,
   check_cmd: string | null,
 ): Promise<{ goal: string }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/loop/refine`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/loop/refine`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ goal, check_cmd }),
@@ -2733,7 +2737,7 @@ export async function refineLoopForServer(
 }
 
 export async function stopLoopForServer(s: Server, name: string): Promise<{ loop: LoopState }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/loop`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/loop`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${s.token}` },
   });
@@ -2743,7 +2747,7 @@ export async function stopLoopForServer(s: Server, name: string): Promise<{ loop
 
 // Resolve um loop no estado 'done_claimed' (accept=true) ou 'stopped' (accept=false).
 export async function resolveLoopForServer(s: Server, name: string, accept: boolean): Promise<{ loop: LoopState }> {
-  const res = await fetch(`${s.baseUrl}/api/sessions/${encodeURIComponent(name)}/loop/resolve`, {
+  const res = await fetch(`${baseOf(s)}/api/sessions/${encodeURIComponent(name)}/loop/resolve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
     body: JSON.stringify({ accept }),

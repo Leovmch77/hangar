@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
 import type { SessionInfo, Server, AggSession } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
@@ -91,6 +91,10 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
   for (const s of list) {
     if (streams.has(s.id)) continue;
     if (retryTimers.has(s.id)) continue;
+    if (!rotaDecidida(s.id)) {
+      void decidirRota(s).then(() => { if (refs > 0 && serversCache.some((x) => x.id === s.id)) connect(serversCache, get, set); });
+      continue;
+    }
     const es = openSessionsStream(s);
     let falhaDados = false;
     // ping mantém o watchdog do adapter vivo (wrap rearma). Sem listener,
@@ -123,6 +127,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
       recompute(set);
       es.close();
       streams.delete(s.id);
+      esquecerRota(s.id);
       scheduleRetry(s.id, get, set);
     };
     streams.set(s.id, es);

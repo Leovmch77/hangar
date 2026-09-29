@@ -4,7 +4,7 @@
 
 import { normalizeBaseUrl } from './url';
 import * as m from '../paraglide/messages';
-import { type Server, type InviteRedeemResult, serverColor, registrarDiag } from '@hangar/core';
+import { type Server, type InviteRedeemResult, type LanInfo, serverColor, registrarDiag, baseOf } from '@hangar/core';
 export { serverColor };
 export type { Server };
 
@@ -209,12 +209,27 @@ export function setServerDisabled(id: string, disabled: boolean): boolean {
   return true;
 }
 
+export function rememberLan(id: string, lan: LanInfo): void {
+  const list = readServers();
+  const i = list.findIndex((s) => s.id === id);
+  if (i < 0) return;
+  list[i] = { ...list[i], lan };
+  writeServers(list);
+  notifyChanged();
+}
+
 export function getActiveId(): string | null {
   return activeServer()?.id ?? null;
 }
 
 export function getBaseUrl(): string {
   return activeServer()?.baseUrl ?? '';
+}
+
+/** Endereço por onde as chamadas ao ativo saem: a rede local quando ela responde. */
+export function getRouteBaseUrl(): string {
+  const s = activeServer();
+  return s ? baseOf(s) : '';
 }
 
 export function getToken(): string | null {
