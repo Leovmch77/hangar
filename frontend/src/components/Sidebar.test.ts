@@ -61,7 +61,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   // item.session — sessão crua no lugar certo quebraria na chave do each.
   clusterByPair: (s: unknown[]) => s.map((x) => ({ session: x })),
   untrackedReason: () => '', providerName: vi.fn(() => 'claude'),
-  providerTag: () => null,
+  providerTag: vi.fn(() => null),
   cwdParts: (c: string | undefined) => ({ prefix: '', base: c ?? '' }),
  loopBadge: () => null, LOOP_TONE_COLOR: {},
 }));
@@ -1075,6 +1075,30 @@ describe('Sidebar — linha do orquestrador sem LLM', () => {
     unmount(t.comp);
     storeState.rows.length = 0;
     vi.mocked(api.providerName).mockImplementation(() => 'claude');
+  });
+
+  it('no trilho recolhido o title da linha não nomeia provider', async () => {
+    comOrq();
+    const sessions = (storeState.byServer[0] as { sessions: unknown[] }).sessions;
+    sessions.push(
+      { name: 'c1', serverId: 'srv-a', state: 'idle' },
+      { name: 'x1', serverId: 'srv-a', state: 'idle', provider: 'codex' },
+    );
+    storeState.rows.push(...sessions);
+    vi.mocked(api.providerName).mockImplementation((p) => p ?? 'claude');
+    vi.mocked(api.providerTag).mockImplementation((p) => (p === 'codex' ? 'Codex' : 'Orq'));
+    navMode.mode = 'rail';
+    sidebarPin.setUser(true);   // trilho recolhido
+    const t = montar();
+    await tick();
+    const titles = [...document.querySelectorAll('.sess-main')].map((b) => b.getAttribute('title') ?? '');
+    expect(titles.find((x) => x.startsWith('g1-orq'))).not.toContain('Orq');
+    expect(titles.find((x) => x.startsWith('x1'))).toContain('Codex');
+    unmount(t.comp);
+    sidebarPin.setUser(false);
+    storeState.rows.length = 0;
+    vi.mocked(api.providerName).mockImplementation(() => 'claude');
+    vi.mocked(api.providerTag).mockImplementation(() => null);
   });
 
   it('seleção múltipla não aceita a linha', async () => {

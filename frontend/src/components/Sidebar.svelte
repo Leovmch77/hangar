@@ -800,7 +800,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         {@const s = item.session}
         {@const rowKey = `${s.serverId}::${s.name}`}
         {@const selKey = `${s.serverId}:${s.name}`}
-        {@const provTag = model.showProviderTags ? providerTag(s.provider) : null}
+        {@const provTag = model.showProviderTags && !isOrq(s) ? providerTag(s.provider) : null}
         {@const sub = sidebarStatus(s)}
         {@const contaChip = chipDaConta(s.conta)}
         {@const srvLabel = servers.find((sv) => sv.id === s.serverId)?.label ?? s.serverId}
