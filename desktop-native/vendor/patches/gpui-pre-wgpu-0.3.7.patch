@@ -1,12 +1,12 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/MODIFICADO.md gpui-pre-wgpu-0.3.7/MODIFICADO.md
 --- gpui-pre-wgpu-0.3.7/MODIFICADO.md
 +++ gpui-pre-wgpu-0.3.7/MODIFICADO.md
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,28 @@
 +# Cópia do gpui-pre-wgpu 0.3.7
 +
 +Origem: crate `gpui-pre-wgpu` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
 +Entra no build por `[patch.crates-io]` em `desktop-native/Cargo.toml`. Arquivos alterados: `src/wgpu_renderer.rs`,
-+`src/shaders.wgsl`, `src/gpui_wgpu.rs` e o novo `src/blur_kernel.rs`.
++`src/shaders.wgsl`, `src/gpui_wgpu.rs`, `src/wgpu_context.rs` e o novo `src/blur_kernel.rs`.
 +
 +O desfoque de fundo foi portado do zui `18a89af`: kernel, WGSL e renderer wgpu. O renderer intercala as passadas pela ordem da cena, usa `COPY_SRC` na superfície quando disponível ou um alvo copiável intermediário, reutiliza o scratch e o libera após 30 quadros sem desfoque.
 +
@@ -21,6 +21,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +renderer headless de teste). O desfoque, o scratch e a textura persistente moram no core e somem com ele; as dimensões
 +vêm da textura do quadro, não da configuração da superfície. O dano pendente e as flags `COPY_SRC`/`COPY_DST` da
 +superfície ficam no `WgpuRenderer`.
++
++Navegador embutido (Linux): o WPE WebKit entrega quadros em DMA-BUF, importados sem cópia como `wgpu::Texture` no
++dispositivo do próprio GPUI. Para isso `wgpu_context.rs` cria o dispositivo Vulkan com
++`VK_EXT_image_drm_format_modifier` quando o adaptador suporta (`as_hal` + `open_with_callback` +
++`create_device_from_hal`; senão, `request_device` como antes) e guarda uma cópia do par em
++`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive). O renderer desenha
++`PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
++superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
++em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/src/blur_kernel.rs gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
 --- gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
 +++ gpui-pre-wgpu-0.3.7/src/blur_kernel.rs
@@ -239,7 +248,27 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/src/shaders.wgsl gpui-pre-wgpu-0.3.7/src/shaders.wgsl
 --- gpui-pre-wgpu-0.3.7/src/shaders.wgsl
 +++ gpui-pre-wgpu-0.3.7/src/shaders.wgsl
-@@ -1360,3 +1360,161 @@
+@@ -1303,11 +1303,17 @@
+     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+ 
+     var color = sample;
++    var opacity = sprite.opacity;
++    // Hangar: negative opacity marks an opaque external surface (XRGB: the X byte is not alpha).
++    if (opacity < 0.0) {
++        color.a = 1.0;
++        opacity = -opacity;
++    }
+     if (sprite.grayscale != 0u) {
+         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
+-        color = vec4<f32>(vec3<f32>(grayscale), sample.a);
++        color = vec4<f32>(vec3<f32>(grayscale), color.a);
+     }
+-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
++    return blend_color(color, opacity * saturate(0.5 - distance));
+ }
+ 
+ // --- surfaces --- //
+@@ -1360,3 +1366,161 @@
  
      return ycbcr_to_RGB * y_cb_cr;
  }
@@ -401,12 +430,128 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +fn fs_clear_region() -> @location(0) vec4<f32> {
 +    return vec4<f32>(0.0);
 +}
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/src/wgpu_context.rs gpui-pre-wgpu-0.3.7/src/wgpu_context.rs
+--- gpui-pre-wgpu-0.3.7/src/wgpu_context.rs
++++ gpui-pre-wgpu-0.3.7/src/wgpu_context.rs
+@@ -1,3 +1,5 @@
++// Modified for Hangar: on Linux the device enables VK_EXT_image_drm_format_modifier and is shared through
++// `WgpuContext::shared_device`, so the embedded browser can import DMA-BUF frames on GPUI's own device.
+ #[cfg(not(target_family = "wasm"))]
+ use anyhow::Context as _;
+ #[cfg(not(target_family = "wasm"))]
+@@ -7,6 +9,9 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use wgpu::TextureFormat;
+ 
++#[cfg(target_os = "linux")]
++static SHARED_DEVICE: Mutex<Option<(wgpu::Device, wgpu::Queue)>> = Mutex::new(None);
++
+ pub struct WgpuContext {
+     pub instance: wgpu::Instance,
+     pub adapter: wgpu::Adapter,
+@@ -274,6 +279,10 @@
+             adapter.get_info().backend
+         );
+         let backend = WgpuBackend::Native(adapter.get_info().backend);
++        #[cfg(target_os = "linux")]
++        {
++            *SHARED_DEVICE.lock() = Some((device.clone(), queue.clone()));
++        }
+ 
+         Self {
+             instance,
+@@ -419,17 +428,25 @@
+             .using_resolution(adapter.limits())
+             .using_alignment(adapter.limits());
+ 
+-        let (device, queue) = adapter
+-            .request_device(&wgpu::DeviceDescriptor {
+-                label: Some("gpui_device"),
+-                required_features,
+-                required_limits,
+-                memory_hints: wgpu::MemoryHints::MemoryUsage,
+-                trace: wgpu::Trace::Off,
+-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+-            })
+-            .await
+-            .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
++        let desc = wgpu::DeviceDescriptor {
++            label: Some("gpui_device"),
++            required_features,
++            required_limits,
++            memory_hints: wgpu::MemoryHints::MemoryUsage,
++            trace: wgpu::Trace::Off,
++            experimental_features: wgpu::ExperimentalFeatures::disabled(),
++        };
++        #[cfg(target_os = "linux")]
++        let dmabuf_device = Self::create_dmabuf_device(adapter, &desc);
++        #[cfg(not(target_os = "linux"))]
++        let dmabuf_device = None;
++        let (device, queue) = match dmabuf_device {
++            Some(pair) => pair,
++            None => adapter
++                .request_device(&desc)
++                .await
++                .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?,
++        };
+ 
+         Ok((
+             device,
+@@ -439,6 +456,47 @@
+         ))
+     }
+ 
++    /// Vulkan device that can also import DMA-BUF images with an explicit DRM modifier (wgpu-hal already enables
++    /// the external-memory fd/dma-buf extensions when present). `None` falls back to `request_device`.
++    #[cfg(target_os = "linux")]
++    fn create_dmabuf_device(
++        adapter: &wgpu::Adapter,
++        desc: &wgpu::DeviceDescriptor<'_>,
++    ) -> Option<(wgpu::Device, wgpu::Queue)> {
++        const DRM_MODIFIER: &std::ffi::CStr = c"VK_EXT_image_drm_format_modifier";
++        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
++        if !hal
++            .physical_device_capabilities()
++            .supports_extension(DRM_MODIFIER)
++        {
++            return None;
++        }
++        let open = unsafe {
++            hal.open_with_callback(
++                desc.required_features,
++                &desc.required_limits,
++                &desc.memory_hints,
++                Some(Box::new(
++                    |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_, '_>| {
++                        if !args.extensions.contains(&DRM_MODIFIER) {
++                            args.extensions.push(DRM_MODIFIER);
++                        }
++                    },
++                )),
++            )
++        }
++        .log_err()?;
++        drop(hal);
++        unsafe { adapter.create_device_from_hal::<wgpu::hal::api::Vulkan>(open, desc) }.log_err()
++    }
++
++    /// Device and queue of the most recently created context, for importing external textures that
++    /// `Window::paint_surface` will sample. A GPU recovery replaces them: importers must re-read after a loss.
++    #[cfg(target_os = "linux")]
++    pub fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
++        SHARED_DEVICE.lock().clone()
++    }
++
+     #[cfg(not(target_family = "wasm"))]
+     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+         wgpu::Instance::new(wgpu::InstanceDescriptor {
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-wgpu-0.3.7/src/wgpu_renderer.rs gpui-pre-wgpu-0.3.7/src/wgpu_renderer.rs
 --- gpui-pre-wgpu-0.3.7/src/wgpu_renderer.rs
 +++ gpui-pre-wgpu-0.3.7/src/wgpu_renderer.rs
-@@ -1,10 +1,12 @@
+@@ -1,10 +1,13 @@
 +// Modified for Hangar: backdrop blur ported from zeronsh/zui (18a89af) and partial redraw (`draw_with_damage`)
-+// ported from zed-industries/zed PR #62455 (d9c29a3). See MODIFICADO.md.
++// ported from zed-industries/zed PR #62455 (d9c29a3). External surfaces drawn on Linux (embedded browser).
++// See MODIFICADO.md.
  use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
  use anyhow::{Context as _, Result};
  use bytemuck::{Pod, Zeroable};
@@ -419,7 +564,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  };
  use log::warn;
  #[cfg(not(target_family = "wasm"))]
-@@ -134,6 +136,145 @@
+@@ -134,6 +137,145 @@
      poly_sprites: wgpu::RenderPipeline,
      #[allow(dead_code)]
      surfaces: wgpu::RenderPipeline,
@@ -565,7 +710,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  /// One frame allocation of instance data, ready to bind.
-@@ -161,6 +302,7 @@
+@@ -161,6 +303,7 @@
      instances: wgpu::BindGroupLayout,
      texture: wgpu::BindGroupLayout,
      surfaces: wgpu::BindGroupLayout,
@@ -573,7 +718,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
-@@ -178,6 +320,46 @@
+@@ -178,6 +321,46 @@
      },
  }
  
@@ -620,7 +765,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  /// GPU resources that must be dropped together during device recovery.
  struct WgpuResources {
      device: Arc<wgpu::Device>,
-@@ -194,6 +376,11 @@
+@@ -194,6 +377,11 @@
      path_intermediate_view: Option<wgpu::TextureView>,
      path_msaa_texture: Option<wgpu::Texture>,
      path_msaa_view: Option<wgpu::TextureView>,
@@ -632,7 +777,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  struct CachedTextureBindGroup {
-@@ -207,6 +394,8 @@
+@@ -207,6 +395,8 @@
          self.path_intermediate_view = None;
          self.path_msaa_texture = None;
          self.path_msaa_view = None;
@@ -641,7 +786,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      }
  }
  
-@@ -225,6 +414,10 @@
+@@ -225,6 +415,10 @@
      adapter_info: wgpu::AdapterInfo,
      target_format: wgpu::TextureFormat,
      max_texture_size: u32,
@@ -652,7 +797,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  /// GPU resources of a windowed renderer. A surface is only ever configured against the
-@@ -262,6 +455,12 @@
+@@ -262,6 +456,12 @@
      observed_error_generation: u64,
      last_surface_error: Option<String>,
      needs_redraw: bool,
@@ -665,7 +810,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  }
  
  impl WgpuRenderer {
-@@ -444,8 +643,17 @@
+@@ -444,8 +644,17 @@
              );
          }
  
@@ -684,7 +829,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              format: surface_format,
              width: clamped_width.max(1),
              height: clamped_height.max(1),
-@@ -478,6 +686,9 @@
+@@ -478,6 +687,9 @@
              observed_error_generation: 0,
              last_surface_error: None,
              needs_redraw: false,
@@ -694,7 +839,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          })
      }
  }
-@@ -608,11 +819,44 @@
+@@ -608,11 +820,44 @@
              ],
          });
  
@@ -739,7 +884,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          }
      }
  
-@@ -930,6 +1174,72 @@
+@@ -930,6 +1175,72 @@
              &shader_module,
          );
  
@@ -812,7 +957,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          WgpuPipelines {
              quads,
              shadows,
-@@ -940,9 +1250,38 @@
+@@ -940,9 +1251,38 @@
              subpixel_sprites,
              poly_sprites,
              surfaces,
@@ -851,7 +996,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn create_path_intermediate(
          device: &wgpu::Device,
          format: wgpu::TextureFormat,
-@@ -1039,11 +1378,14 @@
+@@ -1039,11 +1379,14 @@
          if let Some(ref texture) = resources.path_msaa_texture {
              texture.destroy();
          }
@@ -867,7 +1012,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          if let RendererState::Ready { surface, core } = &self.state {
              surface.configure(&core.resources.device, &self.surface_config);
-@@ -1051,12 +1393,22 @@
+@@ -1051,12 +1394,22 @@
      }
  
      pub fn set_subpixel_layout(&mut self, is_bgr: bool) {
@@ -891,7 +1036,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      pub fn update_transparency(&mut self, transparent: bool) {
          let new_alpha_mode = if transparent {
              self.transparent_alpha_mode
-@@ -1072,6 +1424,8 @@
+@@ -1072,6 +1425,8 @@
          let Some(core) = self.core_mut() else {
              return;
          };
@@ -900,7 +1045,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          let resources = &mut core.resources;
          resources.pipelines = WgpuRendererCore::create_pipelines(
              &resources.device,
-@@ -1121,6 +1475,25 @@
+@@ -1121,6 +1476,25 @@
      }
  
      pub fn draw(&mut self, scene: &Scene) -> bool {
@@ -926,7 +1071,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          #[cfg(target_family = "wasm")]
          if self.device_lost() {
              if matches!(self.state, RendererState::Ready { .. }) {
-@@ -1149,6 +1522,8 @@
+@@ -1149,6 +1523,8 @@
                  "GPU error during frame (failure {} of 10): {error}",
                  self.failed_frame_count
              );
@@ -935,7 +1080,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
              // TBD. Does retrying more actually help?
              if self.failed_frame_count > 10 {
-@@ -1191,23 +1566,138 @@
+@@ -1191,23 +1567,138 @@
              width: DevicePixels(frame.texture.width() as i32),
              height: DevicePixels(frame.texture.height() as i32),
          };
@@ -981,8 +1126,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +            }
 +            frame.present();
 +            return true;
-+        }
-+
+         }
+ 
 +        // Partial rendering: bring the persistent frame texture up to date with the scene, re-rendering only the
 +        // damaged region, then copy it into the swapchain image.
 +        core.ensure_frame_texture(size);
@@ -1029,8 +1174,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +                    );
 +                }
 +            }
-         }
- 
++        }
++
 +        if let Some(regions) = regions {
 +            let frame_texture = core
 +                .frame_texture
@@ -1086,7 +1231,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          true
      }
  }
-@@ -1246,6 +1736,25 @@
+@@ -1246,6 +1737,25 @@
          let gamma_size = std::mem::size_of::<GammaParams>() as u64;
          let path_globals_offset = globals_size.next_multiple_of(uniform_alignment);
          let gamma_offset = (path_globals_offset + globals_size).next_multiple_of(uniform_alignment);
@@ -1112,7 +1257,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
              label: Some("globals_buffer"),
              size: gamma_offset + gamma_size,
-@@ -1353,6 +1862,10 @@
+@@ -1353,6 +1863,10 @@
                  path_intermediate_view: None,
                  path_msaa_texture: None,
                  path_msaa_view: None,
@@ -1123,7 +1268,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              },
              atlas,
              path_globals_offset,
-@@ -1367,7 +1880,41 @@
+@@ -1367,7 +1881,41 @@
              adapter_info: context.adapter.get_info(),
              target_format,
              max_texture_size,
@@ -1165,7 +1310,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      }
  
      fn resources(&self) -> &WgpuResources {
-@@ -1414,10 +1961,16 @@
+@@ -1414,10 +1962,16 @@
          resources.path_msaa_view = path_msaa_view;
      }
  
@@ -1182,7 +1327,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          size: Size<DevicePixels>,
          premultiplied_alpha: bool,
          clear_color: wgpu::Color,
-@@ -1436,6 +1989,16 @@
+@@ -1436,6 +1990,16 @@
          self.atlas.before_frame();
          self.ensure_intermediate_textures(size);
  
@@ -1199,7 +1344,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          let gamma_params = GammaParams {
              gamma_ratios: self.rendering_params.gamma_ratios,
              grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
-@@ -1468,17 +2031,32 @@
+@@ -1468,17 +2032,32 @@
              bytemuck::bytes_of(&gamma_params),
          );
  
@@ -1237,7 +1382,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          clear_color: wgpu::Color,
      ) -> Result<wgpu::SubmissionIndex> {
          let mut instance_offset = 0;
-@@ -1506,13 +2084,20 @@
+@@ -1506,13 +2085,20 @@
                  });
  
          {
@@ -1259,7 +1404,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                          store: wgpu::StoreOp::Store,
                      },
                      depth_slice: None,
-@@ -1520,20 +2105,58 @@
+@@ -1520,20 +2106,58 @@
                  depth_stencil_attachment: None,
                  ..Default::default()
              });
@@ -1318,7 +1463,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                      ),
                      PrimitiveBatch::Paths(range) => {
                          let paths = &scene.paths[range];
-@@ -1541,6 +2164,18 @@
+@@ -1541,6 +2165,18 @@
                              continue;
                          }
  
@@ -1337,7 +1482,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                          drop(pass);
                          let rasterized = self.draw_paths_to_intermediate(
                              &mut encoder,
-@@ -1568,6 +2203,7 @@
+@@ -1568,6 +2204,7 @@
                                  paths,
                                  &mut instance_offset,
                                  &mut pass,
@@ -1345,7 +1490,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                              )?;
                          }
                      }
-@@ -1576,6 +2212,7 @@
+@@ -1576,6 +2213,7 @@
                          &self.resources().pipelines.underlines,
                          instance_range(range),
                          &mut pass,
@@ -1353,7 +1498,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                      ),
                      PrimitiveBatch::MonochromeSprites { texture_id, range } => {
                          self.draw_sprites(
-@@ -1584,6 +2221,7 @@
+@@ -1584,6 +2222,7 @@
                              &self.resources().pipelines.mono_sprites,
                              instance_range(range),
                              &mut pass,
@@ -1361,7 +1506,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                          )?;
                      }
                      PrimitiveBatch::SubpixelSprites { texture_id, range } => {
-@@ -1598,6 +2236,7 @@
+@@ -1598,6 +2237,7 @@
                                  .unwrap_or(&resources.pipelines.mono_sprites),
                              instance_range(range),
                              &mut pass,
@@ -1369,15 +1514,23 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                          )?;
                      }
                      PrimitiveBatch::PolychromeSprites { texture_id, range } => {
-@@ -1607,6 +2246,7 @@
+@@ -1607,13 +2247,50 @@
                              &self.resources().pipelines.poly_sprites,
                              instance_range(range),
                              &mut pass,
 +                            regions,
                          )?;
                      }
++                    #[cfg(target_os = "linux")]
++                    PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
++                        &scene.surfaces[range],
++                        &mut instance_offset,
++                        &mut pass,
++                        regions,
++                    )?,
                      // Surfaces are macOS-only for video playback and are not
-@@ -1614,6 +2254,34 @@
+                     // implemented by the WGPU renderer.
++                    #[cfg(not(target_os = "linux"))]
                      PrimitiveBatch::Surfaces(_surfaces) => {}
                  }
              }
@@ -1412,7 +1565,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          }
  
          let submission = self
-@@ -1686,6 +2354,356 @@
+@@ -1686,6 +2363,356 @@
              })
      }
  
@@ -1769,7 +1922,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn prepare_texture_bind_groups(&mut self, scene: &Scene) {
          let mut texture_ids = SmallVec::<[AtlasTextureId; 8]>::new();
          for batch in scene.batches() {
-@@ -1732,12 +2750,31 @@
+@@ -1732,12 +2759,31 @@
          }
      }
  
@@ -1801,7 +1954,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      ) {
          if range.is_empty() {
              return;
-@@ -1745,7 +2782,9 @@
+@@ -1745,7 +2791,9 @@
          pass.set_pipeline(pipeline);
          pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
          pass.set_bind_group(1, &instances.bind_group, &[]);
@@ -1812,7 +1965,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              0..4,
              instances.first_instance + range.start..instances.first_instance + range.end,
          );
-@@ -1758,6 +2797,7 @@
+@@ -1758,6 +2806,7 @@
          pipeline: &wgpu::RenderPipeline,
          range: Range<u32>,
          pass: &mut wgpu::RenderPass<'_>,
@@ -1820,7 +1973,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      ) -> Result<()> {
          if range.is_empty() {
              return Ok(());
-@@ -1772,7 +2812,9 @@
+@@ -1772,7 +2821,9 @@
          pass.set_bind_group(0, &resources.globals_bind_group, &[]);
          pass.set_bind_group(1, &sprite_instances.bind_group, &[]);
          pass.set_bind_group(2, &texture.bind_group, &[]);
@@ -1831,7 +1984,76 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              0..4,
              sprite_instances.first_instance + range.start
                  ..sprite_instances.first_instance + range.end,
-@@ -1794,6 +2836,7 @@
+@@ -1780,6 +2831,68 @@
+         Ok(())
+     }
+ 
++    /// Hangar: external textures (the embedded browser's imported DMA-BUF) drawn as full-texture polychrome sprites.
++    #[cfg(target_os = "linux")]
++    fn draw_surfaces(
++        &mut self,
++        surfaces: &[gpui::PaintSurface],
++        instance_offset: &mut u64,
++        pass: &mut wgpu::RenderPass<'_>,
++        regions: &[ScissorRect],
++    ) -> Result<()> {
++        let surfaces: SmallVec<[(&wgpu::Texture, gpui::PolychromeSprite); 2]> = surfaces
++            .iter()
++            .filter_map(|surface| {
++                let texture = surface.texture.downcast_ref::<wgpu::Texture>()?;
++                let sprite = gpui::PolychromeSprite {
++                    order: surface.order,
++                    pad: 0,
++                    grayscale: false.into(),
++                    // Negative opacity tells the shader the texture is opaque (XRGB: the X byte is not alpha).
++                    opacity: -1.0,
++                    bounds: surface.bounds,
++                    content_mask: surface.content_mask.clone(),
++                    corner_radii: Default::default(),
++                    tile: gpui::AtlasTile {
++                        texture_id: AtlasTextureId {
++                            index: 0,
++                            kind: gpui::AtlasTextureKind::Polychrome,
++                        },
++                        tile_id: gpui::TileId(0),
++                        padding: 0,
++                        bounds: Bounds {
++                            origin: Point::default(),
++                            size: Size {
++                                width: DevicePixels(texture.width() as i32),
++                                height: DevicePixels(texture.height() as i32),
++                            },
++                        },
++                    },
++                };
++                Some((texture, sprite))
++            })
++            .collect();
++        if surfaces.is_empty() {
++            return Ok(());
++        }
++        let sprites: SmallVec<[gpui::PolychromeSprite; 2]> =
++            surfaces.iter().map(|(_, sprite)| *sprite).collect();
++        let instances =
++            self.write_instance_binding("surface_sprites_bind_group", instance_offset, &sprites)?;
++        let resources = self.resources();
++        pass.set_pipeline(&resources.pipelines.poly_sprites);
++        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
++        pass.set_bind_group(1, &instances.bind_group, &[]);
++        for (index, (texture, _)) in surfaces.iter().enumerate() {
++            let view = texture.create_view(&Default::default());
++            let bind_group = self.create_texture_bind_group("surface_texture_bind_group", &view);
++            pass.set_bind_group(2, &bind_group, &[]);
++            let instance = instances.first_instance + index as u32;
++            Self::draw_per_region(pass, regions, 0..4, instance..instance + 1);
++        }
++        Ok(())
++    }
++
+     unsafe fn instance_bytes<T>(instances: &[T]) -> &[u8] {
+         unsafe {
+             std::slice::from_raw_parts(
+@@ -1794,6 +2907,7 @@
          paths: &[Path<ScaledPixels>],
          instance_offset: &mut u64,
          pass: &mut wgpu::RenderPass<'_>,
@@ -1839,7 +2061,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      ) -> Result<()> {
          let first_path = &paths[0];
          let sprites: Vec<PathSprite> = if paths.last().map(|p| &p.order) == Some(&first_path.order)
-@@ -1826,7 +2869,9 @@
+@@ -1826,7 +2940,9 @@
          pass.set_bind_group(0, &resources.globals_bind_group, &[]);
          pass.set_bind_group(1, &instances.bind_group, &[]);
          pass.set_bind_group(2, &texture, &[]);
@@ -1850,7 +2072,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              0..4,
              instances.first_instance..instances.first_instance + sprites.len() as u32,
          );
-@@ -2123,6 +3168,7 @@
+@@ -2123,6 +3239,7 @@
          // Drop intermediate textures since they reference the old surface size.
          if let Some(core) = self.core_mut() {
              core.resources.invalidate_intermediate_textures();
@@ -1858,7 +2080,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          }
      }
  
-@@ -2178,6 +3224,7 @@
+@@ -2178,6 +3295,7 @@
          };
          surface.configure(&core.resources.device, &self.surface_config);
          core.resources.invalidate_intermediate_textures();
@@ -1866,7 +2088,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          self.state = RendererState::Ready { surface, core };
  
          Ok(())
-@@ -2396,14 +3443,21 @@
+@@ -2396,14 +3514,21 @@
      fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
          self.check_gpu_errors()?;
          self.ensure_render_target(size)?;

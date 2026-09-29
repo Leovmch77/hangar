@@ -2,6 +2,7 @@
 // Modified for Hangar: element map (`set_element_map_sink`, `ElementRecord`) for test scripts.
 // Modified for Hangar: scene damage, present skip and partial render ported from zed-industries/zed PR #62455
 // (d9c29a3); on unless GPUI_EXPERIMENTAL_PRESENT_SKIP=0 / GPUI_EXPERIMENTAL_PARTIAL_RENDER=0.
+// Modified for Hangar: `paint_surface` with an external GPU texture on Linux (embedded browser).
 #[cfg(feature = "profiler")]
 use crate::DebugFrameOverlayMode;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -5115,6 +5116,29 @@ impl Window {
             bounds,
             content_mask,
             image_buffer,
+        });
+    }
+
+    /// Paint an externally owned GPU texture (a `wgpu::Texture` on the wgpu renderer), stretched to `bounds`.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "linux")]
+    pub fn paint_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        texture: Arc<dyn std::any::Any + Send + Sync>,
+    ) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            texture,
         });
     }
 

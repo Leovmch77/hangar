@@ -36,3 +36,13 @@ fizemos, e só vale se acompanhar a cópia.
 | Fundo pintado e entrada `dialog-in` do diálogo | gpui-component `dialog/dialog.rs` | adaptado | o cartão agora fica no `Positioner::corner`; a subida de 2 px substitui a descida do `slide-down` |
 
 Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só por leitura).
+
+## Navegador embutido
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| `PaintSurface::texture` e `Window::paint_surface(bounds, texture)` no Linux | gpui-pre `scene.rs`/`window.rs` | a página do WPE WebKit chega como textura GPU externa; o upstream só pinta superfície no macOS (`CVPixelBuffer`) |
+| Superfície sempre conta como dano | gpui-pre `scene_damage.rs` (já vinha do PR #62455; teste novo) | a primitiva fica idêntica enquanto os pixels da página mudam; sem isso o quadro seria pulado como igual |
+| Dispositivo Vulkan com `VK_EXT_image_drm_format_modifier` e `WgpuContext::shared_device()` | gpui-pre-wgpu `wgpu_context.rs` | importar o DMA-BUF sem cópia exige o modificador DRM e o mesmo dispositivo que o GPUI usa para desenhar |
+| `PrimitiveBatch::Surfaces` desenhado como sprite policromático, alpha forçado a 1 | gpui-pre-wgpu `wgpu_renderer.rs`/`shaders.wgsl` | o renderer wgpu ignorava superfícies; em XRGB o byte X não é alpha |
+| `CreateTargetForHwnd(hwnd, false)` | gpui-pre-windows `directx_renderer.rs` | com topmost a composição cobre a janela filha do WebView2; o GPUI deixa de desenhar por cima dela |

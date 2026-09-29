@@ -13,7 +13,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/MODIFICADO.md gpui-pre-windows-0.3.7/MODIFICADO.md
 --- gpui-pre-windows-0.3.7/MODIFICADO.md
 +++ gpui-pre-windows-0.3.7/MODIFICADO.md
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,22 @@
 +# Cópia do gpui-pre-windows 0.3.7
 +
 +Origem: crate `gpui-pre-windows` 0.3.7 do crates.io, checksum `f05592a6f9e3e6bb7a9f2a0d4779271cf747a948db1c07b02448de777ffff8f3`, licença Apache-2.0.
@@ -27,6 +27,11 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +
 +O desfoque usa o registrador b2 porque b1 pertence a `BatchParams` nesta versão; ao restaurar o estado do DirectX, preserva b1.
 +`NOTICE` preserva o aviso de atribuição do zui.
++
++Navegador embutido: `src/directx_renderer.rs` cria o alvo do DirectComposition com `CreateTargetForHwnd(hwnd, false)`
++(topmost=false). Com `true` a composição fica por cima das janelas filhas e esconde o WebView2 embutido; com `false` a
++página aparece e o vidro da janela continua funcionando (provado no protótipo, numa VM Windows; esta cópia não foi compilada). O custo é que o GPUI não desenha
++por cima de janelas filhas.
 +
 +Não conferido em Windows.
 +
@@ -555,7 +560,18 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              swap_chain,
              render_target: Some(render_target),
              render_target_view,
-@@ -1708,6 +1735,8 @@
+@@ -1014,7 +1041,9 @@
+ impl DirectComposition {
+     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
+         let comp_device = get_comp_device(dxgi_device)?;
+-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
++        // Hangar: topmost=false keeps child windows (the embedded WebView2) visible above the composition; the cost is
++        // that GPUI can't draw over them.
++        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
+         let comp_visual = unsafe { comp_device.CreateVisual() }?;
+ 
+         Ok(Self {
+@@ -1708,6 +1737,8 @@
  
      #[derive(Copy, Clone, Debug, Eq, PartialEq)]
      pub(crate) enum ShaderModule {
@@ -564,7 +580,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          Quad,
          Shadow,
          Underline,
-@@ -1758,6 +1787,14 @@
+@@ -1758,6 +1789,14 @@
          #[cfg(not(debug_assertions))]
          fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
              let bytes = match module {
@@ -579,7 +595,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  ShaderModule::Quad => match target {
                      ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                      ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
-@@ -1872,6 +1909,8 @@
+@@ -1872,6 +1911,8 @@
      impl ShaderModule {
          pub fn as_str(self) -> &'static str {
              match self {

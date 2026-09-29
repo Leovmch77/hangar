@@ -18,3 +18,10 @@ comparação. Ligado por padrão; `GPUI_EXPERIMENTAL_PRESENT_SKIP=0`, `GPUI_EXPE
 
 Na passagem para 0.3.7 as funções `present_skip_enabled`/`partial_render_enabled` foram postas antes da doc e do
 `#[inline(always)]` de `with_element_arena`; antes elas ficavam no meio e roubavam o atributo e a doc dessa função.
+
+Navegador embutido (Linux): `PaintSurface` ganhou `texture` (`Arc<dyn Any + Send + Sync>`, um `wgpu::Texture` no
+renderer wgpu) e `Window::paint_surface(bounds, texture)` pinta essa textura externa na fase de pintura, sob a máscara
+de conteúdo atual. O macOS mantém o `image_buffer` de antes. Os pixels da superfície mudam com a primitiva idêntica,
+e a comparação de cenas já trata toda superfície como dano nos dois quadros (`accumulate_surface_damage` em
+`scene_damage.rs`), então um quadro com superfície nunca é pulado; o teste `identical_surface_frames_are_still_damaged`
+trava isso.

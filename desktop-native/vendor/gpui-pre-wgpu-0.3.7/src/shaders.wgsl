@@ -1303,11 +1303,17 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
+    var opacity = sprite.opacity;
+    // Hangar: negative opacity marks an opaque external surface (XRGB: the X byte is not alpha).
+    if (opacity < 0.0) {
+        color.a = 1.0;
+        opacity = -opacity;
+    }
     if (sprite.grayscale != 0u) {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
-        color = vec4<f32>(vec3<f32>(grayscale), sample.a);
+        color = vec4<f32>(vec3<f32>(grayscale), color.a);
     }
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+    return blend_color(color, opacity * saturate(0.5 - distance));
 }
 
 // --- surfaces --- //

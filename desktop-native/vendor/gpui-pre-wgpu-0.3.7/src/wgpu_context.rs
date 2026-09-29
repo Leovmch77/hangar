@@ -1,3 +1,5 @@
+// Modified for Hangar: on Linux the device enables VK_EXT_image_drm_format_modifier and is shared through
+// `WgpuContext::shared_device`, so the embedded browser can import DMA-BUF frames on GPUI's own device.
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
@@ -6,6 +8,9 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
+
+#[cfg(target_os = "linux")]
+static SHARED_DEVICE: Mutex<Option<(wgpu::Device, wgpu::Queue)>> = Mutex::new(None);
 
 pub struct WgpuContext {
     pub instance: wgpu::Instance,
@@ -274,6 +279,10 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        #[cfg(target_os = "linux")]
+        {
+            *SHARED_DEVICE.lock() = Some((device.clone(), queue.clone()));
+        }
 
         Self {
             instance,
@@ -419,17 +428,25 @@ impl WgpuContext {
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("gpui_device"),
-                required_features,
-                required_limits,
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
+        let desc = wgpu::DeviceDescriptor {
+            label: Some("gpui_device"),
+            required_features,
+            required_limits,
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            trace: wgpu::Trace::Off,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        };
+        #[cfg(target_os = "linux")]
+        let dmabuf_device = Self::create_dmabuf_device(adapter, &desc);
+        #[cfg(not(target_os = "linux"))]
+        let dmabuf_device = None;
+        let (device, queue) = match dmabuf_device {
+            Some(pair) => pair,
+            None => adapter
+                .request_device(&desc)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?,
+        };
 
         Ok((
             device,
@@ -437,6 +454,47 @@ impl WgpuContext {
             dual_source_blending,
             color_atlas_texture_format,
         ))
+    }
+
+    /// Vulkan device that can also import DMA-BUF images with an explicit DRM modifier (wgpu-hal already enables
+    /// the external-memory fd/dma-buf extensions when present). `None` falls back to `request_device`.
+    #[cfg(target_os = "linux")]
+    fn create_dmabuf_device(
+        adapter: &wgpu::Adapter,
+        desc: &wgpu::DeviceDescriptor<'_>,
+    ) -> Option<(wgpu::Device, wgpu::Queue)> {
+        const DRM_MODIFIER: &std::ffi::CStr = c"VK_EXT_image_drm_format_modifier";
+        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }?;
+        if !hal
+            .physical_device_capabilities()
+            .supports_extension(DRM_MODIFIER)
+        {
+            return None;
+        }
+        let open = unsafe {
+            hal.open_with_callback(
+                desc.required_features,
+                &desc.required_limits,
+                &desc.memory_hints,
+                Some(Box::new(
+                    |args: wgpu::hal::vulkan::CreateDeviceCallbackArgs<'_, '_, '_>| {
+                        if !args.extensions.contains(&DRM_MODIFIER) {
+                            args.extensions.push(DRM_MODIFIER);
+                        }
+                    },
+                )),
+            )
+        }
+        .log_err()?;
+        drop(hal);
+        unsafe { adapter.create_device_from_hal::<wgpu::hal::api::Vulkan>(open, desc) }.log_err()
+    }
+
+    /// Device and queue of the most recently created context, for importing external textures that
+    /// `Window::paint_surface` will sample. A GPU recovery replaces them: importers must re-read after a loss.
+    #[cfg(target_os = "linux")]
+    pub fn shared_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        SHARED_DEVICE.lock().clone()
     }
 
     #[cfg(not(target_family = "wasm"))]

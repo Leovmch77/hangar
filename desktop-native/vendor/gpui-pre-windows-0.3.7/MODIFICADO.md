@@ -12,6 +12,11 @@ Desfoque de fundo portado de `zeronsh/zui` na revisão `18a89af`. Arquivos alter
 O desfoque usa o registrador b2 porque b1 pertence a `BatchParams` nesta versão; ao restaurar o estado do DirectX, preserva b1.
 `NOTICE` preserva o aviso de atribuição do zui.
 
+Navegador embutido: `src/directx_renderer.rs` cria o alvo do DirectComposition com `CreateTargetForHwnd(hwnd, false)`
+(topmost=false). Com `true` a composição fica por cima das janelas filhas e esconde o WebView2 embutido; com `false` a
+página aparece e o vidro da janela continua funcionando (provado no protótipo, numa VM Windows; esta cópia não foi compilada). O custo é que o GPUI não desenha
+por cima de janelas filhas.
+
 Não conferido em Windows.
 
 Em 0.3.7 `DirectXAtlas::get_texture_view` passou a devolver `Option`; o desfoque não usa o atlas, então nada mudou aqui.

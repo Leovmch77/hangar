@@ -1,5 +1,6 @@
 // Modified for Hangar: backdrop blur ported from zeronsh/zui (18a89af) and partial redraw (`draw_with_damage`)
-// ported from zed-industries/zed PR #62455 (d9c29a3). See MODIFICADO.md.
+// ported from zed-industries/zed PR #62455 (d9c29a3). External surfaces drawn on Linux (embedded browser).
+// See MODIFICADO.md.
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -2249,8 +2250,16 @@ impl WgpuRendererCore {
                             regions,
                         )?;
                     }
+                    #[cfg(target_os = "linux")]
+                    PrimitiveBatch::Surfaces(range) => self.draw_surfaces(
+                        &scene.surfaces[range],
+                        &mut instance_offset,
+                        &mut pass,
+                        regions,
+                    )?,
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
+                    #[cfg(not(target_os = "linux"))]
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
@@ -2819,6 +2828,68 @@ impl WgpuRendererCore {
             sprite_instances.first_instance + range.start
                 ..sprite_instances.first_instance + range.end,
         );
+        Ok(())
+    }
+
+    /// Hangar: external textures (the embedded browser's imported DMA-BUF) drawn as full-texture polychrome sprites.
+    #[cfg(target_os = "linux")]
+    fn draw_surfaces(
+        &mut self,
+        surfaces: &[gpui::PaintSurface],
+        instance_offset: &mut u64,
+        pass: &mut wgpu::RenderPass<'_>,
+        regions: &[ScissorRect],
+    ) -> Result<()> {
+        let surfaces: SmallVec<[(&wgpu::Texture, gpui::PolychromeSprite); 2]> = surfaces
+            .iter()
+            .filter_map(|surface| {
+                let texture = surface.texture.downcast_ref::<wgpu::Texture>()?;
+                let sprite = gpui::PolychromeSprite {
+                    order: surface.order,
+                    pad: 0,
+                    grayscale: false.into(),
+                    // Negative opacity tells the shader the texture is opaque (XRGB: the X byte is not alpha).
+                    opacity: -1.0,
+                    bounds: surface.bounds,
+                    content_mask: surface.content_mask.clone(),
+                    corner_radii: Default::default(),
+                    tile: gpui::AtlasTile {
+                        texture_id: AtlasTextureId {
+                            index: 0,
+                            kind: gpui::AtlasTextureKind::Polychrome,
+                        },
+                        tile_id: gpui::TileId(0),
+                        padding: 0,
+                        bounds: Bounds {
+                            origin: Point::default(),
+                            size: Size {
+                                width: DevicePixels(texture.width() as i32),
+                                height: DevicePixels(texture.height() as i32),
+                            },
+                        },
+                    },
+                };
+                Some((texture, sprite))
+            })
+            .collect();
+        if surfaces.is_empty() {
+            return Ok(());
+        }
+        let sprites: SmallVec<[gpui::PolychromeSprite; 2]> =
+            surfaces.iter().map(|(_, sprite)| *sprite).collect();
+        let instances =
+            self.write_instance_binding("surface_sprites_bind_group", instance_offset, &sprites)?;
+        let resources = self.resources();
+        pass.set_pipeline(&resources.pipelines.poly_sprites);
+        pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+        pass.set_bind_group(1, &instances.bind_group, &[]);
+        for (index, (texture, _)) in surfaces.iter().enumerate() {
+            let view = texture.create_view(&Default::default());
+            let bind_group = self.create_texture_bind_group("surface_texture_bind_group", &view);
+            pass.set_bind_group(2, &bind_group, &[]);
+            let instance = instances.first_instance + index as u32;
+            Self::draw_per_region(pass, regions, 0..4, instance..instance + 1);
+        }
         Ok(())
     }
 

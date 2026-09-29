@@ -687,6 +687,8 @@ mod tests {
             },
             #[cfg(target_os = "macos")]
             image_buffer: dummy_surface_buffer(),
+            #[cfg(target_os = "linux")]
+            texture: std::sync::Arc::new(()),
         });
         scene.finish();
         scene
@@ -945,6 +947,18 @@ mod tests {
         let damage = SceneDamage::between_with_order_tolerance(&before, &after, true);
         assert!(damage_covers(&damage, rect(10., 10., 20., 20.)));
         assert!(damage_covers(&damage, rect(30., 30., 20., 20.)));
+    }
+
+    // Hangar: the embedded browser's pixels change under an identical primitive, so the frame is never skipped.
+    #[test]
+    fn identical_surface_frames_are_still_damaged() {
+        let bounds = rect(10., 10., 20., 20.);
+        let damage = SceneDamage::between_with_order_tolerance(
+            &scene_with_surface(bounds),
+            &scene_with_surface(bounds),
+            true,
+        );
+        assert!(damage_covers(&damage, bounds), "damage {damage:?}");
     }
 
     #[test]

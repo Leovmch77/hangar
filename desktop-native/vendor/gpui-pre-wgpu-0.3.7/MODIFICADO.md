@@ -2,7 +2,7 @@
 
 Origem: crate `gpui-pre-wgpu` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
 Entra no build por `[patch.crates-io]` em `desktop-native/Cargo.toml`. Arquivos alterados: `src/wgpu_renderer.rs`,
-`src/shaders.wgsl`, `src/gpui_wgpu.rs` e o novo `src/blur_kernel.rs`.
+`src/shaders.wgsl`, `src/gpui_wgpu.rs`, `src/wgpu_context.rs` e o novo `src/blur_kernel.rs`.
 
 O desfoque de fundo foi portado do zui `18a89af`: kernel, WGSL e renderer wgpu. O renderer intercala as passadas pela ordem da cena, usa `COPY_SRC` na superfície quando disponível ou um alvo copiável intermediário, reutiliza o scratch e o libera após 30 quadros sem desfoque.
 
@@ -17,3 +17,12 @@ Na 0.3.7 o renderer foi dividido em `WgpuRenderer` (superfície) e `WgpuRenderer
 renderer headless de teste). O desfoque, o scratch e a textura persistente moram no core e somem com ele; as dimensões
 vêm da textura do quadro, não da configuração da superfície. O dano pendente e as flags `COPY_SRC`/`COPY_DST` da
 superfície ficam no `WgpuRenderer`.
+
+Navegador embutido (Linux): o WPE WebKit entrega quadros em DMA-BUF, importados sem cópia como `wgpu::Texture` no
+dispositivo do próprio GPUI. Para isso `wgpu_context.rs` cria o dispositivo Vulkan com
+`VK_EXT_image_drm_format_modifier` quando o adaptador suporta (`as_hal` + `open_with_callback` +
+`create_device_from_hal`; senão, `request_device` como antes) e guarda uma cópia do par em
+`WgpuContext::shared_device()`, trocada a cada contexto novo (recuperação de GPU inclusive). O renderer desenha
+`PrimitiveBatch::Surfaces` como sprite policromático no pipeline `poly_sprites` (`draw_surfaces`), com a textura da
+superfície no lugar do atlas. Opacidade negativa marca a textura como opaca e o `fs_poly_sprite` força alpha 1, porque
+em XRGB/XR24 o byte X não é alpha. Fora do Linux, `Surfaces` continua sem desenho.
