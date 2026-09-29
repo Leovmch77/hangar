@@ -60,8 +60,11 @@ def _reinicios_automaticos(dias: int = 7) -> list[str] | None:
         return [l.split(" ", 1)[0] for l in texto.splitlines()
                 if "hangar-backend sem resposta HTTP" in l and l[:19] >= corte]
     import subprocess
+    journalctl = shutil.which("journalctl")
+    if not journalctl:
+        return None
     try:
-        r = subprocess.run(["journalctl", "--user", "-u", "hangar-backend", "--since", f"-{dias}d",
+        r = subprocess.run([journalctl, "--user", "-u", "hangar-backend", "--since", f"-{dias}d",
                             "-o", "short-iso", "--no-pager", "-q"],
                            capture_output=True, text=True, errors="replace", timeout=15)
     except (OSError, subprocess.TimeoutExpired):
