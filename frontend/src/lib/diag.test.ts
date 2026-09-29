@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from 'vitest';
 
-const estado = vi.hoisted(() => ({ base: 'https://a.test', servidores: [] as { baseUrl: string; token: string }[] }));
+const estado = vi.hoisted(() => ({ base: 'https://a.test', servidores: [] as { baseUrl: string; token: string; invite?: boolean }[] }));
 vi.mock('./auth', () => ({
   getBaseUrl: () => estado.base,
   getToken: () => estado.servidores.find((s) => s.baseUrl === estado.base)?.token ?? null,
@@ -30,6 +30,16 @@ it('guarda login anterior à inicialização e preserva destino após trocar o s
   const corpo = fetchMock.mock.calls[0][1]?.body as string;
   expect(corpo).toContain('login.falhou');
   expect(corpo).not.toMatch(/a-corrigido|https:/);
+});
+
+it('servidor de convite não recebe o diário (nem entra na fila)', async () => {
+  vi.useFakeTimers();
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"gravadas":1}'));
+  estado.base = 'https://convite.test';
+  estado.servidores = [{ baseUrl: estado.base, token: 'c', invite: true }];
+  registrar({ evento: 'tela.ver' });
+  await vi.advanceTimersByTimeAsync(15000);
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
 it('stack conserva script e linha, sem endereço ou query de autenticação', () => {
