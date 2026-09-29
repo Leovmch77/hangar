@@ -400,6 +400,7 @@
   "atalhos_transferir_so_globais": "Só os atalhos de todos os projetos; os deste projeto não entram.",
   "erro_project_shortcuts": "Atalhos do projeto inválidos: {detalhe}",
   "erro_project_shortcuts_projeto": "Não deu para identificar o projeto desta sessão: {detalhe}",
+  "erro_project_shortcuts_arquivo": "O arquivo de atalhos por projeto não pôde ser lido; nada foi gravado para não apagar as listas dos outros projetos: {detalhe}",
   "erro_shortcut_pasta": "Pasta do atalho inválida: {detalhe}",
   "atalhos_subir": "Subir",
   "atalhos_descer": "Descer",

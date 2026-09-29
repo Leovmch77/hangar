@@ -24,6 +24,11 @@ class ProjectError(Exception):
     que nenhuma sessao do repo le, e a lista pareceria apagada."""
 
 
+class FileError(Exception):
+    """O arquivo existe mas nao le. Nunca vira "sem atalhos": a gravacao seguinte reescreveria o
+    arquivo so com este projeto e apagaria a lista de todos os outros."""
+
+
 def _path() -> Path:
     return Path(settings.projects_dir).parent / ".hangar-project-shortcuts.json"
 
@@ -59,11 +64,16 @@ def project_of(cwd: str) -> dict[str, str]:
 
 
 def _load() -> dict:
+    p = _path()
     try:
-        data = json.loads(_path().read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError) as e:
+        raise FileError(f"{p}: {e}") from e
+    if not isinstance(data, dict):
+        raise FileError(f"{p}: esperado um objeto JSON")
+    return data
 
 
 def load_items(key: str) -> list:

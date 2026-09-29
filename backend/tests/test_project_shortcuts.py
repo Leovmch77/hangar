@@ -155,6 +155,22 @@ def test_put_invalid_is_400_and_bad_folder_is_409(client, monkeypatch, tmp_path)
     assert r.status_code == 409 and "nao existe" in r.json()["detail"]["msg"]
 
 
+@pytest.mark.parametrize("content", ["{nao e json", "[1, 2]", b"\xff\xfe"])
+def test_unreadable_file_is_an_error_and_put_never_overwrites_it(client, monkeypatch, tmp_path,
+                                                                 content):
+    # Ler como "sem atalhos" fazia o PUT seguinte reescrever o arquivo so com este projeto.
+    f = tmp_path / "state" / ".hangar-project-shortcuts.json"
+    f.parent.mkdir(parents=True)
+    (f.write_bytes if isinstance(content, bytes) else f.write_text)(content)
+    before = f.read_bytes()
+    _session(monkeypatch, tmp_path)
+    r = client.get("/api/sessions/s/project-shortcuts", headers=_auth())
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_project_shortcuts_arquivo"
+    r = client.put("/api/sessions/s/project-shortcuts", json={"items": [_SHELL]}, headers=_auth())
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_project_shortcuts_arquivo"
+    assert f.read_bytes() == before
+
+
 def test_shell_pasta_resolves_against_copy_root(client, monkeypatch, repo, tmp_path):
     # Os dois caminhos (terminal escondido no POSIX, processo solto no Windows) so recebem o cwd.
     from app import shortcut_terminals

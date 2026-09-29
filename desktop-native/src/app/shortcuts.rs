@@ -62,10 +62,29 @@ pub(super) fn defaults() -> Vec<Item> { NATIVES.map(Item::native).to_vec() }
 /// `items` de `GET/PUT /project-shortcuts`, na regra do `mergeProjectShortcuts` do web: só `send_text` e `shell` válidos
 /// (interno é do servidor inteiro), id repetido fica o primeiro.
 pub(super) fn project_items(items: Option<&Value>) -> Vec<Item> {
+    let raw = items.and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    shown_slots(raw).into_iter().filter_map(|n| raw[n].as_object().map(|o| Item(o.clone()))).collect()
+}
+
+/// Posições em `raw` dos itens que `project_items` mostra.
+fn shown_slots(raw: &[Value]) -> Vec<usize> {
     let mut seen = HashSet::new();
-    items.and_then(Value::as_array).into_iter().flatten()
-        .filter_map(|v| match v { Value::Object(o) if Item::valid(o) && o.get("type") != Some(&json!("internal")) => Some(Item(o.clone())), _ => None })
-        .filter(|item| seen.insert(item.id().to_owned())).collect()
+    raw.iter().enumerate().filter_map(|(n, v)| match v {
+        Value::Object(o) if Item::valid(o) && o.get("type") != Some(&json!("internal"))
+            && seen.insert(o.get("id").and_then(Value::as_str).unwrap_or("").to_owned()) => Some(n),
+        _ => None,
+    }).collect()
+}
+
+/// A lista a gravar: os itens mostrados, já editados, voltam às posições deles em `raw` (novo vai para o fim) e o que a
+/// tela escondeu (inválido para esta versão, repetido) fica onde estava.
+fn merge_project_items(raw: &[Value], shown: Vec<Item>) -> Vec<Value> {
+    let slots = shown_slots(raw);
+    let mut shown = shown.into_iter().map(|item| Value::Object(item.0));
+    let mut out: Vec<Value> = raw.iter().enumerate()
+        .filter_map(|(n, v)| if slots.contains(&n) { shown.next() } else { Some(v.clone()) }).collect();
+    out.extend(shown);
+    out
 }
 
 /// `resolveShortcuts`: nunca falha. Vazio, JSON quebrado ou forma estranha voltam aos nativos; item inválido sai sozinho;
@@ -282,7 +301,7 @@ impl Hangar {
 
     /// Grava a lista inteira do projeto (`PUT /project-shortcuts`): acrescentar, editar, mover e apagar são a mesma gravação.
     /// A lista na tela só muda com a resposta, então o que se vê é sempre o que está gravado.
-    fn save_project_shortcuts(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
+    fn save_project_shortcuts(&mut self, items: Vec<Value>, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.api.clone(), self.selected_key()) else { return };
         let project = &mut self.side.project;
         if project.saving.is_some() || project.owner.as_ref() != Some(&key) { return; }
@@ -290,7 +309,7 @@ impl Hangar {
         (project.saving, project.save_error) = (Some(project.save_seq), None);
         let seq = project.save_seq;
         let (connection, tx) = (self.connection, self.tx.clone());
-        let body = json!({"items": items.into_iter().map(|item| Value::Object(item.0)).collect::<Vec<_>>()});
+        let body = json!({"items": items});
         self.runtime.spawn(async move {
             let result = api.server_send(reqwest::Method::PUT, &["sessions", &key.name, "project-shortcuts"], Some(body), 15).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::ProjectSaved(seq), result) }).await;
@@ -315,9 +334,10 @@ impl Hangar {
     fn project_edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Vec<Item>)) {
         let key = self.selected_key();
         if self.side.project.saving.is_some() { return; }
-        let Some(mut items) = self.side.project.of(key.as_ref()).map(|p| p.items.clone()) else { return };
+        let Some(project) = self.side.project.of(key.as_ref()) else { return };
+        let (mut items, raw) = (project.items.clone(), project.raw.clone());
         change(&mut items);
-        self.save_project_shortcuts(items, cx);
+        self.save_project_shortcuts(merge_project_items(&raw, items), cx);
     }
 
     /// Sugestões de skill: comandos da primeira sessão viva deste servidor. Sem sessão, o campo fica livre.
@@ -540,6 +560,7 @@ impl Hangar {
         let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
         let heading = |text: String| div().mt(px(28.)).mb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
         let section = div().id("project-shortcuts").flex().flex_col();
+        let save_error = p.save_error.clone().map(|error| div().mt(px(10.)).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
         let project = match (&p.list.value, p.list.loading) {
             (None, _) => return Some(section.child(heading(tr("shortcuts_project")))
                 .child(settings_box().mt(px(8.)).child(note(tr("shortcuts_project_loading"), theme::muted())))),
@@ -549,7 +570,7 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, _, cx| { this.load_project_shortcuts(); cx.notify(); }));
                 return Some(section.child(heading(tr("shortcuts_project"))).child(settings_box().mt(px(8.))
                     .child(note(tr("shortcuts_project_failed").replace("{reason}", error), theme::danger()))
-                    .child(div().px_4().pb(px(16.)).flex().child(retry))));
+                    .child(div().px_4().pb(px(16.)).flex().child(retry))).children(save_error));
             }
             (Some(Ok(project)), _) => project,
         };
@@ -566,10 +587,9 @@ impl Hangar {
                 .label(tr("shortcuts_project_add")).loading(saving).disabled(saving)
                 .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx)))),
         };
-        let error = p.save_error.clone().map(|error| div().mt(px(10.)).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
         Some(section.child(heading(tr("shortcuts_project_named").replace("{name}", &project.name)))
             .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_project_lead")))
-            .child(list).child(form).children(error))
+            .child(list).child(form).children(save_error))
     }
 
     /// Linha de um atalho; `project` = da seção "Deste projeto" (ids próprios, grava na hora, sem arrastar).
@@ -686,7 +706,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Draft, Item, apply_edit, clip, defaults, move_by, project_items, resolve, serialize};
+    use super::{Draft, Item, apply_edit, clip, defaults, merge_project_items, move_by, project_items, resolve, serialize};
 
     #[test]
     fn project_items_keep_only_valid_send_and_shell_with_their_folder() {
@@ -700,6 +720,25 @@ mod tests {
         assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["d", "s"]);
         assert_eq!((items[0].pasta(), items[1].pasta()), (Some("backend"), None));
         assert!(project_items(Some(&serde_json::json!({"x": 1}))).is_empty() && project_items(None).is_empty());
+    }
+
+    #[test]
+    fn saving_the_project_list_keeps_what_the_screen_hides() {
+        let raw = serde_json::json!([
+            {"id":"a","type":"send_text","label":"A","text":"a"},
+            {"id":"f","type":"futuro","label":"F"},
+            {"id":"b","type":"send_text","label":"B","text":"b"},
+            {"id":"a","type":"shell","label":"dup","command":"x"}]);
+        let raw = raw.as_array().unwrap();
+        let ids = |list: &[serde_json::Value]| list.iter().map(|v| v["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let mut shown = project_items(Some(&serde_json::Value::Array(raw.clone())));
+        move_by(&mut shown, "b", -1);
+        assert_eq!(ids(&merge_project_items(raw, shown.clone())), ["b", "f", "a", "a"]);
+        shown.retain(|i| i.id() != "b");
+        shown.push(project_items(Some(&serde_json::json!([{"id":"n","type":"send_text","label":"N","text":"n"}])))[0].clone());
+        let merged = merge_project_items(raw, shown);
+        assert_eq!(ids(&merged), ["a", "f", "n", "a"]);
+        assert_eq!(merged[1]["type"], "futuro");
     }
 
     #[test]

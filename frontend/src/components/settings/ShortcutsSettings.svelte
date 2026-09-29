@@ -9,7 +9,8 @@
     type ProjectShortcut, type Shortcut, type ShortcutInternalAction, type ShortcutSendText, type ShortcutShell,
   } from '@hangar/core';
   import {
-    loadShortcuts, shortcutsFor, saveShortcuts, loadProjectShortcuts, projectShortcutsFor, saveProjectShortcuts,
+    loadShortcuts, shortcutsFor, saveShortcuts, loadProjectShortcuts, projectShortcutsFor, projectShortcutsError,
+    saveProjectShortcuts,
   } from '../../lib/shortcuts.svelte';
   import ShortcutIcon, { GLYPHS } from '../icons/ShortcutIcon.svelte';
   import ShortcutTransfer from '../ShortcutTransfer.svelte';
@@ -86,6 +87,10 @@
 
   async function loadProject() {
     const target = projectSession;
+    // A lista da sessão anterior não pode ficar na tela nem ser gravada no projeto da nova.
+    proj = [];
+    projName = '';
+    projDirty = false;
     if (!target) return;
     projLoading = true;
     projLoadError = '';
@@ -98,7 +103,7 @@
       projDirty = false;
     } catch (e) {
       if (target !== projectSession) return;
-      projLoadError = e instanceof Error ? e.message : String(e);
+      projLoadError = projectShortcutsError(target);
     } finally {
       if (target === projectSession) projLoading = false;
     }
@@ -158,7 +163,7 @@
   function itemsOf(sc: Scope): Shortcut[] { return sc === 'global' ? list : proj; }
   function setItems(sc: Scope, next: Shortcut[], isDirty = true) {
     if (sc === 'global') { list = next; dirty = isDirty; }
-    else { proj = next as ProjectShortcut[]; projDirty = isDirty; }
+    else { proj = next.filter((s): s is ProjectShortcut => s.type !== 'internal'); projDirty = isDirty; }
   }
 
   function move(sc: Scope, i: number, delta: -1 | 1) {
@@ -251,8 +256,12 @@
     if (!formValid || !sc) return;
     const icon = fEmoji.trim() ? `emoji:${fEmoji.trim()}` : `glifo:${fGlyph}`;
     const base = { label: fLabel.trim(), icon, ...(fConfirm ? { confirm: true } : {}) };
-    // Pasta só existe nos atalhos do projeto (a raiz a que ela se refere é a da cópia da sessão).
-    const pasta = sc === 'project' && fPasta.trim() ? { pasta: fPasta.trim() } : {};
+    // Pasta só se edita nos atalhos do projeto (a raiz a que ela se refere é a da cópia da sessão);
+    // no global o campo não aparece, e a que o item já tinha volta como estava.
+    const original = editingIdx === null ? undefined : itemsOf(sc)[editingIdx];
+    const kept = sc === 'global' && original?.type === 'shell' ? original.pasta : undefined;
+    const folder = sc === 'project' ? fPasta.trim() : kept;
+    const pasta = folder ? { pasta: folder } : {};
     const shortcut: ShortcutSendText | ShortcutShell = fType === 'shell'
       ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta, ...base }
       : { id: formId(sc), type: 'send_text', text: fContent.trim(),

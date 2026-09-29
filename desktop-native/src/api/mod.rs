@@ -65,7 +65,7 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::Object(fields) => {
             let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
-            if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
+            if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
                 let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");
                 let params = std::collections::HashMap::from([("detalhe".to_owned(), reason.to_owned())]);
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }

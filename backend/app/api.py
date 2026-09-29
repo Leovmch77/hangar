@@ -6320,12 +6320,18 @@ def _project_error(e: project_shortcuts.ProjectError) -> HTTPException:
     return HTTPException(409, detail=erro("erro_project_shortcuts_projeto", str(e), detalhe=str(e)))
 
 
+def _project_file_error(e: project_shortcuts.FileError) -> HTTPException:
+    return HTTPException(500, detail=erro("erro_project_shortcuts_arquivo", str(e), detalhe=str(e)))
+
+
 @app.get("/api/sessions/{name}/project-shortcuts", dependencies=[Depends(require_auth)])
 def get_project_shortcuts(name: str):
     try:
         return project_shortcuts.describe(_session_cwd(name))
     except project_shortcuts.ProjectError as e:
         raise _project_error(e)
+    except project_shortcuts.FileError as e:
+        raise _project_file_error(e)
 
 
 @app.put("/api/sessions/{name}/project-shortcuts", dependencies=[Depends(require_auth)])
@@ -6335,11 +6341,13 @@ def put_project_shortcuts(name: str, body: ProjectShortcutsBody):
     try:
         project = project_shortcuts.project_of(cwd)
         project_shortcuts.save_items(project["key"], body.items)
+        return {**project, "items": project_shortcuts.load_items(project["key"])}
     except project_shortcuts.ProjectError as e:
         raise _project_error(e)
+    except project_shortcuts.FileError as e:
+        raise _project_file_error(e)
     except ValueError as e:
         raise HTTPException(400, detail=erro("erro_project_shortcuts", str(e), detalhe=str(e)))
-    return {**project, "items": project_shortcuts.load_items(project["key"])}
 
 
 _DISPLAY_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "HYPRLAND_INSTANCE_SIGNATURE")

@@ -64,11 +64,17 @@ struct Cost { usd: Option<f64>, has_usage: bool, missing: Vec<String> }
 
 /// `GET/PUT /project-shortcuts`: nome da pasta do projeto e os atalhos dele.
 #[derive(Clone, Debug)]
-pub(super) struct Project { pub(super) name: String, pub(super) items: Vec<shortcuts::Item> }
+pub(super) struct Project {
+    pub(super) name: String,
+    pub(super) items: Vec<shortcuts::Item>,
+    /// A lista como veio: o PUT regrava a inteira, e o que a tela não mostra não pode sumir dela.
+    pub(super) raw: Vec<Value>,
+}
 
 impl Project {
     pub(super) fn parse(value: &Value) -> Self {
-        Self { name: value.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), items: shortcuts::project_items(value.get("items")) }
+        Self { name: value.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), items: shortcuts::project_items(value.get("items")),
+            raw: value.get("items").and_then(Value::as_array).cloned().unwrap_or_default() }
     }
 }
 

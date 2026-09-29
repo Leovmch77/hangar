@@ -448,6 +448,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Atalhos do projeto (/api/sessions/{name}/project-shortcuts e shortcut-shell).
   erro_project_shortcuts: (p) => m.erro_project_shortcuts({ detalhe: String(p.detalhe ?? '') }),
   erro_project_shortcuts_projeto: (p) => m.erro_project_shortcuts_projeto({ detalhe: String(p.detalhe ?? '') }),
+  erro_project_shortcuts_arquivo: (p) => m.erro_project_shortcuts_arquivo({ detalhe: String(p.detalhe ?? '') }),
   erro_shortcut_pasta: (p) => m.erro_shortcut_pasta({ detalhe: String(p.detalhe ?? '') }),
 };
 

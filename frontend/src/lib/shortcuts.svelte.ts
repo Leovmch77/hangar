@@ -8,6 +8,7 @@ import {
   type ShortcutSendText, type ShortcutShell,
 } from '@hangar/core';
 import { getActiveId, listServers } from './auth';
+import * as m from '../paraglide/messages';
 
 const lists = $state<Record<string, Shortcut[]>>({});
 // Promessa, não flag: quem chega com a busca em voo tem de esperar a lista real, senão o editor
@@ -90,7 +91,8 @@ export function loadProjectShortcuts(session: string): Promise<void> {
       projects[k] = await getProjectShortcuts(session);
       delete projectErrors[k];
     } catch (err) {
-      projectErrors[k] = err instanceof Error ? err.message : String(err);
+      // Sem `status` o pedido nem chegou ao servidor, e a mensagem é a do navegador, em inglês.
+      projectErrors[k] = err instanceof Error && 'status' in err ? err.message : m.falha_conexao();
       throw err;
     }
   })().finally(() => projectInFlight.delete(k));

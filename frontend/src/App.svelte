@@ -236,7 +236,7 @@
   });
 
   function irParaConfig(tela: TelaConfig) {
-    abrirConfig(tela, cfg?.srv ?? null);
+    abrirConfig(tela, cfg?.srv ?? null, cfg?.ses);
   }
 
   // Trocar o ALVO do painel (?srv=) sem sair da tela: o seletor do grupo "Servidor" (e o
@@ -244,7 +244,7 @@
   // (abrirConfig conta como nova parada). Antes isto sempre caía em 'maquinas' — trocar o
   // alvo da aba Contas te arrancava dela (pedido recorrente do usuário, 19/08/2026).
   function pickConfigServer(id: string) {
-    abrirConfig(cfg?.tela ?? 'maquinas', id);
+    abrirConfig(cfg?.tela ?? 'maquinas', id, cfg?.ses);
   }
 
   // ‹ (botaoEsquerdo de sub-tela no SettingsModal) e "subir um nivel", nao "voltar no tempo": os dois
@@ -254,7 +254,7 @@
   // por cima (abrirConfig conta como nova parada, cpDepth vira 2) em vez de voltar.
   function voltarConfig() {
     const prof = (history.state?.cpDepth as number | undefined) ?? 0;
-    if (prof <= 1) abrirConfig('root', cfg?.srv ?? null);
+    if (prof <= 1) abrirConfig('root', cfg?.srv ?? null, cfg?.ses);
     else history.back();
   }
 
