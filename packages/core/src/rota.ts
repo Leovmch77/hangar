@@ -76,9 +76,10 @@ async function testarLan(s: Server, lan: LanInfo | null | undefined): Promise<bo
 async function decidir(s: Server): Promise<void> {
   const anterior = rotas.get(s.id);
   let lan: LanInfo | null | undefined = s.lan;
+  const primeira = lan === undefined;
   let principalEm = Infinity;
   const inicio = Date.now();
-  if (lan === undefined) {
+  if (primeira) {
     // Primeira vez: pergunta pelo principal antes de conectar, pra já nascer na rota certa.
     lan = await aprender(s);
     if (lan) principalEm = Date.now() - inicio;
@@ -90,11 +91,12 @@ async function decidir(s: Server): Promise<void> {
   const inicioLan = Date.now();
   const lanOk = await testarLan(s, lan);
   const lanEm = Date.now() - inicioLan;
-  const venceu = lanOk && (s.lan === undefined ? lanEm <= principalEm : principalEm === Infinity);
+  const venceu = lanOk && lan?.url && (primeira ? lanEm <= principalEm : principalEm === Infinity);
   rotas.set(s.id, venceu ? lan!.url : s.baseUrl);
   const agora = rotas.get(s.id)!;
   if (agora !== anterior) {
-    registrarDiag({ evento: 'rota.escolhida', detalhe: agora === s.baseUrl ? 'principal' : 'rede_local' }, s.baseUrl);
+    const detalhe = venceu ? 'rede_local' : lanOk ? 'principal_mais_rapido' : 'principal';
+    registrarDiag({ evento: 'rota.escolhida', detalhe, ms: lanEm }, s.baseUrl);
   }
 }
 

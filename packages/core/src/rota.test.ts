@@ -40,8 +40,8 @@ function rede(maquinas: Record<string, Maquina>) {
 }
 
 const srv = (lan?: LanInfo): Server => ({ id: 's1', label: 'maq', baseUrl: TS, token: 't', lan });
-// O Tailscale leva 30 ms; a rede local de verdade responde na hora.
-const maq = { identificador: 'maq', token: 't', lan_url: LAN, atraso: 30 };
+// O Tailscale leva 100 ms; a rede local de verdade responde na hora.
+const maq = { identificador: 'maq', token: 't', lan_url: LAN, atraso: 100 };
 const maqLocal = { ...maq, atraso: 0 };
 
 beforeEach(() => { _resetRotasForTests(); _resetApiEnvForTests(); });
@@ -83,7 +83,7 @@ describe('rota até o servidor', () => {
 
   it('mesmo IP alcançado por VPN, mais lento que o Tailscale: fica no principal', async () => {
     env(null);
-    rede({ [TS]: maq, [LAN]: { ...maq, atraso: 80 } });
+    rede({ [TS]: maq, [LAN]: { ...maq, atraso: 250 } });
     await decidirRota(srv({ url: LAN, id: 'maq' }));
     expect(baseOf(srv())).toBe(TS);
     esquecerRota('s1');
