@@ -99,6 +99,15 @@ def _keep_semicolon(value: str) -> str:
     return value[:-1] + "\\;" if value.endswith(";") and not _IS_WINDOWS else value
 
 
+def _abort(target: str) -> None:
+    # Sessao que nasceu sem as marcas: sai inteira (com o grupo de processos, se ainda vive).
+    row = next((r for r in _rows() if r["tmux"] == target), None)
+    if row is not None:
+        _close_row(row)
+    else:
+        tmux.kill_session(target)
+
+
 def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
           key: str = "", origin: str = "", ask: bool = True) -> dict | None:
     """Cria a sessao escondida rodando o comando. None = o multiplexador recusou.
@@ -119,7 +128,7 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
             return None
         # Escondida ANTES de tudo, senao a lista de sessoes ve um card no meio do caminho.
         if not _set_options(target, fixed) or not _set_options(target, (*free, ("status", "off"))):
-            tmux.kill_session(target)
+            _abort(target)
             return None
         return {"id": ident, "label": label, "tmux": target}
     shell = os.environ.get("SHELL") or "/bin/sh"
@@ -138,7 +147,10 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
     if cp.returncode != 0 and not tmux.has_session(target):
         _log.warning("shortcut: tmux recusou criar %r: %s", target, (cp.stderr or "").strip()[:200])
         return None
-    _set_options(target, free)
+    # Sem a chave o No Hangar perderia a copia unica: falha aparece em vez de terminal orfao.
+    if not _set_options(target, free):
+        _abort(target)
+        return None
     return {"id": ident, "label": label, "tmux": target}
 
 
@@ -298,6 +310,10 @@ def close_hangar(ident: str) -> bool | None:
     return None if row is None else _close_row(row)
 
 
+class RestartError(Exception):
+    """O comando ou a pasta do terminal nao puderam ser recuperados inteiros."""
+
+
 def restart_hangar(ident: str, env: dict[str, str]) -> tuple[dict | None, bool]:
     """"Rodar de novo" de um No Hangar que saiu: mesmo comando, mesma pasta. Vivo = reaproveita."""
     row = hangar_row(ident)
@@ -305,10 +321,15 @@ def restart_hangar(ident: str, env: dict[str, str]) -> tuple[dict | None, bool]:
         return None, False
     cwd, command = _option(row["tmux"], _CWD), _option(row["tmux"], _CMD)
     if _IS_WINDOWS:
-        # O psmux come contrabarra no argv; o comando original esta inteiro no .cmd dele.
+        # O psmux come contrabarra no argv (a opcao guardada vem corrompida): o comando original
+        # esta inteiro no .cmd dele, e sem ele nao ha o que rodar de novo.
         try:
             with open(_windows_dir() / f"{ident}-cmd.cmd", encoding=_OEM, newline="") as f:
                 command = f.read().split("\r\n", 1)[1].rstrip("\r\n")
-        except (OSError, IndexError):
-            pass
+        except (OSError, IndexError) as e:
+            _log.warning("shortcut: sem o .cmd do terminal %s para rodar de novo: %r", ident, e)
+            raise RestartError(ident) from e
+    if not command.strip() or not cwd:
+        _log.warning("shortcut: comando ou pasta do terminal %s nao recuperados para rodar de novo", ident)
+        raise RestartError(ident)
     return start_hangar(row["key"], cwd, command, row["label"], env, row["origin"], row["ask"])

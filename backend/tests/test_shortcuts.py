@@ -369,6 +369,59 @@ def test_windows_restart_reads_back_the_inner_command_with_crlf_intact(monkeypat
     assert seen[0][2] == "echo a\r\necho b"
 
 
+def _fake_row(term, tmp_path):
+    return {"tmux": term["tmux"], "id": term["id"], "owner": "", "key": "global:k", "label": "X",
+            "origin": "", "ask": True, "alive": False, "pid": None, "exit_code": 0, "created": 1, "seq": 1}
+
+
+def test_windows_restart_without_the_cmd_file_fails_instead_of_running_the_stored_option(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st
+    started = []
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(st, "_rows", lambda: [_fake_row({"tmux": "shortcut-hangar-abcdef", "id": "abcdef"}, tmp_path)])
+    monkeypatch.setattr(st, "_option", lambda target, opt: "C:dirtemp" if opt == "@cp_shortcut_cmd" else str(tmp_path))
+    monkeypatch.setattr(st, "start_hangar", lambda *a: started.append(a) or (None, False))
+    with pytest.raises(st.RestartError):
+        st.restart_hangar("abcdef", {})
+    assert started == []
+
+
+@pytest.mark.parametrize("empty", ["@cp_shortcut_cmd", "@cp_shortcut_cwd"])
+def test_restart_with_an_unrecovered_option_fails_instead_of_running_nothing(monkeypatch, tmp_path, empty):
+    from app import shortcut_terminals as st
+    started = []
+    monkeypatch.setattr(st, "_rows", lambda: [_fake_row({"tmux": "shortcut-hangar-abcdef", "id": "abcdef"}, tmp_path)])
+    monkeypatch.setattr(st, "_option", lambda target, opt: "" if opt == empty else "algo")
+    monkeypatch.setattr(st, "start_hangar", lambda *a: started.append(a) or (None, False))
+    with pytest.raises(st.RestartError):
+        st.restart_hangar("abcdef", {})
+    assert started == []
+
+
+def test_hangar_restart_route_answers_500_when_the_command_is_lost(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api, shortcut_terminals as st
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    ident = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()["terminal"]["id"]
+    monkeypatch.setattr(st, "_option", lambda target, opt: "")
+    r = client.post(f"/api/hangar-terminals/{ident}/restart", headers=_auth())
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_hangar_terminal_rodar_de_novo"
+    assert [t["id"] for t in _hangar(client)] == [ident]              # nada novo nasceu
+
+
+def test_linux_start_fails_and_kills_the_session_when_the_key_cannot_be_stored(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st, tmux
+    killed = []
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    rc = lambda args: 1 if "@cp_shortcut_key" in args else 0            # noqa: E731
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, rc(args), "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(tmux, "kill_session", lambda name: killed.append(name) or True)
+    assert st.start("", str(tmp_path), "sleep 1", "X", {}, key="global:k") is None
+    assert len(killed) == 1
+
+
 def test_windows_start_kills_the_session_when_it_cannot_be_hidden(monkeypatch, tmp_path):
     from app import shortcut_terminals, tmux
     killed = []

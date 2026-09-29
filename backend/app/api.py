@@ -6577,7 +6577,11 @@ def hangar_terminal_close(ident: str):
 @app.post("/api/hangar-terminals/{ident}/restart", dependencies=[Depends(require_auth)], status_code=202)
 def hangar_terminal_restart(ident: str):
     from app import shortcut_terminals
-    term, reused = shortcut_terminals.restart_hangar(ident, _shortcut_display_env())
+    try:
+        term, reused = shortcut_terminals.restart_hangar(ident, _shortcut_display_env())
+    except shortcut_terminals.RestartError:
+        raise HTTPException(500, detail=erro("erro_hangar_terminal_rodar_de_novo",
+                                             "nao foi possivel recuperar o comando do terminal No Hangar"))
     if term is None:
         raise _hangar_404()
     if reused:
