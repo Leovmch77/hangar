@@ -201,9 +201,11 @@ impl<P: Page> Controller<P> {
         self.page.call("Runtime.evaluate", json!({"expression": arm})).await.map_err(|e| format!("sonda nao armada: {e}"))?;
         fire().await?;
         self.frame().await;
-        // Marcador sumido (2) = documento novo: o evento navegou, logo chegou. Leitura que falha não prova entrega.
+        // Marcador sumido (2) ou contexto da sonda destruído = documento novo: o evento navegou, logo chegou.
+        // Outra falha de leitura não prova entrega.
         match self.value(PROBE_READ).await {
             Ok(v) => Ok(matches!(v.as_i64(), Some(1 | 2))),
+            Err(e) if e.contains("Execution context was destroyed") || e.contains("Cannot find default execution context") => Ok(true),
             Err(e) => { eprintln!("[nav] sonda nao lida: {e}"); Ok(false) }
         }
     }
@@ -501,11 +503,23 @@ mod tests {
         let c = ctl(|m, p| match m {
             "Accessibility.getFullAXTree" => Ok(tree()),
             "DOM.getBoxModel" => Ok(boxed()),
-            "Runtime.evaluate" if is_probe_read(p) => Err("Execution context was destroyed".into()),
+            "Runtime.evaluate" if is_probe_read(p) => Err("Internal error".into()),
             _ => Ok(json!({})),
         });
         block_on(c.run("snapshot", &[]));
         assert!(text(block_on(c.run("click", &s(&["@e1"])))).starts_with("erro: click @e1: o evento nao chegou"));
+    }
+
+    #[test]
+    fn click_that_navigates_away_counts_as_delivered() {
+        let c = ctl(|m, p| match m {
+            "Accessibility.getFullAXTree" => Ok(tree()),
+            "DOM.getBoxModel" => Ok(boxed()),
+            "Runtime.evaluate" if is_probe_read(p) => Err("Execution context was destroyed.".into()),
+            _ => Ok(json!({})),
+        });
+        block_on(c.run("snapshot", &[]));
+        assert_eq!(text(block_on(c.run("click", &s(&["@e1"])))), "ok: click @e1");
     }
 
     #[test]
