@@ -5,8 +5,13 @@ import {
   resolveShortcuts,
   serializeShortcuts,
   sendsDirect,
+  runsInHangar,
+  hangarHome,
+  answersInApp,
+  hangarKeyOf,
   type Shortcut,
   type ShortcutSendText,
+  type ShortcutShell,
 } from './shortcuts';
 
 describe('resolveShortcuts', () => {
@@ -95,5 +100,24 @@ describe('sendsDirect', () => {
     expect(sendsDirect(base)).toBe(true);
     expect(sendsDirect({ ...base, send_direct: true })).toBe(true);
     expect(sendsDirect({ ...base, send_direct: false })).toBe(false);
+  });
+});
+
+describe('campos do shell No Hangar', () => {
+  it('mantém os campos do shell e descarta valor desconhecido', () => {
+    const raw = JSON.stringify([
+      { id: 'a', type: 'shell', label: 'RDP', command: 'delphi-vm', runs_in: 'hangar', hangar_home: false, answer_in_app: false },
+      { id: 'b', type: 'shell', label: 'X', command: 'x', runs_in: 'nuvem' },
+      { id: 'c', type: 'shell', label: 'Y', command: 'y', answer_in_app: 'sim' },
+    ]);
+    const list = resolveShortcuts(raw) as ShortcutShell[];
+    expect(list.map((s) => s.id)).toEqual(['a']);
+    expect(runsInHangar(list[0])).toBe(true);
+    expect(hangarHome(list[0])).toBe(false);
+    expect(answersInApp(list[0])).toBe(false);
+    const plain: ShortcutShell = { id: 'd', type: 'shell', label: 'Z', command: 'z' };
+    expect([runsInHangar(plain), hangarHome(plain), answersInApp(plain)]).toEqual([false, true, true]);
+    expect(hangarKeyOf('global', 'a')).toBe('global:a');
+    expect(hangarKeyOf('project', 'a', '/repo/x')).toBe('project:/repo/x:a');
   });
 });

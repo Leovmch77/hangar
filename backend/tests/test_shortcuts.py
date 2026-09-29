@@ -283,3 +283,19 @@ def test_terminal_socket_attaches_to_its_own_shortcut(client, monkeypatch, tmp_p
     finally:
         st.close_all(owner)
     assert st.list_for(owner) == []
+
+
+def test_shell_only_fields_are_validated():
+    shell = {"id": "x", "type": "shell", "label": "L", "command": "c", "runs_in": "hangar",
+             "hangar_home": False, "answer_in_app": False}
+    rc.validate_shortcut_item(shell, "w")
+    rc.validate_shortcut_item({**shell, "runs_in": "session"}, "w")
+    with pytest.raises(ValueError, match="runs_in"):
+        rc.validate_shortcut_item({**shell, "runs_in": "global"}, "w")
+    with pytest.raises(ValueError, match="hangar_home"):
+        rc.validate_shortcut_item({**shell, "hangar_home": "sim"}, "w")
+    with pytest.raises(ValueError, match="answer_in_app"):
+        rc.validate_shortcut_item({**shell, "answer_in_app": 1}, "w")
+    with pytest.raises(ValueError, match="runs_in"):
+        rc.validate_shortcut_item(
+            {"id": "y", "type": "send_text", "label": "L", "text": "t", "runs_in": "hangar"}, "w")
