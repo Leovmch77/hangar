@@ -491,7 +491,7 @@ say "5/8 Wrappers do claude e do codex"
 # que um `git pull` sozinho não atualiza. Eles são idempotentes, então re-rodar é barato; o que
 # não pode voltar é perguntar S/n pro que já está de pé.
 if [ -e "$HOME/.local/bin/hangar-engine" ]; then
-  ./scripts/install-claude-wrapper.sh >/dev/null && ok "wrappers atualizados" || anota_problema "wrappers do claude/codex falharam ao atualizar"
+  ./scripts/install-claude-wrapper.sh --statusline >/dev/null && ok "wrappers atualizados" || anota_problema "wrappers do claude/codex falharam ao atualizar"
 elif [ "$UPDATE" = 1 ]; then
   :   # não instala coisa nova num --update; isso é decisão, não atualização
 elif [ "$WRAPPER" = 1 ] && ask "Instalar (recomendado)?"; then
@@ -551,7 +551,7 @@ publica_tailscale() { # grava CP_PUBLIC_URL com o https do tailnet; o serve prec
   [ -n "$nome" ] || { falta "Tailscale sem login — sudo tailscale up e ./install.sh de novo"; return 1; }
   nota "Publicar o Hangar no Tailscale precisa da senha (tailscale serve)."
   ask_senha "Publicar agora (vai pedir a senha)?" || { nota "pulado — depois: ./install.sh"; return 1; }
-  if sudo tailscale serve --bg "$PORTA_FIM" >/dev/null 2>&1 && tailscale serve status 2>/dev/null | grep -q ':443'; then
+  if sudo tailscale serve --bg "$PORTA_FIM" >/dev/null 2>&1 && tailscale serve status --json 2>/dev/null | grep -q '"443"'; then
     grep -q '^CP_PUBLIC_URL=' backend/.env 2>/dev/null && sed -i.bak '/^CP_PUBLIC_URL=/d' backend/.env && rm -f backend/.env.bak
     printf 'CP_PUBLIC_URL=https://%s\n' "$nome" >> backend/.env
     ok "publicado no Tailscale: https://$nome"
