@@ -1975,12 +1975,15 @@ def advance(d: Path) -> list[str]:
         # trigger (the watchdog's cycle at worst).
         while again.exists() and not state(d)["ended"]:
             again.unlink()
+            # A crashed pass waits for a new close, like any failed step: the arbiter was told
+            # it will not be retried and may be doing it by hand.
+            since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+            if _failed_since(events(d), "advance", None, since):
+                break
             try:
                 _pass(d, cfg, acts)
-            except Exception as e:  # noqa: BLE001 — a crash must reach the arbiter, once
-                since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
-                if not _failed_since(events(d), "advance", None, since):
-                    acts.append(_fail(d, "advance", None, f"{type(e).__name__}: {e}"))
+            except Exception as e:  # noqa: BLE001 — a crash must reach the arbiter
+                acts.append(_fail(d, "advance", None, f"{type(e).__name__}: {e}"))
     return acts
 
 
@@ -1991,7 +1994,8 @@ def spawn_advance(d: Path) -> str | None:
     try:
         with (d / "advance.log").open("a", encoding="utf-8") as log:
             # cwd: the caller may sit in a worktree that the pass itself removes.
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d), "advance"],
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d.resolve()),
+                              "advance"],
                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              start_new_session=True, cwd=str(d))
     except OSError as e:

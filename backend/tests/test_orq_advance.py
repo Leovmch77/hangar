@@ -705,12 +705,23 @@ def test_a_crashing_pass_is_a_failed_step_reported_once(tmp_path, monkeypatch):
     for k, v in e.items():
         monkeypatch.setenv(k, v)
     m = orq_mod()
-    monkeypatch.setattr(m, "_pass", lambda *a: {}["boom"])
+    calls = []
+
+    def crash(*a):
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyError("boom")
+    monkeypatch.setattr(m, "_pass", crash)
     assert m.advance(d) == ["failed advance: KeyError: 'boom'"]
-    assert m.advance(d) == []
+    assert m.advance(d) == [] and len(calls) == 1   # held until a new close, as the wake promised
     assert [(x["passo"], x.get("task")) for x in events(d) if x["tipo"] == "advance_falhou"] == \
         [("advance", None)]
     assert len([s for s in sent(log) if "orq advance failed at advance" in s]) == 1
+    later = datetime.fromtimestamp(time.time() + 5).astimezone().isoformat(timespec="seconds")
+    with (d / "closed.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": later, "task": 1, "hash": g("rev-parse", "HEAD")}) + "\n")
+    m.advance(d)
+    assert len(calls) == 2
 
 
 def test_only_the_orchestrator_sends_as_a_panel_notice(tmp_path):
