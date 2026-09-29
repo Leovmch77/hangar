@@ -710,6 +710,8 @@ impl Hangar {
         let wide = page == Page::Appearance && !self.settings_ui.live && window.viewport_size().width >= px(1400.);
         // Contas cabe em colunas (uma por janela de cota) quando sobra largura ao lado da navegação.
         let accounts_wide = page == Page::Accounts && window.viewport_size().width >= px(1320.);
+        // Servidores ganha o detalhe num painel ao lado da lista; estreita, o detalhe abre em diálogo.
+        let servers_wide = page == Page::Servers && window.viewport_size().width >= px(1320.);
         let body = match page {
             Page::Appearance => self.render_appearance(wide, cx),
             Page::General => self.render_general(cx),
@@ -720,12 +722,12 @@ impl Hangar {
             Page::Shortcuts => self.render_shortcuts_page(cx),
             Page::Harnesses => self.render_harness(cx),
             Page::Voice | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
-            Page::Servers => self.render_machines(cx),
+            Page::Servers => self.render_machines(servers_wide, cx),
             Page::Sync => self.render_sync(cx),
             Page::Windows => self.render_computer(cx),
         };
         let scroll = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)
-            .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(if accounts_wide { 1040. } else { 720. })).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
+            .child(div().w_full().flex().justify_center().child(motion::fade_quick(div().w(px(if accounts_wide || servers_wide { 1040. } else { 720. })).max_w_full().px_4().pt(px(44.)).pb(px(40.)), body_in).child(body)));
         let tabs = (page == Page::Appearance).then(|| div().w_full().flex_shrink_0().flex().justify_center().px_4().pt(px(14.)).pb(px(6.))
             .child(div().w(px(720.)).max_w_full().child(self.section_tabs(cx))));
         let content = div().flex_1().min_w_0().h_full().flex().flex_col().children(tabs).child(scroll).children(self.server_config_footer(page, cx));
