@@ -24,6 +24,8 @@ from pathlib import Path
 a = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(" ".join(a) + "\n")
+if a[:1] == [os.environ.get("FAKE_FAIL")]:   # a send to this session fails
+    sys.exit(1)
 if os.environ.get("HANGAR_SEND_PAINEL") == "1":
     with open(os.environ["FAKE_LOG"] + ".painel", "a") as f:
         f.write(a[0] + "\n")
@@ -582,7 +584,7 @@ def test_team_table_reads_like_the_backend(contract):
 
 def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     m = orq_mod()
-    monkeypatch.setattr(m, "jev_config", lambda: {})   # in-process: the machine's key would add --jev
+    monkeypatch.setattr(m, "jev_config", lambda auto=False: {})   # in-process: the machine's key would add --jev
     rows = [{"papel": "executor", "vez": "1", "sessao": "a"}, {"papel": "executor", "vez": "2", "sessao": "b"}]
     assert [m.role_row(rows, "executor", n, "")["sessao"] for n in (1, 2, 3)] == ["a", "b", "a"]
     rows = [{"papel": "executor", "vez": "low", "sessao": "a"}, {"papel": "executor", "vez": "high", "sessao": "b"}]
@@ -724,6 +726,11 @@ def test_a_spawn_that_fails_is_journaled_and_never_a_traceback(tmp_path):
     assert c.stdout == "ok\n" and "Traceback" not in c.stderr and "orq advance" in c.stderr
     reg = (d / "registro.md").read_text()
     assert "orq advance started" not in reg and "commit T1: orq advance not started" in reg
+    # The arbiter wakes each time: nobody else would integrate or release the next Task.
+    woke = [m for m in sent(log) if m.startswith("arb [painel: orquestrador g1] [decisao]")
+            and "orq advance did not start" in m]
+    assert len(woke) == 3
+    assert len([x for x in timeline_lines(d) if x["kind"] == "failed" and "orq advance" in x["text"]]) == 3
 
 
 def test_a_crashing_pass_is_a_failed_step_reported_once(tmp_path, monkeypatch):
@@ -790,3 +797,108 @@ def test_init_without_auto_keeps_an_auto_run_auto(tmp_path):
     run(e, *args, "--regex", "shadow")
     cfg = json.loads((d / "orq.json").read_text())
     assert (cfg["auto"], cfg["jev"], cfg["regex"]) == (True, "shadow", "shadow")
+
+
+def test_auto_commit_whose_proof_queue_fails_wakes_the_arbiter(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    (d / "advance.log").mkdir()   # no background pass racing the assertions
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t", "--executor", "ex1", "--par", "rev1")
+    (r / "a.txt").write_text("x\n")
+    g("add", "a.txt")
+    h = g("stash", "create")
+    g("stash", "store", "-m", "task-1 round 1", h)
+    run(e, "event", "entrega", "--task", "1", "--rodada", "1", "--commit", h)
+    run(e, "event", "veredito", "--task", "1", "--rodada", "1", "--resultado", "aprova", "--sessao", "rev1")
+    g("commit", "-qm", "t1")
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+    monkeypatch.setattr(m, "spawn_advance", lambda d: None)
+
+    def boom(*a):
+        raise m.OrqError("plan unreadable")
+    monkeypatch.setattr(m, "_queue_proof", boom)
+    assert m.main(["commit", "--task", "1", "--hash", g("rev-parse", "HEAD")]) == 0
+    assert any(x["kind"] == "failed" and x["task"] == 1 and "plan unreadable" in x["text"]
+               for x in timeline_lines(d))
+    assert any(s.startswith("arb [painel: orquestrador g1] [decisao]") and "plan unreadable" in s
+               for s in sent(log))
+
+
+def test_a_crash_outside_the_pass_itself_is_still_a_failed_step(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+
+    def bad(*a):
+        raise ValueError("closed.jsonl unreadable")
+    monkeypatch.setattr(m, "_closes", bad)
+    assert m.advance(d) == ["failed advance: ValueError: closed.jsonl unreadable"]
+    assert [x["passo"] for x in events(d) if x["tipo"] == "advance_falhou"] == ["advance"]
+    assert len([s for s in sent(log) if "orq advance failed at advance" in s]) == 1
+
+
+def test_cmd_advance_reports_a_crash_to_the_arbiter(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+
+    def crash(d):
+        raise OSError("advance.lock: disk full")
+    monkeypatch.setattr(m, "advance", crash)
+    assert m.main(["advance"]) == 1
+    assert [x["passo"] for x in events(d) if x["tipo"] == "advance_falhou"] == ["advance"]
+    assert any("orq advance failed at advance" in s and "disk full" in s for s in sent(log))
+
+
+def test_a_merge_that_hangs_is_killed_and_is_a_failed_step(tmp_path, monkeypatch):
+    d, r, g, e, log = start(tmp_path, integ="`test -f b.txt`")
+    started(e)
+    h = branch_commit(g, r, "main-t1", "b.txt", "b\n")
+    hook = r / ".git" / "hooks" / "pre-merge-commit"
+    hook.write_text("#!/bin/sh\nsleep 60\n")
+    hook.chmod(0o755)
+    close(d, 1, h)
+    for k, v in e.items():
+        monkeypatch.setenv(k, v)
+    m = orq_mod()
+    monkeypatch.setattr(m, "MERGE_TIMEOUT_S", 1)
+    t0 = time.monotonic()
+    out = m.advance(d)
+    assert time.monotonic() - t0 < 20   # the hook's child holding the pipe is killed too
+    assert out[0].startswith("failed integrate T1") and "timed out" in out[0]
+    assert subprocess.run(["git", "-C", str(r), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                          capture_output=True).returncode != 0   # never left mid-merge
+    assert not any(x["tipo"] == "integrada" for x in events(d))
+
+
+def test_open_flags_of_an_auto_run_read_the_jev_key_the_settings_screen_wrote(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "runtime-config.json").write_text(json.dumps({"jev_api_key": "k"}))
+    for k, v in {"CLAUDE_CONFIG_DIR": str(cfg), "HOME": str(tmp_path), "TYPESAFE_API_KEY": ""}.items():
+        monkeypatch.setenv(k, v)
+    assert "--jev" in orq_mod().open_flags({"provider": "claude"}, False)
+
+
+def test_a_failed_final_review_wake_does_not_mark_the_plan_integrated(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    run({**e, "FAKE_FAIL": "arb"}, "advance")
+    assert not any(x["tipo"] == "tudo_integrado" for x in events(d))
+    assert [x["passo"] for x in events(d) if x["tipo"] == "advance_falhou"] == ["final"]
+
+
+def test_a_failed_batch_wake_leaves_the_proofs_pending(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="r1.md"), prova="lote(1)")
+    started(e, tasks=(1,))
+    h = g("rev-parse", "HEAD")
+    close(d, 1, h)
+    with (d / "prova-fila.jsonl").open("w") as f:
+        f.write(json.dumps({"ts": "2026-09-28T10:00:00-03:00", "task": 1, "roteiro": "r1.md", "hash": h}) + "\n")
+    run({**e, "FAKE_FAIL": "arb"}, "advance")
+    assert not (d / "prova-lotes.jsonl").exists()
+    assert [p["task"] for p in orq_mod().pending_proofs(d)] == [1]

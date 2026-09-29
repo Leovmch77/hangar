@@ -412,8 +412,13 @@ novo_auto auto-integrando
 exec 9>>"$d/advance.lock"
 flock -n 9 || fail "não peguei a trava do advance"
 M=2 CICLOS=3 vigia
-exec 9>&-
 if grep -q "Nobody has had the ball" "$t/sent.log"; then fail "alarmou ninguém-com-a-bola com o advance rodando"; fi
+# Trava presa mas intocada há mais de 2×900 s: passada travada, o alarme volta.
+touch -d '-2 hours' "$d/advance.lock"
+M=2 CICLOS=3 vigia
+exec 9>&-
+grep -q "Nobody has had the ball" "$t/sent.log" || fail "advance travado segurando a trava calou o alarme"
+: > "$t/sent.log"
 M=2 CICLOS=3 vigia
 grep -q "Nobody has had the ball" "$t/sent.log" || fail "sem a trava o alarme não voltou"
 

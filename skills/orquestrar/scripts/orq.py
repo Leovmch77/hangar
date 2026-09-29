@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,8 @@ PROJETO_KEYS = {"checagens": "Checagens", "integracao": "Integração", "prova":
                 "paralelo": "Paralelo", "correcao": "Correção pelo revisor", "revisao": "Revisão"}
 SUBAGENT = "subagente"   # `--par` of a Task reviewed by a subagent: a name, never a session
 CHECK_TIMEOUT_S = 900
+# The merge commit runs the repo's hooks, which may run checks of their own.
+MERGE_TIMEOUT_S = CHECK_TIMEOUT_S
 TIMELINE_KINDS = ("advance", "woke", "dropped", "would_drop", "failed", "notice")
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
@@ -499,11 +502,13 @@ def plan_of(d: Path) -> dict:
     return projeto(plan_text(p)) if p else {}
 
 
-def run_checks(repo: str, cmds: list[str], log: Path) -> tuple[bool, str]:
-    """Each declared command in the repo, output to `log`; (ok, first failure's line)."""
+def run_checks(repo: str, cmds: list[str], log: Path, beat: Path | None = None) -> tuple[bool, str]:
+    """Each declared command in the repo, output to `log`; (ok, first failure's line). `beat` is
+    touched before each command, so its age tells a slow pass from a stuck one."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as f:
         for c in cmds:
+            _touch(beat)
             f.write(f"$ {c}\n")
             f.flush()
             try:
@@ -730,6 +735,7 @@ def cmd_event(a) -> int:
     if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
         if err := spawn_advance(d):
             journal_append(d, f"{ev['tipo']} T{ev.get('task')}: orq advance not started: {err}")
+            _advance_not_started(d, f"{ev['tipo']} T{ev.get('task')}", ev.get("task"), err)
     _after_event(d, ev)
     print("ok")
     return 0
@@ -841,10 +847,39 @@ def cmd_lock(a) -> int:
 MARK = re.compile(r"^\s*\[(aviso|decis[aã]o)\]", re.IGNORECASE)
 
 
-def git(repo: str, *args: str) -> str:
+def _touch(p: Path | None) -> None:
+    if p is None:
+        return
+    try:
+        os.utime(p)
+    except OSError:
+        pass   # a heartbeat, not a step: the vigia alarms late at worst
+
+
+def _run_bounded(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """subprocess.run with the whole process group killed on timeout: a hook's child keeping the
+    pipe open would otherwise hold run() past its timeout forever."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          start_new_session=True) as p:
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass   # the group ended between the timeout and the kill
+            p.communicate()
+            raise
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+def git(repo: str, *args: str, timeout: float | None = None) -> str:
     # Unquoted paths: an escaped accented name would slip past the untouchables glob.
-    r = subprocess.run(["git", "-c", "core.quotePath=false", "-C", repo, *args],
-                       capture_output=True, text=True)
+    cmd = ["git", "-c", "core.quotePath=false", "-C", repo, *args]
+    try:
+        r = _run_bounded(cmd, timeout) if timeout else subprocess.run(cmd, capture_output=True, text=True)
+    except subprocess.TimeoutExpired:
+        raise OrqError(f"git {' '.join(args)}: timed out after {timeout}s, killed") from None
     if r.returncode != 0:
         raise OrqError(f"git {' '.join(args)}: {r.stderr.strip()[:200]}")
     return r.stdout
@@ -1135,15 +1170,23 @@ def cmd_commit(a) -> int:
         f.write(json.dumps({"ts": now(), "task": a.task, "hash": full}) + "\n")
     journal_append(d, f"commit T{a.task} {full[:12]} checked ({len(files)} file(s))")
     # closed.jsonl is already written: an unreadable plan must not swallow the close notice.
+    queue_err = None
     try:
         extra = _queue_proof(d, a.task, full)
     except OrqError as e:
-        extra = f" (proof queue skipped: {e})"
+        extra, queue_err = f" (proof queue skipped: {e})", str(e)
     if cfg.get("auto"):
         # The orchestrator integrates and releases the next Task; the arbiter wakes only if it cannot.
+        if queue_err:
+            _wake_or_journal(d, f"[decisao] Task {a.task} closed, but its proof was NOT queued "
+                                f"({queue_err}): no batch will carry it. Run it by hand or take it "
+                                "to the user.",
+                             f"falhou ao enfileirar a prova da T{a.task}: {queue_err[:200]}", a.task)
         err = spawn_advance(d)
         journal_append(d, f"commit T{a.task}: orq advance "
                           + (f"not started ({err})" if err else "started") + extra)
+        if err:
+            _advance_not_started(d, f"commit T{a.task}", a.task, err)
         print("ok")
         return 0
     send(state(d)["arbiter"], f"[decisao] Task {a.task} closed and checked: {full[:12]}, "
@@ -1153,17 +1196,19 @@ def cmd_commit(a) -> int:
     return 0
 
 
-def take_batch(d: Path) -> str | None:
-    """The pending proofs become the next batch; its line, or None when nothing is pending."""
-    pend = pending_proofs(d)
+def take_batch(d: Path, dry: bool = False, pend: list[dict] | None = None) -> str | None:
+    """The pending proofs (or `pend`) become the next batch; its line, or None when nothing is
+    pending. `dry`: the line only, nothing recorded."""
+    pend = pending_proofs(d) if pend is None else pend
     if not pend:
         return None
     # Plan-relative in the plan; the proof session runs elsewhere and needs a path it can open.
     base = Path(config(d)["plan"]).expanduser().resolve().parent
     n = len(_jsonl(d / "prova-lotes.jsonl")) + 1
-    with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
-    journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
+    if not dry:
+        with (d / "prova-lotes.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": now(), "lote": n, "tasks": [p["task"] for p in pend]}) + "\n")
+        journal_append(d, f"proof batch {n} taken: " + " ".join(f"T{p['task']}" for p in pend))
     return f"lote {n}: " + " ".join(f"T{p['task']} {base / p['roteiro']} {p['hash'][:12]}" for p in pend)
 
 
@@ -1543,6 +1588,21 @@ def _union_resolve(repo: str, path: str) -> str | None:
     return None
 
 
+def _wake_or_journal(d: Path, text: str, line: str, task: int | None = None) -> None:
+    """A failure only the arbiter can act on; a send that fails too stays in the journal."""
+    try:
+        _wake(d, text, line, task, kind="failed")
+    except OrqError as e:
+        journal_append(d, f"arbiter not woken: {e}")
+
+
+def _advance_not_started(d: Path, after: str, task: int | None, err: str) -> None:
+    """Nobody else integrates or releases the next Task, so the arbiter hears of it."""
+    _wake_or_journal(d, f"[decisao] After {after}: orq advance did not start ({err}). The watchdog's "
+                        "next cycle retries it; if this repeats, run `orq advance` by hand.",
+                     f"não consegui iniciar o orq advance depois de {after}: {err[:200]}", task)
+
+
 def _abort_merge(repo: str) -> None:
     """The user's checkout never stays half-merged; an abort that fails is raised, never hidden."""
     if subprocess.run(["git", "-C", repo, "rev-parse", "-q", "--verify", "MERGE_HEAD"],
@@ -1557,8 +1617,13 @@ def _abort_merge(repo: str) -> None:
 def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
     """`git merge --no-ff` of the verified commit. None = merged (additive conflicts resolved);
     else the conflicting files and the reason, with the merge aborted."""
-    r = subprocess.run(["git", "-C", repo, "merge", "--no-ff", "-m", f"Merge Task {n} ({h[:12]})", h],
-                       capture_output=True, text=True)
+    try:
+        r = _run_bounded(["git", "-C", repo, "merge", "--no-ff", "-m", f"Merge Task {n} ({h[:12]})", h],
+                         MERGE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _abort_merge(repo)
+        raise OrqError(f"git merge {h[:12]}: timed out after {MERGE_TIMEOUT_S}s, killed and "
+                       "aborted") from None
     if r.returncode == 0:
         return None
     merged = False
@@ -1572,7 +1637,7 @@ def _merge(d: Path, repo: str, n: int, h: str) -> tuple[list[str], str] | None:
         whys = [] if others else [w for f in files if (w := _union_resolve(repo, f))]
         if others or whys:
             return others or files, "; ".join(whys)
-        git(repo, "commit", "--no-edit")
+        git(repo, "commit", "--no-edit", timeout=MERGE_TIMEOUT_S)
         merged = True
     finally:
         if not merged:
@@ -1630,7 +1695,9 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
         return False
     needs_merge = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
                                  capture_output=True).returncode != 0
+    beat = d / "advance.lock"
     if needs_merge:
+        _touch(beat)
         conflict = _merge(d, repo, n, h)
         if conflict:
             files, why = conflict
@@ -1650,14 +1717,14 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
     head = git(repo, "rev-parse", "HEAD").strip()
     cmds = plan_of(d).get("integracao") or []
     log = d / "checks" / f"integration-t{n}-{head[:12]}.log"
-    ok, why = run_checks(repo, cmds, log)
+    ok, why = run_checks(repo, cmds, log, beat)
     choice = "back"
     if not ok:
         choice = _red_choice(d, cfg, n, why, log)
         if choice == "retry":
             timeline(d, "advance", f"T{n}: integração vermelha, rodando de novo uma vez", n)
             log = log.with_name(log.stem + "-retry.log")
-            ok, why = run_checks(repo, cmds, log)
+            ok, why = run_checks(repo, cmds, log, beat)
             choice = "back"  # a second red never runs again
     if ok:
         event_append(d, {"tipo": "integrada", "task": n, "commit": head})
@@ -1787,7 +1854,8 @@ def open_flags(row: dict, read_only: bool) -> list[str]:
     # The backend refuses read-only on a session without terminal.
     if read_only and "--read-only" not in extra and "--headless" not in extra:
         flags.append("--read-only")
-    if jev_config().get("key") and not {"--jev", "--sem-jev"} & set(extra):
+    # Only auto runs open sessions: the key the settings screen wrote counts too.
+    if jev_config(auto=True).get("key") and not {"--jev", "--sem-jev"} & set(extra):
         flags.append("--jev")
     return flags + extra
 
@@ -1947,11 +2015,13 @@ def _announce_batch(d: Path, cfg: dict, acts: list[str]) -> None:
                     for p in pend)
     if len(pend) < prova[1] and not wave_over:
         return
-    line = take_batch(d)
+    # Taken only once the arbiter heard of it: a failed send keeps the proofs pending.
+    line = take_batch(d, dry=True, pend=pend)
     names = ", ".join(f"T{p['task']}" for p in pend)
     _wake(d, f"[decisao] Proof batch ready — {line}. Open one proof session for those roteiros on "
              "the integrated code (prova-lote.md).",
           f"acordou o árbitro: lote de prova pronto ({names})")
+    take_batch(d, pend=pend)   # the Tasks announced, even if a commit queued one meanwhile
     acts.append(f"batch: {line}")
 
 
@@ -1962,10 +2032,11 @@ def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
         return
     if not {t["n"] for t in tasks} <= _integrated(d, evs):
         return
-    event_append(d, {"tipo": "tudo_integrado"})
     _wake(d, "[decisao] Every Task of the plan is integrated: your turn for the final review "
              "(arbitro-encerramento.md, \"Phase 4\").",
           "acordou o árbitro: todas as Tasks integradas, hora da revisão final")
+    # After the send: recorded first, a failed send would never be tried again.
+    event_append(d, {"tipo": "tudo_integrado"})
     acts.append("all integrated: arbiter woken for the final review")
 
 
@@ -2013,17 +2084,21 @@ def advance(d: Path) -> list[str]:
         lock.flush()
         # ponytail: a mark left between the holder's last check and its unlock waits for the next
         # trigger (the watchdog's cycle at worst).
-        while again.exists() and not state(d)["ended"]:
+        while again.exists():
             again.unlink()
-            # A crashed pass waits for a new close, like any failed step: the arbiter was told
-            # it will not be retried and may be doing it by hand.
-            since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
-            if _failed_since(events(d), "advance", None, since):
-                break
+            _touch(d / "advance.lock")
             try:
+                if state(d)["ended"]:
+                    break
+                # A crashed pass waits for a new close, like any failed step: the arbiter was told
+                # it will not be retried and may be doing it by hand.
+                since = max((c.get("ts") or "" for c in _closes(d).values()), default=None) or None
+                if _failed_since(events(d), "advance", None, since):
+                    break
                 _pass(d, cfg, acts)
             except Exception as e:  # noqa: BLE001 — a crash must reach the arbiter
                 acts.append(_fail(d, "advance", None, f"{type(e).__name__}: {e}"))
+                break
     return acts
 
 
@@ -2051,7 +2126,16 @@ def cmd_advance(a) -> int:
         return 0
     if a.detach:
         return 1 if spawn_advance(d) else 0
-    for line in advance(d):
+    try:
+        lines = advance(d)
+    except Exception as e:  # noqa: BLE001 — outside the pass (lock, recording a failure): still the arbiter's to know
+        err = f"{type(e).__name__}: {e}"
+        try:
+            print(_fail(d, "advance", None, err))
+        except Exception as e2:  # noqa: BLE001
+            print(f"orq: advance failed ({err}) and the arbiter was not told: {e2}", file=sys.stderr)
+        return 1
+    for line in lines:
         print(line)
     return 0
 

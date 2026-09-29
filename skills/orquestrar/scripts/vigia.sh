@@ -441,10 +441,15 @@ PY
 orq_log() { ORQ_DIR="$ORQD" python3 "$ORQ" log "$1" >/dev/null 2>>"$CP_VIGIA_LOG"; }
 # The orchestrator mid-pass (merge + Integração: outlast a cycle) holds advance.lock. Read from
 # /proc/locks, never by taking the lock: a probe holding it makes a starting pass give up.
+# The pass touches the lock before each merge and check, each bounded by orq.py's 900 s: a lock
+# untouched for twice that is a stuck pass, and "nobody has the ball" must fire again.
 # ponytail: matched by inode only; add the device if two filesystems ever collide.
+ADVANCE_STUCK_S=${CP_VIGIA_ADVANCE_STUCK_S:-1800}
 advance_running() {
-  local ino
+  local ino mt
   ino=$(stat -c %i "$ORQD/advance.lock" 2>/dev/null) || return 1
+  mt=$(stat -c %Y "$ORQD/advance.lock" 2>/dev/null) || return 1
+  [ $(( $(date +%s) - mt )) -lt "$ADVANCE_STUCK_S" ] || return 1
   grep -q "^[0-9]*: FLOCK .*:${ino} " /proc/locks 2>/dev/null
 }
 # A leading [aviso] makes notify only journal it, as `aviso:` (the panel feed's prefix).
