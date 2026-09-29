@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Hangar
+Name=Hangar (Electron)
 Comment=Janela nativa do Hangar, com a área de trabalho aparecendo atrás
 # Chama o binário do Electron direto, e não `npm start`: quem abre pelo lançador do desktop não
 # tem o PATH do shell interativo, então um `npm` instalado por fnm/nvm simplesmente não é achado.
