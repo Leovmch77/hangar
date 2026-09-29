@@ -69,7 +69,7 @@ from app.adapters import CLAUDE_HEADLESS, get_adapter
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
-from app.sse import merged_events, nav_confirmar, nav_pendente
+from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
@@ -912,8 +912,8 @@ def abrir_terminal_nativo(name: str):
 
 # Snapshot com TTL de registry.list() pros endpoints request/response QUENTES (history/workflows):
 # o mount do board dispara dezenas de /history de uma vez e cada list() fresco e um scan completo
-# de /proc + fork de tmux list-panes. Mesmo padrao do sse._list_snap (la pros loops de SSE; caches
-# separados porque as instancias de SessionRegistry sao separadas). Miss por nome (sessao criada ha
+# de /proc + fork de tmux list-panes. Os loops do SSE leem este mesmo snapshot (sse._cached_list).
+# Miss por nome (sessao criada ha
 # <1s) -> fallback pro list() fresco, entao o TTL nunca causa 404 falso.
 _LIST_TTL = 1.0
 # UMA chave, guardando o par (quando, lista). Guardar `t` e `infos` em chaves separadas deixava as
@@ -1694,9 +1694,16 @@ async def list_sessions(request: Request):
     # decoracao, e o estado decorado ainda vazaria pro snapshot que `/history` e `/workflows` leem
     # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
     # lugar o que ja esta neles.
+    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele.
+    from app.sse import recent_list
+    guest = guest_of(request)
+    decorated = recent_list(2.0)
+    if decorated is not None:
+        if guest is not None:
+            decorated = [i for i in decorated if i.name == guest.session]
+        return decorated if guest is None else [guest_safe(i) for i in decorated]
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
-    guest = guest_of(request)
     if guest is not None:
         snap = [i for i in snap if i.name == guest.session]
     decorated = await registry.list_with_state([i.model_copy() for i in snap])
@@ -2165,6 +2172,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
             with _list_lock:
                 _list_snap["snap"] = None
+            invalidate_recent_list()
             return info
 
         worker = asyncio.create_task(asyncio.to_thread(create))
@@ -2500,6 +2508,7 @@ def _rename_session(name: str, body: RenameBody):
             atomico.substituir(od, nd)
         with _list_lock:
             _list_snap["snap"] = None
+        invalidate_recent_list()
         share_store.rename(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
