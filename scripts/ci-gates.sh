@@ -21,7 +21,7 @@ if (( $# == 2 )); then
     mudados="$(git diff --name-only --no-renames "$1" "$2" -- . 2>/dev/null)" || { echo "ci-gates: intervalo $1..$2 ilegível" >&2; exit 1; }
     grep -q '^backend/' <<< "$mudados" || roda_back=0
     grep -q '^frontend/' <<< "$mudados" || roda_front=0
-    grep -qE '^skills/orquestrar/|^scripts/checar-orquestrar\.sh' <<< "$mudados" || roda_skill=0
+    grep -qE '^skills/orquestrar(-auto)?/|^scripts/checar-orquestrar\.sh' <<< "$mudados" || roda_skill=0
     grep -q '^\.github/workflows/' <<< "$mudados" && { roda_back=1; roda_front=1; }
 fi
 

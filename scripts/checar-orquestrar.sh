@@ -202,9 +202,105 @@ for f in references/executor*.md references/revisor*.md references/revisao-final
   fi
 done
 
+# 9. orquestrar-auto: as mesmas regras de escrita, teto proprio por pagina, ponteiros que existem
+#    e moldes de kick-off so com os campos que o `orq` preenche (`render_kickoff`).
+n_orq=${#arquivos[@]}
+auto="$raiz/skills/orquestrar-auto"
+if [ ! -d "$auto" ]; then
+  echo "PARE: nao achei $auto" >&2
+  exit 1
+fi
+cd "$auto" || exit 1
+arquivos=(SKILL.md references/*.md)
+
+proibido 'superpowers\|mattpocock\|/implement\|to-tickets\|to-spec\|/grill\|writing-plans\|executing-plans' \
+  'A skill nao nomeia metodo de planejamento/execucao — isso vem do contrato, o usuario nomeia.'
+proibido '20[0-9][0-9]-[01][0-9]-[0-3][0-9]\|[0-3][0-9]/[01][0-9]/20[0-9][0-9]' \
+  'Skill nao carrega data literal — a evidencia datada vai pra mensagem de commit ou pro registro.'
+proibido '\.svelte|\.tsx|\.vue|pixel|screenshot|agent-browser|hangar-preview' \
+  'A skill e generica: isso e do plano (`## Projeto`, roteiro) ou da skill provar-tela.' -iE
+proibido 'Step' \
+  'A camada de baixo se chama "step" (minusculo). "Step" so vale como formato literal do app.'
+
+for f in "${arquivos[@]}"; do
+  # Nome solto e pagina DESTA skill; pagina da orquestrar vai pelo caminho inteiro.
+  while IFS= read -r alvo; do
+    [ -z "$alvo" ] && continue
+    case "$alvo" in licoes.md|registro.md|regras.md) continue ;; esac
+    if [ ! -f "references/$alvo" ]; then
+      echo
+      echo "✗ $f aponta para \`$alvo\`, que nao existe na orquestrar-auto (pagina da orquestrar: caminho inteiro)."
+      falhou=1
+    fi
+  done < <(grep -oh '`\(references/\)\?[a-z][a-z0-9-]*\.md`' "$f" 2>/dev/null \
+             | tr -d '`' | sed 's|^references/||' | sort -u)
+  # Caminho inteiro de skill: o arquivo tem de existir neste repositorio.
+  while IFS= read -r alvo; do
+    [ -z "$alvo" ] && continue
+    if [ ! -f "$raiz/skills/$alvo" ]; then
+      echo
+      echo "✗ $f aponta para \`~/.claude/skills/$alvo\`, que nao existe."
+      falhou=1
+    fi
+  done < <(grep -oh '~/\.claude/skills/[a-z-]*/[A-Za-z0-9/_-]*\.\(md\|py\|sh\)' "$f" 2>/dev/null \
+             | sed 's|^~/\.claude/skills/||' | sort -u)
+done
+
+declare -A teto_auto=(
+  [SKILL.md]=8000
+  [references/lancamento.md]=6000
+  [references/arbitro.md]=9000
+  [references/kickoff-executor.md]=2000
+  [references/kickoff-revisor.md]=2000
+)
+for f in "${arquivos[@]}"; do
+  teto=${teto_auto[$f]:-}
+  if [ -z "$teto" ]; then
+    echo
+    echo "✗ $f nao tem teto em teto_auto: pagina nova entra com o seu."
+    falhou=1
+    continue
+  fi
+  tam=$(wc -m < "$f")
+  if [ "$tam" -gt "$teto" ]; then
+    echo
+    echo "✗ $f tem $tam caracteres; teto e $teto. Enxugue."
+    falhou=1
+  fi
+done
+
+for papel in executor revisor; do
+  obrigatorio "references/kickoff-$papel.md" "~/.claude/skills/orquestrar/references/$papel.md" \
+    'O molde manda ler a pagina do papel na orquestrar, e so ela.'
+done
+
+# Campo fora da lista, chave solta ou `{}` quebram o `str.format_map` do `orq` na hora de soltar a Task.
+for f in references/kickoff-*.md; do
+  if ! saida=$(python3 - "$f" <<'EOF'
+import string
+import sys
+
+CAMPOS = {"task", "title", "worktree", "branch", "base", "run_dir", "plan", "contract", "untouchables",
+          "executor", "reviewer", "arbiter"}
+texto = open(sys.argv[1], encoding="utf-8").read()
+try:
+    sobra = {n for _, n, _, _ in string.Formatter().parse(texto) if n is not None} - CAMPOS
+except ValueError as e:
+    sobra = {f"chave solta ({e})"}
+if sobra:
+    print(", ".join(sorted(sobra)))
+    sys.exit(1)
+EOF
+  ); then
+    echo
+    echo "✗ $f tem campo que o orq nao preenche: $saida"
+    falhou=1
+  fi
+done
+
 echo
 if [ "$falhou" = 0 ]; then
-  echo "orquestrar OK — ${#arquivos[@]} arquivos, nenhuma contradicao."
+  echo "orquestrar OK — $n_orq arquivos; orquestrar-auto OK — ${#arquivos[@]} arquivos; nenhuma contradicao."
   exit 0
 fi
 echo "PARE: a skill se contradiz nos pontos acima."
