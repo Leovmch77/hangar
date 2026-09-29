@@ -58,6 +58,15 @@ def test_passo_so_posix_no_windows_vira_texto_e_nao_cobra_prova(passos, monkeypa
     assert "x" in atualizacoes.aplicados()
 
 
+def test_passo_sem_comando_nenhum_ainda_cobra_prova(passos):
+    """Passo só de texto pode provar que o código chegou; isso não some."""
+    _escreve(passos, "x", id="x", titulo="Chegou", prova="nao-existe")
+    (p,) = atualizacoes.todos()
+    assert p["prova"] == ["nao-existe"]
+    with pytest.raises(atualizacoes.PassoFalhou):
+        atualizacoes.aplicar(p)
+
+
 def test_sem_titulo_e_ignorado_sem_derrubar_o_resto(passos):
     """Arquivo malformado não pode travar a atualização de todo mundo."""
     _escreve(passos, "quebrado", id="quebrado", comando="echo oi", prova="docs")

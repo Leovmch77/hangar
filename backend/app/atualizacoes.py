@@ -104,8 +104,8 @@ def _passo(arquivo: Path) -> dict | None:
         "id": ident,
         "titulo": campos["titulo"],
         "comando": comando,
-        # Sem comando neste sistema o passo é só texto: a prova é do efeito do outro sistema.
-        "prova": campos.get("prova", "").split() if comando else [],
+        # Comando só pro outro sistema: aqui é texto, e a prova é do efeito de lá.
+        "prova": [] if tem_comando and not comando else campos.get("prova", "").split(),
         "destrutivo": campos.get("destrutivo", "").strip().lower() in ("true", "sim", "1"),
         "texto": corpo,
         "arquivo": arquivo.name,
