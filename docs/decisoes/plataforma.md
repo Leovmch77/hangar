@@ -324,6 +324,21 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     neste plano uma suíte verde mexeu de verdade no `~/.claude/.hangar-pair`/`~/.hangar/pair-arquivo`
     do desenvolvedor.
 
+## Grupo de 1 só existe no grupo `orq` com execução `auto` viva
+
+29/09/2026. Na `orquestrar-auto` o árbitro lança sozinho (`hangar-send --pair --orq` sem par) e
+quem abre o time é o orquestrador; entre uma Task e outra o grupo volta a ter só o árbitro. Pela
+regra antiga, grupo de 1 se desfazia e arquivava o `regras-<gid>.md`, que o orquestrador relê a
+cada kick-off. Por isso o `leave()` segura o último membro enquanto `runs.group_phase(gid)` diz
+`live`. "Viva" é o `orq.json` com `auto` e sem `execucao_fim`, não o batimento do vigia: o vigia
+roda com `Restart=always` e o reinício deixa uma janela sem batimento, que dissolveria o grupo no
+meio da execução. O outro lado: sem peers e sem execução viva, o hook de `SessionStart` (que lê o
+arquivo do sidecar, fora do backend) reinjetaria o protocolo para sempre. A varredura do `list()`
+(`pair.dissolve_lone_orq`) apaga o sidecar e arquiva o contrato quando a execução acabou, ou
+quando nenhuma começou 1 h depois da última escrita do sidecar (`ORQ_LAUNCH_GRACE_S`): entre o
+`--pair --orq` e o `execucao_inicio` o árbitro escreve o contrato e roda o `orq init`, e dissolver
+ali trocaria o `gid` já anotado.
+
 ## Plan progress
 
 (`app/planprog.py` + `registry._decorate_plan` + `PlanBar`/`PlanPanel.svelte`):
@@ -602,6 +617,26 @@ Jev e comparar, o que acontece entre sessões. Virar ao vivo exigiria endpoint n
 sessão e a chave atravessando mais uma fronteira. Ficaram de fora, pelo mesmo motivo, o registro de
 consumidores da chave e o override por sessão. A tela é só do front desktop neste primeiro momento,
 por decisão explícita — o app Expo fica para depois.
+
+## Triagem de recados da orquestrar-auto: Jev ligado, regex só anotando
+
+Na `orquestrar-auto` o `orq notify` sem `[aviso]`/`[decisao]` passa por uma triagem que pode
+descartar o recado em vez de acordar o árbitro (o descarte fica na linha do tempo, com o texto
+inteiro). O lançamento usa `--jev on --regex shadow`: o Jev descarta; a regex, usada só sem chave
+do Jev, apenas anota "teria descartado" até o usuário conferir e ligar.
+
+- **Regex** (`orq_triage.py`, porte de `~/.hangar/orq/jev-calibracao/regex/rx.py`, 28/09/2026):
+  690 recados classificados (416 da calibragem 26/08–25/09, fora 1 excluído, + 274 da
+  native-parity conferidos um a um por três subagentes), 232 descartados, 0 descarte de recado
+  que precisava do árbitro. Os 18 casos achados na conferência serviram para ajustar os vetos,
+  então não sobrou base cega: por isso nasce anotando. O `labeled.json` virou teste
+  (`test_orq_triage.py`): mudança na regex que descarte um `wake` falha.
+- **Jev** (29/09/2026, commit `648c1531`): os 416 da calibragem (149 wake, 258 no_wake, 9
+  ambíguos), 2 sorteios (832 chamadas, 0 erro), perguntas e limiares atuais do `orq.py`
+  (`DISCARD_P` 0,85, `VETO_P` 0,40), OpenRouter `typesafe/jev-1.13-20260917`. Descarte errado =
+  rótulo `wake` descartado: 0 nos dois sorteios; descartou 85/258 (33%) e 87/258 (34%) dos sem
+  ação, nenhum ambíguo. Zero erro era a condição da spec (§2.4) para nascer ligado
+  (`AUTO_JEV_DEFAULT = "on"`).
 
 ## Function hooks: configuração do servidor, e por isso o relançamento relê
 

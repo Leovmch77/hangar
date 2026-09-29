@@ -177,6 +177,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `_entrou_no_composer`/`_submeteu` (`_SUBMIT_CHECK_PRAZO`) cobre a primeira mensagem logo após
   criar a sessão; o caminho que dá certo sai na primeira leitura, só a falha paga o prazo. Ver
   [primeira mensagem na TUI recém-aberta](#primeira-mensagem-na-tui-recém-aberta).
+- **Provider `orq` não tem pane nem processo.** A linha `<gid>-orq` é montada do `orq.json` e a
+  conversa é a linha do tempo da execução; entrada, fim, renomear, interromper e parear respondem
+  409 `erro_sessao_orq` (`api._recusa_orq`), e os três clientes escondem compositor, terminal,
+  parear e rodar, com o botão "Falar com o árbitro" no lugar. Ver
+  [Provider `orq`](#provider-orq-a-linha-do-orquestrador-não-tem-pane).
 
 ## Primeira mensagem na TUI recém-aberta
 
@@ -1830,3 +1835,14 @@ Por isso o canal é um arquivo por chamada, gravado pelo próprio MCP, com o `to
 por regex dos dois lados (é nome de arquivo). O `hangar-computer-control` foi o primeiro a gravar;
 qualquer MCP nosso pode seguir o mesmo formato. Os arquivos não são apagados: são poucos bytes por
 chamada. Se a pasta crescer a ponto de pesar, a faxina é apagar os mais velhos que alguns dias.
+
+## Provider `orq`: a linha do orquestrador não tem pane
+
+28/09/2026 (spec `2026-09-28-orquestrar-auto-design.md`, §3). O orquestrador da `orquestrar-auto`
+é o `orq advance`, um programa disparado pelo vigia e pelo `orq commit`: não há tmux, sidecar de
+sessão nem processo vivo por trás da linha. Sem a recusa, `/input`, `DELETE`, `rename` e
+`interrupt` caíam no caminho do tmux de uma sessão que não existe, e o pareamento gravava um
+sidecar para um nome que nunca responde. A recusa vive num ponto só (`_recusa_orq`, que consulta
+`runs.find`), e o 409 traz a frase "fale com o árbitro", porque é ele quem decide pela execução.
+O estado da linha sai da atividade: trabalhando com `advance.lock` preso (lido em `/proc/locks`,
+sem pegar a trava) ou com a linha do tempo/trava mexida nos últimos 2 min.

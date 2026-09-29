@@ -308,6 +308,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   nem o protocolo: o kick-off traz canal e contrato.
   Varredura de sessão morta confirma ausência por TEMPO, nunca por número de polls. Aviso do app
   sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`: o modelo responde a quem assina.
+- **Grupo de 1 só existe no grupo `orq` com execução `auto` viva.** Viva = `orq.json` com `auto`
+  e sem `execucao_fim`, nunca o batimento do vigia; acabada (ou não iniciada em 1 h), a varredura
+  do `list()` dissolve o grupo e arquiva o contrato.
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper
