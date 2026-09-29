@@ -1652,7 +1652,10 @@ impl Hangar {
         });
     }
 
-    fn can_send(&self) -> bool { !self.connection_dialog && self.chat_online && self.history_installed }
+    // O orquestrador recusa mensagem (409): nada que envie pela conversa dele sai daqui.
+    fn can_send(&self) -> bool {
+        !self.connection_dialog && self.chat_online && self.history_installed && !self.selected.as_ref().is_some_and(SessionInfo::orq)
+    }
 
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -5020,7 +5023,7 @@ impl Render for Hangar {
             .font_family(theme::SANS)
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some();
-                if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(|s| s.readable())
+                if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(SessionInfo::takes_messages)
                     || this.selected.is_none() && this.api.is_some()) {
                     this.composer.update(cx, |input, cx| input.focus(window, cx));
                 }
