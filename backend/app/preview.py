@@ -7,7 +7,7 @@ from typing import AsyncIterator, Callable, Optional
 
 from app import tmux
 from app.hook_state import hook_state
-from app.state import _RULE_RE, _is_boundary, _live_spinner
+from app.state import _RULE_RE, _is_boundary, _live_spinner, run_tmux, shared_capture
 # _dirs: MESMO cache de diretorios de config que a statusline usa, e pelo mesmo motivo (roda por
 # sessao, a cada poll). Reusado em vez de copiado — sao os mesmos diretorios e a mesma chave (o stem
 # do .jsonl); duas copias so dariam a chance de uma envelhecer.
@@ -593,6 +593,7 @@ class PreviewBroker:
         # voltava toda hora (flicker). O front limpa o preview por reconcile (coberto pelo .jsonl) /
         # idle. O spinner serve só pra CADÊNCIA: rápido trabalhando, devagar ocioso. Diff-gate (só
         # notifica em mudança) evita spam.
+        working = False
         while True:
             # Epoca do poll: se o reset() (/clear) cair no MEIO desta iteracao, o frame capturado
             # e da conversa apagada — o publish la embaixo confere e descarta.
@@ -621,8 +622,10 @@ class PreviewBroker:
                     # A chamada dos OUTROS providers fica byte-identica de proposito (nem o
                     # argumento `lines` explicito): este e o poll mais quente do backend e ha dublê
                     # de teste com assinatura de um argumento so.
-                    pane = await (asyncio.to_thread(tmux.capture_pane, self.name, 200, True) if kimi
-                                  else asyncio.to_thread(tmux.capture_pane, self.name))
+                    # Texto puro sai do quadro compartilhado com o monitor de estado; trabalhando, a
+                    # idade máxima fica abaixo da cadência pra prévia não andar mais devagar.
+                    pane = await (run_tmux(tmux.capture_pane, self.name, 200, True) if kimi
+                                  else shared_capture(self.name, 0.1 if working else 0.5))
                 except Exception:
                     # Sem log isto congela a previa do Kimi no ultimo texto com full=True,
                     # indistinguivel de "geracao longa em andamento" (achado da review — o
