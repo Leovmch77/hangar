@@ -227,8 +227,26 @@ def _projeto_de(cwd: Optional[str]) -> Optional[str]:
 
 
 def _conversas_de_outros_providers():
-    from app import archive_providers
+    from app import archive_providers, transcript_index
+    idx = transcript_index.current()
+    # A varredura de Pi/Kimi/Codex custa mais que o resto da listagem: vale a da ultima passada do
+    # indice (conversa nova aparece com no maximo um intervalo de atraso).
+    if idx is not None and idx.providers is not None:
+        return idx.providers
     return archive_providers.conversas()
+
+
+def _heads() -> dict[str, tuple[str, Optional[str]]]:
+    """Cabecalhos (preview, cwd) ja lidos pelo indice; arquivo fora dele cai no _head_info."""
+    from app import transcript_index
+    idx = transcript_index.current()
+    if idx is None:
+        return {}
+    try:
+        return idx.heads()
+    except Exception:
+        _log.warning("arquivo: indice ilegivel, lendo cabecalhos do disco", exc_info=True)
+        return {}
 
 
 def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
@@ -236,6 +254,7 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
     costuma existir em varias contas -- aqui elas somam numa linha so (a pasta e o que o usuario
     procura; de qual conta e cada conversa so importa um nivel abaixo)."""
     agg: dict[str, ArchiveFolder] = {}
+    heads = _heads()
     for _cfg, _rot, base in _contas(config_dir):
         try:
             projdirs = [d for d in base.iterdir() if d.is_dir()]
@@ -245,7 +264,8 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
             files = _folder_files(proj)
             if not files:
                 continue
-            _, cwd = _head_info(files[0][1])   # cwd real do transcript mais recente (1 leitura/pasta)
+            # cwd real do transcript mais recente (1 leitura/pasta quando o indice ainda nao tem)
+            _, cwd = heads.get(str(files[0][1])) or _head_info(files[0][1])
             ja = agg.get(proj.name)
             if ja is None:
                 agg[proj.name] = ArchiveFolder(project=proj.name, cwd=cwd, count=len(files),
@@ -310,8 +330,9 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
     if provider is not None and provider != "claude":
         linhas = []
     out: list[ArchiveEntry] = []
+    heads = _heads() if linhas else {}
     for mt, f, cfg, rotulo in linhas[:cap]:
-        preview, cwd = _head_info(f)
+        preview, cwd = heads.get(str(f)) or _head_info(f)
         out.append(ArchiveEntry(
             project=project, cwd=cwd, session_id=f.stem, mtime=mt,
             preview=preview, ultima=_tail_info(f), config_dir=cfg, conta=rotulo,
