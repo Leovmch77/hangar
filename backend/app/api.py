@@ -42,7 +42,7 @@ from app import filesearch, filetree, git_ops
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
-from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica
+from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica, orq_start
 from app import pi_catalog
 from app import cli_probe
 from app import pi_models
@@ -4236,8 +4236,10 @@ async def orq_get(name: str):
     # A lista fresca do registry (sem git nem pane): `casar_viva` só precisa de nome + last_activity.
     infos = await asyncio.to_thread(registry.list)
     arbitro = next((p for p in papeis if p.e_arbitro()), None)
+    cwd = next((s.cwd for s in infos if s.name == name), None)
+    pronto = await asyncio.to_thread(orq_start.readiness, cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
     return {
-        "gid": gid, "arquivo": str(orq_papeis.regras_path(gid)), "mtime": mtime,
+        "gid": gid, "arquivo": str(orq_papeis.regras_path(gid)), "mtime": mtime, "prontidao": pronto,
         "arbitro": orq_papeis.casar_viva(arbitro, infos) if arbitro else None,
         "papeis": [{**asdict(p), "viva": orq_papeis.casar_viva(p, infos),
                     "id_cota": orq_politica.id_cota(p.provider, p.conta)} for p in papeis],
@@ -4392,34 +4394,21 @@ async def orq_comecar(name: str, body: ComecarBody):
     info = next((s for s in await asyncio.to_thread(registry.list) if s.name == name), None)
     if info is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    gid = await asyncio.to_thread(_gid_de, name)
-    if gid == orq_papeis.GID_PADRAO:
-        raise HTTPException(409, detail=erro("erro_orq_sem_grupo",
-                                             "esta sessão não está num grupo — pareie as sessões antes"))
-    _texto, _mt, papeis = await asyncio.to_thread(_papeis_de, gid)
-    if not papeis:
-        raise HTTPException(409, detail=erro("erro_orq_sem_papeis",
-                                             "defina os papéis do grupo antes de começar"))
-    plano = await asyncio.to_thread(plan_progress, info.cwd)
-    if plano is None:
-        raise HTTPException(409, detail=erro("erro_orq_sem_plano",
-                                             "não há plano nesta pasta — a orquestração despacha as "
-                                             "Tasks do plano, então escreva o plano primeiro"))
-    regras = str(orq_papeis.regras_path(gid))
-    texto = (
-        "[painel: orquestração] Comece a orquestração deste grupo. Você é o ÁRBITRO.\n"
-        f"Invoque a skill `orquestrar` e leia `references/arbitro.md` — só a página do seu papel.\n"
-        f"Contrato do grupo: `{regras}` (tabela `## Quem é quem` = quem roda cada papel; "
-        "papel com coluna `vez` reveza entre contas, e a Task N cabe à linha (N-1) % total).\n"
-        f"Plano: `{plano.path}` — {plano.done} de {plano.total} steps, Task {plano.task_idx} de {plano.task_total}.\n"
-        "Comece pelo portão: confira o que já passou, e só então despache a próxima Task."
-    )
-    res = await _enviar(name, texto)
+    gid, pronto = await asyncio.to_thread(_prontidao, name, info.cwd)
+    res = await _enviar(name, orq_start.kickoff(pronto, str(orq_papeis.regras_path(gid))))
     if not res["ok"]:
         raise HTTPException(409, detail=erro("erro_orq_comecar_falhou",
                                              f"não deu pra avisar a sessão: {_erro_texto(res['error'])}",
                                              erro=res["error"]))
-    return {"ok": True, "entregue": bool(res.get("delivered")), "plano": plano.name}
+    plano = pronto["plan"]
+    return {"ok": True, "entregue": bool(res.get("delivered")), "fase": pronto["phase"],
+            "plano": Path(plano["path"]).name if plano else ""}
+
+
+def _prontidao(name: str, cwd: str | None) -> tuple[str, dict]:
+    gid = _gid_de(name)
+    _texto, _mt, papeis = _papeis_de(gid)
+    return gid, orq_start.readiness(cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
 
 
 class RemoverPapelBody(_StrictBody):

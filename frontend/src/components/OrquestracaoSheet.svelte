@@ -285,16 +285,15 @@
     }
   }
 
-  // Começar a orquestração: acorda ESTA sessão como árbitra. O 409 do backend explica o que falta
-  // (grupo, papéis ou plano), e é ele que aparece na tela — um botão que não faz nada e não diz
-  // por quê é o pior desfecho possível aqui.
+  // Começar a orquestração: acorda ESTA sessão no passo que falta. O único erro é o recado não
+  // chegar, e ele aparece na tela — um botão que não faz nada e não diz por quê é o pior desfecho.
   let comecando = $state(false);
   async function comecar() {
     if (comecando) return;
     comecando = true; erro = ''; aviso = ''; avisoRuim = false;
     try {
       const r = await comecarOrq(sessionName);
-      aviso = r.entregue ? m.orqcfg_comecou({ plano: r.plano }) : m.orqcfg_comecou_fila({ plano: r.plano });
+      aviso = r.entregue ? m.orqcfg_comecou() : m.orqcfg_comecou_fila();
       onClose();
     } catch (e) {
       erro = (e as Error).message;
@@ -606,13 +605,18 @@
   {:else if grupo}
     <p class="os-intro">{papeis.length ? m.orqcfg_papeis_intro() : m.orqcfg_sem_papeis()}</p>
     {#if andamento}<p class="os-andamento">{m.orqcfg_andamento({ t: andamento.t, total: andamento.total })}</p>{/if}
-    {#if papeis.length}
-      <!-- Fica no fim da lista, não no formulário: começar é ação do GRUPO, e o formulário edita
-           um papel. Sem plano o backend recusa com o motivo, que aparece aqui em cima. -->
-      <button type="button" class="os-comecar" onclick={comecar} disabled={comecando}>
-        {comecando ? m.orqcfg_comecando() : m.orqcfg_comecar()}
-      </button>
+    <!-- Começar é ação do GRUPO, não do formulário de um papel. Nunca recusa por falta de plano ou
+         de grupo: a frase diz de que passo a sessão parte (backend/app/orq_start.py). -->
+    {#if grupo.prontidao}
+      {@const p = grupo.prontidao}
+      {@const plano = p.plan ? (p.plan.path.split(/[\\/]/).pop() ?? '') : ''}
+      <p class="os-intro">{p.phase === 'planner' ? m.orqcfg_fase_planner()
+        : p.phase === 'prepare' ? (p.plan?.state === 'changed' ? m.orqcfg_fase_changed({ plano }) : m.orqcfg_fase_prepare({ plano }))
+        : p.phase === 'launch' ? m.orqcfg_fase_launch({ plano }) : m.orqcfg_fase_arbiter({ plano })}</p>
     {/if}
+    <button type="button" class="os-comecar" onclick={comecar} disabled={comecando}>
+      {comecando ? m.orqcfg_comecando() : m.orqcfg_comecar()}
+    </button>
     <!-- Uma etapa por papel-base, na ordem em que o trabalho acontece. Faixas ("executor faixa A")
          e rodízio viram linhas dentro da etapa: soltos, o mesmo papel aparecia duas ou três vezes.
          O que a lista mostra é para que serve cada etapa e com que modelo roda; o resto fica no

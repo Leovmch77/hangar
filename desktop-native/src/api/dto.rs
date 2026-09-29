@@ -47,6 +47,9 @@ pub struct SessionInfo {
     #[serde(default)] pub shared: bool,
     /// Só na linha `orq`: a sessão do árbitro atual, que o "Falar com o árbitro" abre.
     pub orq_arbiter: Option<String>,
+    /// Task em andamento do plano que a sessão executa, e o total delas.
+    pub plan_task: Option<u32>,
+    pub plan_task_total: Option<u32>,
 }
 
 impl SessionInfo {

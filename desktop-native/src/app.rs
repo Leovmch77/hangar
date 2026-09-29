@@ -30,6 +30,7 @@ mod viewer;
 mod disk;
 mod machines;
 mod orchestration;
+mod orq_roles;
 mod panes;
 mod popup;
 mod rail;

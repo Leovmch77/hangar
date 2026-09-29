@@ -62,7 +62,7 @@ pub(super) enum OrchestrationReply {
     Saved(u64, Policy, bool, Result<Value, Failure>),
 }
 
-fn provider_name(provider: &str) -> &'static str {
+pub(super) fn provider_name(provider: &str) -> &'static str {
     match provider { "codex" => "Codex", "pi" => "Pi", "kimi" => "Kimi", "omp" => "OMP", _ => "Claude" }
 }
 

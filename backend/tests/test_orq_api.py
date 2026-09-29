@@ -106,30 +106,63 @@ def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_orq_celula_invalida"
 
 
-def test_comecar_recusa_sem_plano_e_manda_kickoff_com_ele(cli, tmp_path, monkeypatch):
-    """O botão "Começar" acorda a PRÓPRIA sessão como árbitra. Sem plano ele recusa com motivo: o
-    árbitro despacha Tasks do plano, e acordar alguém sem ter o que despachar é pior que nada."""
-    import app.api as api_mod
+def test_find_plan_ignora_exemplo_e_plano_terminado(tmp_path):
+    """Exemplo do formato dentro de bloco de código não é plano, e plano com todo Step marcado —
+    carimbado ou não — é trabalho feito: nenhum dos dois pode virar o plano do play."""
+    import subprocess
+    from app import orq_start
+    orq = orq_start._orq()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "doc.md").write_text("````md\n```\n### Task 1: x\n```\n### Task 2: y\n````\n", encoding="utf-8")
+    feito = "### Task 1: x\n- [x] **Step 1: y**\n"
+    (tmp_path / "feito.orq.md").write_text(f"Preparado: ontem · sha {orq.plan_sha(feito)}\n{feito}", encoding="utf-8")
+    assert orq.find_plan(tmp_path) == {"finished": str(tmp_path / "feito.orq.md")}
+    (tmp_path / "aberto.md").write_text("### Task 1: x\n- [ ] **Step 1: y**\n", encoding="utf-8")
+    assert orq.find_plan(tmp_path)["path"] == str(tmp_path / "aberto.md")
+
+
+def test_prontidao_nao_confunde_git_quebrado_com_sem_plano(tmp_path, monkeypatch):
+    """Git que falha (timeout, dono duvidoso) não é "não há plano": o recado de planejadora avisa
+    que não deu para ler, senão ela escreve um plano novo por cima de um que existe."""
+    import subprocess
+    from app import orq_start
+    orq = orq_start._orq()
+    real = subprocess.run
+    monkeypatch.setattr(orq.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 128, "", "fatal: detected dubious ownership") if a[0][:1] == ["git"] else real(*a, **k))
+    r = orq_start.readiness(str(tmp_path), False, True)
+    assert r["phase"] == "planner" and any("dubious ownership" in p for p in r["problems"])
+    assert "Não consegui ler tudo" in orq_start.kickoff(r, "/c/regras.md")
+    sem = orq_start.readiness(None, False, True)
+    assert sem["problems"] and "confira se já existe" in orq_start.kickoff(sem, "/c/regras.md")
+
+
+def test_comecar_parte_do_passo_que_falta(cli, tmp_path):
+    """O botão "Começar" nunca recusa por falta de plano: sem plano a PRÓPRIA sessão vira
+    planejadora; com o plano carimbado e grupo, árbitra. A régua é o `find_plan` do orq.py."""
+    import subprocess
+    from app import orq_start
     mt0 = cli.get("/api/orquestracao/politica", headers=H).json()["mtime"]
     cli.put("/api/orquestracao/politica/200-01", headers=H, json={"provider": "claude", "mtime": mt0})
     cli.post("/api/sessions/exec/orq/papel", headers=H, json={
         "papel": "árbitro", "sessao": "arb", "provider": "claude", "conta": "200-01",
         "modelo": "opus[1m]", "esforco": "high", "mtime": 0.0})
 
-    monkeypatch.setattr(api_mod, "plan_progress", lambda cwd: None)
     r = cli.post("/api/sessions/exec/orq/comecar", headers=H, json={})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_orq_sem_plano"
-
-    plano = SimpleNamespace(name="p1", path="/tmp/p1.md", done=2, total=9, task_idx=1, task_total=3)
-    monkeypatch.setattr(api_mod, "plan_progress", lambda cwd: plano)
-    antes = len(cli.enviados)
-    r = cli.post("/api/sessions/exec/orq/comecar", headers=H, json={})
-    assert r.status_code == 200, r.text
-    assert len(cli.enviados) == antes + 1
+    assert r.status_code == 200 and r.json()["fase"] == "planner", r.text
     alvo, texto = cli.enviados[-1]
     assert alvo == "exec", "o kick-off tem de ir pra PRÓPRIA sessão, não pro árbitro da tabela"
-    assert "ÁRBITRO" in texto and "orquestrar" in texto
-    assert "/tmp/p1.md" in texto and "regras-g1.md" in texto
+    assert "PLANEJADORA" in texto and "orquestrar" in texto and "regras-g1.md" in texto
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    corpo = "# Plano\n\n### Task 1: x\n- [ ] **Step 1: y**\n"
+    orq = orq_start._orq()
+    (tmp_path / "p1.orq.md").write_text(f"Preparado: hoje · sha {orq.plan_sha(corpo)}\n{corpo}", encoding="utf-8")
+    assert cli.get("/api/sessions/exec/orq", headers=H).json()["prontidao"]["phase"] == "arbiter"
+    r = cli.post("/api/sessions/exec/orq/comecar", headers=H, json={})
+    assert r.status_code == 200 and r.json()["fase"] == "arbiter", r.text
+    texto = cli.enviados[-1][1]
+    assert "ÁRBITRO" in texto and str(tmp_path / "p1.orq.md") in texto
 
 
 def test_remover_uma_conta_do_rodizio_nao_leva_as_outras(cli, tmp_path):

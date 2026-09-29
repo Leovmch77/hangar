@@ -139,6 +139,19 @@ export interface OrqGrupo {
   mtime: number;
   papeis: Papel[];
   arbitro: string | null;
+  /** Por onde o play começa (backend/app/orq_start.py). Ausente em backend antigo. */
+  prontidao?: OrqReadiness;
+}
+
+export interface OrqReadiness {
+  phase: 'planner' | 'prepare' | 'launch' | 'arbiter';
+  plan: { path: string; state: 'stamped' | 'changed' | 'unstamped' | 'tasks' } | null;
+  group: boolean;
+  roles: boolean;
+  /** O que não deu para ler; sem plano achado, ele pode estar ali. */
+  problems?: string[];
+  /** Plano mais recente com todos os Steps marcados. */
+  finished?: string | null;
 }
 
 // Conta que está na tabela "O que pode" = liberada. Fora dela = proibida (não existe "desligada
