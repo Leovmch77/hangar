@@ -1,4 +1,5 @@
-"""Busca de conteudo cross-session: UM `rg` capado sobre projects_dir varre todos os transcripts
+"""Busca de conteudo cross-session: consulta o indice FTS5 (app.transcript_index) quando ele ja
+foi construido; antes disso, UM `rg` capado sobre projects_dir varre todos os transcripts
 .jsonl (vivos + arquivados) e devolve os trechos casados. Reusa o join live/dead do archive/registry
 (realpath do jsonl no conjunto das sessoes vivas) pra a UI saber se abre o chat (viva) ou o arquivo
 (morta).
@@ -18,6 +19,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from app import transcript_index
 from app.archive import _contas, _head_info
 from app.transcript import parse_obj
 
@@ -142,6 +144,40 @@ def search(q: str, live_names: dict[str, str], limit: int = _MAX_HITS) -> list[S
     t = termos(q)
     if not t:
         return []
+    idx = transcript_index.current()
+    if idx is not None and idx.ready:
+        try:
+            linhas = idx.search(t, limit)
+        except Exception:
+            _log.warning("busca no índice falhou; caindo no rg", exc_info=True)
+            linhas = None
+        if linhas is not None:
+            return _hits_do_indice(linhas, t, live_names)
+    return _search_rg(t, live_names, limit)
+
+
+def _hits_do_indice(linhas: list[tuple], t: list[str], live_names: dict[str, str]) -> list[SearchHit]:
+    hits: list[SearchHit] = []
+    mtimes: dict[str, float] = {}
+    for path, project, session_id, cwd, text, role, event_id, ts in linhas:
+        if path not in mtimes:
+            try:
+                mtimes[path] = os.path.getmtime(path)
+            except OSError:
+                mtimes[path] = -1.0   # sumiu (movido de conta, apagado) desde a última passada
+        if mtimes[path] < 0:
+            continue
+        name = live_names.get(os.path.realpath(path))
+        hits.append(SearchHit(
+            project=project, session_id=session_id, session_name=name, cwd=cwd,
+            line=_snippet(text, t), mtime=mtimes[path], live=name is not None,
+            role=role, event_id=event_id, ts=ts,
+        ))
+    hits.sort(key=lambda h: h.mtime, reverse=True)
+    return hits
+
+
+def _search_rg(t: list[str], live_names: dict[str, str], limit: int) -> list[SearchHit]:
     bases = [str(base) for _, _, base in _contas() if base.is_dir()]
     if not bases:
         return []
