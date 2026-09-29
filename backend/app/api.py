@@ -68,6 +68,7 @@ from app.terminal_input import TerminalInput, drain
 from app.adapters import CLAUDE_HEADLESS, get_adapter
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
+from app.adapters.orq import runs as orq_runs
 from app.sse import merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
@@ -2291,6 +2292,7 @@ async def kill_session(name: str, by: str | None = None):
     # na varredura seguinte, sem fila e sem pareamento (ver SessionRegistry.kill).
     # Os peers são lidos ANTES do kill: registry.kill -> _clear_pair já limpa o sidecar, e depois
     # dele ninguém sabe quem ficou.
+    await asyncio.to_thread(_recusa_orq, name)
     link = await asyncio.to_thread(lambda: PairLink(name).get())
     try:
         await asyncio.to_thread(registry.kill, name)
@@ -2474,6 +2476,7 @@ async def rename_session(name: str, body: RenameBody):
 
 def _rename_session(name: str, body: RenameBody):
     from app import tmux
+    _recusa_orq(name)
     # tmux nao aceita espaco/./: no nome -> sanitiza. O transcript NAO depende do nome (resolve por
     # /proc), entao renomear nao quebra o historico. Migra so o sidecar da fila (keyed por nome).
     new = sanitize_session_name(body.new)
@@ -3683,6 +3686,14 @@ def _session_exists(name: str) -> bool:
     return codex_sessions.exists(name) or headless_sessions.exists(name) or tmux.has_session(name)
 
 
+def _recusa_orq(name: str) -> None:
+    """O orquestrador não tem pane nem processo: sem esta recusa, entrada, nome, fim e interrupção
+    cairiam no tmux de uma sessão que não existe."""
+    if orq_runs.find(name):
+        raise HTTPException(409, detail=erro("erro_sessao_orq",
+                                             "o orquestrador não recebe mensagens; fale com o árbitro"))
+
+
 def _headless(name: str) -> bool:
     """Sessão Claude SEM terminal (sidecar do adapter headless). Provider continua "claude"; só o
     transporte muda — quem ramifica por isto é a entrada, o interrupt, a opção e a resposta."""
@@ -3697,6 +3708,7 @@ async def input_prompt(name: str, body: InputBody):
     # (nao o default do asyncio, que a decoracao — git_summary/capture_pane — pode ocupar). Assim um
     # git status pendurado + refine (60s, pool do anyio) + check (600s, thread propria) nao seguram
     # o POST /input. Ver _send_thread.
+    await _send_thread(_recusa_orq, name)
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, detail=erro("erro_sessao_recado_nao_enfileirado", "sessão não encontrada — recado NÃO enfileirado"))
     provider = _provider_of(name)
@@ -4774,6 +4786,7 @@ def select_submit(name: str):
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth)])
 async def interrupt(name: str, clear: bool = False):
+    await asyncio.to_thread(_recusa_orq, name)
     # Codex: interrompe a propria TUI pelo tmux, mantendo celular e terminal no mesmo controlador.
     if _provider_of(name) == "codex":
         if not await get_adapter("codex").interrupt(name):

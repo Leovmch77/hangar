@@ -394,7 +394,9 @@ def _list_sig(infos) -> str:
           getattr(i, "provider", None),
           # Ligar/desligar o compartilhamento não mexe em mais nada da sessão: sem isto o selo 🔗
           # não aparece nem some até outra coisa mudar a assinatura.
-          getattr(i, "shared", False))
+          getattr(i, "shared", False),
+          # Sucessão do árbitro muda só este campo na linha do orquestrador.
+          getattr(i, "orq_arbiter", None))
          for i in infos],
         ensure_ascii=False,
     )
@@ -590,12 +592,12 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     current_jsonl = jsonl          # atualizado no __reset__ (ex: /clear abre novo transcript)
     # Ancora de hook do estado: o monitor le o marcador do sid VIVO (a closure acompanha o rebind
     # do /clear, que troca o current_jsonl -> sid novo).
-    # transcript_get so vai pro adapter que o aceita (hoje o Kimi): fecha sobre `current_jsonl` pelo
+    # transcript_get so vai pro adapter que o aceita (Kimi e orq): fecha sobre `current_jsonl` pelo
     # mesmo motivo do sid_get — o /clear troca o transcript, e um caminho congelado leria o mtime do
     # arquivo da sessao anterior.
     def _monitor_de(prov):
         adap = get_adapter(prov)
-        kw = {"transcript_get": lambda: current_jsonl} if prov == "kimi" else {}
+        kw = {"transcript_get": lambda: current_jsonl} if prov in ("kimi", "orq") else {}
         # Um monitor por (sessao, provider, transcript), compartilhado entre as conexoes abertas
         # nesse chat (desktop + celular = um capture-pane, nao dois). O transcript entra na chave
         # porque o monitor fecha sobre o sid VIVO da conexao que o criou: apos um /clear, quem
@@ -615,8 +617,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     # stem_get: chave do sidecar de previa (o agente publica o texto em voo por conta propria — hoje
     # so a extensao do Pi). Fecha sobre `current_jsonl` pelo mesmo motivo do monitor: o /clear troca
     # o transcript, e um stem congelado leria o marcador da sessao anterior.
+    # orq: sem pane nem texto em voo; a fonte de push fica vazia e nada raspa o tmux.
     def _broker_de(prov):
-        return (PushPreviewSource.get(name) if prov in ("codex", CLAUDE_HEADLESS)
+        return (PushPreviewSource.get(name) if prov in ("codex", CLAUDE_HEADLESS, "orq")
                 else PreviewBroker.get(name, prov,
                                        lambda: session_key(current_jsonl) if current_jsonl else None))
 
