@@ -21,6 +21,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -42,6 +43,7 @@ _STATUS_SUBDIR = ".hangar-status"
 # 30s é curto o bastante pra um login novo (OAuth leva minutos) aparecer sem refresh manual e
 # longo o bastante pra não pagar N subprocesses a cada montagem da aba.
 _LOGIN_TTL = 30.0
+_LOGIN_TTL_ARQUIVO = 600.0
 _CLI_TIMEOUT = 10.0
 
 
@@ -250,19 +252,41 @@ def _marcar_onboarding(destino: Path, dir_conta: str) -> None:
         _log.warning("não consegui marcar o onboarding de %s: %s", dir_conta, exc)
 
 
+def _assinatura_credencial(dir_conta: str) -> tuple[int, int] | None:
+    try:
+        st = (Path(dir_conta) / ".credentials.json").stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def _login_de(cfg) -> EstadoLogin:
-    """Estado de login da conta, com o cache curto (chamada externa por conta)."""
+    """Estado de login da conta, com cache (chamada externa por conta).
+
+    Login, logout e renovação reescrevem o `.credentials.json`: com ele intacto a resposta vale
+    por `_LOGIN_TTL_ARQUIVO`. Sem o arquivo (credencial fora do disco) fica o prazo curto."""
+    assinatura = _assinatura_credencial(cfg.path)
     with _login_lock:
         agora = time.monotonic()
         hit = _login_cache.get(cfg.path)
-        if hit is not None and agora - hit[0] < _LOGIN_TTL:
+        prazo = _LOGIN_TTL_ARQUIVO if assinatura is not None else _LOGIN_TTL
+        if hit is not None and hit[2] == assinatura and agora - hit[0] < prazo:
             return hit[1]
     estado = _estado_login(_auth_status(Path(cfg.path)))
     if estado.loggedIn:
         estado.refreshExpiresAt = renova_token.refresh_expires_at(Path(cfg.path))
     with _login_lock:
-        _login_cache[cfg.path] = (time.monotonic(), estado)
+        _login_cache[cfg.path] = (time.monotonic(), estado, assinatura)
     return estado
+
+
+def logins(cfgs) -> list[EstadoLogin]:
+    """`_login_de` de várias contas ao mesmo tempo: a tela esperava a soma dos processos."""
+    cfgs = list(cfgs)
+    if len(cfgs) < 2:
+        return [_login_de(c) for c in cfgs]
+    with ThreadPoolExecutor(max_workers=min(4, len(cfgs))) as pool:
+        return list(pool.map(_login_de, cfgs))
 
 
 def _limite(dir_conta: Path) -> EstadoLimite:
@@ -314,13 +338,13 @@ def listar_contas() -> list[ContaEstado]:
     mostrasse viraria linha que a tela não consegue apagar (o DELETE exige conta de verdade e
     recusa com 404). `active` fica mesmo sem marcador: o `~/.claude` default é a conta-base do
     app, não apagável por aqui (409 com motivo) e sumi-lo da tela seria "some sem explicação"."""
+    cfgs = [c for c in list_config_dirs() if contas.e_conta(Path(c.path)) or c.active]
     return [
         ContaEstado(
             path=c.path, label=c.label, active=c.active,
-            login=_login_de(c), limite=_limite(Path(c.path)),
+            login=login, limite=_limite(Path(c.path)),
         )
-        for c in list_config_dirs()
-        if contas.e_conta(Path(c.path)) or c.active
+        for c, login in zip(cfgs, logins(cfgs))
     ]
 
 

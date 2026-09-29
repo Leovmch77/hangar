@@ -28,7 +28,7 @@ from app.auth import require_auth
 from app import engine_probe
 from app.config import list_config_dirs
 from app.mensagens import erro
-from app.conta_estado import EstadoLogin, _login_de
+from app.conta_estado import EstadoLogin, logins
 from app.adapters.kimi.sessions import kimi_home
 
 _log = logging.getLogger("hangar.credenciais")
@@ -139,14 +139,13 @@ def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) ->
 
     # Contas do Claude: mesmo filtro da aba antiga — conta de verdade (carimbada pelo app) ou a
     # base do app. Pasta de backup continua fora: a tela não conseguiria apagá-la.
-    for c in list_config_dirs():
-        if not (contas.e_conta(Path(c.path)) or c.active):
-            continue
+    cfgs = [c for c in list_config_dirs() if contas.e_conta(Path(c.path)) or c.active]
+    for c, login in zip(cfgs, logins(cfgs)):
         cid = f"claude:{c.path}"
         saida.append(Credencial(
             id=cid, tipo="claude", nome=nomes.get(cid) or c.label, nome_natural=c.label,
             apelido=nomes.get(cid), ativa=bool(c.active), path=c.path,
-            login=_login_de(c), cota=cota.get(cid), auth_method="oauth",
+            login=login, cota=cota.get(cid), auth_method="oauth",
         ))
 
     # Chaves de API: o engines.json é o cadastro que já existe. Cada motor é uma credencial cujo

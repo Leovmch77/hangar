@@ -155,6 +155,24 @@ def test_sem_leitura_e_explicito_nao_zero(cli, monkeypatch, tmp_path):
     assert "linha" not in limite or limite["linha"] is None
 
 
+def test_login_em_cache_ate_a_credencial_mudar(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    chamadas = []
+    monkeypatch.setattr(conta_estado, "_auth_status",
+                        lambda p: chamadas.append(p) or {"loggedIn": True})
+    monkeypatch.setattr(conta_estado.renova_token, "refresh_expires_at", lambda p: None)
+    cfg = SimpleNamespace(path=str(tmp_path))
+    cred = tmp_path / ".credentials.json"
+    cred.write_text("{}")
+    conta_estado._login_de(cfg)
+    monkeypatch.setattr(conta_estado, "_LOGIN_TTL", 0)  # só o arquivo segura o cache
+    conta_estado._login_de(cfg)
+    assert len(chamadas) == 1
+    cred.write_text('{"novo": 1}')
+    conta_estado._login_de(cfg)
+    assert len(chamadas) == 2
+
+
 def test_401_sem_credencial(cli):
     # Régua do árbitro 16/08: esta rota serve e-mail e plano de conta — sem o caso, alguém
     # remove o require_auth um dia e nada acusa.
