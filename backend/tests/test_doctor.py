@@ -12,6 +12,7 @@ def _tudo_ok(monkeypatch):
     monkeypatch.setattr(doctor, "_porta_responde", lambda porta: True)
     monkeypatch.setattr(doctor, "_tempo_resposta", lambda porta: 0.01)
     monkeypatch.setattr(doctor, "_reinicios_automaticos", lambda dias=7: [])
+    monkeypatch.setattr(doctor, "_prioridade_backend", lambda porta: "normal")
     monkeypatch.setattr(doctor, "_binario", lambda nome: "/usr/bin/x")
     monkeypatch.setattr(doctor, "_claude_logado", lambda: True)
     monkeypatch.setattr(doctor, "_tailscale", lambda: ("instalado", "logado"))
@@ -137,3 +138,11 @@ def test_reinicios_da_vigia_do_windows_contam_so_o_periodo(monkeypatch, tmp_path
     monkeypatch.setattr(doctor, "_WIN", True)
     monkeypatch.setattr(log_paths, "base", lambda: tmp_path)
     assert doctor._reinicios_automaticos() == [novo]
+
+
+def test_windows_avisa_backend_abaixo_do_normal(monkeypatch):
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_WIN", True)
+    monkeypatch.setattr(doctor, "_prioridade_backend", lambda porta: "abaixo do normal")
+    linha = next(l for l in doctor.diagnosticar(_settings()) if "prioridade" in l.titulo)
+    assert linha.nivel == "aviso" and "install.ps1 -Update" in linha.conserto

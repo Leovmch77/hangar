@@ -72,6 +72,21 @@ def _reinicios_automaticos(dias: int = 7) -> list[str] | None:
     return [l.split(" ", 1)[0] for l in r.stdout.splitlines() if "Scheduled restart job" in l]
 
 
+def _prioridade_backend(porta: int) -> str | None:
+    """Classe de prioridade do processo que escuta a porta (só Windows); None = não achou."""
+    import psutil
+    nomes = {"IDLE_PRIORITY_CLASS": "ociosa", "BELOW_NORMAL_PRIORITY_CLASS": "abaixo do normal",
+             "NORMAL_PRIORITY_CLASS": "normal", "ABOVE_NORMAL_PRIORITY_CLASS": "acima do normal",
+             "HIGH_PRIORITY_CLASS": "alta", "REALTIME_PRIORITY_CLASS": "tempo real"}
+    try:
+        for c in psutil.net_connections(kind="tcp"):
+            if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == porta and c.pid:
+                return nomes.get(getattr(psutil.Process(c.pid).nice(), "name", ""))
+    except (OSError, psutil.Error):
+        pass
+    return None
+
+
 def _claude_logado() -> bool:
     import app.conta_estado as ce
     try:
@@ -126,6 +141,16 @@ def diagnosticar(s) -> list[Linha]:
                                 "máquina sobrecarregada? veja CPU/memória; no Windows a vigia reinicia acima de 3 s"))
         else:
             linhas.append(Linha("ok", f"Hangar respondendo em http://127.0.0.1:{s.port} ({t * 1000:.0f} ms)", ""))
+
+    if _WIN:
+        prioridade = _prioridade_backend(s.port)
+        if prioridade is None:
+            linhas.append(Linha("aviso", "não deu para ler a prioridade do processo do backend", ""))
+        elif prioridade in ("ociosa", "abaixo do normal"):
+            linhas.append(Linha("aviso", f"backend rodando com prioridade {prioridade} — com a CPU cheia ele fica lento",
+                                "rode o Atualizar do app (ou install.ps1 -Update): a tarefa volta a nascer normal"))
+        else:
+            linhas.append(Linha("ok", f"backend com prioridade {prioridade}", ""))
 
     reinicios = _reinicios_automaticos()
     if reinicios is None:
