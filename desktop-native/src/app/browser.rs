@@ -9,6 +9,9 @@ use crate::browser::{Engine, Pointer, model};
 pub(super) struct BrowserPanel {
     /// Nasce na primeira navegação, que tem a janela. No Linux só cabe um por processo: falhou, não tenta de novo.
     engine: Option<Result<Rc<Engine>, String>>,
+    /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
+    starting: Option<String>,
+    _start: Option<Task<()>>,
     events: async_channel::Sender<crate::browser::Event>,
     address: Entity<InputState>,
     page: model::PageState,
@@ -42,7 +45,7 @@ impl BrowserPanel {
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
-        Self { engine: None, events, address, page: model::PageState::default(), invalid: None, focus,
+        Self { engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -66,17 +69,38 @@ impl BrowserPanel {
             Err(key) => self.invalid = Some(tr(key)),
             Ok(url) => {
                 self.invalid = None;
-                if self.engine.is_none() {
-                    self.engine = Some(Engine::new(window, self.events.clone()).map(Rc::new));
-                }
-                if let Some(engine) = self.engine() {
-                    engine.load(&url);
-                    self.address.update(cx, |input, cx| input.set_value(url, window, cx));
-                    self.focus.focus(window, cx);
+                if self.engine.is_some() {
+                    self.navigate(url, window, cx);
+                } else if self.starting.replace(url).is_none() {
+                    // Enter repetido enquanto o motor nasce só troca o endereço pendente.
+                    self.start(window, cx);
                 }
             }
         }
         cx.notify();
+    }
+
+    fn navigate(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine() else { return };
+        engine.load(&url);
+        self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+        self.focus.focus(window, cx);
+    }
+
+    fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let starter = Engine::prepare(window);
+        let events = self.events.clone();
+        self._start = Some(cx.spawn_in(window, async move |this, cx| {
+            // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
+            // roda até nascer pode executar outras tarefas da GPUI sem pânico.
+            let engine = starter.and_then(|starter| starter.start(events)).map(Rc::new);
+            // Painel fechado no meio: o motor cai junto com o resultado.
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.engine = Some(engine);
+                if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
+                cx.notify();
+            });
+        }));
     }
 
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -109,6 +133,7 @@ impl BrowserPanel {
         let note = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4()
             .text_size(px(12.)).text_color(color).text_center().whitespace_normal().child(text);
         let engine = match &self.engine {
+            None if self.starting.is_some() => return page.role(Role::Status).child(note(tr("loading"), theme::muted())).into_any_element(),
             None => return page.child(note(tr("browser_empty"), theme::faint())).into_any_element(),
             Some(Err(error)) => return page.role(Role::Alert)
                 .child(note(tr("browser_failed").replace("{error}", error), theme::warning())).into_any_element(),

@@ -8,6 +8,7 @@ use gpui_kit::*;
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
+    raw_window_handle::{self, HasWindowHandle},
 };
 
 use super::{Event, Pointer, model};
@@ -26,10 +27,29 @@ fn send(events: &async_channel::Sender<Event>, state: &model::PageState) {
     let _ = events.try_send(Event::State(state.clone()));
 }
 
+/// Janela pai guardada sem o empréstimo da `Window` da GPUI, para o motor nascer fora dele.
+pub struct Starter(raw_window_handle::RawWindowHandle);
+
+impl HasWindowHandle for Starter {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: a janela GPUI dura mais que o motor: o painel que o cria e o guarda vive nela.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
 impl Engine {
     pub fn available() -> Result<(), String> { Ok(()) }
 
-    pub fn new(window: &mut Window, events: async_channel::Sender<Event>) -> Result<Self, String> {
+    pub fn prepare(window: &Window) -> Result<Starter, String> {
+        // Caminho completo: a `Window` tem um `window_handle()` próprio, que devolve o identificador da GPUI.
+        Ok(Starter(HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw()))
+    }
+}
+
+impl Starter {
+    /// No Windows o WebView2 roda um laço de mensagens aninhado até o controle ficar pronto, e a GPUI executa outras
+    /// tarefas dentro dele: chamar fora de qualquer empréstimo da App, senão elas entram em pânico.
+    pub fn start(self, events: async_channel::Sender<Event>) -> Result<Engine, String> {
         // Cookies e logins ficam ao lado das configurações do app. O macOS ignora a pasta e usa o armazenamento do app.
         let mut context = WebContext::new(crate::appearance::dir().map(|dir| dir.join("browser")));
         let state = Rc::new(RefCell::new(model::PageState::default()));
@@ -57,11 +77,13 @@ impl Engine {
                 page.title = title;
                 send(&on_title.1, &page);
             })
-            .build_as_child(&*window)
+            .build_as_child(&self)
             .map_err(|e| e.to_string())?;
-        Ok(Self { view, _context: context, state, events, placed: Cell::new(None) })
+        Ok(Engine { view, _context: context, state, events, placed: Cell::new(None) })
     }
+}
 
+impl Engine {
     /// Falha da chamada nativa vira `error` do estado, para a tela mostrar.
     fn report(&self, result: wry::Result<()>) {
         if let Err(e) = result {

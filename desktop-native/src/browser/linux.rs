@@ -75,10 +75,18 @@ pub struct Engine {
     pressed: Cell<bool>,
 }
 
+/// Mesma forma do motor wry, que precisa da janela antes de nascer; o WPE não usa a janela.
+pub struct Starter;
+
 impl Engine {
     pub fn available() -> Result<(), String> { ffi::api().map(|_| ()) }
 
-    pub fn new(_window: &mut Window, events: async_channel::Sender<Event>) -> Result<Self, String> {
+    pub fn prepare(_window: &Window) -> Result<Starter, String> { Ok(Starter) }
+}
+
+impl Starter {
+    /// Espera até 10 s a thread do WPE responder: chamar fora de qualquer empréstimo da App.
+    pub fn start(self, events: async_channel::Sender<Event>) -> Result<Engine, String> {
         let api = ffi::api()?;
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let host = grafting::HostWgpuContext::new(device, queue);
@@ -97,9 +105,11 @@ impl Engine {
             .spawn(move || run(api, host, thread_shared, data_dir, ready_tx))
             .map_err(|e| e.to_string())?;
         ready_rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "o WPE não respondeu ao iniciar".to_string())??;
-        Ok(Self { api, shared, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false) })
+        Ok(Engine { api, shared, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false) })
     }
+}
 
+impl Engine {
     /// Enfileira no contexto da thread do WebKit; nunca roda na thread da GPUI.
     fn post(&self, cmd: Cmd) {
         let api = self.api;
