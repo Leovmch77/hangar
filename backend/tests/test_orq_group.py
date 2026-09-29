@@ -117,6 +117,45 @@ def test_lone_orq_group_before_its_run_starts_waits_for_the_launch():
     assert PairLink("arb").get() is None
 
 
+def _old_lone_orq():
+    import os, time
+    pair.join_group("arb", [], "obra", orq=True)
+    old = time.time() - pair.ORQ_LAUNCH_GRACE_S - 1
+    os.utime(PairLink("arb").path, (old, old))
+
+
+def test_unreadable_runs_root_never_dissolves_a_lone_orq_group(root, caplog):
+    _old_lone_orq()
+    root.chmod(0)
+    try:
+        assert runs.group_phase(PairLink("arb").get()["gid"]) == "unknown"
+        assert pair.dissolve_lone_orq() == []
+    finally:
+        root.chmod(0o755)
+    assert PairLink("arb").get() is not None
+    assert "orq" in caplog.text
+
+
+def test_unreadable_events_never_dissolve_a_lone_orq_group(root):
+    _old_lone_orq()
+    _run(root, PairLink("arb").get()["gid"], ended=True)
+    ev = next(root.iterdir()) / "eventos.jsonl"
+    ev.unlink()
+    ev.mkdir()   # read_text raises IsADirectoryError: the run may be this group's, alive
+    assert pair.dissolve_lone_orq() == []
+    assert PairLink("arb").get() is not None
+
+
+def test_last_member_leaving_with_an_unreadable_run_keeps_the_group(root):
+    gid, contrato = _solo_with_team(root)
+    ev = next(root.iterdir()) / "eventos.jsonl"
+    ev.unlink()
+    ev.mkdir()
+    assert pair.leave("exec") == ["arb"]
+    assert PairLink("arb").get()["gid"] == gid
+    assert contrato.exists()
+
+
 def test_last_member_leaving_a_live_run_keeps_the_contract(root, tmp_path):
     # O orquestrador lê o regras-<gid>.md a cada kick-off: arquivar com a execução viva o quebraria.
     gid, contrato = _solo_with_team(root)

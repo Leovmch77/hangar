@@ -73,6 +73,19 @@ def test_list_has_one_row_per_live_auto_run(root, tmp_path, monkeypatch):
     assert row.jsonl == str(root / "2026-09-28-g1" / "timeline-2026-09-28-g1.jsonl")
 
 
+def test_backend_reads_the_timeline_file_orq_py_writes_through_a_symlinked_run(root, tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "orq_timeline_mod", Path(__file__).resolve().parents[2] / "skills" / "orquestrar" / "scripts" / "orq.py")
+    orq_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(orq_py)
+    real = _run(tmp_path, "2026-09-28-real", "g1")
+    link = root / "2026-09-28-link"
+    link.symlink_to(real)
+    orq_py.timeline(link, "advance", "linha")
+    assert runs.timeline_path(link).read_text(encoding="utf-8").count("linha") == 1
+
+
 def test_list_with_state_reads_activity_and_never_touches_tmux(root, tmp_path):
     d = _run(root, "2026-09-28-g1", "g1")
     tl = d / "timeline-2026-09-28-g1.jsonl"

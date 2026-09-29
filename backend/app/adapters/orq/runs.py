@@ -7,6 +7,7 @@ SSE é o nome do arquivo, e `eventos.jsonl` se repete entre execuções.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -14,40 +15,54 @@ from app import orq, orq_conductor
 
 ACTIVE_S = 120
 
+_log = logging.getLogger(__name__)
+
 
 def root() -> Path:
     return orq.raiz_padrao()
 
 
 def timeline_path(d: Path) -> Path:
-    return d / f"timeline-{d.name}.jsonl"
+    # Mesmo nome que o orq.py grava: a pasta resolvida, também quando a execução é um symlink.
+    return d / f"timeline-{d.resolve().name}.jsonl"
 
 
 def _text(v) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
-def _auto_run(d: Path) -> tuple[dict, str, bool] | None:
-    """(orq.json, gid, encerrada) de uma execução `auto` com início gravado."""
+def _auto_run(d: Path, strict: bool = False) -> tuple[dict, str, bool] | None:
+    """(orq.json, gid, encerrada) de uma execução `auto` com início gravado. `strict`: falha de
+    leitura sobe como OSError em vez de passar por "não é execução"."""
     try:
         cfg = json.loads((d / "orq.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    except OSError:
+        if strict:
+            raise
         return None
     if not isinstance(cfg, dict) or cfg.get("auto") is not True:
         return None
-    eventos = orq._le_eventos(d / "eventos.jsonl")
+    eventos = orq._le_eventos(d / "eventos.jsonl", strict=strict)
     gid = next((_text(e.get("gid")) for e in eventos if e["tipo"] == "execucao_inicio"), None)
     return (cfg, gid, orq._current_end(eventos) is not None) if gid else None
 
 
 def group_phase(gid: str) -> str | None:
-    """"live" / "ended" para a execução `auto` do grupo, None sem execução iniciada. O vigia fica
-    de fora: o reinício dele deixa uma janela sem batimento com a execução viva."""
+    """"live" / "ended" para a execução `auto` do grupo, None sem execução iniciada, "unknown"
+    quando alguma execução não pôde ser lida: ela pode ser a deste grupo, e quem desfaz o grupo
+    não decide no escuro. O vigia fica de fora: o reinício dele deixa uma janela sem batimento
+    com a execução viva."""
     try:
         dirs = sorted(root().iterdir())
-    except OSError:
+        runs = [r for d in dirs if (r := _auto_run(d, strict=True))]
+    except FileNotFoundError:
         return None
-    fases = {r[2] for d in dirs if (r := _auto_run(d)) and r[1] == gid}
+    except OSError as e:
+        _log.warning("orq: execuções ilegíveis, grupo %s mantido: %s", gid, e)
+        return "unknown"
+    fases = {r[2] for r in runs if r[1] == gid}
     return "live" if False in fases else "ended" if fases else None
 
 

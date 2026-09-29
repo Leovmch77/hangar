@@ -60,7 +60,9 @@ def _int_ou_none(v) -> int | None:
     return v
 
 
-def _le_eventos(path: Path) -> list[dict]:
+def _le_eventos(path: Path, strict: bool = False) -> list[dict]:
+    """`strict`: falha de leitura (fora arquivo ausente) sobe como OSError, para quem decide
+    apagar algo não confundir "não consegui ler" com "não existe"."""
     out: list[dict] = []
     try:
         # `errors="replace"` e `ValueError` no except, os dois de propósito. O arquivo é append de
@@ -69,7 +71,13 @@ def _le_eventos(path: Path) -> list[dict]:
         # execução truncada derrubava a listagem INTEIRA com 500 (medido). `ValueError` também
         # cobre o `embedded null byte` que um exec_id de URL com \x00 levanta no open.
         texto = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return out
+    except OSError:
+        if strict:
+            raise
+        return out
+    except ValueError:
         return out
     for linha in texto.splitlines():
         linha = linha.strip()

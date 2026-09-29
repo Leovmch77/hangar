@@ -288,8 +288,8 @@ def leave(name: str) -> list[str]:
             return []
         peers = link["peers"]
         # Execução `orquestrar-auto` viva: o orquestrador fecha e abre as sessões das Tasks, e o
-        # grupo passa por trechos só com o árbitro.
-        vivo = link["orq"] and orq_runs.group_phase(link["gid"]) == "live"
+        # grupo passa por trechos só com o árbitro. Ilegível conta como viva: desfazer não tem volta.
+        vivo = link["orq"] and orq_runs.group_phase(link["gid"]) in ("live", "unknown")
         snap = {m: PairLink(m).get() for m in [name, *peers]}
         try:
             PairLink(name).clear()
@@ -332,7 +332,7 @@ def dissolve_lone_orq() -> list[str]:
                 novo = time.time() - f.stat().st_mtime < ORQ_LAUNCH_GRACE_S
             except OSError:
                 continue
-            if fase == "live" or (fase is None and novo):
+            if fase in ("live", "unknown") or (fase is None and novo):
                 continue
             PairLink(f.stem).clear()
             _arquivar_contratos(st["gid"])
