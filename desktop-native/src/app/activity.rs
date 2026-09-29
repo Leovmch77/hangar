@@ -672,6 +672,8 @@ impl Hangar {
             SideTab::Files if readable => SideTab::Files,
             SideTab::Activity if self.has_activity() => SideTab::Activity,
             SideTab::Git if readable && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
+            // Lembrada de outra execução, a aba só volta depois que o navegador for aberto de novo.
+            SideTab::Browser if self.side.browser.is_some() => SideTab::Browser,
             _ => SideTab::Context,
         }
     }
@@ -936,7 +938,7 @@ impl Hangar {
     }
 
     /// Abas "Contexto | Arquivos | Atividade | Git" numa fileira, como o web: Atividade só com atividade e Git só com
-    /// repositório; Arquivos e Git pedem a sessão legível.
+    /// repositório; Arquivos e Git pedem a sessão legível. Navegador só depois de aberto pelo menu.
     pub(super) fn render_side_title(&self, cx: &mut Context<Self>) -> AnyElement {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         let git = readable && self.selected.as_ref().is_some_and(super::sidebar::has_git);
@@ -960,6 +962,7 @@ impl Hangar {
             .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, cx)))
             .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, cx)))
             .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, cx)))
+            .when(self.side.browser.is_some(), |el| el.child(tab("side-tab-browser", tr("browser"), SideTab::Browser, cx)))
             .into_any_element()
     }
 

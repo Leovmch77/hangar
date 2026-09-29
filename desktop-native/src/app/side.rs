@@ -83,12 +83,14 @@ pub(super) struct Side {
     pub(super) shortcut_recheck: HashMap<String, std::time::Instant>,
     /// Há um run vivo no projeto desta sessão (botão Rodar aceso).
     pub(super) run: Option<(SessionKey, bool)>,
+    /// Um navegador por execução do app: aberto uma vez, segue o mesmo ao trocar de sessão ou de servidor.
+    pub(super) browser: Option<Entity<super::browser::BrowserPanel>>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         Self { open: true, menu: true, width: 300., drag: None, shortcuts: None, cost: None, cost_task: None, cost_gen: 0,
-            files: None, diff: None, reloading: HashSet::new(), git: None, run: None,
+            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browser: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
@@ -672,14 +674,17 @@ impl Hangar {
     // Mesma regra da aba Git.
     fn side_menu_git(&self) -> bool { self.selected.as_ref().is_some_and(|s| s.readable() && super::sidebar::has_git(s)) }
 
+    // Nesta máquina o motor roda (no Linux, a biblioteca do WPE está instalada).
+    fn side_menu_browser(&self) -> bool { crate::browser::Engine::available().is_ok() }
+
     /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
     pub(super) fn side_menu_shown(&self) -> bool {
-        self.side.menu && !self.subagent_tab_open() && (self.side_menu_terminal() || self.side_menu_git())
+        self.side.menu && !self.subagent_tab_open() && (self.side_menu_browser() || self.side_menu_terminal() || self.side_menu_git())
     }
 
     /// Menu da superfície vazia do Zeron: uma linha por ferramenta, no meio do painel.
     fn render_side_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (terminal, git) = (self.side_menu_terminal(), self.side_menu_git());
+        let (browser, terminal, git) = (self.side_menu_browser(), self.side_menu_terminal(), self.side_menu_git());
         let row = |id: &'static str, icon: IconName, label: String, cx: &mut Context<Self>| Button::new(id)
             .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
             .w_full().h(px(44.)).px(px(14.)).rounded(px(10.)).border_1().border_color(theme::border()).accessibility_label(label.clone())
@@ -689,6 +694,8 @@ impl Hangar {
                 .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(theme::text()).child(label)));
         div().id("side-menu").flex_1().min_h_0().flex().items_center().justify_center().p(px(16.))
             .child(div().w_full().max_w(px(280.)).flex().flex_col().gap(px(8.))
+                .when(browser, |el| el.child(row("side-menu-browser", IconName::Globe, tr("browser"), cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_browser(window, cx)))))
                 .when(terminal, |el| el.child(row("side-menu-terminal", IconName::SquareTerminal, tr("shortcuts_native_terminal"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.show_terminal(window, cx)))))
                 .when(git, |el| el
@@ -788,6 +795,7 @@ impl Hangar {
                     Some(SideTab::Files) => div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element(),
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
+                    Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.side.browser.clone()).into_any_element(),
                     Some(SideTab::Context) => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element(),
                 }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))

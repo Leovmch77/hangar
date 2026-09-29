@@ -84,6 +84,8 @@ impl Hangar {
         self.recent.clone().map(Floating::Recent)
     }
 
+    pub(super) fn popup_open(&self) -> bool { self.floating().is_some() }
+
     /// Fecha o painel aberto sobre o compositor; diz se havia um.
     pub(super) fn close_popups(&mut self) -> bool {
         let folders = self.new_chat_folders.replace(None).is_some();

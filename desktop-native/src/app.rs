@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 mod activity;
 mod backdrop;
 mod baton;
+mod browser;
 mod accounts;
 pub(crate) mod chrome;
 mod computer;
@@ -575,7 +576,10 @@ impl Hangar {
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
             KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
-            KeyBinding::new("ctrl-c", NoAction, Some("Terminal"))]);
+            KeyBinding::new("ctrl-c", NoAction, Some("Terminal")),
+            // Tab dentro da página navega os campos dela, não o foco do app.
+            KeyBinding::new("tab", NoAction, Some("BrowserPage")),
+            KeyBinding::new("shift-tab", NoAction, Some("BrowserPage"))]);
         // No Mac Ctrl+C vai para o programa do terminal; copiar e colar são Cmd+C e Cmd+V.
         #[cfg(target_os = "macos")]
         cx.bind_keys([KeyBinding::new("cmd-c", terminal::CopyTerminal, Some("Terminal")),
@@ -4897,6 +4901,7 @@ impl Render for Hangar {
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };
         self.sync_side_cost(window);
+        self.sync_browser(window, cx);
         // A marca da aba Atividade anima fora das duas views guardadas (painel e aba), depois delas na árvore.
         let slide = self.side_slide_frame(window, cx);
         let beside = beside_sidebar.then(|| self.side_width(window).filter(|_| !files_expanded)

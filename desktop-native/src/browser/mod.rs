@@ -15,6 +15,7 @@ pub use wry_engine::Engine;
 pub enum Event {
     State(model::PageState),
     /// Quadro novo para desenhar; só o motor que pinta pela GPUI manda.
+    #[cfg(target_os = "linux")]
     Frame,
 }
 
