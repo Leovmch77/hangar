@@ -32,7 +32,8 @@ export function buildSessionTabs(buckets: ServerBucket[]): SessionTabsModel {
   const offlineLabels: string[] = [];
   for (const bucket of buckets) {
     if (bucket.error) {
-      offlineLabels.push(bucket.server.label);
+      // Convite encerrado não é máquina fora do ar (a barra lateral diz que acabou).
+      if (!bucket.server.inviteEnded) offlineLabels.push(bucket.server.label);
       continue;
     }
     const ordered = sortSessions([...bucket.sessions]);

@@ -50,9 +50,11 @@ import * as m from '../paraglide/messages';
   // Sessões em cache não são prova de conexão: a falha continua visível no resumo.
   const serverErrors = $derived(
     sessionsStore.byServer
-      .filter((b) => b.error)
+      .filter((b) => b.error && !b.server.inviteEnded)
       .map((b) => ({ label: b.server.label, error: b.error! })),
   );
+  // Convite encerrado não é servidor offline: tem aviso próprio.
+  const endedInvites = $derived(sessionsStore.byServer.filter((b) => b.server.inviteEnded).map((b) => b.server.label));
   let error = $state('');
   // Mensagem de AÇÃO (excluir/renomear), separada do `error` acima: aquele substitui a lista inteira
   // (estado de "não consegui carregar"), e uma falha de exclusão não pode apagar a lista da tela.
@@ -440,7 +442,7 @@ import * as m from '../paraglide/messages';
            (Sidebar, flash → menu-toast), e as duas views têm de anunciar igual. -->
       <p class="action-msg" role="status">{actionMsg}</p>
     {/if}
-    {#if (sessions.length > 0 && multiServer) || serverErrors.length > 0}
+    {#if (sessions.length > 0 && multiServer) || serverErrors.length > 0 || endedInvites.length > 0}
       <!-- UMA faixa de chrome só: toggle à esquerda, aviso de servidor offline à direita. Empilhados
            (duas faixas) eles comiam ~1/3 da tela do celular antes da primeira sessão aparecer. -->
       <div class="top-strip">
@@ -459,6 +461,9 @@ import * as m from '../paraglide/messages';
             : m.lista_servidores_offline_lista({ n: serverErrors.length, lista: serverErrors.map((e) => e.label).join(', ') })}
           <!-- Uma linha-resumo (N chips só enchiam a tela do celular — pedido do usuário). -->
           <span class="server-warn-item" role="status" title={warn}>⚠ {warn}</span>
+        {/if}
+        {#if endedInvites.length > 0}
+          <span class="server-warn-item" role="status">{m.convite_encerrado()} ({endedInvites.join(', ')})</span>
         {/if}
       </div>
     {/if}

@@ -35,7 +35,8 @@
   const rows = $derived<BoardRow[]>(sessionsStore.rows);
   const loading = $derived(sessionsStore.loading);
   // Banner de offline mesmo com lista stale: filtra por error SEM gate de loaded.
-  const offline = $derived(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.label));
+  const offline = $derived(sessionsStore.byServer.filter((b) => b.error && !b.server.inviteEnded).map((b) => b.server.label));
+  const endedInvites = $derived(sessionsStore.byServer.filter((b) => b.server.inviteEnded).map((b) => b.server.label));
   const servers = $derived(sessionsStore.servers);
 
   // Colunas fixas por estado; dentro, atividade recente primeiro (desempate por nome = estável).
@@ -121,6 +122,9 @@
   <RateStrip buckets={sessionsStore.byServer} />
   {#if offline.length}
     <p class="board-offline">{m.board_sem_conexao()}: {offline.join(', ')}</p>
+  {/if}
+  {#if endedInvites.length}
+    <p class="board-offline" role="status">{m.convite_encerrado()} ({endedInvites.join(', ')})</p>
   {/if}
   <!-- Recibo de msg não entregue a uma sessão que sumiu (o card que mostraria o erro já não existe).
        Clique dispensa. -->

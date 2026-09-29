@@ -551,7 +551,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   // servidores (`servers`, não `renderGroups`) e deixa escolher o alvo, então dá pra criar sessão
   // num servidor que não aparece aqui.
   const groupBuckets = $derived.by(() => {
-    const offline = sessionsStore.byServer.filter(b => b.error);
+    // Convite encerrado não é máquina fora do ar: reconectar não traz a sessão de volta.
+    const offline = sessionsStore.byServer.filter(b => b.error && !b.server.inviteEnded);
     const offlineIds = new Set(offline.map(b => b.server.id));
     const key = (s: AggSession) => `${s.serverId}::${s.name}`;
     const paired = new Set(model.groups.filter(g => g.pair).flatMap(g => g.sessions.map(key)));
@@ -567,6 +568,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   });
   const onlineGroups = $derived(groupBuckets.onlineGroups);
   const offlineGroups = $derived(groupBuckets.offlineGroups);
+  const endedInvites = $derived(sessionsStore.byServer.filter(b => b.server.inviteEnded).map(b => b.server.label));
   const renderGroups = $derived(showOffline ? [...onlineGroups, ...offlineGroups] : onlineGroups);
 
 
@@ -704,7 +706,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     {/if}
     <!-- Servidor online e vazio nao aparece mais; com TODOS vazios a lista ficaria em branco, sem
          dizer o porque. (Nao vale quando o filtro esta ativo — ai quem fala e o filter-empty.) -->
-    {#if expanded && !model.filterText.trim() && renderGroups.length === 0 && offlineGroups.length === 0}
+    {#if expanded && !model.filterText.trim() && renderGroups.length === 0 && offlineGroups.length === 0 && endedInvites.length === 0}
       <p class="filter-empty">{m.lista_vazia_aberta()} <strong>+ {m.lista_nova_curto()}</strong>.</p>
     {/if}
     {#each renderGroups as g (g.id)}
@@ -1059,6 +1061,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         <span class="grp-offline-label">⚠ {offlineGroups.length === 1 ? m.sessao_offline_1() : m.sessao_offline({ n: offlineGroups.length })}</span>
         {#if !showOffline}<span class="grp-offline-names">({offlineGroups.map((g) => g.label).join(', ')})</span>{/if}
       </button>
+    {/if}
+    {#if expanded && endedInvites.length > 0}
+      <p class="grp-offline-sum grp-ended" role="status">{m.convite_encerrado()} ({endedInvites.join(', ')})</p>
     {/if}
   </nav>
 
@@ -1713,6 +1718,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     color: var(--warning); text-align: left;
   }
   .grp-offline-label { flex-shrink: 0; white-space: nowrap; }
+  .grp-ended { margin-bottom: 0; }
   .grp-offline-sum:hover { background: var(--bg-hover); }
   .grp-offline-names {
     color: var(--text-muted); font-weight: 500; overflow: hidden;

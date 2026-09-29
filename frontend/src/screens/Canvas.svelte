@@ -26,7 +26,8 @@ import * as m from '../paraglide/messages';
   });
 
   const rows = $derived<BoardRow[]>(sessionsStore.rows);
-  const offline = $derived(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.label));
+  const offline = $derived(sessionsStore.byServer.filter((b) => b.error && !b.server.inviteEnded).map((b) => b.server.label));
+  const endedInvites = $derived(sessionsStore.byServer.filter((b) => b.server.inviteEnded).map((b) => b.server.label));
   const rowKey = (r: BoardRow) => `${r.serverId}::${r.name}`;
 
   // Migração one-shot da VIEW: os formatos de cp_canvas_hidden/cp_canvas_collapsed mudaram
@@ -526,6 +527,9 @@ import * as m from '../paraglide/messages';
   {/if}
   {#if offline.length}
     <p class="cv-offline">{m.board_sem_conexao()}: {offline.join(', ')}</p>
+  {/if}
+  {#if endedInvites.length}
+    <p class="cv-offline" role="status">{m.convite_encerrado()} ({endedInvites.join(', ')})</p>
   {/if}
   {#each orphanErrors as [key, msg] (key)}
     <button class="cv-senderr" onclick={() => sendErrors.delete(key)} title={m.board_dispensar()}>

@@ -1011,3 +1011,25 @@ it.each(['none', 'project', 'server'] as const)('mantém offline no resumo em %s
     storeState.byServer.splice(0, Infinity, ...previous.byServer);
   }
 });
+
+it.each(['none', 'server'] as const)('convite encerrado aparece como encerrado, não como servidor offline (%s)', async mode => {
+  const previous = { servers: [...storeState.servers], rows: [...storeState.rows], byServer: [...storeState.byServer] };
+  const grouping = vi.spyOn(api, 'effectiveGroupBy').mockReturnValue(mode);
+  const ended = { id: 'dono', label: 'Convite · J', baseUrl: 'https://d:8443', token: 'g', invite: true, inviteEnded: true };
+  storeState.servers.splice(0, Infinity, ended);
+  storeState.rows.splice(0, Infinity);
+  storeState.byServer.splice(0, Infinity,
+    { server: ended, sessions: [], error: 'Compartilhamento encerrado', loaded: true });
+  const t = montar();
+  try {
+    await tick();
+    expect(t.el.querySelector('button.grp-offline-sum')).toBeNull();
+    expect(t.el.querySelector('.filter-empty')).toBeNull();
+    expect(t.el.querySelector('.grp-ended')?.textContent).toContain('Compartilhamento encerrado (Convite · J)');
+  } finally {
+    await unmount(t.comp); t.el.remove(); grouping.mockRestore();
+    storeState.servers.splice(0, Infinity, ...previous.servers);
+    storeState.rows.splice(0, Infinity, ...previous.rows);
+    storeState.byServer.splice(0, Infinity, ...previous.byServer);
+  }
+});

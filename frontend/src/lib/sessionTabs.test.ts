@@ -37,6 +37,14 @@ describe('buildSessionTabs', () => {
     expect(model.tabs.map((t) => t.boundary)).toEqual([false, false, true]);
   });
 
+  it('convite encerrado não gera aba nem conta como offline', () => {
+    const model = buildSessionTabs([
+      bucket({ ...srv('d', 'Convite · J'), invite: true, inviteEnded: true }, [], 'Compartilhamento encerrado'),
+    ]);
+    expect(model.tabs).toEqual([]);
+    expect(model.offlineLabels).toEqual([]);
+  });
+
   it('bucket offline não gera aba e entra no indicador offline', () => {
     const model = buildSessionTabs([
       bucket(srv('a', 'A'), [sess('x')]),
