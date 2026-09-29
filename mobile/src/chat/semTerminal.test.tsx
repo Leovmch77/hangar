@@ -42,16 +42,20 @@ describe('terminal escondido', () => {
     act(() => root.unmount());
   });
 
-  it('"⋯" com noTerminal não lista o Terminal', async () => {
-    const { container, root } = await render(createElement(MoreSheet, { ...sheet, noTerminal: true }));
+  it('"⋯" do orquestrador não lista Terminal, resposta nem anexos', async () => {
+    const { container, root } = await render(createElement(MoreSheet, { ...sheet, orq: true }));
     expect(container.querySelector('[aria-label="term_titulo"]')).toBeNull();
+    expect(container.querySelector('[aria-label="askq_sua_resposta"]')).toBeNull();
+    expect(container.querySelector('[aria-label="ctx_anexos"]')).toBeNull();
     expect(container.querySelector('[aria-label="arq_aba"]')).not.toBeNull();
     act(() => root.unmount());
   });
 
-  it('"⋯" sem a marca continua listando o Terminal', async () => {
+  it('"⋯" de sessão comum continua listando Terminal, resposta e anexos', async () => {
     const { container, root } = await render(createElement(MoreSheet, sheet));
     expect(container.querySelector('[aria-label="term_titulo"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="askq_sua_resposta"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="ctx_anexos"]')).not.toBeNull();
     act(() => root.unmount());
   });
 });

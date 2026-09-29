@@ -64,6 +64,13 @@ describe('SessionRow', () => {
     act(() => root.unmount());
   });
 
+  it('orquestrador com cwd: Git no arrasto continua, excluir não', async () => {
+    const { container, root } = await render({ ...base, name: 'g1-orq', provider: 'orq', pair_gid: 'g1', orq_arbiter: 'arb', cwd: '/repo' });
+    expect(container.querySelector('[aria-label="Git"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
   it('sessão comum continua com excluir e toque longo', async () => {
     longPress.enabled.mockClear();
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude' });
