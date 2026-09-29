@@ -573,10 +573,18 @@ def cmd_init(a) -> int:
         raise OrqError(too_big)
     cfg = {"arbiter": a.arbiter, "repo": str(Path(a.repo).expanduser().resolve()),
            "contract": str(contract), "untouchables": a.untouchable}
-    if a.auto:
+    try:
+        old = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    old = old if isinstance(old, dict) else None
+    # A re-init that forgets --auto must not turn the run plain: the orchestrator would stop.
+    auto = a.auto or (old or {}).get("auto") is True
+    if auto:
         if not a.plan:
             raise OrqError("--auto needs --plan: the orchestrator reads the Tasks from it")
-        cfg.update(auto=True, jev=a.jev or AUTO_JEV_DEFAULT, regex=a.regex or "shadow")
+        cfg.update(auto=True, jev=a.jev or (old or {}).get("jev") or AUTO_JEV_DEFAULT,
+                   regex=a.regex or (old or {}).get("regex") or "shadow")
     elif a.jev or a.regex:
         raise OrqError("--jev and --regex only apply with --auto")
     if a.plan:
@@ -592,16 +600,12 @@ def cmd_init(a) -> int:
         cfg["plan"] = str(plan)
     else:
         # Only a run started before plans were stamped re-inits without one, and stays plan-less.
-        try:
-            old = json.loads((d / "orq.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            old = None
-        if not isinstance(old, dict) or "plan" in old:
+        if old is None or "plan" in old:
             raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
                            "started without a plan re-inits without one")
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
-                      + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if a.auto else ""))
+                      + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if auto else ""))
     print("ok")
     return 0
 
@@ -1384,9 +1388,34 @@ def additive_files(text: str) -> list[str]:
 
 def orchestrator_tag(d: Path) -> str:
     """The panel's notice form: nobody answers it as if it were a session."""
-    gid = next((ev["gid"] for ev in reversed(events(d))
-                if ev.get("tipo") == "execucao_inicio" and ev.get("gid")), d.name)
-    return f"[painel: orquestrador {gid}] "
+    return f"[painel: orquestrador {_gid(d)}] "
+
+
+def _gid(d: Path) -> str:
+    return _run_start(d).get("gid") or d.name
+
+
+def _run_start(d: Path) -> dict:
+    return next((ev for ev in reversed(events(d)) if ev.get("tipo") == "execucao_inicio"), {})
+
+
+def _notice_once(d: Path, text: str, task: int | None = None) -> None:
+    """A wait the orchestrator keeps passing over: one timeline line per episode, not per pass."""
+    last = (_jsonl(d / f"timeline-{d.resolve().name}.jsonl") or [{}])[-1]
+    if last.get("text") != text:
+        timeline(d, "notice", text, task)
+
+
+def _off_branch(d: Path, repo: str) -> str | None:
+    """Why the main checkout is not where the run merges and opens, in pt-BR; None = it is. The
+    user may switch the checkout mid-run, and a merge would land on whatever is checked out."""
+    want = _run_start(d).get("branch")
+    cur = git(repo, "branch", "--show-current").strip()
+    if cur and (not want or cur == want):
+        return None
+    where = f"na branch {cur}" if cur else "em HEAD destacado"
+    return (f"o checkout principal está {where}, não na {want or 'branch'} da execução; integrar "
+            "e abrir Tasks esperam ele voltar")
 
 
 def _say(d: Path, target: str, text: str) -> None:
@@ -1461,24 +1490,31 @@ def _red_choice(d: Path, cfg: dict, n: int, why: str, log: Path) -> str:
     return "back"
 
 
-def _prove_additive(path: str, ours: bytes, theirs: bytes, merged: bytes) -> str | None:
-    """A union is accepted only by content: a JSON object keeps every key of both sides with its
-    value; any other file keeps every line of both sides and adds none."""
+def _prove_additive(path: str, base: bytes, ours: bytes, theirs: bytes, merged: bytes) -> str | None:
+    """A union is accepted only by content, against the base (empty when both sides added the
+    file): a JSON object holds exactly the keys of both sides minus what either side deleted, each
+    with its value; any other file holds exactly base + each side's changes, so an old line kept
+    beside its edited version is refused."""
     if path.endswith(".json"):
         try:
+            b = json.loads(base) if base.strip() else {}
             o, t, m = (json.loads(x) for x in (ours, theirs, merged))
         except ValueError as e:
             return f"{path}: the union is not valid JSON ({e})"
-        if not all(isinstance(x, dict) for x in (o, t, m)):
+        if not all(isinstance(x, dict) for x in (b, o, t, m)):
             return f"{path}: not a JSON object"
-        if set(m) != set(o) | set(t):
-            return f"{path}: {len(m)} keys after the union, {len(set(o) | set(t))} expected"
+        want = (set(o) | set(t)) - (set(b) - set(o)) - (set(b) - set(t))
+        if set(m) != want:
+            return f"{path}: keys {sorted(set(m) ^ want)} differ from both sides' changes"
         changed = sorted(k for k in m if (k in o and m[k] != o[k]) or (k in t and m[k] != t[k]))
         return f"{path}: values changed for {changed}" if changed else None
-    o, t, m = (Counter(x.decode("utf-8", "replace").splitlines()) for x in (ours, theirs, merged))
-    lost = [k for k, c in (o | t).items() if m[k] < c]
-    added = [k for k in m if k not in o and k not in t]
-    return f"{path}: the union lost {len(lost)} line(s), added {len(added)}" if lost or added else None
+    b, o, t, m = (Counter(x.decode("utf-8", "replace").splitlines())
+                  for x in (base, ours, theirs, merged))
+    want = o + t - b
+    if m != want:
+        return (f"{path}: the union holds {sum((m - want).values())} line(s) too many and misses "
+                f"{sum((want - m).values())}")
+    return None
 
 
 def _union_resolve(repo: str, path: str) -> str | None:
@@ -1499,7 +1535,7 @@ def _union_resolve(repo: str, path: str) -> str | None:
         r = subprocess.run(["git", "merge-file", "-p", "--union", *names], capture_output=True)
     if r.returncode != 0:
         return f"{path}: git merge-file failed ({r.stderr.decode(errors='replace').strip()[:120]})"
-    why = _prove_additive(path, sides[2], sides[3], r.stdout)
+    why = _prove_additive(path, sides[1] or b"", sides[2], sides[3], r.stdout)
     if why:
         return why
     (Path(repo) / path).write_bytes(r.stdout)
@@ -1589,10 +1625,8 @@ def _integrate(d: Path, cfg: dict, n: int, h: str, acts: list[str]) -> bool:
     repo = cfg["repo"]
     # Git merges over uncommitted changes it does not touch, and Integração: would test them too.
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
-        text = f"T{n}: a linha principal tem mudanças não commitadas; a integração espera a árvore limpa"
-        last = (_jsonl(d / f"timeline-{d.resolve().name}.jsonl") or [{}])[-1]
-        if last.get("text") != text:  # once per dirty episode, not every pass
-            timeline(d, "notice", text, n)
+        _notice_once(d, f"T{n}: a linha principal tem mudanças não commitadas; a integração espera "
+                        "a árvore limpa", n)
         return False
     needs_merge = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", h, "HEAD"],
                                  capture_output=True).returncode != 0
@@ -1815,9 +1849,11 @@ def _open_task(d: Path, cfg: dict, pj: dict, t: dict) -> str:
     if not branch:
         raise OrqError(f"{repo} is on a detached HEAD: no branch to work on")
     wave = (pj.get("paralelo") or 1) > 1
-    cwd = str(Path(repo).parent / f"{Path(repo).name}-t{n}") if wave else repo
+    # The gid keeps a later run on the same branch from meeting this run's leftovers.
+    gid = _gid(d)
+    cwd = str(Path(repo).parent / f"{Path(repo).name}-{gid}-t{n}") if wave else repo
     if wave:
-        branch = f"{branch}-t{n}"
+        branch = f"{branch}-{gid}-t{n}"
     # The executor's Expected HEAD: the main line after the merges so far, and the wave's base.
     base = git(repo, "rev-parse", "HEAD").strip()
     ctx = {"task": n, "title": title, "worktree": cwd, "branch": branch, "run_dir": str(d),
@@ -1935,6 +1971,10 @@ def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
 
 def _pass(d: Path, cfg: dict, acts: list[str]) -> None:
     """Integration first: nothing opens or goes to proof on a main line that is red or waiting."""
+    off = _off_branch(d, cfg["repo"])
+    if off:
+        _notice_once(d, off)
+        return
     if not _integrate_all(d, cfg, acts):
         return
     evs = events(d)
@@ -1993,7 +2033,8 @@ def spawn_advance(d: Path) -> str | None:
     started; otherwise the error, already warned on stderr (the watchdog's cycle retries)."""
     try:
         with (d / "advance.log").open("a", encoding="utf-8") as log:
-            # cwd: the caller may sit in a worktree that the pass itself removes.
+            # cwd: the run dir, never the caller's: a Task worktree removed at the end of the run
+            # must not be the working directory of a pass still running.
             subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--dir", str(d.resolve()),
                               "advance"],
                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,

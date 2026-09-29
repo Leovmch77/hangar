@@ -313,9 +313,34 @@ def test_a_held_lock_leaves_a_mark_and_does_nothing(tmp_path):
 
 def test_union_proof_refuses_a_changed_value_and_a_lost_line():
     m = orq_mod()
-    assert m._prove_additive("m.json", b'{"a": "1"}', b'{"a": "2"}', b'{"a": "1", "a": "2"}')
-    assert m._prove_additive("m.txt", b"x\ny\n", b"x\nz\n", b"x\ny\n")
-    assert m._prove_additive("m.json", b'{"a": "1"}', b'{"b": "2"}', b'{"a": "1", "b": "2"}') is None
+    assert m._prove_additive("m.json", b"", b'{"a": "1"}', b'{"a": "2"}', b'{"a": "1", "a": "2"}')
+    assert m._prove_additive("m.txt", b"x\n", b"x\ny\n", b"x\nz\n", b"x\ny\n")
+    assert m._prove_additive("m.json", b"{}", b'{"a": "1"}', b'{"b": "2"}', b'{"a": "1", "b": "2"}') is None
+    assert m._prove_additive("m.txt", b"a\nb\n", b"a\nX\nb\n", b"a\nY\nb\n", b"a\nX\nY\nb\n") is None
+
+
+def test_union_proof_refuses_an_old_line_kept_beside_its_edit():
+    # ours edited X into X2, theirs inserted Y after X: the union keeps X, which ours removed.
+    m = orq_mod()
+    assert m._prove_additive("m.txt", b"a\nX\nb\n", b"a\nX2\nb\n", b"a\nX\nY\nb\n",
+                             b"a\nX2\nX\nY\nb\n")
+    # A key one side deleted does not come back through the other side's copy.
+    assert m._prove_additive("m.json", b'{"a": 1, "z": 1}', b'{"a": 1, "b": 1}',
+                             b'{"a": 1, "c": 1, "z": 1}', b'{"a": 1, "b": 1, "c": 1, "z": 1}')
+
+
+def test_an_edit_beside_an_insertion_in_an_additive_file_is_a_conflict(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    started(e)
+    base = '{\n  "a": "A",\n  "z": "Z"\n}\n'
+    h1 = branch_commit(g, r, "main-t1", "messages/pt.json", base.replace('"A"', '"A2"'))
+    h2 = branch_commit(g, r, "main-t2", "messages/pt.json", base.replace('"A",', '"A",\n  "c": "C",'))
+    close(d, 1, h1)
+    close(d, 2, h2)
+    run(e, "advance")
+    assert [x["task"] for x in events(d) if x["tipo"] == "conflito"] == [2]
+    assert json.loads((r / "messages" / "pt.json").read_text()) == {"a": "A2", "z": "Z"}
+    assert g("status", "--porcelain") == ""
 
 
 def hook(g, r, name):
@@ -436,8 +461,9 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     base = g("rev-parse", "HEAD")
     assert run(e, "advance").stdout.splitlines() == ["opened T1: w-t1 + w-rev-1",
                                                      "opened T2: w-t2 + w-rev-2"]
-    wt1, wt2 = root / "repo-t1", root / "repo-t2"
-    assert git_in(wt1)("branch", "--show-current") == "main-t1"
+    # The run's gid in the names: a later run on the same branch never meets these.
+    wt1, wt2 = root / "repo-g1-t1", root / "repo-g1-t2"
+    assert git_in(wt1)("branch", "--show-current") == "main-g1-t1"
     assert git_in(wt2)("rev-parse", "HEAD") == g("rev-parse", "HEAD")
     assert [m for m in sent(log) if m.startswith("--new ")] == [
         f"--new w-t1 {wt1} --provider claude --conta 200-01 --model opus[1m] --effort medium",
@@ -447,7 +473,7 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     ]
     assert [(x["task"], x["titulo"], x["executor"], x["par"]) for x in events(d)
             if x["tipo"] == "task_inicio"] == [(1, "first", "w-t1", "w-rev-1"), (2, "second", "w-t2", "w-rev-2")]
-    head = (f"EXECUTOR T1 first wt={wt1} br=main-t1 dir={d} plan={root / 'plan.orq.md'} "
+    head = (f"EXECUTOR T1 first wt={wt1} br=main-g1-t1 dir={d} plan={root / 'plan.orq.md'} "
             f"c={root / 'regras.md'} ex=w-t1 rev=w-rev-1 arb=arb base={base}")
     assert [m for m in sent(log) if m.startswith("w-t1 ")] == [f"w-t1 [painel: orquestrador g1] {head}"]
     assert (d / "kickoffs" / "task1-executor.md").read_text() == f"{head}\n- CLAUDE.md\n- docs/*"
@@ -732,3 +758,35 @@ def test_only_the_orchestrator_sends_as_a_panel_notice(tmp_path):
     run(e, "advance")
     assert sum(m.startswith("arb ") for m in sent(log)) == 2
     assert (tmp_path / "sent.log.painel").read_text().splitlines() == ["arb"]
+
+
+@pytest.mark.parametrize("move", ["branch", "detached"])
+def test_a_main_checkout_off_the_run_branch_waits(tmp_path, move):
+    d, r, g, e, log = start(tmp_path, integ="`test -f b.txt`", contract=CONTRACT)
+    e = with_molds(tmp_path, e)
+    started(e, tasks=(1,))
+    close(d, 1, branch_commit(g, r, "main-t1", "b.txt", "b\n"))
+    g("checkout", "-q", *(["-b", "other"] if move == "branch" else ["--detach"]))
+    before, n_events = g("rev-parse", "HEAD"), len(events(d))
+    assert run(e, "advance").stdout == ""
+    run(e, "advance")
+    # Neither merged into the wrong branch nor opened T2 on it.
+    assert g("rev-parse", "HEAD") == before and len(events(d)) == n_events and sent(log) == []
+    waits = [x for x in timeline_lines(d) if x["kind"] == "notice"]
+    assert len(waits) == 1 and "main" in waits[0]["text"]   # once per episode
+    g("checkout", "-q", "main")
+    out = run(e, "advance").stdout
+    assert "integrated T1" in out and "opened T2" in out
+
+
+def test_init_without_auto_keeps_an_auto_run_auto(tmp_path):
+    d, r, g, e, log = start(tmp_path)
+    args = ["init", "--arbiter", "arb2", "--repo", str(r), "--contract", str(tmp_path / "regras.md"),
+            "--plan", str(tmp_path / "plan.orq.md")]
+    run(e, *args, "--auto", "--jev", "shadow", "--regex", "on")
+    run(e, *args)   # the arbiter changing only the untouchables forgot --auto
+    cfg = json.loads((d / "orq.json").read_text())
+    assert (cfg["auto"], cfg["jev"], cfg["regex"], cfg["arbiter"]) == (True, "shadow", "on", "arb2")
+    run(e, *args, "--regex", "shadow")
+    cfg = json.loads((d / "orq.json").read_text())
+    assert (cfg["auto"], cfg["jev"], cfg["regex"]) == (True, "shadow", "shadow")
