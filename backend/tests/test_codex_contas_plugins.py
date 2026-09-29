@@ -373,9 +373,9 @@ async def test_marketplace_embutido_ausente_e_materializado_na_conta_destino(con
     assert (target_root / ".agents/plugins/marketplace.json").is_file()
     assert (target_root / "plugins/browser/.codex-plugin/plugin.json").is_file()
     assert not (target_root / "plugins/latex").exists()
-    config_text = (target.home / "config.toml").read_text(encoding="utf-8")
-    assert str(target_root) in config_text
-    assert str(source_root) not in config_text
+    # Lido como TOML: no Windows a barra invertida vem escapada no texto cru.
+    config = tomllib.loads((target.home / "config.toml").read_text(encoding="utf-8"))
+    assert config["marketplaces"]["openai-bundled"]["source"] == str(target_root)
     assert any(item["pluginId"] == "browser@openai-bundled"
                for item in FakeNative.states[str(target.home)]["plugins"])
 
