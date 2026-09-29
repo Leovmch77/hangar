@@ -126,8 +126,9 @@ impl Engine {
     /// Fica visível para o Chromium, mas fora da área do pai, que recorta a janela filha: ninguém a vê.
     #[cfg(target_os = "windows")]
     fn park(&self) {
+        // Longe demais estoura os 16 bits do WM_MOVE em DPI alto; -3000 já tira os 1280 da área do pai.
         self.report(self.view.set_bounds(Rect {
-            position: LogicalPosition::new(-20_000.0, 0.0).into(),
+            position: LogicalPosition::new(-3000.0, 0.0).into(),
             size: LogicalSize::new(1280.0, 800.0).into(),
         }));
         self.report(self.view.set_visible(true));
