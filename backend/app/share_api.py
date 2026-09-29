@@ -23,6 +23,11 @@ _SWEEP_INTERVAL = 60.0
 changing_mode: set[str] = set()
 
 
+# O funnel sobrevive um pouco ao último convite: o convidado ainda conectado precisa alcançar
+# o servidor para receber o 410 "encerrado" em vez de parecer que a máquina caiu.
+ENDED_GRACE = 120.0
+
+
 def sync_tunnel() -> None:
     # Revogar nunca pode falhar por causa do túnel: o registro já saiu, e o laço periódico
     # tenta de novo em um minuto. Quem nunca compartilhou não passa pelo tailscale: o funnel
@@ -30,7 +35,7 @@ def sync_tunnel() -> None:
     if not share_store.has_any():
         return
     try:
-        share_tunnel.sync(share_store.has_active())
+        share_tunnel.sync(share_store.has_active() or share_store.recently_ended(ENDED_GRACE))
     except share_tunnel.TunnelError as e:
         _log.warning("[share] sincronizar funnel falhou: %s", e.fix)
 

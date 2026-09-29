@@ -226,6 +226,13 @@ def has_active(now: float | None = None) -> bool:
         return any(x.active(now) for x in _load().values())
 
 
+def recently_ended(window: float, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    with _lock:
+        return any(x.revoked_at is not None and now - x.revoked_at <= window
+                   for x in _load().values())
+
+
 def active_sessions(now: float | None = None) -> set[str]:
     now = time.time() if now is None else now
     with _lock:

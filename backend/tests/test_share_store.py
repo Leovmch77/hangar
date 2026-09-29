@@ -189,3 +189,12 @@ def test_has_any():
     assert share_store.has_any() is False
     share_store.create("a", "t:1", now=1000.0)
     assert share_store.has_any() is True
+
+
+def test_recently_ended_so_dentro_da_janela():
+    s, _ = share_store.create("a", "t:1", now=1000.0)
+    assert share_store.recently_ended(120.0) is False
+    share_store.revoke(s.id)
+    revogado = share_store._load()[s.id].revoked_at
+    assert share_store.recently_ended(120.0, now=revogado + 119) is True
+    assert share_store.recently_ended(120.0, now=revogado + 121) is False

@@ -53,7 +53,7 @@ def test_cria_lista_e_revoga(cli, syncs):
 
     r = cli.delete(f"/api/sessions/proj/share/{body['id']}", headers=AUTH)
     assert r.json() == {"ok": True}
-    assert syncs[-1] is False
+    assert syncs[-1] is True  # carência: o convidado ainda recebe o "encerrado"
     assert cli.delete(f"/api/sessions/proj/share/{body['id']}", headers=AUTH).status_code == 404
 
 
@@ -120,7 +120,7 @@ def test_fechar_sessao_revoga(cli, syncs, monkeypatch):
     r = cli.delete("/api/sessions/proj", headers=AUTH)
     assert r.status_code == 200
     assert share_store.has_active() is False
-    assert syncs[-1] is False
+    assert syncs[-1] is True  # carência do funnel
 
 
 def test_lista_reemite_quando_compartilhamento_muda():
@@ -134,7 +134,7 @@ def test_sweep_once_revoga_sessao_renascida(syncs, monkeypatch):
     monkeypatch.setattr(share_api, "session_life", lambda n: "t:2")
     share_api._sweep_once()
     assert share_store.has_active() is False
-    assert syncs[-1] is False
+    assert syncs[-1] is True  # carência do funnel
 
 
 def _sem_sidecar(monkeypatch):
@@ -178,7 +178,7 @@ def test_sweep_ausencia_confirmada_revoga(syncs, monkeypatch):
     monkeypatch.setattr(share_api.tmux, "sessao_existe", lambda n: False)
     share_api._sweep_once()
     assert share_store.has_active() is False
-    assert syncs[-1] is False
+    assert syncs[-1] is True  # carência do funnel
 
 
 def test_sweep_pula_sessao_em_troca_de_modo(syncs, monkeypatch):
@@ -219,3 +219,13 @@ def test_sync_do_tunel_nao_toca_o_tailscale_de_quem_nunca_compartilhou(syncs):
     share_store.create("proj", "t:1")
     share_api.sync_tunnel()
     assert syncs == [True]
+
+
+def test_funnel_fica_ligado_na_carencia_e_cai_depois(syncs):
+    s, _ = share_store.create("proj", "t:1")
+    share_store.revoke(s.id)
+    share_api.sync_tunnel()
+    assert syncs[-1] is True
+    share_store._load()[s.id].revoked_at -= share_api.ENDED_GRACE + 1
+    share_api.sync_tunnel()
+    assert syncs[-1] is False
