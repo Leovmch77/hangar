@@ -4968,6 +4968,9 @@ impl Render for Hangar {
         let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                if let Some(browser) = &this.side.browser { browser.read(cx).release_focus() }
+            }))
             // Sessão solta fora da lista: nada acontece, só termina o arrasto.
             .on_drop(cx.listener(|this, _: &grouping::SessionDrag, _, cx| this.end_session_drag(cx)))
             .bg(if !chat_background { theme::window_fill() }

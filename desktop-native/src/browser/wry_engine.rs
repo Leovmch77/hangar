@@ -111,7 +111,11 @@ impl Engine {
     }
 
     pub fn hide(&self) {
-        if self.placed.take().is_some() { self.report(self.view.set_visible(false)); }
+        if self.placed.take().is_some() {
+            self.report(self.view.set_visible(false));
+            // Página escondida com o foco do sistema deixaria o teclado sem dono.
+            self.release_focus();
+        }
     }
 
     pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}

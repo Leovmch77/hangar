@@ -111,6 +111,12 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// Clique na GPUI com a página nativa segurando o foco do sistema: sem isto o teclado (Esc, atalhos) seguiria
+    /// indo para a página.
+    pub(super) fn release_focus(&self) {
+        if let Some(engine) = self.engine() { engine.release_focus() }
+    }
+
     pub(super) fn focus_address(&self, window: &mut Window, cx: &mut App) {
         self.address.update(cx, |input, cx| input.focus(window, cx));
     }
@@ -190,9 +196,6 @@ impl Render for BrowserPanel {
             .disabled(!ready || self.page.url.is_none())
             .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.reload() }));
         let address = div().flex_1().min_w_0()
-            // O foco da GPUI pode já estar na barra enquanto a página nativa segura o do sistema: sem troca, o
-            // `on_focus` não dispara, então o clique também devolve.
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| if let Some(engine) = this.engine() { engine.release_focus() }))
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
                 .when(self.page.loading, |el| el.suffix(chrome::Spinner::new("browser-loading", IconName::LoaderCircle, px(12.), theme::muted()))));
