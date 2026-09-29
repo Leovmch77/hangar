@@ -14,7 +14,7 @@ import sys
 import tomllib
 from urllib.parse import urlsplit
 
-from app.codex_arquivos import editar_config
+from app.codex_arquivos import backup, editar_config
 from app.codex_compat import adaptar_hooks_plugin, normalizar_hooks
 from app.codex_contas import Account
 from app.codex_importador import CodexNativo, CodexNativoErro
@@ -364,6 +364,14 @@ async def _ensure_marketplace(native, entry: dict, plugin: dict,
                 raise
             # Clone que o config perdeu: o `add` recusa pra sempre e cada preparo pagava um clone
             # de rede em vão. O `remove` nativo apaga o clone órfão; o `add` volta a funcionar.
+            # Só é órfão se o config.toml não o declara: a listagem pode esconder um registrado.
+            config_path = target_account.home / "config.toml"
+            raw = config_path.read_bytes() if config_path.is_file() else None
+            declared = tomllib.loads(raw.decode("utf-8")).get("marketplaces", {}) if raw else {}
+            if not isinstance(declared, dict) or name in declared:
+                raise
+            if raw is not None:
+                backup(config_path, raw, _private_dir(target_account) / "backups")
             await native.cli(["plugin", "marketplace", "remove", name, "--json"])
             await native.cli(args)
         current = _marketplace_map(await _marketplaces(native))

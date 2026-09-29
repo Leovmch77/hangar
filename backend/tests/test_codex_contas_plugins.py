@@ -283,6 +283,29 @@ async def test_clone_orfao_do_marketplace_e_removido_e_readicionado(contas, fake
                         ["plugin", "marketplace", "add"]]
 
 
+async def test_marketplace_declarado_no_config_nunca_e_removido(contas, fake_native, monkeypatch):
+    _, source, target, marketplace = contas
+    source_state = FakeNative.states[str(source.home)]
+    source_state["marketplaces"] = [{
+        "name": "accounts-local", "root": str(marketplace),
+        "marketplaceSource": {"sourceType": "local", "source": str(marketplace)},
+    }]
+    source_state["plugins"] = [_entry(marketplace)]
+    FakeNative.states[str(target.home)]["orphan"] = True
+    (target.home / "config.toml").write_text(
+        '[marketplaces.accounts-local]\nsource_type = "git"\nsource = "https://x/y"\n', encoding="utf-8")
+
+    async def listagem_sem_ele(native):
+        return []
+
+    monkeypatch.setattr("app.codex_contas_plugins._marketplaces", listagem_sem_ele)
+
+    result = await sync_plugins(source, target, {})
+
+    assert any(issue["code"] == "codex_account_plugin_marketplace_add_failed" for issue in result["issues"])
+    assert not any(call[2][:3] == ["plugin", "marketplace", "remove"] for call in FakeNative.calls)
+
+
 async def test_plugin_remote_ja_instalado_nao_exige_marketplace_homonimo(contas, fake_native):
     _, source, target, _ = contas
     remote = {
