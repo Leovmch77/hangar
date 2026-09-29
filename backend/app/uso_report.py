@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections import defaultdict
 from dataclasses import replace
@@ -392,7 +393,10 @@ def report(period: str = "all", now: datetime | None = None, fresco: bool = Fals
            **filtros) -> UsoReport:
     """Levanta `costs_sources.Aquecendo` enquanto a primeira coleta da subida não terminou.
     `filtros`: conta, projeto, modelo, plugin, foco (ver `montar`)."""
-    uso, tokens = coletar_uso(fresco=fresco)
+    now = now or datetime.now(LOCAL)
+    dias = costs.PERIODOS.get(period)
+    uso, tokens = coletar_uso(fresco=fresco, desde=(now - timedelta(days=dias - 1)).strftime("%Y-%m-%d")
+                              if dias else None)
     return montar(uso, tokens, period=period, now=now, origens=_origens_recentes(), **filtros)
 
 
@@ -401,8 +405,21 @@ _origens_cache: tuple[float, dict[str, str]] = (float("-inf"), {})
 
 
 def _origens_recentes() -> dict[str, str]:
-    # A varredura desce no cache de plugins inteiro; filtro e detalhe pedem o relatório de novo.
+    """A varredura desce no cache de plugins inteiro (segundos); filtro e detalhe pedem o
+    relatório de novo. Vencida, o pedido leva a anterior e a nova sai atrás; só o primeiro
+    pedido do processo espera."""
     global _origens_cache
-    if time.monotonic() - _origens_cache[0] > _ORIGENS_TTL_S:
+    if _origens_cache[0] == float("-inf"):
         _origens_cache = (time.monotonic(), origens_de_skill())
+    elif time.monotonic() - _origens_cache[0] > _ORIGENS_TTL_S:
+        _origens_cache = (time.monotonic(), _origens_cache[1])
+        threading.Thread(target=_atualizar_origens, name="uso-origens", daemon=True).start()
     return _origens_cache[1]
+
+
+def _atualizar_origens() -> None:
+    global _origens_cache
+    try:
+        _origens_cache = (time.monotonic(), origens_de_skill())
+    except Exception:
+        _log.warning("uso: origem das skills não atualizada", exc_info=True)

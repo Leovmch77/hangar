@@ -167,6 +167,10 @@ _lock = threading.Lock()
 _cat: dict[str, Rate] | None = None
 _overrides: dict[str, dict] | None = None
 _minusculas: dict[str, str] | None = None
+# Memo por id de modelo: os relatórios perguntam o mesmo punhado de modelos dezenas de milhares
+# de vezes. Depende só do catálogo e dos overrides, então some junto com eles.
+_canon: dict = {}
+_tarifas: dict = {}
 
 
 def invalidar_cache() -> None:
@@ -175,6 +179,8 @@ def invalidar_cache() -> None:
         _cat = None
         _overrides = None
         _minusculas = None
+        _canon.clear()
+        _tarifas.clear()
 
 
 def catalogo_de_bruto(bruto: dict) -> dict[str, Rate]:
@@ -266,6 +272,19 @@ def canonizar(model: str) -> str:
     'deepseek/deepseek-v4-flash' — forma que EXISTE no catálogo (mesmo mecanismo de chave dupla).
     O laço tem teto porque a lista de prefixos é finita e cada volta encurta a string.
     """
+    try:
+        return _canon[model]
+    except (KeyError, TypeError):
+        pass
+    cat = _carregar()
+    r = _canonizar(model)
+    # Catálogo trocado no meio (download de fundo): não memoriza a resposta velha.
+    if isinstance(model, str) and _cat is cat:
+        _canon[model] = r
+    return r
+
+
+def _canonizar(model: str) -> str:
     m = (model or "").strip()
     base = m
     mudou = True
@@ -292,6 +311,18 @@ def canonizar(model: str) -> str:
 
 
 def rate_for(model: str) -> Rate | None:
+    try:
+        return _tarifas[model]
+    except (KeyError, TypeError):
+        pass
+    cat, ov = _carregar(), _carregar_overrides()
+    r = _rate_for(model)
+    if isinstance(model, str) and _cat is cat and _overrides is ov:
+        _tarifas[model] = r
+    return r
+
+
+def _rate_for(model: str) -> Rate | None:
     if (model or "").strip() in IGNORADOS:
         return None
     mid = canonizar(model)
