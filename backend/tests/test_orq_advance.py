@@ -485,8 +485,12 @@ def test_subagent_review_opens_only_the_executor(tmp_path):
 def test_born_on_another_model_fails_once_and_is_not_retried(tmp_path):
     d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"), contract=CONTRACT)
     e = {**with_molds(tmp_path, e), "FAKE_BORN_MODEL": "sonnet"}
+    root = tmp_path.resolve()
+    # What exists already is named, so the arbiter can finish or clean by hand.
     assert run(e, "advance").stdout.strip() == (
-        "failed open T1: born wrong: w-t1: born on model sonnet, row says opus[1m]")
+        "failed open T1: born wrong: w-t1: born on model sonnet, row says opus[1m]. "
+        f"Left behind (finish or clean by hand): session w-t1 in {root / 'repo'}; "
+        "task_inicio NOT recorded; no kick-off written")
     run(e, "advance")
     assert len([m for m in sent(log) if m.startswith("--new ")]) == 1
     assert [(x["passo"], x["task"]) for x in events(d) if x["tipo"] == "advance_falhou"] == [("open", 1)]
@@ -517,14 +521,33 @@ def test_full_proof_batch_is_announced_once_its_tasks_are_integrated(tmp_path):
     assert any("[painel: orquestrador g1] [decisao] Proof batch ready — lote 1: T1" in m for m in sent(log))
 
 
-def test_team_table_reads_like_the_backend():
+CONTRACT6 = """## Quem é quem
+
+| papel | sessão | provider | conta | modelo | esforço |
+|---|---|---|---|---|---|
+| **árbitro** | arb | claude | padrao | opus[1m] | high |
+| **executor** | `w-t*` | Claude | **200-01** | - | — |
+| revisor | w-rev-* | claude | padrao | sonnet | high |
+"""
+CONTRACT7 = """## Quem é quem
+
+| papel | vez | sessão | provider | conta | modelo | esforço |
+|---|---|---|---|---|---|---|
+| árbitro | - | arb | claude | padrao | opus[1m] | high |
+| **executor** | 1 | **w-a-t*** | claude | 200-01 | opus[1m] | medium |
+| executor | 2 | w-b-t* | codex | `openai-codex` | gpt-6-sol | high |
+"""
+
+
+@pytest.mark.parametrize("contract", [CONTRACT, CONTRACT6, CONTRACT7])
+def test_team_table_reads_like_the_backend(contract):
     from app import orq_papeis
     m = orq_mod()
     ours = [(x["papel"], x["vez"], x["sessao"], x["provider"].lower(), x["conta"], x["modelo"], x["esforco"])
-            for x in m.team_rows(CONTRACT)]
+            for x in m.team_rows(contract)]
     theirs = [(p.papel, p.vez, p.sessao, p.provider, p.conta, p.modelo, p.esforco)
-              for p in orq_papeis.ler(CONTRACT)]
-    assert ours == theirs
+              for p in orq_papeis.ler(contract)]
+    assert ours and ours == theirs
 
 
 def test_role_row_rotation_risk_names_and_flags(monkeypatch):
@@ -537,6 +560,8 @@ def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     with pytest.raises(m.OrqError):
         m.role_row(rows, "executor", 5, "")
     assert [m.session_name("w-t*", 4), m.session_name("w-review", 4)] == ["w-t4", "w-review-t4"]
+    # The name the backend gives the session (app/names.py), not the one asked for.
+    assert [m.session_name("revisão-t*", 4), m.session_name("rev x", 4)] == ["revisao-t4", "rev-x-t4"]
     # The backend refuses a session without terminal and read-only together: headless wins.
     assert m.open_flags({"provider": "claude", "abertura": "--headless"}, True) == ["--provider", "claude", "--headless"]
 
@@ -558,3 +583,49 @@ def test_the_real_molds_render_with_the_twelve_keys(role, monkeypatch):
     text = m.render_kickoff(role, {k: f"<{k}>" for k in keys})
     assert "{" not in text and "}" not in text
     assert "<task>" in text and "<untouchables>" in text
+
+
+def test_accented_session_pattern_opens_under_the_backend_name(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"),
+                            contract=CONTRACT.replace("w-rev-*", "revisão-t*"))
+    e = with_molds(tmp_path, e)
+    assert run(e, "advance").stdout.splitlines() == ["opened T1: w-t1 + revisao-t1"]
+    assert [m.split()[1] for m in sent(log) if m.startswith("--new ")] == ["w-t1", "revisao-t1"]
+    assert [x["par"] for x in events(d) if x["tipo"] == "task_inicio"] == ["revisao-t1"]
+    assert any(m.startswith("revisao-t1 [painel: orquestrador g1] REVISOR T1") for m in sent(log))
+
+
+def test_a_task_whose_opening_failed_still_holds_its_paralelo_slot(tmp_path):
+    d, r, g, e, log = start(tmp_path, contract=CONTRACT)
+    e = with_molds(tmp_path, e)
+    # plan-check keeps a wave within Paralelo; a plan edited after the stamp is what gets past it.
+    plan = tmp_path / "plan.orq.md"
+    plan.write_text(plan.read_text() + "| 3 | third | §3 | `c.txt` | `true` | 1 | low | — |\n")
+    with (d / "eventos.jsonl").open("a") as f:   # the arbiter may open T1 by hand at any time
+        f.write(json.dumps({"ts": "2026-09-28T10:00:00-03:00", "tipo": "advance_falhou",
+                            "passo": "open", "task": 1, "motivo": "x"}) + "\n")
+    assert run(e, "advance").stdout.splitlines() == ["opened T2: w-t2 + w-rev-2"]
+
+
+def test_prove_born_reads_the_sidecar_then_the_pane(tmp_path, monkeypatch):
+    m = orq_mod()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    row = {"provider": "claude", "modelo": "opus[1m]"}
+    side = tmp_path / ".hangar" / "claude-headless"
+    side.mkdir(parents=True)
+    (side / "s1.json").write_text(json.dumps({"provider": "codex", "model": "gpt-6-sol"}))
+    assert m.prove_born("s1", row) == "s1: born on codex, row says claude"
+    pane = {"rc": 0, "out": "claude --session-id u --model claude-opus-5-5\n"}
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, pane["rc"], pane["out"], "")
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    assert m.prove_born("s2", row) is None
+    assert calls[-1][:2] == ["tmux", "display"] and "=s2:" in calls[-1]
+    assert m.prove_born("s2", {"provider": "codex", "modelo": "gpt-6-sol"}).startswith(
+        "s2: pane started `claude --session-id u")
+    pane["rc"] = 1
+    assert m.prove_born("s2", row) == "s2: no sidecar and no tmux pane to prove what was born"

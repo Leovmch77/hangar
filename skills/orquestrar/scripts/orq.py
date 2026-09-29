@@ -1390,13 +1390,13 @@ def _wake(d: Path, text: str, line: str, task: int | None = None, kind: str = "w
 def _fail(d: Path, passo: str, task: int | None, err: str) -> str:
     """A step that broke: recorded and the arbiter woken, once. Callers skip a (step, Task) that
     already failed, so it never repeats in a loop."""
-    ev = {"tipo": "advance_falhou", "passo": passo, "motivo": err[:500]}
+    ev = {"tipo": "advance_falhou", "passo": passo, "motivo": err[:1200]}
     if task is not None:
         ev["task"] = task
     event_append(d, ev)
     where = passo + (f" T{task}" if task is not None else "")
     try:
-        _wake(d, f"[decisao] orq advance failed at {where}: {err[:300]}. It will not retry this "
+        _wake(d, f"[decisao] orq advance failed at {where}: {err[:1200]}. It will not retry this "
                  "step: do it by hand or take it to the user.",
               f"falhou ao {PASSO_PT[passo]}" + (f" a T{task}" if task is not None else "")
               + f": {err[:200]}", task, kind="failed")
@@ -1673,6 +1673,9 @@ def _norm(cell: str) -> str:
     return re.sub(r"\s+", " ", "".join(c for c in s if not unicodedata.combining(c))).lower()
 
 
+TEAM_KEYS = ("papel", "vez", "sessao", "provider", "conta", "modelo", "esforco", "janela", "abertura")
+
+
 def team_rows(text: str) -> list[dict]:
     """`## Quem é quem`, read as backend/app/orq_papeis.py reads it: orq stays stdlib and runs
     outside the backend. Keys without accents, `-` read as empty."""
@@ -1683,9 +1686,10 @@ def team_rows(text: str) -> list[dict]:
     head = [_norm(c) for c in cells(lines[0])]
     out = []
     for l in lines[2:]:
-        vals = [c.strip("`").strip() for c in cells(l)]
-        row = {h: ("" if v in ("-", "—") else v) for h, v in zip(head, vals)}
-        if row.get("papel"):
+        # orq_md.limpar: bold, then backticks; `-` is empty.
+        vals = [re.sub(r"^\*\*(.*)\*\*$", r"\1", c).strip().strip("`").strip() for c in cells(l)]
+        row = dict.fromkeys(TEAM_KEYS, "") | {h: ("" if v in ("-", "—") else v) for h, v in zip(head, vals)}
+        if row["papel"]:
             out.append(row)
     return out
 
@@ -1712,7 +1716,11 @@ def session_name(pattern: str, n: int) -> str:
     a wave never share a session."""
     if not pattern:
         raise OrqError("a row without a session name")
-    return pattern.replace("*", str(n)) if "*" in pattern else f"{pattern}-t{n}"
+    raw = pattern.replace("*", str(n)) if "*" in pattern else f"{pattern}-t{n}"
+    # backend/app/names.py: the name the session really gets, so events, sends and the sidecar
+    # lookup all use it.
+    ascii_name = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Za-z0-9_-]", "-", ascii_name.strip()).strip("-")
 
 
 def open_flags(row: dict, read_only: bool) -> list[str]:
@@ -1806,23 +1814,39 @@ def _open_task(d: Path, cfg: dict, pj: dict, t: dict) -> str:
     # Rendered before anything opens: a broken mold costs no session.
     kicks = [(role, target, render_kickoff(role, ctx))
              for role, target in (("revisor", rev), ("executor", ex)) if target != SUBAGENT]
-    if wave:
-        git(repo, "worktree", "add", cwd, "-b", branch, base)
-        journal_append(d, f"T{n} worktree {cwd}, branch {branch}, base {base[:12]}")
-    for name, row, read_only in ((ex, ex_row, False), (rev, rev_row, True)):
-        if row is None:
-            continue
-        hangar_new(name, cwd, open_flags(row, read_only))
-        why = prove_born(name, row)
-        if why:
-            raise OrqError(f"born wrong: {why}")
-    ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": title, "executor": ex, "par": rev})
-    journal_append(d, _event_line(ev))
-    for role, target, text in kicks:
-        path = d / "kickoffs" / f"task{n}-{role}.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        _say(d, target, text)
+    made: list[str] = []
+    recorded = False
+    try:
+        if wave:
+            git(repo, "worktree", "add", cwd, "-b", branch, base)
+            made.append(f"worktree {cwd} on branch {branch}")
+            journal_append(d, f"T{n} worktree {cwd}, branch {branch}, base {base[:12]}")
+        for name, row, read_only in ((ex, ex_row, False), (rev, rev_row, True)):
+            if row is None:
+                continue
+            hangar_new(name, cwd, open_flags(row, read_only))
+            made.append(f"session {name} in {cwd}")
+            why = prove_born(name, row)
+            if why:
+                raise OrqError(f"born wrong: {why}")
+        ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": title, "executor": ex, "par": rev})
+        recorded = True
+        journal_append(d, _event_line(ev))
+        for role, target, text in kicks:
+            path = d / "kickoffs" / f"task{n}-{role}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            made.append(f"kick-off {path} (not yet sent to {target})")
+            _say(d, target, text)
+            made[-1] = f"kick-off {path} sent to {target}"
+    except (OrqError, OSError, ValueError, subprocess.SubprocessError) as e:
+        if not made and not recorded:
+            raise
+        # Like _send_after_event: the arbiter finishes or undoes by hand, knowing what exists.
+        left = [x for x in made if not x.startswith("kick-off")]
+        left.append("task_inicio recorded" if recorded else "task_inicio NOT recorded")
+        left += [x for x in made if x.startswith("kick-off")] or ["no kick-off written"]
+        raise OrqError(f"{e}. Left behind (finish or clean by hand): {'; '.join(left)}") from None
     who = [f"{name} ({row.get('provider') or 'claude'}, {row.get('modelo') or 'modelo padrão'})"
            for name, row in ((ex, ex_row), (rev, rev_row)) if row]
     timeline(d, "advance", f"T{n}: abriu {' e '.join(who)} e entregou o kick-off", n)
@@ -1842,7 +1866,9 @@ def _open_ready(d: Path, cfg: dict, acts: list[str]) -> None:
     wave = next((w for w in waves if any(t["n"] not in done for t in tasks if in_wave(t, w))), None)
     if wave is None:
         return
-    room = (pj.get("paralelo") or 1) - len(started - done)
+    # A failed opening keeps its slot: the arbiter may open it by hand at any time.
+    failed = {ev.get("task") for ev in evs if ev.get("tipo") == "advance_falhou" and ev.get("passo") == "open"}
+    room = (pj.get("paralelo") or 1) - len((started | failed) - done)
     for t in tasks:
         if room <= 0:
             return
