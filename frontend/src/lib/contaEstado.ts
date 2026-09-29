@@ -4,8 +4,8 @@
 // lib/api.ts está fechado neste lote: o fetch segue o MESMO padrão dele (authHeaders +
 // ensureOk com 401 → dropActiveServer + reload), sem tocar no arquivo. `errorDetail` vem de
 // api.ts, que é exportado — importar não é editar.
-import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { errorDetail } from '@hangar/core';
+import { getBaseUrl, getToken, dropActiveServer, isActiveInvite, type Server } from './auth';
+import { errorDetail, inviteAllows } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 export type EstadoLogin = {
@@ -62,6 +62,11 @@ async function reqEm<T>(s: Server, path: string): Promise<T> {
 
 // Uma porta só pros exportados: alvo null = servidor ativo (é o contrato do apiTarget).
 function em<T>(alvo: Server | null, path: string): Promise<T> {
+  // Este fetch não passa pela trava de convite do core: sem ela, o relógio das cotas batia no dono.
+  if ((alvo ? alvo.invite === true : isActiveInvite()) && !inviteAllows(path)) {
+    return Promise.reject(Object.assign(new Error(m.erro_fora_do_convite()),
+      { status: 403, code: 'erro_fora_do_convite' }));
+  }
   return alvo ? reqEm<T>(alvo, path) : req<T>(path);
 }
 
