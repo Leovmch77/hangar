@@ -278,22 +278,29 @@ impl<P: Page> Controller<P> {
         }
         if target == "--idle" { self.enable("Network").await?; }
         let needle = args.get(1).map(String::as_str).unwrap_or("");
+        // Conta o tempo das checagens além das pausas: página presa num laço de JS não responde ao
+        // evaluate, e sem teto o verbo seguraria a vez de todos os outros.
         let mut waited = 0;
         while waited < WAIT_MS {
-            let hit = match target {
-                t if t.starts_with('@') => { self.snapshot().await?; self.state.borrow().refs.contains_key(t) }
-                "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle)),
-                "--text" => self.value("document.body.innerText").await?.as_str().is_some_and(|u| u.contains(needle)),
-                // Rede parada (contador zero e 500 ms sem resposta) e documento completo.
-                "--idle" => {
-                    let quiet = { let s = self.state.borrow(); s.inflight == 0 && s.last_network.elapsed().as_millis() > 500 };
-                    quiet && self.value("document.readyState").await?.as_str() == Some("complete")
-                }
-                _ => false,
+            let check = async {
+                Ok::<_, String>(match target {
+                    t if t.starts_with('@') => { self.snapshot().await?; self.state.borrow().refs.contains_key(t) }
+                    "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle)),
+                    "--text" => self.value("document.body.innerText").await?.as_str().is_some_and(|u| u.contains(needle)),
+                    // Rede parada (contador zero e 500 ms sem resposta) e documento completo.
+                    "--idle" => {
+                        let quiet = { let s = self.state.borrow(); s.inflight == 0 && s.last_network.elapsed().as_millis() > 500 };
+                        quiet && self.value("document.readyState").await?.as_str() == Some("complete")
+                    }
+                    _ => false,
+                })
             };
-            if hit { return Ok(format!("ok: wait {joined}")); }
+            let t0 = Instant::now();
+            let Some(hit) = self.within(WAIT_MS.saturating_sub(waited), check).await else { break };
+            if hit? { return Ok(format!("ok: wait {joined}")); }
+            let spent = t0.elapsed().as_millis() as u64;
             self.page.sleep(POLL_MS).await;
-            waited += POLL_MS;
+            waited += POLL_MS + spent;
         }
         Ok(format!("erro: wait {joined} nao aconteceu em {WAIT_MS}ms"))
     }
@@ -377,16 +384,17 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
 
-    struct Fake { calls: RefCell<Vec<(String, Value)>>, answer: Box<dyn Fn(&str, &Value) -> Result<Value, String>> }
+    /// `stuck`: método que nunca responde, como página presa num laço de JS.
+    struct Fake { calls: RefCell<Vec<(String, Value)>>, answer: Box<dyn Fn(&str, &Value) -> Result<Value, String>>, stuck: &'static str }
     impl Page for Fake {
         fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> {
             self.calls.borrow_mut().push((method.into(), params.clone()));
-            std::future::ready((self.answer)(method, &params))
+            if method == self.stuck { Either::Left(std::future::pending()) } else { Either::Right(std::future::ready((self.answer)(method, &params))) }
         }
         fn sleep(&self, _: u64) -> impl Future<Output = ()> { std::future::ready(()) }
     }
     fn ctl(answer: impl Fn(&str, &Value) -> Result<Value, String> + 'static) -> Controller<Fake> {
-        Controller::new(Fake { calls: RefCell::default(), answer: Box::new(answer) })
+        Controller::new(Fake { calls: RefCell::default(), answer: Box::new(answer), stuck: "" })
     }
     fn text(r: Reply) -> String { match r { Reply::Text(t) => t, Reply::Png(_) => "png".into() } }
     fn methods(c: &Controller<Fake>) -> Vec<String> { c.page.calls.borrow().iter().map(|(m, _)| m.clone()).collect() }
@@ -482,6 +490,12 @@ mod tests {
         let c = ctl(|_, _| Ok(json!({"result": {"value": "http://a/"}})));
         assert_eq!(text(block_on(c.run("wait", &s(&["--url", "/done"])))), "erro: wait --url /done nao aconteceu em 15000ms");
         assert_eq!(text(block_on(c.run("wait", &s(&["300"])))), "ok: wait 300ms");
+    }
+
+    #[test]
+    fn wait_gives_up_when_the_page_never_answers() {
+        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "Runtime.evaluate" });
+        assert_eq!(text(block_on(c.run("wait", &s(&["--text", "x"])))), "erro: wait --text x nao aconteceu em 15000ms");
     }
 
     #[test]
