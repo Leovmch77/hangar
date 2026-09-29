@@ -627,6 +627,7 @@ import * as m from '../paraglide/messages';
               sendError={sendErrors.get(key) ?? ''}
               onSendError={(m) => setSendError(key, m)}
               onOpen={() => onOpenSession(row.name, row.serverId)}
+              onOpenArbiter={(n) => onOpenSession(n, row.serverId)}
               onGatherPair={row.pair_gid ? () => gatherPair(key, gkeyOf(row)!) : null}
               onLeavePair={canLeave(row) ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
             />

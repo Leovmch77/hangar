@@ -8,7 +8,7 @@ import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
   clusterByPair, countAwaiting, effectiveGroupBy, groupRemotePairs, groupSelectedByServer, projectKey, projectLabel, providerName,
-  sortSessions, type GroupBy, type PairRow,
+  isOrq, sortSessions, type GroupBy, type PairRow,
 } from '@hangar/core';
 import type { AggSession, ResumeCandidate, State } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -170,7 +170,8 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   const allSessions = $derived(allGroups.flatMap((g) => g.sessions));
   const showFilter = $derived(allSessions.length > FILTER_FROM);
   const filterEmpty = $derived(filterText.trim() !== '' && groups.length === 0);
-  const showProviderTags = $derived(new Set(rows.map((s) => providerName(s.provider))).size > 1);
+  // A linha do orquestrador não é um agente: sozinha, ela faria toda linha Claude ganhar o glifo.
+  const showProviderTags = $derived(new Set(rows.filter((s) => !isOrq(s)).map((s) => providerName(s.provider))).size > 1);
   const awaitingTotal = $derived(countAwaiting(allSessions));
 
   function pairMembers(gid: string): AggSession[] {

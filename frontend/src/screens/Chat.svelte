@@ -86,7 +86,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
-  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors } from '@hangar/core';
+  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors, isOrq } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
   import * as diag from '../lib/diag';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
@@ -921,6 +921,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // "claude" e o caso comum e some do header; os demais ganham badge (providerBadge abaixo) e o
   // "codex" alem disso esconde controles Claude-only.
   const sessionProvider = $derived(allSessions.find((s) => s.name === sessionName)?.provider);
+  // Orquestrador sem LLM: não recebe texto nem interrupção. O rodapé leva ao árbitro atual.
+  const orqSession = $derived(isOrq({ provider: sessionProvider }));
+  const orqArbiter = $derived(allSessions.find((s) => s.name === sessionName)?.orq_arbiter ?? null);
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
   // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
@@ -3190,6 +3193,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       <div class="dead-footer">
         <p class="dead-text">{m.chat_sessao_encerrada()}</p>
         <button class="back-btn" onclick={onBack}>{'← '}{m.comum_voltar()}</button>
+      </div>
+    {:else if orqSession}
+      <!-- Mesmo desenho do rodapé de sessão encerrada: o foco de teclado do resize
+           já procura `.dead-footer .back-btn`, e aqui ele cai no botão do árbitro. -->
+      <div class="dead-footer orq-footer">
+        <p class="dead-text">{m.orq_row_badge()}</p>
+        <button class="back-btn" disabled={!orqArbiter}
+                onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
       </div>
     {:else}
       <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor

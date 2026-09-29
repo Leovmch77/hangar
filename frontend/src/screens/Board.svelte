@@ -170,6 +170,7 @@
                 sendError={sendErrors.get(rowKey(row)) ?? ''}
                 onSendError={(m) => setSendError(rowKey(row), m)}
                 onOpen={() => onOpenSession(row.name, row.serverId)}
+                onOpenArbiter={(n) => onOpenSession(n, row.serverId)}
                 onLeavePair={canLeave(row) ? () => arrastarGrupo.pedirSaida({ serverId: row.serverId, name: row.name }) : null}
               />
             </div>

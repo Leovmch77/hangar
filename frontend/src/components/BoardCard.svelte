@@ -11,7 +11,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   } from '@hangar/core';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { keepWarmMic, takeWarmMic } from '../lib/warmMic';
-  import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag } from '@hangar/core';
+  import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag, isOrq } from '@hangar/core';
   import { parseStatusLine } from '@hangar/core';
   import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
   import { loopBadge, LOOP_TONE_COLOR, type ChatEvent } from '@hangar/core';
@@ -47,11 +47,13 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     // Canvas: botão de sair do grupo — lá não existe área neutra pra soltar e pedir saída (a
     // Sidebar/Board usam o fundo da lista/coluna). Opcional: sem prop, o botão não aparece.
     onLeavePair?: (() => void) | null;
+    // Linha do orquestrador sem LLM: o rodapé troca o campo por um botão que abre o árbitro.
+    onOpenArbiter?: ((name: string) => void) | null;
   }
   let {
     session, server, color, draft, onDraftChange,
     pending, updatePending, sendError, onSendError, onOpen, fill = false, onGatherPair = null,
-    onLeavePair = null,
+    onLeavePair = null, onOpenArbiter = null,
   }: Props = $props();
 
   const TAIL = 15;
@@ -559,7 +561,12 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
   <!-- `tracked === false` = claude aberto sem --session-id: transcript não rastreável, não recebe
        input. (Sem checar `dead`: esta lista nunca traz esse estado — ver COLS no Board.) -->
-  {#if session.tracked !== false}
+  {#if isOrq(session)}
+    <footer class="bc-foot">
+      <button class="bc-arbiter" disabled={!session.orq_arbiter || !onOpenArbiter}
+              onclick={() => { if (session.orq_arbiter) onOpenArbiter?.(session.orq_arbiter); }}>{m.orq_talk_to_arbiter()}</button>
+    </footer>
+  {:else if session.tracked !== false}
     <footer class="bc-foot">
       {#if meta?.model || meta?.ctxPct != null}
         <div class="bc-meta">
@@ -871,4 +878,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .bc-foot textarea:focus { border-color: var(--accent); outline: none; }
   .bc-send { width: 28px; border-radius: var(--radius-md); border: 0; background: var(--accent); color: var(--text-inverse); cursor: pointer; }
   .bc-send:disabled { opacity: 0.4; cursor: default; }
+  .bc-arbiter {
+    min-height: 32px; border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer;
+  }
+  .bc-arbiter:hover:not(:disabled) { background: var(--bg-hover); }
+  .bc-arbiter:disabled { opacity: 0.4; cursor: default; }
 </style>

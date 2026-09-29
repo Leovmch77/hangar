@@ -1033,3 +1033,38 @@ it.each(['none', 'server'] as const)('convite encerrado aparece como encerrado, 
     storeState.byServer.splice(0, Infinity, ...previous.byServer);
   }
 });
+
+describe('Sidebar — linha do orquestrador sem LLM', () => {
+  function comOrq() {
+    storeState.servers.length = 0;
+    storeState.servers.push({ id: 'srv-a', label: 'Servidor A', baseUrl: 'http://a', token: 'x' });
+    storeState.byServer.length = 0;
+    storeState.byServer.push({
+      server: { id: 'srv-a', label: 'Servidor A' },
+      sessions: [{ name: 'g1-orq', serverId: 'srv-a', state: 'idle', provider: 'orq', orq_arbiter: 'arb' }],
+      error: null, loaded: true,
+    });
+  }
+
+  it('mostra o selo na linha', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    expect(document.querySelector('.orq-badge')?.textContent?.trim()).toBe(m.orq_row_badge());
+    unmount(t.comp);
+  });
+
+  it('botão direito (e o menu das abas) não abre renomear/fechar', async () => {
+    comOrq();
+    const t = montar();
+    await tick();
+    sidebarBridge.openSessionMenu(
+      new MouseEvent('contextmenu', { clientX: 5, clientY: 5 }),
+      { name: 'g1-orq', serverId: 'srv-a', provider: 'orq' } as unknown as AggSession,
+      'srv-a',
+    );
+    await tick();
+    expect(document.querySelector('.ctx-menu')).toBeNull();
+    unmount(t.comp);
+  });
+});

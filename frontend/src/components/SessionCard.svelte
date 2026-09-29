@@ -3,7 +3,7 @@
   import type { AggSession, SessionInfo } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
-  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen, isOrq } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
@@ -93,6 +93,8 @@ import { textoProblema } from '../lib/problema';
   const loopChip = $derived(loopBadge(session.loop_status, session.loop_iter, session.loop_max));
   // Provider da linha — só as não-Claude ganham chip (ver providerTag em lib/format).
   const provTag = $derived(providerTag(session.provider));
+  // Orquestrador sem LLM: sem renomear e sem excluir; o backend recusa os dois.
+  const orq = $derived(isOrq(session));
   // Tempo relativo da última atividade ("51 min atrás" — o "51m ago" do card do super.engineering).
   const agoLabel = $derived(session.last_reply ? '' : relativeTime(session.last_activity));
   const replyTime = $derived(relativeTime(session.last_reply_at));
@@ -277,14 +279,16 @@ import { textoProblema } from '../lib/problema';
         <span>{m.sessao_git()}</span>
       </button>
     {/if}
-    <button class="act del" onclick={onDelete} aria-label={m.sessao_aria_excluir_sessao({ n: session.name })}>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <polyline points="3 6 5 6 21 6"/>
-        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-        <path d="M10 11v6M14 11v6"/>
-      </svg>
-      <span>{m.sessao_excluir_curto()}</span>
-    </button>
+    {#if !orq}
+      <button class="act del" onclick={onDelete} aria-label={m.sessao_aria_excluir_sessao({ n: session.name })}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+        </svg>
+        <span>{m.sessao_excluir_curto()}</span>
+      </button>
+    {/if}
   </div>
 
   <div
@@ -355,6 +359,9 @@ import { textoProblema } from '../lib/problema';
         {/if}
         {#if untracked}
           <span class="untracked-badge" title={untrackedReason(session.provider)}>⚠ {m.sessao_sem_id()}</span>
+        {/if}
+        {#if orq}
+          <span class="untracked-badge orq-badge">{m.orq_row_badge()}</span>
         {/if}
         <!-- Conta no FIM DA LINHA DO NOME (paridade com a Sidebar): aqui sobra largura, e ela
              deixa de ocupar um lugar na fila de chips, que é a linha que enche primeiro. -->
@@ -492,19 +499,21 @@ import { textoProblema } from '../lib/problema';
           </svg>
         </button>
       {/if}
-      <button
-        class="kbd-only del"
-        inert={offset === OPEN}
-        onpointerdown={(e) => e.stopPropagation()}
-        onclick={(e) => { e.stopPropagation(); onDelete(); }}
-        aria-label={m.sessao_aria_excluir_sessao({ n: session.name })}
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-          <path d="M10 11v6M14 11v6"/>
-        </svg>
-      </button>
+      {#if !orq}
+        <button
+          class="kbd-only del"
+          inert={offset === OPEN}
+          onpointerdown={(e) => e.stopPropagation()}
+          onclick={(e) => { e.stopPropagation(); onDelete(); }}
+          aria-label={m.sessao_aria_excluir_sessao({ n: session.name })}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/>
+          </svg>
+        </button>
+      {/if}
       <!-- Alternativa por TOQUE SIMPLES pras acoes do swipe (WCAG 2.2 SC 2.5.7, Dragging Movements):
            quem nao completa um arrasto abre a trilha no tap. O swipe continua igual. -->
       <button
@@ -523,7 +532,7 @@ import { textoProblema } from '../lib/problema';
 <BottomSheet open={menuOpen} onClose={() => (menuOpen = false)} ariaLabel={m.sessao_aria_acoes({ n: session.name })}>
   <div class="card-menu">
     <h2 class="card-menu-title">{session.name}</h2>
-    {#if !untracked}
+    {#if !untracked && !orq}
       <button class="card-menu-item" onclick={() => menuPick(startRename)}>
         <span class="card-menu-ico" aria-hidden="true">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -546,16 +555,18 @@ import { textoProblema } from '../lib/problema';
         <span class="card-menu-label">{m.sessao_git()}</span>
       </button>
     {/if}
-    <button class="card-menu-item danger" onclick={() => menuPick(onDelete)}>
-      <span class="card-menu-ico" aria-hidden="true">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="3 6 5 6 21 6"/>
-          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-          <path d="M10 11v6M14 11v6"/>
-        </svg>
-      </span>
-      <span class="card-menu-label">{m.sessao_excluir_curto()}</span>
-    </button>
+    {#if !orq}
+      <button class="card-menu-item danger" onclick={() => menuPick(onDelete)}>
+        <span class="card-menu-ico" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6M14 11v6"/>
+          </svg>
+        </span>
+        <span class="card-menu-label">{m.sessao_excluir_curto()}</span>
+      </button>
+    {/if}
   </div>
 </BottomSheet>
 
@@ -879,6 +890,7 @@ import { textoProblema } from '../lib/problema';
     border: 1px solid var(--warning);
     white-space: nowrap;
   }
+  .untracked-badge.orq-badge { color: var(--text-muted); border-color: var(--border-subtle); }
   .row-right {
     display: flex;
     align-items: center;

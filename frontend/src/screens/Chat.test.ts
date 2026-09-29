@@ -722,3 +722,37 @@ it('rascunho do MESMO transcript é restaurado', async () => {
     await unmount(t.comp);
   }
 });
+
+// Orquestrador sem LLM: ninguém lê o que se digita ali. No lugar do Composer, um botão leva à
+// sessão do árbitro, que é quem conversa.
+it('orquestrador: sem Composer, com botão que abre o árbitro', async () => {
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', provider: 'orq', orq_arbiter: 'arb' }];
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  const onNavigateToChat = vi.fn();
+  const comp = mount(Chat, {
+    target: el,
+    props: { sessionName: 'sess', onBack: vi.fn(), onNavigateToChat, desktop: true, showContextPanel: true },
+  });
+  try {
+    await tick(); await tick();
+    expect(el.querySelector('.composer-stub')).toBeNull();
+    const btn = el.querySelector<HTMLButtonElement>('.orq-footer .back-btn');
+    expect(btn?.textContent?.trim()).toBe(m.orq_talk_to_arbiter());
+    btn!.click();
+    expect(onNavigateToChat).toHaveBeenCalledWith('arb');
+  } finally {
+    await unmount(comp as never);
+  }
+});
+
+it('orquestrador sem árbitro registrado: botão desligado', async () => {
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', provider: 'orq', orq_arbiter: null }];
+  const t = montar(true);
+  try {
+    await tick(); await tick();
+    expect(t.el.querySelector<HTMLButtonElement>('.orq-footer .back-btn')?.disabled).toBe(true);
+  } finally {
+    await unmount(t.comp);
+  }
+});

@@ -25,10 +25,10 @@ export interface LoopState {
 // pane (registry.provider_of_pane); "kimi" idem ao pi (pane tmux, transcript tardio); "omp" e o
 // oh-my-pi, fork do pi — mesmo transcript, mas a pergunta ao usuario vem da tool `ask`. O front usa
 // isto pra esconder controles Claude-only (picker de /model, slash-commands) e pra rotular a
-// sessao (lib/format.providerName).
+// sessao (lib/format.providerName). "orq" é a linha do orquestrador sem LLM (skill orquestrar-auto): só leitura, sem pane.
 // Tipo nomeado porque a mesma uniao viaja pela cadeia de criacao (CreateSessionSheet -> handleCreate
 // das duas views -> api.createSession): quando o Pi entrou, as copias literais ficaram pra tras.
-export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp';
+export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp' | 'orq';
 
 export interface SessionInfo {
   codex_account?: string | null;
@@ -87,6 +87,9 @@ export interface SessionInfo {
   pair_peers?: string[] | null; // grupo de trabalho ativo: os OUTROS membros (2 sessões = lista de 1)
   pair_gid?: string | null;     // id estável do grupo (cluster da lista agrupa por ele)
   pair_task?: string | null;    // rótulo do grupo (ex: ABC-1234) pro header do cluster
+  // Linha do orquestrador sem LLM: nome da sessão do árbitro atual, para onde o botão
+  // "Falar com o árbitro" leva. null enquanto o árbitro não está registrado.
+  orq_arbiter?: string | null;
   // Statusline crua da sessão (cache ~20s no backend) — o card do board/canvas parseia com
   // parseStatusLine (modelo/contexto no composer; ⚡5h/📅7d na RateStrip). Chat usa a versão ao vivo.
   status_line?: string | null;

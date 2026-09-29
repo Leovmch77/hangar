@@ -22,7 +22,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
   import type { SessionInfo, AggSession, Provider } from '@hangar/core';
-  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { createDragToGroup, dragChave } from '../lib/dragToGroup';
   import { updateBadge } from '../lib/badge';
@@ -399,6 +399,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
 
   function openMenu(e: MouseEvent, s: SessionInfo, serverId: string) {
     e.preventDefault();
+    // Orquestrador: nada do menu serve (renomear, fechar, git, bastão, compartilhar).
+    if (isOrq(s)) return;
     clearTimeout(pressTimer);   // cancela o long-press (senao dispararia rename junto)
     hpLeave();   // botao direito nao move o mouse: fecha a espiada pra nao ficar atras do menu
     menuOrigem = (e.currentTarget as HTMLElement | null)?.closest('.sess-row')?.querySelector('.sess-main') as HTMLElement | null;
@@ -846,7 +848,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                 : (!expanded
                   ? `${s.name} · ${srvLabel} · ${estadoTxt}${questionLabel ? ` · ${questionLabel}` : ''}${provTag ? ` · ${m.sessao_singular()} ${provTag}` : ''}`
                   : (s.tracked === false ? untrackedReason(s.provider) : m.sessao_toque_renomear()))}
-              onpointerdown={() => { if (!model.selectMode && !sidebarPin.collapsed) pressStart(rowKey); }}
+              onpointerdown={() => { if (!model.selectMode && !sidebarPin.collapsed && !isOrq(s)) pressStart(rowKey); }}
               onpointerup={pressEnd}
               onpointerleave={pressEnd}
               onpointercancel={pressEnd}
@@ -909,6 +911,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       <span class="sess-badge pending-questions" title={questionLabel} aria-label={questionLabel}>? {pendingQuestions}</span>
                     {/if}
                     {#if s.tracked === false}<span class="sess-badge" title={untrackedReason(s.provider)}>{m.sessao_sem_id()}</span>{/if}
+                    {#if isOrq(s)}<span class="sess-badge orq-badge">{m.orq_row_badge()}</span>{/if}
                     <!-- Conta e hora no FIM DA LINHA DO NOME: aqui sobra largura, e as duas juntas
                          liberam a linha da resposta inteira — que é onde a largura faltava. A conta
                          deixa de ocupar uma linha própria na fila de chips. -->
@@ -1981,6 +1984,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     flex-shrink: 0; font-size: 10px; padding: 1px 5px; border-radius: var(--radius-sm);
     background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--warning); white-space: nowrap;
   }
+  /* Identidade, não alerta: o selo do orquestrador não usa a cor de aviso do .sess-badge. */
+  .sess-badge.orq-badge { color: var(--text-muted); }
   .rail-questions { position: absolute; right: -4px; top: -4px; padding: 0 2px; }
   .sess-edit {
     flex: 1; min-width: 0; height: 38px; padding: 0 var(--space-2);
