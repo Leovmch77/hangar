@@ -117,7 +117,9 @@ async def _default_list_fn():
 async def _tick(list_fn) -> None:
     """Uma varredura: notifica quem ENTROU em stalled/limited desde a ultima vez; libera (re-arma)
     quem saiu de cada um (concerns independentes -- uma sessao pode estar nos dois, so um, ou nenhum)."""
-    infos = await list_fn()
+    # O orquestrador (provider orq) não tem processo: a linha some quando a execução termina ou
+    # o vigia para, e isso não é sessão caindo nem travando.
+    infos = [i for i in await list_fn() if getattr(i, "provider", "claude") != "orq"]
 
     # Death ping (feature #2): quem estava vivo no ciclo anterior e sumiu agora = morreu (ver docstring
     # dos sets no topo). Dispara notify_dead 1x (respeita CP_NOTIFY_DEAD) e limpa o _working_started da

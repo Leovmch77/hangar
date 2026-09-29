@@ -3899,10 +3899,14 @@ async def pair_session(name: str, body: PairBody):
     em CADA membro o prompt do grupo atualizado — a partir daí trocam recados via hangar-send por
     iniciativa própria, dentro do escopo da tarefa. Badge `pair_peers` aparece na lista."""
     others = [p for p in dict.fromkeys(body.peers or ([body.peer] if body.peer else [])) if p]
-    if not others:
+    # Sem peer só o grupo de orquestração: o árbitro do `orquestrar-auto` precisa do gid antes do
+    # `orq init`, e o time só chega depois, aberto pelo orquestrador.
+    if not others and not body.orq:
         raise HTTPException(400, detail=erro("erro_peer_nao_informado", "informe peer ou peers"))
     if name in others:
         raise HTTPException(400, detail=erro("erro_autopareamento", "não dá pra parear uma sessão com ela mesma"))
+    for n in (name, *others):
+        await asyncio.to_thread(_recusa_orq, n)
     if any(peers.is_remote(o) for o in others):
         # Cross-server é 1:1 puro (um peer remoto, sem misturar grupo local) — grupo cross-server de
         # N fica pra fase 2. ponytail: 1:1 cobre "trabalhar junto entre máquinas"; N quando doer.
@@ -3950,7 +3954,7 @@ async def pair_session(name: str, body: PairBody):
                             f"pareamento desfeito: falha ao avisar as sessões "
                             f"({'; '.join(f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs)})",
                             avisos=errs))
-    return {"ok": True, "members": members,
+    return {"ok": True, "members": members, "gid": link.get("gid"),
             "warning": erro("erro_pareamento_aviso_parcial",
                             "aviso falhou em: " + "; ".join(
                                 f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
@@ -4023,6 +4027,7 @@ async def pair_remote(name: str, body: PairRemoteBody):
     via peers.call, autenticado pelo token do peers.json."""
     if not peers.is_remote(body.initiator):
         raise HTTPException(400, detail=erro("erro_initiator_invalido", "initiator precisa ser qualificado (srv::nome)"))
+    await asyncio.to_thread(_recusa_orq, name)
     harness = {s.name: s.provider for s in await asyncio.to_thread(registry.list)}
     if name not in harness:
         raise HTTPException(404, detail=erro("erro_sessao_nao_encontrada_detalhe", f"sessão não encontrada: {name}", detalhe=name))
@@ -4532,6 +4537,7 @@ async def unpair_session(name: str):
     """`name` SAI do grupo (os demais membros continuam entre si; grupo restante de 1 dissolve).
     Avisa quem saiu e quem ficou. Idempotente. Aviso que falhar NÃO refaz o vínculo (fora do grupo
     é o estado desejado) — só reporta no result."""
+    await asyncio.to_thread(_recusa_orq, name)
     expeers = await asyncio.to_thread(pair.leave, name)   # nome próprio: 'peers' é o módulo importado
     if not expeers:
         return {"ok": True, "warning": None}

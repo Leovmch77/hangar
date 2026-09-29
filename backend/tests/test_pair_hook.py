@@ -76,3 +76,18 @@ def test_sidecar_torto_nao_trava(tmp_path):
     bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
     out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
     assert out == ""
+
+
+def test_grupo_orq_de_um_membro_reinjeta_versao_curta(tmp_path):
+    # O árbitro do orquestrar-auto nasce sozinho no grupo; depois de um /clear ele segue nele.
+    (tmp_path / "arb.json").write_text(json.dumps({"peers": [], "task": "PM-9", "gid": "g1", "orq": True}))
+    bin_ = _fake_tmux(tmp_path, "%3\tarb\n")
+    out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith("[painel: grupo de trabalho] Você está no grupo da orquestração na tarefa: PM-9.")
+
+
+def test_sidecar_sem_peers_fora_de_orq_nao_imprime_nada(tmp_path):
+    (tmp_path / "api.json").write_text(json.dumps({"peers": [], "task": "PM-9", "gid": "g1"}))
+    bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
+    assert _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"}) == ""

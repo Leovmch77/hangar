@@ -16,6 +16,8 @@
 #                                        QUALQUER posição entre os tokens de tarefa.
 #                                        --orq: grupo de orquestração (skill orquestrar); o
 #                                        pareamento não manda aviso a ninguém, o kick-off traz tudo
+#   hangar-send --pair --orq [tarefa...]  grupo de orquestração só com ESTA sessão (árbitro do
+#                                        orquestrar-auto, que nasce antes do time); imprime o gid
 #   hangar-send --unpair               tira esta sessão do grupo (só ela é avisada)
 #   hangar-send --close <sessao>       fecha OUTRA sessão desta máquina, com ou sem terminal
 #                                  (sai do grupo dela sem aviso). Nunca a própria.
@@ -287,7 +289,10 @@ if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
 fi
 
 if [[ "$1" == "--pair" ]]; then
-    peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa] [--orq]}"; shift 2
+    # `--pair --orq [tarefa...]`, sem sessão: grupo de orquestração só com esta (o `--orq` fica em "$@").
+    peer=""
+    if [[ "${2:-}" == "--orq" ]]; then shift
+    else peer="${2:?uso: hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa] [--orq] | --pair --orq [tarefa...]}"; shift 2; fi
     substituir=false
     orq=false
     tarefa=""
@@ -301,8 +306,11 @@ if [[ "$1" == "--pair" ]]; then
     # peer local (nome cru) OU remoto (servidor::sessao) — o backend local resolve o remoto via
     # peers.json + CP_SERVER_ID e registra o vínculo dos dois lados (/pair-remote). Cross-server é 1:1.
     body=$(python3 -c 'import json,sys; print(json.dumps({"peer": sys.argv[1], "task": sys.argv[2], "replace_task": sys.argv[3] == "true", "orq": sys.argv[4] == "true"}))' "$peer" "$tarefa" "$substituir" "$orq")
-    api POST "/api/sessions/$(me)/pair" "$body" >/dev/null
-    if $orq; then
+    resp=$(api POST "/api/sessions/$(me)/pair" "$body")
+    if [[ -z "$peer" ]]; then
+        gid=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("gid") or "")' "$resp")
+        echo "grupo de orquestração criado: $(me), sozinha, gid $gid (ninguém recebe aviso; o time entra depois)"
+    elif $orq; then
         echo "pareado: $(me) <-> $peer (grupo de orquestração: ninguém recebe aviso; o kick-off traz o protocolo)"
     else
         echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
