@@ -141,6 +141,33 @@ def _run(client, monkeypatch, cwd, command, name="s", **extra):
                        headers=_auth())
 
 
+def _wait_for(fn, timeout=5.0):
+    limit = time.monotonic() + timeout
+    while time.monotonic() < limit:
+        value = fn()
+        if value:
+            return value
+        time.sleep(0.1)
+    return fn()
+
+
+def _run_hangar(client, monkeypatch, cwd, command, key="global:k1", name="s", **extra):
+    return _run(client, monkeypatch, cwd, command, name=name, runs_in="hangar", key=key, **extra)
+
+
+def _hangar(client):
+    return client.get("/api/hangar-terminals", headers=_auth()).json()["terminals"]
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    # Todo teste No Hangar roda com a home falsa: o padrao e rodar na home e nao pode escrever na real.
+    path = tmp_path / "casa"
+    path.mkdir()
+    monkeypatch.setenv("HOME", str(path))
+    return path
+
+
 def test_shell_runs_in_session_cwd_and_returns_its_terminal(client, monkeypatch, tmp_path, private_tmux):
     monkeypatch.setenv("SHELL", "/bin/sh")
     r = _run(client, monkeypatch, tmp_path, "pwd > prova.txt", label="Onde")
@@ -196,6 +223,164 @@ def test_list_is_per_session_and_label_falls_back_to_command(client, monkeypatch
     assert [t["label"] for t in listed] == ["Primeiro", "sleep 31"]
     assert all(t["alive"] and t["exit_code"] is None and t["created"] > 0 for t in listed)
     assert len(client.get("/api/sessions/b/shortcut-terminals", headers=_auth()).json()["terminals"]) == 1
+
+
+def test_hangar_second_click_from_other_session_reuses_the_copy(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    first = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="a", label="RDP").json()
+    second = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="b", label="RDP").json()
+    assert first["reused"] is False and second["reused"] is True
+    assert second["terminal"]["id"] == first["terminal"]["id"]
+    assert [(t["id"], t["owner"], t["key"], t["origin"], t["alive"]) for t in _hangar(client)] == [
+        (first["terminal"]["id"], "", "global:k1", "a", True)]
+
+
+def test_hangar_concurrent_clicks_start_one_copy(client, monkeypatch, tmp_path, private_tmux):
+    from concurrent.futures import ThreadPoolExecutor
+    from app import shortcut_terminals
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    with ThreadPoolExecutor(4) as pool:
+        results = list(pool.map(
+            lambda i: shortcut_terminals.start_hangar("global:k1", str(tmp_path), "sleep 30", "RDP", {}, f"s{i}", True),
+            range(4)))
+    assert len({term["id"] for term, _ in results}) == 1
+    assert sorted(reused for _, reused in results) == [False, True, True, True]
+
+
+def test_hangar_terminal_is_outside_the_session(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api, shortcut_terminals
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    ident = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="a").json()["terminal"]["id"]
+    assert client.get("/api/sessions/a/shortcut-terminals", headers=_auth()).json()["terminals"] == []
+    assert shortcut_terminals.find("a", ident) is None
+    shortcut_terminals.close_all("a")
+    shortcut_terminals.rename_owner("a", "a2")
+    assert [t["alive"] for t in _hangar(client)] == [True]
+
+
+def test_hangar_restart_reruns_the_same_multiline_command(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.5)
+    dead = _run_hangar(client, monkeypatch, tmp_path, "echo x >> runs.txt\necho y >> runs.txt").json()["terminal"]
+    assert dead["alive"] is False
+    assert [t["id"] for t in _hangar(client)] == [dead["id"]]          # comando multilinha continua listado
+    r = client.post(f"/api/hangar-terminals/{dead['id']}/restart", headers=_auth())
+    assert r.status_code == 202 and r.json()["terminal"]["id"] != dead["id"]
+    assert _wait_for(lambda: (home / "runs.txt").read_text().split() == ["x", "y", "x", "y"])
+    fresh = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()
+    assert fresh["reused"] is False
+    assert [t["alive"] for t in _hangar(client)] == [True]
+
+
+def test_hangar_folder_home_by_default_and_session_folder_when_off(client, monkeypatch, tmp_path, home, private_tmux):
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    assert _run_hangar(client, monkeypatch, tmp_path, "pwd > prova.txt").status_code == 202
+    assert _wait_file(home / "prova.txt") == str(home)
+    assert _run_hangar(client, monkeypatch, tmp_path, "pwd > prova2.txt", key="global:k2", home=False).status_code == 202
+    assert _wait_file(tmp_path / "prova2.txt") == str(tmp_path)
+
+
+def test_hangar_home_wins_over_a_configured_folder(client, monkeypatch, tmp_path, home, private_tmux):
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    (tmp_path / "proj").mkdir()
+    r = _run_hangar(client, monkeypatch, tmp_path, "pwd > prova.txt", pasta=str(tmp_path / "proj"))
+    assert r.status_code == 202
+    assert _wait_file(home / "prova.txt") == str(home)
+    r = _run_hangar(client, monkeypatch, tmp_path, "pwd > prova3.txt", key="global:k3", home=False,
+                    pasta=str(tmp_path / "proj"))
+    assert r.status_code == 202
+    assert _wait_file(tmp_path / "proj" / "prova3.txt") == str(tmp_path / "proj")
+
+
+def test_hangar_without_key_is_rejected(client, monkeypatch, tmp_path, private_tmux):
+    r = _run(client, monkeypatch, tmp_path, "sleep 1", runs_in="hangar")
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_shortcut_sem_chave"
+
+
+def test_hangar_close_route(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    ident = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()["terminal"]["id"]
+    assert client.post(f"/api/hangar-terminals/{ident}/close", headers=_auth()).status_code == 200
+    assert _hangar(client) == []
+    assert client.post(f"/api/hangar-terminals/{ident}/close", headers=_auth()).status_code == 404
+
+
+def test_list_all_carries_owner_key_and_ask(client, monkeypatch, tmp_path, home, private_tmux):
+    from app import api, shortcut_terminals
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.2)
+    _run(client, monkeypatch, tmp_path, "sleep 30", name="a", key="global:s1", ask=False)
+    _run_hangar(client, monkeypatch, tmp_path, "sleep 30", name="a")
+    rows = sorted(((r["owner"], r["key"], r["ask"]) for r in shortcut_terminals.list_all()))
+    assert rows == [("", "global:k1", True), ("a", "global:s1", False)]
+
+
+def test_free_text_ending_in_semicolon_does_not_break_creation(client, monkeypatch, tmp_path, home, private_tmux):
+    # O tmux le argumento terminado em `;` como separador de comando.
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    r = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", label="rotulo;", key="global:k;")
+    assert r.status_code == 202
+    assert [(t["label"], t["key"]) for t in _hangar(client)] == [("rotulo;", "global:k;")]
+    again = _run_hangar(client, monkeypatch, tmp_path, "sleep 30", label="rotulo;", key="global:k;")
+    assert again.json()["reused"] is True                             # a chave com `;` continua casando
+
+
+def test_windows_start_writes_wrapper_marks_hidden_first_and_reads_exit_file(monkeypatch, tmp_path):
+    from app import shortcut_terminals, tmux
+    calls = []
+    monkeypatch.setattr(shortcut_terminals, "_IS_WINDOWS", True)
+    monkeypatch.setattr(shortcut_terminals, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    term = shortcut_terminals.start("s", str(tmp_path), "delphi-vm\nexit 3", "RDP", {}, ask=True)
+    inner = (tmp_path / f"{term['id']}-cmd.cmd").read_bytes().decode("latin-1")
+    outer = (tmp_path / f"{term['id']}.cmd").read_bytes().decode("latin-1")
+    assert "delphi-vm" in inner and "exit 3" in inner
+    assert "\r\r" not in inner and "\r\r" not in outer                  # sem CRLF duplicado
+    assert 'cmd /d /c "' in outer and '>"' in outer and "echo %ERRORLEVEL%" in outer and "goto h" in outer
+    assert not any(a == ";" for a in calls[0])                          # opcoes em chamadas separadas
+    assert calls[1][-2:] == ["@cp_hidden", "1"]                          # escondida antes de tudo
+    (tmp_path / f"{term['id']}.exit").write_text("3\n")
+    assert shortcut_terminals._windows_status(term["id"]) == (False, 3)
+
+
+def test_windows_restart_reads_back_the_inner_command_with_crlf_intact(monkeypatch, tmp_path):
+    from app import shortcut_terminals, tmux
+    monkeypatch.setattr(shortcut_terminals, "_IS_WINDOWS", True)
+    monkeypatch.setattr(shortcut_terminals, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    term = shortcut_terminals.start("", str(tmp_path), "echo a\necho b", "X", {}, key="global:k")
+    row = {"tmux": term["tmux"], "id": term["id"], "owner": "", "key": "global:k", "label": "X",
+           "origin": "", "ask": True, "alive": False, "pid": None, "exit_code": 0, "created": 1, "seq": 1}
+    seen = []
+    monkeypatch.setattr(shortcut_terminals, "_rows", lambda: [row])
+    monkeypatch.setattr(shortcut_terminals, "_option", lambda target, opt: str(tmp_path) if opt == "@cp_shortcut_cwd" else "pi")
+    monkeypatch.setattr(shortcut_terminals, "start_hangar", lambda *a: seen.append(a) or (None, False))
+    shortcut_terminals.restart_hangar(term["id"], {})
+    assert seen[0][2] == "echo a\r\necho b"
+
+
+def test_windows_start_kills_the_session_when_it_cannot_be_hidden(monkeypatch, tmp_path):
+    from app import shortcut_terminals, tmux
+    killed = []
+    monkeypatch.setattr(shortcut_terminals, "_IS_WINDOWS", True)
+    monkeypatch.setattr(shortcut_terminals, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    rc = lambda args: 1 if "@cp_hidden" in args else 0                  # noqa: E731
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, rc(args), "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(tmux, "kill_session", lambda name: killed.append(name) or True)
+    assert shortcut_terminals.start("s", str(tmp_path), "x", "X", {}) is None
+    assert len(killed) == 1
 
 
 def test_close_kills_the_process_tree_and_removes_the_terminal(client, monkeypatch, tmp_path, private_tmux):

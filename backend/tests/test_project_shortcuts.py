@@ -172,12 +172,9 @@ def test_unreadable_file_is_an_error_and_put_never_overwrites_it(client, monkeyp
 
 
 def test_shell_pasta_resolves_against_copy_root(client, monkeypatch, repo, tmp_path):
-    # Os dois caminhos (terminal escondido no POSIX, processo solto no Windows) so recebem o cwd.
     from app import shortcut_terminals
     seen = {}
-    monkeypatch.setattr(api, "_shortcut_shell_detached",
-                        lambda name, cwd, command: seen.setdefault("cwd", cwd) and {"ok": True})
-    monkeypatch.setattr(shortcut_terminals, "start", lambda name, cwd, *a: seen.setdefault("cwd", cwd)
+    monkeypatch.setattr(shortcut_terminals, "start", lambda name, cwd, *a, **kw: seen.setdefault("cwd", cwd)
                         and {"id": "x", "label": "", "tmux": "t"})
     monkeypatch.setattr(shortcut_terminals, "status", lambda t: (True, None))
     _session(monkeypatch, repo / "sub")

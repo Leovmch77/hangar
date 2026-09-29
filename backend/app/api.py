@@ -767,6 +767,17 @@ async def term_ws_route(ws: WebSocket, name: str):
     await termsock.term_ws(ws, name, resolve)
 
 
+@app.websocket("/api/hangar-terminals/{ident}/term")
+async def hangar_term_ws_route(ws: WebSocket, ident: str):
+    # Terminal de nenhuma sessao: convidado de sessao compartilhada nunca chega aqui.
+    from app import shortcut_terminals, termsock
+    from app.share_gate import guest_of
+    if guest_of(ws) is not None:
+        await ws.close(code=1008)
+        return
+    await termsock.term_ws(ws, "hangar", lambda: shortcut_terminals.find_hangar(ident))
+
+
 @app.websocket("/api/sessions/{name}/nav-remoto")
 async def nav_ws_route(ws: WebSocket, name: str):
     # Acesso remoto ao navegador embutido DAQUELA sessao: quadros pra fora, toque/tecla pra dentro.
@@ -6428,15 +6439,25 @@ def _shortcut_env() -> dict[str, str]:
 
 @app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
           status_code=202)
-def shortcut_shell(name: str, body: ShortcutShellBody):
-    # Atalho "shell" da fileira, no cwd da sessao. No POSIX cada execucao ganha um terminal
-    # escondido proprio (app/shortcut_terminals.py): a pessoa ve a saida numa aba do painel e fecha
-    # quando quiser. O tmux sobrevive a restart do backend, entao o programa tambem.
+def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
+    # Atalho "shell" da fileira. Cada execucao ganha um terminal escondido proprio
+    # (app/shortcut_terminals.py, no tmux e no psmux): a pessoa ve a saida numa aba do painel e
+    # fecha quando quiser, e o programa sobrevive a restart do backend. `runs_in="hangar"` cria uma
+    # copia unica do servidor, sem dono.
+    from app.share_gate import guest_of
+    # Convidado nao cria nem reaproveita copia No Hangar: ele nao a ve, nao a fecha, e o reuso traria
+    # uma janela pra frente na tela do dono.
+    if body.runs_in == "hangar" and guest_of(request) is not None:
+        raise HTTPException(403, detail=erro("erro_shortcut_hangar_convidado",
+                                             "convidado nao roda atalho No Hangar"))
     cwd = _session_cwd(name)
     command = body.command.strip()
     if not command:
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
-    if body.pasta is not None:
+    # No Hangar a pasta e a home, mesmo com `pasta` configurada; com `home` desligado vale a pasta.
+    if body.runs_in == "hangar" and body.home:
+        cwd = os.path.expanduser("~")
+    elif body.pasta is not None:
         try:
             cwd = project_shortcuts.resolve_folder(cwd, body.pasta)
         except project_shortcuts.ProjectError as e:
@@ -6450,15 +6471,25 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
         raise HTTPException(422, detail=erro("erro_shortcut_segredo",
                                              f"preencha a credencial {missing} antes de usar",
                                              nome=missing))
-    if os.name == "nt":
-        return _shortcut_shell_detached(name, cwd, command)
+    if body.runs_in == "hangar":
+        return _shortcut_shell_hangar(name, cwd, command, body)
     from app import shortcut_terminals
-    env = {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
-    term = shortcut_terminals.start(name, cwd, command, body.label or "", env)
+    term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_display_env(),
+                                    key=body.key, ask=body.ask)
     if term is None:
-        raise HTTPException(500, detail=erro("erro_shortcut_shell", "tmux recusou criar o terminal"))
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
     # Sem o texto do comando: ele pode carregar credencial.
     _log.info("shortcut-shell: sessao=%s terminal=%s", name, term["tmux"])
+    return _shortcut_started(name, term)
+
+
+def _shortcut_display_env() -> dict[str, str]:
+    return {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
+
+
+def _shortcut_started(name: str, term: dict) -> dict:
+    """202 quando o processo ainda vive (ou saiu 0) na janela; 422 com o fim da saida se morreu."""
+    from app import shortcut_terminals
     public = {"id": term["id"], "label": term["label"]}
     # Quem clicou precisa saber que falhou. Comando que erra (nao existe, sintaxe, VPN fora)
     # morre em segundos; o que ainda roda depois da janela e programa longo e conta como ok.
@@ -6479,37 +6510,30 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
                                          terminal={**public, "alive": False, "exit_code": code}))
 
 
-def _shortcut_shell_detached(name: str, cwd: str, command: str):
-    # Windows: sem tmux de verdade (psmux), o atalho segue dispara-e-esquece, desprendido do
-    # backend (grupo proprio e sem console, em valor literal porque subprocess.CREATE_* so existe
-    # la). Saida num arquivo anonimo, lida so se o comando morrer com erro na janela abaixo.
-    detach = {"creationflags": 0x00000200 | 0x08000000}
-    with tempfile.TemporaryFile() as out:
-        try:
-            proc = subprocess.Popen(command, shell=True, cwd=cwd, env=_shortcut_env(),
-                                    stdin=subprocess.DEVNULL, stdout=out,
-                                    stderr=subprocess.STDOUT, **detach)
-        except OSError as e:
-            raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
-        _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
-        try:
-            code = proc.wait(timeout=_SHORTCUT_FAIL_WINDOW)
-        except subprocess.TimeoutExpired:
-            return {"ok": True}
-        if code == 0:
-            return {"ok": True}
-        out.seek(0)
-        tail = _shortcut_output_tail(out.read())
-    _log.info("shortcut-shell: sessao=%s pid=%s saiu com %s", name, proc.pid, code)
-    msg = f"o comando saiu com o código {code}" + (f": {tail}" if tail else "")
-    raise HTTPException(422, detail=erro("erro_shortcut_falhou", msg, codigo=code, saida=tail))
+def _shortcut_reused(term: dict) -> dict:
+    return {"ok": True, "reused": True, "focused": False,
+            "terminal": {"id": term["id"], "label": term["label"], "alive": True, "exit_code": None}}
+
+
+def _shortcut_shell_hangar(name: str, cwd: str, command: str, body: ShortcutShellBody):
+    # Copia unica do servidor: clicar de novo reaproveita em vez de abrir outra (a VM do RDP so
+    # aceita uma conexao por usuario, e a segunda derrubava a primeira).
+    key = body.key.strip()
+    if not key:
+        raise HTTPException(400, detail=erro("erro_shortcut_sem_chave", "atalho No Hangar sem chave"))
+    from app import shortcut_terminals
+    term, reused = shortcut_terminals.start_hangar(key, cwd, command, body.label or "",
+                                                   _shortcut_display_env(), name, body.ask)
+    if term is None:
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
+    _log.info("shortcut-shell: hangar terminal=%s reaproveitou=%s", term["tmux"], reused)
+    if reused:
+        return _shortcut_reused(term)
+    return {**_shortcut_started(name, term), "reused": False, "focused": False}
 
 
 @app.get("/api/sessions/{name}/shortcut-terminals", dependencies=[Depends(require_auth)])
 def shortcut_terminals_list(name: str):
-    # Lista vazia no Windows: la o atalho nao cria terminal (ver _shortcut_shell_detached).
-    if os.name == "nt":
-        return {"terminals": []}
     from app import shortcut_terminals
     return {"terminals": shortcut_terminals.list_for(name)}
 
@@ -6518,7 +6542,7 @@ def shortcut_terminals_list(name: str):
 @app.post("/api/sessions/{name}/shortcut-terminals/{ident}/close", dependencies=[Depends(require_auth)])
 def shortcut_terminal_close(name: str, ident: str):
     from app import shortcut_terminals
-    closed = None if os.name == "nt" else shortcut_terminals.close(name, ident)
+    closed = shortcut_terminals.close(name, ident)
     if closed is None:
         raise HTTPException(404, detail=erro("erro_shortcut_terminal_inexistente",
                                              "terminal do atalho nao encontrado"))
@@ -6526,6 +6550,39 @@ def shortcut_terminal_close(name: str, ident: str):
         raise HTTPException(500, detail=erro("erro_shortcut_terminal_fechar",
                                              "o terminal do atalho nao fechou"))
     return {"ok": True}
+
+
+@app.get("/api/hangar-terminals", dependencies=[Depends(require_auth)])
+def hangar_terminals_list():
+    from app import shortcut_terminals
+    return {"terminals": [t for t in shortcut_terminals.list_all() if not t["owner"]]}
+
+
+def _hangar_404():
+    return HTTPException(404, detail=erro("erro_hangar_terminal_inexistente", "terminal No Hangar nao encontrado"))
+
+
+# POST, nao DELETE: o proxy da frente so deixa passar GET/POST.
+@app.post("/api/hangar-terminals/{ident}/close", dependencies=[Depends(require_auth)])
+def hangar_terminal_close(ident: str):
+    from app import shortcut_terminals
+    closed = shortcut_terminals.close_hangar(ident)
+    if closed is None:
+        raise _hangar_404()
+    if not closed:
+        raise HTTPException(500, detail=erro("erro_hangar_terminal_fechar", "o terminal No Hangar nao fechou"))
+    return {"ok": True}
+
+
+@app.post("/api/hangar-terminals/{ident}/restart", dependencies=[Depends(require_auth)], status_code=202)
+def hangar_terminal_restart(ident: str):
+    from app import shortcut_terminals
+    term, reused = shortcut_terminals.restart_hangar(ident, _shortcut_display_env())
+    if term is None:
+        raise _hangar_404()
+    if reused:
+        return _shortcut_reused(term)
+    return {**_shortcut_started("hangar", term), "reused": False, "focused": False}
 
 
 class ShortcutImportBody(BaseModel):

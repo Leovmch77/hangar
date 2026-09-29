@@ -151,6 +151,32 @@ def test_lista_do_convidado_nao_cita_outras_sessoes(guest_client, monkeypatch):
     assert "outra" not in r.text
 
 
+def test_guest_cannot_start_a_hangar_copy(guest_client, monkeypatch):
+    from app import shortcut_terminals
+    started = []
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(shortcut_terminals, "start_hangar", lambda *a: started.append(a) or (None, False))
+    r = guest_client.post("/api/sessions/cc/shortcut-shell", headers={"Authorization": "Bearer g"},
+                          json={"command": "notepad", "runs_in": "hangar", "key": "global:k"})
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "erro_shortcut_hangar_convidado"
+    assert started == []
+
+
+def test_guest_does_not_reach_the_hangar_terminal_routes(guest_client, monkeypatch):
+    # O porteiro so deixa passar `/api/sessions/<a sessao do convite>/...`: nem lista, nem fecha, nem terminal.
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    auth = {"Authorization": "Bearer g"}
+    assert guest_client.get("/api/hangar-terminals", headers=auth).status_code == 403
+    assert guest_client.post("/api/hangar-terminals/abcdef/close", headers=auth).status_code == 403
+    assert guest_client.post("/api/hangar-terminals/abcdef/restart", headers=auth).status_code == 403
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect) as e:
+        with guest_client.websocket_connect("ws://127.0.0.1:8766/api/hangar-terminals/abcdef/term?token=g"):
+            pass
+    assert e.value.code == 1008
+
+
 class _FakeRefresher:
     def __init__(self, data):
         self.version, self.errored, self.data = 1, False, data
