@@ -252,8 +252,10 @@ impl Hangar {
         };
         let viewport = window.viewport_size();
         let (cols, rows) = ((f32::from(viewport.width) / GRAIN_SIDE).ceil() as usize, (f32::from(viewport.height) / GRAIN_SIDE).ceil() as usize);
-        let grain = div().absolute().inset_0().flex().flex_wrap().opacity(theme::grain_opacity())
-            .children((0..cols * rows).map(|_| img(self.grain.clone()).flex_shrink_0().size(px(GRAIN_SIDE))));
+        // Linhas fixas cortadas na borda: com quebra automática o último ladrilho descia e a borda direita ficava sem grão.
+        let grain = div().absolute().inset_0().overflow_hidden().flex().flex_col().opacity(theme::grain_opacity())
+            .children((0..rows).map(|_| div().flex().flex_shrink_0()
+                .children((0..cols).map(|_| img(self.grain.clone()).flex_shrink_0().size(px(GRAIN_SIDE))))));
         let layer = div().absolute().inset_0().overflow_hidden()
             .when(busy, |el| el
                 .when_some(image, |el, image| el.child(img(image).absolute().inset_0().size_full().object_fit(ObjectFit::Cover)))

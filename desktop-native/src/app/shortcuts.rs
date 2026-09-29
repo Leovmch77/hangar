@@ -366,13 +366,14 @@ impl Hangar {
                 if !s.load.finish(seq, parsed.map(|_| ())) { return; }
                 if let Some(list) = list {
                     (s.items, s.dirty) = (list.clone(), false);
-                    self.side.set_shortcuts(&list);
+                    // O painel mostra os atalhos da máquina da conversa aberta; esta página é da ativa.
+                    if self.open_api.is_none() { self.side.set_shortcuts(&list); }
                 }
             }
             ShortcutsReply::Saved(seq, list, result) => {
                 let saved = list.unwrap_or_else(defaults);
                 // Gravado vale para o painel mesmo com a página já fechada.
-                if result.is_ok() { self.side.set_shortcuts(&saved); }
+                if result.is_ok() && self.open_api.is_none() { self.side.set_shortcuts(&saved); }
                 if seq != s.save_seq { return; }
                 s.saving = false;
                 match result {

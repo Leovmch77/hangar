@@ -737,7 +737,8 @@ impl OrqRoles {
 
     // ── Desenho ──
 
-    fn sessions(&self, cx: &App) -> Vec<SessionInfo> { self.hangar.upgrade().map(|h| h.read(cx).sessions.clone()).unwrap_or_default() }
+    /// A lista da máquina do diálogo (a da sessão que o abriu), não a da ativa.
+    fn sessions(&self, cx: &App) -> Vec<SessionInfo> { self.hangar.upgrade().map(|h| h.read(cx).sessions_of(&self.api.identity()).to_vec()).unwrap_or_default() }
 
     fn pending(&self) -> Vec<(String, String)> {
         let mut list: Vec<(String, String)> = self.drafts.iter().filter_map(|(key, role)| {

@@ -175,9 +175,12 @@ struct DeferredMenu {
 impl DeferredMenu {
     fn build_menu(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         // Focus the menu, so that can be handle the action.
+        // Modified for Hangar: never in the middle of prepaint. Elements already painted this frame had claimed the
+        // accessibility focus, and a second claim panics in debug builds ("set_focus called more than once in a single
+        // frame"). The menu is focused when it is built (below); a lost focus comes back after this frame.
         let focus_handle = self.menu_view.focus_handle(cx);
         if !focus_handle.contains_focused(window, cx) {
-            focus_handle.focus(window, cx);
+            window.defer(cx, move |window, cx| focus_handle.focus(window, cx));
         }
 
         deferred(
@@ -440,6 +443,8 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                     menu.set_trigger_focus(trigger_focus_handle, cx);
                                     menu.set_previous_focus(previous_focus_handle, cx);
                                 });
+                                // Modified for Hangar: focused here, between frames, like the dropdown menu.
+                                menu.focus_handle(cx).focus(window, cx);
 
                                 // Set up the subscription for dismiss handling.
                                 // Hold a Weak here, not a strong clone: the closure

@@ -1,7 +1,7 @@
 //! Barra lateral como a do web (Sidebar.svelte + sessionListModel): filtro, agrupar por projeto, ordem por nome,
 //! prévia da última resposta ao parar o mouse e o menu da sessão (Renomear, Silenciar, Copiar cwd, Abrir no editor,
-//! Fechar). Toda resposta volta amarrada ao nome capturado no gesto e ao número do pedido: resposta velha não mexe
-//! no que a pessoa fez depois.
+//! Fechar). Toda resposta volta amarrada à sessão capturada no gesto (máquina + nome) e ao número do pedido: resposta
+//! velha não mexe no que a pessoa fez depois. Cada gesto vai à máquina da linha, como o `withServer` do web.
 use super::*;
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{WindowExt, dialog, menu::{DropdownMenu, PopupMenu}, notification::NotificationType};
@@ -20,6 +20,16 @@ pub(super) const PREVIEW_W: f32 = 380.;
 pub(super) const PREVIEW_H: f32 = 220.;
 const NO_CWD: &str = "no-cwd";
 
+/// Sessão de uma linha: a máquina (endereço normalizado, `servers::norm`) e o nome, que sozinho se repete entre máquinas.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Target { pub(super) server: String, pub(super) name: String }
+
+impl Target {
+    pub(super) fn new(server: &str, name: &str) -> Self { Self { server: server.to_owned(), name: name.to_owned() } }
+    /// Id estável dos elementos da linha: o nome sozinho colidiria entre máquinas.
+    pub(super) fn id(&self) -> String { format!("{}::{}", self.server, self.name) }
+}
+
 /// Estado de silenciar da sessão do menu aberto, lido de `GET /api/push/settings`.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Mute { Loading, Known(bool), Failed(String) }
@@ -31,7 +41,7 @@ pub(super) enum Branches { Loading, Known(BranchList), Failed(String) }
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub(super) struct BranchList { #[serde(default)] branches: Vec<String>, current: Option<String>, #[serde(default)] dirty: bool }
 
-struct MenuRead { name: String, seq: u64, mute: Mute, branches: Option<Branches> }
+struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches> }
 
 #[derive(Clone, Debug)]
 /// O renomear leva o número do pedido: resposta de um diálogo cancelado não fecha a tentativa seguinte na mesma sessão.
@@ -41,13 +51,13 @@ pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bo
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
 
 pub(super) enum SidebarReply {
-    Preview(u64, String, Result<String, Failure>),
+    Preview(u64, Target, Result<String, Failure>),
     MuteRead(u64, Result<Value, Failure>),
     BranchRead(u64, Result<Value, Failure>),
-    Wrote(String, Write, Result<Value, Failure>),
+    Wrote(Target, Write, Result<Value, Failure>),
     /// Resultado de uma gravação de git: nível e texto da notificação daquela sessão.
-    Note(String, NotificationType, String),
-    Chained(String, u64, String, Result<Value, Failure>),
+    Note(Target, NotificationType, String),
+    Chained(Target, u64, String, Result<Value, Failure>),
     NotSaved(String),
     /// Resposta de agrupar, sair do grupo ou sugerir a tarefa, amarrada ao número do pedido.
     Group(u64, super::grouping::GroupReply),
@@ -100,8 +110,8 @@ async fn git_result(api: &Api, name: &str, what: GitWrite) -> (NotificationType,
     }
 }
 
-/// Encadear: o alvo escolhido no submenu e o prompt, num diálogo curto.
-pub(super) struct Chain { from: String, target: String, input: Entity<InputState>, status: Rc<RefCell<Pending>>, _events: Subscription }
+/// Encadear: o alvo escolhido no submenu (da mesma máquina da origem) e o prompt, num diálogo curto.
+pub(super) struct Chain { from: Target, target: String, input: Entity<InputState>, status: Rc<RefCell<Pending>>, _events: Subscription }
 
 /// Leva a resposta de volta à janela, amarrada à conexão do pedido.
 pub(super) struct Tell(async_channel::Sender<Envelope>, u64);
@@ -114,7 +124,7 @@ impl Tell {
 
 /// Nome em edição: na própria linha (barra lateral) ou num diálogo (abas no topo, como o web com a barra recolhida).
 pub(super) struct Edit {
-    pub(super) old: String, pub(super) input: Entity<InputState>, inline: bool, status: Rc<RefCell<Pending>>, _events: Subscription,
+    pub(super) target: Target, pub(super) input: Entity<InputState>, inline: bool, status: Rc<RefCell<Pending>>, _events: Subscription,
 }
 
 /// Diálogo de renomear: o pedido em voo e a falha dele seguram o resultado junto do campo; só fecha com o renomear confirmado,
@@ -126,29 +136,31 @@ pub(super) struct Sidebar {
     pub(super) filter: Entity<InputState>,
     collapsed: HashSet<String>,
     /// Fechadas agora: somem da lista na hora e voltam se o servidor recusar.
-    deleting: HashSet<String>,
+    deleting: HashSet<Target>,
     pub(super) editing: Option<Edit>,
-    renaming: HashSet<String>,
+    renaming: HashSet<Target>,
     /// Aberta e renomeada: o nome novo abre assim que aparecer na lista.
-    follow: Option<String>,
+    follow: Option<Target>,
     /// A aberta sumiu da lista com o renomear em voo: a resposta decide se ela reabre pelo nome novo.
-    lost: Option<String>,
+    lost: Option<Target>,
     menu: Option<MenuRead>,
     menu_seq: u64,
     rename_seq: u64,
     pub(super) chain: Option<Chain>,
     chain_seq: u64,
     /// Renomeada pelo diálogo antes de a aba nova existir: o foco vai a ela quando a lista trouxer o nome.
-    focus_tab: Option<String>,
+    focus_tab: Option<Target>,
+    /// Foco das linhas das outras máquinas; as da ativa usam o `tab_focus`, que as abas também usam.
+    remote_focus: HashMap<Target, FocusHandle>,
     /// Número do último clique em cabeçalho de grupo: gravação de um clique anterior que termine depois não volta o arquivo.
     collapse_gen: u64,
     /// Linha cujo ⋯ está com o menu aberto: o botão fica na tela enquanto o ponteiro anda pelo menu.
-    pub(super) button_menu: Option<String>,
-    pub(super) hover: Option<String>,
+    pub(super) button_menu: Option<Target>,
+    pub(super) hover: Option<Target>,
     hover_seq: u64,
     pointer_y: f32,
-    pub(super) preview: Option<(String, Entity<TextViewState>, f32)>,
-    cache: HashMap<String, (String, Instant)>,
+    pub(super) preview: Option<(Target, Entity<TextViewState>, f32)>,
+    cache: HashMap<Target, (String, Instant)>,
     press_seq: u64,
     long_pressed: bool,
     /// A troca entre a lista e o trilho em andamento: quando começou e se vai para o trilho.
@@ -164,7 +176,7 @@ impl Sidebar {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_filter")).clean_on_escape());
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None,
-            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
+            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
             long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
     }
 
@@ -182,15 +194,22 @@ impl Sidebar {
         self.press_seq += 1;
     }
 
-    fn menu_for(&self, name: &str) -> Option<Mute> {
-        self.menu.as_ref().filter(|m| m.name == name).map(|m| m.mute.clone())
+    fn menu_for(&self, target: &Target) -> Option<Mute> {
+        self.menu.as_ref().filter(|m| m.target == *target).map(|m| m.mute.clone())
     }
 
-    fn branches_for(&self, name: &str) -> Option<Branches> {
-        self.menu.as_ref().filter(|m| m.name == name).and_then(|m| m.branches.clone())
+    fn branches_for(&self, target: &Target) -> Option<Branches> {
+        self.menu.as_ref().filter(|m| m.target == *target).and_then(|m| m.branches.clone())
     }
 
-    pub(super) fn hidden(&self) -> &HashSet<String> { &self.deleting }
+    /// Fechada agora na máquina `server`: fora da lista até o servidor responder.
+    pub(super) fn is_hidden(&self, server: &str, name: &str) -> bool { self.deleting.iter().any(|t| t.server == server && t.name == name) }
+
+    /// Os nomes escondidos da máquina `server`, no formato que o `layout` lê.
+    pub(super) fn hidden_on(&self, server: &str) -> HashSet<String> {
+        self.deleting.iter().filter(|t| t.server == server).map(|t| t.name.clone()).collect()
+    }
+
     pub(super) fn is_collapsed(&self, key: &str) -> bool { self.collapsed.contains(key) }
 }
 
@@ -298,24 +317,74 @@ impl Hangar {
     pub(super) fn by_project() -> bool { appearance::get().sidebar_group == appearance::SidebarGroup::Project }
 
     pub(super) fn sidebar_layout(&self, cx: &App) -> Layout<'_> {
-        layout(&self.sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &self.sidebar.deleting)
+        layout(&self.sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &self.sidebar.hidden_on(&self.active_key()))
     }
 
-    /// Ordem em que o Ctrl+↓/↑ anda: a das linhas à vista na barra (pula filtrada e recolhida) ou a das abas.
-    fn visible_order(&self, cx: &App) -> Vec<String> {
+    /// A lista de outra máquina como a barra a mostra: grupos de projeto com a chave dela, para recolher um não recolher o
+    /// de mesmo caminho na outra.
+    pub(super) fn remote_layout<'a>(&self, key: &str, sessions: &'a [SessionInfo], cx: &App) -> Layout<'a> {
+        let mut l = layout(sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &self.sidebar.hidden_on(key));
+        for group in &mut l.groups { group.key = format!("{key}::{}", group.key); }
+        l
+    }
+
+    /// A sessão da linha, lida da lista viva da máquina dela.
+    pub(super) fn target_session(&self, target: &Target) -> Option<&SessionInfo> {
+        self.sessions_of(&target.server).iter().find(|s| s.name == target.name)
+    }
+
+    /// A aberta, com a máquina dela.
+    pub(super) fn selected_target(&self) -> Option<Target> {
+        self.selected.as_ref().map(|s| Target::new(&self.open_server(), &s.name))
+    }
+
+    /// Linha de um convite: parar de acompanhar no lugar de fechar, e só o que é da própria sessão.
+    pub(super) fn invite_target(&self, target: &Target) -> bool { self.server_entry(&target.server).is_some_and(|s| s.invite) }
+
+    /// Foco da linha: da ativa é o da aba; das outras máquinas, o da própria linha.
+    pub(super) fn row_focus(&self, target: &Target) -> Option<&FocusHandle> {
+        if self.is_active_key(&target.server) { self.tab_focus.get(&target.name) } else { self.sidebar.remote_focus.get(target) }
+    }
+
+    /// Abre a sessão da linha na máquina dela, sem trocar o servidor ativo.
+    pub(super) fn select_target(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) -> Option<SessionInfo> {
+        let session = self.target_session(target)?.clone();
+        self.select_on(&target.server, session.clone(), window, cx);
+        Some(session)
+    }
+
+    /// O clique na linha: abre e leva o foco ao compositor.
+    pub(super) fn open_target(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_preview();
+        if let Some(session) = self.select_target(target, window, cx) { self.focus_composer_for(&session, window, cx); }
+    }
+
+    /// Ordem em que o Ctrl+↓/↑ anda: a das linhas à vista na barra, máquina por máquina (pula filtrada e recolhida), ou a
+    /// das abas.
+    fn visible_order(&self, cx: &App) -> Vec<Target> {
+        let active = self.active_key();
         if appearance::get().navigation == appearance::Navigation::Tabs {
-            return self.sessions.iter().filter(|s| !self.sidebar.deleting.contains(&s.name)).map(|s| s.name.clone()).collect();
+            return self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).map(|s| Target::new(&active, &s.name)).collect();
         }
-        let l = self.sidebar_layout(cx);
         // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
-        let shown = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
-            super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, None) => Some(s.name.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
-        shown(&l.waiting).into_iter()
-            .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key)))
-                .flat_map(|g| shown(&g.sessions)))
-            .collect()
+        let shown = |key: &str, remote: Option<&str>, l: &Layout| -> Vec<Target> {
+            let rows = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
+                super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => Some(Target::new(key, &s.name)),
+                _ => None,
+            }).collect::<Vec<_>>();
+            rows(&l.waiting).into_iter()
+                .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key))).flat_map(|g| rows(&g.sessions)))
+                .collect()
+        };
+        if !self.multi_server() { return shown(&active, None, &self.sidebar_layout(cx)); }
+        let mut order = Vec::new();
+        for entry in self.servers.iter().filter(|s| !s.disabled) {
+            let key = servers::norm(&entry.address);
+            if self.sidebar.collapsed.contains(&format!("server:{key}")) { continue; }
+            if key == active { order.extend(shown(&key, None, &self.sidebar_layout(cx))); }
+            else if let Some(list) = self.remote.get(&key) { order.extend(shown(&key, Some(&key), &self.remote_layout(&key, &list.sessions, cx))); }
+        }
+        order
     }
 
     pub(super) fn step_session(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -324,13 +393,13 @@ impl Hangar {
             || self.sidebar.editing.is_some() { return; }
         let order = self.visible_order(cx);
         if order.is_empty() { return; }
-        let current = self.selected.as_ref().and_then(|s| order.iter().position(|n| n == &s.name));
+        let current = self.selected_target().and_then(|t| order.iter().position(|o| *o == t));
         let next = match current {
             Some(i) => (i as isize + step).rem_euclid(order.len() as isize) as usize,
             None if step > 0 => 0,
             None => order.len() - 1,
         };
-        if let Some(session) = self.sessions.iter().find(|s| s.name == order[next]).cloned() { self.select(session, window, cx); }
+        self.select_target(&order[next], window, cx);
     }
 
     pub(super) fn set_group(&mut self, project: bool, cx: &mut Context<Self>) {
@@ -351,48 +420,55 @@ impl Hangar {
         cx.notify();
     }
 
-    /// A lista nova chegou: fechadas que saíram dela deixam de ser escondidas; renomeada aberta é reaberta pelo nome novo.
+    /// Uma lista nova chegou (a ativa ou a de outra máquina): fechadas que saíram dela deixam de ser escondidas; renomeada
+    /// aberta é reaberta pelo nome novo.
     pub(super) fn sidebar_sessions_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let names: HashSet<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.sidebar.deleting.retain(|n| names.contains(n));
+        let alive = |this: &Self, t: &Target| this.target_session(t).is_some();
+        let deleting = std::mem::take(&mut self.sidebar.deleting);
+        self.sidebar.deleting = deleting.into_iter().filter(|t| alive(self, t)).collect();
+        // Cada linha das outras máquinas guarda o próprio foco pela vida da sessão, como as da ativa.
+        let rows: HashSet<Target> = self.remote.iter()
+            .flat_map(|(key, list)| list.sessions.iter().map(move |s| Target::new(key, &s.name))).collect();
+        self.sidebar.remote_focus.retain(|t, _| rows.contains(t));
+        for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
-        if self.sidebar.hover.as_ref().is_some_and(|n| !names.contains(n)) { self.hide_preview(); }
+        if self.sidebar.hover.as_ref().is_some_and(|t| !alive(self, t)) { self.hide_preview(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
-        if let Some(new) = self.sidebar.focus_tab.clone().filter(|n| names.contains(n)) {
+        if let Some(new) = self.sidebar.focus_tab.clone().filter(|t| alive(self, t)) {
             self.sidebar.focus_tab = None;
-            if self.root_focus.is_focused(window) && let Some(focus) = self.tab_focus.get(&new) { focus.focus(window, cx); }
+            if self.root_focus.is_focused(window) && let Some(focus) = self.row_focus(&new).cloned() { focus.focus(window, cx); }
         }
-        if let Some(new) = self.sidebar.follow.clone().filter(|n| names.contains(n)) {
+        if let Some(new) = self.sidebar.follow.clone().filter(|t| alive(self, t)) {
             self.sidebar.follow = None;
-            if self.selected.is_none() && let Some(s) = self.sessions.iter().find(|s| s.name == new).cloned() {
+            if self.selected.is_none() {
                 self.error = None;
-                self.select(s, window, cx);
+                self.select_target(&new, window, cx);
             }
         }
     }
 
     /// A sessão aberta sumiu da lista: se está sendo renomeada, a resposta do renomear decide; não é "sessão encerrada".
-    pub(super) fn lost_while_renaming(&mut self, name: &str) -> bool {
-        let renaming = self.sidebar.renaming.contains(name);
-        if renaming { self.sidebar.lost = Some(name.to_owned()); }
+    pub(super) fn lost_while_renaming(&mut self, target: &Target) -> bool {
+        let renaming = self.sidebar.renaming.contains(target);
+        if renaming { self.sidebar.lost = Some(target.clone()); }
         renaming
     }
 
     // ── Prévia ──
 
-    pub(super) fn row_hover(&mut self, name: String, hovered: bool, cx: &mut Context<Self>) {
+    pub(super) fn row_hover(&mut self, target: Target, hovered: bool, cx: &mut Context<Self>) {
         if !hovered {
-            if self.sidebar.hover.as_deref() == Some(name.as_str()) { self.hide_preview(); cx.notify(); }
+            if self.sidebar.hover.as_ref() == Some(&target) { self.hide_preview(); cx.notify(); }
             self.sidebar.press_seq += 1;
             return;
         }
         self.hide_preview();
-        self.sidebar.hover = Some(name.clone());
+        self.sidebar.hover = Some(target.clone());
         let seq = self.sidebar.hover_seq;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PREVIEW_DELAY).await;
-            let _ = this.update(cx, |this, cx| this.preview_due(seq, name, cx));
+            let _ = this.update(cx, |this, cx| this.preview_due(seq, target, cx));
         }).detach();
         cx.notify();
     }
@@ -404,33 +480,33 @@ impl Hangar {
         (self.sidebar.hover, self.sidebar.preview) = (None, None);
     }
 
-    fn preview_due(&mut self, seq: u64, name: String, cx: &mut Context<Self>) {
+    fn preview_due(&mut self, seq: u64, target: Target, cx: &mut Context<Self>) {
         if seq != self.sidebar.hover_seq { return; }
-        if let Some((text, _)) = self.sidebar.cache.get(&name).filter(|(_, at)| at.elapsed() < PREVIEW_TTL).cloned() {
-            self.show_preview(name, text, cx);
+        if let Some((text, _)) = self.sidebar.cache.get(&target).filter(|(_, at)| at.elapsed() < PREVIEW_TTL).cloned() {
+            self.show_preview(target, text, cx);
             return;
         }
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.machine_api(&target.server) else { return };
         let tell = self.sidebar_tell();
         self.runtime.spawn(async move {
-            let result = api.history(&name, PREVIEW_TAIL, None).await.map(|h| h.events.unwrap_or_default().into_iter().rev()
+            let result = api.history(&target.name, PREVIEW_TAIL, None).await.map(|h| h.events.unwrap_or_default().into_iter().rev()
                 .find(|e| e.kind == "assistant_msg" && e.text.as_deref().is_some_and(|t| !t.is_empty()))
                 .and_then(|e| e.text).unwrap_or_default());
-            tell.send(SidebarReply::Preview(seq, name, result)).await;
+            tell.send(SidebarReply::Preview(seq, target, result)).await;
         });
     }
 
-    fn show_preview(&mut self, name: String, text: String, cx: &mut Context<Self>) {
+    fn show_preview(&mut self, target: Target, text: String, cx: &mut Context<Self>) {
         // Texto vazio não abre, como o web.
         if text.trim().is_empty() { return; }
         let view = cx.new(|cx| TextViewState::markdown(&safe_markdown(&text), cx));
-        self.sidebar.preview = Some((name, view, self.sidebar.pointer_y));
+        self.sidebar.preview = Some((target, view, self.sidebar.pointer_y));
         cx.notify();
     }
 
     // ── Pressionar para renomear ──
 
-    pub(super) fn row_press(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn row_press(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.press_seq += 1;
         self.sidebar.long_pressed = false;
         let seq = self.sidebar.press_seq;
@@ -439,7 +515,7 @@ impl Hangar {
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.sidebar.press_seq != seq { return; }
                 this.sidebar.long_pressed = true;
-                this.start_session_rename(name, window, cx);
+                this.start_session_rename(target, window, cx);
             });
         }).detach();
     }
@@ -452,42 +528,48 @@ impl Hangar {
     // ── Menu ──
 
     /// Abrir o menu lê o silenciar daquela sessão; resposta de um menu anterior é descartada pelo número.
-    pub(super) fn start_menu(&mut self, name: String, cx: &mut Context<Self>) {
+    pub(super) fn start_menu(&mut self, target: Target, cx: &mut Context<Self>) {
         self.hide_preview();
         self.sidebar.press_seq += 1;
         self.sidebar.menu_seq += 1;
         let seq = self.sidebar.menu_seq;
         // Branches só onde o menu mostra o git (pasta num repositório); como o silenciar, lidas a cada abertura do menu.
-        let git = self.sessions.iter().find(|s| s.name == name).is_some_and(has_git);
-        let Some(api) = self.api.clone() else {
+        let git = self.target_session(&target).is_some_and(has_git);
+        // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
+        let mute = !self.invite_target(&target);
+        let Some(api) = self.machine_api(&target.server) else {
             let failed = tr("connection_failed");
-            self.sidebar.menu = Some(MenuRead { name, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
+            self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
             return;
         };
-        self.sidebar.menu = Some(MenuRead { name: name.clone(), seq, mute: Mute::Loading, branches: git.then_some(Branches::Loading) });
+        self.sidebar.menu = Some(MenuRead { target: target.clone(), seq, mute: Mute::Loading, branches: git.then_some(Branches::Loading) });
         if git {
-            let (api, tell) = (api.clone(), self.sidebar_tell());
+            let (api, tell, name) = (api.clone(), self.sidebar_tell(), target.name.clone());
             self.runtime.spawn(async move { tell.send(SidebarReply::BranchRead(seq, api.read(&name, &["branches"], &[], 30).await)).await; });
         }
-        let tell = self.sidebar_tell();
-        self.runtime.spawn(async move { tell.send(SidebarReply::MuteRead(seq, api.server_read(&["push", "settings"], &[], 15).await)).await; });
+        if mute {
+            let tell = self.sidebar_tell();
+            self.runtime.spawn(async move { tell.send(SidebarReply::MuteRead(seq, api.server_read(&["push", "settings"], &[], 15).await)).await; });
+        }
         cx.notify();
     }
 
-    pub(super) fn button_menu(&mut self, name: String, open: bool, cx: &mut Context<Self>) {
-        if open { self.start_menu(name.clone(), cx); self.sidebar.button_menu = Some(name); }
-        else if self.sidebar.button_menu.as_deref() == Some(name.as_str()) { self.sidebar.button_menu = None; cx.notify(); }
+    pub(super) fn button_menu(&mut self, target: Target, open: bool, cx: &mut Context<Self>) {
+        if open { self.start_menu(target.clone(), cx); self.sidebar.button_menu = Some(target); }
+        else if self.sidebar.button_menu.as_ref() == Some(&target) { self.sidebar.button_menu = None; cx.notify(); }
     }
 
-    pub(super) fn start_session_rename(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sessions.iter().any(|s| s.name == name && !s.orq()) { return; }
-        let inline = appearance::get().navigation == appearance::Navigation::Sidebar;
+    pub(super) fn start_session_rename(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.target_session(&target).is_some_and(|s| !s.orq()) { return; }
+        // No trilho a linha não tem onde mostrar o campo: vai ao diálogo, como o web com a barra recolhida.
+        let inline = appearance::get().navigation == appearance::Navigation::Sidebar && !self.rail();
+        let name = target.name.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name.clone()));
-        let old = name.clone();
+        let old = target.clone();
         let events = cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { .. } => this.commit_session_rename(window, cx),
             // Sair do campo salva, como o blur do web; no diálogo quem decide são os botões.
-            InputEvent::Blur if this.sidebar.editing.as_ref().is_some_and(|e| e.inline && e.old == old) => this.commit_session_rename(window, cx),
+            InputEvent::Blur if this.sidebar.editing.as_ref().is_some_and(|e| e.inline && e.target == old) => this.commit_session_rename(window, cx),
             // O diálogo é desenhado com a janela: refazê-la liga e desliga o Renomear enquanto se digita.
             InputEvent::Change => cx.notify(),
             _ => {}
@@ -497,23 +579,23 @@ impl Hangar {
         cx.defer_in(window, move |_, window, cx| field.update(cx, |state, cx| { state.focus(window, cx); state.select_all(window, cx); }));
         self.hide_preview();
         let status = Rc::new(RefCell::new(Pending::default()));
-        self.sidebar.editing = Some(Edit { old: name.clone(), input: input.clone(), inline, status: status.clone(), _events: events });
+        self.sidebar.editing = Some(Edit { target: target.clone(), input: input.clone(), inline, status: status.clone(), _events: events });
         if !inline {
             // O diálogo devolve ao fechar o foco de quando abriu: o do menu morre com ele, então a aba de origem vem antes.
-            self.focus_origin(&name, window, cx);
+            self.focus_origin(&target, window, cx);
             let weak = cx.entity().downgrade();
-            let owner = name.clone();
+            let owner = target;
             window.open_dialog(cx, move |dialog, _, cx| {
                 let value = input.read(cx).value().trim().to_owned();
                 let (busy, error) = { let s = status.borrow(); (s.sent.is_some(), s.error.clone()) };
                 let (commit, cancel, close, owner) = (weak.clone(), weak.clone(), weak.clone(), owner.clone());
                 // Vazio ou igual ao atual não renomeia, e gravando não manda de novo: o botão fica desligado, como o do web.
-                let rename = Button::new("rename-ok").primary().label(tr("sidebar_rename")).disabled(busy || value.is_empty() || value == owner)
+                let rename = Button::new("rename-ok").primary().label(tr("sidebar_rename")).disabled(busy || value.is_empty() || value == owner.name)
                     .on_click(move |_, window, cx| {
                     let _ = commit.update(cx, |this, cx| this.commit_session_rename(window, cx));
                 });
-                let forget = move |weak: &WeakEntity<Hangar>, owner: &str, cx: &mut App| { let _ = weak.update(cx, |this, cx| {
-                    if this.sidebar.editing.as_ref().is_some_and(|e| e.old == owner) { this.sidebar.editing = None; cx.notify(); }
+                let forget = move |weak: &WeakEntity<Hangar>, owner: &Target, cx: &mut App| { let _ = weak.update(cx, |this, cx| {
+                    if this.sidebar.editing.as_ref().is_some_and(|e| e.target == *owner) { this.sidebar.editing = None; cx.notify(); }
                 }); };
                 let cancel_owner = owner.clone();
                 // Borda vermelha liga o erro ao campo, como o `aria-invalid` do web; o anel de foco do kit a cobriria, então sai
@@ -540,21 +622,30 @@ impl Hangar {
     }
 
     fn commit_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.sidebar.editing.as_mut() else { return };
+        let Some(edit) = self.sidebar.editing.as_ref() else { return };
         let new = edit.input.read(cx).value().trim().to_owned();
-        let unchanged = new.is_empty() || new == edit.old;
-        let old = edit.old.clone();
+        let unchanged = new.is_empty() || new == edit.target.name;
+        let old = edit.target.clone();
+        let offline = self.machine_api(&old.server).is_none();
+        let Some(edit) = self.sidebar.editing.as_mut() else { return };
         if edit.inline {
             // Na linha o campo fecha na hora e a falha vai à notificação, como o `saveEdit` do web.
             self.sidebar.editing = None;
             self.root_focus.focus(window, cx);
             cx.notify();
-            if unchanged || self.api.is_none() { return; }
+            if unchanged { return; }
+            if offline { window.push_notification(Notification::error(tr("sidebar_rename_failed").replace("{n}", &tr("connection_failed"))), cx); return; }
         } else {
             // No diálogo, vazio ou igual não faz nada (o web só envia válido), e gravando não manda de novo. Ele fica aberto
             // com o botão ocupado até a resposta, que fecha ou mostra o motivo junto do campo.
             let mut status = edit.status.borrow_mut();
-            if unchanged || status.sent.is_some() || self.api.is_none() { return; }
+            if unchanged || status.sent.is_some() { return; }
+            if offline {
+                *status = Pending { sent: None, error: Some(tr("sidebar_rename_failed").replace("{n}", &tr("connection_failed"))) };
+                drop(status);
+                cx.notify();
+                return;
+            }
             *status = Pending { sent: Some(self.sidebar.rename_seq + 1), error: None };
         }
         self.sidebar.rename_seq += 1;
@@ -562,19 +653,25 @@ impl Hangar {
         self.write(old, Write::Rename(new, self.sidebar.rename_seq), cx);
     }
 
-    fn write(&mut self, name: String, what: Write, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+    /// Grava na máquina da linha; sem a conexão dela a falha volta pelo mesmo caminho da resposta, nunca calada.
+    fn write(&mut self, target: Target, what: Write, cx: &mut Context<Self>) {
+        let api = self.machine_api(&target.server);
         let tell = self.sidebar_tell();
-        let editor = matches!(what, Write::Editor).then(|| self.local_editor(&name)).flatten();
+        let editor = matches!(what, Write::Editor).then(|| self.local_editor(api.clone(), &target.name)).flatten();
         self.runtime.spawn(async move {
+            let Some(api) = api else {
+                tell.send(SidebarReply::Wrote(target, what, Err(Failure::local("connection_failed")))).await;
+                return;
+            };
+            let name = &target.name;
             let result = match &what {
                 Write::Mute(muted) => api.server_send(reqwest::Method::POST, &["push", "mute"], Some(json!({"session": name, "muted": muted})), 15).await,
-                Write::Editor => match editor { Some(open) => open.await, None => api.act(&name, &["open-editor"], None, false, 15).await },
-                Write::Delete => api.act(&name, &[], None, true, 30).await,
-                Write::Rename(new, _) => api.act(&name, &["rename"], Some(json!({"new": new})), false, 30).await,
-                Write::Mode(terminal) => api.act(&name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
+                Write::Editor => match editor { Some(open) => open.await, None => api.act(name, &["open-editor"], None, false, 15).await },
+                Write::Delete => api.act(name, &[], None, true, 30).await,
+                Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
+                Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
             };
-            tell.send(SidebarReply::Wrote(name, what, result)).await;
+            tell.send(SidebarReply::Wrote(target, what, result)).await;
         });
         cx.notify();
     }
@@ -582,28 +679,26 @@ impl Hangar {
     // ── Git e encadear ──
 
     /// "Git": a aba Git do painel da direita (o diálogo quando o painel não cabe), o mesmo caminho da faixa do compositor.
-    fn open_git(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.as_ref().is_none_or(|s| s.name != name) {
-            let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() else { return };
-            self.select(session, window, cx);
-        }
+    fn open_git(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_target().as_ref() != Some(&target) && self.select_target(&target, window, cx).is_none() { return; }
         self.open_git_panel(window, cx);
     }
 
     /// Terminal ⇄ sem terminal na mesma conversa: reinicia o processo da sessão, então pergunta antes, como o web.
-    fn confirm_mode(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.iter().find(|s| s.name == name) else { return };
+    fn confirm_mode(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.target_session(&target) else { return };
         let terminal = session.headless;
         let label = web(if terminal { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
         let message = web(if terminal { "modo_confirmar_terminal_msg" } else { "modo_confirmar_sem_terminal_msg" });
-        self.focus_origin(&name, window, cx);
+        self.focus_origin(&target, window, cx);
         let this = cx.entity().downgrade();
         chrome::confirm_alert(window, cx, label.clone(), message, label, ButtonVariant::Primary,
-            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(name.clone(), Write::Mode(terminal), cx)); true });
+            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Mode(terminal), cx)); true });
     }
 
-    fn git_write(&mut self, name: String, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else {
+    fn git_write(&mut self, target: Target, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {
+        let name = target.name.clone();
+        let Some(api) = self.machine_api(&target.server) else {
             window.push_notification(git_note(&name, NotificationType::Error, tr("connection_failed")), cx);
             return;
         };
@@ -617,22 +712,22 @@ impl Hangar {
         let tell = self.sidebar_tell();
         self.runtime.spawn(async move {
             let (kind, text) = git_result(&api, &name, what).await;
-            tell.send(SidebarReply::Note(name, kind, text)).await;
+            tell.send(SidebarReply::Note(target, kind, text)).await;
         });
     }
 
     /// Branch com a árvore suja pergunta antes, como o web; limpa troca direto.
-    fn pick_branch(&mut self, name: String, branch: String, dirty: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !dirty { self.git_write(name, GitWrite::Checkout(branch), window, cx); return; }
-        self.focus_origin(&name, window, cx);
+    fn pick_branch(&mut self, target: Target, branch: String, dirty: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !dirty { self.git_write(target, GitWrite::Checkout(branch), window, cx); return; }
+        self.focus_origin(&target, window, cx);
         let weak = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
             let run = |id: &'static str, label: String, stash: bool| {
-                let (weak, name, branch) = (weak.clone(), name.clone(), branch.clone());
+                let (weak, target, branch) = (weak.clone(), target.clone(), branch.clone());
                 Button::new(id).label(label).when(stash, |b| b.primary()).on_click(move |_, window, cx| {
                     window.close_dialog(cx);
                     let what = if stash { GitWrite::StashCheckout(branch.clone()) } else { GitWrite::Checkout(branch.clone()) };
-                    let _ = weak.update(cx, |this, cx| this.git_write(name.clone(), what, window, cx));
+                    let _ = weak.update(cx, |this, cx| this.git_write(target.clone(), what, window, cx));
                 })
             };
             let line = |label: String, text: String| div().child(div().font_weight(FontWeight::SEMIBOLD).child(label))
@@ -651,7 +746,7 @@ impl Hangar {
         });
     }
 
-    fn start_chain(&mut self, from: String, target: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_chain(&mut self, from: Target, target: String, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_chain_prompt")));
         let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { .. } => this.commit_chain(window, cx),
@@ -690,7 +785,7 @@ impl Hangar {
         let Some(chain) = self.sidebar.chain.as_ref() else { return };
         let text = chain.input.read(cx).value().trim().to_owned();
         if text.is_empty() || chain.status.borrow().sent.is_some() { return; }
-        let Some(api) = self.api.clone() else {
+        let Some(api) = self.machine_api(&chain.from.server) else {
             *chain.status.borrow_mut() = Pending { sent: None, error: Some(tr("sidebar_chain_failed").replace("{n}", &tr("connection_failed"))) };
             cx.notify();
             return;
@@ -700,34 +795,37 @@ impl Hangar {
         *chain.status.borrow_mut() = Pending { sent: Some(seq), error: None };
         let (from, target, tell) = (chain.from.clone(), chain.target.clone(), self.sidebar_tell());
         self.runtime.spawn(async move {
-            let result = api.server_send(reqwest::Method::PUT, &["sessions", &from, "then"], Some(json!({"target": target, "text": text})), 30).await;
+            let result = api.server_send(reqwest::Method::PUT, &["sessions", &from.name, "then"], Some(json!({"target": target, "text": text})), 30).await;
             tell.send(SidebarReply::Chained(from, seq, target, result)).await;
         });
         cx.notify();
     }
 
     /// Foco na linha/aba de onde o menu saiu (o `menuOrigem` do web), para o diálogo devolvê-lo ao fechar.
-    pub(super) fn focus_origin(&self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab_focus.get(name).unwrap_or(&self.root_focus).focus(window, cx);
+    pub(super) fn focus_origin(&self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.row_focus(target).unwrap_or(&self.root_focus).focus(window, cx);
     }
 
-    fn confirm_delete(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus_origin(&name, window, cx);
+    fn confirm_delete(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_origin(&target, window, cx);
         let this = cx.entity().downgrade();
-        chrome::confirm_alert(window, cx, tr("sidebar_close_title"), name.clone(), tr("sidebar_close"), ButtonVariant::Danger,
+        chrome::confirm_alert(window, cx, tr("sidebar_close_title"), target.name.clone(), tr("sidebar_close"), ButtonVariant::Danger,
             move |window, cx| { let _ = this.update(cx, |this, cx| {
-                    // A linha some na hora e volta se o servidor recusar; sem conexão nada sai, e ela não some.
-                    if this.api.is_none() { return; }
-                    this.sidebar.deleting.insert(name.clone());
-                    this.write(name.clone(), Write::Delete, cx);
+                    // A linha some na hora e volta se o servidor recusar; sem conexão nada sai, ela não some e o motivo aparece.
+                    if this.machine_api(&target.server).is_none() {
+                        window.push_notification(Notification::error(tr("sidebar_close_failed").replace("{n}", &tr("connection_failed"))), cx);
+                        return;
+                    }
+                    this.sidebar.deleting.insert(target.clone());
+                    this.write(target.clone(), Write::Delete, cx);
                     // O Confirm fecha com animação e só então devolve o foco à linha, que já sumiu: passado esse prazo, a raiz
                     // o recebe (`fallbackFocus` do web). Se a linha voltou (o servidor recusou), o foco fica nela.
-                    let name = name.clone();
+                    let target = target.clone();
                     cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor().timer(*dialog::ANIMATION_DURATION + Duration::from_millis(50)).await;
                         let _ = this.update_in(cx, |this, window, cx| {
-                            let gone = this.sidebar.deleting.contains(&name) || !this.sessions.iter().any(|s| s.name == name);
-                            let on_row = this.tab_focus.get(&name).is_some_and(|f| f.is_focused(window));
+                            let gone = this.sidebar.deleting.contains(&target) || this.target_session(&target).is_none();
+                            let on_row = this.row_focus(&target).is_some_and(|f| f.is_focused(window));
                             if gone && (on_row || window.focused(cx).is_none()) { this.root_focus.focus(window, cx); }
                         });
                     }).detach();
@@ -740,17 +838,17 @@ impl Hangar {
                 eprintln!("grupos recolhidos não gravaram: {error}");
                 window.push_notification(Notification::warning(tr("sidebar_collapse_not_saved").replace("{n}", &error)), cx);
             }
-            SidebarReply::Preview(seq, name, result) => {
+            SidebarReply::Preview(seq, target, result) => {
                 // Espiada é opcional: falha não vira erro na tela (como o web), só no log.
-                let text = match result { Ok(text) => text, Err(error) => { eprintln!("prévia de {name}: {}", error.detail); return; } };
-                self.sidebar.cache.insert(name.clone(), (text.clone(), Instant::now()));
-                if seq == self.sidebar.hover_seq && self.sidebar.hover.as_deref() == Some(name.as_str()) { self.show_preview(name, text, cx); }
+                let text = match result { Ok(text) => text, Err(error) => { eprintln!("prévia de {}: {}", target.id(), error.detail); return; } };
+                self.sidebar.cache.insert(target.clone(), (text.clone(), Instant::now()));
+                if seq == self.sidebar.hover_seq && self.sidebar.hover.as_ref() == Some(&target) { self.show_preview(target, text, cx); }
             }
             SidebarReply::MuteRead(seq, result) => {
                 let Some(menu) = self.sidebar.menu.as_mut().filter(|m| m.seq == seq) else { return };
                 menu.mute = match result {
                     Ok(value) => match value.get("muted").and_then(Value::as_array) {
-                        Some(list) => Mute::Known(list.iter().any(|v| v.as_str() == Some(menu.name.as_str()))),
+                        Some(list) => Mute::Known(list.iter().any(|v| v.as_str() == Some(menu.target.name.as_str()))),
                         None => Mute::Failed(tr("invalid_response")),
                     },
                     Err(error) => Mute::Failed(Self::fetch_failure(&error)),
@@ -766,7 +864,7 @@ impl Hangar {
                 });
                 cx.notify();
             }
-            SidebarReply::Note(name, kind, text) => window.push_notification(git_note(&name, kind, text), cx),
+            SidebarReply::Note(target, kind, text) => window.push_notification(git_note(&target.name, kind, text), cx),
             SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
             SidebarReply::Sheet(reply) => self.receive_sheet(reply, window, cx),
             SidebarReply::Chained(from, seq, target, result) => {
@@ -775,53 +873,50 @@ impl Hangar {
                 match (result, open) {
                     (Ok(_), open) => {
                         if open.is_some() { self.sidebar.chain = None; window.close_dialog(cx); }
-                        window.push_notification(git_note(&from, NotificationType::Success, tr("sidebar_chained").replace("{n}", &target)), cx);
+                        window.push_notification(git_note(&from.name, NotificationType::Success, tr("sidebar_chained").replace("{n}", &target)), cx);
                     }
                     (Err(error), Some(chain)) => *chain.status.borrow_mut() = Pending { sent: None,
                         error: Some(tr("sidebar_chain_failed").replace("{n}", &Self::fetch_failure(&error))) },
-                    (Err(error), None) => window.push_notification(git_note(&from, NotificationType::Error,
+                    (Err(error), None) => window.push_notification(git_note(&from.name, NotificationType::Error,
                         tr("sidebar_chain_failed").replace("{n}", &Self::fetch_failure(&error))), cx),
                 }
                 cx.notify();
             }
-            SidebarReply::Wrote(name, what, result) => {
+            SidebarReply::Wrote(target, what, result) => {
                 // Com status, o motivo do servidor; sem resposta, "falha na conexão". Nunca o texto de entrega de conversa, que o
                 // `failure` dá a um 5xx de POST.
                 let failed = |key: &str, error: &Failure| tr(key).replace("{n}", &Self::fetch_failure(error));
                 // Diálogo desta sessão ainda aberto (não cancelado): o resultado aparece nele, não em notificação solta.
                 let in_dialog = match what {
-                    Write::Rename(_, seq) => self.sidebar.editing.as_ref().is_some_and(|e| !e.inline && e.status.borrow().sent == Some(seq) && e.old == name),
+                    Write::Rename(_, seq) => self.sidebar.editing.as_ref().is_some_and(|e| !e.inline && e.status.borrow().sent == Some(seq) && e.target == target),
                     _ => false,
                 };
                 let note = match (&what, result) {
                     (Write::Rename(new, _), Ok(value)) => {
-                        self.sidebar.renaming.remove(&name);
-                        let new = value.get("name").and_then(Value::as_str).unwrap_or(new).to_owned();
+                        self.sidebar.renaming.remove(&target);
+                        let new = Target::new(&target.server, value.get("name").and_then(Value::as_str).unwrap_or(new));
                         if in_dialog {
                             self.sidebar.editing = None;
                             window.close_dialog(cx);
-                            // Foco na aba do nome novo; ainda fora da lista, ela o recebe quando aparecer.
-                            match self.tab_focus.get(&new) {
+                            // Foco na linha/aba do nome novo; ainda fora da lista, ela o recebe quando aparecer.
+                            match self.row_focus(&new).cloned() {
                                 Some(focus) => focus.focus(window, cx),
                                 None => { self.root_focus.focus(window, cx); self.sidebar.focus_tab = Some(new.clone()); }
                             }
                         }
-                        let lost = self.sidebar.lost.as_deref() == Some(name.as_str());
+                        let lost = self.sidebar.lost.as_ref() == Some(&target);
                         if lost { self.sidebar.lost = None; }
-                        // Renomear é da lista ativa: a aberta de mesmo nome em outra máquina fica onde está.
-                        let open_here = self.open_api.is_none() && self.selected.as_ref().is_some_and(|s| s.name == name);
-                        if open_here || (lost && self.selected.is_none()) {
-                            match self.sessions.iter().find(|s| s.name == new).cloned() {
-                                Some(s) => { self.error = None; self.select(s, window, cx); }
-                                None => self.sidebar.follow = Some(new),
-                            }
+                        // Só a aberta nesta máquina segue o nome novo: a de mesmo nome em outra fica onde está.
+                        let open_here = self.selected_target().as_ref() == Some(&target);
+                        if (open_here || (lost && self.selected.is_none())) && self.select_target(&new, window, cx).is_none() {
+                            self.sidebar.follow = Some(new);
                         }
                         None
                     }
                     (Write::Rename(..), Err(error)) => {
-                        self.sidebar.renaming.remove(&name);
+                        self.sidebar.renaming.remove(&target);
                         // Sumiu da lista e o renomear falhou: aí sim ela foi encerrada.
-                        if self.sidebar.lost.as_deref() == Some(name.as_str()) {
+                        if self.sidebar.lost.as_ref() == Some(&target) {
                             self.sidebar.lost = None;
                             if self.selected.is_none() { self.error = Some(tr("session_gone")); }
                         }
@@ -842,7 +937,7 @@ impl Hangar {
                             w.get("msg").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| w.to_string())))
                     }
                     (Write::Delete, Err(error)) => {
-                        self.sidebar.deleting.remove(&name);
+                        self.sidebar.deleting.remove(&target);
                         Some(Notification::error(failed("sidebar_close_failed", &error)))
                     }
                 };
@@ -917,56 +1012,55 @@ pub(super) fn menu_style(menu: PopupMenu) -> PopupMenu {
         .key_renderer(|key, _, _| popup::key_hint("").child(key.appearance(false))))
 }
 
-/// O mesmo menu no clique direito da linha, no ⋯ e na aba.
-/// Sessão de um convite: o único gesto é parar de acompanhar deste aparelho, nunca fechar a sessão do dono.
-pub(super) fn invite_menu(hangar: WeakEntity<Hangar>, key: String, name: String) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    move |menu, _, _| {
-        let (hangar, key) = (hangar.clone(), key.clone());
-        menu_style(menu).min_w(px(240.)).label(name.clone())
-            .item(PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr_shared("convite_parar", &[])))
-                .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.stop_following(&key, window, cx)); }))
-    }
-}
-
-pub(super) fn session_menu(hangar: WeakEntity<Hangar>, session: SessionInfo) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+/// O mesmo menu no clique direito da linha, no ⋯ e na aba, para a sessão de qualquer máquina (`server` é a chave dela).
+pub(super) fn session_menu(hangar: WeakEntity<Hangar>, server: String, session: SessionInfo) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let target = Target::new(&server, &session.name);
     move |menu, window, cx| {
         let Some(entity) = hangar.upgrade() else { return menu };
         // Sem nome, processo nem turno próprios para renomear, fechar ou interromper: o menu do orquestrador só leva ao árbitro.
         if session.orq() {
-            let missing = entity.read(cx).arbiter_of(&session.name).is_none();
-            let (hangar, name) = (hangar.clone(), session.name.clone());
+            let missing = entity.read(cx).arbiter_of(&target).is_none();
+            let (hangar, target) = (hangar.clone(), target.clone());
             return menu_style(menu).min_w(px(240.)).label(session.name.clone())
                 .item(PopupMenuItem::new(tr_shared("orq_talk_to_arbiter", &[])).disabled(missing)
-                    .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.open_arbiter(&name, window, cx)); }));
+                    .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.open_arbiter(&target, window, cx)); }));
         }
-        // As outras sessões deste servidor, na ordem da barra sem o filtro, são as candidatas do encadear (web: `chainCandidates`,
-        // que lê os grupos inteiros).
-        let others = |hangar: &Hangar, name: &str| -> Vec<String> {
-            let l = layout(&hangar.sessions, "", Hangar::by_project(), &hangar.sidebar.deleting);
-            l.waiting.iter().chain(l.groups.iter().flat_map(|g| g.sessions.iter())).filter(|s| s.name != name).map(|s| s.name.clone()).collect()
+        // As outras sessões da mesma máquina, na ordem da barra sem o filtro, são as candidatas do encadear (web:
+        // `chainCandidates`, que lê os grupos inteiros daquele servidor): o vínculo é resolvido pelo backend dela.
+        let others = |hangar: &Hangar, target: &Target| -> Vec<String> {
+            let l = layout(hangar.sessions_of(&target.server), "", Hangar::by_project(), &hangar.sidebar.hidden_on(&target.server));
+            l.waiting.iter().chain(l.groups.iter().flat_map(|g| g.sessions.iter())).filter(|s| s.name != target.name).map(|s| s.name.clone()).collect()
         };
-        let seen = RefCell::new(entity.read(cx).sidebar.menu_for(&session.name));
-        let (weak, again) = (hangar.clone(), session.clone());
-        cx.observe_in(&entity, window, move |menu, entity, _, cx| {
-            let now = entity.read(cx).sidebar.menu_for(&again.name);
-            if *seen.borrow() == now { return; }
-            *seen.borrow_mut() = now.clone();
-            // Atualiza só Silenciar: o submenu aberto mantém entidade, seleção e foco.
-            menu.replace_item(2, mute_item(&weak, &again.name, now), cx);
-        }).detach();
-        let view = entity.read(cx).sidebar.menu_for(&session.name);
-        let list = others(entity.read(cx), &session.name);
-        let group = entity.read(cx).group_candidates(&session.name);
-        fill_menu(menu, &hangar, &session, view, list, group, window, cx)
+        let invite = entity.read(cx).invite_target(&target);
+        // Convite não tem Silenciar, então nada a atualizar na posição dele.
+        if !invite {
+            let seen = RefCell::new(entity.read(cx).sidebar.menu_for(&target));
+            let (weak, again) = (hangar.clone(), target.clone());
+            cx.observe_in(&entity, window, move |menu, entity, _, cx| {
+                let now = entity.read(cx).sidebar.menu_for(&again);
+                if *seen.borrow() == now { return; }
+                *seen.borrow_mut() = now.clone();
+                // Atualiza só Silenciar: o submenu aberto mantém entidade, seleção e foco.
+                menu.replace_item(2, mute_item(&weak, &again, now), cx);
+            }).detach();
+        }
+        let view = entity.read(cx).sidebar.menu_for(&target);
+        let list = others(entity.read(cx), &target);
+        let group = entity.read(cx).group_candidates(&target);
+        let active = entity.read(cx).is_active_key(&target.server);
+        fill_menu(menu, &hangar, &target, &session, Access { invite, active }, view, list, group, window, cx)
     }
 }
 
-fn mute_item(hangar: &WeakEntity<Hangar>, name: &str, mute: Option<Mute>) -> PopupMenuItem {
+/// O que o menu de uma linha pode oferecer: convite só o que é da própria sessão; `active` diz se a máquina é a ativa.
+struct Access { invite: bool, active: bool }
+
+fn mute_item(hangar: &WeakEntity<Hangar>, target: &Target, mute: Option<Mute>) -> PopupMenuItem {
     match mute {
         Some(Mute::Known(muted)) => {
-            let (hangar, name) = (hangar.clone(), name.to_owned());
+            let (hangar, target) = (hangar.clone(), target.clone());
             PopupMenuItem::new(tr(if muted { "sidebar_unmute" } else { "sidebar_mute" }))
-                .on_click(move |_, _, cx| { let _ = hangar.update(cx, |this, cx| this.write(name.clone(), Write::Mute(!muted), cx)); })
+                .on_click(move |_, _, cx| { let _ = hangar.update(cx, |this, cx| this.write(target.clone(), Write::Mute(!muted), cx)); })
         }
         // Sem leitura confirmada o item não grava: carregando mostra "…", falha mostra o motivo.
         Some(Mute::Failed(reason)) => PopupMenuItem::new(tr("sidebar_mute_unread").replace("{n}", &reason)).disabled(true),
@@ -974,33 +1068,40 @@ fn mute_item(hangar: &WeakEntity<Hangar>, name: &str, mute: Option<Mute>) -> Pop
     }
 }
 
-fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo, mute: Option<Mute>, others: Vec<String>,
-    group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
-    let item = |label: String, act: fn(&mut Hangar, String, &mut Window, &mut Context<Hangar>)| {
-        let (hangar, name) = (hangar.clone(), session.name.clone());
-        PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, name.clone(), window, cx)); })
+#[allow(clippy::too_many_arguments)]
+fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, session: &SessionInfo, access: Access, mute: Option<Mute>,
+    others: Vec<String>, group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let item = |label: String, act: fn(&mut Hangar, Target, &mut Window, &mut Context<Hangar>)| {
+        let (hangar, target) = (hangar.clone(), target.clone());
+        PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, target.clone(), window, cx)); })
     };
-    let invite = hangar.upgrade().is_some_and(|h| h.read(cx).active_invite());
+    let invite = access.invite;
     let cwd = session.cwd.clone().filter(|c| !c.is_empty());
-    let close = {
-        let (hangar, name) = (hangar.clone(), session.name.clone());
+    // No convite o item de fechar vira "Parar de acompanhar": sai só deste aparelho, nunca fecha a sessão do dono. Com o convite
+    // como servidor ativo ele não sai daqui (a troca de ativo é das configurações).
+    let close = if invite {
+        let (hangar, key) = (hangar.clone(), target.server.clone());
+        PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr_shared("convite_parar", &[]))).disabled(access.active)
+            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.stop_following(&key, window, cx)); })
+    } else {
+        let (hangar, target) = (hangar.clone(), target.clone());
         PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr("sidebar_close")))
-            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.confirm_delete(name.clone(), window, cx)); })
+            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.confirm_delete(target.clone(), window, cx)); })
     };
     let git = has_git(session);
     let chain_label = match &session.then_target {
         Some(target) => tr("sidebar_chained_to").replace("{n}", target),
         None => tr("sidebar_chain"),
     };
-    let (weak, name, current) = (hangar.clone(), session.name.clone(), session.then_target.clone());
-    let (group_weak, group_name, leave) = (hangar.clone(), session.name.clone(), super::grouping::can_leave(session));
-    // O diálogo de criar, aberto para continuar esta sessão.
+    let (weak, chain_from, current) = (hangar.clone(), target.clone(), session.then_target.clone());
+    let (group_weak, group_origin, leave) = (hangar.clone(), target.clone(), super::grouping::can_leave(session));
+    // O diálogo de criar, aberto para continuar esta sessão, travado na máquina dela.
     let baton = {
-        let (hangar, name, cwd) = (hangar.clone(), session.name.clone(), session.cwd.clone());
+        let (hangar, target, cwd) = (hangar.clone(), target.clone(), session.cwd.clone());
         PopupMenuItem::new(tr("sidebar_baton")).on_click(move |_, window, cx| {
-            let baton = super::create::Baton { name: name.clone(), cwd: cwd.clone() };
+            let baton = super::create::Baton { name: target.name.clone(), cwd: cwd.clone(), server: target.server.clone() };
             let _ = hangar.update(cx, |this, cx| {
-                this.focus_origin(&baton.name, window, cx);
+                this.focus_origin(&target, window, cx);
                 this.open_new_session(Some(baton), window, cx);
             });
         })
@@ -1010,41 +1111,42 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, session: &SessionInfo
         let label = web(if session.headless { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
         let idle = session.state == "idle";
         let label = if idle { label } else { format!("{label} · {}", web("modo_so_ociosa")) };
-        item(label, |this, name, window, cx| this.confirm_mode(name, window, cx)).disabled(!idle)
+        item(label, |this, target, window, cx| this.confirm_mode(target, window, cx)).disabled(!idle)
     });
+    // O convite só alcança as rotas da própria sessão, como o menu do web: silenciar, editor, encadear, agrupar, modo e bastão
+    // são do servidor inteiro ou mexem no processo do dono.
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
-        .item(item(tr("sidebar_rename"), |this, name, window, cx| this.start_session_rename(name, window, cx)))
-        .item(mute_item(hangar, &session.name, mute))
-        // Convidado não compartilha a sessão de outro dono.
-        .when(!invite, |menu| menu.item(item(tr_shared("compartilhar_menu", &[]), |this, name, window, cx| this.open_share_dialog(name, window, cx))))
+        .item(item(tr("sidebar_rename"), |this, target, window, cx| this.start_session_rename(target, window, cx)))
+        .when(!invite, |menu| menu.item(mute_item(hangar, target, mute))
+            .item(item(tr_shared("compartilhar_menu", &[]), |this, target, window, cx| this.open_share_dialog(target, window, cx))))
         .when_some(cwd, |menu, cwd| menu
             .item(PopupMenuItem::new(tr("sidebar_copy_cwd")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))))
-            .item(item(tr("sidebar_open_editor"), |this, name, _, cx| this.write(name, Write::Editor, cx))))
+            .when(!invite, |menu| menu.item(item(tr("sidebar_open_editor"), |this, target, _, cx| this.write(target, Write::Editor, cx)))))
         .when(git, |menu| {
-            let (weak, name) = (hangar.clone(), session.name.clone());
+            let (weak, target) = (hangar.clone(), target.clone());
             menu.separator()
-                .item(item(tr("sidebar_git"), |this, name, window, cx| this.open_git(name, window, cx)))
-                .item(item(tr("sidebar_git_pull"), |this, name, window, cx| this.git_write(name, GitWrite::Pull, window, cx)))
-                .submenu(tr("sidebar_switch_branch"), window, cx, move |menu, window, cx| branch_menu(menu, &weak, &name, window, cx))
+                .item(item(tr("sidebar_git"), |this, target, window, cx| this.open_git(target, window, cx)))
+                .item(item(tr("sidebar_git_pull"), |this, target, window, cx| this.git_write(target, GitWrite::Pull, window, cx)))
+                .submenu(tr("sidebar_switch_branch"), window, cx, move |menu, window, cx| branch_menu(menu, &weak, &target, window, cx))
         })
-        .separator()
-        .submenu(chain_label, window, cx, move |menu, _, _| fill_chain(menu, &weak, &name, current.clone(), &others))
-        // Mesmo diálogo do arrastar, para quem não arrasta (e o teclado).
-        .submenu(tr("group_with"), window, cx, move |menu, _, _| super::grouping::fill_group(menu, &group_weak, &group_name, &group))
-        .when(leave, |menu| menu.item(item(tr("group_leave"), |this, name, window, cx| this.request_leave(name, window, cx))))
-        .separator()
-        .when_some(mode, |menu, mode| menu.item(mode))
-        .item(baton)
+        .when(!invite, |menu| menu.separator()
+            .submenu(chain_label, window, cx, move |menu, _, _| fill_chain(menu, &weak, &chain_from, current.clone(), &others))
+            // Mesmo diálogo do arrastar, para quem não arrasta (e o teclado).
+            .submenu(tr("group_with"), window, cx, move |menu, _, _| super::grouping::fill_group(menu, &group_weak, &group_origin, &group))
+            .when(leave, |menu| menu.item(item(tr("group_leave"), |this, target, window, cx| this.request_leave(target, window, cx))))
+            .separator()
+            .when_some(mode, |menu, mode| menu.item(mode))
+            .item(baton))
         .separator()
         .item(close)
 }
 
 /// O submenu de branches se refaz sozinho quando a leitura chega: refazer o menu de cima fecharia o submenu aberto.
-fn branch_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+fn branch_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let Some(entity) = hangar.upgrade() else { return menu };
-    let seen = RefCell::new(entity.read(cx).sidebar.branches_for(name));
+    let seen = RefCell::new(entity.read(cx).sidebar.branches_for(target));
     let now = seen.borrow().clone();
-    let (weak, owner) = (hangar.clone(), name.to_owned());
+    let (weak, owner) = (hangar.clone(), target.clone());
     cx.observe_in(&entity, window, move |menu, entity, window, cx| {
         let now = entity.read(cx).sidebar.branches_for(&owner);
         if *seen.borrow() == now { return; }
@@ -1052,11 +1154,11 @@ fn branch_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, window:
         let (weak, owner) = (weak.clone(), owner.clone());
         menu.rebuild(window, cx, move |menu, _, _| fill_branches(menu, &weak, &owner, now));
     }).detach();
-    fill_branches(menu, hangar, name, now)
+    fill_branches(menu, hangar, target, now)
 }
 
 /// Submenu "Trocar branch": o estado da leitura feita ao abrir o menu; a atual com ✓ e sem ação.
-fn fill_branches(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, branches: Option<Branches>) -> PopupMenu {
+fn fill_branches(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, branches: Option<Branches>) -> PopupMenu {
     let menu = menu_style(menu).min_w(px(240.)).label(tr("sidebar_switch_branch"));
     let list = match branches {
         Some(Branches::Known(list)) => list,
@@ -1070,10 +1172,10 @@ fn fill_branches(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, branc
     if list.branches.is_empty() { return menu.item(PopupMenuItem::new(tr("sidebar_no_branches")).disabled(true)); }
     list.branches.iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, branch| {
         let current = list.current.as_deref() == Some(branch.as_str());
-        let (hangar, name, branch, dirty) = (hangar.clone(), name.to_owned(), branch.clone(), list.dirty);
+        let (hangar, target, branch, dirty) = (hangar.clone(), target.clone(), branch.clone(), list.dirty);
         menu.item(mono_item(branch.clone(), current).on_click(move |_, window, cx| {
             if current { return; }
-            let _ = hangar.update(cx, |this, cx| this.pick_branch(name.clone(), branch.clone(), dirty, window, cx));
+            let _ = hangar.update(cx, |this, cx| this.pick_branch(target.clone(), branch.clone(), dirty, window, cx));
         }))
     })
 }
@@ -1085,19 +1187,19 @@ pub(super) fn mono_item(text: String, current: bool) -> PopupMenuItem {
 }
 
 /// Submenu do encadear: as outras sessões (✓ no alvo atual) e, com alvo, o Remover vínculo.
-fn fill_chain(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, current: Option<String>, others: &[String]) -> PopupMenu {
+fn fill_chain(menu: PopupMenu, hangar: &WeakEntity<Hangar>, from: &Target, current: Option<String>, others: &[String]) -> PopupMenu {
     let menu = menu_style(menu).label(tr("sidebar_chain"));
     let menu = if others.is_empty() { menu.item(PopupMenuItem::new(tr("sidebar_no_other")).disabled(true)) } else {
         others.iter().fold(menu.min_w(px(220.)).max_h(px(260.)).scrollable(true), |menu, target| {
-            let (hangar, name, target) = (hangar.clone(), name.to_owned(), target.clone());
+            let (hangar, from, target) = (hangar.clone(), from.clone(), target.clone());
             menu.item(mono_item(target.clone(), current.as_deref() == Some(target.as_str())).on_click(move |_, window, cx| {
-                let _ = hangar.update(cx, |this, cx| this.start_chain(name.clone(), target.clone(), window, cx));
+                let _ = hangar.update(cx, |this, cx| this.start_chain(from.clone(), target.clone(), window, cx));
             }))
         })
     };
-    let (hangar, name) = (hangar.clone(), name.to_owned());
+    let (hangar, from) = (hangar.clone(), from.clone());
     menu.when(current.is_some(), |menu| menu.separator().item(PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr("sidebar_unlink")))
-        .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.git_write(name.clone(), GitWrite::Unlink, window, cx)); })))
+        .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.git_write(from.clone(), GitWrite::Unlink, window, cx)); })))
 }
 
 /// A barra recolhida mora no mesmo arquivo dos grupos recolhidos: é mais uma coisa recolhida.
@@ -1192,9 +1294,10 @@ impl Hangar {
     }
 
     /// Recolher/expandir, a última peça do rodapé nas duas formas da barra.
-    pub(super) fn fold_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `id` próprio de cada forma: na animação de recolher as duas aparecem juntas.
+    pub(super) fn fold_button(&self, id: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let rail = self.rail();
-        Button::new("sidebar-fold").ghost().icon(chrome::small_icon(IconName::PanelLeft, 18., theme::muted()))
+        Button::new(id).ghost().icon(chrome::small_icon(IconName::PanelLeft, 18., theme::muted()))
             .h(px(36.)).w(px(if rail { 40. } else { 36. })).flex_shrink_0().rounded(px(8.))
             .accessibility_label(web(if rail { "sessao_expandir_barra" } else { "sessao_recolher_barra" }))
             .tooltip(web(if rail { "sessao_expandir_atalho" } else { "sessao_recolher_atalho" }))
@@ -1216,12 +1319,11 @@ impl Hangar {
             }
         };
         if self.multi_server() {
-            let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
-            let (query, by_project, none) = (self.sidebar.filter.read(cx).value().to_string(), Self::by_project(), HashSet::new());
+            let active = self.active_key();
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
                 if key == active { place(&local, None, &mut rows, cx); }
-                else if let Some(list) = self.remote.get(&key) { place(&layout(&list.sessions, &query, by_project, &none), Some(&key), &mut rows, cx); }
+                else if let Some(list) = self.remote.get(&key) { place(&self.remote_layout(&key, &list.sessions, cx), Some(&key), &mut rows, cx); }
             }
         } else {
             place(&local, None, &mut rows, cx);
@@ -1250,8 +1352,8 @@ impl Hangar {
                     .icon(chrome::small_icon(IconName::Plus, 16., theme::on_accent())).w(px(44.)).h(px(36.)).rounded(px(8.))
                     .tooltip(tr("create_title")).accessibility_label(tr("create_title")).disabled(self.api.is_none())
                     .on_click(cx.listener(|this, _, window, cx| this.open_new_session(None, window, cx))))
-                .child(self.fold_button(cx))
-                .child(Button::new("connection").ghost().size(px(36.)).rounded(px(8.)).tooltip(host).accessibility_label(tr("connection"))
+                .child(self.fold_button("rail-fold", cx))
+                .child(Button::new("rail-connection").ghost().size(px(36.)).rounded(px(8.)).tooltip(host).accessibility_label(tr("connection"))
                     .child(div().size(px(7.)).rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
                     .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))))
             .into_any_element()
@@ -1263,7 +1365,8 @@ impl Hangar {
         let awaiting = state == "awaiting_input";
         let color = if limited { theme::limited() } else { theme::status(state) };
         let (top, bottom) = rail_label(&session.name);
-        let row_key = match &remote { Some(key) => format!("{key}::{}", session.name), None => session.name.clone() };
+        let target = Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
+        let row_key = match &remote { Some(_) => target.id(), None => session.name.clone() };
         let host = match &remote { Some(key) => self.servers.iter().find(|s| servers::norm(&s.address) == *key).map_or(key.clone(), |s| s.label.clone()),
             None => self.server_label(cx) };
         let questions = session.pending_questions;
@@ -1291,27 +1394,12 @@ impl Hangar {
                 .child(div().min_h(px(10.)).text_color(theme::faint()).child(bottom)))
             .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
             .when(mixed && !session.orq(), |el| el.child(chrome::provider_badge(&session.provider)));
-        match remote {
-            Some(key) => self.remote_row(el, key, session.name.clone(), cx),
-            None => {
-                let (weak, menu_session, menu_name) = (cx.entity().downgrade(), session.clone(), session.name.clone());
-                el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.hide_preview();
-                        this.select(session.clone(), window, cx);
-                        this.focus_composer_for(&session, window, cx);
-                    }))
-                    .context_menu(session_menu(weak, menu_session))
-                    .into_any_element()
-            }
-        }
-    }
-
-    /// Linha de sessão de outra máquina: clicar abre nela; num convite, o clique direito oferece parar de acompanhar.
-    pub(super) fn remote_row(&self, el: Stateful<Div>, key: String, name: String, cx: &mut Context<Self>) -> AnyElement {
-        let menu = self.server_entry(&key).is_some_and(|s| s.invite).then(|| invite_menu(cx.entity().downgrade(), key.clone(), name.clone()));
-        let el = el.on_click(cx.listener(move |this, _, window, cx| this.open_remote(&key, name.clone(), window, cx)));
-        match menu { Some(menu) => el.context_menu(menu).into_any_element(), None => el.into_any_element() }
+        // Linha de qualquer máquina: o mesmo menu e o mesmo clique, cada um na máquina dela.
+        let (weak, menu_target, open) = (cx.entity().downgrade(), target.clone(), target.clone());
+        el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_target(&open, window, cx)))
+            .context_menu(session_menu(weak, target.server, session))
+            .into_any_element()
     }
 }
 

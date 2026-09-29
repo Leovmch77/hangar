@@ -399,6 +399,8 @@ impl Hangar {
         for input in self.ask_form.inputs.clone() { input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)); }
         self.relabel_settings(window, cx);
         self.rebuild_accounts();
+        // O texto preparado das mensagens de aviso e o separador decimal das tabelas dependem do idioma.
+        self.chat.invalidate();
         self.sync_rows(cx);
         self.list_state.remeasure();
         cx.refresh_windows();

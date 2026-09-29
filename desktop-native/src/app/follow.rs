@@ -39,6 +39,23 @@ fn wheel_step(wheel: f32, ms: f32, distance: f32) -> (f32, f32) {
     (step, if distance - step <= 0.5 { 0. } else { wheel - step })
 }
 
+/// Se a âncora da lista está no trecho trocado, o gpui a zera no começo do trecho e a tela pularia para lá.
+fn splice_keeping_anchor(list: &ListState, old_ids: &[String], range: std::ops::Range<usize>, new_ids: &[String]) {
+    let anchor = list.logical_scroll_top();
+    let top = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    list.splice(range.clone(), new_ids.len());
+    if !range.contains(&anchor.item_ix) { return; }
+    // A linha do topo só mudou de índice dentro do trecho: ancora nela. Pixel não serve, porque linha nunca desenhada
+    // vale 0 px antes da troca e a altura real depois.
+    if let Some(moved) = old_ids.get(anchor.item_ix).and_then(|id| new_ids.iter().position(|new| new == id)) {
+        list.scroll_to(ListOffset { item_ix: range.start + moved, offset_in_item: anchor.offset_in_item });
+        return;
+    }
+    // A própria linha foi trocada (prévia virando a resposta gravada): mesma altura, contada do começo do trecho.
+    let start = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+    list.scroll_to(ListOffset { item_ix: range.start, offset_in_item: px((top - start).max(0.)) });
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct StickSpring { velocity: f32, target_vel: f32, last_target: Option<f32> }
 
@@ -108,17 +125,10 @@ impl Hangar {
 
     fn visible_top(&self) -> f32 { f32::from(self.list_state.max_offset_for_scrollbar().y) - self.distance_from_bottom() }
 
-    /// Troca de linhas que mantém o texto da tela parado. Se a âncora da lista está no trecho
-    /// trocado (prévia virando a mensagem final, com a resposta mais alta que a janela), o gpui a
-    /// zera no começo do trecho e a tela pularia para o topo da resposta.
-    pub(super) fn splice_rows(&self, range: std::ops::Range<usize>, count: usize) {
-        let anchor = self.list_state.logical_scroll_top();
-        let top = -f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
-        self.list_state.splice(range.clone(), count);
-        if range.contains(&anchor.item_ix) {
-            let start = -f32::from(self.list_state.scroll_px_offset_for_scrollbar().y);
-            self.list_state.scroll_to(ListOffset { item_ix: range.start, offset_in_item: px((top - start).max(0.)) });
-        }
+    /// Troca as linhas `range` de `row_ids` por `new_ids` mantendo o texto da tela parado. Chamar antes de gravar
+    /// `row_ids`.
+    pub(super) fn splice_rows(&self, range: std::ops::Range<usize>, new_ids: &[String]) {
+        splice_keeping_anchor(&self.list_state, &self.row_ids, range, new_ids);
     }
 
     /// Conversa aberta ou recarregada: nasce no fim, sem deslizar.
@@ -377,6 +387,20 @@ mod tests {
         assert!(next <= 4. * super::MAX_STEP + 0.01, "{next} px em 4 quadros");
         let mut spring = StickSpring::default();
         assert_eq!(spring.step(29.8, 30., 8.), 30.);
+    }
+
+    /// Agente de fundo que termina volta do fim para o meio: o trecho trocado vai dele até o fim e engole a linha do
+    /// topo da tela, que só mudou de índice.
+    #[test]
+    fn splice_keeps_the_anchor_row_that_moved_inside_the_range() {
+        use gpui_kit::{ListAlignment, ListOffset, ListState, px};
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let old = ids(&["a", "b", "c", "d", "e", "pin"]);
+        let list = ListState::new(old.len(), ListAlignment::Bottom, px(300.));
+        list.scroll_to(ListOffset { item_ix: 3, offset_in_item: px(12.) });
+        super::splice_keeping_anchor(&list, &old, 1..6, &ids(&["agent", "b", "c", "d", "e"]));
+        let top = list.logical_scroll_top();
+        assert_eq!((top.item_ix, top.offset_in_item), (4, px(12.)));
     }
 
     #[test]

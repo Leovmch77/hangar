@@ -3,9 +3,12 @@
 //! trecho com a mensagem em volta (`/api/search/context`) e o "Perguntar" (`/api/ask-history`) — mais as sessões vivas
 //! pelo nome, como a paleta do Zeron. Enter abre a sessão viva; a arquivada é retomada numa sessão nova
 //! (`/api/archive/…/resume`), porque o nativo não tem a vista de arquivo do web.
+//! Sessões e busca de conteúdo cobrem todas as máquinas próprias, como o web; cada trecho abre, mostra contexto e retoma na
+//! máquina de onde veio. O "Perguntar" segue só na ativa, como no web.
 use super::*;
 use super::device::Remote;
 use super::costs::web_with;
+use super::sidebar::Target;
 use serde::Deserialize;
 
 /// Espera entre a última tecla e a busca, como o web.
@@ -25,11 +28,16 @@ struct Hit {
     role: Option<String>,
     event_id: Option<String>,
     ts: Option<f64>,
+    /// Máquina de onde o trecho veio (chave e rótulo), marcada ao chegar.
+    #[serde(skip)]
+    server: String,
+    #[serde(skip)]
+    label: String,
 }
 
 impl Hit {
-    fn key(&self) -> String { format!("{}/{}/{}", self.project, self.session_id, self.event_id.as_deref().unwrap_or(&self.line)) }
-    fn conversation(&self) -> String { format!("{}/{}", self.project, self.session_id) }
+    fn key(&self) -> String { format!("{}/{}/{}/{}", self.server, self.project, self.session_id, self.event_id.as_deref().unwrap_or(&self.line)) }
+    fn conversation(&self) -> String { format!("{}/{}/{}", self.server, self.project, self.session_id) }
     fn folder(&self) -> String {
         self.cwd.as_deref().map(super::costs::project_label).unwrap_or_else(|| self.project.clone())
     }
@@ -39,7 +47,7 @@ impl Hit {
 
 /// O que as setas percorrem: sessões vivas pelo nome e trechos da busca, na ordem da tela.
 #[derive(Clone, Debug, PartialEq)]
-enum Entry { Session(String), Hit(usize), Answer(usize) }
+enum Entry { Session(Target), Hit(usize), Answer(usize) }
 
 #[derive(Default)]
 pub(super) struct Search {
@@ -48,6 +56,8 @@ pub(super) struct Search {
     /// A busca que está na tela (ou em voo).
     query: String,
     hits: Remote<Vec<Hit>>,
+    /// Máquinas que não responderam à última busca, já com o motivo: as outras mostram o que acharam.
+    failed: Vec<String>,
     debounce: u64,
     active: usize,
     preview: Option<(String, Remote<Vec<ChatEvent>>)>,
@@ -137,7 +147,7 @@ impl Hangar {
         self.search.debounce += 1;
         let seq = self.search.debounce;
         if query.is_empty() {
-            (self.search.query, self.search.hits) = (String::new(), Remote::default());
+            (self.search.query, self.search.hits, self.search.failed) = (String::new(), Remote::default(), Vec::new());
             cx.notify();
             return;
         }
@@ -149,25 +159,72 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Máquinas da busca de conteúdo: as próprias ligadas, a ativa primeiro. Convite fica de fora: a busca é rota do servidor
+    /// inteiro do dono.
+    fn search_machines(&self, cx: &App) -> Vec<(String, String, Option<Api>)> {
+        let active = self.active_key();
+        let mut list: Vec<(String, String, Option<Api>)> = self.servers.iter().filter(|s| !s.disabled && !s.invite)
+            .map(|s| { let key = servers::norm(&s.address); (key.clone(), s.label.clone(), self.machine_api(&key)) }).collect();
+        if let Some(ix) = list.iter().position(|(key, ..)| *key == active) { let first = list.remove(ix); list.insert(0, first); }
+        // A ativa ainda fora da lista gravada (a conexão grava depois da primeira resposta) entra do mesmo jeito.
+        else if !active.is_empty() && !self.active_invite() { list.insert(0, (active, self.server_label(cx), self.api.clone())); }
+        list
+    }
+
+    /// Rótulo da máquina `key` para a busca.
+    fn machine_label(&self, key: &str, cx: &App) -> String {
+        if self.is_active_key(key) { return self.server_label(cx); }
+        self.server_entry(key).map_or_else(|| key.to_owned(), |s| s.label.clone())
+    }
+
     fn run_search(&mut self, query: String, cx: &mut Context<Self>) {
         self.search.query = query.clone();
         let seq = self.search.hits.start();
-        // 30 s: a busca varre as conversas de todas as contas; termo raro percorre tudo antes de parar.
-        self.server_get(vec!["search".into()], vec![("q".into(), query)], 30, cx, move |this, result, cx| {
-            let parsed = result.map_err(|e| Self::failure(&e)).and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response")))
-                .map(|mut hits| { hits.sort_by(|a, b| b.mtime.total_cmp(&a.mtime)); hits });
-            this.search.hits.finish(seq, parsed);
-            cx.notify();
+        // Uma busca por máquina, como o fan-out do web: a lenta ou fora do ar falha sozinha, sem segurar as outras.
+        let machines = self.search_machines(cx);
+        let connection = self.connection;
+        let task = self.runtime.spawn(async move {
+            futures::future::join_all(machines.into_iter().map(|(key, label, api)| {
+                let query = query.clone();
+                async move {
+                    // 30 s: a busca varre as conversas de todas as contas; termo raro percorre tudo antes de parar.
+                    let result = match api {
+                        Some(api) => api.server_read(&["search"], &[("q", query.as_str())], 30).await,
+                        None => Err(Failure::local("connection_failed")),
+                    };
+                    (key, label, result)
+                }
+            })).await
         });
+        cx.spawn(async move |this, cx| {
+            let Ok(results) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.connection != connection { return; }
+                let (mut hits, mut failed) = (Vec::new(), Vec::new());
+                for (key, label, result) in results {
+                    match result.map_err(|e| Self::failure(&e)).and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))) {
+                        Ok(list) => hits.extend(list.into_iter().map(|hit| Hit { server: key.clone(), label: label.clone(), ..hit })),
+                        Err(error) => failed.push(format!("{label} ({error})")),
+                    }
+                }
+                hits.sort_by(|a, b| b.mtime.total_cmp(&a.mtime));
+                if this.search.hits.finish(seq, Ok(hits)) { this.search.failed = failed; }
+                cx.notify();
+            });
+        }).detach();
     }
 
-    /// Sessões vivas cujo nome ou pasta tem a busca, as mais recentes primeiro.
-    fn search_sessions(&self, query: &str) -> Vec<SessionInfo> {
+    /// Sessões vivas de todas as máquinas cujo nome ou pasta tem a busca, as mais recentes primeiro.
+    fn search_sessions(&self, query: &str) -> Vec<(Target, SessionInfo)> {
         let q = query.to_lowercase();
-        let mut list: Vec<SessionInfo> = self.sessions.iter()
-            .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q) || s.cwd.as_deref().is_some_and(|c| c.to_lowercase().contains(&q)))
-            .cloned().collect();
-        list.sort_by(|a, b| b.last_activity.unwrap_or(0.).total_cmp(&a.last_activity.unwrap_or(0.)));
+        let matches = |s: &SessionInfo| q.is_empty() || s.name.to_lowercase().contains(&q) || s.cwd.as_deref().is_some_and(|c| c.to_lowercase().contains(&q));
+        let active = self.active_key();
+        let mut list: Vec<(Target, SessionInfo)> = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
+            .map(|s| (active.clone(), s))
+            .chain(self.remote.iter().flat_map(|(key, l)| l.sessions.iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).map(move |s| (key.clone(), s))))
+            .filter(|(_, s)| matches(s))
+            .map(|(key, s)| (Target::new(&key, &s.name), s.clone())).collect();
+        list.sort_by(|a, b| b.1.last_activity.unwrap_or(0.).total_cmp(&a.1.last_activity.unwrap_or(0.)));
         list.truncate(SESSIONS_MAX);
         list
     }
@@ -184,7 +241,7 @@ impl Hangar {
 
     fn search_entries(&self, cx: &App) -> Vec<Entry> {
         let query = self.search_text(cx).trim().to_owned();
-        let mut out: Vec<Entry> = self.search_sessions(&query).into_iter().map(|s| Entry::Session(s.name)).collect();
+        let mut out: Vec<Entry> = self.search_sessions(&query).into_iter().map(|(target, _)| Entry::Session(target)).collect();
         if let Some((_, hits)) = self.search.ask.ok() { out.extend((0..hits.len()).map(Entry::Answer)); }
         out.extend(self.search_groups().into_iter().flat_map(|(_, hits)| hits.into_iter().map(Entry::Hit)));
         out
@@ -210,35 +267,41 @@ impl Hangar {
     fn search_activate(&mut self, entry: Option<Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = entry.or_else(|| self.search_entries(cx).get(self.search.active).cloned()) else { return };
         match entry {
-            Entry::Session(name) => self.search_open_session(&name, window, cx),
+            Entry::Session(target) => self.search_open_session(&target, window, cx),
             other => {
                 let Some(hit) = self.hit_of(&other) else { return };
                 match hit.live_name() {
-                    Some(name) => { let name = name.to_owned(); self.search_open_session(&name, window, cx) }
+                    Some(name) => { let target = Target::new(&hit.server, name); self.search_open_session(&target, window, cx) }
                     None => self.search_resume(hit, window, cx),
                 }
             }
         }
     }
 
-    fn search_open_session(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() else {
-            self.search.resume_error = Some(tr("search_session_gone").replace("{name}", name));
+    /// Abre na máquina dela, sem trocar o servidor ativo.
+    fn search_open_session(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        if self.target_session(target).is_none() {
+            self.search.resume_error = Some(tr("search_session_gone").replace("{name}", &target.name));
             cx.notify();
             return;
-        };
+        }
         self.search.previous_focus = None;
         self.close_search(window, cx);
         self.close_costs(window, cx);
         self.close_settings(window, cx);
-        self.select(session.clone(), window, cx);
-        self.focus_composer_for(&session, window, cx);
+        self.open_target(target, window, cx);
     }
 
-    /// Conversa arquivada: sobe uma sessão nova com `--resume` na conta dona dela, pela rota do Arquivo do web.
+    /// Conversa arquivada: sobe uma sessão nova com `--resume` na conta dona dela, pela rota do Arquivo do web, na máquina
+    /// de onde o trecho veio.
     fn search_resume(&mut self, hit: Hit, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.machine_api(&hit.server) else {
+            self.search.resume_error = Some(tr("connection_failed"));
+            cx.notify();
+            return;
+        };
         if self.search.resuming.is_some() { return; }
+        let server = hit.server.clone();
         self.search.resuming = Some(hit.conversation());
         self.search.resume_error = None;
         let connection = self.connection;
@@ -257,7 +320,11 @@ impl Hangar {
                         this.close_costs(window, cx);
                         this.close_settings(window, cx);
                         let readable = session.readable();
-                        this.select(session, window, cx);
+                        // Nasceu em outra máquina: entra na lista guardada dela, senão a leitura que chega primeiro a fecharia.
+                        if let Some(list) = this.remote.get_mut(&server).filter(|l| l.loaded && !l.sessions.iter().any(|s| s.name == session.name)) {
+                            list.sessions.push(session.clone());
+                        }
+                        this.select_on(&server, session, window, cx);
                         if readable { this.composer.update(cx, |input, cx| input.focus(window, cx)); }
                     }
                     Err(error) => this.search.resume_error = Some(error),
@@ -281,14 +348,23 @@ impl Hangar {
         };
         let seq = remote.start();
         self.search.preview = Some((key.clone(), remote));
-        let query = vec![("project".into(), hit.project.clone()), ("session_id".into(), hit.session_id.clone()), ("event_id".into(), event)];
-        self.server_get(vec!["search".into(), "context".into()], query, 15, cx, move |this, result, cx| {
-            let Some((k, remote)) = this.search.preview.as_mut().filter(|(k, _)| *k == key) else { return };
-            let _ = k;
-            remote.finish(seq, result.map_err(|e| Self::fetch_failure(&e))
-                .and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response"))));
-            cx.notify();
+        // O contexto é lido da máquina do trecho.
+        let api = self.machine_api(&hit.server);
+        let connection = self.connection;
+        let task = self.runtime.spawn(async move {
+            let Some(api) = api else { return Err(Failure::local("connection_failed")) };
+            api.server_read(&["search", "context"], &[("project", hit.project.as_str()), ("session_id", hit.session_id.as_str()), ("event_id", event.as_str())], 15).await
         });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.connection != connection { return; }
+                let Some((_, remote)) = this.search.preview.as_mut().filter(|(k, _)| *k == key) else { return };
+                remote.finish(seq, result.map_err(|e| Self::fetch_failure(&e))
+                    .and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response"))));
+                cx.notify();
+            });
+        }).detach();
         cx.notify();
     }
 
@@ -299,6 +375,7 @@ impl Hangar {
         let Some(api) = self.api.clone() else { return };
         let seq = self.search.ask.start();
         let connection = self.connection;
+        let (server, label) = (self.active_key(), self.server_label(cx));
         let task = self.runtime.spawn(async move {
             api.server_send(reqwest::Method::POST, &["ask-history"], Some(json!({ "question": question })), 90).await
         });
@@ -309,7 +386,7 @@ impl Hangar {
                 let parsed = result.map_err(|e| Self::failure(&e)).and_then(|v| {
                     let answer = v.get("answer").and_then(Value::as_str).unwrap_or_default().to_owned();
                     let hits = serde_json::from_value::<Vec<Hit>>(v.get("hits").cloned().unwrap_or(json!([]))).map_err(|_| tr("invalid_response"))?;
-                    Ok((answer, hits))
+                    Ok((answer, hits.into_iter().map(|hit| Hit { server: server.clone(), label: label.clone(), ..hit }).collect()))
                 });
                 this.search.ask.finish(seq, parsed);
                 cx.notify();
@@ -336,18 +413,23 @@ impl Hangar {
         let section = |title: String| div().px(px(10.)).pt(px(10.)).pb(px(4.)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM)
             .text_color(theme::faint()).child(title).into_any_element();
 
+        let multi = self.multi_server();
         let sessions = self.search_sessions(&query);
         if !sessions.is_empty() {
             rows.push(section(tr("search_sessions")));
-            for s in sessions {
-                let on = active.as_ref() == Some(&Entry::Session(s.name.clone()));
-                let name = s.name.clone();
-                let entry = Entry::Session(name.clone());
-                rows.push(self.search_row(format!("search-session-{name}"), on, entry, cx)
+            for (target, s) in sessions {
+                let entry = Entry::Session(target.clone());
+                let on = active.as_ref() == Some(&entry);
+                // Com várias máquinas, de qual é: o mesmo nome pode estar em duas.
+                let place = match (multi.then(|| self.machine_label(&target.server, cx)), s.cwd.clone()) {
+                    (Some(label), Some(cwd)) => Some(format!("{label} · {cwd}")),
+                    (label, cwd) => label.or(cwd),
+                };
+                rows.push(self.search_row(format!("search-session-{}", target.id()), on, entry, cx)
                     .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(theme::status(&s.state)))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
                         .child(div().truncate().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).child(highlighted(s.name.clone(), &words)))
-                        .children(s.cwd.clone().map(|c| div().truncate().font_family(theme::MONO).text_size(px(11.5)).text_color(theme::faint()).child(c))))
+                        .children(place.map(|c| div().truncate().font_family(theme::MONO).text_size(px(11.5)).text_color(theme::faint()).child(c))))
                     .children(s.last_activity.map(|t| div().flex_shrink_0().text_size(px(12.)).text_color(theme::faint()).child(ago(t))))
                     .into_any_element());
             }
@@ -380,8 +462,13 @@ impl Hangar {
         } else if self.search.hits.loading || self.search.query != query {
             rows.push(state_line(web_with("switcher_buscando", &[]), theme::muted()));
         } else {
+            // A máquina que falhou aparece mesmo com resultados das outras, como o web.
+            for failed in &self.search.failed {
+                rows.push(state_line(web_with("busca_servidor_falhou", &[("servidor", failed.clone())]), theme::danger()));
+            }
             match &self.search.hits.value {
                 Some(Err(error)) => rows.push(state_line(web_with("busca_servidor_falhou", &[("servidor", format!("{} ({error})", self.server_label(cx)))]), theme::danger())),
+                Some(Ok(hits)) if hits.is_empty() && !self.search.failed.is_empty() => {}
                 Some(Ok(hits)) if hits.is_empty() => rows.push(state_line(web_with("busca_nenhum_todas", &[("termos", words.join(", "))]), theme::muted())),
                 Some(Ok(hits)) => {
                     let hits = hits.clone();
@@ -394,6 +481,7 @@ impl Hangar {
                         let first = &hits[indexes[0]];
                         let title = first.live_name().map(str::to_owned).unwrap_or_else(|| first.folder());
                         let mut meta = Vec::new();
+                        if multi { meta.push(div().child(first.label.clone())); }
                         if first.live_name().is_some_and(|name| name != first.folder()) { meta.push(div().font_family(theme::MONO).child(first.folder())); }
                         meta.push(div().when(first.live, |el| el.text_color(theme::success()).font_weight(FontWeight::SEMIBOLD))
                             .child(web_with(if first.live { "switcher_ativa" } else { "switcher_arquivo" }, &[])));
@@ -513,7 +601,7 @@ impl Hangar {
                     .loading(resuming).disabled(self.search.resuming.is_some())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         match action_hit.live_name() {
-                            Some(name) => { let name = name.to_owned(); this.search_open_session(&name, window, cx) }
+                            Some(name) => { let target = Target::new(&action_hit.server, name); this.search_open_session(&target, window, cx) }
                             None => this.search_resume(action_hit.clone(), window, cx),
                         }
                     })))))
@@ -523,7 +611,14 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{marks, terms};
+    use super::{Hit, marks, terms};
+
+    #[test]
+    fn the_same_conversation_on_two_machines_stays_apart() {
+        let hit = |server: &str| Hit { project: "p".into(), session_id: "s".into(), line: "x".into(), server: server.into(), ..Default::default() };
+        assert_ne!(hit("http://a:8765").conversation(), hit("http://b:8765").conversation(), "agrupar juntaria trechos de máquinas diferentes");
+        assert_ne!(hit("http://a:8765").key(), hit("http://b:8765").key(), "a prévia aberta de uma abriria a da outra");
+    }
 
     #[test]
     fn highlights_every_term_without_overlaps() {

@@ -685,7 +685,9 @@ impl Hangar {
             this.sync_sliders(window, cx);
             cx.notify();
         }).detach();
+        chrome::set_window_active(window.is_window_active());
         cx.observe_window_activation(window, |this, window, cx| {
+            chrome::set_window_active(window.is_window_active());
             if !window.is_window_active() { return; }
             this.refresh_desktop_palette(cx);
             // O papel de parede muda fora da janela; a volta do foco é quando repintar importa.
@@ -806,8 +808,9 @@ impl Hangar {
     }
 
     /// Lista da máquina `server`: a ativa ou a de outra máquina já lida.
+    /// `server` pode vir como identidade da conexão ou já normalizado (chave das listas e das linhas).
     pub(super) fn sessions_of(&self, server: &str) -> &[SessionInfo] {
-        if self.server.as_deref() == Some(server) { return &self.sessions; }
+        if self.is_active_key(&servers::norm(server)) { return &self.sessions; }
         self.remote.get(&servers::norm(server)).map_or(&[], |list| &list.sessions)
     }
 
@@ -843,7 +846,7 @@ impl Hangar {
         self.api = Some(api.clone());
         self.server = Some(api.identity());
         if let Some((key, sessions, online, error)) = previous {
-            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error });
+            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error, api: None });
         }
         self.start_remote_lists();
         self.sync_updater(cx);
@@ -883,12 +886,16 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Silenciar, horas quietas e atalhos globais da máquina da conversa aberta: são deles que o aviso e o painel falam.
+    /// Convite não alcança essas rotas do servidor do dono: nada é lido, e nenhum aviso usa as preferências de outra máquina.
     fn load_notification_preferences(&mut self) {
-        let Some(api) = self.api.clone() else { return };
+        let server = self.open_server();
+        let api = self.machine_api(&server).filter(|_| !self.server_entry(&server).is_some_and(|s| s.invite));
         let n = &mut self.system_notifications;
         n.seq += 1;
         n.prefs = None;
         n.finished = None;
+        let Some(api) = api else { return };
         let (seq, connection, tx) = (n.seq, self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let (config, prefs) = tokio::join!(api.config(), api.server_read(&["push", "settings"], &[], 15));
@@ -972,8 +979,10 @@ impl Hangar {
         }
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
         self.open_api = open_api;
-        // Com as abas no topo, a aba da sessão aberta entra na vista da faixa.
-        if let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
+        // Avisos e atalhos globais passam a ser os da máquina desta conversa.
+        if !same_server { self.load_notification_preferences(); }
+        // Com as abas no topo (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
+        if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
         self.revision += 1;
         if let Some(t) = self.session_task.take() { t.abort(); }
@@ -1049,7 +1058,9 @@ impl Hangar {
         self.selection += 1;
         if let Some(task) = self.session_task.take() { task.abort(); }
         if let Some(task) = self.history_task.take() { task.abort(); }
+        let remote = self.open_api.is_some();
         (self.selected, self.open_api) = (None, None);
+        if remote { self.load_notification_preferences(); }
         self.opening = None;
         self.chat = Chat::default();
         self.turn_seen = None;
@@ -1148,7 +1159,8 @@ impl Hangar {
             // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
             Payload::Remote(generation, key, update) => {
                 if generation == self.remote_gen {
-                    self.receive_remote(generation, key.clone(), update, cx);
+                    // Menu, renomear, fechar e grupo das linhas desta máquina acompanham a lista dela como os da ativa.
+                    if self.receive_remote(generation, key.clone(), update, cx) { self.sidebar_sessions_changed(window, cx); }
                     self.remote_changed(&key, window, cx);
                 }
                 return;
@@ -1215,7 +1227,13 @@ impl Hangar {
                     applied
                 } else if frame.event == "sessions" {
                     match serde_json::from_value(frame.data) {
-                        Ok(sessions) => { self.list_error = None; self.replace_sessions(sessions, window, cx); true }
+                        Ok(sessions) => {
+                            // Lista igual à que está na tela não redesenha a janela.
+                            visible = self.list_error.is_some() || self.sessions != sessions;
+                            self.list_error = None;
+                            self.replace_sessions(sessions, window, cx);
+                            true
+                        }
                         Err(_) => { self.list_error = Some(tr("invalid_response")); false }
                     }
                 } else if frame.event == "list_error" { self.list_error = Some(tr("list_stale")); true }
@@ -1328,7 +1346,9 @@ impl Hangar {
             Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }
             Payload::Harness(reply) => { self.receive_harness(reply, cx); return; }
             Payload::ServerConfig(reply) => {
-                if matches!(&reply, server_config::ServerConfigReply::QuietSaved(..) | server_config::ServerConfigReply::Saved(..)) {
+                // A configuração gravada é da ativa: só vale para os avisos quando a conversa aberta é dela.
+                if matches!(&reply, server_config::ServerConfigReply::QuietSaved(..) | server_config::ServerConfigReply::Saved(..))
+                    && self.open_api.is_none() {
                     self.load_notification_preferences();
                 }
                 self.receive_server_config(reply, window, cx); return;
@@ -1338,7 +1358,8 @@ impl Hangar {
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Sidebar(reply) => {
-                if matches!(&reply, sidebar::SidebarReply::Wrote(_, sidebar::Write::Mute(_), _)) { self.load_notification_preferences(); }
+                // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
+                if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
@@ -1435,6 +1456,8 @@ impl Hangar {
 
     /// A sessão aberta acompanha a lista da máquina dela: dados novos, transcript trocado ou sumiço.
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
+        // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
+        let target = self.selected_target();
         if let Some(old) = self.selected.clone() {
             match list.iter().find(|s| s.name == old.name).cloned() {
                 Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.open_session(self.open_api.clone(), new, window, cx),
@@ -1444,7 +1467,9 @@ impl Hangar {
                     self.selection += 1;
                     if let Some(task) = self.session_task.take() { task.abort(); }
                     if let Some(task) = self.history_task.take() { task.abort(); }
+                    let remote = self.open_api.is_some();
                     (self.selected, self.open_api) = (None, None);
+                    if remote { self.load_notification_preferences(); }
                     self.chat = Chat::default();
                     self.turn_seen = None;
                     self.reset_details();
@@ -1452,7 +1477,7 @@ impl Hangar {
                     self.clear_visible_preview();
                     self.loading = false;
                     self.chat_online = false;
-                    if !self.lost_while_renaming(&old.name) { self.error = Some(tr("session_gone")); }
+                    if !target.is_some_and(|t| self.lost_while_renaming(&t)) { self.error = Some(tr("session_gone")); }
                 }
             }
         }
@@ -2300,6 +2325,7 @@ impl Hangar {
 
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
         let a = appearance::get();
+        let stable = self.chat.take_unsynced();
         self.activity = conversation::fold_activity(&self.chat.events);
         self.pinned = self.activity.running_agents().map(|agent| agent.call).collect();
         self.sync_activity(cx);
@@ -2307,9 +2333,9 @@ impl Hangar {
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
-        self.sync_tables(a.table_chart);
-        api::open_trace(|| format!("sync_rows built {} items", self.items.len()));
-        self.sync_row_ids(true, cx);
+        self.sync_tables(a.table_chart, stable);
+        api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
+        self.sync_row_ids(Some(stable), cx);
         api::open_trace(|| format!("sync_rows prepared {} rows", self.row_ids.len()));
         let provider = self.provider().0.to_owned();
         if matches!(provider.as_str(), "pi" | "omp" | "kimi") {
@@ -2324,12 +2350,16 @@ impl Hangar {
     fn sync_tail_rows(&mut self, cx: &mut Context<Self>) {
         // Lista zerada (troca de sessão, reset) ainda sem os itens: só a reconstrução inteira sabe as linhas.
         let full = self.row_ids.len() < self.items.len();
-        if full { self.sync_rows(cx) } else { self.sync_row_ids(false, cx) }
+        if full { self.sync_rows(cx) } else { self.sync_row_ids(None, cx) }
     }
 
-    /// Ids e assinaturas das linhas, splice na lista e texto das linhas que mudaram. `full` = os itens foram refeitos;
-    /// sem ele, só as linhas depois dos itens são comparadas.
-    fn sync_row_ids(&mut self, full: bool, cx: &mut Context<Self>) {
+    /// Ids e assinaturas das linhas, splice na lista e texto das linhas que mudaram. `rebuilt` = os itens foram refeitos,
+    /// com quantos eventos do começo intactos (o texto preparado deles é reaproveitado); sem ele, só as linhas depois
+    /// dos itens são comparadas.
+    fn sync_row_ids(&mut self, rebuilt: Option<usize>, cx: &mut Context<Self>) {
+        let full = rebuilt.is_some();
+        let stable = rebuilt.unwrap_or(0);
+        let mut old = if full { std::mem::take(&mut self.prepared) } else { HashMap::new() };
         let opening = self.opening_row_shown();
         let events = &self.chat.events;
         let items = self.items.len();
@@ -2355,7 +2385,7 @@ impl Hangar {
             if !full && index < items { return None; }
             let body = if id == PREVIEW { preview_source(&self.visible_preview) } else {
                 let Some(Item::Event(i)) = self.items.get(index) else { return None };
-                let message = prepare_message(&events[*i]);
+                let message = old.remove(id).filter(|_| *i < stable).unwrap_or_else(|| prepare_message(&events[*i]));
                 let Prepared::Message { markdown, .. } = &message else { unreachable!() };
                 let body = markdown.clone();
                 prepared.insert(id.clone(), message);
@@ -2364,13 +2394,25 @@ impl Hangar {
             self.rich.get(id).filter(|cached| cached.source != body).map(|_| (index, body))
         }).collect();
         if full {
+            // Saída de ferramenta de evento intacto já foi contada e cortada; o resto o `prepare_tools` refaz.
+            for (key, value) in old {
+                let Some((id, part)) = key.rsplit_once(':') else { continue };
+                let Some(i) = self.chat.position(id).filter(|i| *i < stable) else { continue };
+                let keep = match part {
+                    "lines" => true,
+                    "input" => self.expanded.contains(id),
+                    "result" => self.expanded.contains(id) && self.paired.get(&i).is_none_or(|result| *result < stable),
+                    _ => false,
+                };
+                if keep { prepared.insert(key, value); }
+            }
             self.prepared = prepared;
             self.last_message = events.iter().rposition(|e| e.kind == "assistant_msg" || e.kind == "user_msg" && !e.queued());
             self.prepare_tools();
         }
         // Só linha que muda de altura puxa a mola: um quadro sem mudança não pode desgrudar a lista do fim.
         if spliced || !resized.is_empty() || !rewritten.is_empty() { self.follow_content_changed(cx); }
-        if spliced { self.splice_rows(prefix..self.row_ids.len()-suffix, ids.len()-prefix-suffix); }
+        if spliced { self.splice_rows(prefix..self.row_ids.len()-suffix, &ids[prefix..ids.len()-suffix]); }
         // Só o bloco novo entra animado: um acréscimo pequeno no meio ou no fim de uma conversa já aberta. Troca de linha (a
         // prévia virando a resposta gravada, o envio virando a mensagem real), histórico carregando ou páginas antigas
         // chegando em cima aparecem direto.
@@ -2434,7 +2476,7 @@ impl Hangar {
 
     /// Tabelas das respostas gravadas que dão gráfico. Lidas aqui, quando as linhas mudam, e só para a
     /// resposta cuja fonte mudou; o desenho só consulta. Sem a opção, nada é lido nem guardado.
-    fn sync_tables(&mut self, enabled: bool) {
+    fn sync_tables(&mut self, enabled: bool, stable: usize) {
         let mut old = std::mem::take(&mut self.tables);
         if !enabled { return; }
         let decimal = tr("decimal").chars().next().unwrap_or(',');
@@ -2443,6 +2485,10 @@ impl Hangar {
             let Item::Event(i) = item else { continue };
             let event = &events[*i];
             if event.kind != "assistant_msg" || event.is_error == Some(true) { continue; }
+            if *i < stable && let Some(kept) = old.remove(&event.id) {
+                self.tables.insert(event.id.clone(), kept);
+                continue;
+            }
             let source = safe_markdown(&composer::citation_markdown(&display_body(event)));
             let tables = match old.remove(&event.id) {
                 Some((seen, tables)) if seen == source => tables,
@@ -2585,15 +2631,15 @@ impl Hangar {
         self.follow_content_changed(cx);
         match at {
             Some(at) => {
+                self.splice_rows(at..at + 1, &[]);
                 self.row_ids.remove(at);
                 self.row_signatures.remove(at);
-                self.splice_rows(at..at + 1, 0);
             }
             None => {
                 let at = self.row_ids.iter().position(|id| id.starts_with(PINNED)).unwrap_or(self.row_ids.len());
+                self.splice_rows(at..at, &[WORKING.into()]);
                 self.row_ids.insert(at, WORKING.into());
                 self.row_signatures.insert(at, String::new());
-                self.splice_rows(at..at, 1);
             }
         }
     }
@@ -3166,15 +3212,18 @@ impl Hangar {
         let name = HashMap::from([("n".to_owned(), peer.from.clone())]);
         let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel" };
         let label = crate::i18n::tr_web(key, &name).unwrap_or_else(|| peer.from.clone());
-        let target = self.sessions.iter().find(|s| s.name == peer.from).filter(|_| peer.scope != cards::PeerScope::Panel).cloned();
+        // O remetente é da máquina da conversa aberta, não da ativa.
+        let server = self.open_server();
+        let target = self.sessions_of(&server).iter().any(|s| s.name == peer.from).then(|| sidebar::Target::new(&server, &peer.from))
+            .filter(|_| peer.scope != cards::PeerScope::Panel);
         let chip = div().id(SharedString::from(format!("peer-{row}"))).text_xs().font_weight(FontWeight::SEMIBOLD).text_color(peer_tint(peer.scope));
         let chip = match target {
-            Some(session) => {
+            Some(target) => {
                 let open = crate::i18n::tr_web("user_abrir_chat_de", &name).unwrap_or_default();
                 chip.child(format!("{label} ›")).cursor_pointer().focusable().tab_stop(true).role(Role::Button).aria_label(open.clone())
                     .hover(|el| el.underline()).focus_visible(|el| el.underline())
                     .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(open.clone()).build(window, cx))
-                    .on_click(cx.listener(move |this, _, window, cx| this.select(session.clone(), window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| { this.select_target(&target, window, cx); }))
             }
             None => chip.child(label),
         };
@@ -4074,8 +4123,7 @@ impl Hangar {
         let mut remote_rows = 0;
         if self.multi_server() {
             // Como o web com mais de uma máquina: um bloco por servidor, na ordem da lista.
-            let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
-            let (query, by_project, none) = (self.sidebar.filter.read(cx).value().to_string(), Self::by_project(), HashSet::new());
+            let active = self.active_key();
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
                 if key == active {
@@ -4083,9 +4131,7 @@ impl Hangar {
                     children.push(self.render_server_header(&entry.id, &key, &entry.label, layout.total, entry.invite, error, cx));
                     if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
                 } else if let Some(list) = self.remote.get(&key) {
-                    let mut remote = sidebar::layout(&list.sessions, &query, by_project, &none);
-                    // Recolher um projeto numa máquina não recolhe o de mesmo caminho na outra.
-                    for group in &mut remote.groups { group.key = format!("{key}::{}", group.key); }
+                    let remote = self.remote_layout(&key, &list.sessions, cx);
                     total += remote.total;
                     remote_rows += remote.total;
                     children.push(self.render_server_header(&entry.id, &key, &entry.label, remote.total, entry.invite, list.error.clone(), cx));
@@ -4095,7 +4141,8 @@ impl Hangar {
         } else {
             place(&layout, None, &mut children, window, cx);
         }
-        let empty = remote_rows == 0 && self.sessions.iter().all(|s| self.sidebar.hidden().contains(&s.name));
+        let active = self.active_key();
+        let empty = remote_rows == 0 && self.sessions.iter().all(|s| self.sidebar.is_hidden(&active, &s.name));
         let list = div().id("session-list").min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col().gap(px(2.))
             // A borda do painel já ocupa parte do recuo externo de oito pixels.
             .when(conversations, |el| el.pl(px(if floating { 7. } else { 8. })).pr(px(7.)))
@@ -4150,7 +4197,7 @@ impl Hangar {
             // O CTA do rodapé da barra do web, com o recolher ao lado.
             .child(div().flex_shrink_0().px(px(8.)).pt(px(8.)).pb(px(8.)).flex().items_center().gap_2()
                 .child(self.new_session_button(false, cx))
-                .child(self.fold_button(cx)))
+                .child(self.fold_button("sidebar-fold", cx)))
             // A engrenagem mora na barra do app, acima de tudo; o rodapé fica com a conexão.
             .child(div().h(px(48.)).flex_shrink_0().px(px(8.)).flex().items_center().gap_1().border_t_1().border_color(theme::border())
                 .child(Button::new("connection").ghost().flex_1().min_w_0().h(px(32.)).px(px(6.))
@@ -4168,7 +4215,8 @@ impl Hangar {
         let floating = theme::is_floating();
         let host = self.server_label(cx);
         let weak = cx.entity().downgrade();
-        let tabs = self.sessions.iter().filter(|s| !self.sidebar.hidden().contains(&s.name)).filter_map(|session| {
+        let active = self.active_key();
+        let tabs = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).filter_map(|session| {
             let focus = self.tab_focus.get(&session.name)?.clone();
             // As abas são da lista ativa: sessão de mesmo nome aberta em outra máquina não marca nenhuma.
             let on = self.open_api.is_none() && selected_name == Some(session.name.as_str());
@@ -4184,7 +4232,7 @@ impl Hangar {
             };
             let pick = session.clone();
             let open = session.clone();
-            let menu_name = session.name.clone();
+            let menu_target = sidebar::Target::new(&active, &session.name);
             Some(div().id(SharedString::from(format!("tab-{}", session.name))).track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
@@ -4208,15 +4256,16 @@ impl Hangar {
                     }
                 }))
                 // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx)))
-                .context_menu(sidebar::session_menu(weak.clone(), session.clone())))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
+                .context_menu(sidebar::session_menu(weak.clone(), active.clone(), session.clone())))
         }).collect::<Vec<_>>();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem.
         let strip = div().id("tabs-strip").flex_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
-                let names: Vec<&String> = this.sessions.iter().filter(|s| !this.sidebar.hidden().contains(&s.name)).map(|s| &s.name).collect();
+                let active = this.active_key();
+                let names: Vec<&String> = this.sessions.iter().filter(|s| !this.sidebar.is_hidden(&active, &s.name)).map(|s| &s.name).collect();
                 let Some(current) = names.iter().position(|name| this.tab_focus.get(*name).is_some_and(|f| f.is_focused(window))) else { return };
                 let next = (current as isize + step).rem_euclid(names.len() as isize) as usize;
                 if let Some(focus) = this.tab_focus.get(names[next]) { focus.focus(window, cx); }
@@ -4248,17 +4297,17 @@ impl Hangar {
     }
 
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
-    /// `remote` é a chave da máquina de uma linha que não é do servidor ativo: clicar troca de máquina, e o menu, a prévia e o foco
-    /// são do ativo, então ela fica sem eles.
+    /// `remote` é a chave da máquina de uma linha que não é do servidor ativo: menu, foco e gestos são os mesmos, cada um
+    /// na máquina da linha.
     fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = appearance::get().sidebar_compact;
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
-        let local = remote.is_none();
-        let focus = self.tab_focus.get(&name).filter(|_| local);
+        let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &name);
+        let focus = self.row_focus(&target);
         let focused = focus.is_some_and(|f| f.contains_focused(window, cx));
-        let hovered = local && self.sidebar.hover.as_deref() == Some(name.as_str());
-        let menu_open = local && self.sidebar.button_menu.as_deref() == Some(name.as_str());
+        let hovered = self.sidebar.hover.as_ref() == Some(&target);
+        let menu_open = self.sidebar.button_menu.as_ref() == Some(&target);
         let show_menu = hovered || focused || menu_open;
         let outcome = selected.then(|| self.selected_key()).flatten().and_then(|key| self.delivery.outcome(&key));
         let queued = selected && self.history_installed && self.queued_count() > 0;
@@ -4269,19 +4318,21 @@ impl Hangar {
         let branch = shown_branch(&session).filter(|_| !compact);
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
+        // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
+        let row_key = if remote.is_some() { target.id() } else { name.clone() };
         let glyph = if state == "working" {
-            self.nav_mark(format!("conversation-mark-{name}"), 13., color, None)
+            self.nav_mark(format!("conversation-mark-{row_key}"), 13., color, None)
         } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
         let status = div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph);
         let weak = cx.weak_entity();
         let menu = || {
-            let (weak, target) = (weak.clone(), name.clone());
-            Button::new(SharedString::from(format!("conversation-menu-{name}"))).ghost().xsmall()
+            let (weak, target) = (weak.clone(), target.clone());
+            Button::new(SharedString::from(format!("conversation-menu-{row_key}"))).ghost().xsmall()
                 .icon(chrome::small_icon(IconName::Ellipsis, 13., theme::muted())).h(px(18.)).px(px(4.)).rounded(px(5.))
                 // No hover fica fora do Tab; com foco na linha o botão está visível e acessível pelo teclado.
                 .tab_stop(focused)
                 .accessibility_label(tr("sidebar_options").replace("{n}", &name)).tooltip(tr("sidebar_options_tip"))
-                .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), session.clone()))
+                .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), target.server.clone(), session.clone()))
                 .on_open_change(move |open, _, cx| { let _ = weak.update(cx, |this, cx| {
                     let hover = this.sidebar.hover.take();
                     this.button_menu(target.clone(), *open, cx);
@@ -4298,9 +4349,9 @@ impl Hangar {
             .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
-        let (open, menu_name, menu_session) = (session.clone(), name.clone(), session.clone());
-        let hover_name = name.clone();
-        let row_id = match &remote { Some(key) => format!("conversation-row-{key}::{name}"), None => format!("conversation-row-{name}") };
+        let (open, menu_target, click_target) = (target.clone(), target.clone(), target.clone());
+        let hover_target = target.clone();
+        let row_id = format!("conversation-row-{row_key}");
         div().id(SharedString::from(row_id)).relative().flex_shrink_0()
             .h(px(if branch.is_some() { 45. } else { 29. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
@@ -4308,11 +4359,11 @@ impl Hangar {
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(selection))
             .when(!selected, |el| el.hover(|el| el.bg(hover)))
-            .when(local, |el| el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered { this.sidebar.hover = Some(hover_name.clone()); }
-                else if this.sidebar.hover.as_deref() == Some(hover_name.as_str()) { this.sidebar.hover = None; }
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered { this.sidebar.hover = Some(hover_target.clone()); }
+                else if this.sidebar.hover.as_ref() == Some(&hover_target) { this.sidebar.hover = None; }
                 this.redraw(panes::Area::Nav, cx);
-            })))
+            }))
             .role(Role::Button).aria_selected(selected).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(title)
@@ -4322,27 +4373,23 @@ impl Hangar {
                 .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
                 .child(div().flex_1().min_w_0().truncate().child(branch))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.tab_focus.get(&open.name).is_some_and(|f| f.is_focused(window)) { return; }
-                this.select(open.clone(), window, cx);
+                if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.row_focus(&open).is_some_and(|f| f.is_focused(window)) { return; }
+                this.select_target(&open, window, cx);
                 cx.stop_propagation();
             }))
             .map(|el| self.group_row(el, &session, remote.as_deref(), 8., cx))
-            .map(|el| match remote {
-                Some(key) => self.remote_row(el, key, session.name.clone(), cx),
-                None => el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
-                    let hover = this.sidebar.hover.take();
-                    this.start_menu(menu_name.clone(), cx);
-                    this.sidebar.hover = hover;
-                }))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let hover = this.sidebar.hover.take();
-                    this.hide_preview();
-                    this.sidebar.hover = hover;
-                    this.select(session.clone(), window, cx);
-                    this.focus_composer_for(&session, window, cx);
-                }))
-                .context_menu(sidebar::session_menu(cx.entity().downgrade(), menu_session)).into_any_element(),
-            })
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                let hover = this.sidebar.hover.take();
+                this.start_menu(menu_target.clone(), cx);
+                this.sidebar.hover = hover;
+            }))
+            // O ⋯ do Zeron segue o ponteiro: abrir não o apaga.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let hover = this.sidebar.hover.take();
+                this.open_target(&click_target, window, cx);
+                this.sidebar.hover = hover;
+            }))
+            .context_menu(sidebar::session_menu(cx.entity().downgrade(), target.server, session)).into_any_element()
     }
 
     /// Linha do web (Sidebar.svelte): a marca tingida pelo estado no lugar do avatar; nome com a conta e a hora da última
@@ -4353,7 +4400,9 @@ impl Hangar {
     fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // O orquestrador não roda agente: selo de provider nele seria mentira.
         let mixed = mixed && !session.orq();
-        let local = remote.is_none();
+        let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
+        // Ids com a máquina: a de mesmo nome em outra máquina não divide marca, menu nem selos.
+        let row_key = if remote.is_some() { target.id() } else { session.name.clone() };
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
@@ -4361,7 +4410,7 @@ impl Hangar {
         // Trabalhando, a marca (e o selo, que fica por cima dela) é pintada fora da lista guardada: a batida não redesenha a lista.
         let working = state == "working" && !limited;
         let mark = if working {
-            self.nav_mark(format!("row-mark-{}", session.name), 18., mark_color, mixed.then(|| session.provider.clone().into()))
+            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, mixed.then(|| session.provider.clone().into()))
         } else { chrome::hangar_mark(18., mark_color).into_any_element() };
         let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
             .when(mixed && !working, |el| el.child(chrome::provider_badge(&session.provider)));
@@ -4385,21 +4434,21 @@ impl Hangar {
         let sync_title = tr("git_sync_title").replace("{ahead}", &ahead.unwrap_or(0).to_string()).replace("{behind}", &behind.unwrap_or(0).to_string());
         let name = session.name.clone();
         let questions = session.pending_questions;
-        let editing = self.sidebar.editing.as_ref().filter(|e| e.old == name).map(|e| e.input.clone());
-        let focus = self.tab_focus.get(&name).cloned().filter(|_| local);
+        let editing = self.sidebar.editing.as_ref().filter(|e| e.target == target).map(|e| e.input.clone());
+        let focus = self.row_focus(&target).cloned();
         let focused = focus.as_ref().is_some_and(|f| f.contains_focused(window, cx));
-        let hovered = local && self.sidebar.hover.as_deref() == Some(name.as_str());
+        let hovered = self.sidebar.hover.as_ref() == Some(&target);
         let weak = cx.entity().downgrade();
-        let menu_open = local && self.sidebar.button_menu.as_deref() == Some(name.as_str());
+        let menu_open = self.sidebar.button_menu.as_ref() == Some(&target);
         let show_menu = selected || hovered || focused || menu_open;
         // O ⋯ mora no lugar do tempo: com ele à vista, o tempo sai (senão sobra um pedaço do "12m" atrás dele).
         let when = when.filter(|_| !show_menu);
         let menu_button = show_menu.then(|| {
-            let (weak, target) = (weak.clone(), session.name.clone());
+            let (weak, target) = (weak.clone(), target.clone());
             div().absolute().top(px(5.)).right(px(6.)).rounded(px(6.)).bg(if selected { theme::selected_row() } else { theme::hover() })
-                .child(Button::new(SharedString::from(format!("row-menu-{name}"))).ghost().xsmall().icon(IconName::Ellipsis)
+                .child(Button::new(SharedString::from(format!("row-menu-{row_key}"))).ghost().xsmall().icon(IconName::Ellipsis)
                     .accessibility_label(tr("sidebar_options").replace("{n}", &name)).tooltip(tr("sidebar_options_tip"))
-                    .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), session.clone()))
+                    .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), target.server.clone(), session.clone()))
                     .on_open_change(move |open, _, cx| { let _ = weak.update(cx, |this, cx| this.button_menu(target.clone(), *open, cx)); }))
         });
         let lane = || div().w(px(18.)).flex_shrink_0();
@@ -4410,33 +4459,32 @@ impl Hangar {
                 .child(Input::new(&input).xsmall().aria_label(tr("sidebar_new_name"))).into_any_element(),
             None => div().flex_1().min_w_0().flex().items_center().gap_2()
                 .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
-                .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{name}"))).flex_shrink_0().flex().opacity(0.72)
+                .when(session.headless, |el| el.child(div().id(SharedString::from(format!("row-headless-{row_key}"))).flex_shrink_0().flex().opacity(0.72)
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("create_mode_headless")).build(window, cx))
                     .child(chrome::no_terminal_mark(12., theme::muted()))))
                 .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
-                .when(session.shared, |el| el.child(div().id(SharedString::from(format!("row-shared-{name}"))).flex_shrink_0().flex()
+                .when(session.shared, |el| el.child(div().id(SharedString::from(format!("row-shared-{row_key}"))).flex_shrink_0().flex()
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr_shared("sessao_compartilhada", &[])).build(window, cx))
                     .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
-        let (hover_name, press_name, menu_name, key_open, menu_session) = (name.clone(), name.clone(), name.clone(), session.clone(), session.clone());
-        let row_id = match &remote { Some(key) => format!("{key}::{name}"), None => name.clone() };
+        let (hover_target, press_target, menu_target, key_open, click_target) = (target.clone(), target.clone(), target.clone(), target.clone(), target.clone());
+        let row_id = row_key.clone();
         div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
             .when_some(focus.as_ref(), |el, focus| el.track_focus(focus))
             .when(focus.as_ref().is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(theme::selected_row()))
             .when(!selected, |el| el.hover(|el| el.bg(theme::hover())))
-            .when(local, |el| el
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.row_hover(hover_name.clone(), *hovered, cx)))
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.row_pointer(f32::from(event.position.y))))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.row_press(press_name.clone(), window, cx)))
-                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.row_release()))
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_name.clone(), cx))))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.row_hover(hover_target.clone(), *hovered, cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.row_pointer(f32::from(event.position.y))))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.row_press(press_target.clone(), window, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.row_release()))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 // Só a própria linha: Enter no ⋯ ou no campo do nome é deles.
-                if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.tab_focus.get(&key_open.name).is_some_and(|f| f.is_focused(window)) { return; }
-                this.select(key_open.clone(), window, cx);
+                if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.row_focus(&key_open).is_some_and(|f| f.is_focused(window)) { return; }
+                this.select_target(&key_open, window, cx);
                 cx.stop_propagation();
             }))
             .role(Role::Button).aria_selected(selected)
@@ -4463,7 +4511,7 @@ impl Hangar {
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(b)))
                     // Zero não desenha: a ausência da seta é "em dia".
-                    .when(ahead.is_some() || behind.is_some(), |el| el.child(div().id(SharedString::from(format!("row-sync-{name}")))
+                    .when(ahead.is_some() || behind.is_some(), |el| el.child(div().id(SharedString::from(format!("row-sync-{row_key}")))
                         .flex_shrink_0().flex().gap(px(4.)).font_weight(FontWeight::SEMIBOLD)
                         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(sync_title.clone()).build(window, cx))
                         .when_some(ahead, |el, n| el.child(div().text_color(theme::accent()).child(format!("↑{n}"))))
@@ -4472,18 +4520,14 @@ impl Hangar {
                     .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
             .children(menu_button)
             .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
-            .map(|el| match remote {
-                Some(key) => self.remote_row(el, key, session.name.clone(), cx),
-                None => el.on_click(cx.listener(move |this, _, window, cx| {
-                    this.hide_preview();
-                    if this.take_long_press() { return; }
-                    this.select(session.clone(), window, cx);
-                    // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
-                    this.focus_composer_for(&session, window, cx);
-                }))
-                .context_menu(sidebar::session_menu(weak, menu_session))
-                .into_any_element(),
-            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.hide_preview();
+                if this.take_long_press() { return; }
+                // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
+                this.open_target(&click_target, window, cx);
+            }))
+            .context_menu(sidebar::session_menu(weak, target.server, session))
+            .into_any_element()
     }
 }
 
@@ -4845,24 +4889,26 @@ impl Hangar {
 
     /// Rodapé da linha `orq`, como o do web: sem campo de digitar, o selo e o botão que abre o árbitro da orquestração.
     fn render_orq_footer(&self, orq: &str, cx: &mut Context<Self>) -> Div {
-        let target = orq.to_owned();
+        // A linha `orq` aberta é da máquina da sessão aberta, e o árbitro também.
+        let target = sidebar::Target::new(&self.open_server(), orq);
         div().w_full().py_3().flex().flex_col().items_center().gap_2()
             .child(div().text_sm().text_color(theme::muted()).child(tr_shared("orq_row_badge", &[])))
             .child(Button::new("orq-talk-to-arbiter").small().label(tr_shared("orq_talk_to_arbiter", &[]))
-                .disabled(self.arbiter_of(orq).is_none())
+                .disabled(self.arbiter_of(&target).is_none())
                 .on_click(cx.listener(move |this, _, window, cx| this.open_arbiter(&target, window, cx))))
     }
 
-    /// Lido da lista atual, não da linha guardada ao abrir: a sucessão troca o árbitro sem trocar a linha `orq`.
-    fn arbiter_of(&self, orq: &str) -> Option<&SessionInfo> {
-        self.sessions.iter().find(|s| s.name == orq).and_then(|s| s.arbiter(&self.sessions))
+    /// Lido da lista atual da máquina dela, não da linha guardada ao abrir: a sucessão troca o árbitro sem trocar a linha `orq`.
+    fn arbiter_of(&self, orq: &sidebar::Target) -> Option<&SessionInfo> {
+        let list = self.sessions_of(&orq.server);
+        list.iter().find(|s| s.name == orq.name).and_then(|s| s.arbiter(list))
     }
 
     /// Abre o árbitro com o campo focado, como o clique na linha dele.
-    fn open_arbiter(&mut self, orq: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(arbiter) = self.arbiter_of(orq).cloned() else { return };
-        self.select(arbiter.clone(), window, cx);
-        self.focus_composer_for(&arbiter, window, cx);
+    fn open_arbiter(&mut self, orq: &sidebar::Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(arbiter) = self.arbiter_of(orq) else { return };
+        let target = sidebar::Target::new(&orq.server, &arbiter.name);
+        self.open_target(&target, window, cx);
     }
 
     /// Foco no campo depois de escolher uma conversa, só se ela tem compositor desenhado.
@@ -5041,8 +5087,9 @@ impl Render for Hangar {
                     .child(selected_name.clone().or_else(|| opening.as_ref().map(|o| o.name.clone())).unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
                 .child(div().flex_1())
-                .child(if session_chip { chrome::state_chip(&chip_state, tr(&format!("chip_{chip_state}")), true) }
-                    else { div().flex_shrink_0().text_xs().text_color(theme::status(&header_state)).child(tr(&header_state)).into_any_element() })
+                // Sem sessão, o estado da ligação só aparece quando ela não está normal: "Conectado" não diz nada.
+                .when(session_chip || header_state != "connected", |el| el.child(if session_chip { chrome::state_chip(&chip_state, tr(&format!("chip_{chip_state}")), true) }
+                    else { div().flex_shrink_0().text_xs().text_color(theme::status(&header_state)).child(tr(&header_state)).into_any_element() }))
                 .when_some(self.render_activity_button(window, cx), |el, button| el.child(button))
                 .when(self.selected.is_some(), |el| el.child(chrome::icon_button("side-show", IconName::PanelRight,
                         tr(if self.side.open { "side_hide" } else { "side_show" }), cx)
@@ -5074,7 +5121,13 @@ impl Render for Hangar {
         let slide = self.side_slide_frame(window, cx);
         let beside = beside_sidebar.then(|| self.side_width(window).filter(|_| !files_expanded)
             .or(slide.map(|(width, _)| width)).or_else(|| self.opening_side_width(window)).unwrap_or(0.));
-        let topbar = self.render_topbar(beside, window, cx);
+        // A barra é guardada entre quadros; `beside` muda sem aviso (painel deslizando), e aí ela sai deste desenho e
+        // redesenha a cópia para o próximo. No Windows sempre sai do desenho: a área de arrastar e os botões da janela
+        // não sobrevivem à cópia guardada.
+        let beside_moved = self.panes.top_beside.replace(beside) != beside;
+        if beside_moved { self.redraw(panes::Area::Top, cx); }
+        let topbar = self.pane_element_live(panes::Area::Top, StyleRefinement::default().w_full().h(px(topbar::height())).flex_shrink_0(),
+            beside_moved || cfg!(target_os = "windows"));
         let (topbar, topbar_beside) = if beside_sidebar { (None, Some(chat_fill(div(), self, window).relative().flex_1().min_w_0().h_full().flex().flex_col().child(topbar))) }
             else { (Some(topbar), None) };
         let side = self.side_width(window).or(slide.map(|(width, _)| width)).map(|width| div().h_full().flex_shrink_0().relative().opacity(shown).top(px(rise))
@@ -5096,7 +5149,8 @@ impl Render for Hangar {
         COLUMN_FRAME.set((f32::from(window.viewport_size().width), side.is_some()));
         let dialog_top = window.viewport_size().height / 10.;
         let dialog_width = (window.viewport_size().width - px(32.)).min(px(480.));
-        let dialog = div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
+        // Só montado com a conexão aberta: a raiz redesenha a cada batida das animações.
+        let dialog = self.connection_dialog.then(|| div().id("connection-card").w(dialog_width).max_h(window.viewport_size().height - dialog_top - px(16.))
             .p(px(20.)).bg(theme::popup_fill(theme::raised())).border_1().border_color(theme::glass_border()).rounded(px(16.))
             .shadow_xl().overflow_y_scroll().occlude().flex().flex_col().gap_4()
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
@@ -5129,7 +5183,7 @@ impl Render for Hangar {
                         window.close_all_dialogs(cx);
                         this.root_focus.focus(window, cx);
                     }
-                }))));
+                })))));
         self.finish_landing(window);
 
         let ticker = motion::ticker(window, cx);
@@ -5295,7 +5349,7 @@ impl Render for Hangar {
             .children(self.render_search(window, cx))
             .child(ticker)
             // Uma autenticação recusada pode abrir a conexão sobre um formulário já aberto: adiada, fica acima dos diálogos do kit.
-            .when(self.connection_dialog, |el| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
+            .when_some(dialog, |el, dialog| el.child(deferred(div().absolute().inset_0().bg(cx.theme().overlay).occlude().opacity(dialog_in)
                 .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                     if this.api.is_some() {
                         this.connection_dialog = false;

@@ -286,9 +286,13 @@ impl Render for ShareDialog {
 }
 
 impl Hangar {
-    pub(super) fn open_share_dialog(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
-        let runtime = self.runtime.handle().clone();
+    /// O convite nasce na máquina da sessão: é o backend dela que guarda o código e abre a porta do convidado.
+    pub(super) fn open_share_dialog(&mut self, target: super::sidebar::Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(api) = self.machine_api(&target.server) else {
+            window.push_notification(Notification::error(tr("connection_failed")), cx);
+            return;
+        };
+        let (runtime, name) = (self.runtime.handle().clone(), target.name);
         let dialog = cx.new(|_| ShareDialog { api, runtime, name: name.clone(), list: Remote::default(), created: None,
             revoke_error: None, copied: false, busy: false, watch: None, watching: false, authorizing: false, authorize_error: None });
         dialog.update(cx, |d, cx| d.reload(cx));

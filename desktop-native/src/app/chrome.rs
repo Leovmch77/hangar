@@ -6,10 +6,17 @@ use crate::appearance::{self, SurfaceMaterial};
 pub use crate::motion::ease_out;
 use std::{cell::Cell, rc::Rc, sync::OnceLock, time::{Duration, Instant}};
 
-/// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. O `Spinner`/`Skeleton` do
-/// kit pedem um quadro por atualização da tela enquanto montados; relógios próprios de 30 Hz, fora de fase entre si,
-/// somariam mais que 30 quadros. Na grade, as views que batem juntas saem num quadro só.
+/// Batida das animações que se repetem: 30 por segundo, numa grade de tempo comum a todas. Menos que isso a marca e os
+/// spinners andam aos saltos. Relógios próprios, fora de fase entre si, somariam quadros; na grade, as views que batem
+/// juntas saem num quadro só.
 const PULSE_TICK: Duration = Duration::from_micros(33_333);
+
+thread_local! {
+    /// A janela tem o foco. Sem ele o relógio para: a marca fica parada no último quadro e nada acorda a janela.
+    static WINDOW_ACTIVE: Cell<bool> = const { Cell::new(true) };
+}
+
+pub fn set_window_active(active: bool) { WINDOW_ACTIVE.set(active); }
 /// Resposta que chega antes disso não mostra esqueleto: o espaço fica vazio e a lista entra direto.
 const SKELETON_DELAY: Duration = Duration::from_millis(150);
 
@@ -23,8 +30,8 @@ fn pulse_phase(period: Duration) -> f32 {
     (pulse_epoch().elapsed().as_secs_f64() % period.as_secs_f64() / period.as_secs_f64()) as f32
 }
 
-/// Redesenha a view a cada batida da grade, a partir de `delay`, até ela sair da tela. Com movimento reduzido, ou com
-/// `awake` dizendo que ela não está à vista, não redesenha.
+/// Redesenha a view a cada batida da grade, a partir de `delay`, até ela sair da tela. Com movimento reduzido, com a
+/// janela sem foco, ou com `awake` dizendo que ela não está à vista, não redesenha.
 fn pulse<V: 'static>(delay: Duration, awake: fn(&V) -> bool, cx: &mut Context<V>) {
     cx.spawn(async move |view, cx| {
         cx.background_executor().timer(delay).await;
@@ -33,7 +40,7 @@ fn pulse<V: 'static>(delay: Duration, awake: fn(&V) -> bool, cx: &mut Context<V>
         loop {
             let into = Duration::from_nanos((pulse_epoch().elapsed().as_nanos() % PULSE_TICK.as_nanos()) as u64);
             cx.background_executor().timer(PULSE_TICK - into).await;
-            if view.update(cx, |view, cx| if !cx.reduce_motion() && awake(view) { cx.notify() }).is_err() { break; }
+            if view.update(cx, |view, cx| if !cx.reduce_motion() && WINDOW_ACTIVE.get() && awake(view) { cx.notify() }).is_err() { break; }
         }
     }).detach();
 }
@@ -47,7 +54,7 @@ fn keyed_view<V: 'static>(key: ElementId, window: &mut Window, cx: &mut App, ini
     }))
 }
 
-/// O `Spinner` do kit (mesmo ícone, giro de 0,8 s com `ease_in_out`) no relógio comum de 30 batidas, numa view própria
+/// O `Spinner` do kit (mesmo ícone, giro de 0,8 s com `ease_in_out`) no relógio comum, numa view própria
 /// guardada entre quadros. Parado com movimento reduzido, como o do kit.
 #[derive(IntoElement)]
 pub struct Spinner { key: ElementId, icon: IconName, size: Pixels, color: Hsla }
@@ -78,8 +85,8 @@ impl RenderOnce for Spinner {
     }
 }
 
-/// O `Skeleton` do kit (mesma cor) com o `zeron-pulse` do kit de movimento (2,4 s, em onda), no relógio comum de 30
-/// batidas, numa view própria que só aparece depois de `SKELETON_DELAY`; até lá ocupa o mesmo espaço, vazio. Em lista, cada
+/// O `Skeleton` do kit (mesma cor) com o `zeron-pulse` do kit de movimento (2,4 s, em onda), no relógio comum,
+/// numa view própria que só aparece depois de `SKELETON_DELAY`; até lá ocupa o mesmo espaço, vazio. Em lista, cada
 /// linha anda um pouco atrás da de cima.
 #[derive(IntoElement)]
 pub struct Skeleton { key: ElementId, style: StyleRefinement, secondary: bool, lag: f32 }
@@ -122,7 +129,7 @@ impl RenderOnce for Skeleton {
 }
 
 /// Ícone que respira (o `breathe` do botão Atividade do web: opacidade 0,55 → 1 e escala 0,92 → 1,05 em 1,5 s), no
-/// relógio comum de 30 batidas, numa view própria; inteiro e parado com movimento reduzido.
+/// relógio comum, numa view própria; inteiro e parado com movimento reduzido.
 #[derive(IntoElement)]
 pub struct Breathing { key: ElementId, icon: IconName, size: Pixels, color: Hsla }
 
@@ -217,8 +224,8 @@ fn paint_mark(bounds: Bounds<Pixels>, frame: MarkFrame, color: Hsla, window: &mu
     if any && let Ok(path) = path.build() { window.paint_path(path, color); }
 }
 
-/// A marca animada "trabalhando" (três arcos: entrada que se desenha, onda de giro e respiro), no relógio comum de 30
-/// batidas, numa view própria guardada entre quadros. Fora da área visível (barra rolada, aba fora da faixa) para de
+/// A marca animada "trabalhando" (três arcos: entrada que se desenha, onda de giro e respiro), no relógio comum,
+/// numa view própria guardada entre quadros. Fora da área visível (barra rolada, aba fora da faixa) para de
 /// pedir quadro; com movimento reduzido fica completa e parada.
 #[derive(IntoElement)]
 pub struct WorkingMark { key: ElementId, size: f32, color: Hsla }
@@ -304,7 +311,7 @@ impl RenderOnce for Elapsed {
 }
 
 /// Texto apagado com uma faixa clara passando (o brilho do título do grupo que roda, como no Zeron), numa view própria
-/// no relógio comum de 30 batidas; fora da área visível para de pedir quadro, e com movimento reduzido fica parado.
+/// no relógio comum; fora da área visível para de pedir quadro, e com movimento reduzido fica parado.
 #[derive(IntoElement)]
 pub struct Shimmer { key: ElementId, text: SharedString }
 

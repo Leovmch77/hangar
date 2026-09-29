@@ -4,7 +4,7 @@
 //! diálogo por "Agrupar com…" e "Sair do grupo".
 use super::*;
 use super::activity::web;
-use super::sidebar::SidebarReply;
+use super::sidebar::{SidebarReply, Target};
 use gpui_kit::base::AccordionTrigger;
 use gpui_kit::component::{WindowExt, menu::PopupMenu};
 use std::{cell::RefCell, rc::Rc};
@@ -28,7 +28,7 @@ impl Refusal {
 
 fn remote_peer(s: &SessionInfo) -> bool { s.peers().iter().any(|p| p.contains("::")) }
 
-/// `canPair` do web. `same_server`: as duas são do mesmo servidor (o nativo só agrupa no servidor ativo).
+/// `canPair` do web. `same_server`: as duas são da mesma máquina (o grupo é resolvido pelo backend de uma só).
 pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: bool) -> Result<(), Refusal> {
     if !same_server { return Err(Refusal::OtherServer); }
     if origin.name == target.name { return Err(Refusal::Same); }
@@ -84,18 +84,19 @@ pub(super) fn pair_key(gid: &str, remote: Option<&str>) -> String {
     match remote { Some(key) => format!("{key}::pair:{gid}"), None => format!("pair:{gid}") }
 }
 
-/// O que anda com o arrasto: o nome da sessão do servidor ativo.
+/// O que anda com o arrasto: a sessão (máquina + nome).
 #[derive(Clone)]
-pub(super) struct SessionDrag { name: String }
+pub(super) struct SessionDrag { target: Target }
 
 /// Onde o ponteiro está durante o arrasto. `Pair` é o cabeçalho do bloco, que vale pelo primeiro membro (agrupar funde o grupo
-/// inteiro); `Remote` é linha de outra máquina, sempre recusada.
+/// inteiro). Alvo de outra máquina que a da origem é recusado.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum DropSpot { Row(String), Pair { gid: String, rep: String }, Remote(String) }
+pub(super) enum DropSpot { Row(Target), Pair { gid: String, rep: Target } }
 
-enum DropAction { Join(String), Leave }
+enum DropAction { Join(Target), Leave }
 
-enum AskMode { Join { origin: String, target: String }, Leave { origin: String } }
+/// `target` é da mesma máquina da origem: agrupar só existe dentro de uma.
+enum AskMode { Join { origin: Target, target: String }, Leave { origin: Target } }
 
 /// O que o diálogo mostra. Mora fora do `Hangar` porque o `open_dialog` desenha na hora, com o `Hangar` em atualização; a
 /// lista nova de sessões refaz os campos vivos (`refresh_group_ask`).
@@ -122,7 +123,7 @@ pub(super) enum GroupReply { Paired(Result<PairResult, Failure>), Left(Result<Pa
 #[derive(Default)]
 pub(super) struct Grouping {
     /// Sessão arrastada agora; só vale com um arrasto em curso (`has_active_drag`).
-    origin: Option<String>,
+    origin: Option<Target>,
     spot: Option<DropSpot>,
     /// Ponteiro dentro da área visível da lista: linha rolada para fora ainda tem caixa, e só isto a separa da visível.
     in_list: bool,
@@ -163,24 +164,25 @@ pub(super) fn web_with(key: &str, name: &str, value: &str) -> String {
 }
 
 impl Hangar {
-    fn session(&self, name: &str) -> Option<&SessionInfo> { self.sessions.iter().find(|s| s.name == name) }
+    /// Sessão `name` da máquina `server`, pela lista viva dela.
+    fn session(&self, server: &str, name: &str) -> Option<&SessionInfo> { self.target_session(&Target::new(server, name)) }
 
     /// O bloco deste membro está recolhido.
     pub(super) fn pair_collapsed(&self, s: &SessionInfo, remote: Option<&str>) -> bool {
         s.pair_gid.as_deref().is_some_and(|gid| self.sidebar.is_collapsed(&pair_key(gid, remote)))
     }
 
-    /// Candidatas do "Agrupar com…": as outras do servidor que o arrastar aceitaria, na ordem da barra.
-    pub(super) fn group_candidates(&self, name: &str) -> Vec<String> {
-        let Some(origin) = self.session(name) else { return Vec::new() };
-        let mut list: Vec<&SessionInfo> = self.sessions.iter().filter(|s| !self.sidebar.hidden().contains(&s.name)).collect();
+    /// Candidatas do "Agrupar com…": as outras da mesma máquina que o arrastar aceitaria, na ordem da barra.
+    pub(super) fn group_candidates(&self, origin: &Target) -> Vec<String> {
+        let Some(session) = self.target_session(origin) else { return Vec::new() };
+        let mut list: Vec<&SessionInfo> = self.sessions_of(&origin.server).iter().filter(|s| !self.sidebar.is_hidden(&origin.server, &s.name)).collect();
         list.sort_by_cached_key(|s| s.name.to_lowercase());
-        list.into_iter().filter(|s| can_pair(origin, s, true).is_ok()).map(|s| s.name.clone()).collect()
+        list.into_iter().filter(|s| can_pair(session, s, true).is_ok()).map(|s| s.name.clone()).collect()
     }
 
     // ── Arrastar ──
 
-    fn dragging<'a>(&'a self, cx: &App) -> Option<&'a str> { self.sidebar.grouping.origin.as_deref().filter(|_| cx.has_active_drag()) }
+    fn dragging<'a>(&'a self, cx: &App) -> Option<&'a Target> { self.sidebar.grouping.origin.as_ref().filter(|_| cx.has_active_drag()) }
 
     /// `None`: ponteiro fora da lista. `Some(None)`: no fundo dela.
     fn current_spot(&self) -> Option<Option<&DropSpot>> {
@@ -189,14 +191,15 @@ impl Hangar {
     }
 
     /// O que soltar ali faria, pela sessão viva: `None` é nada (fundo sem grupo, sessão sumida).
-    fn verdict(&self, origin: &str, spot: Option<&DropSpot>) -> Option<Result<DropAction, Refusal>> {
-        let origin = self.session(origin)?;
+    fn verdict(&self, origin: &Target, spot: Option<&DropSpot>) -> Option<Result<DropAction, Refusal>> {
+        // Convidado não agrupa nem desagrupa: parear é rota do servidor inteiro do dono.
+        if self.invite_target(origin) { return None; }
+        let session = self.target_session(origin)?;
         match spot {
-            None => can_leave(origin).then_some(Ok(DropAction::Leave)),
-            Some(DropSpot::Remote(_)) => Some(Err(Refusal::OtherServer)),
-            Some(DropSpot::Row(name) | DropSpot::Pair { rep: name, .. }) => {
-                let target = self.session(name)?;
-                Some(can_pair(origin, target, true).map(|_| DropAction::Join(name.clone())))
+            None => can_leave(session).then_some(Ok(DropAction::Leave)),
+            Some(DropSpot::Row(target) | DropSpot::Pair { rep: target, .. }) => {
+                let other = self.target_session(target)?;
+                Some(can_pair(session, other, target.server == origin.server).map(|_| DropAction::Join(target.clone())))
             }
         }
     }
@@ -216,11 +219,11 @@ impl Hangar {
         match self.verdict(origin, Some(spot))? { Ok(_) => Some(true), Err(_) => Some(false) }
     }
 
-    fn start_session_drag(&mut self, name: String, cx: &mut Context<Self>) {
+    fn start_session_drag(&mut self, target: Target, cx: &mut Context<Self>) {
         self.row_release(); // senão o pressionar longo abre o renomear no meio do arrasto
         self.hide_preview();
         let g = &mut self.sidebar.grouping;
-        (g.origin, g.spot, g.in_list) = (Some(name), None, true);
+        (g.origin, g.spot, g.in_list) = (Some(target), None, true);
         cx.notify();
     }
 
@@ -243,11 +246,11 @@ impl Hangar {
     }
 
     /// Soltou: confere de novo pela sessão viva e abre o pedido; recusado não faz nada.
-    fn drop_session(&mut self, origin: String, spot: Option<DropSpot>, window: &mut Window, cx: &mut Context<Self>) {
+    fn drop_session(&mut self, origin: Target, spot: Option<DropSpot>, window: &mut Window, cx: &mut Context<Self>) {
         let verdict = self.verdict(&origin, spot.as_ref());
         self.end_session_drag(cx);
         match verdict {
-            Some(Ok(DropAction::Join(target))) => self.request_group(origin, target, window, cx),
+            Some(Ok(DropAction::Join(target))) => self.request_group(origin, target.name, window, cx),
             Some(Ok(DropAction::Leave)) => self.request_leave(origin, window, cx),
             _ => {}
         }
@@ -261,7 +264,7 @@ impl Hangar {
         el.on_drag_move(cx.listener(move |this, event: &DragMoveEvent<SessionDrag>, _, cx| {
                 this.drag_moved(Some(moved.clone()), event.bounds.contains(&event.event.position), cx);
             }))
-            .on_drop(cx.listener(move |this, dragged: &SessionDrag, window, cx| this.drop_session(dragged.name.clone(), Some(spot.clone()), window, cx)))
+            .on_drop(cx.listener(move |this, dragged: &SessionDrag, window, cx| this.drop_session(dragged.target.clone(), Some(spot.clone()), window, cx)))
             .when_some(state, |el, ok| el.when(ok, |el| el.bg(theme::accent_dim()))
                 .child(div().absolute().inset_0().rounded(px(radius)).border_2()
                     .map(|b| if ok { b.border_color(theme::accent()) } else { b.border_dashed().border_color(theme::muted()) })))
@@ -272,29 +275,24 @@ impl Hangar {
         el.on_drag_move(cx.listener(|this, event: &DragMoveEvent<SessionDrag>, _, cx| {
                 this.drag_moved(None, event.bounds.contains(&event.event.position), cx);
             }))
-            .on_drop(cx.listener(|this, dragged: &SessionDrag, window, cx| this.drop_session(dragged.name.clone(), None, window, cx)))
+            .on_drop(cx.listener(|this, dragged: &SessionDrag, window, cx| this.drop_session(dragged.target.clone(), None, window, cx)))
     }
 
-    /// Linha da lista: arrastável (só do servidor ativo), alvo de soltar e, no bloco, recuada com a faixa do grupo (âmbar
-    /// quando espera resposta, como o web).
+    /// Linha da lista, de qualquer máquina: arrastável, alvo de soltar e, no bloco, recuada com a faixa do grupo (âmbar
+    /// quando espera resposta, como o web). `remote` é a chave da máquina quando ela não é a ativa.
     pub(super) fn group_row(&self, el: Stateful<Div>, session: &SessionInfo, remote: Option<&str>, radius: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        let target = Target::new(&remote.map(str::to_owned).unwrap_or_else(|| self.active_key()), &session.name);
         let member = session.pair_gid.is_some();
-        let lifted = remote.is_none() && self.dragging(cx) == Some(session.name.as_str());
+        let lifted = self.dragging(cx) == Some(&target);
         let bar = if session.state == "awaiting_input" { theme::warning() } else { theme::accent() };
         let el = el.when(member, |el| el.ml(px(8.)).child(div().absolute().left_0().top(px(6.)).bottom(px(6.)).w(px(2.)).rounded_full().bg(bar)))
             .when(lifted, |el| el.opacity(0.45));
-        let el = match remote {
-            Some(_) => el,
-            None => {
-                let weak = cx.entity().downgrade();
-                el.on_drag(SessionDrag { name: session.name.clone() }, move |dragged, _, _, cx| {
-                    let _ = weak.update(cx, |this, cx| this.start_session_drag(dragged.name.clone(), cx));
-                    cx.new(|_| DragChip { name: dragged.name.clone(), hangar: weak.clone() })
-                })
-            }
-        };
-        let spot = match remote { Some(key) => DropSpot::Remote(format!("{key}::{}", session.name)), None => DropSpot::Row(session.name.clone()) };
-        self.drop_target(el, spot, radius, cx)
+        let weak = cx.entity().downgrade();
+        let el = el.on_drag(SessionDrag { target: target.clone() }, move |dragged, _, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.start_session_drag(dragged.target.clone(), cx));
+            cx.new(|_| DragChip { name: dragged.target.name.clone(), hangar: weak.clone() })
+        });
+        self.drop_target(el, DropSpot::Row(target), radius, cx)
     }
 
     /// Cabeçalho do bloco (`.pair-head` do web): ▾, glifo, chave da tarefa em destaque e o resto em cinza, quantas esperam e o
@@ -309,10 +307,9 @@ impl Hangar {
         let focus = window.use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let title = web_with("sessao_grupo_pareado", "label", label);
         let tip = title.clone();
-        let spot = match (remote, members.first()) {
-            (None, Some(rep)) => DropSpot::Pair { gid: gid.to_owned(), rep: rep.name.clone() },
-            _ => DropSpot::Remote(key.clone()),
-        };
+        let server = remote.map(str::to_owned).unwrap_or_else(|| self.active_key());
+        let rep = members.first().map_or_else(String::new, |rep| rep.name.clone());
+        let spot = DropSpot::Pair { gid: gid.to_owned(), rep: Target::new(&server, &rep) };
         let pill = |text: String, color: Hsla, bg: Hsla| div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(bg)
             .flex().justify_center().font_family(theme::MONO).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(text);
         let weak = cx.entity().downgrade();
@@ -333,18 +330,19 @@ impl Hangar {
 
     // ── Diálogo ──
 
-    pub(super) fn request_group(&mut self, origin: String, target: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// `target` é outra sessão da máquina de `origin`.
+    pub(super) fn request_group(&mut self, origin: Target, target: String, window: &mut Window, cx: &mut Context<Self>) {
         // Tarefa que já existe entra no campo (a do alvo antes), como o web.
-        let task = [&target, &origin].into_iter().filter_map(|n| self.session(n)?.pair_task.clone()).find(|t| !t.trim().is_empty());
+        let task = [&target, &origin.name].into_iter().filter_map(|n| self.session(&origin.server, n)?.pair_task.clone()).find(|t| !t.trim().is_empty());
         self.open_group_ask(AskMode::Join { origin, target }, task.unwrap_or_default(), window, cx);
     }
 
-    pub(super) fn request_leave(&mut self, origin: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn request_leave(&mut self, origin: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.open_group_ask(AskMode::Leave { origin }, String::new(), window, cx);
     }
 
     fn open_group_ask(&mut self, mode: AskMode, task: String, window: &mut Window, cx: &mut Context<Self>) {
-        let origin = match &mode { AskMode::Join { origin, .. } | AskMode::Leave { origin } => origin.clone() };
+        let origin = ask_origin(&mode).clone();
         let join = matches!(mode, AskMode::Join { .. });
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(web("grupo_drop_tarefa")).default_value(task));
         let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
@@ -433,7 +431,7 @@ impl Hangar {
         let mut v = ask.view.borrow_mut();
         match &ask.mode {
             AskMode::Join { origin, target } => {
-                let (o, t) = (self.session(origin), self.session(target));
+                let (o, t) = (self.target_session(origin), self.session(&origin.server, target));
                 // Agrupar funde os grupos inteiros: todos os afetados, não só os dois.
                 let mut names: Vec<String> = Vec::new();
                 for s in [o, t].into_iter().flatten() {
@@ -445,7 +443,7 @@ impl Hangar {
                 v.block = match (o, t) { (Some(o), Some(t)) => can_pair(o, t, true).err().map(Refusal::text), _ => Some(Refusal::Dead.text()) };
             }
             AskMode::Leave { origin } => {
-                let o = self.session(origin);
+                let o = self.target_session(origin);
                 v.affected = o.map(|s| s.peers().to_vec()).unwrap_or_default();
                 v.block = o.is_none().then(|| Refusal::Dead.text());
             }
@@ -458,21 +456,21 @@ impl Hangar {
         let mut v = ask.view.borrow_mut();
         if v.busy || v.done || v.suggesting { return; }
         if let Some(block) = v.block.clone() { v.error = Some(block); cx.notify(); return; }
-        let Some(api) = self.api.clone() else { v.error = Some(tr("connection_failed")); cx.notify(); return };
+        let Some(api) = self.machine_api(ask_origin(&ask.mode).server.as_str()) else { v.error = Some(tr("connection_failed")); cx.notify(); return };
         let (seq, tell) = (ask.seq, self.sidebar_tell());
         // Entrando num grupo que existe, a tarefa é a dele: o campo nem aparece.
         let task = if v.inherited.is_some() { String::new() } else { ask.task.read(cx).value().trim().to_owned() };
         (v.busy, v.error) = (true, None);
         match &ask.mode {
             AskMode::Join { origin, target } => {
-                let (origin, target) = (origin.clone(), target.clone());
+                let (origin, target) = (origin.name.clone(), target.clone());
                 self.runtime.spawn(async move {
                     let result = api.pair(&target, &[origin], &task, replace).await;
                     tell.send(SidebarReply::Group(seq, GroupReply::Paired(result))).await;
                 });
             }
             AskMode::Leave { origin } => {
-                let origin = origin.clone();
+                let origin = origin.name.clone();
                 self.runtime.spawn(async move { tell.send(SidebarReply::Group(seq, GroupReply::Left(api.unpair(&origin).await))).await; });
             }
         }
@@ -483,7 +481,7 @@ impl Hangar {
         let Some(ask) = self.sidebar.grouping.ask.as_ref() else { return };
         let mut v = ask.view.borrow_mut();
         if v.busy || v.suggesting || v.block.is_some() { return; }
-        let Some(api) = self.api.clone() else { v.error = Some(tr("connection_failed")); cx.notify(); return };
+        let Some(api) = self.machine_api(ask_origin(&ask.mode).server.as_str()) else { v.error = Some(tr("connection_failed")); cx.notify(); return };
         let (seq, tell, names) = (ask.seq, self.sidebar_tell(), v.affected.clone());
         (v.suggesting, v.error) = (true, None);
         self.runtime.spawn(async move {
@@ -530,6 +528,8 @@ impl Hangar {
     }
 }
 
+fn ask_origin(mode: &AskMode) -> &Target { match mode { AskMode::Join { origin, .. } | AskMode::Leave { origin } => origin } }
+
 /// Motivo do servidor; sem ele, a frase do web.
 pub(super) fn failed(error: &Failure, fallback: &str) -> String {
     let text = Hangar::fetch_failure(error);
@@ -545,13 +545,13 @@ fn existing_group<'a>(origin: Option<&'a SessionInfo>, target: Option<&'a Sessio
 }
 
 /// Submenu "Agrupar com…": as candidatas em mono; escolher abre o diálogo.
-pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, name: &str, candidates: &[String]) -> PopupMenu {
+pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &Target, candidates: &[String]) -> PopupMenu {
     let menu = sidebar::menu_style(menu).label(tr("group_with"));
     if candidates.is_empty() { return menu.item(PopupMenuItem::new(tr("group_none")).disabled(true)); }
     candidates.iter().fold(menu.min_w(px(220.)).max_h(px(260.)).scrollable(true), |menu, target| {
-        let (hangar, name, target) = (hangar.clone(), name.to_owned(), target.clone());
+        let (hangar, origin, target) = (hangar.clone(), origin.clone(), target.clone());
         menu.item(sidebar::mono_item(target.clone(), false).on_click(move |_, window, cx| {
-            let _ = hangar.update(cx, |this, cx| this.request_group(name.clone(), target.clone(), window, cx));
+            let _ = hangar.update(cx, |this, cx| this.request_group(origin.clone(), target.clone(), window, cx));
         }))
     })
 }

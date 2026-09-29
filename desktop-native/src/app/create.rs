@@ -100,7 +100,8 @@ impl CodexAccount {
 pub(super) struct Opened { session: SessionInfo, notes: Vec<String>, warning: Option<String> }
 
 /// A sessão que o diálogo continua (modo bastão): o servidor monta o resumo dela e o manda à sessão nova.
-pub(in crate::app) struct Baton { pub(in crate::app) name: String, pub(in crate::app) cwd: Option<String> }
+/// `server`: chave da máquina da sessão continuada; o diálogo fica travado nela (o resumo é arquivo de lá).
+pub(in crate::app) struct Baton { pub(in crate::app) name: String, pub(in crate::app) cwd: Option<String>, pub(in crate::app) server: String }
 
 /// Nome de quem continua: `pm18368-t24` → `pm18368-t24b`, e a próxima letra livre. Letra, não `-2`: o `-2` é o desempate de
 /// duas sessões na mesma pasta.
@@ -1589,8 +1590,7 @@ impl Hangar {
         // A tela chega como um objeto só, descendo 10 px até o lugar (o `settle-down` do kit, no tempo do `fade-in`).
         let settle = motion::enter("new-chat-in", motion::FADE_IN, window, cx);
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
-        let reserved = self.new_chat_side_width(window).unwrap_or(0.);
-        div().id("new-chat").size_full().pr(px(reserved)).overflow_y_scroll().flex().flex_col()
+        div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
             .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
                 .child(landing_column(popup::anchor(top, super::landing::TOP)))
                 .child(composer)
@@ -1602,7 +1602,14 @@ impl Hangar {
 
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
     pub(super) fn open_new_session(&mut self, baton: Option<Baton>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let api = match &baton {
+            Some(baton) => self.machine_api(&baton.server),
+            None => self.api.clone(),
+        };
+        let Some(api) = api else {
+            if baton.is_some() { window.push_notification(Notification::error(tr("connection_failed")), cx); }
+            return;
+        };
         let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
             servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));

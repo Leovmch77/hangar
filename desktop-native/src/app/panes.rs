@@ -5,7 +5,7 @@ use gpui_kit::{prelude::FluentBuilder, *};
 use super::Hangar;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Area { Nav, Conversation, Bottom, Side }
+pub(super) enum Area { Nav, Conversation, Bottom, Side, Top }
 
 pub(super) struct Pane { hangar: WeakEntity<Hangar>, area: Area, _observe: Option<Subscription> }
 
@@ -14,6 +14,9 @@ pub(super) struct Panes {
     pub conversation: Entity<Pane>,
     pub bottom: Entity<Pane>,
     pub side: Entity<Pane>,
+    pub top: Entity<Pane>,
+    /// O `beside` da barra do app no último desenho: vem de medidas da raiz que mudam sem aviso (painel deslizando).
+    pub top_beside: Cell<Option<f32>>,
     /// Altura medida da faixa de baixo: a view guardada precisa de altura definida, e o compositor cresce com o texto.
     pub bottom_height: Rc<Cell<f32>>,
     /// Lugares que as áreas guardadas deixaram para o que anima dentro delas (`MarkPlace`).
@@ -43,6 +46,7 @@ impl Panes {
         });
         Self {
             nav: pane(Area::Nav), conversation: pane(Area::Conversation), bottom: pane(Area::Bottom), side: pane(Area::Side),
+            top: pane(Area::Top), top_beside: Cell::new(None),
             bottom_height: Rc::new(Cell::new(120.)), marks: Rc::default(),
         }
     }
@@ -87,18 +91,29 @@ impl Hangar {
                 self.side.open = open;
                 side.unwrap_or_else(|| div().into_any_element())
             }
+            Area::Top => self.render_topbar(self.panes.top_beside.get(), window, cx),
+        }
+    }
+
+    fn pane(&self, area: Area) -> &Entity<Pane> {
+        match area {
+            Area::Nav => &self.panes.nav, Area::Conversation => &self.panes.conversation, Area::Bottom => &self.panes.bottom,
+            Area::Side => &self.panes.side, Area::Top => &self.panes.top,
         }
     }
 
     /// A área guardada entre quadros.
     pub(super) fn pane_element(&self, area: Area, style: StyleRefinement) -> AnyElement {
-        let pane = match area {
-            Area::Nav => &self.panes.nav, Area::Conversation => &self.panes.conversation, Area::Bottom => &self.panes.bottom,
-            Area::Side => &self.panes.side,
-        };
         // Na chegada da primeira mensagem a conversa, o painel e a faixa de baixo (que, antes de a sessão nascer, desenha a
         // conversa por vir) desenham a cada quadro: a cópia guardada não acompanha a opacidade de quem a envolve.
-        if self.landing_active() && matches!(area, Area::Conversation | Area::Side | Area::Bottom) {
+        let live = self.landing_active() && matches!(area, Area::Conversation | Area::Side | Area::Bottom);
+        self.pane_element_live(area, style, live)
+    }
+
+    /// A área desenhada neste quadro sem a cópia guardada quando `live`.
+    pub(super) fn pane_element_live(&self, area: Area, style: StyleRefinement, live: bool) -> AnyElement {
+        let pane = self.pane(area);
+        if live {
             let mut frame = div();
             frame.style().refine(&style);
             return frame.child(AnyView::from(pane.clone())).into_any_element();
@@ -108,11 +123,7 @@ impl Hangar {
 
     /// Redesenha uma área só, sem acordar as outras: para o que muda só nela (texto chegando, rolagem, digitação).
     pub(super) fn redraw(&self, area: Area, cx: &mut Context<Self>) {
-        let pane = match area {
-            Area::Nav => &self.panes.nav, Area::Conversation => &self.panes.conversation, Area::Bottom => &self.panes.bottom,
-            Area::Side => &self.panes.side,
-        };
-        pane.update(cx, |_, cx| cx.notify());
+        self.pane(area).update(cx, |_, cx| cx.notify());
     }
 
     /// A faixa de baixo ancorada no pé da caixa: crescendo, ela sobe por cima da conversa no mesmo quadro, e a medida

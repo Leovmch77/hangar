@@ -19,6 +19,8 @@ pub struct Chat {
     removed: HashSet<String>,
     claimed_real: HashSet<String>,
     index: HashMap<String, usize>,
+    /// Quantos eventos do começo não mudaram desde o último `take_unsynced`.
+    unsynced: usize,
 }
 
 impl Chat {
@@ -26,11 +28,26 @@ impl Chat {
         self.index = self.events.iter().enumerate().map(|(i, e)| (e.id.clone(), i)).collect();
     }
 
+    fn changed_at(&mut self, i: usize) { self.unsynced = self.unsynced.min(i); }
+
+    fn remove_id(&mut self, id: &str) {
+        if let Some(i) = self.events.iter().position(|e| e.id == id) { self.changed_at(i); }
+        self.events.retain(|e| e.id != id);
+        self.reindex();
+    }
+
+    /// Eventos do começo intactos desde a chamada anterior; o que vem depois deles pode ter mudado.
+    pub fn take_unsynced(&mut self) -> usize { std::mem::replace(&mut self.unsynced, self.events.len()) }
+
+    /// O que é derivado dos eventos mudou por fora deles (idioma): a próxima leitura refaz tudo.
+    pub fn invalidate(&mut self) { self.unsynced = 0; }
+
+    pub fn position(&self, id: &str) -> Option<usize> { self.index.get(id).copied() }
+
     pub fn apply(&mut self, event: ChatEvent) {
         if event.queued_confirmed == Some(true) {
             self.removed.insert(event.id.clone());
-            self.events.retain(|e| e.id != event.id);
-            self.reindex();
+            self.remove_id(&event.id);
             return;
         }
         if self.removed.contains(&event.id) { return; }
@@ -39,6 +56,7 @@ impl Chat {
                 && event.text.as_deref().is_some_and(|text| preview_matches(&self.preview.text, text)) {
                 self.clear_preview();
             }
+            self.changed_at(i);
             self.events[i] = event;
             return;
         }
@@ -64,12 +82,14 @@ impl Chat {
                 .max_by(|(ai, a), (bi, b)| a.cmp(b).then_with(|| bi.cmp(ai))).map(|(i, _)| i);
             if let Some(i) = owner {
                 self.removed.insert(self.events[i].id.clone());
+                self.changed_at(i);
                 self.events.remove(i);
                 self.reindex();
                 self.claimed_real.insert(event.id.clone());
             }
         }
         self.settle_live(&event);
+        self.changed_at(self.events.len());
         self.index.insert(event.id.clone(), self.events.len());
         self.events.push(event);
     }
@@ -108,6 +128,7 @@ impl Chat {
     }
 
     pub fn merge_history(&mut self, history: Vec<ChatEvent>) {
+        self.unsynced = 0;
         // Mantém os eventos ao vivo e as baixas que chegaram enquanto o HTTP estava em voo.
         // Reaplicar o histórico não é evento novo: o que está em voo continua como estava.
         let live = (self.preview.clone(), self.live_thinking.clone(), self.live_tool.clone(),
@@ -195,8 +216,7 @@ impl Chat {
 
     pub fn retire(&mut self, id: &str) {
         self.removed.insert(id.to_owned());
-        self.events.retain(|e| e.id != id);
-        self.reindex();
+        self.remove_id(id);
     }
 
     // Resposta de /steer: `queued_ids` já saiu para o turno; `promoted` baixa a fila inteira.
@@ -206,7 +226,10 @@ impl Chat {
             for id in queued { self.retire(&id); }
             return;
         }
-        for event in self.events.iter_mut().filter(|e| ids.contains(&e.id)) { event.queued_delivered = Some(true); }
+        for (i, event) in self.events.iter_mut().enumerate().filter(|(_, e)| ids.contains(&e.id)) {
+            event.queued_delivered = Some(true);
+            self.unsynced = self.unsynced.min(i);
+        }
     }
 
     pub fn clear_preview(&mut self) {
@@ -334,6 +357,25 @@ mod tests {
 
     fn event(kind: &str, id: &str, text: &str) -> ChatEvent {
         ChatEvent { kind: kind.into(), id: id.into(), text: Some(text.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn unsynced_marks_the_first_event_that_changed() {
+        let mut chat = Chat::default();
+        for id in ["a", "b", "c"] { chat.apply(event("assistant_msg", id, id)); }
+        assert_eq!(chat.take_unsynced(), 0);
+        assert_eq!(chat.take_unsynced(), 3);
+        chat.apply(event("assistant_msg", "d", "d"));
+        assert_eq!(chat.take_unsynced(), 3);
+        chat.apply(event("assistant_msg", "b", "b2"));
+        chat.apply(event("assistant_msg", "e", "e"));
+        assert_eq!(chat.take_unsynced(), 1);
+        chat.retire("a");
+        assert_eq!(chat.take_unsynced(), 0);
+        chat.merge_history(vec![event("assistant_msg", "b", "b2")]);
+        assert_eq!(chat.take_unsynced(), 0);
+        chat.invalidate();
+        assert_eq!(chat.take_unsynced(), 0);
     }
 
     #[test]

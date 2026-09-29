@@ -150,11 +150,12 @@ impl Hangar {
         dossier.update(cx, |d, cx| if d.remote.finish(seq, value) { cx.notify(); });
     }
 
-    /// A origem continua viva: abre o chat dela. Fora da lista deste servidor, um aviso.
+    /// A origem continua viva: abre o chat dela, na máquina da conversa aberta (o bastão só nasce na mesma). Fora da lista
+    /// daquela máquina, um aviso.
     fn open_origin(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        match self.sessions.iter().find(|s| s.name == name).cloned() {
-            Some(session) => self.select(session, window, cx),
-            None => window.push_notification(Notification::warning(tr("baton_origin_missing").replace("{nome}", name)), cx),
+        let target = super::sidebar::Target::new(&self.open_server(), name);
+        if self.select_target(&target, window, cx).is_none() {
+            window.push_notification(Notification::warning(tr("baton_origin_missing").replace("{nome}", name)), cx);
         }
     }
 }

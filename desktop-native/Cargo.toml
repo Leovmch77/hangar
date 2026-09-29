@@ -62,5 +62,9 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows-0.3.7" }
 [profile.dev]
 debug = 0
 
+# Dependências (GPUI, wgpu) otimizadas uma vez e guardadas: o build de ajuste só recompila o app e a janela fica fluida.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 strip = true

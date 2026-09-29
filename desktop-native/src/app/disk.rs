@@ -235,7 +235,7 @@ impl Hangar {
         if !cfg!(unix) || !api.is_loopback() { return None; }
         // A aberta vem antes: a lista ativa pode ter outra de mesmo nome quando ela é de outra máquina.
         let open = self.selected.as_ref().filter(|s| s.name == name && self.session_server().as_deref() == Some(api.identity().as_str()));
-        let cwd = open.or_else(|| self.sessions.iter().find(|s| s.name == name))?.cwd.clone()?;
+        let cwd = open.or_else(|| self.sessions_of(&api.identity()).iter().find(|s| s.name == name))?.cwd.clone()?;
         let real = self.local_dirs.get(&cwd).cloned().flatten()?;
         Some((cwd, real))
     }
@@ -266,11 +266,10 @@ impl Hangar {
         local.unwrap_or(Uploads::Remote)
     }
 
-    /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor.
-    pub(super) fn local_editor(&self, name: &str) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
-        // Chamado pelo menu da lista, que é do servidor ativo.
-        let (cwd, _) = self.local_cwd(self.api.clone(), name)?;
-        let api = self.api.clone()?;
+    /// `open-editor` local quando a sessão é desta máquina: o editor vem da configuração do servidor dela (`api`).
+    pub(super) fn local_editor(&self, api: Option<Api>, name: &str) -> Option<impl Future<Output = Result<Value, Failure>> + use<>> {
+        let (cwd, _) = self.local_cwd(api.clone(), name)?;
+        let api = api?;
         Some(async move {
             let config = api.config().await?;
             let binary = config.pointer("/campos/editor/valor").and_then(Value::as_str).filter(|b| !b.is_empty()).map(str::to_owned)

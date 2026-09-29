@@ -53,6 +53,9 @@ fn window_buttons(window: &Window, floating: bool) -> Div {
         .child(button("window-close", IconName::WindowClose, WindowControlArea::Close, true))
 }
 
+/// Altura da barra, para a view guardada que a desenha.
+pub(super) fn height() -> f32 { if theme::is_floating() { TOPBAR_FLOATING_HEIGHT } else { TOPBAR_HEIGHT } }
+
 impl Hangar {
     pub(super) fn schedule_account_refresh(&mut self, cx: &mut Context<Self>) {
         self.topbar.account_tick += 1;

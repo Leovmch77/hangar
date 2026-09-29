@@ -19,8 +19,9 @@ pub(crate) struct ServerEntry {
 pub(crate) enum RemoteUpdate { Sessions(Result<Vec<SessionInfo>, Failure>), Stream(Update) }
 
 /// A lista de uma máquina que não é a ativa. Fora do ar, fica a última lista boa, como no web.
+/// `api` é a conexão guardada da máquina: as ações das linhas dela não montam um cliente HTTP a cada gesto.
 #[derive(Default)]
-pub(crate) struct RemoteList { pub sessions: Vec<SessionInfo>, pub loaded: bool, pub online: bool, pub error: Option<String> }
+pub(crate) struct RemoteList { pub sessions: Vec<SessionInfo>, pub loaded: bool, pub online: bool, pub error: Option<String>, pub api: Option<Api> }
 
 /// Mesma máquina escrita de dois jeitos (barra final, maiúsculas) é o mesmo servidor.
 pub(crate) fn norm(address: &str) -> String { address.trim().trim_end_matches('/').to_ascii_lowercase() }
@@ -79,25 +80,33 @@ impl Hangar {
                 Ok(api) => api,
                 Err(error) => { list.error = Some(Self::failure(&error)); continue; }
             };
+            list.api = Some(api.clone());
             self.remote_tasks.push(self.runtime.spawn(run_list(api, key, self.remote_gen, self.tx.clone())));
         }
     }
 
-    pub(super) fn receive_remote(&mut self, generation: u64, key: String, update: RemoteUpdate, cx: &mut Context<Self>) {
-        if generation != self.remote_gen { return; }
+    /// Devolve se a lista (ou o estado dela) mudou.
+    pub(super) fn receive_remote(&mut self, generation: u64, key: String, update: RemoteUpdate, cx: &mut Context<Self>) -> bool {
+        if generation != self.remote_gen { return false; }
         let invite = self.server_entry(&key).is_some_and(|s| s.invite);
         // 401 só é "encerrado" num convite; nos outros continua sendo login perdido.
         let ended = |error: &Failure| error.status == Some(410) || (invite && error.status == Some(401));
-        let Some(list) = self.remote.get_mut(&key) else { return };
+        let Some(list) = self.remote.get_mut(&key) else { return false };
+        // Ping e lista igual à de antes não redesenham: cada aviso aqui acordava todas as áreas.
+        let mut changed = true;
+        let same = |list: &RemoteList, sessions: &[SessionInfo]| list.loaded && list.error.is_none() && list.sessions == sessions;
         match update {
-            RemoteUpdate::Sessions(Ok(sessions)) => { list.sessions = sessions; list.loaded = true; list.error = None; }
+            RemoteUpdate::Sessions(Ok(sessions)) => {
+                changed = !same(list, &sessions);
+                list.sessions = sessions; list.loaded = true; list.error = None;
+            }
             RemoteUpdate::Sessions(Err(error)) if ended(&error) => {
                 self.invite_ended.insert(key.clone());
                 list.sessions.clear();
                 list.error = Some(tr_shared("convite_encerrado", &[]));
             }
             RemoteUpdate::Sessions(Err(error)) => list.error = Some(Self::failure(&error)),
-            RemoteUpdate::Stream(Update::Online) => list.online = true,
+            RemoteUpdate::Stream(Update::Online) => { changed = !list.online; list.online = true; }
             RemoteUpdate::Stream(Update::Offline(error)) => {
                 list.online = false;
                 list.error = Some(if ended(&error) {
@@ -108,18 +117,23 @@ impl Hangar {
             }
             RemoteUpdate::Stream(Update::Frame(frame)) => {
                 let applied = match frame.event.as_str() {
-                    "sessions" => match serde_json::from_value(frame.data) {
-                        Ok(sessions) => { list.sessions = sessions; list.loaded = true; list.error = None; true }
+                    "sessions" => match serde_json::from_value::<Vec<SessionInfo>>(frame.data) {
+                        Ok(sessions) => {
+                            changed = !same(list, &sessions);
+                            list.sessions = sessions; list.loaded = true; list.error = None; true
+                        }
                         Err(_) => { list.error = Some(tr("invalid_response")); false }
                     },
                     "list_error" => { list.error = Some(tr("list_stale")); true }
-                    _ => true,
+                    _ => { changed = false; true }
                 };
                 let _ = frame.applied.send(applied);
             }
         }
+        if !changed { return false; }
         self.redraw(panes::Area::Nav, cx);
         cx.notify();
+        true
     }
 
     pub(super) fn server_entry(&self, key: &str) -> Option<&ServerEntry> { self.servers.iter().find(|s| norm(&s.address) == key) }
@@ -152,6 +166,21 @@ impl Hangar {
 
     /// Chave da máquina da sessão aberta quando ela não é a ativa.
     pub(super) fn open_key(&self) -> Option<String> { self.open_api.as_ref().map(|api| norm(&api.identity())) }
+
+    /// Chave (endereço normalizado) da máquina ativa; vazia sem conexão.
+    pub(super) fn active_key(&self) -> String { self.server.as_deref().map(norm).unwrap_or_default() }
+
+    /// Chave da máquina da conversa aberta; sem sessão de outra máquina, a ativa.
+    pub(super) fn open_server(&self) -> String { self.open_key().unwrap_or_else(|| self.active_key()) }
+
+    pub(super) fn is_active_key(&self, key: &str) -> bool { self.server.as_deref().is_some_and(|s| norm(s) == key) }
+
+    /// Conexão da máquina `key`: a ativa, a da sessão aberta ou a guardada com a lista dela.
+    pub(super) fn machine_api(&self, key: &str) -> Option<Api> {
+        if self.is_active_key(key) { return self.api.clone(); }
+        if self.open_key().as_deref() == Some(key) { return self.open_api.clone(); }
+        self.remote.get(key).and_then(|list| list.api.clone())
+    }
 
     /// Lista de outra máquina mudou: a sessão aberta dela acompanha, e a que esperava por ela abre.
     pub(super) fn remote_changed(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
