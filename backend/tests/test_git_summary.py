@@ -136,6 +136,41 @@ def test_git_summary_returncode_nao_zero_usa_ttl_curto(tmp_path, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_git_summary_pula_git_quando_index_e_head_nao_mudaram(tmp_path, monkeypatch):
+    # Passado o TTL, sem mudança em index/HEAD/ref o resultado é reaproveitado até
+    # _SUMMARY_MAX_AGE; mexer no index refaz na hora.
+    import os
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    (git / "refs" / "heads" / "main").write_text("0" * 40 + "\n")
+    (git / "index").write_bytes(b"x")
+    from app import git_ops
+
+    clock = [1000.0]
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: clock[0])
+    calls = {"n": 0}
+
+    def fake_run(cwd, *a, timeout=None, **k):
+        calls["n"] += 1
+        return type("P", (), {"returncode": 0, "stdout": "## main\n M a.py\n"})()
+
+    monkeypatch.setattr(git_ops, "_run", fake_run)
+    git_ops._summary_cache.clear()
+
+    assert git_ops.git_summary(str(tmp_path))["dirty"] == 1
+    clock[0] = 1005.0                       # TTL passou, .git igual -> sem fork
+    assert git_ops.git_summary(str(tmp_path))["dirty"] == 1
+    assert calls["n"] == 1
+    st = os.stat(git / "index")
+    os.utime(git / "index", ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    git_ops.git_summary(str(tmp_path))      # index mudou -> refaz
+    assert calls["n"] == 2
+    clock[0] += git_ops._SUMMARY_MAX_AGE + 1   # teto de idade -> refaz mesmo sem mudança
+    git_ops.git_summary(str(tmp_path))
+    assert calls["n"] == 3
+
+
 def test_sessioninfo_serializa_campos_git():
     from app.models import SessionInfo
     s = SessionInfo(name="x", git_dirty=3, git_ahead=2, git_behind=0)
