@@ -33,7 +33,8 @@ gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, GitBranch, RotateCcwClock, 
     Activity, Contrast, Droplet, Image, Keyboard, Layers, List, Mic, Monitor, RefreshCw, Server, SlidersHorizontal, Type, Users,
     SquarePen, FilePlus, Wrench, Circle, CircleDashed, ChartColumn, Table, ListChecks, Download, Clock, Languages, Banknote,
     Zap, Rocket, MessageCircle, Key, Pencil, GripVertical, AudioLines, Volume2, Hash, LogOut, Smartphone, FolderTree, ChevronsDownUp, FileCode,
-    RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert, Link, Wifi]);
+    RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert, Link, Wifi,
+    CircleStop, Upload, Workflow]);
 
 pub const HANGAR_MARK: &str = "brand/hangar-mark.svg";
 pub const GROUP_GLYPH: &str = "brand/group-glyph.svg";
@@ -158,4 +159,49 @@ fn main() {
         cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // O glob da gpui_kit traz um `test` que colide com o atributo padrão; o nome explícito vence o glob.
+    use core::prelude::v1::test;
+
+    fn kebab(name: &str) -> String {
+        let mut out = String::new();
+        let mut prev: Option<char> = None;
+        for c in name.chars() {
+            let boundary = prev.is_some_and(|p| (c.is_ascii_uppercase() && (p.is_ascii_lowercase() || p.is_ascii_digit()))
+                || (c.is_ascii_digit() && p.is_ascii_alphabetic()));
+            if boundary { out.push('-'); }
+            out.push(c.to_ascii_lowercase());
+            prev = Some(c);
+        }
+        out
+    }
+
+    // Ícone fora do catálogo embutido não dá erro: o botão só fica em branco.
+    #[test]
+    fn every_icon_used_in_the_source_is_embedded() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut missing = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() { stack.push(path); continue; }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") { continue; }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for piece in text.split("IconName::").skip(1) {
+                    let name: String = piece.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                    if !name.starts_with(|c: char| c.is_ascii_uppercase()) { continue; }
+                    let asset = format!("icons/{}.svg", kebab(&name));
+                    if !matches!(AppAssets.load(&asset), Ok(Some(_))) { missing.push(name); }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "ícones sem SVG embutido (acrescentar em ExtraIcons): {missing:?}");
+    }
 }

@@ -623,6 +623,13 @@ class ShortcutShellBody(BaseModel):
     label: str = Field(default="", max_length=200)
     # Onde rodar: absoluta ou relativa a raiz da copia da sessao; ausente = cwd da sessao.
     pasta: Optional[str] = Field(default=None, max_length=4096)
+    runs_in: Literal["session", "hangar"] = "session"
+    # Identidade da copia unica No Hangar: o id do atalho.
+    key: str = Field(default="", max_length=200)
+    # No Hangar: roda na home (padrao) em vez da pasta da sessao que clicou.
+    home: bool = True
+    # Mostrar no app a pergunta que o terminal fizer.
+    ask: bool = True
 
 
 # `Any` nos itens: item torto volta 400 apontando qual (validate_shortcut_item), nao 422 generico.

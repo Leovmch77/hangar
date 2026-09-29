@@ -54,6 +54,8 @@ class Share:
     device: str | None = None
     redeemed_at: float | None = None
     revoked_at: float | None = None
+    # Convite pela rede local: não liga o Funnel.
+    local: bool = False
 
     def active(self, now: float) -> bool:
         if self.revoked_at is not None:
@@ -113,11 +115,11 @@ def _save() -> None:
         raise
 
 
-def create(session: str, life: str, now: float | None = None) -> tuple[Share, str]:
+def create(session: str, life: str, now: float | None = None, local: bool = False) -> tuple[Share, str]:
     now = time.time() if now is None else now
     code = base64.b32encode(secrets.token_bytes(16)).decode().rstrip("=")
     s = Share(id=secrets.token_hex(8), session=session, life=life, created_at=now,
-              code_expires_at=now + CODE_TTL, code_hash=_hash(code))
+              code_expires_at=now + CODE_TTL, code_hash=_hash(code), local=local)
     with _lock:
         _load()[s.id] = s
         _save()
@@ -213,24 +215,24 @@ def set_life(session: str, life: str | None) -> None:
             _save()
 
 
-def has_any() -> bool:
+def has_any(internet_only: bool = False) -> bool:
     # Revogado fica guardado por dias, então "tem registro" cobre o funnel a desligar depois do
     # último revoke; quem nunca compartilhou não tem nenhum.
     with _lock:
-        return bool(_load())
+        return any(not (internet_only and x.local) for x in _load().values())
 
 
-def has_active(now: float | None = None) -> bool:
+def has_active(now: float | None = None, internet_only: bool = False) -> bool:
     now = time.time() if now is None else now
     with _lock:
-        return any(x.active(now) for x in _load().values())
+        return any(x.active(now) and not (internet_only and x.local) for x in _load().values())
 
 
-def recently_ended(window: float, now: float | None = None) -> bool:
+def recently_ended(window: float, now: float | None = None, internet_only: bool = False) -> bool:
     now = time.time() if now is None else now
     with _lock:
         return any(x.revoked_at is not None and now - x.revoked_at <= window
-                   for x in _load().values())
+                   and not (internet_only and x.local) for x in _load().values())
 
 
 def active_sessions(now: float | None = None) -> set[str]:

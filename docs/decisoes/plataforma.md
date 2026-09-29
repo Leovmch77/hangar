@@ -701,6 +701,13 @@ roda em `bypassPermissions`, o terminal é um `tmux attach` completo (`switch-cl
 outras sessões) e `/file` lê o que a conversa citar. O filtro de rotas delimita a interface, não é
 fronteira de segurança.
 
+"Gerar link local" (29/09/2026, pedido do usuário): na mesma rede, sem Tailscale, o link sai
+`http://<ip-da-rede>:8766/convite/<código>`. A 8766 escuta em `0.0.0.0` quando o backend escuta fora
+do loopback; o portão reconhece o convidado pela PORTA local, então vale igual pelos dois caminhos.
+O convite local fica marcado (`local`) e não liga o Funnel. Página e resgate devolvem o endereço
+por onde o convidado chegou (`scope["server"]`: loopback = Funnel, senão o IP da rede). Os
+clientes só aceitam `http` num convite quando o host é IP privado (10/8, 172.16/12, 192.168/16).
+
 O Funnel expõe só `127.0.0.1:8766`, em `:8443` (a 443 é o `serve` da tailnet e a 10000 é a prévia
 de porta do `tunnel.py`; Funnel só aceita essas três). Nessa porta só vale o token do convidado
 (Bearer ou `?token=`); o token do dono e o cookie são recusados. Abrir `/convite/<código>` não

@@ -2793,8 +2793,8 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
 }
 
 // Compartilhar sessão (dono). Todas no servidor ATIVO: a Sidebar usa `withServer`.
-export async function createShare(name: string): Promise<ShareCreated> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share`, { method: 'POST' });
+export async function createShare(name: string, local = false): Promise<ShareCreated> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`, { method: 'POST' });
   if (res.status === 409) {
     const corpo = (await res.clone().json().catch(() => null)) as { detail?: EnvelopeErro } | null;
     const d = corpo?.detail;

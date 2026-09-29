@@ -277,6 +277,11 @@ def validate_shortcut_item(item: Any, where: str) -> None:
             raise ValueError(f"{where} (shell) sem comando")
     else:
         raise ValueError(f"{where} tem type desconhecido '{kind}'")
+    if item.get("runs_in") is not None and (kind != "shell" or item["runs_in"] not in ("session", "hangar")):
+        raise ValueError(f"{where} tem runs_in invalido (so em atalho shell: 'session' ou 'hangar')")
+    for flag in ("hangar_home", "answer_in_app"):
+        if item.get(flag) is not None and (kind != "shell" or not isinstance(item[flag], bool)):
+            raise ValueError(f"{where} tem {flag} invalido (so em atalho shell, verdadeiro ou falso)")
     if kind in ("send_text", "shell") and (
         not isinstance(item.get("label"), str) or not item["label"].strip()
     ):

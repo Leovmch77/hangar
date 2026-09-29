@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -10,6 +11,7 @@ from app import share_store, share_tunnel, tmux
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.auth import require_auth
+from app.config import detect_lan_ip, resolve_bind_ip, settings
 from app.mensagens import erro
 from app.share_life import session_life
 
@@ -32,10 +34,11 @@ def sync_tunnel() -> None:
     # Revogar nunca pode falhar por causa do túnel: o registro já saiu, e o laço periódico
     # tenta de novo em um minuto. Quem nunca compartilhou não passa pelo tailscale: o funnel
     # da 8443 pode ser dele.
-    if not share_store.has_any():
+    if not share_store.has_any(internet_only=True):
         return
     try:
-        share_tunnel.sync(share_store.has_active() or share_store.recently_ended(ENDED_GRACE))
+        share_tunnel.sync(share_store.has_active(internet_only=True)
+                          or share_store.recently_ended(ENDED_GRACE, internet_only=True))
     except share_tunnel.TunnelError as e:
         _log.warning("[share] sincronizar funnel falhou: %s", e.fix)
 
@@ -70,15 +73,33 @@ async def sweep_loop() -> None:
         await asyncio.sleep(_SWEEP_INTERVAL)
 
 
-def _create(name: str) -> dict:
+def _escuta(ip: str, port: int) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _create(name: str, local: bool = False) -> dict:
     life = session_life(name)
     if life is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    try:
-        base = share_tunnel.ensure_on()
-    except share_tunnel.TunnelError as e:
-        raise _prereq_error(e)
-    s, code = share_store.create(name, life)
+    if local:
+        # Mesma rede, sem Tailscale: só com a porta do convite de fato escutando no IP da rede
+        # (bind 0.0.0.0, porta livre no boot). Senão o link sairia sem ninguém atendendo.
+        ip = detect_lan_ip()
+        if resolve_bind_ip(settings) not in ("0.0.0.0", "::") or not _escuta(ip, share_tunnel.GUEST_PORT):
+            raise HTTPException(409, detail=erro(
+                "erro_compartilhar_sem_rede_local",
+                "esta máquina só escuta em 127.0.0.1: grave CP_LAN_BIND_IP=0.0.0.0 no backend/.env e reinicie"))
+        base = f"http://{ip}:{share_tunnel.GUEST_PORT}"
+    else:
+        try:
+            base = share_tunnel.ensure_on()
+        except share_tunnel.TunnelError as e:
+            raise _prereq_error(e)
+    s, code = share_store.create(name, life, local=local)
     return {"id": s.id, "link": f"{base}/convite/{code}", "expires_at": s.code_expires_at}
 
 
@@ -104,8 +125,8 @@ async def share_prereqs():
 
 
 @router.post("/api/sessions/{name}/share", dependencies=[Depends(require_auth)])
-async def create_share(name: str):
-    return await asyncio.to_thread(_create, name)
+async def create_share(name: str, local: bool = False):
+    return await asyncio.to_thread(_create, name, local)
 
 
 @router.get("/api/sessions/{name}/share", dependencies=[Depends(require_auth)])

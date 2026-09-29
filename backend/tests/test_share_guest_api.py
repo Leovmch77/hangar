@@ -85,6 +85,20 @@ def test_resgate_devolve_token_e_endereco(guest_client, monkeypatch):
     assert body["owner"]
 
 
+def test_convite_pela_rede_local_usa_o_ip_e_nao_o_tunel(guest_client, monkeypatch):
+    import app.api as api_mod
+    local = TestClient(api_mod.app, base_url="http://192.168.77.142:8766", client=("192.168.77.50", 1))
+
+    def sem_tunel():
+        raise share_tunnel.TunnelError([], "sem tailscale")
+    monkeypatch.setattr(share_tunnel, "host", sem_tunel)
+    monkeypatch.setattr(share_store, "peek", lambda code: SHARED)
+    assert "hangar://convite/192.168.77.142:8766/ABCD" in local.get("/convite/ABCD").text
+    monkeypatch.setattr(share_store, "redeem", lambda code, device: (SHARED, "tok"))
+    r = local.post("/api/guest/redeem", json={"code": "ABCD", "device": "Pixel"})
+    assert r.json()["address"] == "http://192.168.77.142:8766"
+
+
 def test_resgate_com_tunel_fora_nao_gasta_o_codigo(guest_client, monkeypatch):
     def sem_tunel():
         raise share_tunnel.TunnelError([], "sem tailscale")

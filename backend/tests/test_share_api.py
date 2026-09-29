@@ -57,6 +57,31 @@ def test_cria_lista_e_revoga(cli, syncs):
     assert cli.delete(f"/api/sessions/proj/share/{body['id']}", headers=AUTH).status_code == 404
 
 
+def test_link_local_nao_liga_o_funnel(cli, syncs, monkeypatch):
+    monkeypatch.setattr(share_api, "resolve_bind_ip", lambda s: "0.0.0.0")
+    monkeypatch.setattr(share_api, "detect_lan_ip", lambda: "192.168.77.142")
+    monkeypatch.setattr(share_api, "_escuta", lambda ip, port: True)
+    monkeypatch.setattr(share_tunnel, "ensure_on", lambda: pytest.fail("link local não passa pelo Funnel"))
+    r = cli.post("/api/sessions/proj/share?local=true", headers=AUTH)
+    assert r.json()["link"].startswith("http://192.168.77.142:8766/convite/")
+    assert share_store.has_active(internet_only=True) is False
+    cli.delete("/api/sessions/proj/share", headers=AUTH)
+    assert all(a is False for a in syncs)
+
+
+def test_link_local_com_bind_so_local_explica(cli, syncs, monkeypatch):
+    monkeypatch.setattr(share_api, "resolve_bind_ip", lambda s: "127.0.0.1")
+    r = cli.post("/api/sessions/proj/share?local=true", headers=AUTH)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_compartilhar_sem_rede_local"
+
+
+def test_link_local_sem_ninguem_escutando_nao_gera(cli, syncs, monkeypatch):
+    monkeypatch.setattr(share_api, "resolve_bind_ip", lambda s: "0.0.0.0")
+    monkeypatch.setattr(share_api, "_escuta", lambda ip, port: False)
+    r = cli.post("/api/sessions/proj/share?local=true", headers=AUTH)
+    assert r.status_code == 409 and not share_store.has_any()
+
+
 def test_encerrar_todos(cli, syncs):
     cli.post("/api/sessions/proj/share", headers=AUTH)
     cli.post("/api/sessions/proj/share", headers=AUTH)
