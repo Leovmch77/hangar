@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -96,14 +96,6 @@ def _read_agent(f: Path, tail: int) -> dict | None:
 
 def _parse_agent(f: Path, tail: int) -> dict | None:
     """Uma passada no transcript do subagente: prompt, contagem de tools, últimas chamadas, texto."""
-    try:
-        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as e:
-        # Sem log, um subagente ilegível (permissão, disco) sumia da lista igualzinho a um que
-        # nunca existiu — e ninguém tinha como saber a diferença.
-        _log.warning("subagents: não consegui ler %s: %s", f, e)
-        return None
-
     agent_id = f.stem[len("agent-"):] if f.stem.startswith("agent-") else f.stem
     prompt: str | None = None
     tools: dict[str, int] = {}
@@ -113,42 +105,51 @@ def _parse_agent(f: Path, tail: int) -> dict | None:
     updated = ""
     failed = False
 
-    for line in lines:
-        try:
-            r = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        ts = r.get("timestamp")
-        if isinstance(ts, str):
-            if not started:
-                started = ts
-            updated = ts
-        msg = r.get("message") or {}
-        content = msg.get("content")
-        if r.get("type") == "assistant":
-            # O Claude Code grava o erro de API como a última resposta quando esgota as tentativas (529, 429); uma
-            # resposta normal depois dele desfaz a falha.
-            failed = r.get("isApiErrorMessage") is True
-        if r.get("type") == "user" and prompt is None:
-            t = _text_of(content)
-            if t:
-                # Fork: o texto padrão vem na frente e o prompt que o pai mandou vem depois do
-                # marcador. Sem o corte, nada casava com o `prompt` do Agent e o título era o padrão.
-                if t.lstrip().startswith("<fork-boilerplate>") and _FORK_DIRETIVA in t:
-                    t = t.split(_FORK_DIRETIVA, 1)[1].strip()
-                prompt = t
-        elif r.get("type") == "assistant" and isinstance(content, list):
-            for b in content:
-                if not isinstance(b, dict):
+    # Linha a linha: a lista relê o arquivo a cada crescimento, e read_text de um transcript de
+    # dezenas de MB custava várias vezes o tamanho dele em memória.
+    try:
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
                     continue
-                if b.get("type") == "tool_use":
-                    n = b.get("name") or "?"
-                    tools[n] = tools.get(n, 0) + 1
-                    calls.append({"name": n, "target": _tool_target(n, b.get("input"))[:200]})
-                elif b.get("type") == "text":
-                    t = (b.get("text") or "").strip()
+                ts = r.get("timestamp")
+                if isinstance(ts, str):
+                    if not started:
+                        started = ts
+                    updated = ts
+                msg = r.get("message") or {}
+                content = msg.get("content")
+                if r.get("type") == "assistant":
+                    # O Claude Code grava o erro de API como a última resposta quando esgota as tentativas (529, 429); uma
+                    # resposta normal depois dele desfaz a falha.
+                    failed = r.get("isApiErrorMessage") is True
+                if r.get("type") == "user" and prompt is None:
+                    t = _text_of(content)
                     if t:
-                        last_text = t
+                        # Fork: o texto padrão vem na frente e o prompt que o pai mandou vem depois do
+                        # marcador. Sem o corte, nada casava com o `prompt` do Agent e o título era o padrão.
+                        if t.lstrip().startswith("<fork-boilerplate>") and _FORK_DIRETIVA in t:
+                            t = t.split(_FORK_DIRETIVA, 1)[1].strip()
+                        prompt = t
+                elif r.get("type") == "assistant" and isinstance(content, list):
+                    for b in content:
+                        if not isinstance(b, dict):
+                            continue
+                        if b.get("type") == "tool_use":
+                            n = b.get("name") or "?"
+                            tools[n] = tools.get(n, 0) + 1
+                            calls.append({"name": n, "target": _tool_target(n, b.get("input"))[:200]})
+                        elif b.get("type") == "text":
+                            t = (b.get("text") or "").strip()
+                            if t:
+                                last_text = t
+    except OSError as e:
+        # Sem log, um subagente ilegível (permissão, disco) sumia da lista igualzinho a um que
+        # nunca existiu — e ninguém tinha como saber a diferença.
+        _log.warning("subagents: não consegui ler %s: %s", f, e)
+        return None
 
     # `mtime` é o sinal de vida: o arquivo é append-only enquanto o agente trabalha. Quem decide se
     # ele TERMINOU é o transcript do pai (tool_result) — aqui só reportamos a última escrita, e a UI
@@ -462,15 +463,7 @@ def _events_pi(f: Path, limit: int) -> list[dict] | None:
     o jsonl do Claude."""
     from app.adapters.pi.transcript import parse_line as parse_pi
 
-    out: list[dict] = []
-    try:
-        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-            for ev in parse_pi(line):
-                out.append(ev if isinstance(ev, dict) else ev.__dict__)
-    except OSError as e:
-        _log.warning("subagents: não consegui ler os eventos de %s: %s", f, e)
-        return None
-    return out[-limit:]
+    return _tail_events(f, limit, parse_pi)
 
 
 def _mtime(f: Path) -> float:
@@ -598,15 +591,7 @@ def _events_kimi(f: Path, limit: int) -> list[dict] | None:
     """O mesmo que `_events`, com o parser do Kimi — o wire nao e o jsonl do Claude."""
     from app.adapters.kimi.transcript import parse_line as parse_kimi
 
-    out: list[dict] = []
-    try:
-        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-            for ev in parse_kimi(line):
-                out.append(ev if isinstance(ev, dict) else ev.__dict__)
-    except OSError as e:
-        _log.warning("subagents: não consegui ler os eventos de %s: %s", f, e)
-        return None
-    return out[-limit:]
+    return _tail_events(f, limit, parse_kimi)
 
 
 def _events(f: Path, limit: int) -> list[dict] | None:
@@ -618,12 +603,19 @@ def _events(f: Path, limit: int) -> list[dict] | None:
     """
     from app.transcript import parse_line
 
-    out: list[dict] = []
+    return _tail_events(f, limit, parse_line)
+
+
+def _tail_events(f: Path, limit: int, parse) -> list[dict] | None:
+    # Linha a linha e só a cauda em memória: o painel relê transcripts de dezenas de MB, e
+    # read_text + lista de todos os eventos custava várias vezes o tamanho do arquivo.
+    out: deque[dict] = deque(maxlen=max(limit, 0))
     try:
-        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-            for ev in parse_line(line):
-                out.append(ev if isinstance(ev, dict) else ev.__dict__)
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                for ev in parse(line):
+                    out.append(ev if isinstance(ev, dict) else ev.__dict__)
     except OSError as e:
         _log.warning("subagents: não consegui ler os eventos de %s: %s", f, e)
         return None
-    return out[-limit:]
+    return list(out)

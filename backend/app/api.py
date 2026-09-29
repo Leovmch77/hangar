@@ -6737,9 +6737,11 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
         if provider != "claude":
             # Fora do Claude nao ha fila duravel keyed por este arquivo: o transcript e a conversa
             # inteira, e cada provider tem o parser dele.
-            return [ev for linha in p.read_text(encoding="utf-8", errors="replace").splitlines()
-                    if (o := _json_dict(linha)) is not None
-                    for ev in archive_providers.parse_obj(provider, o)]
+            # Linha a linha: rollout de dezenas de MB inteiro na memória, mais a lista das linhas.
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                return [ev for linha in fh
+                        if (o := _json_dict(linha)) is not None
+                        for ev in archive_providers.parse_obj(provider, o)]
     except codex_accounts.AccountError as e:
         raise _erro_conta_codex(e) from None
     except ValueError:

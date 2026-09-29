@@ -324,3 +324,27 @@ def test_claude_tailer_never_pays_the_wait(tmp_path, monkeypatch):
     evs, _ = TranscriptTailer(f)._read_from(0)
     assert [e.kind for e in evs] == ["user_msg"]
     assert chamou == []
+
+
+@pytest.mark.asyncio
+async def test_follow_nao_observa_subpastas(tmp_path, monkeypatch):
+    # <uuid>/subagents/ fica dentro da pasta do projeto; watch recursivo acordava todo chat aberto
+    # a cada escrita de subagente.
+    f = tmp_path / "s.jsonl"
+    f.write_text(_user("u1", "a"))
+    armou = asyncio.Event()
+    kwargs_vistos = []
+
+    async def fake_awatch(*args, **kwargs):
+        kwargs_vistos.append(kwargs)
+        armou.set()
+        await asyncio.Event().wait()
+        yield set()
+
+    monkeypatch.setattr("app.transcript.awatch", fake_awatch)
+    gen = TranscriptTailer(f).follow()
+    assert (await gen.__anext__()).id == "u1"
+    task = asyncio.ensure_future(gen.__anext__())
+    await asyncio.wait_for(armou.wait(), timeout=5)
+    task.cancel()
+    assert kwargs_vistos[0].get("recursive") is False
