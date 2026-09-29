@@ -496,7 +496,7 @@ def plan_sha(text: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
-TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
+PLAN_TASK_HEAD = re.compile(r"^### Task \d+:", re.MULTILINE)
 # Closing fence: same character, at least as long, up to 3 spaces of indent (CommonMark).
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n.*?^ {0,3}\1[`~]*[ \t]*$", re.MULTILINE | re.DOTALL)
 OPEN_STEP = re.compile(r"^\s*- \[ \] \*\*Step", re.MULTILINE)
@@ -544,7 +544,7 @@ def find_plan(repo: Path) -> dict:
         if DONE_STEP.search(body) and not OPEN_STEP.search(body):
             done.append((mtime, str(path)))
             continue
-        if not m and not rel.endswith(".orq.md") and not TASK_HEAD.search(body):
+        if not m and not rel.endswith(".orq.md") and not PLAN_TASK_HEAD.search(body):
             continue
         state = ("stamped" if m.group(1) == plan_sha(text) else "changed") if m else \
             "unstamped" if rel.endswith(".orq.md") else "tasks"
