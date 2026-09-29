@@ -72,7 +72,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   25% de cota (decide antes de gastar), só sobe com a TUI, e vale a partir da SEGUNDA sessão — o
   índice entra na abertura, então quem manda consolidar não vê o próprio resultado.
 - **Instruções nativas do Codex entram por `AGENTS.override.md`** apontando para o `CLAUDE.md`.
-  Override pessoal nunca é sobrescrito; onde existe `AGENTS.md` de verdade, ele deixa de ser lido.
+  Com sincronização ativada, o Claude vence a cópia do Codex; divergência é guardada em backup.
+  Desativada, a abertura não altera os aliases. Reconciliar manualmente autoriza a atualização.
+  Onde existe `AGENTS.md` de verdade, ele deixa de ser lido.
 - **A ponte de skills é a ÚNICA dona das pastas de ponte**, é stdlib-only, e só mexe em symlink
   cujo alvo está numa fonte conhecida. Config alheia é conferida, nunca editada.
 - **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
@@ -1436,7 +1438,7 @@ inventário. Isso mede chamadas evitadas, não ganho de tempo da abertura real.
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o
 lançador prepara também os escopos raiz→cwd antes de subir o app-server. `CLAUDE.MD` é a segunda
-opção. Override pessoal não é sobrescrito. Sem permissão de symlink, usa cópia gerenciada que é
+opção. Sem permissão de symlink, usa cópia gerenciada que é
 atualizada na próxima preparação. Isso INVERTE a decisão de 06/09 (bloco "leia o CLAUDE.md" no
 `AGENTS.md`, custo de as regras não estarem no primeiro token): o bloco antigo sai com backup e o
 `CLAUDE.md` inteiro entra no primeiro request — por isso `project_doc_max_bytes` sobe pra pelo menos
@@ -1449,7 +1451,42 @@ substitui, não soma). Teste com CLI real captura a primeira requisição em ser
 modelo: global + projeto acima de 180 KB presentes, AGENTS preteridos ausentes. Projeto novo
 aberto pelo IDE/CLI cru precisa ser registrado e reconciliado antes de ganhar prioridade sobre um
 AGENTS existente. Sessões já abertas conservam o contexto inicial. Falha na preparação (override
-pessoal, `config.toml` ilegível) não impede a TUI de abrir: sai aviso no stderr do pane.
+pessoal sem fonte Claude, `config.toml` ilegível) não impede a TUI de abrir: sai aviso no stderr do pane.
+
+**Decisão de 29/09/2026.** Ativar sincronização no menu Harness autoriza atualizar as instruções
+do Codex a partir do Claude mesmo quando o destino divergiu do registro. O destino anterior é
+guardado em backup restrito por conteúdo; fonte externa de um symlink não é modificada. A
+preparação automática dos aliases também respeita o interruptor, inclusive pelo lançador.
+Reconciliar manualmente continua sendo uma ação explícita, permitida com o interruptor desligado.
+A falha observada foi um `ValueError` na preparação global: o `AGENTS.override.md` da instalação
+principal diferia do hash registrado, e a rodada parava antes de atualizar skills. A alteração
+de data sozinha não explica a falha. Regressões acrescentadas para fonte autoritativa, backup,
+interruptor desligado, link externo e segunda preparação; testes não executados nesta tarefa.
+Na conferência real, a integração principal concluiu com estado `ok`, sem erros; o override
+passou a coincidir com o conteúdo expandido do Claude e com o hash registrado, com backup do
+destino anterior. A skill `orquestrar-auto` foi instalada na principal.
+O preparo da conta `jefferson-felizardo` também copiou as instruções e a skill; permaneceu
+parcial pelos conflitos de origem dos marketplaces, com confiança dos hooks pendente. Essa
+pendência não foi autoaprovada nem tratada como sincronização completa da conta.
+
+## Preparo do Codex sem repetir etapas inalteradas
+
+**Regra vigente.** Conferir inventário antes de materializar os recursos da conta. Separar as
+assinaturas de instruções, plugins, fragmentos e skills; executar apenas categorias alteradas.
+Falhas de plugins continuam visíveis e são reutilizadas por até 300 s quando fonte, destino e
+CLI permanecem iguais; forçar atualização ou mudar o inventário invalida esse prazo. Confiança
+pendente dos hooks é consultada separadamente, sem autoaprovação. Importação de memória ativada
+continua passando pela etapa de fragmentos. Fonte e destino são reconferidos antes de guardar o
+inventário validado; erro de validação não vira sucesso de cache.
+
+**Conferência em 29/09/2026.** Na conta `jefferson-felizardo`, uma chamada real de preparação
+levou 60,482 s antes da alteração. Após aplicar, a primeira rodada levou 50,127 s para preencher
+os registros; as duas seguintes levaram 2,027 s e 1,017 s. Medição pelo tempo monotônico entre o
+POST `/api/codex-contas/jefferson-felizardo/prepare` e o estado final, consultado a cada segundo.
+São uma amostra anterior e duas posteriores com cache preenchido, não percentis nem promessa
+para importação completa. O estado permaneceu parcial, com conflitos de plugins e confiança
+pendente visíveis. Regressões foram acrescentadas para inventário, cache, aprovação dos hooks e
+mudança de skill isolada; testes automatizados não foram executados.
 
 ## Perguntas assíncronas do Codex (11/09/2026, CLI 0.154.0)
 

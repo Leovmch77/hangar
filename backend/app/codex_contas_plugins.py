@@ -487,6 +487,10 @@ async def _trust_state(native) -> bool | None:
     )
 
 
+async def check_trust(account: Account) -> bool | None:
+    return await _trust_state(_NATIVO(Path.home(), account.home, account=account))
+
+
 async def sync_plugins(source: Account, target: Account, previous: dict) -> dict:
     """Adota no destino apenas os plugins instalados na conta padrão."""
     manifest = _manifest(previous)

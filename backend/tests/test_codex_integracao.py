@@ -546,10 +546,60 @@ def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     except OSError:
         pytest.skip('Symlink indisponível nesta máquina')
     service = IntegracaoCodex(home, home / '.codex')
-    service._instrucoes()
+    service._instrucoes(force=True)
     assert target.is_symlink()
     assert (home / '.codex/AGENTS.override.md').read_text() == source.read_text()
     assert source.read_text() == 'Texto global que deve permanecer somente na fonte'
+
+
+async def test_skill_change_does_not_repeat_plugin_or_fragment_import(tmp_path, monkeypatch):
+    from app import codex_integracao as module
+    home = _home(tmp_path)
+    monkeypatch.setattr(module, '_REPO', tmp_path / 'repo')
+    monkeypatch.setattr(module, 'memoria_ligada', lambda: False)
+    class Native:
+        def __init__(self, *args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def request(self, *args): return {'data': []}
+    service = IntegracaoCodex(home, home / '.codex', nativo=Native)
+    calls = dict.fromkeys(('instructions', 'plugins', 'fragments', 'skills'), 0)
+    def instructions(*args): calls['instructions'] += 1
+    async def plugins(native, selected, registry, force):
+        calls['plugins'] += 1
+        registry['marketplaces_em'] = __import__('time').time()
+    async def fragments(*args): calls['fragments'] += 1
+    def skills(*args): calls['skills'] += 1
+    async def config(*args): pass
+    monkeypatch.setattr(service, '_instrucoes', instructions)
+    monkeypatch.setattr(service, '_plugins', plugins)
+    monkeypatch.setattr(service, '_fragmentos', fragments)
+    monkeypatch.setattr(service, '_skills', skills)
+    monkeypatch.setattr(service, '_config', config)
+    monkeypatch.setattr(service, '_hooks_arquivos', lambda: None)
+    assert (await service.reconciliar())['estado'] == 'ok'
+    skill = home / '.claude/skills/sample/SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: sample\ndescription: sample\n---\nSample')
+    assert (await service.reconciliar(motivo='sessao'))['estado'] == 'ok'
+    assert calls == {'instructions': 1, 'plugins': 1, 'fragments': 1, 'skills': 2}
+    assert (await service.reconciliar(forcar=True))['estado'] == 'ok'
+    assert calls == {'instructions': 2, 'plugins': 2, 'fragments': 2, 'skills': 3}
+
+
+def test_claude_account_metadata_does_not_invalidate_mcp_import(tmp_path, monkeypatch):
+    from app import codex_integracao as module
+    home = _home(tmp_path)
+    monkeypatch.setattr(module, '_REPO', tmp_path / 'repo')
+    monkeypatch.setattr(module, 'memoria_ligada', lambda: False)
+    path = home / '.claude.json'
+    path.write_text(json.dumps({'mcpServers': {}, 'lastSessionId': 'first'}))
+    service = IntegracaoCodex(home, home / '.codex')
+    first = service.fingerprint()
+    path.write_text(json.dumps({'mcpServers': {}, 'lastSessionId': 'second'}))
+    assert service.fingerprint() == first
+    path.write_text(json.dumps({'mcpServers': {'probe': {'command': 'echo'}}}))
+    assert service.fingerprint() != first
 
 
 async def test_rodada_informa_etapa_x_de_n_e_limpa_no_fim(tmp_path, monkeypatch):

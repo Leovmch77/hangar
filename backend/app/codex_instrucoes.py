@@ -7,7 +7,7 @@ import tempfile
 import tomllib
 from contextlib import contextmanager
 
-from app.codex_arquivos import gravar, hash_bytes, json_bytes, json_obj
+from app.codex_arquivos import backup, gravar, hash_bytes, json_bytes, json_obj
 
 LIMITE_INSTRUCOES = 1024 * 1024
 
@@ -102,7 +102,7 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
         for estado in estados)
     if existe and not proprio and fonte is not None and alvo.is_symlink() and alvo.resolve() == fonte.resolve():
         return  # Um link pessoal já correto não precisa ser adotado nem modificado.
-    if existe and not proprio:
+    if existe and not proprio and fonte is None:
         raise ValueError(f'Instruções pessoais preservadas em {alvo}; não é um alias gerenciado.')
     if fonte is None:
         if proprio:
@@ -130,6 +130,8 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
                 tmp.write_bytes(dados)
         else:
             tmp.write_bytes(dados)
+        if existe and not proprio:
+            backup(alvo, raw or b'', registros / 'backups' / hash_bytes(raw))
         # O registro vem antes: uma queda após a troca ainda deixa a autoria verificável.
         transicao = json_bytes({**novo, 'anterior': {k: anterior.get(k) for k in ('fonte', 'hash')}})
         gravar(registro, transicao, registro.read_bytes() if registro.exists() else None)
@@ -142,15 +144,27 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def preparar_instrucoes(home: Path, codex_home: Path, cwd: Path | None = None) -> None:
-    """Prepara o global e os escopos conhecidos; não sobrescreve overrides pessoais."""
+def _sync_enabled(force: bool) -> bool:
+    if force:
+        return True
+    from app.codex_integracao import sincronizacao_ligada
+    return sincronizacao_ligada()
+
+
+def preparar_instrucoes(home: Path, codex_home: Path, cwd: Path | None = None,
+                        *, force: bool = False) -> None:
+    """Sincroniza as instruções do Claude; a opção desligada preserva o destino."""
+    if not _sync_enabled(force):
+        return
     with _trava(codex_home):
         _preparar_global(home, codex_home)
         _preparar_projetos(codex_home, cwd)
 
 
-def preparar_projeto(codex_home: Path, cwd: Path) -> None:
+def preparar_projeto(codex_home: Path, cwd: Path, *, force: bool = False) -> None:
     """Prepara somente os aliases dos escopos do projeto, preservando o global da conta."""
+    if not _sync_enabled(force):
+        return
     with _trava(codex_home):
         _preparar_projetos(codex_home, cwd)
 

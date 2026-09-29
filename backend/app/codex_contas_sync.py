@@ -33,6 +33,7 @@ from app.codex_importador import CodexNativo
 
 _log = logging.getLogger("hangar.codex.contas_sync")
 _PLUGIN_CACHE_SECONDS = 300
+_CLI_VERSION_CACHE: tuple[tuple, float, str] | None = None
 
 PREFERENCE_KEYS = frozenset({
     "model",
@@ -117,30 +118,32 @@ def _issue(code: str, **params) -> dict:
 
 
 # Roda dentro do loop a cada preparo; a versão só muda quando o binário muda.
-_cli_versions: dict[tuple[str, int, int], str] = {}
-
-
 def _cli_version() -> str:
+    global _CLI_VERSION_CACHE
     binary = shutil.which("codex")
     if not binary:
         return "indisponível"
     try:
-        stat = os.stat(binary)
+        stat = Path(binary).stat()
+        signature = (str(Path(binary).resolve()), stat.st_size, stat.st_mtime_ns,
+                     stat.st_ctime_ns, stat.st_ino)
     except OSError:
         return "indisponível"
-    key = (binary, stat.st_mtime_ns, stat.st_size)
-    if key in _cli_versions:
-        return _cli_versions[key]
+    now = time.monotonic()
+    cached = _CLI_VERSION_CACHE
+    if (cached is not None and cached[0] == signature
+            and 0 <= now - cached[1] < _PLUGIN_CACHE_SECONDS):
+        return cached[2]
     try:
-        result = subprocess.run([binary, "--version"], capture_output=True, text=True,
+        result = subprocess.run([binary, "--version"], capture_output=True, text=True, errors='replace',
                                 timeout=2, check=False)
     except (OSError, subprocess.SubprocessError):
         return "indisponível"
     lines = (result.stdout or "").strip().splitlines()
-    if result.returncode != 0 or not lines:
-        return "indisponível"
-    _cli_versions[key] = lines[0][:80]
-    return _cli_versions[key]
+    version = lines[0][:80] if result.returncode == 0 and lines and '\ufffd' not in lines[0] else "indisponível"
+    if version != "indisponível":
+        _CLI_VERSION_CACHE = (signature, now, version)
+    return version
 
 
 _ETAPAS = ("configuracoes", "recursos", "plugins")
@@ -399,7 +402,7 @@ def _external_agents_supported(path: Path) -> bool:
 
 
 def _walk_source(path: Path, relative: Path, files: dict[str, bytes], issues: list[dict],
-                 active: set[Path], source: Path) -> None:
+                 active: set[Path], source: Path, *, read_contents: bool = True) -> None:
     if ".hangar-uploads" in relative.parts:
         return
     if _forbidden_resource(relative):
@@ -436,7 +439,8 @@ def _walk_source(path: Path, relative: Path, files: dict[str, bytes], issues: li
             active.add(real)
             try:
                 for child in sorted(path.iterdir(), key=lambda item: item.name):
-                    _walk_source(child, relative / child.name, files, issues, active, source)
+                    _walk_source(child, relative / child.name, files, issues, active, source,
+                                 read_contents=read_contents)
             finally:
                 active.remove(real)
             return
@@ -445,25 +449,25 @@ def _walk_source(path: Path, relative: Path, files: dict[str, bytes], issues: li
                                       _forbidden_resource(Path(real.name))):
                 issues.append(_issue("codex_account_source_forbidden", path=relative.as_posix()))
                 return
-            files[relative.as_posix()] = path.read_bytes()
+            files[relative.as_posix()] = path.read_bytes() if read_contents else b''
     except (OSError, RuntimeError, ValueError) as exc:
         issues.append(_issue("codex_account_source_unreadable", path=relative.as_posix(), error=type(exc).__name__))
 
 
-def _source_resources(source: Path) -> tuple[dict[str, bytes], list[dict]]:
+def _source_resources(source: Path, *, read_contents: bool = True) -> tuple[dict[str, bytes], list[dict]]:
     files: dict[str, bytes] = {}
     issues: list[dict] = []
     active: set[Path] = set()
     for name in _RESOURCE_FILES:
         path = source / name
         if path.exists() or path.is_symlink():
-            _walk_source(path, Path(name), files, issues, active, source)
+            _walk_source(path, Path(name), files, issues, active, source, read_contents=read_contents)
     for name in _RESOURCE_DIRS:
         path = source / name
         if path.exists() or path.is_symlink():
-            _walk_source(path, Path(name), files, issues, active, source)
+            _walk_source(path, Path(name), files, issues, active, source, read_contents=read_contents)
     hooks = files.get("hooks.json")
-    if hooks is not None:
+    if read_contents and hooks is not None:
         try:
             data = json.loads(hooks)
             if not isinstance(data, dict):
@@ -1039,15 +1043,98 @@ def _destination_paths(state: dict) -> set[str]:
     return paths
 
 
+def _inventory(root: Path, relative_paths: set[str]) -> str:
+    paths = {root}
+    for relative in relative_paths:
+        if not _safe_relative(relative):
+            raise ValueError('caminho de recurso inválido')
+        path = root / relative
+        paths.add(path)
+        paths.update(parent for parent in path.parents if parent == root or root in parent.parents)
+    entries = []
+    for path in sorted(paths):
+        try:
+            stat = path.lstat()
+        except FileNotFoundError:
+            entries.append((str(path), None))
+            continue
+        metadata = (stat.st_mode, stat.st_ino, stat.st_dev)
+        if not path.is_dir() or path.is_symlink():
+            metadata += (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        link = None
+        if path.is_symlink():
+            link = (os.readlink(path), str(path.resolve()))
+            try:
+                target = path.stat()
+            except FileNotFoundError:
+                link += (None,)
+            else:
+                link += (target.st_mode, target.st_ino, target.st_dev, target.st_size,
+                         target.st_mtime_ns, target.st_ctime_ns)
+        entries.append((str(path), metadata, link))
+    return hash_bytes(json_bytes(entries))
+
+
+def _source_inventory(source: Path) -> tuple[str, list[dict]]:
+    resources, issues = _source_resources(source, read_contents=False)
+    profiles = {path.name for path in source.glob('*.config.toml') if path.is_file() or path.is_symlink()}
+    inventory = _inventory(source, {'config.toml', *resources, *profiles})
+    return hash_bytes(json_bytes({'inventory': inventory, 'issues': issues})), issues
+
+
+async def _cached_preparation(account: Account, source: Path, state: dict,
+                              cli_version: str, force: bool) -> tuple[dict | None, str]:
+    source_inventory, issues = await asyncio.to_thread(_source_inventory, source)
+    checked = state.get('plugins_attempted_at', state.get('plugins_checked_at'))
+    public = _public_state(state)
+    non_plugin_issues = [issue for issue in public['issues']
+                         if not issue['code'].startswith('codex_account_plugin_')
+                         and issue['code'] != 'codex_account_unknown_preference']
+    if (force or issues or _has_blocking_issues(non_plugin_issues)
+            or public['status'] not in {'ready', 'partial'}
+            or state.get('cli_version') != cli_version
+            or state.get('source_inventory') != source_inventory
+            or not isinstance(checked, (int, float))
+            or not 0 <= time.time() - checked < _PLUGIN_CACHE_SECONDS):
+        return None, source_inventory
+    destination_inventory = await asyncio.to_thread(_inventory, account.home, _destination_paths(state))
+    if destination_inventory != state.get('destination_inventory'):
+        return None, source_inventory
+    if public['trust_pending']:
+        from app.codex_contas_plugins import check_trust
+        trust = await check_trust(account)
+        if isinstance(trust, bool):
+            public['trust_pending'] = trust
+            public['issues'] = [issue for issue in public['issues']
+                                if issue['code'] != 'codex_account_plugin_trust_unavailable']
+            public['status'] = 'partial' if _has_blocking_issues(public['issues']) else 'ready'
+        elif not any(issue['code'] == 'codex_account_plugin_trust_unavailable' for issue in public['issues']):
+            public['issues'].append(_issue('codex_account_plugin_trust_unavailable'))
+            public['status'] = 'partial'
+        current_source, current_issues = await asyncio.to_thread(_source_inventory, source)
+        current_destination = await asyncio.to_thread(_inventory, account.home, _destination_paths(state))
+        if current_issues or current_source != source_inventory or current_destination != destination_inventory:
+            return None, current_source
+        if public != _public_state(state):
+            _write_state(account, {**state, 'public': public})
+    return public, source_inventory
+
+
 async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
+    global _CLI_VERSION_CACHE
     source = default_home()
     destination = account.home
+    if force:
+        _CLI_VERSION_CACHE = None
     # `--version` e subprocesso: fora do event loop.
     cli_version = await asyncio.to_thread(_cli_version)
     if destination.is_symlink() or not destination.is_dir():
         return _status("error", issues=[_issue("codex_account_destination_invalid")])
     if _canonical(source) == _canonical(destination):
         return _status("error", issues=[_issue("codex_account_source_destination_conflict")])
+    cached, initial_inventory = await _cached_preparation(account, source, state, cli_version, force)
+    if cached is not None:
+        return cached
     try:
         source_config, _ = _config_source(source, "config.toml")
         source_profiles = {}
@@ -1076,21 +1163,6 @@ async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
     plugins_configured = bool(previous_plugins) or any(
         isinstance(source_config.get(key), dict) for key in ("marketplaces", "plugins")
     )
-    public = _public_state(state)
-    checked_at = state.get("plugins_checked_at")
-    # ponytail: estado nativo fora dos hashes só invalida por prazo; force confere imediatamente.
-    plugins_recent = (isinstance(checked_at, (int, float)) and
-                      0 <= time.time() - checked_at < _PLUGIN_CACHE_SECONDS and
-                      not _has_blocking_issues(public.get("issues", [])) and
-                      not public.get("trust_pending"))
-    if (not force and state.get("source_digest") == source_digest and
-            state.get("destination_digest") == destination_digest and
-            state.get("cli_version") == cli_version and
-            _public_state(state).get("status") == "ready" and
-            not _has_blocking_issues(source_issues) and
-            (not plugins_configured or plugins_recent)):
-        return _public_state(state)
-
     state_dir = _private_dir(destination, create=True)
     backups = state_dir / "backups"
     issues = list(source_issues)
@@ -1181,6 +1253,7 @@ async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
     check_destination_digest, _ = _snapshot(destination, final_paths, None, safe_destination=True)
     if check_destination_digest != final_destination_digest:
         raise _PreparationChanged("destino mudou durante a preparação")
+    final_inventory = await asyncio.to_thread(_inventory, destination, final_paths)
     _verify_config(destination / "config.toml", config_result)
     for relative, manifest in profile_results.items():
         if manifest.get("values") or manifest.get("restrictions"):
@@ -1201,7 +1274,16 @@ async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
         "plugins": plugin_manifest,
         "plugins_checked_at": (time.time() if plugins_configured and final_status == "ready"
                                and not _has_blocking_issues(issues) and not plugin_trust_pending else None),
+        "plugins_attempted_at": time.time(),
     }
+    source_inventory, inventory_issues = await asyncio.to_thread(_source_inventory, source)
+    if source_inventory != initial_inventory:
+        raise _PreparationChanged('inventário da fonte mudou durante a preparação')
+    if await asyncio.to_thread(_inventory, destination, final_paths) != final_inventory:
+        raise _PreparationChanged('inventário do destino mudou durante a preparação')
+    if not inventory_issues:
+        result['source_inventory'] = source_inventory
+        result['destination_inventory'] = final_inventory
     _write_state(account, result)
     return _public_state(result)
 
