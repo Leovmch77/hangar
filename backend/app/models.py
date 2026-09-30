@@ -209,6 +209,8 @@ class ChatEvent(BaseModel):
     # Só em notice `skill_loaded`: {name, path, body} da skill que o harness injetou como fala do
     # usuário. O corpo vem inteiro pra interface abrir sob demanda.
     skill: Optional[dict] = None
+    # Só em notice da linha do tempo do orquestrador: a leitura estruturada da linha (orq_timeline.entry).
+    orq: Optional[dict] = None
     # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
     queued_delivered: Optional[bool] = None
     # Só em bolha da fila: o relógio da ENTRADA (epoch), pra ordenar no front quando ela chega ao

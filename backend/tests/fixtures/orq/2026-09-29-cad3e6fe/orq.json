@@ -1,0 +1,22 @@
+{
+  "arbiter": "w-arbiter",
+  "repo": "/home/jefferson/Projetos/hangar-mobile-deliveries",
+  "contract": "/home/jefferson/.claude/.hangar-pair/regras-cad3e6fe.md",
+  "untouchables": [
+    "/home/jefferson/Projetos/hangar/**",
+    "backend/**",
+    "frontend/**",
+    "desktop-native/**",
+    "scripts/**",
+    "install.sh",
+    "install.ps1",
+    "VERSION",
+    "docs/analysis/2026-09-29-mobile-arbiter-kickoff.md",
+    "docs/analysis/2026-09-29-mobile-delivery-parity.md",
+    "docs/analysis/2026-09-29-mobile-orq-handoff.md"
+  ],
+  "auto": true,
+  "jev": "on",
+  "regex": "shadow",
+  "plan": "/home/jefferson/Projetos/hangar-mobile-deliveries/docs/superpowers/plans/2026-09-29-mobile-deliveries.orq.md"
+}
