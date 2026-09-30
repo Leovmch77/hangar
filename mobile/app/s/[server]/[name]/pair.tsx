@@ -4,7 +4,7 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
-import { formataErro, getHistory, getPairContract, getSessions, pairSession, unpairSession } from '@hangar/core';
+import { fetchSessionsForServer, formataErro, getHistory, getPairContract, pairSession, unpairSession } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
 import { useSessions } from '../../../../src/stores/sessions';
@@ -27,7 +27,7 @@ export default function PairSheet() {
   const peers = current?.pair_peers ?? [];
   const peersKey = peers.join('\u0000');
 
-  const [sessions, setSessions] = useState<Awaited<ReturnType<typeof getSessions>>>([]);
+  const [sessions, setSessions] = useState<Awaited<ReturnType<typeof fetchSessionsForServer>>>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [routeMissing, setRouteMissing] = useState(false);
@@ -41,6 +41,7 @@ export default function PairSheet() {
   const [feedLoading, setFeedLoading] = useState(false);
   const [contract, setContract] = useState<{ path: string; content: string } | null>(null);
   const [contractError, setContractError] = useState('');
+  const [contractLoading, setContractLoading] = useState(false);
   const epoch = useRef(0);
   const mdStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
 
@@ -52,72 +53,78 @@ export default function PairSheet() {
     if (!ready) return;
     const currentEpoch = ++epoch.current;
     setLoading(true);
+    setSessions([]);
+    setBusy(false);
     setLoadError('');
     setPicked([]);
     setTask('');
     setAdding(false);
     setFeed([]);
     setFeedFailed([]);
-    setFeedLoading(false);
+    setFeedLoading(peers.length > 0);
+    setContractLoading(peers.length > 0);
     setContract(null);
     setContractError('');
 
-    if (!useServers.getState().ensureActive(serverId)) {
+    if (!routeServer) {
       setRouteMissing(true);
       setLoading(false);
+      setFeedLoading(false);
+      setContractLoading(false);
       return;
     }
     setRouteMissing(false);
 
-    const members = [name, ...peers];
+    const server = routeServer;
+    const controller = new AbortController();
     void (async () => {
       try {
-        const all = await getSessions();
+        const all = await fetchSessionsForServer(server);
         if (currentEpoch !== epoch.current) return;
         setSessions(all.filter((session) => session.name !== name && session.state !== 'dead'));
-        setLoadError('');
       } catch {
         if (currentEpoch === epoch.current) setLoadError(m.forward_nao_listou());
-      }
-
-      if (!peers.length) {
-        if (currentEpoch === epoch.current) {
-          setFeedLoading(false);
-          setLoading(false);
-        }
-        return;
-      }
-
-      setFeedLoading(true);
-      const results = await Promise.all(
-        members.map((member) =>
-          getHistory(member)
-            .then((history) => ({ ok: true, h: history }))
-            .catch(() => ({ ok: false, h: [] as ChatEvent[] })),
-        ),
-      );
-      if (currentEpoch !== epoch.current) return;
-      const built = montarFeed(members, results);
-      setFeed(built.feed);
-      setFeedFailed(built.failed);
-      setFeedLoading(false);
-
-      try {
-        const shared = await getPairContract(name);
-        if (currentEpoch === epoch.current) setContract({ path: shared.path, content: shared.content });
-      } catch {
-        if (currentEpoch === epoch.current) setContractError(m.arquivo_carregar_erro());
       } finally {
         if (currentEpoch === epoch.current) setLoading(false);
       }
     })();
 
+    if (peers.length) {
+      const members = [name, ...peers];
+      void (async () => {
+        const results = await Promise.all(
+          members.map((member) =>
+            getHistory(member, undefined, controller.signal, 45_000, server)
+              .then((history) => ({ ok: true, h: history }))
+              .catch(() => ({ ok: false, h: [] as ChatEvent[] })),
+          ),
+        );
+        if (currentEpoch !== epoch.current) return;
+        const built = montarFeed(members, results);
+        setFeed(built.feed);
+        setFeedFailed(built.failed);
+        setFeedLoading(false);
+      })();
+
+      void (async () => {
+        try {
+          const shared = await getPairContract(name, server);
+          if (currentEpoch === epoch.current) setContract({ path: shared.path, content: shared.content });
+        } catch {
+          if (currentEpoch === epoch.current) setContractError(m.par_contrato_falhou());
+        } finally {
+          if (currentEpoch === epoch.current) setContractLoading(false);
+        }
+      })();
+    }
+
     return () => {
+      controller.abort();
       if (epoch.current === currentEpoch) epoch.current += 1;
     };
     // peersKey é a chave primitiva: o store cria um array novo a cada poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, serverId, name, peersKey]);
+  }, [ready, routeServer, name, peersKey]);
 
   const candidates = sessions.filter((session) => !peers.includes(session.name));
 
@@ -126,49 +133,56 @@ export default function PairSheet() {
   }
 
   async function doPair() {
-    if (!picked.length || busy) return;
+    if (!picked.length || busy || loading || !routeServer) return;
     const selected = picked;
+    const currentEpoch = epoch.current;
+    const server = routeServer;
     setBusy(true);
     setActionError('');
     try {
-      const result = await pairSession(name, selected, task.trim());
+      const result = await pairSession(name, selected, task.trim(), false, server);
+      if (currentEpoch !== epoch.current) return;
       if (result.warning) {
         setActionError(formataErro(result.warning) ?? String(result.warning));
       } else {
         router.back();
       }
     } catch {
-      setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
+      if (currentEpoch === epoch.current) setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
     } finally {
-      setBusy(false);
+      if (currentEpoch === epoch.current) setBusy(false);
     }
   }
 
   async function doLeave() {
-    if (busy) return;
+    if (busy || !routeServer) return;
+    const currentEpoch = epoch.current;
+    const server = routeServer;
     setBusy(true);
     setActionError('');
     try {
-      const result = await unpairSession(name);
+      const result = await unpairSession(name, server);
+      if (currentEpoch !== epoch.current) return;
       if (result.warning) {
         setActionError(formataErro(result.warning) ?? String(result.warning));
       } else {
         router.back();
       }
     } catch {
-      setActionError(m.par_falhou_saida());
+      if (currentEpoch === epoch.current) setActionError(m.par_falhou_saida());
     } finally {
-      setBusy(false);
+      if (currentEpoch === epoch.current) setBusy(false);
     }
   }
 
   function confirmLeave() {
+    const currentEpoch = epoch.current;
     Alert.alert(
       m.comandos_confirmar({ n: m.par_sair_grupo() }),
       undefined,
       [
         { text: m.comum_cancelar(), style: 'cancel' },
-        { text: m.comum_confirmar(), style: 'destructive', onPress: () => void doLeave() },
+        { text: m.comum_confirmar(), style: 'destructive', onPress: () => { if (currentEpoch === epoch.current) void doLeave(); } },
       ],
     );
   }
@@ -217,7 +231,7 @@ export default function PairSheet() {
           {peers.length && loadError ? <Text style={[styles.actionError, { color: theme.tokens.status.error }]} accessibilityRole="alert" selectable>{loadError}</Text> : null}
           {peers.length ? (
             <>
-              <PairMembers
+              {loading ? <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text> : <PairMembers
                 peers={peers}
                 sessions={sessions}
                 candidates={candidates}
@@ -229,9 +243,11 @@ export default function PairSheet() {
                 onToggle={togglePick}
                 onAdd={() => void doPair()}
                 onLeave={confirmLeave}
-              />
+              />}
 
-              {contract?.content ? (
+              {contractLoading ? (
+                <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
+              ) : contract?.content.trim() ? (
                 <View style={[styles.contract, { borderTopColor: theme.tokens.border.subtle }]}>
                   <Text style={[styles.sectionTitle, { color: theme.tokens.text.secondary }]}>{m.par_contrato_titulo()}</Text>
                   <View style={[styles.contractBody, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}>

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { getPlan, getPlans, setPlanPin } from '@hangar/core';
-import type { PlanDetail, SessionInfo, PlanListItem } from '@hangar/core';
+import { getPlanForServer, getPlans, setPlanPin } from '@hangar/core';
+import type { PlanDetail, SessionInfo, PlanListItem, Server } from '@hangar/core';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { mkMarkdownStyle } from '../../chat/AssistantBubble';
 import { PlanBar } from './PlanBar';
@@ -13,9 +13,10 @@ import * as m from '../../paraglide/messages';
 interface Props {
   session: SessionInfo | null | undefined;
   name: string;
+  server: Server;
 }
 
-export function PlanPanel({ session, name }: Props) {
+export function PlanPanel({ session, name, server }: Props) {
   const { theme } = useUnistyles();
   const [detail, setDetail] = useState<PlanDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,46 +27,68 @@ export function PlanPanel({ session, name }: Props) {
   const [pinned, setPinned] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerErr, setPickerErr] = useState('');
+  const [pickerLoading, setPickerLoading] = useState(false);
   const genRef = useRef(0);
+  const pickerGen = useRef(0);
   const mdStyle = mkMarkdownStyle(theme);
 
   const fetchPlan = useCallback(async () => {
     const g = ++genRef.current;
     try {
-      const d = await getPlan(name);
+      const d = await getPlanForServer(server, name);
       if (g !== genRef.current) return;
       setDetail(d);
       setError(false);
-      if (d) setLoading(false);
-      else setLoading(false);
+      setLoading(false);
     } catch {
       if (g !== genRef.current) return;
       setError(true);
       setLoading(false);
     }
-  }, [name]);
+  }, [name, server]);
 
   useEffect(() => {
     setLoading(true);
     setError(false);
-    void fetchPlan();
-    const id = setInterval(() => void fetchPlan(), 5000);
+    setDetail(null);
+    setPlans([]);
+    setPinned(null);
+    setPickerOpen(false);
+    setPickerErr('');
+    setPickerLoading(false);
+    setShowMd(false);
+    setShowTasks(true);
+    let active = true;
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      await fetchPlan();
+      if (active) id = setTimeout(() => void refresh(), 5000);
+    };
+    void refresh();
     return () => {
+      active = false;
       genRef.current += 1;
-      clearInterval(id);
+      pickerGen.current += 1;
+      clearTimeout(id);
     };
   }, [fetchPlan]);
 
   const loadPlans = useCallback(async () => {
+    const g = ++pickerGen.current;
+    setPickerLoading(true);
     setPickerErr('');
     try {
-      const r = await getPlans(name);
+      const r = await getPlans(name, server);
+      if (g !== pickerGen.current) return;
       setPlans(r.plans);
       setPinned(r.pinned);
     } catch (e) {
-      setPickerErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : 'falhou');
+      if (g !== pickerGen.current) return;
+      setPickerErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : m.plano_falha_leitura());
+    } finally {
+      if (g === pickerGen.current) setPickerLoading(false);
     }
-  }, [name]);
+  }, [name, server]);
 
   const handleOpenPicker = useCallback(() => {
     setPickerOpen(true);
@@ -74,18 +97,26 @@ export function PlanPanel({ session, name }: Props) {
 
   const handleSelect = useCallback(
     async (stem: string) => {
+      if (pickerLoading) return;
+      const g = ++pickerGen.current;
+      genRef.current += 1;
       const alvo = stem || null;
       setPickerErr('');
+      setPickerLoading(true);
       try {
-        const r = await setPlanPin(name, alvo === '!none' ? '!none' : alvo);
+        const r = await setPlanPin(name, alvo, server);
+        if (g !== pickerGen.current) return;
         setPinned(r.pinned);
         setPickerOpen(false);
         void fetchPlan();
       } catch (e) {
-        setPickerErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : 'falhou');
+        if (g !== pickerGen.current) return;
+        setPickerErr(e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : m.plano_falha_leitura());
+      } finally {
+        if (g === pickerGen.current) setPickerLoading(false);
       }
     },
-    [name, fetchPlan],
+    [name, server, fetchPlan, pickerLoading],
   );
 
   const cur = currentIndex(detail);
@@ -94,8 +125,6 @@ export function PlanPanel({ session, name }: Props) {
     { label: m.plano_nenhum(), hint: '', selected: pinned === '!none' },
     ...plans.map((p) => ({ label: p.name, hint: `${p.done}/${p.total}${p.complete ? ' ✓' : ''}`, selected: p.stem === pinned })),
   ];
-
-  if (!detail && !loading && !error && !session?.plan_hidden) return null;
 
   return (
     <View style={styles.wrap}>
@@ -121,6 +150,13 @@ export function PlanPanel({ session, name }: Props) {
         <View style={styles.center}>
           <ActivityIndicator color={theme.tokens.text.muted} />
           <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.plano_carregando()}</Text>
+        </View>
+      ) : error ? (
+        <View style={styles.center}>
+          <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.plano_falha_leitura()}</Text>
+          <Pressable onPress={() => void fetchPlan()} accessibilityRole="button" accessibilityLabel={m.lista_tentar_novamente()}>
+            <Text style={[styles.muted, { color: theme.tokens.accent.base }]}>{m.lista_tentar_novamente()}</Text>
+          </Pressable>
         </View>
       ) : detail ? (
         <View style={styles.tasks}>
@@ -151,9 +187,7 @@ export function PlanPanel({ session, name }: Props) {
             </View>
           ))}
         </View>
-      ) : error ? (
-        <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.plano_falha_leitura()}</Text>
-      ) : null}
+      ) : <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.erro_sem_plano_ativo()}</Text>}
 
       {showMd && detail ? (
         <ScrollView style={[styles.mdBox, { borderColor: theme.tokens.border.subtle, backgroundColor: theme.tokens.bg.surface }]} contentContainerStyle={styles.mdContent}>
@@ -163,9 +197,13 @@ export function PlanPanel({ session, name }: Props) {
 
       <PillMenu
         open={pickerOpen}
-        onClose={() => setPickerOpen(false)}
+        onClose={() => {
+          pickerGen.current += 1;
+          setPickerLoading(false);
+          setPickerOpen(false);
+        }}
         title={m.plano_trocar()}
-        loading={false}
+        loading={pickerLoading}
         error={pickerErr || null}
         onRetry={loadPlans}
         items={pickerItems}

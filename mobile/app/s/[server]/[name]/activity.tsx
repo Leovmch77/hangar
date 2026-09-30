@@ -217,7 +217,7 @@ export default function ActivitySheet() {
             {hasPlan ? (
               <View style={styles.section}>
                 <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.ctx_plano()}</Text>
-                <PlanPanel session={session} name={name} />
+                <PlanPanel key={`${serverId}::${name}`} session={session} name={name} server={server} />
               </View>
             ) : null}
 
