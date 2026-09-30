@@ -2054,6 +2054,15 @@ async def creation_progress(name: str):
     return _criacao_passo.get(sanitize_session_name(name)) or {"step": None, "params": {}}
 
 
+async def _kill_unclaimed(name: str) -> None:
+    try:
+        await asyncio.to_thread(registry.kill, name)
+    except Exception:
+        _log.exception("[guests] sessao %s sem dono nao encerrou", name)
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
+
+
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
     with _acompanhar_criacao(body.name):
@@ -2065,7 +2074,13 @@ async def create_session(body: CreateBody):
                                                "worktree": Path(body.cwd, ".git").is_file()})
             guest = guest_users.current.get()
             if guest is not None:
-                await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+                try:
+                    await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+                except Exception:
+                    # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
+                    _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
+                    await _kill_unclaimed(info.name)
+                    raise
                 info = info.model_copy(update={"owner": guest.name})
             return info
         except BaseException:
@@ -2485,7 +2500,11 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
             def _move_life():
                 life = session_life(name)
                 share_store.set_life(name, life)
-                guest_users.set_life(name, life)
+                try:
+                    guest_users.set_life(name, life)
+                except Exception:
+                    # Não troca o resultado da troca de modo pelo erro de gravar o dono.
+                    _log.exception("[guests] dono de %s nao acompanhou a troca de modo", name)
             await asyncio.to_thread(_move_life)
         finally:
             share_api.changing_mode.discard(name)
@@ -2568,6 +2587,14 @@ async def rename_session(name: str, body: RenameBody):
             raise
 
 
+def _rename_guest_claim(name: str, new: str) -> None:
+    # A sessão já foi renomeada; falhar aqui não pode pular a migração da fila e do bastão.
+    try:
+        guest_users.rename_session(name, new)
+    except Exception:
+        _log.exception("[guests] dono de %s nao acompanhou o rename para %s", name, new)
+
+
 def _rename_session(name: str, body: RenameBody):
     from app import tmux
     _recusa_orq(name)
@@ -2592,7 +2619,7 @@ def _rename_session(name: str, body: RenameBody):
         _invalidate_lists()
         forget_frame(name)
         share_store.rename(name, new)
-        guest_users.rename_session(name, new)
+        _rename_guest_claim(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -2618,7 +2645,7 @@ def _rename_session(name: str, body: RenameBody):
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     share_store.rename(name, new)
-    guest_users.rename_session(name, new)
+    _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
         oq, nq = PromptQueue(name).path, PromptQueue(new).path

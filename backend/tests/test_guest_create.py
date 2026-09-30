@@ -121,3 +121,68 @@ def test_guest_user_shortcut_folder_must_be_inside_his_root(guest_shortcut):
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "erro_fora_da_pasta"
     assert started == []
+
+
+def test_failed_claim_kills_the_new_session_and_surfaces(ana, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api
+    from app.models import SessionInfo
+    g, _ = ana
+    monkeypatch.setattr(api.settings, "auth_token", "secret")
+    _, tok = guest_users.create("bia", g.root, False, True)
+
+    def claim_fails(session, gid):
+        raise OSError("disco cheio")
+    killed = []
+    monkeypatch.setattr(guest_users, "claim", claim_fails)
+    monkeypatch.setattr(api.registry, "create",
+                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="claude"))
+    monkeypatch.setattr(api.registry, "kill", killed.append)
+    r = TestClient(api.app, raise_server_exceptions=False).post(
+        "/api/sessions", headers={"Authorization": f"Bearer {tok}"},
+        json={"name": "x", "cwd": g.root + "/sub"})
+    assert r.status_code == 500
+    assert killed == ["x"]
+
+
+def test_rename_survives_guest_claim_failure(ana, monkeypatch):
+    from app import api, pqueue, tmux
+    _, tmp = ana
+
+    def boom(a, b):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(guest_users, "rename_session", boom)
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api, "_headless", lambda n: False)
+    monkeypatch.setattr(api, "_codex_sem_terminal", lambda n: False)
+    monkeypatch.setattr(tmux, "has_session", lambda n: n == "velho")
+    monkeypatch.setattr(api.headless_sessions, "exists", lambda n: False)
+    monkeypatch.setattr(tmux, "rename_session", lambda a, b: True)
+    monkeypatch.setattr(api.registry, "rename", lambda a, b: None)
+    monkeypatch.setattr(api.share_store, "rename", lambda a, b: None)
+    monkeypatch.setattr(api.bastao_mod, "caminho", lambda n: tmp / f"bastao-{n}")
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp)
+    (tmp / "velho.jsonl").write_text("q")
+    (tmp / "bastao-velho").write_text("b")
+    assert api._rename_session("velho", api.RenameBody(new="novo")) == {"ok": True, "name": "novo"}
+    assert (tmp / "novo.jsonl").read_text() == "q"
+    assert (tmp / "bastao-novo").read_text() == "b"
+
+
+def test_mode_switch_result_survives_guest_life_failure(ana, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api
+
+    async def troca(name, body):
+        return {"ok": True, "terminal": False}
+
+    def boom(session, life):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(api.settings, "auth_token", "secret")
+    monkeypatch.setattr(api, "_trocar_modo", troca)
+    monkeypatch.setattr(api, "session_life", lambda n: "k:novo")
+    monkeypatch.setattr(api.share_store, "set_life", lambda n, life: None)
+    monkeypatch.setattr(guest_users, "set_life", boom)
+    r = TestClient(api.app).post("/api/sessions/proj/modo-execucao", json={"terminal": False},
+                                 headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200 and r.json() == {"ok": True, "terminal": False}
