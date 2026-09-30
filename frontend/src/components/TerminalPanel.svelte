@@ -501,31 +501,31 @@
 
   // Terminais No Hangar do servidor: moram fora de qualquer sessão, então o grupo aparece no painel
   // de TODAS as sessões desse servidor.
-  const hgServidor = $derived(connKey.split('::')[0] ?? '');
-  const hgLista = $derived(hangarOf(hgServidor));
+  const hgServerId = $derived(connKey.split('::')[0] ?? '');
+  const hangarList = $derived(hangarOf(hgServerId));
 
   // Pedido de aba No Hangar (chip, tile, pergunta), com o painel aberto ou abrindo. Terminal que já
   // não existe descarta o pedido, senão ele ficaria no store e reabriria o painel depois.
   $effect(() => {
-    const id = liveTerminals.panelRequest[hgServidor];
+    const id = liveTerminals.panelRequest[hgServerId];
     if (!open || !id) return;
-    const existe = hgLista.some((t) => t.id === id);
+    const existe = hangarList.some((t) => t.id === id);
     untrack(() => {
       if (existe) abaAtiva = `hg:${id}`;
-      takeHangarTab(hgServidor);
+      takeHangarTab(hgServerId);
     });
   });
 
   // Aba de atalho que sumiu (fechada aqui ou noutro aparelho) ou sessao sem pane ainda sem aba:
   // cai no primeiro terminal que existe; sem nenhum, na aba da sessao (ou no vazio, sem pane).
   $effect(() => {
-    const ids = [...scLista.map((t) => `sc:${t.id}`), ...hgLista.map((t) => `hg:${t.id}`)];
+    const ids = [...scLista.map((t) => `sc:${t.id}`), ...hangarList.map((t) => `hg:${t.id}`)];
     const atual = abaAtiva;
     if (atual === 'attach' || atual === 'shell' || ids.includes(atual)) return;
     untrack(() => { abaAtiva = ids[0] ?? (headless ? '' : 'attach'); });
   });
 
-  async function pararHangar(id: string) {
+  async function stopHangar(id: string) {
     const srv = scServidor;
     if (!srv) { scErro = m.servidor_nao_existe(); return; }
     scErro = null;
@@ -590,9 +590,9 @@
                     aria-label={m.term_atalho_fechar({ label: t.label })} title={m.term_atalho_fechar({ label: t.label })}>✕</button>
           </span>
         {/each}
-        {#if hgLista.length}
+        {#if hangarList.length}
           <span class="tp-grupo" aria-hidden="true">{m.term_grupo_hangar()}</span>
-          {#each hgLista as t (t.id)}
+          {#each hangarList as t (t.id)}
             {@const sel = abaAtiva === `hg:${t.id}`}
             <span class="tp-aba tp-aba-sc" class:sel class:morto={!t.alive}>
               <button class="tp-aba-rotulo" role="tab" aria-selected={sel} title={t.label}
@@ -601,7 +601,7 @@
                 {t.label}{#if !t.alive}<span class="tp-aba-saida">{t.exit_code == null
                   ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
               </button>
-              <button class="tp-aba-x" onclick={() => pararHangar(t.id)}
+              <button class="tp-aba-x" onclick={() => stopHangar(t.id)}
                       aria-label={m.term_hangar_parar({ label: t.label })} title={m.term_hangar_parar({ label: t.label })}>✕</button>
             </span>
           {/each}
@@ -659,11 +659,11 @@
         {#each scLista as t (t.id)}
           <ShortcutTerminalTab srv={scServidor} {sessionName} id={t.id} visible={abaAtiva === `sc:${t.id}`} />
         {/each}
-        {#each hgLista as t (t.id)}
+        {#each hangarList as t (t.id)}
           <ShortcutTerminalTab srv={scServidor} {sessionName} id={t.id} visible={abaAtiva === `hg:${t.id}`} hangar />
         {/each}
       {/if}
-      {#if headless && scLista.length === 0 && hgLista.length === 0}
+      {#if headless && scLista.length === 0 && hangarList.length === 0}
         <div class="tp-screen tp-status" role="status">
           <p class="tp-msg">{scCarregando ? m.comum_carregando() : m.term_atalho_vazio()}</p>
         </div>

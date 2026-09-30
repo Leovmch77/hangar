@@ -35,12 +35,12 @@
   // Alvo do cano: '' = a sessao; senao o id do terminal de atalho (um socket so, troca = reconecta).
   let alvoAtalho = $state('');
   // O alvo é um terminal No Hangar (sem sessão dona) e não um atalho da sessão.
-  let alvoHangar = $state(false);
+  let hangarTarget = $state(false);
   let scErro = $state<string | null>(null);
   const scKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
   const scLista = $derived(shortcutTerminalsOf(scKey));
-  const hgServidor = $derived(scKey.split('::')[0] ?? '');
-  const hgLista = $derived(hangarOf(hgServidor));
+  const hgServerId = $derived(scKey.split('::')[0] ?? '');
+  const hangarList = $derived(hangarOf(hgServerId));
 
   $effect(() => {
     const key = scKey;
@@ -53,27 +53,27 @@
   // descarta o pedido.
   $effect(() => {
     const pedido = shortcutTerminals.focus[scKey];
-    const pedidoHg = liveTerminals.panelRequest[hgServidor];
+    const hangarRequest = liveTerminals.panelRequest[hgServerId];
     const ids = scLista.map((t) => t.id);
-    const hgIds = hgLista.map((t) => t.id);
+    const hangarIds = hangarList.map((t) => t.id);
     if (!open) return;
     untrack(() => {
-      if (pedidoHg) {
-        takeHangarTab(hgServidor);
-        if (hgIds.includes(pedidoHg)) { alvoAtalho = pedidoHg; alvoHangar = true; return; }
+      if (hangarRequest) {
+        takeHangarTab(hgServerId);
+        if (hangarIds.includes(hangarRequest)) { alvoAtalho = hangarRequest; hangarTarget = true; return; }
       }
       if (pedido && ids.includes(pedido)) {
-        alvoAtalho = pedido; alvoHangar = false; delete shortcutTerminals.focus[scKey]; return;
+        alvoAtalho = pedido; hangarTarget = false; delete shortcutTerminals.focus[scKey]; return;
       }
-      const conhecidos = alvoHangar ? hgIds : ids;
-      if (alvoAtalho && !conhecidos.includes(alvoAtalho)) {
-        alvoHangar = false;
+      const known = hangarTarget ? hangarIds : ids;
+      if (alvoAtalho && !known.includes(alvoAtalho)) {
+        hangarTarget = false;
         alvoAtalho = headless ? (ids[0] ?? '') : '';
       }
       // Sem pane nao ha aba da sessao: cai no primeiro terminal que existe.
       if (!alvoAtalho && headless) {
         if (ids.length) alvoAtalho = ids[0];
-        else if (hgIds.length) { alvoAtalho = hgIds[0]; alvoHangar = true; }
+        else if (hangarIds.length) { alvoAtalho = hangarIds[0]; hangarTarget = true; }
       }
     });
   });
@@ -86,7 +86,7 @@
     await refreshShortcutTerminals(scKey).catch(() => {});
   }
 
-  async function pararHangar(id: string) {
+  async function stopHangar(id: string) {
     const srv = servidorAtivo();
     if (!srv) { scErro = m.servidor_nao_existe(); return; }
     scErro = null;
@@ -186,7 +186,7 @@
 
   $effect(() => {
     const alvo = sessionName;
-    const atalho = alvoAtalho, noHangar = alvoHangar;
+    const atalho = alvoAtalho, isHangar = hangarTarget;
     void geracao;
     if (!open || !host) return;
     // Sem pane e sem terminal de atalho escolhido nao ha o que anexar.
@@ -240,7 +240,7 @@
       mo = new MutationObserver(() => { t.options.theme = temaDe(hostEl); });
       mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows, atalho ? (noHangar ? { hangar: atalho } : { shortcut: atalho }) : undefined), {
+      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows, atalho ? (isHangar ? { hangar: atalho } : { shortcut: atalho }) : undefined), {
         data: (b) => { t.write(b); agendarBuscaDeUrl(); },
         open: () => { if (vivo) pronto = true; },
         // `vivo`, nao incondicional: o close() dispara onclose ASSINCRONO, e sem a guarda o "caiu"
@@ -407,16 +407,16 @@
       </div>
     </header>
 
-    {#if scLista.length > 0 || hgLista.length > 0 || headless}
+    {#if scLista.length > 0 || hangarList.length > 0 || headless}
       <div class="tx-abas" role="tablist">
         {#if !headless}
           <button class="tx-aba" class:sel={!alvoAtalho} role="tab" aria-selected={!alvoAtalho}
-                  onclick={() => { alvoAtalho = ''; alvoHangar = false; }}>{sessionName}</button>
+                  onclick={() => { alvoAtalho = ''; hangarTarget = false; }}>{sessionName}</button>
         {/if}
         {#each scLista as t (t.id)}
-          <span class="tx-aba" class:sel={!alvoHangar && alvoAtalho === t.id} class:morto={!t.alive}>
-            <button class="tx-aba-rotulo" role="tab" aria-selected={!alvoHangar && alvoAtalho === t.id}
-                    onclick={() => { alvoAtalho = t.id; alvoHangar = false; }}>
+          <span class="tx-aba" class:sel={!hangarTarget && alvoAtalho === t.id} class:morto={!t.alive}>
+            <button class="tx-aba-rotulo" role="tab" aria-selected={!hangarTarget && alvoAtalho === t.id}
+                    onclick={() => { alvoAtalho = t.id; hangarTarget = false; }}>
               {t.label}{#if !t.alive}<span class="tx-aba-saida">{t.exit_code == null
                 ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
             </button>
@@ -424,23 +424,23 @@
                     aria-label={m.term_atalho_fechar({ label: t.label })}>✕</button>
           </span>
         {/each}
-        {#if hgLista.length}
+        {#if hangarList.length}
           <span class="tx-grupo" aria-hidden="true">{m.term_grupo_hangar()}</span>
-          {#each hgLista as t (t.id)}
-            {@const sel = alvoHangar && alvoAtalho === t.id}
+          {#each hangarList as t (t.id)}
+            {@const sel = hangarTarget && alvoAtalho === t.id}
             <span class="tx-aba" class:sel class:morto={!t.alive}>
               <button class="tx-aba-rotulo" role="tab" aria-selected={sel}
-                      onclick={() => { alvoAtalho = t.id; alvoHangar = true; }}>
+                      onclick={() => { alvoAtalho = t.id; hangarTarget = true; }}>
                 <span class="tx-hg-ponto" class:pergunta={t.alive && t.question} class:morto={!t.alive}></span>
                 {t.label}{#if !t.alive}<span class="tx-aba-saida">{t.exit_code == null
                   ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
               </button>
-              <button class="tx-aba-x" onclick={() => pararHangar(t.id)}
+              <button class="tx-aba-x" onclick={() => stopHangar(t.id)}
                       aria-label={m.term_hangar_parar({ label: t.label })}>✕</button>
             </span>
           {/each}
         {/if}
-        {#if headless && scLista.length === 0 && hgLista.length === 0}
+        {#if headless && scLista.length === 0 && hangarList.length === 0}
           <span class="tx-aba-vazio" role="status">{m.term_atalho_vazio()}</span>
         {/if}
       </div>

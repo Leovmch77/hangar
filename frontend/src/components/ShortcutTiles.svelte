@@ -1,10 +1,10 @@
 <script lang="ts">
   // Seção "Ações": os atalhos customizados como blocos (ícone em cima, rótulo embaixo), no desenho do
-  // painel direito do app nativo. Grade que quebra linha em vez de rolar: com mais largura cabem mais
-  // colunas, e cada bloco divide a linha por igual. Usada no painel do desktop e no "⋯" do celular.
+  // painel direito do app nativo. Grade que quebra stateLine em vez de rolar: com mais largura cabem mais
+  // colunas, e cada bloco divide a stateLine por igual. Usada no painel do desktop e no "⋯" do celular.
   import ShortcutIcon from './icons/ShortcutIcon.svelte';
   import { shortcutMissingSecret, runsInHangar, hangarKeyOf, type LiveShortcutTerminal, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
-  import type { Snippet } from 'svelte';
+  import { onDestroy, type Snippet } from 'svelte';
   import type { CustomScoped } from '../lib/shortcuts.svelte';
   import { tileStateOf, runningFor } from '../lib/hangarTerminals.svelte';
   import * as m from '../paraglide/messages';
@@ -15,7 +15,7 @@
     onAdd?: () => void;
     // Controles extras do cabeçalho (menu de importar/exportar), à direita do "+".
     extra?: Snippet;
-    // Nome do projeto da sessão (dica da marca) e erro ao ler os atalhos dele (uma linha discreta).
+    // Nome do projeto da sessão (tooltip da marca) e erro ao ler os atalhos dele (uma stateLine discreta).
     projectName?: string;
     projectError?: string;
     // Chave do repositório (identidade da cópia No Hangar de atalho do projeto) e a sessão desta tela.
@@ -28,8 +28,13 @@
   let { shortcuts, onShortcut, onAdd, extra, projectName = '', projectError = '', projectKey, sessionName,
     hangarOf, sessionTerminal }: Props = $props();
 
-  function tempo(created?: number) {
-    const r = runningFor(created ?? 0, Date.now());
+  // Relógio do "rodando · X min": sem ele o texto congela no primeiro valor.
+  let now = $state(Date.now());
+  const clock = setInterval(() => (now = Date.now()), 30_000);
+  onDestroy(() => clearInterval(clock));
+
+  function elapsed(created: number) {
+    const r = runningFor(created, now);
     return 'minutes' in r ? m.hangar_min({ n: r.minutes }) : m.hangar_h({ n: r.hours });
   }
 </script>
@@ -51,33 +56,33 @@
     {#each shortcuts as { shortcut: s, scope, key } (key)}
       {@const falta = shortcutMissingSecret(s)}
       {@const rotulo = scope === 'project' ? m.atalhos_projeto_marca({ rotulo: s.label, nome: projectName }) : s.label}
-      {@const tk = hangarKeyOf(scope, s.id, projectKey)}
-      {@const ht = runsInHangar(s) ? hangarOf?.(tk) ?? null : null}
-      {@const st = s.type === 'shell' && !runsInHangar(s) ? sessionTerminal?.(tk) ?? null : null}
-      {@const estado = st?.alive && st.question ? 'asking' : tileStateOf(ht)}
-      {@const linha = estado === 'running' && ht ? m.hangar_rodando_ha({ tempo: tempo(ht.created) })
-        : estado === 'asking' ? m.atalho_tile_pergunta()
-        : estado === 'exited' && ht ? m.atalho_tile_caiu({ codigo: String(ht.exit_code ?? '?') }) : ''}
-      {@const dica = ht?.alive && ht.origin && ht.origin !== sessionName
-        ? m.atalho_tile_dica_hangar({ rotulo: s.label, sessao: ht.origin }) : rotulo}
+      {@const tileKey = hangarKeyOf(scope, s.id, projectKey)}
+      {@const hangarTerm = runsInHangar(s) ? hangarOf?.(tileKey) ?? null : null}
+      {@const sessionTerm = s.type === 'shell' && !runsInHangar(s) ? sessionTerminal?.(tileKey) ?? null : null}
+      {@const tileState = sessionTerm?.alive && sessionTerm.question ? 'asking' : tileStateOf(hangarTerm)}
+      {@const stateLine = tileState === 'running' && hangarTerm?.created ? m.hangar_rodando_ha({ tempo: elapsed(hangarTerm.created) })
+        : tileState === 'asking' ? m.atalho_tile_pergunta()
+        : tileState === 'exited' && hangarTerm ? m.atalho_tile_caiu({ codigo: String(hangarTerm.exit_code ?? '?') }) : ''}
+      {@const tooltip = hangarTerm?.alive && hangarTerm.origin && hangarTerm.origin !== sessionName
+        ? m.atalho_tile_dica_hangar({ rotulo: s.label, sessao: hangarTerm.origin }) : rotulo}
       <!-- Credencial em branco (veio de uma importação): o bloco fica apagado e o clique avisa. -->
-      <button type="button" class="acao-bloco" class:pendente={!!falta} class:rodando={estado === 'running'}
-              class:pergunta={estado === 'asking'} onclick={() => onShortcut(s)}
-              aria-label={linha ? `${rotulo} · ${linha}` : rotulo}
-              title={falta ? m.atalhos_segredo_falta({ nome: falta }) : dica}>
+      <button type="button" class="acao-bloco" class:pendente={!!falta} class:rodando={tileState === 'running'}
+              class:pergunta={tileState === 'asking'} onclick={() => onShortcut(s)}
+              aria-label={stateLine ? `${rotulo} · ${stateLine}` : rotulo}
+              title={falta ? m.atalhos_segredo_falta({ nome: falta }) : tooltip}>
         {#if scope === 'project'}<span class="acao-projeto" aria-hidden="true"></span>{/if}
         {#if runsInHangar(s)}<span class="acao-hangar" aria-hidden="true">{m.term_grupo_hangar()}</span>{/if}
         <ShortcutIcon icon={s.icon} />
         <span class="acao-rotulo">{s.label}</span>
-        {#if linha}<span class="acao-estado">{linha}</span>{/if}
+        {#if stateLine}<span class="acao-tileState">{stateLine}</span>{/if}
       </button>
     {/each}
   </div>
   <!-- Vale também no celular, onde o title não aparece. -->
   {#each shortcuts as { shortcut: s, scope } (scope + s.id)}
-    {@const ht = runsInHangar(s) ? hangarOf?.(hangarKeyOf(scope, s.id, projectKey)) ?? null : null}
-    {#if ht?.alive && ht.origin && ht.origin !== sessionName}
-      <p class="acoes-nota">{m.atalho_tile_dica_hangar({ rotulo: s.label, sessao: ht.origin })}</p>
+    {@const hangarTerm = runsInHangar(s) ? hangarOf?.(hangarKeyOf(scope, s.id, projectKey)) ?? null : null}
+    {#if hangarTerm?.alive && hangarTerm.origin && hangarTerm.origin !== sessionName}
+      <p class="acoes-nota">{m.atalho_tile_dica_hangar({ rotulo: s.label, sessao: hangarTerm.origin })}</p>
     {/if}
   {/each}
   {#if projectError}
@@ -101,9 +106,9 @@
   .acoes-add:hover { background: var(--surface-raised); color: var(--text-primary); }
   .acoes-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   /* auto-fit + minmax: as colunas saem da largura e as vazias somem, então poucos blocos dividem a
-     linha inteira em vez de ficarem encostados à esquerda. */
+     stateLine inteira em vez de ficarem encostados à esquerda. */
   .acoes { container-type: inline-size; }
-  /* No máximo cinco por linha: o piso da coluna é o maior entre 88px e um quinto da linha. */
+  /* No máximo cinco por stateLine: o piso da coluna é o maior entre 88px e um quinto da stateLine. */
   .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(max(88px, calc((100% - 24px) / 5)), 1fr)); gap: 6px; }
   @container (max-width: 200px) { .acoes-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .acao-bloco {
@@ -129,9 +134,9 @@
   .acao-hangar { position: absolute; top: 4px; left: 6px; font-size: 9px; letter-spacing: 0.05em; color: var(--text-muted); }
   .acao-bloco.rodando .acao-hangar { color: var(--success); }
   .acao-bloco.pergunta .acao-hangar { color: var(--warning); }
-  .acao-estado { font-size: 10px; color: var(--text-muted); }
-  .acao-bloco.rodando .acao-estado { color: var(--success); }
-  .acao-bloco.pergunta .acao-estado { color: var(--warning); }
+  .acao-tileState { font-size: 10px; color: var(--text-muted); }
+  .acao-bloco.rodando .acao-tileState { color: var(--success); }
+  .acao-bloco.pergunta .acao-tileState { color: var(--warning); }
   .acoes-erro {
     margin: 0; font-size: var(--text-xs); color: var(--text-muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

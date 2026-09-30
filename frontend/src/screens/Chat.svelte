@@ -196,7 +196,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const servidorDaCauda = getActiveId() ?? '';
   // Servidor DESTA sessão, fixado na entrada pelo mesmo motivo: os terminais No Hangar e as perguntas
   // são consultados por servidor, e o ativo pode mudar sob um Chat aberto por overlay.
-  const servidorDoChat = servidorDaCauda;
+  const chatServerId = servidorDaCauda;
 
   // Store da aba Arquivos — MESMA instância do FilesPanel (registry por identidade
   // serverId::sessionName). Quem desenha o arquivo aberto no DESKTOP é este Chat (mock 2: o
@@ -1416,30 +1416,30 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // do AskUserQuestion: o fallback existe pra destravar picker, e o painel bloqueia o /answer (Task 3).
   function abrirTerminalReal() {
     // Sem pane só há o que os atalhos abriram: painel/terminal com as abas deles, nunca o espelho.
-    if (sessionHeadless && !temTerminalDeAtalho && hangarOf(servidorDoChat).length === 0) return;
+    if (sessionHeadless && !temTerminalDeAtalho && hangarOf(chatServerId).length === 0) return;
     if (desktop && onOpenTerminalPanel && terminalPanelDisponivel) onOpenTerminalPanel(sessionHeadless);
     else if (!desktop && terminalCapazMobile) xtermOpen = true;
     else if (!sessionHeadless) mirrorOpen = true;
   }
   // Terminais dos atalhos "shell" desta sessão (lib/shortcutTerminals.svelte.ts). Sessão sem pane
   // ganha o botão de terminal quando existe pelo menos um.
-  const atalhoKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
+  const atalhoKey = $derived(`${chatServerId}::${sessionName}`);
   const temTerminalDeAtalho = $derived(shortcutTerminalsOf(atalhoKey).length > 0);
-  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho));
+  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho || hangarOf(chatServerId).length > 0));
   // Celular: pedido de aba No Hangar (chip, tile, pergunta) ou pergunta de terminal "Na sessão" desta
   // sessão abre o terminal; quem escolhe a aba e consome o pedido é o TerminalMobile. Pedido de
   // terminal que já não existe é descartado. Foco de atalho comum não abre nada: só a pergunta abre.
   $effect(() => {
     if (desktop || xtermOpen) return;
-    const id = liveTerminals.panelRequest[servidorDoChat];
-    const foco = shortcutTerminals.focus[`${servidorDoChat}::${sessionName}`];
-    const perguntando = foco
-      ? (liveTerminals.byServer[servidorDoChat] ?? []).find((t) => t.id === foco && t.owner === sessionName && t.alive && t.question)
+    const id = liveTerminals.panelRequest[chatServerId];
+    const focusId = shortcutTerminals.focus[atalhoKey];
+    const asking = focusId
+      ? (liveTerminals.byServer[chatServerId] ?? []).find((t) => t.id === focusId && t.owner === sessionName && t.alive && t.question)
       : null;
     if (id) {
-      if (hangarOf(servidorDoChat).some((t) => t.id === id) && terminalCapazMobile) abrirTerminalReal();
-      else takeHangarTab(servidorDoChat);
-    } else if (perguntando && terminalCapazMobile) abrirTerminalReal();
+      if (hangarOf(chatServerId).some((t) => t.id === id) && terminalCapazMobile) abrirTerminalReal();
+      else takeHangarTab(chatServerId);
+    } else if (asking && terminalCapazMobile) abrirTerminalReal();
   });
   $effect(() => {
     const key = atalhoKey;
@@ -2776,24 +2776,24 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // Cada execução vira uma aba no painel de terminal. O painel não abre sozinho: a aba só vai pra
   // frente, e fica listada (inclusive a que falhou, com a saída inteira) até alguém fechar.
-  const tileHangar = (key: string) => hangarForShortcut(servidorDoChat, key);
-  const tileSessionTerminal = (key: string) => sessionTerminalFor(servidorDoChat, sessionName, key);
+  const tileHangar = (key: string) => hangarForShortcut(chatServerId, key);
+  const tileSessionTerminal = (key: string) => sessionTerminalFor(chatServerId, sessionName, key);
 
   // Identidade do atalho clicado: a mesma que os tiles usam (`hangarKeyOf`).
-  function chaveDoAtalho(s: ShortcutShell): string {
+  function shortcutKeyOf(s: ShortcutShell): string {
     const scoped = shortcuts.find((x) => x.shortcut === s);
     return hangarKeyOf(scoped?.scope ?? 'global', s.id, projectShortcuts?.key);
   }
 
   async function rodarAtalhoShell(s: ShortcutShell) {
-    if (runsInHangar(s)) { await rodarNoHangar(s); return; }
-    const chave = chaveDoAtalho(s);
+    if (runsInHangar(s)) { await runInHangar(s); return; }
+    const shortcutKey = shortcutKeyOf(s);
     // Pergunta pendente do terminal deste atalho: o clique abre a pergunta em vez de rodar outro.
-    const perguntando = sessionTerminalFor(servidorDoChat, sessionName, chave);
-    if (perguntando?.alive && perguntando.question) { openQuestion(servidorDoChat, sessionName, perguntando.id); return; }
+    const asking = sessionTerminalFor(chatServerId, sessionName, shortcutKey);
+    if (asking?.alive && asking.question) { openQuestion(chatServerId, sessionName, asking.id); return; }
     const key = atalhoKey;
     try {
-      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta, { key: chave, ask: answersInApp(s) });
+      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta, { key: shortcutKey, ask: answersInApp(s) });
       if (r.terminal) focusShortcutTerminal(key, r.terminal.id);
     } finally {
       const lista = await refreshShortcutTerminals(key).catch(() => null);
@@ -2802,22 +2802,22 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
   }
 
-  // Cópia única do servidor: perguntando abre a pergunta; rodando, a janela vem pra frente ou o
+  // Cópia única do servidor: asking abre a pergunta; rodando, a janela vem pra frente ou o
   // painel abre na aba dele; parado, roda.
-  async function rodarNoHangar(s: ShortcutShell) {
-    const chave = chaveDoAtalho(s);
-    const atual = hangarForShortcut(servidorDoChat, chave);
-    if (atual?.alive && atual.question) { openQuestion(servidorDoChat, '', atual.id); return; }
+  async function runInHangar(s: ShortcutShell) {
+    const shortcutKey = shortcutKeyOf(s);
+    const current = hangarForShortcut(chatServerId, shortcutKey);
+    if (current?.alive && current.question) { openQuestion(chatServerId, '', current.id); return; }
     let r;
     try {
       r = await runShortcutShell(sessionName, s.command, s.label, s.pasta,
-        { key: chave, hangar: true, home: hangarHome(s), ask: answersInApp(s) });
+        { key: shortcutKey, hangar: true, home: hangarHome(s), ask: answersInApp(s) });
     } catch (err) {
       if (err instanceof OutdatedServerError) throw new Error(m.hangar_servidor_desatualizado());
       throw err;
     }
     if (r.reused && !r.focused && r.terminal) {
-      requestHangarTab(servidorDoChat, r.terminal.id);
+      requestHangarTab(chatServerId, r.terminal.id);
       abrirTerminalReal();
     }
   }
