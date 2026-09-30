@@ -3,6 +3,9 @@ Sidecar JSON por sessao FONTE em ".hangar-loop", keyed pelo NOME (sobrevive ao /
 mesmo padrao do chain/pqueue. Um loop por sessao; loop novo sobrescreve o anterior.
 Spec: docs/superpowers/specs/2026-07-22-loop-runner-design.md"""
 import json
+import logging
+import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -17,6 +20,8 @@ from app import atomico
 from app.config import settings
 from app.models import dumps_safe
 from app.pqueue import _sanitize
+
+_log = logging.getLogger("hangar.loop")
 
 ACTIVE = {"running", "paused_awaiting", "done_claimed"}
 
@@ -256,27 +261,71 @@ def _exe_claude() -> str | None:
     return shutil.which("claude")
 
 
-def _claude_p(prompt: str) -> str:
-    """Roda um claude -p efemero (sonnet) com o prompt por STDIN, tools de efeito colateral negadas,
-    cwd neutro (tempdir), argv sem shell, timeout 60s. Devolve o stdout (strip). Levanta ClaudePError
-    em qualquer falha (CLI ausente/timeout/exit≠0/vazio) — o endpoint mapeia pra 502."""
-    exe = _exe_claude()
-    if exe is None:
-        raise ClaudePError("claude CLI não encontrado")
+# O CLI escreve o aviso de limite no STDOUT ("You've hit your weekly limit · resets ...").
+_LIMITE_RE = re.compile(r"hit your .*limit|usage limit|rate limit", re.IGNORECASE)
+
+
+def _esgotada(c) -> bool:
+    return any(j.pct >= 100 for j in c.janelas if not j.por_modelo)
+
+
+def _ordem_contas(lidas: list) -> list[str | None]:
+    """Config dirs na ordem de tentativa; None = conta padrão (herda o ambiente do backend).
+    A padrão vai primeiro salvo se a leitura dela mostrar 5h/7d esgotada; as outras só entram
+    com leitura boa (prova de login) e folga, pela maior sobra semanal."""
+    padrao_esgotada = any(c.ativa and _esgotada(c) for c in lidas)
+    outras = [c for c in lidas if c.provedor == "claude" and not c.ativa and c.estado == "lida"
+              and c.janelas and not _esgotada(c)]
+    outras.sort(key=lambda c: max((j.pct for j in c.janelas if j.rotulo == "7d"), default=0.0))
+    ordem: list[str | None] = [] if padrao_esgotada else [None]
+    ordem += [c.id.removeprefix("claude:") for c in outras]
+    return ordem or [None]
+
+
+def _rodar_claude_p(exe: str, prompt: str, conta: str | None) -> subprocess.CompletedProcess:
+    env = None if conta is None else {**os.environ, "CLAUDE_CONFIG_DIR": conta}
     try:
-        p = subprocess.run(
+        return subprocess.run(
             # Sem persistir: a conversa gravada em /tmp aparecia na busca como se fosse do usuário.
             [exe, "-p", "--model", "sonnet", "--no-session-persistence",
              "--disallowedTools", *_REFINE_DISALLOWED],
             input=prompt, cwd=tempfile.gettempdir(), capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=_REFINE_TIMEOUT,
+            errors="replace", timeout=_REFINE_TIMEOUT, env=env,
         )
     except FileNotFoundError:
         raise ClaudePError("claude CLI não encontrado")
     except (subprocess.TimeoutExpired, OSError):
         raise ClaudePError("claude -p excedeu o tempo ou falhou ao iniciar")
+
+
+def _bateu_limite(p: subprocess.CompletedProcess) -> bool:
+    return p.returncode != 0 and bool(_LIMITE_RE.search(f"{p.stdout or ''}\n{p.stderr or ''}"))
+
+
+def _claude_p(prompt: str) -> str:
+    """Roda um claude -p efemero (sonnet) com o prompt por STDIN, tools de efeito colateral negadas,
+    cwd neutro (tempdir), argv sem shell, timeout 60s. Devolve o stdout (strip). Levanta ClaudePError
+    em qualquer falha (CLI ausente/timeout/exit≠0/vazio) — o endpoint mapeia pra 502.
+    Roda na conta com cota (`_ordem_contas`); bateu limite, tenta UMA vez a próxima."""
+    from app import cotas  # tardio: cotas puxa meio app, e loop é importado cedo
+
+    exe = _exe_claude()
+    if exe is None:
+        raise ClaudePError("claude CLI não encontrado")
+    conta = _ordem_contas(cotas.cotas_claude())[0]
+    p = _rodar_claude_p(exe, prompt, conta)
+    if _bateu_limite(p):
+        # A leitura em cache pode ser velha: relê antes de escolher a próxima.
+        proximas = [c for c in _ordem_contas(cotas.cotas_claude(atualizar=True)) if c != conta]
+        if proximas:
+            _log.info("claude -p: limite na conta %s, tentando %s", conta or "padrão", proximas[0])
+            conta = proximas[0]
+            p = _rodar_claude_p(exe, prompt, conta)
     if p.returncode != 0:
-        raise ClaudePError(f"claude -p falhou (exit {p.returncode}): {(p.stderr or '').strip()[-500:]}")
+        # Sem stderr (caso do limite), a causa está no stdout.
+        motivo = (p.stderr or "").strip() or (p.stdout or "").strip()
+        raise ClaudePError(f"claude -p falhou (exit {p.returncode}): {motivo[-500:]}")
+    _log.info("claude -p atendido pela conta %s", conta or "padrão")
     out = (p.stdout or "").strip()
     if not out:
         raise ClaudePError("claude -p devolveu saída vazia")

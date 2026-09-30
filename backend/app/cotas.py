@@ -991,6 +991,17 @@ def listar_cotas(forcar: bool = False) -> list[CotaConta]:
     return saida
 
 
+def cotas_claude(atualizar: bool = False) -> list[CotaConta]:
+    """Leituras das contas Claude. Sem `atualizar`, só o cache: quem chama está no caminho de uma
+    requisição e não pode esperar a rede das outras credenciais."""
+    fontes = [f for f in _fontes() if f.provedor == "claude"]
+    if atualizar:
+        _atualizar(fontes)
+    with _lock:
+        _carregar_cache()
+        return [h[1] for f in fontes if (h := _cache.get(f.chave)) is not None]
+
+
 class SugestaoConta(BaseModel):
     id: str
     label: str
