@@ -18,6 +18,8 @@ import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
 import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
+import { PendingPlan } from '../../../../src/chat/PendingPlan';
+import { SessionProblem } from '../../../../src/chat/SessionProblem';
 import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
 import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, parseStatusLine, selectOptionForServer, interrupt, recarregarSessao } from '@hangar/core';
@@ -261,14 +263,20 @@ export default function ChatScreen() {
       if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
     } catch (e) { optionError(e); }
   };
-  const optionsSlot = showOptions ? (
-    <View>
-      <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} />
+  // O plano vem antes das ações: a pessoa lê o que vai aprovar. Sem ações, fica só o plano.
+  const planPending = stateEvent?.claude_plan_pending;
+  const optionsSlot = showOptions || planPending || aviso ? (
+    <View style={styles.slot}>
+      {planPending ? <PendingPlan {...planPending} /> : null}
+      {showOptions ? (
+        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} />
+      ) : null}
       {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}
     </View>
-  ) : aviso ? (
-    <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text>
   ) : undefined;
+  // Antes da thread o SSE da conversa ainda não publica o problema; a lista (repetida a cada 2 s) sim.
+  const problem = codexPreThread ? currentSession.problema : stateEvent?.problema;
+  const problemDetail = codexPreThread ? null : stateEvent?.problema_detalhe;
 
   return (
     <Screen>
@@ -302,6 +310,9 @@ export default function ChatScreen() {
       <KeyboardAvoidingView behavior="padding" style={styles.body}>
         {stateEvent?.codex_buffering ? (
           <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
+        ) : null}
+        {!servidorSumiu && problem ? (
+          <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
         ) : null}
         <View style={styles.inner}>
           {servidorSumiu ? (
@@ -453,6 +464,13 @@ const styles = StyleSheet.create((theme) => ({
     textAlign: 'center',
     minHeight: 44,
     lineHeight: 44,
+  },
+  problem: {
+    paddingHorizontal: theme.base.space[3],
+    paddingTop: theme.base.space[2],
+  },
+  slot: {
+    gap: theme.base.space[2],
   },
   aviso: {
     fontSize: theme.base.text.sm,

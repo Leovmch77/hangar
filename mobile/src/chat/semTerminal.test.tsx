@@ -14,7 +14,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' permissao_pedido comum_cancelar').split(' ').map((k) => [k, () => k]),
+    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens').split(' ').map((k) => [k, () => k]),
 ));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
@@ -40,7 +40,25 @@ vi.mock('../stores/chat', () => {
   return { chatStore: () => ({ use, send: async () => {} }), filaCount: () => 0 };
 });
 
+// Lista isolada: a bolha só registra o texto recebido, pra provar o que chega nela.
+const bubbleTexts = vi.hoisted(() => [] as string[]);
+vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string }) => { bubbleTexts.push(text); return null; } }));
+vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
+vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
+vi.mock('./StatusLine', () => ({ StatusLine: () => null }));
+vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
+vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
+vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
+vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
+vi.mock('../stores/aparencia', () => ({ useAparencia: (sel: (s: unknown) => unknown) => sel({ pensamentoTools: 'busca' }) }));
+vi.mock('@legendapp/list/react-native', () => ({
+  LegendList: ({ data, renderItem, keyExtractor }: {
+    data: unknown[]; renderItem: (a: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string;
+  }) => createElement('div', null, data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item })))),
+}));
+
 import { ChatHeader } from './ChatHeader';
+import { MessageList } from './MessageList';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
 import { OptionButtons } from './OptionButtons';
@@ -140,6 +158,20 @@ describe('Parar no Composer', () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, props));
     expect(container.querySelector('[aria-label="composer_parar"]')).toBeNull();
+    act(() => root.unmount());
+  });
+});
+
+describe('plano proposto na lista', () => {
+  it('Codex: a bolha recebe o texto original, com os marcadores, pra detectar o plano', async () => {
+    bubbleTexts.length = 0;
+    const text = 'Antes\n<proposed_plan>\n# Plano\n- passo\n</proposed_plan>';
+    const { root } = await render(createElement(MessageList, {
+      events: [{ id: 'a1', kind: 'assistant_msg', text }],
+      preview: '', statusLine: null, olderFailed: '', onLoadOlder: () => {},
+      session: { provider: 'codex' } as never,
+    } as never));
+    expect(bubbleTexts).toEqual([text]);
     act(() => root.unmount());
   });
 });
