@@ -96,7 +96,7 @@ Done when the item is journaled and the ball is back with executor or reviewer.
    Read the approving report's WASTE and NOTED lines (its path: the `veredito`'s `motivo=` in
    `orq read journal --task <N>`): NOTED → contract, WASTE → lessons. Add one PROGRESS line with
    `orq log --task <N>`: elapsed time and code rounds (proof rounds apart) vs the estimate;
-   past 2× either → reavalie conforme arbitro-vigia.md; estimativa/diff não bloqueiam.
+   past 2× either → reassess as arbitro-vigia.md defines; estimates/diffs do not block.
    Context counts only for rotation.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.

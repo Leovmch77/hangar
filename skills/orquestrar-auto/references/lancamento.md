@@ -35,27 +35,27 @@ Create the orchestration group with you as its only member; open no session for 
 hangar-send --pair --orq "<work> — each session's role is in the regras-<gid>.md contract"
 ```
 
-Leia o gid no seu sidecar. Se o time foi configurado em outra sessão planejadora, associe
-o registro dela a este grupo pela API autenticada:
+Read the gid from your sidecar. If the team was configured in another planner session, link
+its record to this group through the authenticated API:
 
 ```http
-POST /api/sessions/<sessão-do-trabalho>/orq/grupo
+POST /api/sessions/<work-session>/orq/grupo
 Content-Type: application/json
 
-{"gid":"<gid-real>","mtime":<mtime-lido-em-GET-orq>}
+{"gid":"<real-gid>","mtime":<mtime-read-from-GET-orq>}
 ```
 
-Faça isso antes de escrever as demais seções do contrato de destino. Conflito retorna 409:
-releia o registro atual, sem copiar tabela antiga ou substituir escolhas. Rascunho do próprio
-fundador é associado na criação do grupo. Depois, leia GET /orq novamente e use o arquivo
-retornado; planejador e árbitro usam o mesmo registro. O grupo orq de um membro fica vivo
-durante a execução auto; o vigia junta as sessões abertas pelo programa.
+Do this before writing the destination contract's other sections. A conflict returns 409:
+re-read the current record, without copying an old table or replacing choices. The founder's
+own draft is linked when the group is created. Then read GET /orq again and use the returned
+file; planner and arbiter use the same record. The one-member orq group stays alive during
+auto execution; the watchdog joins sessions opened by the program.
 
 Done when your sidecar carries the `gid` and the `orq` mark.
 
 ## 3. Contract, init, start event
 
-1. Complete o registro atual associado a `regras-<gid>.md`, preservando sua tabela do time
+1. Complete the current record linked to `regras-<gid>.md`, preserving its team table
    (skeleton in
    `~/.claude/skills/orquestrar/references/planejamento-equipe.md`; first lines in
    `~/.claude/skills/orquestrar/references/arbitro.md`, "The four files"), adding under them:
@@ -93,8 +93,8 @@ systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=Resta
 
 Its round also runs `orq advance`. Proof: the `[vigia] ARMED …` prompt arrives in your session
 within 2 min; `active` is not proof. Never stop it to ask the user something: ask in text with a
-default and let the orchestrator go on. Desarme somente após execucao_fim e confirmação
-de que os candidatos concluídos foram fechados ou têm impedimento explicitamente registrado.
+default and let the orchestrator go on. Disarm only after execucao_fim and confirmation
+that completed candidates were closed or have an explicitly recorded impediment.
 
 ## 5. Hand over
 

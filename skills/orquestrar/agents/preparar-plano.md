@@ -26,8 +26,8 @@ does.
    - what breaks if the order is followed (a Task using what a later one creates);
    - every Task with proof has a roteiro the plan can support (what to run, what to look at,
      what counts as pass); a Task on a screen cites the `provar-tela` skill in its roteiro;
-   - Task com responsabilidades independentes ou dependências distintas → separe esses
-     recortes; número de linhas, incluindo testes/traduções, não impõe corte ou bloqueio.
+   - Task with independent responsibilities or distinct dependencies → separate those
+     parts; line counts, including tests/translations, impose no split or block.
 3. Build the waves: independent Tasks share a wave, never more per wave than `Paralelo:`.
    Suggest `Revisão: subagente` unless the user asked for another model or account to review.
    A Task on a screen → suggest `Prova: manual` unless the user asked for automated proof.

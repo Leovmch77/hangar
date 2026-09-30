@@ -1,7 +1,7 @@
 # Role: planner (phases 0, 1 and 2)
 
-Planeje com o usuário; lance o árbitro configurado, sem mudar seu próprio papel.
-Rota audit: a planejadora escreve (passo 7).
+Plan with the user; launch the configured arbiter without changing your own role.
+Route `audit`: the planner writes (step 7).
 
 ## Two words: Task and step
 
@@ -64,8 +64,8 @@ Right after the spec closes, before Task 1:
    (no public contract, shared state, destination or credential change); few enough Tasks for one
    writer in one context. One fails → `full`. The user decides; no answer → `full`. Escalation
    runs through `replanejar.md`, reason in the journal.
-2. Leia o time deste trabalho conforme `planejamento-equipe.md`, "The team".
-   Configuração completa: siga sem oferecer outro time; peça só campo obrigatório ausente.
+2. Read this work's team as `planejamento-equipe.md`, "The team", defines.
+   Complete configuration: proceed without offering another team; ask only for missing mandatory fields.
 3. Read each chosen model's card in `~/.hangar/orq/modelos/`. No card → write the plan
    conservatively, do one sweep (vendor guide + community) into a `## What they say` section marked
    hypothesis, and create the card in the retrospective.
@@ -89,8 +89,8 @@ chosen model has a card or a `## What they say` section.
 2. **Each Task carries:**
    - Wave: parallel by default. Tasks passing the four conditions of `paralelo-worktree.md`
      together share a wave; a dependent or colliding Task goes to a later wave (gate items 3, 4).
-   - Tamanho: uma responsabilidade e critérios verificáveis; separe partes independentes.
-     Não limite linhas de diff nem corte/compacte cobertura para caber num número.
+   - Size: one responsibility and verifiable criteria; separate independent parts.
+     Do not cap diff lines or cut/compact coverage to fit a number.
    - A-priori estimate, one line: expected clock and rounds. Actuals live only in `eventos.jsonl`;
      no second table. 2+ authorized executors → consumption per model in quota and
      context (context per Task, sessions per Task, account/window per model, when the heavy model
@@ -164,7 +164,7 @@ PRODUCE = write it in the orchestration plan.
    report pasted.
 4. AUDIT — shared state searched; ownership contract with copy count and who checks the N; shared
    state in the plan's HEADER, not inside a Task.
-5. PRODUCE — Tasks delimitadas por responsabilidade/dependência, sem teto numérico de diff.
+5. PRODUCE — Tasks bounded by responsibility/dependency, with no numeric diff cap.
 6. PRODUCE — orchestration Task: smoke step, literal command. Measurement Task: ≥2
    starting states swept, which ones declared.
 7. AUDIT — remaining quota per account with reading time; fallback in writing.

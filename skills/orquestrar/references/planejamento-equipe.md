@@ -8,38 +8,38 @@ decomposition and the exit gate stay in `planejamento.md`.
 
 ## The team: configuration belongs to this work
 
-1. Leia a política de contas permitidas; ela limita opções, não escolhe o time.
-2. Leia `GET /api/sessions/<sessão-do-trabalho>/orq`. Tela e LLM usam esse mesmo registro.
-   Sem grupo, `arquivo` é o rascunho deste trabalho; com grupo, é seu contrato.
-3. Time já configurado: preserve contas, modelos, esforços, papéis, ordem/vez, janela e flags;
-   não proponha outro nem repita escolhas. Peça somente campo obrigatório ausente.
-   Campos opcionais vazios/- mantêm o padrão do provedor; não os preencha sozinho.
-4. Sem time: configure as escolhas explícitas do usuário pela tela ou pelo POST /orq.
-   Não carregue time padrão, contratos anteriores ou modelos de exemplos.
-5. Nomes novos usam `session_prefix` deste trabalho. Preserve nomes explicitamente escolhidos
-   para ele e os vínculos de sessões já abertas; não encerre sessão por mudança de tabela.
-6. Cada papel tem sua sessão conforme a configuração. A linha de árbitro define quem lança;
-   se for uma sessão nova, abra-a e transfira plano aprovado e referência deste registro.
-   Um escritor por árvore; revisão final fresca e independente.
-7. No lançamento, associe o MESMO registro ao gid real por POST /orq/grupo {gid, mtime}.
-   O contrato acrescenta as demais seções sem reescrever a tabela do time. Não mantenha
-   outra configuração editável no plano, pedido ou arquivo global.
+1. Read the allowed-account policy; it limits options and does not select the team.
+2. Read `GET /api/sessions/<work-session>/orq`. The UI and LLM use this same record.
+   Without a group, `arquivo` is this work's draft; with a group, it is its contract.
+3. Team already configured: preserve accounts, models, efforts, roles, order/rotation, window
+   and flags; propose no replacement and repeat no choices. Ask only for a missing required
+   field. Empty/- optional fields retain the provider's default; do not fill them yourself.
+4. No team: configure the user's explicit choices through the UI or POST /orq.
+   Load no default team, previous contracts or models from examples.
+5. New names use this work's `session_prefix`. Preserve names explicitly selected for it
+   and existing session links; do not close a session because the table changed.
+6. Each role has its session as configured. The arbiter row defines who launches;
+   if it is a new session, open it and transfer the approved plan and this record's reference.
+   One writer per tree; fresh, independent final review.
+7. At launch, link the SAME record to the real gid through POST /orq/grupo {gid, mtime}.
+   The contract adds its other sections without rewriting the team table. Keep no other
+   editable configuration in the plan, request or global file.
 
 Done when the current work's record contains the explicit choices required by its roles.
 
 ## `## Quem é quem`
 
-Tabela do próprio trabalho, depois associada a `regras-<gid>.md`; valores brutos
-(`-` = padrão opcional escolhido). Exemplo de formato, sem escolher papéis/modelos:
+This work's own table, later linked to `regras-<gid>.md`; raw values
+(`-` = selected optional default). Format example, without selecting roles/models:
 
 ```markdown
 ## Quem é quem
 
 | papel | sessão | provider | conta | modelo | esforço |
 |---|---|---|---|---|---|
-| árbitro | <work>-arbitro | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
-| executor | <work>-t* | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
-| revisor | <work>-review* | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
+| árbitro | <work>-arbitro | <selected> | <selected> | <selected> | <selected-or-default> |
+| executor | <work>-t* | <selected> | <selected> | <selected> | <selected-or-default> |
+| revisor | <work>-review* | <selected> | <selected> | <selected> | <selected-or-default> |
 ```
 
 - `provider`: `claude` | `codex` | `pi` | `kimi`. `conta`: config-dir name on Claude (`padrao`,
@@ -112,7 +112,7 @@ risk, `—` otherwise.
 
 ## Phase 2 — Launch (the user's single "go ahead")
 
-- On `full`: a sessão escolhida para árbitro lê `arbitro.md` e executa o lançamento de
+- On `full`: the session selected as arbiter reads `arbitro.md` and runs the launch in
   `arbitro-lancamento.md` ("Launch"): pre-flight, branch question, baseline, sessions, contract,
   kick-offs.
 - On `audit`: open no session. Run the pre-flight, the branch question and the baseline of

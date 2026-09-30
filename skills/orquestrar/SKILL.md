@@ -14,8 +14,8 @@ allowed-tools: Bash(hangar-send:*), Bash(git status:*), Bash(git log:*), Bash(gi
 
 # orquestrar — router for the planner and the arbiter
 
-Invoque somente por pedido do usuário ou kick-off com `Role: arbiter`.
-Não deduza o fluxo pelo tamanho ou risco da tarefa.
+Invoke only at the user's request or on a kick-off with `Role: arbiter`.
+Do not infer the workflow from the task's size or risk.
 
 ## Phases and routes
 
@@ -23,7 +23,7 @@ Não deduza o fluxo pelo tamanho ou risco da tarefa.
 |---|---|---|---|
 | 0. Research | read-only session/subagent | no | findings in a file the plan cites |
 | 1. Spec + plan | with the user | no | plan approved, decisions and team settled |
-| 2. Launch | sessão escolhida para árbitro | nunca | registro do time associado ao grupo, contrato escrito, aprovação |
+| 2. Launch | session selected as arbiter | never | team record linked to the group, contract written, approval |
 | 3. Execution | executor + reviewer, separate sessions | executor only | every Task with `APROVA` |
 | 4. Branch review | fresh session that took no part | no | the whole set approved |
 | 5. Retrospective | fresh session that took no part | no | proposed patch for this skill, in the user's hands |
@@ -45,7 +45,7 @@ its page and reads that page plus the sibling pages it names; nothing else of th
 | Role | Page | You are this when |
 |---|---|---|
 | planner | `references/planejamento.md` (+ `references/planejamento-equipe.md` for team, plan skeleton, contract and launch) | the user asked you for the work; no kick-off exists |
-| arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | papel declarado e sessão escolhida na configuração deste trabalho |
+| arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | role declared and session selected in this work's configuration |
 | executor | `~/.claude/skills/orquestrar/references/executor.md` | kick-off says `Role: executor` |
 | reviewer | `~/.claude/skills/orquestrar/references/revisor.md` | kick-off says `Role: reviewer` |
 | branch review | `~/.claude/skills/orquestrar/references/revisao-final.md` | kick-off says `Role: branch review` |
@@ -82,17 +82,17 @@ proof mode, parallelism and review mode are the plan's `## Projeto`, written by 
 
 ## Locks for the planner and the arbiter
 
-- O time vem do registro deste trabalho configurado na tela ou pelo LLM, nunca de sessão
-  viva, template global ou contrato anterior. Campo obrigatório ausente: peça só esse campo.
+- The team comes from this work's record configured through the UI or the LLM, never from a
+  live session, global template or previous contract. Missing required field: ask only for it.
 - The contract is an order: engine, model, account, session name and role are not reopened.
   Unforeseen case: re-read the contract, then ask.
-- Time configurado não é reaberto. Ausência de resposta não escolhe conta, modelo, esforço
-  ou papel. Sair da conta escolhida ou entrar em cobrança por token exige ordem do usuário.
+- A configured team is not reopened. No reply selects no account, model, effort or role.
+  Leaving the selected account or using per-token billing requires the user's instruction.
 - The model is the user's decision. Read `~/.hangar/orquestracao-contas.md` before assembling a
   team; missing or stale: take the inventory, ask, write the answer there with the date. The
   contract carries the account↔model table per role; a model outside it is not used even to
-  test. Abra a sessão diretamente com os parâmetros da linha escolhida; confira o modelo
-  real antes de enviar trabalho, sem passar primeiro por um default. Subagents: same account; model switch inside it only where the contract allows; a
+  test. Open the session directly with the selected row's parameters; verify the real model
+  before sending work, without first using a default. Subagents: same account; model switch inside it only where the contract allows; a
   `model:` in an agent's frontmatter overrides yours. Need another model: stop and ask.
 - Stage by explicit path; no `--amend`/rebase/squash; untouchables never enter a commit.
 - Write first, notify after: reports, recipes and journals are files in the durable directory

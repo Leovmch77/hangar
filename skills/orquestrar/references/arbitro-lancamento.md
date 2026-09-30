@@ -29,11 +29,11 @@ session is opened or a Task released. Back to `arbitro.md` once the team stands.
    write", below) and the closing items (`arbitro-encerramento.md`); write the a-priori
    estimate: time and rounds per Task.
 5. Survey the tooling (below), once.
-6. Abra as sessões configuradas e forme o grupo. Leia o gid real; associe o registro do time
-   por POST `/api/sessions/<sessão-do-trabalho>/orq/grupo` com `{gid, mtime}` lido em GET /orq.
-   Faça a associação antes de completar o contrato de destino; preserve a tabela atual.
-   Complete o contrato (skeleton in `planejamento-equipe.md`; detalhes por Task em
-   `## Task N` no fim) → `orq init --arbiter <you> --repo <repo> --contract <regras
+6. Open the configured sessions and form the group. Read the real gid; link the team record
+   through POST `/api/sessions/<work-session>/orq/grupo` with `{gid, mtime}` read from GET /orq.
+   Link it before completing the destination contract; preserve the current table.
+   Complete the contract (skeleton in `planejamento-equipe.md`; Task details in
+   `## Task N` at the end) → `orq init --arbiter <you> --repo <repo> --contract <regras
    path> --plan <user plan dir>/<user plan stem>.orq.md --untouchable <glob>…` (the stamped plan
    itself, never a copy) → `orq event execucao_inicio --plano <plan> --branch <branch> --gid <gid>`
    → arm the watchdog and prove it (`arbitro-vigia.md`, "Arming") → kick-offs ("Kick-off", below).
@@ -90,8 +90,8 @@ Outside tool (skill, subagent, command): the three questions of `SKILL.md`'s loc
 
 - The model comes from the ROLE, including bug worktrees and one-off tasks.
 - Before creating any session: re-read its row and state in the message which engine/model you use and where it came from.
-- Abra a sessão já na conta/modelo/esforço/flags escolhidos para o papel; confira a identidade
-  real antes de enviar trabalho. Divergência não autoriza fallback ou troca da escolha.
+- Open the session with the account/model/effort/flags selected for the role; verify its real
+  identity before sending work. A mismatch authorizes no fallback or change to the choice.
 - Subagents: same account always; a model switch inside it only where the contract allows; an agent frontmatter `model:` overrides yours.
 
 ## Who you open
@@ -108,9 +108,9 @@ Outside tool (skill, subagent, command): the three questions of `SKILL.md`'s loc
 
 ## Opening a session — five steps, one unit
 
-1. Crie na conta/provider da linha deste trabalho: `hangar-send --new <name> <cwd>` com
-   os parâmetros escolhidos. Mesmo modelo por outro gateway/router é outro provider;
-   não substitui a escolha do usuário. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). Server with a Jev key: every executor and reviewer is born with `--jev`. The row's `abertura` cell goes on the command as written (it may carry `--engine` and `--permissao`); a Codex `conta` other than `openai-codex` → `--conta <name>`. A 400 = session not born: recreate with the flags right, never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
+1. Create in the account/provider of this work's row: `hangar-send --new <name> <cwd>` with
+   the selected parameters. The same model through another gateway/router is another provider;
+   it does not replace the user's choice. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). Server with a Jev key: every executor and reviewer is born with `--jev`. The row's `abertura` cell goes on the command as written (it may carry `--engine` and `--permissao`); a Codex `conta` other than `openai-codex` → `--conta <name>`. A 400 = session not born: recreate with the flags right, never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
 
    ```bash
    hangar-send --new <name> <repo> --provider pi --model <provider>/<id> --effort <level>

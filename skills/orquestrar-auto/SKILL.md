@@ -32,16 +32,16 @@ the rule cannot decide.
 | Phase | Who | Read |
 |---|---|---|
 | 0–1. Research, spec + plan | planner, with the user | `~/.claude/skills/orquestrar/references/planejamento.md` (+ `~/.claude/skills/orquestrar/references/planejamento-equipe.md`), with the additions below |
-| 2. Launch | sessão escolhida para árbitro | `references/lancamento.md` — nunca o lançamento da orquestrar comum |
+| 2. Launch | session selected as arbiter | `references/lancamento.md` — never the regular orquestrar launch |
 | 3. Execution | orchestrator + executor + reviewer | arbiter: `references/arbitro.md` |
 | 4–5. Branch review, retrospective | fresh sessions | the arbiter fires them from `references/arbitro.md` |
 
 Phase-1 additions, written into the plan and the contract before approval:
 
 - Route is `full`. A work that fits `audit` runs under `orquestrar`: tell the user in one line.
-- Use o registro deste trabalho configurado pela tela ou LLM; no lançamento associe-o ao
-  gid sem importar defaults/execuções anteriores nem regenerar escolhas. Nomes pertencem
-  ao trabalho atual.
+- Use this work's record configured through the UI or LLM; at launch link it to the gid
+  without importing defaults/previous executions or regenerating choices. Names belong to
+  the current work.
 - `## Quem é quem`: `papel` written exactly `executor` and `revisor`; the `executor` row ends
   its `sessão` in `*` (one session per Task); every row the orchestrator opens carries its full
   `abertura` cell.
@@ -58,7 +58,7 @@ its `orquestrar` page and reads nothing of this skill.
 | Role | Page | You are this when |
 |---|---|---|
 | planner | `~/.claude/skills/orquestrar/references/planejamento.md` | the user asked you for the work; no kick-off exists |
-| arbiter | `references/arbitro.md` (+ `references/lancamento.md` at launch) | papel declarado e sessão escolhida na configuração deste trabalho |
+| arbiter | `references/arbitro.md` (+ `references/lancamento.md` at launch) | role declared and session selected in this work's configuration |
 | executor | `~/.claude/skills/orquestrar/references/executor.md` | kick-off says `Role: executor` |
 | reviewer | `~/.claude/skills/orquestrar/references/revisor.md` | kick-off says `Role: reviewer` |
 | branch review | `~/.claude/skills/orquestrar/references/revisao-final.md` | kick-off says `Role: branch review` |

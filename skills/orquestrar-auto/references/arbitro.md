@@ -31,7 +31,7 @@ you, or the user holds a decision.
 | a session's message the triage kept (Jev asked, the regex did not drop it, or triage is in `shadow`) | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table. The timeline shows it `would_drop` and it needed you → `orq log "triage: would_drop needed the arbiter — <why>"` |
 | merge conflict in a file the plan did not declare additive (`T<a> conflitou com T<b> em <file>`) | `~/.claude/skills/orquestrar/references/paralelo-worktree.md`, "Integration": the losing Task gets a correction round on the merged base, same executor. Its worktree `<repo>-<gid>-t<N>` and branch `<branch>-<gid>-t<N>` already exist: the round's worktree is `<repo>-<gid>-t<N>-r2` on branch `<branch>-<gid>-t<N>-r2`, from the merged tip. Then `orq event task_inicio` again for that Task and the replacement kick-off (below), with the old branch's commit as the approved diff. The round's `orq commit` reopens the integration by itself: never merge nor record `integrada` by hand |
 | DEVOLVIDO | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4, first row; wake the user only by `~/.claude/skills/orquestrar/references/arbitro-vigia.md`, "Deciding vs waking the user" |
-| a Task past 2× its estimate (time or code rounds) | reavalie; decida o rotineiro ou pergunte em texto com recomendação e prazo de 10 min conforme arbitro-vigia.md. Não interrompa por contagem de linhas; mantenha as Tasks independentes andando |
+| a Task past 2× its estimate (time or code rounds) | reassess; decide routine matters or ask in text with a recommendation and a 10 min deadline as arbitro-vigia.md defines. Do not stop for line counts; keep independent Tasks moving |
 | red base: the plan's checks red on the branch with no Task to return it to | the user decides: fix first (a fix Task through the gate) or record a known failure the review ignores |
 | `advance_falhou` (a `failed` timeline line: session not born, `hangar-send` refused, git failed) | read the output in the event. Session not born → open it by `~/.claude/skills/orquestrar/references/arbitro-lancamento.md`, "Opening a session", then the replacement kick-off. Git or repo state → resolve it in the tree only if it is not code; code → back to the Task's executor. Outside your reach → the user. Never re-run the failed step blindly |
 | proof batch taken | `~/.claude/skills/orquestrar/references/prova-lote.md` |
@@ -61,10 +61,10 @@ there.
 write each into the orchestration plan, stamp it again (`orq plan-check … --stamp`), then
 `orq advance` releases them.
 
-Antes de remover uma worktree, confirme que suas sessões concluídas foram fechadas;
-um processo vivo pode manter cwd/arquivos em uso. Não desarme o vigia na passagem às
-etapas finais: ele fecha executor e revisor de cada Task concluída após inatividade,
-com proteção de grupo, identidade e subagentes.
+Before removing a worktree, confirm its completed sessions have been closed;
+a live process may keep cwd/files in use. Do not disarm the watchdog when entering
+the final phases: it closes each completed Task's executor and reviewer after idleness,
+with group, identity and subagent protection.
 
 Before `execucao_fim`, each Task worktree of the run (`git worktree list`, `<repo>-<gid>-t*`):
 trail check first — `grep -rl "<worktree path>" ~/.local/bin <agent config dirs> <service unit
@@ -73,8 +73,8 @@ dir>` — then `git worktree remove <path>`. A hit in the trail → the user, no
 line.
 
 Done when the branch is in the user's hands, the retrospective delivered, no worktree of the run
-left, `orq event execucao_fim --resultado <result>` logged, fechamento das sessões
-concluídas conferido e somente então o vigia desarmado.
+left, `orq event execucao_fim --resultado <result>` logged, completed sessions' closure
+checked and only then the watchdog disarmed.
 
 ## Succession
 
@@ -87,9 +87,9 @@ watchdog stays untouched.
 
 - Never do by hand what the orchestrator does (`SKILL.md`, "Locks"). A Task you want held →
   `orq log` the reason and ask the user; never race `orq advance`.
-- Perguntas operacionais são em texto, sem AskUserQuestion/request_user_input bloqueante.
-  Dê recomendação e prazo de 10 min; sem resposta, aplique a recomendação autorizada dentro
-  do escopo. Agende o despertar conforme arbitro-vigia.md; vigia/Tasks independentes continuam.
+- Operational questions go in text, without blocking AskUserQuestion/request_user_input.
+  Give a recommendation and a 10 min deadline; without a reply, apply the authorized recommendation
+  within scope. Schedule a wake as arbitro-vigia.md defines; the watchdog/independent Tasks continue.
 - The four files, the contract commands and the locks of
   `~/.claude/skills/orquestrar/references/arbitro.md` bind here too.
 - Talk little with the user: one line when a wave closes; a decision only they can make,
