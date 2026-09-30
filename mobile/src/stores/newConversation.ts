@@ -21,7 +21,8 @@ export type NewConversationIssue =
   | { kind: 'local'; message: string };
 
 export type NewConversationInput = {
-  body: Omit<CreateSessionBody, 'name' | 'cwd'> & { cwd: string };
+  // Sem `name`, o store gera o nome estável; com ele, o nome escolhido fica congelado na tentativa.
+  body: Omit<CreateSessionBody, 'name' | 'cwd'> & { cwd: string; name?: string };
   text: string;
 };
 
@@ -125,15 +126,18 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
   const server = serverById(serverId);
   if (!server) { setIssue(serverId, { kind: 'local', message: m.nova_conversa_servidor_ausente() }); return; }
 
-  // O backend ainda arbitra o conflito; a lista só evita um nome já visível.
-  let taken = new Set<string>();
-  try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
-
+  // Nome escolhido pela pessoa não ganha sufixo: conflito volta como 409 e ela decide.
+  const explicit = input.body.name?.trim();
   let id = newId();
-  while (taken.has(stableName(input.body.cwd, id))) id = newId();
+  if (!explicit) {
+    // O backend ainda arbitra o conflito; a lista só evita um nome já visível.
+    let taken = new Set<string>();
+    try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
+    while (taken.has(stableName(input.body.cwd, id))) id = newId();
+  }
   const draft: FirstConversationAttempt = {
     id, serverId, text: input.text, phase: 'draft', sessionName: null,
-    body: { ...input.body, name: stableName(input.body.cwd, id) },
+    body: { ...input.body, name: explicit || stableName(input.body.cwd, id) },
   };
   const creating = transitionFirstConversation(draft, { type: 'begin' });
   try { persist(creating); } catch {

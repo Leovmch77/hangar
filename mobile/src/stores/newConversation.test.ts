@@ -173,6 +173,23 @@ describe('newConversation', () => {
     expect(attempt()?.body.name).toBe(name);
   });
 
+  it('nome explícito é gravado antes do POST e não ganha sufixo nem troca após conflito', async () => {
+    const create = deferred<SessionInfo>();
+    calls.create.mockReturnValue(create.promise);
+    calls.sessions.mockResolvedValue([{ name: 'meu-nome', state: 'idle' }]);
+    void beginAttempt('server-a', { ...input, body: { ...input.body, name: ' meu-nome ' } });
+    await settle();
+    expect(stored().body.name).toBe('meu-nome');
+    expect(calls.create.mock.calls[0][1]).toEqual(stored().body);
+
+    create.reject(httpError(409, '409: nome em uso'));
+    await settle();
+    expect(attempt()).toMatchObject({ phase: 'create_unknown', body: { name: 'meu-nome' } });
+    expect(restoreAttempt('server-a')?.body.name).toBe('meu-nome');
+    await beginAttempt('server-a', { ...input, body: { ...input.body, name: 'outro' } });
+    expect(calls.create).toHaveBeenCalledOnce();
+  });
+
   it('recusa definitiva (cwd inválido) volta ao rascunho editável com o motivo do servidor', async () => {
     calls.create.mockRejectedValueOnce(httpError(400, '400: diretório não existe'));
     await beginAttempt('server-a', input);
