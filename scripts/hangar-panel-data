@@ -106,6 +106,9 @@ def main() -> int:
     # nenhum pra religar, só editar o peers.json na mão.
     servers: list[dict] = []
     for pid, cfg in known.items():
+        # Só com "app" (sem base_url) é máquina da lista do app, não peer de recado.
+        if isinstance(cfg, dict) and "app" in cfg and not cfg.get("base_url"):
+            continue
         on = enabled(cfg)
         servers.append({"id": pid, "enabled": on, "ok": False, "error": ""})
         # Desativado à mão: sai da varredura SEM virar linha de erro — é escolha do dono, não

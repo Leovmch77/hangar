@@ -126,7 +126,8 @@ import json, sys
 try:
     peers = json.load(open(sys.argv[1]))
     p = peers.get(sys.argv[2])
-    if not p:
+    # Entrada só com "app" é máquina da lista do app, não peer de recado.
+    if not p or not p.get("base_url"):
         known = ", ".join(peers) or "nenhum"
         sys.exit("erro: servidor '%s' não está em %s (conhecidos: %s)" % (sys.argv[2], sys.argv[1], known))
     # \t como separador (mesmo formato do peers_tsv do --list): token/URL com espaço não quebra o parse.
@@ -177,6 +178,9 @@ if eu.get("pair_peers"):
     if [[ -f "$PEERS_FILE" ]]; then
         peers_tsv=$(python3 -c 'import json, sys
 for k, v in json.load(open(sys.argv[1])).items():
+    # Só com "app" (sem base_url) é máquina da lista do app, não peer: fora da varredura, calada.
+    if isinstance(v, dict) and "app" in v and not v.get("base_url"):
+        continue
     # "enabled": false -> máquina que o dono sabe que está desligada. Fica FORA da varredura
     # (cada uma custa o timeout inteiro), mas avisa: some da lista sem nota nenhuma e daqui a
     # duas semanas vira "cadê meu PC?". Endereçar servidor::sessao continua funcionando.
