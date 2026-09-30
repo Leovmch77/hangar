@@ -43,10 +43,16 @@ export default function PairSheet() {
   const [contractError, setContractError] = useState('');
   const [contractLoading, setContractLoading] = useState(false);
   const epoch = useRef(0);
+  // A ação só perde a validade com rota nova ou desmontagem; pair_peers mudando recarrega a tela, não cancela o POST.
+  const actionEpoch = useRef(0);
   const mdStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
 
   useEffect(() => {
     setActionError('');
+    setBusy(false);
+    return () => {
+      actionEpoch.current += 1;
+    };
   }, [serverId, name]);
 
   useEffect(() => {
@@ -54,7 +60,6 @@ export default function PairSheet() {
     const currentEpoch = ++epoch.current;
     setLoading(true);
     setSessions([]);
-    setBusy(false);
     setLoadError('');
     setPicked([]);
     setTask('');
@@ -135,54 +140,54 @@ export default function PairSheet() {
   async function doPair() {
     if (!picked.length || busy || loading || !routeServer) return;
     const selected = picked;
-    const currentEpoch = epoch.current;
+    const token = actionEpoch.current;
     const server = routeServer;
     setBusy(true);
     setActionError('');
     try {
       const result = await pairSession(name, selected, task.trim(), false, server);
-      if (currentEpoch !== epoch.current) return;
+      if (token !== actionEpoch.current) return;
       if (result.warning) {
         setActionError(formataErro(result.warning) ?? String(result.warning));
       } else {
         router.back();
       }
     } catch {
-      if (currentEpoch === epoch.current) setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
+      if (token === actionEpoch.current) setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
     } finally {
-      if (currentEpoch === epoch.current) setBusy(false);
+      if (token === actionEpoch.current) setBusy(false);
     }
   }
 
   async function doLeave() {
     if (busy || !routeServer) return;
-    const currentEpoch = epoch.current;
+    const token = actionEpoch.current;
     const server = routeServer;
     setBusy(true);
     setActionError('');
     try {
       const result = await unpairSession(name, server);
-      if (currentEpoch !== epoch.current) return;
+      if (token !== actionEpoch.current) return;
       if (result.warning) {
         setActionError(formataErro(result.warning) ?? String(result.warning));
       } else {
         router.back();
       }
     } catch {
-      if (currentEpoch === epoch.current) setActionError(m.par_falhou_saida());
+      if (token === actionEpoch.current) setActionError(m.par_falhou_saida());
     } finally {
-      if (currentEpoch === epoch.current) setBusy(false);
+      if (token === actionEpoch.current) setBusy(false);
     }
   }
 
   function confirmLeave() {
-    const currentEpoch = epoch.current;
+    const token = actionEpoch.current;
     Alert.alert(
       m.comandos_confirmar({ n: m.par_sair_grupo() }),
       undefined,
       [
         { text: m.comum_cancelar(), style: 'cancel' },
-        { text: m.comum_confirmar(), style: 'destructive', onPress: () => { if (currentEpoch === epoch.current) void doLeave(); } },
+        { text: m.comum_confirmar(), style: 'destructive', onPress: () => { if (token === actionEpoch.current) void doLeave(); } },
       ],
     );
   }
