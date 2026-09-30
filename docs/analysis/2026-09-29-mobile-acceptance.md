@@ -551,3 +551,55 @@ e resultados registrados. A entrega 3 **não está aceita**, mobile typecheck/te
 continuam falhando, AppState recebeu segunda correção aplicada/não revalidada,
 PDF Android e percursos do APK 3 permanecem pendentes. Revisão estática da rodada
 não pode ser descrita como aprovação funcional ou repetir a bateria.
+
+## Entrega 4 — T33: preparação de assinatura e instalação iOS
+
+HEAD: `820dc6b7b67b1a355bde9cd76562c95ad0dbcf38` (branch `mobile-deliveries-orq-cad3e6fe-t33`).
+Data: 30/09/2026, 14:40–14:45 UTC. Natureza: leituras do EAS e uma tentativa de build iOS
+não interativa. Nenhum binário gerado, instalado ou aberto; os percursos são do lote T37.
+Recursos `mobile-signing`, `mobile-build` e `mobile-version` reservados durante as operações
+e liberados ao sair. Evidências (sem UDID completo nem credencial) em `tasks/t33-*.log` do
+diretório durável.
+
+Preparação: `npm ci --prefix mobile --workspaces=false` na worktree (exit 0, lockfiles
+inalterados; mesmo aviso de script do `react-native-enriched-markdown` dos lotes anteriores).
+Todo `eas` rodou em subshell dentro de `mobile/` com `eas-cli/23.2.0` do cache do `npx`
+(24.8.0 disponível; não atualizado).
+
+### Assinatura, dispositivo e canal (Step 1)
+
+| Item | Esperado | Observado / resultado |
+|---|---|---|
+| Conta Expo e projeto | owner `jeffer1312`, projeto do `app.json` | conferido: `whoami` = `jeffer1312 (Owner)`; `project:info` = `@jeffer1312/hangar`, ID `9fd06001-…` igual ao `app.json` |
+| Equipe Apple ligada à conta | equipe com capacidade de assinar | conferido parcialmente: EAS lista uma equipe, `23AH874D3J` (organização); capacidade de assinar ad hoc não comprovada (ver credenciais) |
+| iPhone registrado | UDID do aparelho do Jefferson na equipe | conferido no EAS: um `iPhone` registrado, UDID `00008120…`, nome `Unknown`. Não confirmado que é o aparelho atual dele nem que está no perfil |
+| Credenciais de distribuição interna (certificado + perfil ad hoc) | existentes no servidor Expo | **falhou**: `eas build --platform ios --profile preview --non-interactive --freeze-credentials` → "EAS CLI couldn't find any credentials suitable for internal distribution. Run this command again in interactive mode." |
+| Canal | preview ad hoc interno; sem TestFlight/submit | escolhido o `preview` existente (`distribution: internal`); TestFlight, submit, loja e OTA não usados |
+| iOS suportado pelo binário | versão mínima do SDK 57 compatível com o aparelho | não conferido: sem binário e sem acesso ao aparelho |
+| Aparelho na máquina | iPhone por USB para diagnóstico | ausente: `idevice_id -l` sem aparelho, `usbmuxd` inativo |
+
+Bundle, owner, projeto e equipe não foram trocados. `app.json`/`eas.json` ficaram
+inalterados: nenhuma falha atribuível à configuração foi demonstrada. O aviso
+`ITSAppUsesNonExemptEncryption` ausente só afeta App Store Connect/TestFlight, fora do canal.
+
+### Build e instalação (Step 2)
+
+Uma tentativa, exit 1, antes do upload do projeto: o build não entrou na fila e nada foi
+enviado. Sem segunda tentativa, porque o impedimento é credencial, não código.
+**Impedimento:** criar certificado de distribuição e perfil ad hoc com o UDID exige login
+Apple interativo (Apple ID + 2FA) do Jefferson: `(cd <worktree>/mobile && eas credentials
+--platform ios)` ou o mesmo `eas build` sem `--non-interactive`. Depois disso, o build
+`preview` do código atual e a instalação pelo link interno no iPhone real ficam para o lote T37.
+
+### Rede local, QR/token e reinício (Step 3)
+
+| Percurso | Resultado |
+|---|---|
+| Permitir/recusar rede local e câmera | não conferido: sem binário iOS |
+| Conectar por LAN e pela VPN | não conferido |
+| Token recusado explica a causa | não conferido |
+| Reiniciar conserva servidor no SecureStore | não conferido |
+| Rede local negada oferece caminho para os Ajustes | não conferido |
+
+**T33 com impedimento registrado; aceite iOS pendente.** Assinatura e instalação dependem
+da ação interativa do Jefferson descrita no Step 2. Android não é afetado.
