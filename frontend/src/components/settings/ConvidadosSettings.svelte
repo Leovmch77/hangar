@@ -6,6 +6,7 @@
   import ConfirmSheet from '../ConfirmSheet.svelte';
   import * as m from '../../paraglide/messages';
 
+  let { ownerUser = null }: { ownerUser?: string | null } = $props();
   const servers = listOwnServers();
   let guests = $state<GuestAdmin[]>([]);
   let loading = $state(true);
@@ -56,6 +57,9 @@
     if (saving) return;
     formError = '';
     const chosen = Object.entries(roots).map(([serverId, root]) => ({ serverId, root: root.trim() }));
+    // Nome repetido sobrescreveria o cadastro de outro convidado (ou bateria no usuário do dono) depois de já ter criado acesso nos servidores.
+    const name = user.trim();
+    if (!editing && (name === ownerUser || guests.some((g) => g.user === name))) { formError = m.convidados_usuario_em_uso(); return; }
     if (password.length < 8) { formError = m.sync_password_min(); return; }
     if (!chosen.length) { formError = m.convidados_servidor_obrigatorio(); return; }
     if (chosen.some((c) => !c.root)) { formError = m.convidados_pasta_obrigatoria(); return; }

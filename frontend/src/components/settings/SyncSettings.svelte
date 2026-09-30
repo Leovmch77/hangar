@@ -124,7 +124,7 @@
     <button type="button" class="action" disabled={saving} aria-busy={saving} onclick={() => (confirmDisable = true)}>{m.sync_config_desativar()}</button>
     {#if sameOrigin}
       {#if hasOwnerKey}
-        <ConvidadosSettings />
+        <ConvidadosSettings ownerUser={setup.user ?? null} />
       {:else}
         <p class="context">{m.convidados_sem_login()}</p>
       {/if}
