@@ -131,7 +131,7 @@ impl Hangar {
         cx.spawn_in(window, async move |this, cx| {
             let result = result.await.unwrap_or_else(|_| Err(Failure::local("network_error")));
             let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(redeemed) => { window.close_all_dialogs(cx); this.add_invite_server(redeemed, window, cx); }
+                Ok(redeemed) => { this.forget_question(); window.close_all_dialogs(cx); this.add_invite_server(redeemed, window, cx); }
                 Err(error) => { let _ = dialog.update(cx, |d, cx| { (d.busy, d.error) = (false, Some(redeem_failure(&error))); cx.notify(); }); }
             });
         }).detach();

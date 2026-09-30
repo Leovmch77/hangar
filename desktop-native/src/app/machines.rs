@@ -1069,7 +1069,7 @@ impl Hangar {
         chrome::confirm_alert(window, cx, title, description, ok, ButtonVariant::Danger, move |window, cx| {
             // Saiu: o detalhe e esta pergunta fecham juntos. Não saiu: o aviso aparece onde se clicou.
             let left = this.update(cx, |this, cx| this.forget_connection(leave, window, cx)).unwrap_or(false);
-            if left { window.close_all_dialogs(cx); }
+            if left { let _ = this.update(cx, |this, _| this.forget_question()); window.close_all_dialogs(cx); }
             !left
         });
     }

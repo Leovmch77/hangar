@@ -563,7 +563,7 @@ impl Hangar {
                 self.address.update(cx, |input, cx| input.set_value(address, window, cx));
                 self.token.update(cx, |input, cx| input.set_value(token, window, cx));
                 self.connect(window, cx);
-                if !self.connection_dialog { window.close_all_dialogs(cx); }
+                if !self.connection_dialog { self.forget_question(); window.close_all_dialogs(cx); }
             }
         }
         let note = if what.is_empty() { tr("electron_import_same") } else { tr("electron_import_done").replace("{what}", &what.join(", ")) };

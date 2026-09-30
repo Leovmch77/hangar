@@ -344,6 +344,10 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Zera o estado do cartão sem tocar no diálogo: quem chama `close_all_dialogs` não passa pelo `on_close`,
+    /// e o cartão registrado sem diálogo travaria a próxima pergunta em "já aberto".
+    pub(super) fn forget_question(&mut self) { (self.question_open, self.question_card) = (None, None); }
+
     /// `close_question` só se o cartão registrado ainda é `card`: um temporizador velho não pode fechar o diálogo de outro.
     fn close_question_of(&mut self, card: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         if self.question_card.as_ref().is_some_and(|open| open.entity_id() == card) { self.close_question(window, cx); }
@@ -357,7 +361,8 @@ impl Hangar {
 }
 
 /// Assinatura de uma pergunta: a lista só atualiza depois do envio, e até lá a pergunta velha não pode voltar como nova.
-fn signature(question: &TermQuestion) -> String { format!("{}|{}", question.text, question.default) }
+/// A tela entra: a mesma pergunta repetida (senha errada) traz uma linha nova acima dela.
+fn signature(question: &TermQuestion) -> String { format!("{}|{}|{}", question.text, question.default, question.screen.join("\n")) }
 
 struct Answered { text: String, value: String, hidden: bool }
 
@@ -582,9 +587,11 @@ mod live_tests {
     }
 
     #[test]
-    fn a_question_is_new_only_when_its_text_or_default_changes() {
+    fn a_question_is_new_only_when_its_text_default_or_screen_changes() {
         let q = |text: &str, default: &str| TermQuestion { text: text.into(), default: default.into(), screen: Vec::new() };
         assert_eq!(signature(&q("Porta", "3000")), signature(&q("Porta", "3000")));
         assert_ne!(signature(&q("Porta", "3000")), signature(&q("Porta", "3001")));
+        let again = TermQuestion { screen: vec!["Sorry, try again.".into()], ..q("Porta", "3000") };
+        assert_ne!(signature(&q("Porta", "3000")), signature(&again));
     }
 }
