@@ -263,6 +263,11 @@ def _exe_claude() -> str | None:
 
 # O CLI escreve o aviso de limite no STDOUT ("You've hit your weekly limit · resets ...").
 _LIMITE_RE = re.compile(r"hit your .*limit|usage limit|rate limit", re.IGNORECASE)
+# Com exit 0 só conta como limite se a saída inteira FOR o aviso: resposta de verdade que cita
+# "limit" não pode ser descartada.
+_LIMITE_EXIT0_RE = re.compile(r"\s*(?:you'?ve hit your \w+ limit|claude ai usage limit reached|usage limit reached)",
+                              re.IGNORECASE)
+_LIMITE_EXIT0_MAX = 300
 
 
 def _esgotada(c) -> bool:
@@ -299,33 +304,70 @@ def _rodar_claude_p(exe: str, prompt: str, conta: str | None) -> subprocess.Comp
 
 
 def _bateu_limite(p: subprocess.CompletedProcess) -> bool:
-    return p.returncode != 0 and bool(_LIMITE_RE.search(f"{p.stdout or ''}\n{p.stderr or ''}"))
+    if p.returncode != 0:
+        return bool(_LIMITE_RE.search(f"{p.stdout or ''}\n{p.stderr or ''}"))
+    out = (p.stdout or "").strip()
+    return len(out) <= _LIMITE_EXIT0_MAX and bool(_LIMITE_EXIT0_RE.match(out))
+
+
+def _motivo(p: subprocess.CompletedProcess) -> str:
+    # Sem stderr (caso do limite), a causa está no stdout.
+    return ((p.stderr or "").strip() or (p.stdout or "").strip())[-500:]
+
+
+def _nome(conta: str | None) -> str:
+    return conta or "padrão"
+
+
+def _avisar_leituras(lidas: list) -> None:
+    """Deixa no log quando a escolha da conta foi feita sem dado confiável."""
+    from app import cotas
+
+    if not any(c.ativa and c.estado == "lida" and c.janelas for c in lidas):
+        _log.warning("claude -p: sem leitura de cota da conta padrão (%d leituras no cache); "
+                     "escolha caiu na padrão sem dados", len(lidas))
+    agora = time.time()
+    velhas = [c for c in lidas if c.ts is not None and agora - c.ts > cotas._TTL_S]
+    if velhas:
+        _log.info("claude -p: escolhendo com leitura de cota velha: %s",
+                  ", ".join(f"{c.label} ({int(agora - c.ts)}s)" for c in velhas))
 
 
 def _claude_p(prompt: str) -> str:
     """Roda um claude -p efemero (sonnet) com o prompt por STDIN, tools de efeito colateral negadas,
     cwd neutro (tempdir), argv sem shell, timeout 60s. Devolve o stdout (strip). Levanta ClaudePError
-    em qualquer falha (CLI ausente/timeout/exit≠0/vazio) — o endpoint mapeia pra 502.
+    em qualquer falha (CLI ausente/timeout/exit≠0/vazio/limite) — o endpoint mapeia pra 502.
     Roda na conta com cota (`_ordem_contas`); bateu limite, tenta UMA vez a próxima."""
     from app import cotas  # tardio: cotas puxa meio app, e loop é importado cedo
 
     exe = _exe_claude()
     if exe is None:
         raise ClaudePError("claude CLI não encontrado")
-    conta = _ordem_contas(cotas.cotas_claude())[0]
+    lidas = cotas.cotas_claude()
+    _avisar_leituras(lidas)
+    conta = _ordem_contas(lidas)[0]
     p = _rodar_claude_p(exe, prompt, conta)
     if _bateu_limite(p):
-        # A leitura em cache pode ser velha: relê antes de escolher a próxima.
-        proximas = [c for c in _ordem_contas(cotas.cotas_claude(atualizar=True)) if c != conta]
-        if proximas:
-            _log.info("claude -p: limite na conta %s, tentando %s", conta or "padrão", proximas[0])
-            conta = proximas[0]
-            p = _rodar_claude_p(exe, prompt, conta)
+        erro_limite = f"claude -p: conta {_nome(conta)} bateu o limite: {_motivo(p)}"
+        _log.warning("%s", erro_limite)
+        try:
+            # A leitura em cache pode ser velha: relê antes de escolher a próxima.
+            lidas = cotas.cotas_claude(atualizar=True)
+        except Exception as e:  # noqa: BLE001 - falha da releitura não pode esconder o limite
+            _log.warning("claude -p: releitura das cotas falhou: %s", e)
+            raise ClaudePError(erro_limite) from e
+        proximas = [c for c in _ordem_contas(lidas) if c != conta]
+        if not proximas:
+            raise ClaudePError(erro_limite)
+        _log.info("claude -p: tentando a conta %s", _nome(proximas[0]))
+        conta = proximas[0]
+        p = _rodar_claude_p(exe, prompt, conta)
+        if p.returncode != 0 or _bateu_limite(p):
+            raise ClaudePError(f"{erro_limite}; segunda tentativa na conta {_nome(conta)} falhou "
+                               f"(exit {p.returncode}): {_motivo(p)}")
     if p.returncode != 0:
-        # Sem stderr (caso do limite), a causa está no stdout.
-        motivo = (p.stderr or "").strip() or (p.stdout or "").strip()
-        raise ClaudePError(f"claude -p falhou (exit {p.returncode}): {motivo[-500:]}")
-    _log.info("claude -p atendido pela conta %s", conta or "padrão")
+        raise ClaudePError(f"claude -p falhou (exit {p.returncode}): {_motivo(p)}")
+    _log.info("claude -p atendido pela conta %s", _nome(conta))
     out = (p.stdout or "").strip()
     if not out:
         raise ClaudePError("claude -p devolveu saída vazia")

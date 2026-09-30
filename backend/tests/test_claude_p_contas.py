@@ -79,3 +79,45 @@ def test_falha_comum_nao_troca_de_conta(fake):
     with pytest.raises(loop.ClaudePError, match="boom"):
         loop._claude_p("q")
     assert fake["contas"] == [None]
+
+
+def test_limite_com_exit_zero_troca_de_conta(fake):
+    fake["lidas"] = [_cota("/h/.claude", ativa=True), _cota("/h/.claude-a")]
+    fake["respostas"] = [_cp(0, out=LIMITE), _cp(0, out="ok")]
+    assert loop._claude_p("q") == "ok"
+    assert fake["contas"] == [None, "/h/.claude-a"]
+
+
+def test_resposta_que_cita_limite_nao_e_limite(fake):
+    resposta = "Para evitar o rate limit, you've hit your weekly limit aparece quando a cota acaba."
+    fake["lidas"] = [_cota("/h/.claude", ativa=True), _cota("/h/.claude-a")]
+    fake["respostas"] = [_cp(0, out=resposta)]
+    assert loop._claude_p("q") == resposta
+    assert fake["contas"] == [None]
+
+
+def test_erro_final_cita_conta_do_limite_e_segunda_falha(fake):
+    fake["lidas"] = [_cota("/h/.claude", ativa=True), _cota("/h/.claude-a")]
+    fake["respostas"] = [_cp(1, out=LIMITE), _cp(1, err="boom")]
+    with pytest.raises(loop.ClaudePError) as e:
+        loop._claude_p("q")
+    assert "conta padrão bateu o limite" in str(e.value) and "boom" in str(e.value)
+
+
+def test_releitura_falha_preserva_erro_de_limite(fake, monkeypatch):
+    def cotas_claude(atualizar=False):
+        if atualizar:
+            raise RuntimeError("rede")
+        return [_cota("/h/.claude", ativa=True)]
+
+    monkeypatch.setattr(cotas, "cotas_claude", cotas_claude)
+    fake["respostas"] = [_cp(1, out=LIMITE)]
+    with pytest.raises(loop.ClaudePError, match="hit your weekly limit"):
+        loop._claude_p("q")
+
+
+def test_sem_leitura_avisa_que_caiu_na_padrao(fake, caplog):
+    fake["respostas"] = [_cp(0, out="ok")]
+    with caplog.at_level("WARNING", logger="hangar.loop"):
+        loop._claude_p("q")
+    assert "sem dados" in caplog.text
