@@ -34,6 +34,22 @@ def env(tmp_path, monkeypatch):
     def config():
         return {"ok": True}
 
+    @app.get("/api/sync/status")
+    def sync_status():
+        return {"ok": True}
+
+    @app.get("/api/sync/vault")
+    def sync_vault():
+        return {"ok": True}
+
+    @app.get("/api/sync/setup", dependencies=[Depends(require_auth)])
+    def sync_setup():
+        return {"ok": True}
+
+    @app.post("/api/engines/modelos", dependencies=[Depends(require_auth)])
+    def engine_models():
+        return {"ok": True}
+
     @app.get("/")
     def index():
         return {"page": True}
@@ -141,3 +157,31 @@ def test_guest_cookie_does_not_break_page_paths(env):
 def test_guest_keeps_codex_mode_on_own_session(env):
     client, _, tok = env
     assert client.post("/api/sessions/minha/codex/mode", headers=_h(tok)).status_code == 200
+
+
+def test_guest_cookie_does_not_lock_out_the_hub(env):
+    client, _, tok = env
+    client.cookies.set("cp_token", tok)
+    assert client.get("/api/sync/status").status_code == 200
+    assert client.get("/api/sync/vault").status_code == 200
+
+
+def test_guest_cookie_still_refused_on_hub_setup(env):
+    client, _, tok = env
+    client.cookies.set("cp_token", tok)
+    assert client.get("/api/sync/setup").status_code == 401
+
+
+def test_guest_cannot_list_engine_models(env):
+    client, _, tok = env
+    assert client.post("/api/engines/modelos", headers=_h(tok)).status_code == 403
+
+
+def test_hiding_owner_sessions_closes_open_terminal(env):
+    client, ana, tok = env
+    guest_users.update(ana.id, ana.root, sees_owner=True, owner_sees=True)
+    with client.websocket_connect(f"/api/sessions/dono/term?token={tok}") as ws:
+        guest_users.update(ana.id, ana.root, sees_owner=False, owner_sees=True)
+        with pytest.raises(WebSocketDisconnect) as e:
+            ws.receive_text()
+        assert e.value.code == 4410

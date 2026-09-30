@@ -20,7 +20,6 @@ _GLOBAL_ROUTES = share_gate._GLOBAL_ROUTES | {
     ("GET", "/api/fs/scan"),
     ("GET", "/api/fs/branches"),
     ("GET", "/api/providers"),
-    ("GET", "/api/engines/modelos"),
     ("GET", "/api/claude-configs"),
     ("GET", "/api/codex-contas"),
     ("GET", "/api/cotas"),
@@ -49,6 +48,12 @@ def guest_allowed_user(guest, method: str, path: str) -> bool:
     return guest_users.visible_to(guest, name)
 
 
+def _still_allowed(token: str, method: str, path: str) -> bool:
+    # Revê a visibilidade também: desligar "ele vê as minhas" fecha o terminal já aberto.
+    guest = guest_users.lookup_token(token)
+    return guest is not None and guest_allowed_user(guest, method, path)
+
+
 def _token(scope) -> str:
     # Mesma ordem do require_auth: header, ?token=, cookie cp_token (o app servido pela VPS usa o cookie).
     headers = dict(scope.get("headers") or [])
@@ -75,8 +80,11 @@ class GuestUserGate:
         # Na porta do convidado de convite manda o ShareGate; com a porta colidida ela É a principal.
         # Só /api/ tem dono de sessão; página, assets e /convite/ seguem sem o porteiro (o cookie
         # cp_token do próprio servidor do convidado chega aqui em toda carga da tela).
-        if scope["type"] not in ("http", "websocket") or not scope["path"].startswith("/api/") or (
-                server[1] == GUEST_PORT and not port_clash()):
+        # /api/sync/ é o hub: autentica pelo cp_sync, e o cp_token do convidado na mesma origem não
+        # pode trancá-lo fora; a parte de administração segue no require_auth, que o recusa.
+        path = scope["path"]
+        if scope["type"] not in ("http", "websocket") or not path.startswith("/api/") or (
+                path.startswith("/api/sync/")) or (server[1] == GUEST_PORT and not port_clash()):
             await self.app(scope, receive, send)
             return
         token = _token(scope)
@@ -89,7 +97,6 @@ class GuestUserGate:
             await self.app(scope, receive, send)      # require_auth recusa como sempre
             return
         method = scope.get("method", "GET")
-        path = scope["path"]
         if not await asyncio.to_thread(guest_allowed_user, guest, method, path):
             await share_gate._deny(scope, receive, send, 403, "erro_fora_do_convidado",
                                    "fora do acesso do convidado")
@@ -98,7 +105,7 @@ class GuestUserGate:
         try:
             if share_gate._is_long(scope, path):
                 await share_gate.watch(self.app, scope, receive, send,
-                                       lambda: guest_users.lookup_token(token) is not None)
+                                       lambda: _still_allowed(token, method, path))
             else:
                 await self.app(scope, receive, send)
         finally:
