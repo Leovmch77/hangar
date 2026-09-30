@@ -123,6 +123,8 @@ pub(super) struct Side {
     cost: Option<(SessionKey, Option<Cost>, Option<String>)>,
     cost_task: Option<(SessionKey, JoinHandle<()>)>,
     cost_gen: u64,
+    /// A aba Orquestração da sessão `orq` aberta.
+    pub(super) orq: super::orq_panel::State,
     files: Option<(SessionKey, Option<Result<Vec<GitFile>, String>>)>,
     diff: Option<(SessionKey, String, Option<Result<(String, bool), String>>)>,
     reloading: HashSet<SessionKey>,
@@ -146,7 +148,7 @@ pub(super) struct Side {
 impl Default for Side {
     fn default() -> Self {
         let saved = appearance::get();
-        Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0,
+        Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0, orq: Default::default(),
             files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: false,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
@@ -157,6 +159,7 @@ impl Side {
         self.shortcuts = None;
         self.stop_cost();
         self.cost = None;
+        self.orq.reset();
         self.on_select();
         self.reloading.clear();
         self.shortcut_terms.clear();
@@ -268,7 +271,7 @@ fn notice_button(id: &'static str, label: String, serious: bool, cx: &App) -> Bu
         .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(label))
 }
 
-fn agent_label(provider: &str) -> String {
+pub(super) fn agent_label(provider: &str) -> String {
     let mut chars = provider.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
@@ -481,6 +484,7 @@ impl Hangar {
                     Err(error) => (key, previous, Some(Self::failure(&error))),
                 });
             }
+            Reply::OrqPanel(generation) => self.receive_orq_panel(generation, key, result),
             Reply::GitFiles => {
                 let Some((owner, slot)) = self.side.files.as_mut() else { return; };
                 if owner != &key { return; }
@@ -739,7 +743,7 @@ impl Hangar {
         Some(body.into_any_element())
     }
 
-    fn render_shortcuts(&self, readable: bool, width: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_shortcuts(&self, readable: bool, width: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.selected_key();
         let failure = |text: String| div().text_xs().text_color(theme::warning()).child(text);
         // Carregando ou com erro, os do projeto não escondem os globais: o erro vira uma linha discreta embaixo.
@@ -896,8 +900,9 @@ impl Hangar {
 
     /// A leitura de custo acompanha o painel visível; roda no desenho da janela, que acontece mesmo com o painel fechado.
     pub(super) fn sync_side_cost(&mut self, window: &Window) {
-        let visible = self.side_width(window).is_some() && self.selected.as_ref().is_some_and(|s| s.readable());
-        self.sync_cost(visible);
+        let shown = self.side_width(window).is_some();
+        self.sync_cost(shown && self.selected.as_ref().is_some_and(|s| s.readable()));
+        self.sync_orq_panel(shown);
     }
 
     pub(super) fn render_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -926,6 +931,7 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_side_menu(cx)))))
             .child(chrome::icon_button("side-toggle", IconName::PanelRight, tr("side_hide"), cx).flex_shrink_0()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_side(cx))));
+        let orq = session.orq();
         let section = |body: AnyElement| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).child(body);
         let mut content = div().flex().flex_col();
         if detail.is_some() || self.loop_text().is_some() {
@@ -951,6 +957,7 @@ impl Hangar {
             if let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
         }
         let queued = if readable { self.queued_count() } else { 0 };
+        let orq_body = if orq { self.render_orq_panel(width, readable, cx) } else { div().into_any_element() };
         let handle = div().id("side-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
             .hover(|el| el.bg(theme::accent_dim()))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -975,6 +982,7 @@ impl Hangar {
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
                     Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.browser_key().and_then(|k| self.side.browsers.get(&k).cloned())).into_any_element(),
+                    Some(SideTab::Context) if orq => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(orq_body).into_any_element(),
                     Some(SideTab::Context) => div().id("side-scroll").flex_1().min_h_0().overflow_y_scroll().child(content).into_any_element(),
                 }))
                 .child(div().flex_shrink_0().px_4().py_3().flex().items_center().justify_between().gap_2().border_t_1().border_color(theme::border()).text_size(px(11.))

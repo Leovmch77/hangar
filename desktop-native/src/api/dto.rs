@@ -265,8 +265,9 @@ pub struct OrqAutomation {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OrqAutoMode {
-    #[serde(default)] pub jev: u32,
-    #[serde(default)] pub regex: u32,
+    /// `on` | `shadow` | `off`.
+    #[serde(default)] pub jev: String,
+    #[serde(default)] pub regex: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -573,7 +574,7 @@ mod tests {
             "team": [{"name": "arb", "role": "arbiter", "task": null, "current": true,
                 "last": {"code": "delivered", "round": 2, "ts": "2026-09-29T21:00:00Z"}}, {"name": "t1", "role": "executor", "task": 5, "current": false, "last": null}],
             "decisions": [{"task": 4, "ts": "2026-09-29T21:00:00Z", "question": "?", "parecer": null, "event_id": "e1"}],
-            "automation": {"mode": {"jev": 3, "regex": 1}, "woke": {"total": 5, "decisions": 1, "alarms": 1, "messages": 3},
+            "automation": {"mode": {"jev": "on", "regex": "shadow"}, "woke": {"total": 5, "decisions": 1, "alarms": 1, "messages": 3},
                 "alone": {"total": 6, "opened": 2, "integrated": 3, "dropped": 1}, "dropped_by_jev": 4,
                 "advanced": {"would_drop": 2, "disagree": 1, "judged": 7,
                     "min_confidence": {"p": 0.61, "choice": "act", "ts": "2026-09-29T21:00:00Z", "text": "oi"}, "by_rule": 2}},
@@ -587,6 +588,7 @@ mod tests {
                 "red_log": null, "delivery_checks": {"ok": 2, "total": 3, "failing": ["lint"]}}});
         let read: OrqPanel = serde_json::from_value(panel.clone()).unwrap();
         assert_eq!(read.tasks.integrated, 4);
+        assert_eq!((read.automation.mode.jev.as_str(), read.automation.mode.regex.as_str()), ("on", "shadow"));
         assert_eq!(read.tasks.rows[1].round, None);
         assert_eq!(read.team[0].last.as_ref().unwrap().code, "delivered");
         assert_eq!(read.automation.advanced.min_confidence.unwrap().p, Some(0.61));

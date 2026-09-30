@@ -46,7 +46,7 @@ fn badge_key(decided: &OrqDecidedBy, kind: &str) -> BadgeKey {
     }
 }
 
-fn pct(p: f64) -> String { format!("{}%", (p * 100.).round()) }
+pub(super) fn pct(p: f64) -> String { format!("{}%", (p * 100.).round()) }
 
 /// Casa decimal com o idioma escolhido no app, como o `dec` do web.
 fn dec(value: f64) -> String {

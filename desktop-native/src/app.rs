@@ -33,6 +33,7 @@ mod disk;
 mod machines;
 mod orchestration;
 mod orq_roles;
+mod orq_panel;
 mod orq_timeline;
 mod panes;
 mod popup;
@@ -207,6 +208,8 @@ enum Reply {
     // Valor aplicado e o que a fonte ao vivo mostrava no gesto.
     Applied(controls::Ctl, String, Option<String>),
     Cost(u64),
+    /// Leitura do painel da orquestração, com o número do pedido.
+    OrqPanel(u64),
     GitFiles,
     Diff(String),
     /// Rótulo do atalho e se o pedido foi No Hangar.
