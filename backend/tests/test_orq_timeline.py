@@ -485,7 +485,7 @@ def test_consumo_por_provider_e_modelo(real, tmp_path, monkeypatch):
     monkeypatch.setattr(ot, "_find_rollout", lambda home, thread: rollout)
     fake = {rollout: [_row("codex", "gpt-6.1-sol", 100, 10, 0, 1000),
                       _row("codex", "gpt-6.1-sol", 999, 0, 0, 0, ts="2026-09-29T20:00:00+00:00")],  # antes do início
-            "/p/t5.jsonl": [_row("claude", "claude-opus-5-5", 50, 5, 20, 500),
+            "/p/t5.jsonl": [_row("claude", "claude-opus-5", 50, 5, 20, 500),
                             _row("claude", "claude-sonnet-5", 1, 1, 0, 10)]}
     monkeypatch.setattr(ot, "_rows_for", lambda provider, path: fake[path])
     before = sorted(p.name for p in real.iterdir())
@@ -496,7 +496,7 @@ def test_consumo_por_provider_e_modelo(real, tmp_path, monkeypatch):
     assert "w-t1" in c["sessions"]["missing"]
     assert c["totals"]["new"] == 100 + 10 + 50 + 5 + 20 + 1 + 1 and c["totals"]["cache_read"] == 1510
     claude = next(p for p in c["providers"] if p["provider"] == "claude")
-    assert [m["model"] for m in claude["models"]] == ["claude-opus-5-5", "claude-sonnet-5"] and claude["sessions"] == 1
+    assert [m["model"] for m in claude["models"]] == ["claude-opus-5", "claude-sonnet-5"] and claude["sessions"] == 1
 
 
 def test_medicao_serve_de_fonte_para_execucao_antiga(real, monkeypatch):
