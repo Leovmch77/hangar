@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Text, View } from 'react-native';
+import { AccessibilityInfo, Text, View } from 'react-native';
+import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
@@ -15,6 +16,9 @@ const askKey = (payload: AskQuestionPayload) => payload.request_id != null
 
 export default function AskSheet() {
   const router = useRouter();
+  const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
+  const headingRef = useRef<Text>(null);
+  const presented = useRef(false);
   const { server, name } = useLocalSearchParams<{ server: string; name: string }>();
   const serverId = Array.isArray(server) ? server[0] : (server ?? '');
   const sessionName = Array.isArray(name) ? name[0] : (name ?? '');
@@ -29,6 +33,15 @@ export default function AskSheet() {
     scope.current = { chat, key: payload ? askKey(payload) : null, generation: scope.current.generation + 1 };
   }
   const request = scope.current;
+  useEffect(() => navigation.addListener('transitionEnd', ({ data }) => {
+    presented.current = !data.closing && navigation.isFocused();
+    if (presented.current && headingRef.current) AccessibilityInfo.sendAccessibilityEvent(headingRef.current, 'focus');
+  }), [navigation]);
+  useEffect(() => {
+    if (presented.current && navigation.isFocused() && headingRef.current) {
+      AccessibilityInfo.sendAccessibilityEvent(headingRef.current, 'focus');
+    }
+  }, [request, navigation]);
   const inFlight = useRef<typeof request | null>(null);
   const [pendingRequest, setPendingRequest] = useState<typeof request | null>(null);
   const mounted = useRef(true);
@@ -73,8 +86,10 @@ export default function AskSheet() {
 
   if (!payload) {
     return (
-      <View style={styles.empty}>
-        <Text style={styles.hint}>{pendingRequest ? m.askq_enviando() : m.askq_sua_resposta()}</Text>
+      <View style={styles.empty} accessibilityViewIsModal>
+        <Text style={styles.hint} accessibilityLiveRegion="polite" accessibilityState={{ busy: !!pendingRequest }}>
+          {pendingRequest ? m.askq_enviando() : m.askq_sua_resposta()}
+        </Text>
         {routeError ? <Text style={styles.error} accessibilityRole="alert">{routeError}</Text> : null}
       </View>
     );
@@ -142,7 +157,10 @@ export default function AskSheet() {
 
   return (
     <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.root}>
-      <View style={styles.inner}>
+      <View style={styles.inner} accessibilityViewIsModal onAccessibilityEscape={() => { if (router.canGoBack()) router.back(); }}>
+        <Text ref={headingRef} accessible accessibilityRole="header" style={styles.heading}>
+          {m.board_precisa_de_voce()}
+        </Text>
         <AskStepper key={request.generation} payload={payload} onSubmit={handleSubmit} onClose={handleCancel} />
         {routeError ? (
           <Text style={styles.error} accessibilityRole="alert">
@@ -161,6 +179,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   inner: {
     flex: 1,
+  },
+  heading: {
+    color: theme.tokens.text.primary,
+    fontSize: theme.base.text.base,
+    fontWeight: '600',
+    paddingHorizontal: theme.base.space[4],
+    paddingTop: theme.base.space[2],
   },
   empty: {
     flex: 1,

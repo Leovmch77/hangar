@@ -9,12 +9,36 @@ import type { FirstConversationAttempt } from '@hangar/core';
 vi.mock('react-native', async (original) => ({
   ...await original<object>(),
   AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+  AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
+  Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref }: {
+    accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean }; accessibilityRole?: string;
+    accessibilityLabel?: string; onPress?: () => void; children: ReactNode; disabled?: boolean;
+    accessibilityHint?: string; ref?: import('react').Ref<HTMLButtonElement>;
+  }) => createElement('button', {
+    ref, role: accessibilityRole, 'aria-label': accessibilityLabel, title: accessibilityHint, onClick: onPress, disabled,
+    'aria-disabled': accessibilityState?.disabled, 'aria-busy': accessibilityState?.busy,
+    'aria-expanded': accessibilityState?.expanded,
+  }, children),
 }));
 
+const focusNavigation = vi.hoisted(() => ({
+  listeners: new Map<string, Set<(event: { data: { closing: boolean } }) => void>>(),
+  focused: true,
+}));
+const nativeNavigation = {
+  isFocused: () => focusNavigation.focused,
+  addListener: (name: string, listener: (event: { data: { closing: boolean } }) => void) => {
+    const listeners = focusNavigation.listeners.get(name) ?? new Set();
+    listeners.add(listener);
+    focusNavigation.listeners.set(name, listeners);
+    return () => { listeners.delete(listener); };
+  },
+};
 const routerPush = vi.hoisted(() => vi.fn());
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 vi.mock('expo-router', () => ({
+  useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
 }));
@@ -39,7 +63,12 @@ vi.mock('./StatsStrip', () => ({ StatsStrip: () => null }));
 vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
 vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: () => createElement('div', { 'data-create': true }) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
-vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+const sheetEvents = vi.hoisted(() => ({ presented: undefined as (() => void) | undefined, dismissed: undefined as (() => void) | undefined }));
+vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDidPresent, onDismiss }: { children: ReactNode; onDidPresent?: () => void; onDismiss?: () => void }) => {
+  sheetEvents.presented = onDidPresent;
+  sheetEvents.dismissed = onDismiss;
+  return createElement('div', null, children);
+} }));
 vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
@@ -48,7 +77,8 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
-    .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again').split(' ').map((k) => [k, () => k]),
+    .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
+    .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando').split(' ').map((k) => [k, () => k]),
 ));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
@@ -77,8 +107,9 @@ vi.mock('./draftAttachments', () => ({
   removeDraftAttachment: vi.fn(),
 }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
-vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText }: { value: string; onChangeText: (text: string) => void }) =>
-  createElement('textarea', { value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
+vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref }: {
+  value: string; onChangeText: (text: string) => void; accessibilityLabel?: string; ref?: import('react').Ref<HTMLTextAreaElement>;
+}) => createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
 }));
 vi.mock('../features/pills/ModelPill', () => ({ ModelPill: () => null }));
 vi.mock('../features/pills/EffortPill', () => ({ EffortPill: () => null }));
@@ -112,6 +143,7 @@ vi.mock('../stores/newConversation', () => ({
     && firstInput.attempt.sessionName === name ? firstInput.attempt : null,
   confirmFirstInput: firstInput.confirm,
   sendFirstInput: firstInput.send,
+  restoreAttempt: () => null,
 }));
 
 // Lista isolada: a bolha só registra o texto recebido, pra provar o que chega nela.
@@ -149,6 +181,8 @@ import { Composer } from './Composer';
 import { OptionButtons } from './OptionButtons';
 import ChatScreen from '../../app/s/[server]/[name]/index';
 import CreateRoute from '../../app/create';
+import { NewConversation } from '../features/create/NewConversation';
+import { AccessibilityInfo } from 'react-native';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -211,6 +245,37 @@ describe('terminal escondido', () => {
   });
 });
 
+it('opções da Nova conversa recebem foco e devolvem ao seletor que abriu, preservando o rascunho', async () => {
+  firstInput.attempt = null;
+  vi.mocked(AccessibilityInfo.sendAccessibilityEvent).mockClear();
+  const { container, root } = await render(createElement(NewConversation, {
+    server: { id: 's1' } as never,
+    destination: null, destinationPending: false, destinationSummary: 'srv /repo',
+    settingsSummary: 'Codex', notices: null, options: null,
+    body: { cwd: '/repo', provider: 'codex' }, blocked: false,
+  }));
+  const field = container.querySelector('textarea')!;
+  act(() => {
+    field.value = 'primeira mensagem';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const opener = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Codex')!;
+  expect(opener.title).toBe('nova_conversa_config_hint');
+  act(() => opener.click());
+  expect(opener.getAttribute('aria-expanded')).toBe('true');
+  expect(AccessibilityInfo.sendAccessibilityEvent).not.toHaveBeenCalled();
+  act(() => sheetEvents.presented?.());
+  const close = [...container.querySelectorAll('button')].find((b) => b.textContent === 'nova_conversa_opcoes_fechar')!;
+  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(close, 'focus');
+  act(() => close.click());
+  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
+  act(() => sheetEvents.dismissed?.());
+  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(opener, 'focus');
+  expect(opener.getAttribute('aria-expanded')).toBe('false');
+  expect(field.value).toBe('primeira mensagem');
+  act(() => root.unmount());
+});
+
 describe('Parar no Composer', () => {
   const props = { serverId: 's1', name: 'sess' };
 
@@ -238,7 +303,47 @@ describe('Parar no Composer', () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, { ...props, onStop: () => {}, stopping: true }));
     expect(container.querySelector<HTMLButtonElement>('[aria-label="composer_parar"]')!.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="composer_parar"]')!.getAttribute('aria-busy')).toBe('true');
     act(() => root.unmount());
+  });
+
+  it('VoiceOver identifica o campo preenchido e o estado de envio enquanto Parar continua disponível', async () => {
+    composerChat.state = 'working';
+    let finish!: () => void;
+    composerChat.send.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const { container, root } = await render(createElement(Composer, { ...props, draft: 'texto', onStop: () => {} }));
+    const send = container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
+    expect(container.querySelector('[aria-label="composer_mensagem"]')).not.toBeNull();
+    expect(send.getAttribute('aria-disabled')).toBe('false');
+    act(() => send.click());
+    expect(send.getAttribute('aria-disabled')).toBe('true');
+    expect(send.getAttribute('aria-busy')).toBe('true');
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="composer_parar"]')!.disabled).toBe(false);
+    await act(async () => finish());
+    expect(send.getAttribute('aria-busy')).toBe('false');
+    act(() => root.unmount());
+  });
+
+  it('foco acessível volta ao campo só depois da folha sair, sem abrir teclado nem repetir no streaming', async () => {
+    vi.mocked(AccessibilityInfo.sendAccessibilityEvent).mockClear();
+    const { container, root } = await render(createElement(Composer, { ...props, draft: 'rascunho' }));
+    const emit = (name: string, closing: boolean) => act(() => {
+      focusNavigation.listeners.get(name)?.forEach((listener) => listener({ data: { closing } }));
+    });
+    emit('transitionEnd', false);
+    expect(AccessibilityInfo.sendAccessibilityEvent).not.toHaveBeenCalled();
+    focusNavigation.focused = false;
+    emit('blur', true);
+    emit('transitionEnd', true);
+    expect(AccessibilityInfo.sendAccessibilityEvent).not.toHaveBeenCalled();
+    focusNavigation.focused = true;
+    emit('transitionEnd', false);
+    expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledExactlyOnceWith(container.querySelector('textarea'), 'focus');
+    await act(async () => root.render(createElement(Composer, { ...props, draft: 'rascunho' })));
+    emit('transitionEnd', false);
+    expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+    expect([...focusNavigation.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
   });
 
   it('sem onStop (quem não pode parar): nada de Parar mesmo trabalhando', async () => {

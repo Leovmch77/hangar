@@ -6082,6 +6082,8 @@
   "nova_conversa_placeholder": "Write the first message",
   "nova_conversa_enviar": "Send",
   "nova_conversa_opcoes": "Options",
+  "nova_conversa_destino_hint": "Opens options to choose the machine and folder for the conversation.",
+  "nova_conversa_config_hint": "Opens provider, model and effort options.",
   "nova_conversa_sem_destino": "Pick a project to send.",
   "nova_conversa_guardada": "Saved message",
   "nova_conversa_abrir": "Open conversation",

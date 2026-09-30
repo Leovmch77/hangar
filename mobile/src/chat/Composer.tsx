@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInputKeyPressEventData } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, AppState, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
+import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
@@ -16,7 +17,7 @@ import { useSessions } from '../stores/sessions';
 import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, finishDictation, recoverDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
-import { useRouter } from 'expo-router';
+import { useNavigation, useRouter } from 'expo-router';
 import { ModelPill } from '../features/pills/ModelPill';
 import { EffortPill } from '../features/pills/EffortPill';
 import { PermissionPill } from '../features/pills/PermissionPill';
@@ -88,6 +89,19 @@ function keepRecoverable(serverId: string, name: string, old: ConversationDraft)
 export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
+  const inputRef = useRef<TextInput>(null);
+  const restoreFocus = useRef(false);
+  useEffect(() => {
+    const blur = navigation.addListener('blur', () => { restoreFocus.current = true; });
+    const appeared = navigation.addListener('transitionEnd', ({ data }) => {
+      if (data.closing || !navigation.isFocused() || !restoreFocus.current) return;
+      restoreFocus.current = false;
+      // O foco do leitor volta depois da animação, sem abrir o teclado.
+      if (inputRef.current) AccessibilityInfo.sendAccessibilityEvent(inputRef.current, 'focus');
+    });
+    return () => { blur(); appeared(); };
+  }, [navigation]);
   const chat = chatStore(serverId, name);
   const pending = chat.use((s) => s.pending);
   const events = chat.use((s) => s.events);
@@ -1003,6 +1017,9 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         <View style={styles.row}>
           <View style={styles.inputWrap}>
             <MultilineInput
+              ref={inputRef}
+              accessible
+              accessibilityLabel={m.composer_mensagem()}
               value={text}
               onChangeText={handleChangeText}
               placeholder={m.composer_mensagem()}
@@ -1038,6 +1055,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           <Pressable
             onPress={() => setAttachMenuOpen(true)}
             disabled={uploading || sending || gravando}
+            accessibilityState={{ disabled: uploading || sending || gravando, busy: uploading }}
             style={[styles.iconBtn, (uploading || gravando) && styles.iconBtnDisabled]}
             accessibilityLabel={m.composer_anexar_arquivo()}
             accessibilityRole="button"
@@ -1065,6 +1083,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           <Pressable
             onPress={handleSend}
             disabled={!canSend}
+            accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
             style={[styles.sendBtn, { backgroundColor: theme.tokens.accent.base }, !canSend && styles.sendBtnDisabled]}
             accessibilityLabel={m.composer_enviar_mensagem()}
             accessibilityRole="button"

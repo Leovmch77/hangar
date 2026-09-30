@@ -6082,6 +6082,8 @@
   "nova_conversa_placeholder": "Escreva a primeira mensagem",
   "nova_conversa_enviar": "Enviar",
   "nova_conversa_opcoes": "Opções",
+  "nova_conversa_destino_hint": "Abre as opções para escolher a máquina e a pasta da conversa.",
+  "nova_conversa_config_hint": "Abre as opções de provedor, modelo e esforço.",
   "nova_conversa_sem_destino": "Escolha um projeto para poder enviar.",
   "nova_conversa_guardada": "Mensagem guardada",
   "nova_conversa_abrir": "Abrir conversa",
