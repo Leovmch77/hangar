@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto } from '@hangar/core';
 import type { SessionInfo, Server, AggSession } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
@@ -26,6 +26,7 @@ export interface SessionsState {
   release: () => void;
   order: () => AggSession[];
   reconnect: () => void;
+  setForeground: (active: boolean) => void;
   refreshServers: () => void;
   markDeleting: (serverId: string, name: string) => void;
   unmarkDeleting: (serverId: string, name: string) => void;
@@ -34,18 +35,47 @@ export interface SessionsState {
 // internas — fora do set() para não virar proxy
 const slots = new Map<string, Slot>();
 const streams = new Map<string, ReturnType<typeof openSessionsStream>>();
+type ConnectionAttempt = { server: Server; generation: number; abort: AbortController };
+const connecting = new Map<string, ConnectionAttempt>();
 const retryDelays = new Map<string, number>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let hidden = new Map<string, string | null>();
 let serversCache: Server[] = [];
 let refs = 0;
+let foreground = true;
+let generation = 0;
 let unsubServers: (() => void) | null = null;
 let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
 
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
 
+function hasServer(server: Server) {
+  return serversCache.some((s) => s.id === server.id && s.baseUrl === server.baseUrl && s.token === server.token);
+}
+
+function isCurrent(attempt: ConnectionAttempt) {
+  return foreground && refs > 0 && attempt.generation === generation && !attempt.abort.signal.aborted && hasServer(attempt.server);
+}
+
+function disconnect(id: string) {
+  const stream = streams.get(id);
+  streams.delete(id);
+  stream?.close();
+  clearTimeout(retryTimers.get(id));
+  retryTimers.delete(id);
+  retryDelays.delete(id);
+  connecting.get(id)?.abort.abort();
+  esquecerRota(id);
+}
+
+function pause() {
+  generation++;
+  for (const id of new Set([...streams.keys(), ...retryTimers.keys(), ...connecting.keys()])) disconnect(id);
+}
+
 function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  if (!foreground || refs === 0 || retryTimers.has(id)) return;
   const delay = retryDelays.get(id) ?? RETRY_MIN_MS;
   const servidor = serversCache.find((s) => s.id === id);
   if (servidor) registrarDiag({ evento: 'lista.retentativa', tela: 'lista', espera_ms: delay }, servidor.baseUrl);
@@ -55,7 +85,7 @@ function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<Se
     id,
     setTimeout(() => {
       retryTimers.delete(id);
-      if (refs > 0 && serversCache.some((s) => s.id === id)) {
+      if (foreground && refs > 0 && serversCache.some((s) => s.id === id)) {
         connect(serversCache, get, set);
       }
     }, delay),
@@ -77,30 +107,48 @@ function recompute(set: (p: Partial<SessionsState>) => void) {
 }
 
 function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
-  // fecha streams de servidores removidos
-  for (const [id, es] of streams) {
-    if (!list.some((s) => s.id === id)) {
-      es.close();
-      streams.delete(id);
-      slots.delete(id);
-      clearTimeout(retryTimers.get(id));
-      retryTimers.delete(id);
-      retryDelays.delete(id);
-    }
-  }
+  for (const id of slots.keys()) if (!list.some((s) => s.id === id)) slots.delete(id);
+  if (!foreground || refs === 0) { recompute(set); return; }
   for (const s of list) {
     if (streams.has(s.id)) continue;
     if (retryTimers.has(s.id)) continue;
-    if (!rotaDecidida(s.id)) {
-      void decidirRota(s).then(() => { if (refs > 0 && serversCache.some((x) => x.id === s.id)) connect(serversCache, get, set); });
-      continue;
+    if (connecting.has(s.id)) continue;
+    const attempt = { server: { ...s }, generation, abort: new AbortController() };
+    connecting.set(s.id, attempt);
+    void synchronize(attempt, get, set);
+  }
+  recompute(set);
+}
+
+async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  const s = attempt.server;
+  try {
+    if (!rotaDecidida(s.id)) await decidirRota(s);
+    if (!isCurrent(attempt)) return;
+    try {
+      const response = await probeServerResponse(s, '/api/sessions', { signal: comTeto(attempt.abort.signal, 4000) });
+      if (!response.ok) throw new Error(String(response.status));
+      const sessions = await response.json() as SessionInfo[];
+      if (!isCurrent(attempt)) return;
+      if (!Array.isArray(sessions)) throw new Error('invalid_sessions');
+      slots.set(s.id, { sessions, error: null });
+      recompute(set);
+    } catch (error) {
+      if (!isCurrent(attempt)) return;
+      registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'sincronia',
+        detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
+      slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+      recompute(set);
     }
+    if (!isCurrent(attempt)) return;
     const es = openSessionsStream(s);
+    const active = () => isCurrent(attempt) && streams.get(s.id) === es;
     let falhaDados = false;
     // ping mantém o watchdog do adapter vivo (wrap rearma). Sem listener,
     // ping não rearma e o adapter fecharia stream saudável.
     es.addEventListener('ping', () => {});
     es.addEventListener('sessions', (e) => {
+      if (!active()) return;
       retryDelays.delete(s.id);
       try {
         slots.set(s.id, { sessions: JSON.parse(e.data) as SessionInfo[], error: null });
@@ -114,6 +162,7 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
       recompute(set);
     });
     es.addEventListener('list_error', () => {
+      if (!active()) return;
       falhaDados = true;
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'produtor_falhou' }, s.baseUrl);
       // resposta viva, só list falhou — mantém última lista boa, marca erro distinto
@@ -123,16 +172,33 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
       recompute(set);
     });
     es.onerror = () => {
+      if (!active()) return;
       slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
       recompute(set);
-      es.close();
       streams.delete(s.id);
+      es.close();
       esquecerRota(s.id);
       scheduleRetry(s.id, get, set);
     };
     streams.set(s.id, es);
+  } catch (error) {
+    if (!isCurrent(attempt)) return;
+    registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'conexao',
+      detalhe: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
+    slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+    recompute(set);
+    esquecerRota(s.id);
+    scheduleRetry(s.id, get, set);
+  } finally {
+    if (connecting.get(s.id) === attempt) {
+      connecting.delete(s.id);
+      if (!isCurrent(attempt)) {
+        // A decisão compartilhada de rota não aceita abort; só a geração atual pode usá-la.
+        esquecerRota(s.id);
+        if (foreground && refs > 0) connect(serversCache, get, set);
+      }
+    }
   }
-  recompute(set);
 }
 
 function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
@@ -144,21 +210,18 @@ function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => voi
     const igual =
       next.length === serversCache.length &&
       next.every((s, i) => s.id === serversCache[i]?.id && s.baseUrl === serversCache[i]?.baseUrl && s.token === serversCache[i]?.token);
+    const previous = serversCache;
     serversCache = next.slice();
     if (igual) return;
-    if (refs > 0) connect(serversCache, get, set);
-    else recompute(set);
+    for (const s of previous) if (!hasServer(s)) disconnect(s.id);
+    connect(serversCache, get, set);
   });
 }
 
 function stop(set: (p: Partial<SessionsState>) => void) {
   unsubServers?.();
   unsubServers = null;
-  for (const t of retryTimers.values()) clearTimeout(t);
-  retryTimers.clear();
-  retryDelays.clear();
-  for (const es of streams.values()) es.close();
-  streams.clear();
+  pause();
   slots.clear();
   // hidden mantém? Não — limpa ao parar para próximo retain começar limpo
   hidden = new Map<string, string | null>();
@@ -183,19 +246,21 @@ export const useSessions = create<SessionsState>((set, get) => ({
     return sortSessions(get().rows);
   },
   reconnect() {
-    if (refs === 0) return;
-    for (const es of streams.values()) es.close();
-    streams.clear();
-    // limpa timers de retry para forçar reconexão imediata
-    for (const t of retryTimers.values()) clearTimeout(t);
-    retryTimers.clear();
-    retryDelays.clear();
+    if (refs === 0 || !foreground) return;
+    pause();
     connect(serversCache, get, set);
   },
+  setForeground(active) {
+    if (active === foreground) return;
+    foreground = active;
+    if (!active) pause();
+    else get().reconnect();
+  },
   refreshServers() {
+    const previous = serversCache;
     serversCache = useServers.getState().servers.slice();
-    if (refs > 0) connect(serversCache, get, set);
-    else recompute(set);
+    for (const s of previous) if (!hasServer(s)) disconnect(s.id);
+    connect(serversCache, get, set);
   },
   markDeleting(serverId: string, name: string) {
     hidden.set(`${serverId}::${name}`, jsonlDaSessao(slots, serverId, name));
@@ -209,10 +274,11 @@ export const useSessions = create<SessionsState>((set, get) => ({
 
 // expõe reset apenas para testes (isso não vai para produção)
 export function _resetSessionsForTests() {
-  for (const t of retryTimers.values()) clearTimeout(t);
+  pause();
+  connecting.clear();
+  foreground = true;
   retryTimers.clear();
   retryDelays.clear();
-  for (const es of streams.values()) es.close();
   streams.clear();
   slots.clear();
   hidden = new Map<string, string | null>();
