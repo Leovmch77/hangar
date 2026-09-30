@@ -81,6 +81,7 @@ from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
+from app import guest_users_api
 from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
@@ -600,6 +601,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 app.include_router(sync_admin_router)
 app.include_router(sync_router)
+app.include_router(guest_users_api.router)
 app.include_router(deploy_router)
 # Roteadores por assunto (Task 1 do plano descoberta-e-configuracao): cada Task do lote escreve
 # só no módulo dela. Última edição de api.py deste plano.
