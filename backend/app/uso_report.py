@@ -509,7 +509,20 @@ def _origens_recentes() -> tuple[float, dict[str, str]]:
     return atual
 
 
+_origins_lock = threading.Lock()
+
+
 def _atualizar_origens(home: Path | None = None, force: bool = False) -> None:
+    # Uma varredura por vez: uma lenta terminando depois da seguinte gravaria o mapa velho por cima.
+    if not _origins_lock.acquire(blocking=force):
+        return
+    try:
+        _atualizar_origens_sob_trava(home, force)
+    finally:
+        _origins_lock.release()
+
+
+def _atualizar_origens_sob_trava(home: Path | None, force: bool) -> None:
     global _origens_cache, _origins_watch
     home = home or Path.home()
     try:

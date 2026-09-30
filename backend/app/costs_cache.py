@@ -528,12 +528,12 @@ _SELECT_USAGE = "SELECT " + ", ".join("?" if f.name == "conta" else f"u.{f.name}
 
 
 def iter_usage_rows(scope: str, conta: str, desde: str | None = None) -> Iterable[tuple]:
-    """Linhas de uso como tuplas na ordem dos campos de `UsoLinha` (booleanos como 0/1), lidas
-    do cursor à medida que o relatório soma: sem a lista inteira nem um objeto por linha."""
+    """Linhas de uso como tuplas na ordem dos campos de `UsoLinha` (booleanos como 0/1), sem um
+    objeto por linha. Lidas de uma vez: leitura aberta durante a soma segura o checkpoint do WAL."""
     where, args = _filtro(scope, desde, None, "u")
     conn = _abrir()
     try:
-        yield from conn.execute(f"{_SELECT_USAGE} FROM uso u WHERE {where} ORDER BY u.rowid", (conta, *args))
+        return conn.execute(f"{_SELECT_USAGE} FROM uso u WHERE {where} ORDER BY u.rowid", (conta, *args)).fetchall()
     finally:
         conn.close()
 

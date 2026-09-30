@@ -73,7 +73,7 @@ import * as m from '../paraglide/messages';
   );
 
   // Prévia: o trecho aberto mostra a mensagem inteira e as vizinhas, sem sair da busca.
-  const chaveHit = (h: Hit) => `${h.serverId}/${h.session_id}/${h.event_id ?? h.line}`;
+  const chaveHit = (h: Hit) => `${h.serverId}/${h.project}/${h.session_id}/${h.event_id || h.line}`;
   // Chave repetida num {#each} derruba o componente e a busca congela em "Buscando…": servidor
   // com backend antigo ainda devolve a mesma mensagem duas vezes quando o transcript a repete.
   function semRepetidos(hits: Hit[]): Hit[] {
