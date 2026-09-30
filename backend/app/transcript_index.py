@@ -102,6 +102,8 @@ def _connect(path: Path) -> sqlite3.Connection:
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        # Sem teto, o WAL fica do tamanho do maior lote de escrita mesmo após o checkpoint.
+        conn.execute("PRAGMA journal_size_limit=8388608")
     except BaseException:
         conn.close()
         raise
