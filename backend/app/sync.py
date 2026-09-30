@@ -89,6 +89,7 @@ def _account(v: dict | None, user: str) -> dict | None:
 def verify_credentials(user: str, auth_hash: str) -> bool:
     acc = _account(load_vault(), user)
     if not acc:
+        make_verifier(auth_hash, bytes(16))  # mesmo custo de uma conta real: o tempo não revela quem existe
         return False
     vsalt = base64.b64decode(acc["verifier_salt"])
     return hmac.compare_digest(make_verifier(auth_hash, vsalt), acc["auth_verifier"])
@@ -101,14 +102,20 @@ _SESSION_SECRET = (settings.sync_session_secret or secrets.token_hex(32)).encode
 COOKIE_NAME = "cp_sync"
 
 
-def sign_session(user: str) -> str:
+def _generation(acc: dict) -> str:
+    # Muda quando a conta é recriada ou troca de senha (verifier_salt novo): derruba cookies antigos.
+    return base64.b64decode(acc["verifier_salt"])[:4].hex()
+
+
+def sign_session(user: str, gen: str | None = None) -> str:
     exp = int(time.time()) + _SESSION_TTL
-    msg = f"{user}.{exp}"
+    msg = f"{user}.{exp}" if gen is None else f"{user}.{exp}:{gen}"
     sig = hmac.new(_SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
     return f"{msg}.{sig}"
 
 
-def verify_session(cookie: str | None) -> str | None:
+def verify_session(cookie: str | None) -> tuple[str, str | None] | None:
+    # Devolve (usuário, geração); cookie no formato antigo (`user.exp.sig`) vem com geração None.
     if not cookie:
         return None
     try:
@@ -119,31 +126,41 @@ def verify_session(cookie: str | None) -> str | None:
     good = hmac.new(_SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(good, sig):
         return None
-    if int(exp_s) < int(time.time()):
+    exp_s, _, gen = exp_s.partition(":")
+    if not exp_s.isdigit() or int(exp_s) < int(time.time()):
         return None
-    return user
+    return user, (gen or None)
 
 
-def _set_session_cookie(response: Response, user: str, request: Request) -> None:
+def _set_session_cookie(response: Response, user: str, request: Request, gen: str | None = None) -> None:
     # Loopback bind = dev over http (Secure off senao o cookie nao gruda); qualquer bind non-loopback
     # = deploy real (HTTPS exigido) -> forca Secure mesmo que o proxy reporte http.
     secure = request.url.scheme == "https" or settings.lan_bind_ip not in _LOOPBACK
     response.set_cookie(
-        COOKIE_NAME, sign_session(user),
+        COOKIE_NAME, sign_session(user, gen),
         max_age=_SESSION_TTL, httponly=True, samesite="lax", secure=secure, path="/",
     )
 
 
 def require_session(request: Request, response: Response) -> str:
     cookie = request.cookies.get(COOKIE_NAME)
-    user = verify_session(cookie)
+    session = verify_session(cookie)
     ip = request.client.host if request.client else "?"
+    user = gen = None
+    if session:
+        user, gen = session
+        v = load_vault()
+        if v:
+            acc = _account(v, user)
+            # Formato antigo (sem geração) só vale para o dono, para o deploy não deslogá-lo.
+            if acc is None or (gen != _generation(acc) if gen else user != v.get("user")):
+                user = None
     if not user:
         registrar_acesso(ip, "cookie", "sessao_invalida_ou_expirada" if cookie else "cookie_ausente",
                          dominio="sync.sessao")
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
     registrar_acesso(ip, "cookie", None, dominio="sync.sessao")
-    _set_session_cookie(response, user, request)  # sliding: renova o prazo a cada request autenticado
+    _set_session_cookie(response, user, request, gen)  # sliding: renova o prazo a cada request autenticado
     return user
 
 
@@ -328,11 +345,17 @@ class VaultPutBody(BaseModel):
 
 @sync_router.get("/prelogin")
 def prelogin(user: str) -> dict:
-    # Usuário desconhecido recebe o salt do dono, para não revelar quem existe; falha depois no /login.
-    # Sem cadastro nenhum, devolve um salt fixo de enfeite.
+    # Usuário desconhecido recebe um salt falso e estável por nome (HMAC com o verifier_salt do dono,
+    # que sobrevive a restart), indistinguível do salt de uma conta real. Sem cadastro, salt fixo.
     v = load_vault()
-    acc = _account(v, user) or v
-    salt = acc["salt"] if acc else base64.b64encode(b"unregistered----").decode()
+    acc = _account(v, user)
+    if acc:
+        salt = acc["salt"]
+    elif v:
+        key = base64.b64decode(v["verifier_salt"])
+        salt = base64.b64encode(hmac.new(key, user.encode(), hashlib.sha256).digest()[:16]).decode()
+    else:
+        salt = base64.b64encode(b"unregistered----").decode()
     return {"salt": salt, "iterations": PBKDF2_ITERATIONS}
 
 
@@ -347,7 +370,7 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
         registrar_acesso(ip, "senha", "credenciais_invalidas", dominio="sync.login")
         record_fail(ip)
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
-    _set_session_cookie(response, body.user, request)
+    _set_session_cookie(response, body.user, request, _generation(_account(load_vault(), body.user)))
     registrar_acesso(ip, "senha", None, dominio="sync.login")
     diag.registrar("sync.login_concluido")
     return {"ok": True}

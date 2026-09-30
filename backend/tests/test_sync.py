@@ -304,3 +304,52 @@ def test_deleted_guest_vault_is_401(client):
     assert client.post("/api/sync/guests/ana/delete").json() == {"ok": True}
     assert guest.get("/api/sync/vault").status_code == 401
     assert guest.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH}).status_code == 401
+
+
+def test_prelogin_unknown_names_get_stable_fake_salts(client):
+    _owner_logged(client)
+    _add_guest(client)
+    salt = lambda u: client.get("/api/sync/prelogin", params={"user": u}).json()["salt"]
+    assert salt("x") != salt("y")
+    assert salt("x") == salt("x")
+    assert salt("x") != SALT and salt("y") != SALT
+
+
+def test_login_unknown_user_still_pays_the_verifier(client, monkeypatch):
+    import app.sync as sync
+    _owner_logged(client)
+    calls = []
+    real = sync.make_verifier
+    monkeypatch.setattr(sync, "make_verifier", lambda *a: calls.append(a) or real(*a))
+    assert client.post("/api/sync/login", json={"user": "ghost", "auth_hash": GUEST_AUTH}).status_code == 401
+    assert len(calls) == 1
+
+
+def test_recreated_guest_rejects_old_cookie(client):
+    _owner_logged(client)
+    _add_guest(client)
+    guest = TestClient(client.app)
+    guest.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH})
+    assert guest.get("/api/sync/vault").status_code == 200
+    client.post("/api/sync/guests/ana/delete")
+    _add_guest(client)                                   # outra conta "ana"
+    assert guest.get("/api/sync/vault").status_code == 401
+
+
+def test_owner_old_format_cookie_still_works(client):
+    import hashlib, hmac, time
+    import app.sync as sync
+    _owner_logged(client)
+    msg = f"j.{int(time.time()) + 3600}"
+    sig = hmac.new(sync._SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
+    old = TestClient(client.app)
+    old.cookies.set("cp_sync", f"{msg}.{sig}")
+    assert old.get("/api/sync/vault").status_code == 200
+    assert old.get("/api/sync/guests").status_code == 200   # e segue sendo o dono
+    # o mesmo formato antigo não vale para convidado
+    _add_guest(client)
+    msg = f"ana.{int(time.time()) + 3600}"
+    sig = hmac.new(sync._SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
+    g = TestClient(client.app)
+    g.cookies.set("cp_sync", f"{msg}.{sig}")
+    assert g.get("/api/sync/vault").status_code == 401
