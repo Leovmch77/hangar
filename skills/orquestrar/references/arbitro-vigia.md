@@ -133,7 +133,29 @@ Done when `hangar-send --list` shows only the current phase's sessions plus you.
 | phase-1 item missing (untouchables, verification command) | decide the conservative default, record, report later |
 | two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline: ask the user whether the path is worth the cost, spend in hand. User unavailable and the spiral started → tighten the criterion in the next reviewer kick-off (`arbitro-lancamento.md`, "Tightened criterion"); journal it with the date; not before the third round |
 
-Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask without stopping: declare decision and default, proceed. 0–3 → decide, record, report later. Stop between Tasks, never during. Wake with the decision ready: stakes, options, recommendation.
+Avalie antes de perguntar: 0–3, decida e registre; decisão operacional dentro do escopo,
+pergunte em texto com opções letradas, recomendação explícita e prazo de 10 min. Não use
+AskUserQuestion/request_user_input bloqueante, não pare vigia nem Tasks independentes.
+Quantidade de linhas/estimativa excedida não exige consulta ou exceção por si só.
+
+Registre id da pergunta, opções, recomendação, horário e prazo antes de enviá-la. Sem resposta
+até o prazo, aplique a recomendação: essa conduta está previamente autorizada para decisões
+operacionais da execução. Registre "prazo vencido; recomendação aplicada", não aprovação
+recebida. Resposta anterior ao prazo prevalece; pergunta já resolvida não é aplicada outra vez.
+Isso não autoriza sair da conta/modelo/escopo escolhidos, nem ação destrutiva ou externa sem
+autorização: mantenha essa fronteira e avance no restante que estiver autorizado.
+
+Agende despertar sem bloquear o turno. Id único e notify resolvem o árbitro após sucessão:
+
+```bash
+systemd-run --user --collect --unit=orq-question-<gid>-<id> --on-active=10m \
+  /usr/bin/python3 ~/.claude/skills/orquestrar/scripts/orq.py --dir <durable-dir> \
+  notify --alarm "[decisao] Prazo da pergunta <id>: conferir resposta/registro; se ainda pendente, aplicar recomendação autorizada e registrar."
+```
+
+Confirme o agendamento; falha não é timer armado. Ao acordar, confira prazo/resposta;
+não repita decisão resolvida nem aja em execução encerrada. Sem systemd, confirme outro
+agendador com o mesmo canal.
 
 | Axis | 0–3 | 4–7 | 8–10 |
 |---|---|---|---|

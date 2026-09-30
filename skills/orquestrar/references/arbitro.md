@@ -95,7 +95,8 @@ Done when the item is journaled and the ball is back with executor or reviewer.
 1. `orq commit` checked tip, approved round and untouchables; its message is that check.
    Read the approving report's WASTE and NOTED lines (its path: the `veredito`'s `motivo=` in
    `orq read journal --task <N>`): NOTED → contract, WASTE → lessons. Add one PROGRESS line with
-   `orq log --task <N>`: elapsed time and code rounds (proof rounds apart) vs the estimate; past 2× either → stop and ask.
+   `orq log --task <N>`: elapsed time and code rounds (proof rounds apart) vs the estimate;
+   past 2× either → reavalie conforme arbitro-vigia.md; estimativa/diff não bloqueiam.
    Context counts only for rotation.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.

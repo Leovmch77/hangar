@@ -1,8 +1,7 @@
 # Role: planner (phases 0, 1 and 2)
 
-Conduza pesquisa e plano com o usuário. A sessão de árbitro é a escolhida para este trabalho;
-plano aprovado não muda seu papel automaticamente. Transfira ao árbitro novo quando configurado.
-Rota audit: quem planejou também escreve, conforme passo 7.
+Planeje com o usuário; lance o árbitro configurado, sem mudar seu próprio papel.
+Rota audit: a planejadora escreve (passo 7).
 
 ## Two words: Task and step
 
@@ -90,8 +89,8 @@ chosen model has a card or a `## What they say` section.
 2. **Each Task carries:**
    - Wave: parallel by default. Tasks passing the four conditions of `paralelo-worktree.md`
      together share a wave; a dependent or colliding Task goes to a later wave (gate items 3, 4).
-   - Size: past ~400 changed lines → cut into parts, each its own
-     Task number, round, commit, sized for one executor with no session swap.
+   - Tamanho: uma responsabilidade e critérios verificáveis; separe partes independentes.
+     Não limite linhas de diff nem corte/compacte cobertura para caber num número.
    - A-priori estimate, one line: expected clock and rounds. Actuals live only in `eventos.jsonl`;
      no second table. 2+ authorized executors → consumption per model in quota and
      context (context per Task, sessions per Task, account/window per model, when the heavy model
@@ -165,7 +164,7 @@ PRODUCE = write it in the orchestration plan.
    report pasted.
 4. AUDIT — shared state searched; ownership contract with copy count and who checks the N; shared
    state in the plan's HEADER, not inside a Task.
-5. PRODUCE — every Task within the size line, or cut into parts.
+5. PRODUCE — Tasks delimitadas por responsabilidade/dependência, sem teto numérico de diff.
 6. PRODUCE — orchestration Task: smoke step, literal command. Measurement Task: ≥2
    starting states swept, which ones declared.
 7. AUDIT — remaining quota per account with reading time; fallback in writing.
