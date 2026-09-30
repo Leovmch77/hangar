@@ -1,10 +1,10 @@
 import { create } from 'zustand';
 import {
-  basename, createSessionForServer, fetchSessionsForServer, getCreationProgress,
-  transitionFirstConversation,
+  basename, createSessionForServer, fetchSessionsForServer, getCreationProgress, getHistory,
+  sendInputForServer, transitionFirstConversation,
 } from '@hangar/core';
 import type {
-  CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
+  ChatEvent, CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
 } from '@hangar/core';
 import { prefs } from './prefs';
 import { useServers } from './servers';
@@ -12,7 +12,7 @@ import * as m from '../paraglide/messages';
 
 export type NewConversationIssue =
   | { kind: 'rejected'; message: string }
-  | { kind: 'unknown'; message: string }
+  | { kind: 'unknown'; message: string; events?: ChatEvent[] }
   | { kind: 'in_progress'; message: string }
   | { kind: 'not_found'; message: string }
   | { kind: 'conflict'; message: string }
@@ -112,6 +112,9 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
   if (attempt.phase === 'create_unknown' && !useNewConversation.getState().issues[serverId]) {
     setIssue(serverId, { kind: 'unknown', message: m.nova_conversa_criacao_incerta() });
   }
+  if (attempt.phase === 'send_unknown' && !useNewConversation.getState().issues[serverId]) {
+    setIssue(serverId, { kind: 'unknown', message: m.nova_conversa_envio_incerto() });
+  }
   return attempt;
 }
 
@@ -174,14 +177,76 @@ export function beginAttempt(serverId: string, input: NewConversationInput): Pro
   return exclusive(serverId, () => runCreate(serverId, input));
 }
 
+// A criação e o input são ações separadas; só a sessão já gravada recebe este snapshot.
+export function sendFirstInput(serverId: string, attemptId: string): Promise<void> {
+  return exclusive(serverId, async () => {
+    const attempt = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
+    if (!attempt || attempt.id !== attemptId || attempt.phase !== 'created' || !attempt.sessionName) return;
+    const server = serverById(serverId);
+    if (!server) { setIssue(serverId, { kind: 'local', message: m.nova_conversa_servidor_ausente() }); return; }
+    let sending: FirstConversationAttempt | null;
+    try { sending = apply(attempt, { type: 'send_begin' }); } catch {
+      setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+      return;
+    }
+    if (!sending) return;
+    setIssue(serverId, null);
+
+    // O catch da rede não pode interpretar uma falha posterior no disco como recusa do servidor.
+    try {
+      await sendInputForServer(server, attempt.sessionName, sending.text);
+    } catch (cause) {
+      const status = statusOf(cause);
+      const rejected = status !== null && status >= 400 && status < 500 && status !== 408;
+      try {
+        if (!apply(sending, { type: rejected ? 'send_rejected' : 'send_unknown' })) return;
+      } catch {
+        setIssue(serverId, { kind: 'local', message: m.nova_conversa_resultado_salvar_erro() });
+        return;
+      }
+      setIssue(serverId, rejected
+        ? { kind: 'rejected', message: m.nova_conversa_envio_recusado({ erro: messageOf(cause) }) }
+        : { kind: 'unknown', message: m.nova_conversa_envio_incerto() });
+      return;
+    }
+    try { apply(sending, { type: 'send_ok' }); } catch {
+      setIssue(serverId, { kind: 'local', message: m.nova_conversa_resultado_salvar_erro() });
+    }
+  });
+}
+
+// A rota lê sem consumir: sent não vira draft; sending/incerto exigem conferir antes de reenviar.
+export function readFirstInput(serverId: string, name: string): FirstConversationAttempt | null {
+  const attempt = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
+  if (!attempt || attempt.sessionName !== name || attempt.phase === 'draft'
+    || attempt.phase === 'creating' || attempt.phase === 'create_unknown') return null;
+  return attempt;
+}
+
+// Finaliza somente o snapshot cujo ACK já foi gravado, nunca uma tentativa nova ou incerta.
+export function confirmFirstInput(attemptId: string): void {
+  const attempt = Object.values(useNewConversation.getState().attempts).find((a) => a.id === attemptId);
+  if (attempt?.phase === 'sent') discardAttempt(attempt.serverId, attemptId);
+}
+
 // Consulta lista e progresso do MESMO servidor e nome; nunca cria e nunca troca de nome.
 export function recoverAttempt(serverId: string): Promise<void> {
   return exclusive(serverId, async () => {
     const attempt = useNewConversation.getState().attempts[serverId];
-    if (!attempt || attempt.phase !== 'create_unknown') return;
+    if (!attempt || (attempt.phase !== 'create_unknown' && attempt.phase !== 'send_unknown')) return;
     const server = serverById(serverId);
     if (!server) { setIssue(serverId, { kind: 'local', message: m.nova_conversa_servidor_ausente() }); return; }
     const name = attempt.body.name;
+    if (attempt.phase === 'send_unknown' && attempt.sessionName) {
+      try {
+        const events = await getHistory(attempt.sessionName, 120, undefined, 10000, server);
+        // Histórico inclui fila, mas texto igual não identifica este POST.
+        setIssue(serverId, { kind: 'unknown', message: m.nova_conversa_envio_incerto(), events });
+      } catch (cause) {
+        setIssue(serverId, { kind: 'recover_failed', message: m.nova_conversa_envio_conferir_erro({ erro: messageOf(cause) }) });
+      }
+      return;
+    }
     try {
       const found = (await fetchSessionsForServer(server)).find((s) => s.name === name);
       if (found) {
