@@ -113,7 +113,9 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
           accessibilityRole="button"
           // rótulo composto: um label explícito no pai faz o RN descartar o texto dos filhos, e o
           // estado e a pergunta sumiriam do leitor de tela.
-          accessibilityLabel={`${s.name}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}`}
+          // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
+          // é o que distingue duas conversas de mesmo nome no leitor de tela.
+          accessibilityLabel={`${s.name}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}`}
           accessibilityActions={acoesA11y}
           onAccessibilityAction={({ nativeEvent }) => {
             if (nativeEvent.actionName === 'rename') onRenomear();
@@ -137,28 +139,35 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
                 {sub}
               </Text>
             ) : null}
+            {/* Estado e destino (máquina/projeto) numa linha própria, antes do git: em tela estreita
+                ou texto ampliado o ramo comprido empurrava o projeto para fora. */}
             <View style={styles.meta}>
-              {mostrarServidor ? <Text style={[styles.metaTxt, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text> : null}
-              {s.worktree ? <Chip mono>worktree</Chip> : null}
-              {s.branch ? <Text style={[styles.metaTxt, styles.mono, { color: theme.tokens.accent.base }]} numberOfLines={1}>⎇ {s.branch}</Text> : null}
-              {s.git_added || s.git_removed ? (
-                <Text style={[styles.metaTxt, styles.mono]}>
-                  {s.git_added ? <Text style={{ color: theme.tokens.status.success }}>+{s.git_added}</Text> : null}
-                  {s.git_removed ? <Text style={{ color: theme.tokens.status.error }}> −{s.git_removed}</Text> : null}
-                </Text>
-              ) : null}
+              <Text style={[styles.metaTxt, { color: theme.tokens.text.secondary, flexShrink: 0 }]} numberOfLines={1}>{rotuloEstado(s.state)}</Text>
+              {mostrarServidor ? <Text style={[styles.metaTxt, styles.encolhe, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text> : null}
               {showCwd ? (
                 // Ícone no lugar do prefixo: ele truncava justo a última pasta, que é o que
                 // identifica o projeto. O caminho inteiro segue no menu da linha.
                 <View style={styles.cwd}>
                   <Icon name="Folder" size={11} color={theme.tokens.text.muted} />
-                  <Text style={[styles.metaTxt, styles.mono, { color: theme.tokens.text.secondary, flexShrink: 1 }]} numberOfLines={1}>
+                  <Text style={[styles.metaTxt, styles.mono, styles.encolhe, { color: theme.tokens.text.secondary }]} numberOfLines={1}>
                     {cwd.base}
                   </Text>
                 </View>
               ) : null}
-              <Text style={[styles.metaTxt, { color: theme.tokens.text.muted, marginLeft: 'auto' }]}>{relativeTime(s.last_activity)}</Text>
+              <Text style={[styles.metaTxt, { color: theme.tokens.text.muted, marginLeft: 'auto', flexShrink: 0 }]}>{relativeTime(s.last_activity)}</Text>
             </View>
+            {s.worktree || s.branch || s.git_added || s.git_removed ? (
+              <View style={styles.meta}>
+                {s.worktree ? <Chip mono>worktree</Chip> : null}
+                {s.branch ? <Text style={[styles.metaTxt, styles.mono, styles.encolhe, { color: theme.tokens.accent.base }]} numberOfLines={1}>⎇ {s.branch}</Text> : null}
+                {s.git_added || s.git_removed ? (
+                  <Text style={[styles.metaTxt, styles.mono]}>
+                    {s.git_added ? <Text style={{ color: theme.tokens.status.success }}>+{s.git_added}</Text> : null}
+                    {s.git_removed ? <Text style={{ color: theme.tokens.status.error }}> −{s.git_removed}</Text> : null}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             {s.pair_peers?.length || s.limited || loop || plan || s.engine ? (
               <View style={styles.chips}>
                 {s.pair_peers?.length ? <Chip icon="Users">{s.pair_peers.length === 1 ? s.pair_peers[0] : String(s.pair_peers.length + 1)}</Chip> : null}
@@ -190,12 +199,14 @@ const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, paddingHorizontal: 12, minHeight: 56 },
   lead: { width: 12, alignItems: 'center' },
   col: { flex: 1, gap: 3, minWidth: 0 },
-  linha1: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  // quebra em vez de espremer: com texto ampliado os selos deixavam o nome sem largura
+  linha1: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
   nome: { fontSize: theme.base.text.base, fontWeight: '600', flexShrink: 1 },
   sub: { fontSize: theme.base.text.xs },
-  meta: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'nowrap' },
+  meta: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   metaTxt: { fontSize: theme.base.text.xxs },
   mono: { fontFamily: theme.base.fontMono },
+  encolhe: { flexShrink: 1, minWidth: 0 },
   cwd: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 1, minWidth: 0 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 2 },
   resume: { marginTop: 2 },
