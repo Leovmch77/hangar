@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { prefs } from './prefs';
-import { clearDraft, readDraft, resolveDraftTranscript, writeDraft } from './drafts';
+import {
+  clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft,
+} from './drafts';
 import type { ConversationDraft } from './drafts';
 
 const { memory } = vi.hoisted(() => ({ memory: new Map<string, string>() }));
@@ -119,6 +121,19 @@ describe('drafts', () => {
     expect(memory.get('draft.v1:linux::sessao')).toBe(raw);
     expect(resolveDraftTranscript('linux', 'sessao', '/sessions/original.jsonl'))
       .toEqual({ draft: value, recoverable: null });
+  });
+
+  it('rascunho recuperável tem chave própria por servidor e sessão, sem tocar a principal', () => {
+    const current = draft({ text: 'Sessão nova', transcript: '/sessions/recreated.jsonl' });
+    const old = draft({ text: 'Sessão morta' });
+    writeDraft('linux', 'sessao', current);
+    writeRecoverableDraft('linux', 'sessao', old);
+    expect(readRecoverableDraft('linux', 'sessao')).toEqual(old);
+    expect(readRecoverableDraft('windows', 'sessao')).toBeNull();
+    expect(readDraft('linux', 'sessao')).toEqual(current);
+    clearRecoverableDraft('linux', 'sessao');
+    expect(readRecoverableDraft('linux', 'sessao')).toBeNull();
+    expect(readDraft('linux', 'sessao')).toEqual(current);
   });
 
   it('associação que não foi guardada expõe falha e mantém rascunho provisório recuperável', () => {

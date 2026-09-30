@@ -6086,5 +6086,9 @@
   "draft_read_error": "Não foi possível ler o rascunho neste aparelho. Tente novamente; o conteúdo guardado não foi apagado.",
   "draft_invalid": "O rascunho guardado neste aparelho está em formato inválido e não pôde ser restaurado.",
   "draft_write_error": "Não foi possível guardar o rascunho neste aparelho. Mantenha a conversa aberta para não perder o texto.",
-  "draft_clear_error": "Não foi possível apagar o rascunho neste aparelho. O conteúdo guardado foi conservado."
+  "draft_clear_error": "Não foi possível apagar o rascunho neste aparelho. O conteúdo guardado foi conservado.",
+  "composer_draft_previous": "Rascunho da conversa anterior com este nome: “{text}”",
+  "composer_draft_recover": "Recuperar",
+  "composer_draft_discard": "Descartar",
+  "composer_draft_read_again": "Ler de novo"
 }
