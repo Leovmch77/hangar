@@ -62,18 +62,25 @@ export function clearKey(): void {
   localStorage.removeItem(KEY_STASH);
 }
 
-export async function encryptList(encKey: CryptoKey, servers: Server[]): Promise<{ iv: string; data: string }> {
+export async function encryptJson(encKey: CryptoKey, value: unknown): Promise<{ iv: string; data: string }> {
   const iv = new Uint8Array(12);
   crypto.getRandomValues(iv);
-  // Convite fica só no aparelho que resgatou: o token dele não pode chegar aos outros.
-  const pt = enc.encode(JSON.stringify(servers.filter((s) => !s.invite)));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encKey, pt); // ct includes the GCM tag
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encKey, enc.encode(JSON.stringify(value))); // ct includes the GCM tag
   return { iv: b64(iv.buffer), data: b64(ct) };
 }
 
-export async function decryptList(encKey: CryptoKey, blob: { iv: string; data: string }): Promise<Server[]> {
+export async function decryptJson<T>(encKey: CryptoKey, blob: { iv: string; data: string }): Promise<T> {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(blob.iv) }, encKey, unb64(blob.data));
   return JSON.parse(dec.decode(pt));
+}
+
+export function encryptList(encKey: CryptoKey, servers: Server[]): Promise<{ iv: string; data: string }> {
+  // Convite fica só no aparelho que resgatou: o token dele não pode chegar aos outros.
+  return encryptJson(encKey, servers.filter((s) => !s.invite));
+}
+
+export function decryptList(encKey: CryptoKey, blob: { iv: string; data: string }): Promise<Server[]> {
+  return decryptJson<Server[]>(encKey, blob);
 }
 
 // ── API client (same-origin; the front's reverse proxy forwards /api to the co-located backend) ──
@@ -231,4 +238,35 @@ export async function putVault(
   if (r.status === 409) return { conflict: (await r.json()).detail };
   if (!r.ok) throw new Error('vault write failed');
   return await r.json();
+}
+
+async function ownerKey(): Promise<CryptoKey> {
+  const key = await loadKey();
+  if (!key) throw new Error(m.convidados_sem_login());
+  return key;
+}
+
+export async function getGuestAccounts<T>(): Promise<{ user: string; admin: T }[]> {
+  const r = await jf('/api/sync/guests');
+  if (!r.ok) throw new SyncRequestError(await errorDetail(r), r.status);
+  const key = await ownerKey();
+  const rows: { user: string; admin_blob: { iv: string; data: string } }[] = await r.json();
+  return Promise.all(rows.map(async (row) => ({ user: row.user, admin: await decryptJson<T>(key, row.admin_blob) })));
+}
+
+export async function putGuestAccount(user: string, password: string, servers: Server[], admin: unknown): Promise<void> {
+  const key = await ownerKey();
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)).buffer);
+  const { authHash, encKey } = await deriveKeys(password, salt, PBKDF2_ITERATIONS);
+  const r = await jf('/api/sync/guests', {
+    method: 'POST',
+    body: JSON.stringify({ user, salt, auth_hash: authHash,
+      enc_blob: await encryptList(encKey, servers), admin_blob: await encryptJson(key, admin) }),
+  });
+  if (!r.ok) throw new Error(await errorDetail(r));
+}
+
+export async function deleteGuestAccount(user: string): Promise<void> {
+  const r = await jf(`/api/sync/guests/${encodeURIComponent(user)}/delete`, { method: 'POST' });
+  if (!r.ok && r.status !== 404) throw new Error(await errorDetail(r));
 }

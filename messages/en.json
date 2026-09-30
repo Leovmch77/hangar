@@ -28,6 +28,7 @@
   "sync_config_copiado": "Address copied",
   "sync_config_copiar": "Copy address",
   "sync_config_abrir": "Open synced Hangar",
+  "convidados_sem_login": "Sign in with your username and password at this address to manage guests.",
   "sync_config_conta_existente": "Sign-in for {usuario} already exists. Enable sync to use it again with the same password.",
   "sync_config_confirmar_senha": "Confirm password",
   "sync_config_ativando": "Enabling…",

@@ -2355,6 +2355,28 @@ export function disableSyncForServer(server: Server): Promise<SyncSetup> {
   return apiFetchForServer(server, '/api/sync/setup/disable', { method: 'POST' });
 }
 
+export type Me = { role: 'owner' | 'guest'; name: string | null };
+
+export function getMeForServer(server: Server, signal?: AbortSignal): Promise<Me> {
+  return apiFetchForServer(server, '/api/me', { signal: comTeto(signal, 8000) });
+}
+
+export function createGuestForServer(
+  server: Server, body: { name: string; root: string; sees_owner: boolean; owner_sees: boolean },
+): Promise<{ id: string; token: string }> {
+  return apiFetchForServer(server, '/api/guests', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function updateGuestForServer(
+  server: Server, id: string, body: { root: string; sees_owner: boolean; owner_sees: boolean },
+): Promise<{ id: string }> {
+  return apiFetchForServer(server, `/api/guests/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function deleteGuestForServer(server: Server, id: string): Promise<{ ok: true }> {
+  return apiFetchForServer(server, `/api/guests/${encodeURIComponent(id)}/delete`, { method: 'POST' });
+}
+
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource
 // não manda header e cross-origin não leva cookie); withCredentials same-origin. Por-servidor:
 // cada um tem o seu, falha isolada.

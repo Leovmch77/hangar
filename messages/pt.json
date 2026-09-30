@@ -28,6 +28,7 @@
   "sync_config_copiado": "Endereço copiado",
   "sync_config_copiar": "Copiar endereço",
   "sync_config_abrir": "Abrir Hangar sincronizado",
+  "convidados_sem_login": "Entre com o seu usuário e senha neste endereço para gerenciar convidados.",
   "sync_config_conta_existente": "O acesso de {usuario} já está criado. Ative a sincronização para voltar a usá-lo com a mesma senha.",
   "sync_config_confirmar_senha": "Confirmar senha",
   "sync_config_ativando": "Ativando…",
