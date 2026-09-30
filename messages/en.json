@@ -502,7 +502,7 @@
   "atalhos_comando_dica": "Runs on the server machine, in the session directory",
   "atalhos_send_direct": "Send immediately",
   "atalhos_send_direct_ajuda": "Off, the text lands in the message box for you to finish",
-  "atalhos_confirm": "Confirm before running",
+  "atalhos_confirm": "Confirm first",
   "atalhos_salvar": "Save",
   "atalhos_salvo": "Saved",
   "atalhos_globais_titulo": "All projects",
@@ -6233,6 +6233,9 @@
   "term_hangar_parar": "Stop {label}",
   "atalho_tile_pergunta": "asking you",
   "atalho_tile_caiu": "stopped · {codigo}",
-  "atalho_tile_dica_hangar": "{rotulo} was opened in session {sessao}. Clicking here takes you to it without opening another copy."
+  "atalho_tile_dica_hangar": "{rotulo} was opened in session {sessao}. Clicking here takes you to it without opening another copy.",
+  "atalho_tile_nota_hangar": "was opened in session {sessao}. Clicking here takes you to it without opening another copy.",
+  "atalhos_titulo": "Shortcuts",
+  "atalhos_editando": "editing"
 
 }

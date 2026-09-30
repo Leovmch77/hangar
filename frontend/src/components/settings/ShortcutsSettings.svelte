@@ -303,6 +303,7 @@
 </script>
 
 <div class="at">
+  <h2 class="pagina-titulo">{m.atalhos_titulo()}</h2>
   {#if projectSession}<h3 class="titulo">{m.atalhos_globais_titulo()}</h3>{/if}
   <p class="sub">{m.atalhos_sub()}</p>
 
@@ -384,7 +385,8 @@
 {#snippet rows(sc: Scope, items: Shortcut[])}
   <ul class="linhas">
     {#each items as s, i (s.id)}
-      <li class="linha" class:arrastando={dragScope === sc && dragIdx === i} draggable="true"
+      {@const editing = formScope === sc && editingIdx === i}
+      <li class="linha" class:arrastando={dragScope === sc && dragIdx === i} class:editando={editing} draggable="true"
           ondragstart={(e) => dragStart(e, sc, i)} ondragover={(e) => dragOver(e, sc, i)}
           ondragend={dragEnd}>
         <span class="alca" aria-hidden="true">⠿</span>
@@ -398,7 +400,9 @@
             <span class="detalhe">{m.atalhos_pasta_linha({ pasta: s.pasta })}</span>
           {/if}
         </span>
-        {#if s.type === 'send_text'}
+        {#if editing}
+          <span class="marca-editando">{m.atalhos_editando()}</span>
+        {:else if s.type === 'send_text'}
           <span class="marca">{m.atalhos_marca_sessao_texto()}</span>
         {:else if s.type === 'shell'}
           <span class="marca" class:hangar={s.runs_in === 'hangar'}>{s.runs_in === 'hangar'
@@ -426,10 +430,22 @@
             <option value="shell">{m.atalhos_tipo_shell()}</option>
           </select>
         </label>
-        <label class="campo">
-          <span>{m.atalhos_rotulo()}</span>
-          <input type="text" bind:value={fLabel} maxlength="24" />
-        </label>
+        <div class="par">
+          <label class="campo">
+            <span>{m.atalhos_rotulo()}</span>
+            <input type="text" bind:value={fLabel} maxlength="24" />
+          </label>
+          <label class="campo">
+            <span>{fType === 'shell' ? m.atalhos_comando() : m.atalhos_texto()}</span>
+            <input type="text" class:mono={fType === 'shell'} bind:value={fContent} list={fType === 'send_text' ? 'atalho-skills' : undefined}
+                   placeholder={fType === 'shell' ? m.atalhos_comando_dica() : m.atalhos_texto_dica()} />
+            {#if fType === 'send_text'}
+              <datalist id="atalho-skills">
+                {#each suggestions as sk (sk)}<option value={sk}></option>{/each}
+              </datalist>
+            {/if}
+          </label>
+        </div>
         <div class="campo">
           <span>{m.atalhos_icone()}</span>
           <div class="glifos" role="radiogroup" aria-label={m.atalhos_icone()}>
@@ -444,16 +460,6 @@
                    placeholder={m.atalhos_emoji_dica()} aria-label={m.atalhos_emoji_dica()} />
           </div>
         </div>
-        <label class="campo">
-          <span>{fType === 'shell' ? m.atalhos_comando() : m.atalhos_texto()}</span>
-          <input type="text" bind:value={fContent} list={fType === 'send_text' ? 'atalho-skills' : undefined}
-                 placeholder={fType === 'shell' ? m.atalhos_comando_dica() : m.atalhos_texto_dica()} />
-          {#if fType === 'send_text'}
-            <datalist id="atalho-skills">
-              {#each suggestions as sk (sk)}<option value={sk}></option>{/each}
-            </datalist>
-          {/if}
-        </label>
         {#if fType === 'shell' && formScope === 'project'}
           <label class="campo">
             <span>{m.atalhos_pasta()}</span>
@@ -480,27 +486,30 @@
               </button>
             </div>
             {#if fRunsIn === 'hangar'}
+              {@const home = m.atalhos_onde_home({ home: '~' }).split('~')}
               <div class="onde-bloco">
                 <span class="onde-bloco-titulo">{m.atalhos_onde_clique_titulo()}</span>
-                <span class="onde-bloco-texto">→ {m.atalhos_onde_clique()}</span>
+                <span class="onde-seta">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+                  <span class="onde-bloco-texto">{m.atalhos_onde_clique()}</span>
+                </span>
                 <label class="liga">
                   <input type="checkbox" bind:checked={fHome} />
-                  <span>{m.atalhos_onde_home({ home: '~' })}</span>
+                  <span>{home[0]}<span class="mono">~</span>{home.slice(1).join('~')}</span>
                 </label>
               </div>
             {/if}
           </fieldset>
           <label class="liga">
             <input type="checkbox" bind:checked={fAsk} />
-            <span>{m.atalhos_perguntas()}</span>
-            <small>{m.atalhos_perguntas_ajuda()}</small>
+            <span><span class="liga-titulo">{m.atalhos_perguntas()}</span> {m.atalhos_perguntas_ajuda()}</span>
           </label>
         {/if}
         {#if fType === 'send_text'}
           <label class="liga">
             <input type="checkbox" bind:checked={fSendDirect} />
-            <span>{m.atalhos_send_direct()}</span>
-            <small>{m.atalhos_send_direct_ajuda()}</small>
+            <span><span class="liga-titulo">{m.atalhos_send_direct()}</span> {m.atalhos_send_direct_ajuda()}</span>
           </label>
         {/if}
         <label class="liga">
@@ -509,7 +518,7 @@
         </label>
         <div class="form-acoes">
           <button class="btn" onclick={() => (formScope = null)}>{m.comum_cancelar()}</button>
-          <button class="btn primario" onclick={submitForm} disabled={!formValid}>{m.comum_confirmar()}</button>
+          <button class="btn primario" onclick={submitForm} disabled={!formValid}>{m.atalhos_salvar()}</button>
         </div>
       </div>
 {/snippet}
@@ -517,26 +526,34 @@
 <style>
   /* Container query, não media query: quem aperta a linha é a largura do PAINEL (regra do repo). */
   .at { container-type: inline-size; display: flex; flex-direction: column; gap: var(--space-3); }
+  .at input[type='checkbox'] { accent-color: var(--accent); }
+  .pagina-titulo { margin: 0; font-size: 22px; font-weight: 600; color: var(--text-primary); }
   .sub { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
   .estado { margin: 0; font-size: var(--text-sm); color: var(--text-muted); }
   .erro { color: var(--danger, #e5484d); }
 
-  .linhas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-  .linha {
-    display: flex; align-items: center; gap: var(--space-3);
-    padding: var(--space-2); border-radius: var(--radius-md);
-    background: var(--surface-inset);
+  /* Lista num bloco só, linhas separadas por divisória. */
+  .linhas {
+    list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; overflow: hidden;
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface-card) 70%, transparent);
   }
+  .linha {
+    display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .linha:last-child { border-bottom: 0; }
+  .linha.editando { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .linha.arrastando { opacity: 0.45; }
   .alca { flex-shrink: 0; color: var(--text-muted); cursor: grab; font-size: var(--text-sm); user-select: none; }
   .ico {
     width: 32px; height: 32px; flex-shrink: 0;
     display: inline-flex; align-items: center; justify-content: center;
-    border-radius: var(--radius-sm); background: var(--surface-raised);
+    border-radius: var(--radius-xs); background: var(--surface-raised);
     color: var(--text-secondary);
   }
-  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .rotulo { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .rotulo { font-size: 15px; font-weight: 500; color: var(--text-primary); }
   .detalhe {
     font-size: var(--text-xs); color: var(--text-muted); font-family: var(--font-mono);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -558,16 +575,20 @@
   .chip:hover { color: var(--text-primary); }
 
   .form {
-    display: flex; flex-direction: column; gap: var(--space-3);
-    padding: var(--space-3); border-radius: var(--radius-md);
-    border: 1px solid var(--border-subtle); background: var(--surface-inset);
+    display: flex; flex-direction: column; gap: 18px;
+    padding: var(--space-6); border-radius: var(--radius-md);
+    border: 1px solid var(--border-default); background: var(--surface-card);
   }
-  .campo { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); color: var(--text-secondary); }
+  /* Rótulo e comando lado a lado; a coluna única volta quando o painel aperta. */
+  .par { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
+  @container (min-width: 480px) { .par { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .campo { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-secondary); }
   .campo input[type='text'], .campo select {
-    padding: 8px 10px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border-subtle); background: var(--surface-raised);
+    height: 38px; padding: 0 12px; border-radius: var(--radius-xs); font-family: inherit;
+    border: 1px solid var(--border-default); background: var(--surface-inset);
     color: var(--text-primary); font-size: var(--text-sm);
   }
+  .campo input.mono { font-family: var(--font-mono); font-size: 13px; }
   .glifos { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; }
   .glifo {
     width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
@@ -575,40 +596,52 @@
   }
   .glifo:hover { background: var(--surface-raised); }
   .glifo.sel { background: var(--accent-dim); color: var(--accent); }
-  .emoji { width: 96px; padding: 6px 8px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border-subtle); background: var(--surface-raised);
+  .emoji { width: 96px; padding: 6px 8px; border-radius: var(--radius-xs); font-family: inherit;
+    border: 1px solid var(--border-default); background: var(--surface-inset);
     color: var(--text-primary); font-size: var(--text-sm); }
-  .liga { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--space-2); align-items: center; font-size: var(--text-sm); color: var(--text-primary); }
-  .liga small { grid-column: 2; color: var(--text-muted); font-size: var(--text-xs); }
-  .form-acoes { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .liga { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+  .liga input { flex-shrink: 0; width: 16px; height: 16px; margin: 2px 0 0; }
+  .liga-titulo { color: var(--text-primary); }
+  .mono { font-family: var(--font-mono); color: var(--text-primary); }
+  .form-acoes { display: flex; justify-content: flex-end; gap: 10px; }
+  .form-acoes .btn { align-self: auto; height: 38px; min-height: 0; padding: 0 16px; border-radius: var(--radius-xs);
+    font-size: var(--text-sm); font-weight: 500; background: transparent; border-color: var(--border-default); }
+  .form-acoes .btn:hover { background: var(--bg-hover); }
+  .form-acoes .btn.primario { padding: 0 18px; border-color: transparent; background: var(--accent-press); color: #fff; }
   .ajuda { color: var(--text-muted); font-size: var(--text-xs); }
 
-  .marca { flex-shrink: 0; font-size: var(--text-xs); padding: 2px 8px; border-radius: var(--radius-full);
+  .marca { flex-shrink: 0; font-size: var(--text-xs); padding: 3px 8px; border-radius: var(--radius-full);
     background: var(--surface-raised); color: var(--text-secondary); }
-  .marca.hangar { background: var(--accent-dim); color: var(--text-primary); }
+  .marca.hangar { background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: color-mix(in srgb, var(--accent-text) 75%, var(--accent)); }
+  .marca-editando { flex-shrink: 0; font-size: var(--text-xs); color: var(--text-muted); }
 
   .onde { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: var(--space-2); }
-  .onde legend { padding: 0; margin-bottom: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
-  .onde-opcoes { display: grid; grid-template-columns: 1fr; gap: var(--space-2); }
+  .onde legend { padding: 0; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); }
+  .onde-opcoes { display: grid; grid-template-columns: 1fr; gap: var(--space-3); }
   @container (min-width: 480px) { .onde-opcoes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  /* O botão global centraliza o conteúdo; aqui o texto começa à esquerda. */
   .onde-card {
-    display: flex; flex-direction: column; gap: 6px; padding: var(--space-3); text-align: left;
-    border: 1px solid var(--border-default); border-radius: var(--radius-md); background: transparent;
+    display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px;
+    min-height: 0; padding: var(--space-4); text-align: left;
+    border: 1px solid var(--border-default); border-radius: 10px; background: transparent;
     color: var(--text-secondary); cursor: pointer;
   }
-  .onde-card.sel { border-color: var(--accent); background: var(--accent-dim); }
+  .onde-card.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .onde-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .onde-titulo { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); }
-  .onde-radio { width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
+  .onde-titulo { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .onde-radio { width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
   .onde-card.sel .onde-radio { border: 4px solid var(--accent); background: #fff; }
-  .onde-ajuda { font-size: var(--text-sm); line-height: 1.45; }
-  .onde-uso { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; }
+  .onde-ajuda { font-size: 13px; line-height: 1.5; }
+  .onde-uso { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; }
   .onde-bloco {
-    display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3);
-    border-radius: var(--radius-md); background: var(--surface-inset); border: 1px solid var(--border-subtle);
+    display: flex; flex-direction: column; gap: 12px; padding: var(--space-4);
+    border-radius: 10px; background: var(--surface-inset); border: 1px solid var(--border-subtle);
   }
-  .onde-bloco-titulo { font-size: var(--text-sm); font-weight: 500; color: var(--text-primary); }
-  .onde-bloco-texto { font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.45; }
+  .onde-bloco-titulo { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+  .onde-seta { display: flex; gap: 10px; align-items: flex-start; color: var(--accent); }
+  .onde-seta svg { flex-shrink: 0; margin-top: 2px; }
+  .onde-bloco-texto { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 
   .projeto {
     display: flex; flex-direction: column; gap: var(--space-3);

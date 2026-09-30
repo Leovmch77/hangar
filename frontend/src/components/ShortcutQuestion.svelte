@@ -2,7 +2,7 @@
   // Cartão da pergunta de um terminal de atalho (sessão ou No Hangar). Montado UMA vez no App; quem
   // abre (chip, tile, Chat) chama openQuestion(). Fica aberto entre uma pergunta e a seguinte do
   // mesmo terminal e guarda as respostas desta rodada.
-  import ConfirmDialog from './ConfirmDialog.svelte';
+  import ModalDialog from './ModalDialog.svelte';
   import { answerHangarTerminal, answerShortcutTerminal, type ShortcutQuestion } from '@hangar/core';
   import { listServers } from '../lib/auth';
   import { closeQuestion, liveTerminals, requestHangarTab } from '../lib/hangarTerminals.svelte';
@@ -69,6 +69,9 @@
     }
   }
 
+  // O prompt do script traz o exemplo entre parênteses; a linha de resposta dada fica só com o nome.
+  const shortText = (t: string) => t.replace(/\s*\([^)]*\)\s*:?\s*$/, '').replace(/\s*:\s*$/, '');
+
   function openTerminal() {
     if (!open) return;
     if (open.owner) focusShortcutTerminal(`${open.serverId}::${open.owner}`, open.id);
@@ -79,59 +82,107 @@
 </script>
 
 {#if open && srv}
-  <ConfirmDialog role="dialog" wide
-    title={m.pergunta_titulo({ rotulo: term?.label ?? '' })}
-    aria={m.pergunta_titulo({ rotulo: term?.label ?? '' })}
-    onClose={closeQuestion}
-    initialFocus={field}
-    actions={[
-      { label: m.pergunta_abrir_terminal(), onClick: openTerminal },
-      { label: m.pergunta_enviar(), kind: 'primary', disabled: sending || !pending, onClick: send },
-    ]}>
-    {#if !open.owner}<span class="pq-mark">{m.pergunta_marca_hangar()}</span>{/if}
-    {#each answered as a, i (i)}
-      <div class="pq-done">
-        <span class="pq-ok" aria-hidden="true">✓</span>
-        <span class="pq-done-text">{a.text}</span>
-        <span class="pq-done-value">{a.hidden ? '••••' : a.value || '⏎'}</span>
+  {@const title = m.pergunta_titulo({ rotulo: term?.label ?? '' })}
+  <ModalDialog open={true} ariaLabel={title} onClose={closeQuestion} initialFocus={field} className="pq-shell">
+    <div class="pq-card">
+      <div class="pq-head">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></svg>
+        <p class="pq-title">{title}</p>
+        {#if !open.owner}<span class="pq-mark">{m.pergunta_marca_hangar()}</span>{/if}
       </div>
-    {/each}
+      {#each answered as a, i (i)}
+        <div class="pq-done">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5 9-10" /></svg>
+          <span class="pq-done-text" title={a.text}>{shortText(a.text)}</span>
+          <span class="pq-done-value">{a.hidden ? '••••' : a.value || '⏎'}</span>
+        </div>
+      {/each}
+      {#if term?.question && pending}
+        <label class="pq-field">
+          <span class="pq-text">{term.question.text}</span>
+          <input type={hide ? 'password' : 'text'} bind:value={answer} bind:this={field} autocomplete="off"
+                 onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void send(); } }} />
+          {#if term.question.default}<small>{m.pergunta_padrao()}</small>{/if}
+        </label>
+      {:else}
+        <p class="pq-status" role="status">{waitingSince !== null ? m.pergunta_aguardando() : m.comum_carregando()}</p>
+      {/if}
+      {#if error}<p class="pq-error" role="alert">{error}</p>{/if}
+      <div class="pq-actions">
+        {#if term?.question && pending}
+          <label class="pq-toggle"><input type="checkbox" bind:checked={hide} /> {m.pergunta_esconder()}</label>
+        {/if}
+        <span class="pq-grow"></span>
+        <button type="button" class="pq-btn" onclick={openTerminal}>{m.pergunta_abrir_terminal()}</button>
+        <button type="button" class="pq-btn pq-send" disabled={sending || !pending} onclick={send}>{m.pergunta_enviar()}</button>
+      </div>
+    </div>
     {#if term?.question && pending}
-      <label class="pq-field">
-        <span class="pq-text">{term.question.text}</span>
-        <input type={hide ? 'password' : 'text'} bind:value={answer} bind:this={field} autocomplete="off"
-               onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void send(); } }} />
-        {#if term.question.default}<small>{m.pergunta_padrao()}</small>{/if}
-      </label>
-      <label class="pq-toggle"><input type="checkbox" bind:checked={hide} /> {m.pergunta_esconder()}</label>
+      {@const lines = term.question.screen}
       <div class="pq-screen">
         <span class="pq-screen-title">{m.pergunta_tela()}</span>
-        {#each term.question.screen as line, i (i)}<div class="pq-screen-line">{line}</div>{/each}
+        <div>
+        {#each lines as line, i (i)}
+          {@const last = i === lines.length - 1}
+          <div class="pq-screen-line" class:last>{line}{#if last}<span class="pq-cursor" aria-hidden="true"></span>{:else if answered.some((a) => a.value === '' && line.includes(a.text))}<span class="pq-enter"> ⏎</span>{/if}</div>
+        {/each}
+        </div>
       </div>
-    {:else}
-      <p class="pq-status" role="status">{waitingSince !== null ? m.pergunta_aguardando() : m.comum_carregando()}</p>
     {/if}
-    {#if error}<p class="pq-error" role="alert">{error}</p>{/if}
-  </ConfirmDialog>
+  </ModalDialog>
 {/if}
 
 <style>
-  .pq-mark { align-self: flex-end; font-size: 11px; letter-spacing: 0.05em; color: var(--text-muted); }
-  .pq-done { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--success) 8%, transparent); }
-  .pq-ok { color: var(--success); font-weight: 700; }
-  .pq-done-text { flex: 1; color: var(--text-secondary); font-size: var(--text-sm); }
+  /* O ModalDialog vira só o palco: o cartão e a caixa da tela são dois blocos, então o material
+     de vidro dele sai (vence as regras dele, inclusive a do modo liquid). */
+  :global(:root .modal-dialog.pq-shell), :global(:root[data-liquid] .modal-dialog.pq-shell) {
+    width: min(512px, 100%); display: flex; flex-direction: column; gap: 14px;
+    background: transparent; box-shadow: none; border: 0; border-radius: 0; overflow: visible;
+  }
+  :global(.modal-dialog.pq-shell::before) { display: none; }
+  .pq-card {
+    display: flex; flex-direction: column; gap: 16px; padding: 20px; border-radius: 14px;
+    background: var(--bg-surface); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  }
+  .pq-head { display: flex; align-items: center; gap: 10px; }
+  .pq-head svg { flex-shrink: 0; }
+  .pq-title { flex: 1; margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .pq-mark { font-size: var(--text-2xs); letter-spacing: 0.05em; color: var(--text-muted); }
+  .pq-done { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-xs);
+    background: color-mix(in srgb, var(--success) 7%, transparent); }
+  .pq-done svg { flex-shrink: 0; }
+  .pq-done-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 13px; color: var(--text-secondary); }
   .pq-done-value { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-primary); }
-  .pq-field { display: flex; flex-direction: column; gap: 6px; }
-  .pq-text { font-weight: 500; color: var(--text-primary); }
-  .pq-field input { height: 40px; padding: 0 12px; border-radius: var(--radius-md);
-    border: 1px solid var(--warning); background: var(--surface-inset); color: var(--text-primary); font-family: var(--font-mono); }
-  .pq-field small, .pq-status { color: var(--text-muted); font-size: var(--text-sm); }
-  .pq-toggle { display: flex; gap: 8px; align-items: center; font-size: var(--text-sm); color: var(--text-secondary); }
-  .pq-screen { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: var(--radius-md);
-    background: var(--surface-inset); border: 1px solid var(--border-subtle); font-family: var(--font-mono); font-size: var(--text-xs); }
-  .pq-screen-title { font-family: var(--font-ui); font-size: 11px; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; }
-  .pq-screen-line { color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .pq-screen-line:last-child { color: var(--text-primary); }
+  .pq-field { display: flex; flex-direction: column; gap: 8px; }
+  .pq-text { font-size: var(--text-sm); font-weight: 500; color: var(--text-primary); }
+  .pq-field input { height: 42px; padding: 0 12px; border-radius: var(--radius-xs); outline: none;
+    border: 1px solid var(--warning); background: var(--surface-inset); color: var(--text-primary);
+    font-family: var(--font-mono); font-size: 13px; }
+  .pq-field input:focus-visible { border-color: var(--warning-text); }
+  .pq-field small, .pq-status { margin: 0; color: var(--text-muted); font-size: var(--text-xs); }
+  .pq-actions { display: flex; align-items: center; gap: 8px; }
+  .pq-grow { flex: 1; }
+  .pq-toggle { display: flex; gap: 8px; align-items: center; font-size: var(--text-xs); color: var(--text-secondary); }
+  .pq-toggle input { width: 15px; height: 15px; margin: 0; accent-color: var(--warning); }
+  .pq-btn { height: 36px; min-height: 0; min-width: 0; padding: 0 14px; border-radius: var(--radius-xs);
+    border: 1px solid var(--border-default); background: transparent; color: var(--text-primary); font-size: 13px; }
+  .pq-btn:hover:not(:disabled) { background: var(--bg-hover); }
+  .pq-send { padding: 0 16px; border: 0; font-weight: 500; color: #fff;
+    background: color-mix(in srgb, var(--warning) 75%, black); }
+  .pq-send:hover:not(:disabled) { background: color-mix(in srgb, var(--warning) 75%, black); filter: brightness(1.08); }
+  .pq-send:disabled { opacity: 0.5; }
+  .pq-screen { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 10px;
+    background: var(--surface-inset); border: 1px solid var(--border-subtle);
+    font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.7; }
+  .pq-screen-title { font-family: var(--font-ui); font-size: var(--text-2xs); letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--text-muted); }
+  .pq-screen-line { color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: break-word; }
+  .pq-screen-line.last { color: var(--text-primary); }
+  .pq-enter { color: var(--text-primary); }
+  .pq-cursor { display: inline-block; width: 7px; height: 14px; margin-left: 4px; vertical-align: middle; background: var(--warning); }
   .pq-error { color: var(--error); font-size: var(--text-sm); margin: 0; }
 </style>

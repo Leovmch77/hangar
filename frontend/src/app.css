@@ -120,6 +120,10 @@
   --success:  #34c759;
   --error:    #ff453a;
   --warning:  #ff9f0a;
+  /* Texto sobre fundo tingido da mesma cor (chip, marca, linha de estado). */
+  --accent-text:  color-mix(in srgb, var(--accent) 30%, #fff);
+  --success-text: color-mix(in srgb, var(--success) 55%, #fff);
+  --warning-text: color-mix(in srgb, var(--warning) 60%, #fff);
 
   /* Luminância das cores de grupo de pareamento (lib/format.ts pairColor): pastel claro sobre
      fundo escuro; o tema claro sobrescreve pra mais fundo (aro fino sumia sobre quase-branco). */
@@ -283,6 +287,9 @@
   --success:  #146c30;
   --error:    #b3251c;
   --warning:  #7a5408;
+  --accent-text:  var(--accent-press);
+  --success-text: var(--success);
+  --warning-text: var(--warning);
 
   /* Cores de grupo mais fundas no claro (mesma razao dos semanticos acima). */
   --pair-l: 0.5;

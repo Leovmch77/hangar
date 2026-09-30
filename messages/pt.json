@@ -502,7 +502,7 @@
   "atalhos_comando_dica": "Roda na máquina do servidor, no diretório da sessão",
   "atalhos_send_direct": "Enviar direto",
   "atalhos_send_direct_ajuda": "Desligado, o texto chega no campo de mensagem para você completar",
-  "atalhos_confirm": "Confirmar antes de executar",
+  "atalhos_confirm": "Confirmar antes",
   "atalhos_salvar": "Salvar",
   "atalhos_salvo": "Salvo",
   "atalhos_globais_titulo": "Todos os projetos",
@@ -6233,6 +6233,9 @@
   "term_hangar_parar": "Parar {label}",
   "atalho_tile_pergunta": "pergunta pra você",
   "atalho_tile_caiu": "caiu · {codigo}",
-  "atalho_tile_dica_hangar": "{rotulo} foi aberto na sessão {sessao}. Aqui o clique leva até ele, sem abrir outra cópia."
+  "atalho_tile_dica_hangar": "{rotulo} foi aberto na sessão {sessao}. Aqui o clique leva até ele, sem abrir outra cópia.",
+  "atalho_tile_nota_hangar": "foi aberto na sessão {sessao}. Aqui o clique leva até ele, sem abrir outra cópia.",
+  "atalhos_titulo": "Atalhos",
+  "atalhos_editando": "editando"
 
 }

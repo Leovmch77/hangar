@@ -711,29 +711,35 @@
      absolute, height:6px) cobria os 2px de cima dos botoes (abas, ↗, ⤢, ✕), que comecavam em y≈4px --
      clicar ali comecava um arrasto em vez de acionar o botao. */
   .tp-bar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); padding-top: 6px; background: var(--glass-panel); }
-  .tp-abas { display: flex; gap: var(--space-1); flex: 1; min-width: 0; }
+  /* O botão global tem piso de 44px; a barra do desenho é mais baixa, então os botões dela pedem menos. */
+  .tp-bar > button { min-height: 28px; min-width: 28px; }
+  /* Aba nunca encolhe: com muitas, a fila rola em vez de esmagar o rótulo. */
+  .tp-abas { display: flex; gap: var(--space-1); flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
   .tp-aba {
-    padding: 2px var(--space-2); border-radius: var(--radius-sm); border: 1px solid transparent;
-    background: transparent; color: var(--text-muted); font-size: var(--text-xs); cursor: pointer;
+    flex: 0 0 auto; min-height: 0; min-width: 0;
+    padding: 5px 10px; border-radius: var(--radius-sm); border: 1px solid transparent;
+    background: transparent; color: var(--text-secondary); font-size: var(--text-xs); cursor: pointer;
     max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tp-aba:hover { background: var(--bg-hover); }
   /* Botao nativo como os irmaos da barra (↗ ⤢ ✕): so o teto de largura, mesmo par max-width+
      ellipsis do .tp-aba acima. O rotulo agora carrega o MOTIVO da queda, que pode ser uma frase
      longa (mensagem de import quebrado) — sem o teto ela espremia as abas ate sumir. */
-  .tp-recon { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tp-aba.sel { background: var(--accent-dim); color: var(--accent); }
-  /* Aba de atalho: rotulo + ✕ na mesma pilula; encerrado fica apagado com o codigo ao lado. */
-  .tp-aba-sc { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; }
+  .tp-recon { font-size: var(--text-xs); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tp-aba.sel { background: var(--surface-raised); color: var(--text-primary); }
+  /* Aba de atalho: rotulo + ✕ na mesma pilula; encerrado fica apagado com o codigo ao lado. O padding
+     mora nos botões (não na pílula) pra a área de clique cobrir a aba inteira. */
+  .tp-aba-sc { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 0; }
   .tp-aba-sc.morto { opacity: 0.75; }
   .tp-aba-rotulo {
-    border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0;
-    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 5px 4px 5px 10px;
+    min-height: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tp-aba-saida { margin-left: var(--space-1); color: var(--text-muted); }
   .tp-aba-x {
+    flex-shrink: 0; width: 24px; height: 24px; min-height: 0; min-width: 0;
     border: 0; background: transparent; color: var(--text-muted); cursor: pointer;
-    padding: 0 2px; font-size: 10px; line-height: 1; border-radius: var(--radius-sm);
+    padding: 0; font-size: 10px; line-height: 1; border-radius: var(--radius-sm);
   }
   .tp-aba-x:hover { color: var(--text-primary); background: var(--bg-hover); }
   .tp-grupo { align-self: center; margin: 0 4px 0 10px; padding-left: 10px; border-left: 1px solid var(--border-default);

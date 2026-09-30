@@ -18,7 +18,7 @@
   let menu = $state<HTMLDivElement | null>(null);
   // O menu vai pro <body> (a sidebar tem overflow:hidden e vira containing block de `fixed`), então a
   // posição sai do retângulo do chip, presa à janela.
-  let pos = $state({ left: 8, top: 0, width: 400, maxHeight: 400 });
+  let pos = $state({ left: 8, top: 0, width: 424, maxHeight: 400 });
   const items = $derived(allHangar());
   const asking = $derived(items.some(({ t }) => t.alive && t.question));
   const multi = $derived(new Set(items.map((i) => i.serverId)).size > 1);
@@ -27,7 +27,7 @@
     if (!chip) return;
     const r = chip.getBoundingClientRect();
     const margin = 8;
-    const width = Math.min(400, window.innerWidth - margin * 2);
+    const width = Math.min(424, window.innerWidth - margin * 2);
     const top = r.bottom + 6;
     pos = {
       width,
@@ -103,7 +103,7 @@
             aria-label={m.hangar_chip({ n: items.length })} title={m.hangar_chip({ n: items.length })}
             onclick={toggle}>
       <span class="hr-dot" aria-hidden="true"></span>
-      {#if !rail}{m.hangar_chip({ n: items.length })}{/if}
+      {#if !rail}<span class="hr-txt">{m.hangar_chip({ n: items.length })}</span>{/if}
     </button>
     {#if open}
       <div class="hr-menu" role="dialog" aria-label={m.hangar_lista_titulo()} tabindex="-1"
@@ -120,7 +120,7 @@
               <span class="hr-meta" class:failed={!t.alive}>
                 {#if !t.alive}{m.hangar_caiu({ codigo: String(t.exit_code ?? '?') })}
                 {:else if t.question}{m.hangar_esperando()}
-                {:else}{elapsed(t.created)}{#if origin} · {m.hangar_aberto_em({ sessao: origin })}{/if}{/if}
+                {:else}{elapsed(t.created)}{#if origin}{' · '}{m.hangar_aberto_em({ sessao: origin })}{/if}{/if}
               </span>
             </div>
             {#if t.alive && t.question}<p class="hr-question">{t.question.text}</p>{/if}
@@ -148,14 +148,20 @@
 {/if}
 
 <style>
-  .hr { position: relative; margin-left: auto; }
+  /* Sem espaço, o chip cede (corta o texto) e o título "Hangar" ao lado fica inteiro. */
+  .hr { position: relative; margin-left: auto; min-width: 0; }
+  .hr-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .hr.rail { position: absolute; top: -2px; right: -2px; margin: 0; }
   .hr-chip {
-    height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: var(--radius-full);
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); background: var(--accent-dim);
-    color: var(--text-primary); font-size: var(--text-xs); cursor: pointer; white-space: nowrap;
+    position: relative; height: 30px; min-height: 0; min-width: 0; display: inline-flex; align-items: center; gap: 8px;
+    padding: 0 12px; border-radius: var(--radius-full);
+    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent-text); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; max-width: 100%;
   }
   .hr-chip.rail { width: 12px; height: 12px; padding: 0; border: 2px solid var(--bg-base); background: var(--success); }
+  /* Ponto de 12px com alvo de toque maior. */
+  .hr-chip.rail::after { content: ''; position: absolute; inset: -8px; }
   .hr-chip.rail.asking { background: var(--warning); }
   .hr-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .hr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
@@ -169,22 +175,22 @@
     border: 1px solid var(--border-default); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
   }
   .hr-menu:focus-visible { outline: none; }
-  .hr-head { margin: 0; padding: 10px 14px 6px; font-size: var(--text-xs); color: var(--text-muted); }
-  .hr-item { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border-subtle); }
+  .hr-head { margin: 0; padding: 12px 16px 8px; font-size: var(--text-xs); color: var(--text-muted); }
+  .hr-item { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border-subtle); }
   .hr-item.asking { background: color-mix(in srgb, var(--warning) 7%, transparent); }
-  .hr-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .hr-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .hr-state { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
   .hr-state.live { border: 0; background: var(--success); }
   .hr-state.asking { border: 0; background: var(--warning); }
-  .hr-name { font-weight: 500; color: var(--text-primary); }
+  .hr-name { font-size: var(--text-sm); font-weight: 500; color: var(--text-primary); }
   .hr-name.dead { color: var(--text-secondary); }
   .hr-meta { font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hr-meta.failed { color: var(--error); }
-  .hr-item.asking .hr-meta { color: var(--warning); }
-  .hr-question { margin: 0 0 0 16px; font-size: var(--text-sm); color: var(--text-secondary); }
-  .hr-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 16px; }
+  .hr-item.asking .hr-meta { color: var(--warning-text); }
+  .hr-question { margin: 0 0 0 18px; font-size: var(--text-xs); color: var(--text-secondary); }
+  .hr-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 18px; }
   .hr-actions button {
-    height: 30px; padding: 0 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-default);
+    height: 30px; min-height: 0; min-width: 0; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border-default);
     background: transparent; color: var(--text-primary); font-size: var(--text-xs); cursor: pointer;
   }
   .hr-actions button.primary { border: 0; background: var(--accent-press); color: #fff; }

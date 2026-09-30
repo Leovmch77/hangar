@@ -1602,7 +1602,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   :global(html[data-panels='edge']) .sidebar.collapsed .side-mark:not(:has(:global(.hr))) { display: none; }
   /* Com o chip "N no Hangar" a caixa fica, mas a marca some (a da barra de abas já está lá em cima). */
   :global(html[data-panels='edge']) .sidebar.collapsed .side-mark > :global(svg) { display: none; }
-  .side-brand { flex: 1; min-width: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-brand { flex: 1 0 auto; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Toggle do modo de seleção: mesma caixa de 36px dos outros controles do header. */
   .select-toggle-btn {
     flex-shrink: 0; width: 36px; height: 36px;
