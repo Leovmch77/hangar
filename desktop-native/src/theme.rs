@@ -380,6 +380,11 @@ pub fn glass_border() -> Hsla { border_strong() }
 pub fn success() -> Hsla { rgb(if colors().dark { 0x34c759 } else { 0x1d8a3e }).into() }
 pub fn warning() -> Hsla { rgb(if colors().dark { 0xff9f0a } else { 0xb25e00 }).into() }
 pub fn danger() -> Hsla { rgb(if colors().dark { 0xff453a } else { 0xd12c21 }).into() }
+/// Texto sobre fundo tingido da mesma cor (marca, linha de estado, nome em destaque): clareado no escuro, o `--success-text` do web.
+pub fn success_text() -> Hsla { if colors().dark { rgb(mix(0x34c759, 0xffffff, 0.45)).into() } else { success() } }
+pub fn warning_text() -> Hsla { if colors().dark { rgb(mix(0xff9f0a, 0xffffff, 0.4)).into() } else { warning() } }
+/// Fundo do botão âmbar (Responder, Enviar) com texto branco: o âmbar escurecido em 25%.
+pub fn warning_press() -> Hsla { rgb(mix(if colors().dark { 0xff9f0a } else { 0xb25e00 }, 0x000000, 0.25)).into() }
 /// Moldura do pedido que espera a pessoa (pergunta do agente, seletor do terminal).
 pub fn ask_highlight() -> Hsla {
     match appearance::get().ask_highlight { appearance::AskHighlight::Accent => accent(), appearance::AskHighlight::Amber => warning() }

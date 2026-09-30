@@ -2,6 +2,7 @@
 //! blocos de atalho, o painel de terminal e o cartão da pergunta leem. Porta de `HangarRunning.svelte`,
 //! `ShortcutQuestion.svelte`, `ShortcutTiles.svelte` e `lib/hangarTerminals.svelte.ts`.
 use super::*;
+use gpui_kit::component::dialog::Dialog;
 use super::{popup, side::{Shortcut, now_seconds}, terminal::{LiveTerm, ShortcutTerm, TermQuestion, hangar_failure}};
 
 /// O backend grava a chave com o espaço colapsado; comparar do mesmo jeito.
@@ -25,7 +26,7 @@ pub(super) enum TileState { #[default] Idle, Running, Asking, Exited }
 
 /// O que o bloco de um atalho `shell` mostra do terminal dele.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct Tile { pub state: TileState, pub line: String, pub tip: Option<String>, pub mark: bool }
+pub(super) struct Tile { pub state: TileState, pub line: String, pub tip: Option<String>, pub mark: bool, pub opened_in: Option<String> }
 
 /// Estado do bloco de `shortcut` na sessão `session`: No Hangar vale a cópia do servidor (dono vazio); na sessão, só a
 /// pergunta do terminal mais novo dela.
@@ -48,9 +49,9 @@ pub(super) fn tile_of(live: &[LiveTerm], session: &str, shortcut: &Shortcut, now
         (TileState::Exited, Some(t)) => tr_shared("atalho_tile_caiu", &[("codigo", &t.term.exit_code.map_or_else(|| "?".to_owned(), |c| c.to_string()))]),
         _ => String::new(),
     };
-    let tip = hangar_term.filter(|t| t.term.alive && !t.origin.is_empty() && t.origin != session)
-        .map(|t| tr_shared("atalho_tile_dica_hangar", &[("rotulo", label), ("sessao", &t.origin)]));
-    Tile { state, line, tip, mark: *hangar }
+    let elsewhere = hangar_term.filter(|t| t.term.alive && !t.origin.is_empty() && t.origin != session);
+    let tip = elsewhere.map(|t| tr_shared("atalho_tile_dica_hangar", &[("rotulo", label), ("sessao", &t.origin)]));
+    Tile { state, line, tip, mark: *hangar, opened_in: elsewhere.map(|t| t.origin.clone()) }
 }
 
 /// Ações das linhas do popover do chip.
@@ -100,10 +101,10 @@ impl Hangar {
         tile_of(&self.live_for(server), session, shortcut, now_seconds() as i64)
     }
 
-    /// Uma nota por atalho No Hangar vivo que outra sessão abriu (vale também onde a dica do bloco não aparece).
-    pub(super) fn hangar_notes(&self, server: &str, session: &str, tiles: &[(String, Shortcut, bool)]) -> Vec<String> {
+    /// Uma linha por atalho No Hangar vivo que outra sessão abriu (rótulo e sessão), para a nota única sob a grade.
+    pub(super) fn hangar_notes(&self, server: &str, session: &str, tiles: &[(String, Shortcut, bool)]) -> Vec<(String, String)> {
         let live = self.live_for(server);
-        tiles.iter().filter_map(|(_, shortcut, _)| tile_of(&live, session, shortcut, 0).tip).collect()
+        tiles.iter().filter_map(|(_, shortcut, _)| tile_of(&live, session, shortcut, 0).opened_in.map(|origin| (shortcut.label(), origin))).collect()
     }
 
     /// A lista viva de `server` mudou (ou o stream caiu): o que depende dela se acerta.
@@ -184,11 +185,11 @@ impl Hangar {
                     .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element()
             }
             Chip::Label => Button::new("hangar-chip")
-                .custom(ButtonCustomVariant::new(cx).color(theme::accent_dim()).foreground(theme::text())
-                    .hover(theme::accent_dim()).active(theme::accent_dim()))
-                .h(px(26.)).px(px(10.)).rounded_full().border_1().border_color(theme::accent().opacity(0.55)).flex_shrink_0()
+                .custom(ButtonCustomVariant::new(cx).color(theme::accent().opacity(0.14)).foreground(theme::accent_text())
+                    .hover(theme::accent().opacity(0.2)).active(theme::accent().opacity(0.24)))
+                .h(px(30.)).px(px(12.)).rounded_full().border_1().border_color(theme::accent().opacity(0.5)).flex_shrink_0()
                 .selected(self.hangar_open).accessibility_label(label.clone()).tooltip(label.clone())
-                .child(div().flex().items_center().gap(px(6.)).child(div().size(px(7.)).rounded_full().bg(color))
+                .child(div().flex().items_center().gap(px(8.)).child(div().size(px(7.)).rounded_full().bg(color))
                     .child(div().text_xs().whitespace_nowrap().child(label)))
                 .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element(),
         };
@@ -221,19 +222,19 @@ impl Hangar {
                 .when(t.term.alive, |el| el.bg(if asking { theme::warning() } else { theme::success() }));
             let acts: &[Act] = if !t.term.alive { &[Act::Output, Act::Again, Act::Dismiss] }
                 else if asking { &[Act::Answer, Act::Terminal, Act::Stop] } else { &[Act::Go, Act::Terminal, Act::Stop] };
-            rows.push(div().flex().flex_col().gap(px(8.)).px(px(14.)).py(px(10.)).border_t_1().border_color(theme::border())
-                .when(asking, |el| el.bg(theme::warning().opacity(0.07)))
-                .child(div().flex().items_center().gap(px(8.)).min_w_0().child(dot)
-                    .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM)
+            rows.push(div().flex().flex_col().gap(px(10.)).px(px(16.)).py(px(12.)).border_t_1().border_color(theme::border())
+                .when(asking, |el| el.bg(theme::warning().opacity(0.06)))
+                .child(div().flex().items_center().gap(px(10.)).min_w_0().child(dot)
+                    .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM)
                         .text_color(if t.term.alive { theme::text() } else { theme::muted() }).child(t.term.label.clone()))
                     .child(div().min_w_0().truncate().text_xs()
-                        .text_color(if !t.term.alive { theme::danger() } else if asking { theme::warning() } else { theme::faint() }).child(meta)))
-                .when_some(t.question.as_ref().filter(|_| asking), |el, q| el.child(div().pl(px(16.)).text_sm().text_color(theme::muted()).whitespace_normal().child(q.text.clone())))
-                .child(div().pl(px(16.)).flex().flex_wrap().gap(px(6.))
+                        .text_color(if !t.term.alive { theme::danger() } else if asking { theme::warning_text() } else { theme::faint() }).child(meta)))
+                .when_some(t.question.as_ref().filter(|_| asking), |el, q| el.child(div().pl(px(18.)).text_xs().text_color(theme::muted()).whitespace_normal().child(q.text.clone())))
+                .child(div().pl(px(18.)).flex().flex_wrap().gap(px(6.))
                     .children(acts.iter().enumerate().map(|(n, act)| self.hangar_button(&server, &t.term.id, *act, row == 0 && n == 0, cx)))));
         }
         div().flex().flex_col().rounded(px(12.)).bg(theme::elevated()).overflow_hidden()
-            .child(popup::title(tr_shared("hangar_lista_titulo", &[]), None))
+            .child(div().px(px(16.)).pt(px(12.)).pb(px(8.)).text_xs().text_color(theme::faint()).child(tr_shared("hangar_lista_titulo", &[])))
             .child(div().id("hangar-list").max_h(px(max_height)).overflow_y_scroll().flex().flex_col().children(rows))
             .when_some(self.hangar_error.clone(), |el, error| el.child(div().id("hangar-error").role(Role::Alert).px(px(14.)).py(px(8.)).text_sm()
             .text_color(theme::danger()).whitespace_normal().child(error))).into_any_element()
@@ -246,16 +247,17 @@ impl Hangar {
         }, &[]);
         let base = Button::new(SharedString::from(format!("hangar-{}-{id}", act as u8)));
         let button = match act {
-            Act::Go => base.primary(),
-            Act::Answer => base.custom(ButtonCustomVariant::new(cx).color(theme::warning()).foreground(theme::on_accent())
-                .hover(theme::warning().opacity(0.85)).active(theme::warning().opacity(0.75))),
-            Act::Stop => base.custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::danger())
-                .hover(theme::danger().opacity(0.12)).active(theme::danger().opacity(0.2))).border_1().border_color(theme::danger().opacity(0.45)),
+            Act::Go => base.custom(ButtonCustomVariant::new(cx).color(theme::accent_press()).foreground(gpui::white())
+                .hover(theme::accent()).active(theme::accent_press())),
+            Act::Answer => base.custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(gpui::white())
+                .hover(theme::warning_press().opacity(0.88)).active(theme::warning_press().opacity(0.78))),
+            Act::Stop => base.custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::removed())
+                .hover(theme::danger().opacity(0.12)).active(theme::danger().opacity(0.2))).border_1().border_color(theme::border_strong()),
             Act::Dismiss => base.ghost(),
             _ => base.outline(),
         };
         let (server, id) = (server.to_owned(), id.to_owned());
-        button.small().label(label).when(first, |button| button.track_focus(&self.hangar_focus)).on_click(cx.listener(move |this, _, window, cx| this.hangar_act(act, &server, &id, window, cx)))
+        button.small().h(px(30.)).px(px(12.)).rounded(px(7.)).label(label).when(first, |button| button.track_focus(&self.hangar_focus)).on_click(cx.listener(move |this, _, window, cx| this.hangar_act(act, &server, &id, window, cx)))
     }
 
     fn hangar_act(&mut self, act: Act, server: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,11 +322,10 @@ impl Hangar {
         let hangar = cx.entity().downgrade();
         let runtime = self.runtime.clone();
         let (server_key, owner_name, term_id) = (server.clone(), owner.to_owned(), id.to_owned());
-        let card = cx.new(|cx| QuestionCard::new(api, runtime, hangar.clone(), server_key, owner_name, term_id, term, window, cx));
+        let card = cx.new(|cx| QuestionCard::new(api, runtime, hangar.clone(), server_key, owner_name, term_id, term, tr_shared("pergunta_titulo", &[("rotulo", &label)]), window, cx));
         self.question_card = Some(card.clone());
         let mine = card.entity_id();
-        let title = tr_shared("pergunta_titulo", &[("rotulo", &label)]);
-        window.open_dialog(cx, move |dialog, _, _| popup::dialog(dialog).w(px(520.)).title(title.clone()).child(card.clone())
+        window.open_dialog(cx, move |dialog, _, _| question_dialog(dialog).child(card.clone())
             .on_close({
                 let hangar = hangar.clone();
                 move |_, _, cx| { let _ = hangar.update(cx, |this, _| {
@@ -375,6 +376,7 @@ pub(super) struct QuestionCard {
     server: String,
     owner: String,
     id: String,
+    title: String,
     term: Option<LiveTerm>,
     input: Entity<InputState>,
     hide: bool,
@@ -391,7 +393,7 @@ pub(super) struct QuestionCard {
 impl QuestionCard {
     #[allow(clippy::too_many_arguments)]
     fn new(api: Api, runtime: Arc<tokio::runtime::Runtime>, hangar: WeakEntity<Hangar>, server: String, owner: String, id: String,
-        term: Option<LiveTerm>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        term: Option<LiveTerm>, title: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
         let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { .. } => this.send(window, cx),
@@ -400,7 +402,7 @@ impl QuestionCard {
         });
         let field = input.clone();
         cx.defer_in(window, move |_, window, cx| field.update(cx, |state, cx| state.focus(window, cx)));
-        let mut card = Self { api, runtime, hangar, server, owner, id, term: None, input, hide: false, sending: false, waiting: false, error: None,
+        let mut card = Self { api, runtime, hangar, server, owner, id, title, term: None, input, hide: false, sending: false, waiting: false, error: None,
             answered: Vec::new(), last_sig: String::new(), sent_sig: String::new(), close_timer: None, _events: events };
         card.sync(term, window, cx);
         card
@@ -487,58 +489,84 @@ impl QuestionCard {
     }
 }
 
+/// O cartão desenha a própria superfície (cartão âmbar e caixa da tela soltos, como no desenho): o diálogo só segura o lugar.
+fn question_dialog(dialog: Dialog) -> Dialog {
+    dialog.w(px(512.)).p(px(0.)).bg(transparent_black()).border_color(transparent_black()).close_button(false)
+}
+
+/// O prompt do script traz o exemplo entre parênteses; a linha da resposta dada fica só com o nome.
+fn short_text(text: &str) -> &str {
+    let t = text.trim_end();
+    let t = t.strip_suffix(':').map_or(t, str::trim_end);
+    let t = t.strip_suffix(')').and_then(|head| head.rfind('(').map(|n| head[..n].trim_end())).unwrap_or(t);
+    t.trim_end_matches(':').trim_end()
+}
+
 impl Render for QuestionCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pending = self.pending();
-        let mut body = div().w_full().flex().flex_col().gap(px(12.));
-        if self.owner.is_empty() {
-            body = body.child(div().flex().justify_end().text_size(px(11.)).text_color(theme::faint()).child(tr_shared("pergunta_marca_hangar", &[])));
-        }
+        let mut card = div().w_full().flex().flex_col().gap(px(16.)).p(px(20.)).rounded(px(14.)).bg(theme::surface())
+            .border_1().border_color(theme::warning().opacity(0.4))
+            .child(div().flex().items_center().gap(px(10.))
+                .child(chrome::small_icon(IconName::SquareTerminal, 18., theme::warning()))
+                .child(div().min_w_0().truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(self.title.clone()))
+                .child(div().flex_1())
+                .when(self.owner.is_empty(), |el| el.child(div().flex_shrink_0().text_size(px(11.)).text_color(theme::faint()).child(tr_shared("pergunta_marca_hangar", &[])))));
         for done in &self.answered {
             let value = if done.hidden { "••••".to_owned() } else if done.value.is_empty() { "⏎".to_owned() } else { done.value.clone() };
-            body = body.child(div().flex().items_center().gap(px(10.)).px(px(12.)).py(px(8.)).rounded(px(8.)).bg(theme::success().opacity(0.08))
-                .child(div().font_weight(FontWeight::BOLD).text_color(theme::success()).child("✓"))
-                .child(div().flex_1().min_w_0().text_sm().text_color(theme::muted()).whitespace_normal().child(done.text.clone()))
-                .child(div().font_family(theme::MONO).text_xs().child(value)));
+            card = card.child(div().flex().items_center().gap(px(10.)).px(px(12.)).py(px(10.)).rounded(px(8.)).bg(theme::success().opacity(0.07))
+                .child(chrome::small_icon(IconName::Check, 14., theme::success()))
+                .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(short_text(&done.text).to_owned()))
+                .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(12.)).child(value)));
         }
         let question = self.term.as_ref().and_then(|t| t.question.as_ref()).filter(|_| pending);
         match question {
             Some(question) => {
-                body = body
-                    .child(div().flex().flex_col().gap(px(6.))
-                        .child(div().font_weight(FontWeight::MEDIUM).whitespace_normal().child(question.text.clone()))
-                        .child(Input::new(&self.input))
-                        .when(!question.default.is_empty(), |el| el.child(div().text_sm().text_color(theme::muted()).child(tr_shared("pergunta_padrao", &[])))))
-                    .child(Checkbox::new("question-hide").label(tr_shared("pergunta_esconder", &[])).checked(self.hide)
-                        .on_click(cx.listener(|this, on: &bool, window, cx| {
-                            this.hide = *on;
-                            this.input.update(cx, |state, cx| state.set_masked(*on, window, cx));
-                            cx.notify();
-                        })))
-                    .child(div().flex().flex_col().gap(px(2.)).px(px(12.)).py(px(10.)).rounded(px(10.)).bg(theme::inset()).border_1().border_color(theme::border())
-                        .child(div().mb(px(4.)).text_size(px(11.)).text_color(theme::faint()).child(tr_shared("pergunta_tela", &[])))
-                        .children(question.screen.iter().enumerate().map(|(n, line)| div().font_family(theme::MONO).text_xs().whitespace_normal()
-                            .text_color(if n + 1 == question.screen.len() { theme::text() } else { theme::muted() }).child(line.clone()))));
+                card = card.child(div().flex().flex_col().gap(px(8.))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).whitespace_normal().child(question.text.clone()))
+                    .child(Input::new(&self.input))
+                    .when(!question.default.is_empty(), |el| el.child(div().text_size(px(12.)).text_color(theme::faint()).child(tr_shared("pergunta_padrao", &[])))));
             }
             None => {
-                body = body.child(div().id("question-status").role(Role::Status).text_sm().text_color(theme::muted())
+                card = card.child(div().id("question-status").role(Role::Status).text_sm().text_color(theme::muted())
                     .child(if self.waiting { tr_shared("pergunta_aguardando", &[]) } else { tr("loading") }));
             }
         }
         if let Some(error) = self.error.clone() {
-            body = body.child(div().id("question-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(error));
+            card = card.child(div().id("question-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(error));
         }
-        body.child(div().flex().justify_end().gap_2()
-            .child(Button::new("question-open-terminal").outline().label(tr_shared("pergunta_abrir_terminal", &[]))
+        // "Esconder" à esquerda; Abrir terminal e Enviar à direita, na mesma linha.
+        let hide = pending.then(|| Checkbox::new("question-hide").label(tr_shared("pergunta_esconder", &[])).checked(self.hide)
+            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                this.hide = *on;
+                this.input.update(cx, |state, cx| state.set_masked(*on, window, cx));
+                cx.notify();
+            })));
+        card = card.child(div().flex().items_center().gap(px(8.)).children(hide).child(div().flex_1())
+            .child(Button::new("question-open-terminal").outline().h(px(36.)).px(px(14.)).rounded(px(8.)).label(tr_shared("pergunta_abrir_terminal", &[]))
                 .on_click(cx.listener(|this, _, window, cx| this.open_terminal(window, cx))))
-            .child(Button::new("question-send").primary().label(tr_shared("pergunta_enviar", &[])).loading(self.sending)
-                .disabled(self.sending || !pending).on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))))
+            .child(Button::new("question-send")
+                .custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(gpui::white())
+                    .hover(theme::warning_press().opacity(0.88)).active(theme::warning_press().opacity(0.78)))
+                .h(px(36.)).px(px(16.)).rounded(px(8.)).label(tr_shared("pergunta_enviar", &[])).loading(self.sending)
+                .disabled(self.sending || !pending).on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))));
+        // A tela do terminal é uma caixa à parte, abaixo do cartão; a última linha (a pergunta) leva o cursor âmbar.
+        let screen = question.map(|question| div().w_full().flex().flex_col().gap(px(8.)).px(px(16.)).py(px(14.)).rounded(px(10.))
+            .bg(theme::inset()).border_1().border_color(theme::border())
+            .child(div().text_size(px(11.)).text_color(theme::faint()).child(tr_shared("pergunta_tela", &[]).to_uppercase()))
+            .children(question.screen.iter().enumerate().map(|(n, line)| {
+                let last = n + 1 == question.screen.len();
+                div().flex().items_end().gap(px(4.)).font_family(theme::MONO).text_size(px(12.)).line_height(px(20.)).text_color(if last { theme::text() } else { theme::muted() })
+                    .child(div().min_w_0().whitespace_normal().child(line.clone()))
+                    .when(last, |el| el.child(div().flex_shrink_0().mb(px(3.)).w(px(7.)).h(px(14.)).bg(theme::warning())))
+            })));
+        div().w_full().flex().flex_col().gap(px(14.)).child(card).children(screen)
     }
 }
 
 #[cfg(test)]
 mod live_tests {
-    use super::{Shortcut, TileState, elapsed, norm_key, shortcut_key, signature, tile_of};
+    use super::{Shortcut, TileState, elapsed, norm_key, shortcut_key, short_text, signature, tile_of};
     use crate::app::terminal::{LiveTerm, ShortcutTerm, TermQuestion};
 
     fn shell(key: &str, hangar: bool) -> Shortcut {
@@ -584,6 +612,14 @@ mod live_tests {
         assert!(dead.line.contains('3'));
         // A chave com espaço colapsado casa com a que o backend guardou.
         assert_eq!(tile_of(&[term("global:a b", "", true, None, 1)], "s", &shell("global:a  b", true), 100).state, TileState::Running);
+    }
+
+    #[test]
+    fn answered_line_drops_the_example_in_parentheses_and_the_colon() {
+        assert_eq!(short_text("Destino SSH da VM (usuario@host ou alias do ~/.ssh/config)"), "Destino SSH da VM");
+        assert_eq!(short_text("Pasta do PSS na VM:"), "Pasta do PSS na VM");
+        assert_eq!(short_text("Porta (3000):  "), "Porta");
+        assert_eq!(short_text("Senha"), "Senha");
     }
 
     #[test]

@@ -28,7 +28,7 @@ pub(super) enum Shortcut {
 
 impl Shortcut {
     fn confirm(&self) -> bool { matches!(self, Shortcut::Send { confirm: true, .. } | Shortcut::Shell { confirm: true, .. }) }
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         match self {
             Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(),
             Shortcut::Attach => tr("attach"),
@@ -793,30 +793,36 @@ impl Hangar {
             // A credencial em branco vale mais que a dica: o clique não roda nada.
             let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
             let tone = match live.state { hangar_live::TileState::Running => Some((theme::success(), 0.45)), hangar_live::TileState::Asking => Some((theme::warning(), 0.55)), _ => None };
-            let fill = tone.map_or_else(transparent_black, |(color, _)| color.opacity(0.08));
+            let fill = tone.map_or_else(|| theme::raised().opacity(0.5), |(color, _)| color.opacity(0.08));
+            let text_tone = match live.state { hangar_live::TileState::Running => Some(theme::success_text()), hangar_live::TileState::Asking => Some(theme::warning_text()), _ => None };
+            // A marca HANGAR mora no canto de cima; o bloco com marca ganha respiro em cima para ela não cobrir o ícone.
+            let lift = if live.mark { 22. } else { 8. };
             let edge = tone.map_or_else(theme::border, |(color, alpha)| color.opacity(alpha));
             let accessible = if live.line.is_empty() { label.clone() } else { format!("{label} · {}", live.line) };
             Button::new(SharedString::from(id))
-                .custom(ButtonCustomVariant::new(cx).color(fill).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
+                .custom(ButtonCustomVariant::new(cx).color(fill).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::text() })
                     .hover(theme::hover()).active(theme::hover()))
-                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(edge)
+                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).pt(px(lift)).pb(px(8.)).rounded(px(10.)).border_1().border_color(edge)
                 .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
-                .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().gap(px(4.))
+                .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().gap(px(if tone.is_some() { 6. } else { 8. }))
                     // Marca de "deste projeto", no canto: o bloco segue igual aos outros e o motivo está na dica.
-                    .when(own, |el| el.child(div().absolute().top(px(-4.)).right(px(0.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
-                    .when(live.mark, |el| el.child(div().absolute().top(px(-4.)).left(px(2.)).text_size(px(9.)).font_weight(FontWeight::SEMIBOLD)
-                        .text_color(tone.map_or_else(theme::faint, |(color, _)| color)).child(tr_shared("term_grupo_hangar", &[]))))
+                    .when(own, |el| el.child(div().absolute().top(px(9. - lift)).right(px(4.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
+                    .when(live.mark, |el| el.child(div().absolute().top(px(8. - lift)).right(px(if own { 20. } else { 4. })).flex().items_center().gap(px(4.))
+                        .text_size(px(10.)).text_color(text_tone.unwrap_or_else(theme::faint))
+                        .child(chrome::small_icon(IconName::Globe, 11., text_tone.unwrap_or_else(theme::faint))).child(tr_shared("term_grupo_hangar", &[]))))
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
                     // Sem `whitespace_normal` o rótulo não quebra: a caixa passa da largura do bloco e, centralizada, perde as
                     // duas pontas ("car Review Au"). Altura fixa de duas linhas deixa todos os blocos iguais.
-                    .child(div().w_full().min_w_0().h(px(28.)).flex().items_center().justify_center()
+                    .child(div().w_full().min_w_0().h(px(32.)).flex().items_center().justify_center()
                         .child(div().w_full().whitespace_normal().text_center().line_clamp(2).text_ellipsis()
-                            .text_size(px(11.5)).line_height(px(14.)).child(label)))
-                    .when(!live.line.is_empty(), |el| el.child(div().text_size(px(10.)).text_center()
-                        .text_color(tone.map_or_else(theme::faint, |(color, _)| color)).child(live.line.clone()))))
+                            .text_size(px(13.)).line_height(px(16.)).child(label)))
+                    .when(!live.line.is_empty(), |el| el.child(div().flex().items_center().justify_center().gap(px(5.)).text_size(px(11.))
+                        .text_color(text_tone.unwrap_or_else(theme::faint))
+                        .when(live.state == hangar_live::TileState::Running, |el| el.child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(theme::success())))
+                        .child(live.line.clone()))))
                 .on_click(cx.listener(move |this, _, window, cx| this.run_shortcut(shortcut.clone(), false, window, cx)))
         }).collect();
         let grid = div().flex().flex_wrap().gap(px(SHORTCUT_GAP)).children(buttons);
@@ -827,8 +833,14 @@ impl Hangar {
             .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions")))
                 .child(div().flex().items_center().gap(px(2.)).child(self.transfer_menu_button(cx)).child(add)))
             .child(grid)
-            .children(notes.into_iter().map(|note| div().px(px(10.)).py(px(8.)).rounded(px(10.)).bg(theme::inset())
-                .text_size(px(11.)).line_height(px(16.)).text_color(theme::muted()).whitespace_normal().child(note)))
+            // Uma nota só para todos os terminais abertos por outra sessão, com o nome do atalho em destaque.
+            .when(!notes.is_empty(), |el| el.child(div().flex().flex_col().gap(px(8.)).px(px(14.)).py(px(12.)).rounded(px(10.)).bg(theme::raised().opacity(0.5))
+                .text_size(px(12.)).line_height(px(18.)).text_color(theme::muted())
+                .children(notes.into_iter().map(|(label, origin)| {
+                    let text = format!("{label} {}", tr_shared("atalho_tile_nota_hangar", &[("sessao", &origin)]));
+                    let bold = HighlightStyle { color: Some(theme::success_text()), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                    div().w_full().whitespace_normal().child(StyledText::new(text).with_highlights([(0..label.len(), bold)]))
+                }))))
             .children(global_error).children(project_error).children(self.transfer_note_element()).into_any_element())
     }
 

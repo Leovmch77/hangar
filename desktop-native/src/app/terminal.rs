@@ -617,19 +617,20 @@ impl Hangar {
         };
         let failed = panel.tabs.get(tab).is_some_and(|slot| slot.kind == Kind::Shell && panel.shell_error.is_some()
             || matches!(slot.status, Status::Failed(_)));
-        let mut tabs = div().flex().items_center().gap_1().min_w_0().flex_1().overflow_hidden();
+        // Aba nunca encolhe: com muitas, a fila rola na horizontal em vez de esmagar o rótulo.
+        let mut tabs = div().id("terminal-tabs").flex().items_center().gap_1().min_w_0().flex_1().overflow_x_scroll();
         let live = self.live_for(&panel.server);
         let mut hangar_tabs = Vec::new();
         for (index, slot) in panel.tabs.iter().enumerate() {
             let selected = index == tab;
             let element = match &slot.kind {
-                Kind::Session => Button::new("term-session").ghost().small().selected(selected).label(panel.session.clone())
+                Kind::Session => Button::new("term-session").ghost().small().flex_shrink_0().selected(selected).label(panel.session.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(panel) = this.terminal.as_mut() { (panel.active, panel.error) = (index, None); panel.focus.focus(window, cx); }
                         this.refresh_hangar_sockets();
                         cx.notify();
                     })).into_any_element(),
-                Kind::Shell => Button::new("term-shell").ghost().small().selected(selected).label(tr("term_shell"))
+                Kind::Shell => Button::new("term-shell").ghost().small().flex_shrink_0().selected(selected).label(tr("term_shell"))
                     .on_click(cx.listener(|this, _, window, cx| this.show_shell(window, cx))).into_any_element(),
                 Kind::Shortcut(term) => {
                     let label = shortcut_tab_label(term);
@@ -680,8 +681,9 @@ impl Hangar {
             tabs = tabs.child(element);
         }
         if !hangar_tabs.is_empty() {
-            tabs = tabs.child(div().flex_shrink_0().px_1().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::faint())
-                .child(tr_shared("term_grupo_hangar", &[]))).children(hangar_tabs);
+            tabs = tabs.child(div().flex_shrink_0().flex().items_center().gap(px(8.)).ml(px(6.))
+                .child(div().w(px(1.)).h(px(18.)).bg(theme::border_strong()))
+                .child(div().text_size(px(10.)).font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(tr_shared("term_grupo_hangar", &[])))).children(hangar_tabs);
         }
         let header = div().h(px(38.)).flex_shrink_0().flex().items_center().gap_1().px_2()
             .bg(theme::raised()).border_b_1().border_color(theme::border())
@@ -788,7 +790,7 @@ impl Hangar {
 
 /// Rótulo da aba do atalho: o nome e, depois que o comando saiu, o código (o pane continua com a saída na tela).
 fn shortcut_tab_label(term: &ShortcutTerm) -> String {
-    let label = conversation::one_line(&term.label, 24);
+    let label = conversation::one_line(&term.label, 40);
     if term.alive { return label; }
     let status = term.exit_code.map_or_else(|| tr("term_shortcut_ended"), |code| tr("term_shortcut_exit").replace("{code}", &code.to_string()));
     format!("{label} · {status}")
