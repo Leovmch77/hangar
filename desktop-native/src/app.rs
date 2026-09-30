@@ -363,6 +363,8 @@ pub struct Hangar {
     question_card: Option<Entity<hangar_live::QuestionCard>>,
     /// Popover do chip "N no Hangar" aberto, e a falha da última ação dele.
     hangar_open: bool,
+    /// Primeira ação da lista do chip: recebe o foco quando ela abre.
+    hangar_focus: FocusHandle,
     hangar_error: Option<String>,
     /// Relógio do "rodando · N min": redesenha a cada 30 s enquanto há um No Hangar vivo.
     live_clock: Option<Task<()>>,
@@ -664,7 +666,7 @@ impl Hangar {
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
-            hangar_open: false, hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
+            hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,

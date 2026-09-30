@@ -165,14 +165,23 @@ impl Hangar {
         let asking = items.iter().any(|(_, t)| t.term.alive && t.question.is_some());
         let color = if asking { theme::warning() } else { theme::success() };
         let label = tr_shared("hangar_chip", &[("n", &items.len().to_string())]);
-        let toggle = |this: &mut Self, cx: &mut Context<Self>| { this.hangar_open = !this.hangar_open; this.hangar_error = None; cx.notify(); };
+        // Aberto, o foco vai para a primeira ação da lista (o botão dela segue o `hangar_focus`), como o web.
+        let toggle = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.hangar_open = !this.hangar_open;
+            this.hangar_error = None;
+            if this.hangar_open {
+                let focus = this.hangar_focus.clone();
+                window.on_next_frame(move |window, cx| focus.focus(window, cx));
+            }
+            cx.notify();
+        };
         let element = match kind {
             Chip::Dot => {
                 let tip = label.clone();
                 div().id("hangar-chip").flex_shrink_0().size(px(12.)).rounded_full().bg(color).border_2().border_color(theme::background())
                     .cursor_pointer().role(Role::Button).aria_label(label)
                     .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                    .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx))).into_any_element()
+                    .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element()
             }
             Chip::Label => Button::new("hangar-chip")
                 .custom(ButtonCustomVariant::new(cx).color(theme::accent_dim()).foreground(theme::text())
@@ -181,20 +190,21 @@ impl Hangar {
                 .selected(self.hangar_open).accessibility_label(label.clone()).tooltip(label.clone())
                 .child(div().flex().items_center().gap(px(6.)).child(div().size(px(7.)).rounded_full().bg(color))
                     .child(div().text_xs().whitespace_nowrap().child(label)))
-                .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx))).into_any_element(),
+                .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element(),
         };
         Some(popup::anchor(div().relative().flex_shrink_0(), "hangar-chip").child(element).into_any_element())
     }
 
     /// A lista do chip: uma linha por terminal, com as ações do `HangarRunning.svelte`. Fundo sólido: fica sobre a
     /// conversa e a lista, e o vidro deixaria o texto de baixo atravessar.
-    pub(super) fn render_hangar_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_hangar_popover(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let items = self.all_hangar();
         let multi = items.iter().map(|(server, _)| server.as_str()).collect::<HashSet<_>>().len() > 1;
         let now = now_seconds() as i64;
-        let mut list = div().flex().flex_col().rounded(px(12.)).bg(theme::elevated()).overflow_hidden()
-            .child(popup::title(tr_shared("hangar_lista_titulo", &[]), None));
-        for (server, t) in items {
+        // Muitos terminais rolam dentro da janela, em vez de passar dela (`max-height` do web).
+        let max_height = (f32::from(window.viewport_size().height) - 120.).max(160.);
+        let mut rows = Vec::new();
+        for (row, (server, t)) in items.into_iter().enumerate() {
             let asking = t.term.alive && t.question.is_some();
             let origin = if t.origin.is_empty() { String::new() } else if multi {
                 let label = self.server_entry(&server).map_or_else(|| server.clone(), |s| s.label.clone());
@@ -211,7 +221,7 @@ impl Hangar {
                 .when(t.term.alive, |el| el.bg(if asking { theme::warning() } else { theme::success() }));
             let acts: &[Act] = if !t.term.alive { &[Act::Output, Act::Again, Act::Dismiss] }
                 else if asking { &[Act::Answer, Act::Terminal, Act::Stop] } else { &[Act::Go, Act::Terminal, Act::Stop] };
-            list = list.child(div().flex().flex_col().gap(px(8.)).px(px(14.)).py(px(10.)).border_t_1().border_color(theme::border())
+            rows.push(div().flex().flex_col().gap(px(8.)).px(px(14.)).py(px(10.)).border_t_1().border_color(theme::border())
                 .when(asking, |el| el.bg(theme::warning().opacity(0.07)))
                 .child(div().flex().items_center().gap(px(8.)).min_w_0().child(dot)
                     .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM)
@@ -220,13 +230,16 @@ impl Hangar {
                         .text_color(if !t.term.alive { theme::danger() } else if asking { theme::warning() } else { theme::faint() }).child(meta)))
                 .when_some(t.question.as_ref().filter(|_| asking), |el, q| el.child(div().pl(px(16.)).text_sm().text_color(theme::muted()).whitespace_normal().child(q.text.clone())))
                 .child(div().pl(px(16.)).flex().flex_wrap().gap(px(6.))
-                    .children(acts.iter().map(|act| self.hangar_button(&server, &t.term.id, *act, cx)))));
+                    .children(acts.iter().enumerate().map(|(n, act)| self.hangar_button(&server, &t.term.id, *act, row == 0 && n == 0, cx)))));
         }
-        list.when_some(self.hangar_error.clone(), |el, error| el.child(div().id("hangar-error").role(Role::Alert).px(px(14.)).py(px(8.)).text_sm()
+        div().flex().flex_col().rounded(px(12.)).bg(theme::elevated()).overflow_hidden()
+            .child(popup::title(tr_shared("hangar_lista_titulo", &[]), None))
+            .child(div().id("hangar-list").max_h(px(max_height)).overflow_y_scroll().flex().flex_col().children(rows))
+            .when_some(self.hangar_error.clone(), |el, error| el.child(div().id("hangar-error").role(Role::Alert).px(px(14.)).py(px(8.)).text_sm()
             .text_color(theme::danger()).whitespace_normal().child(error))).into_any_element()
     }
 
-    fn hangar_button(&self, server: &str, id: &str, act: Act, cx: &mut Context<Self>) -> Button {
+    fn hangar_button(&self, server: &str, id: &str, act: Act, first: bool, cx: &mut Context<Self>) -> Button {
         let label = tr_shared(match act {
             Act::Go => "hangar_ir_janela", Act::Terminal => "hangar_terminal", Act::Stop => "hangar_parar", Act::Answer => "hangar_responder",
             Act::Output => "hangar_ver_saida", Act::Again => "hangar_rodar_de_novo", Act::Dismiss => "hangar_dispensar",
@@ -242,7 +255,7 @@ impl Hangar {
             _ => base.outline(),
         };
         let (server, id) = (server.to_owned(), id.to_owned());
-        button.small().label(label).on_click(cx.listener(move |this, _, window, cx| this.hangar_act(act, &server, &id, window, cx)))
+        button.small().label(label).when(first, |button| button.track_focus(&self.hangar_focus)).on_click(cx.listener(move |this, _, window, cx| this.hangar_act(act, &server, &id, window, cx)))
     }
 
     fn hangar_act(&mut self, act: Act, server: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -290,10 +303,17 @@ impl Hangar {
     /// Abre o cartão da pergunta do terminal `id` (`owner` vazio = No Hangar). Já aberto para o mesmo terminal, só o acompanha.
     pub(super) fn open_question(&mut self, server: &str, owner: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let server = servers::norm(server);
-        let Some(api) = self.machine_api(&server) else { return; };
+        let Some(api) = self.machine_api(&server) else {
+            // Sem a conexão da máquina o clique não pode morrer calado; o popover pode estar fechado, então também avisa na janela.
+            let text = tr_shared("hangar_erro", &[("msg", &self.machine_error(&server))]);
+            self.hangar_error = Some(text.clone());
+            window.push_notification(Notification::warning(text), cx);
+            cx.notify();
+            return;
+        };
         let target = (server.clone(), owner.to_owned(), id.to_owned());
         if self.question_open.as_ref() == Some(&target) && self.question_card.is_some() { self.sync_question(window, cx); return; }
-        if self.question_card.take().is_some() { window.close_dialog(cx); }
+        self.close_question(window, cx);
         let term = self.live_for(&server).into_iter().find(|t| t.term.id == id);
         let label = term.as_ref().map(|t| t.term.label.clone()).unwrap_or_default();
         self.question_open = Some(target);
@@ -313,6 +333,20 @@ impl Hangar {
                 }); }
             }));
         cx.notify();
+    }
+
+    /// Fecha o cartão pelo código: o estado sai antes, porque `close_dialog` só tira o diálogo do topo e não chama o
+    /// `on_close` (que só corre no Esc e no fechar do kit). Sem cartão registrado, nada é fechado.
+    pub(super) fn close_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.question_open = None;
+        if self.question_card.take().is_none() { return; }
+        window.close_dialog(cx);
+        cx.notify();
+    }
+
+    /// `close_question` só se o cartão registrado ainda é `card`: um temporizador velho não pode fechar o diálogo de outro.
+    fn close_question_of(&mut self, card: EntityId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.question_card.as_ref().is_some_and(|open| open.entity_id() == card) { self.close_question(window, cx); }
     }
 
     fn sync_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -395,10 +429,13 @@ impl QuestionCard {
     fn arm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_timer = None;
         if !self.waiting || self.term.as_ref().is_some_and(|t| t.question.is_some()) { return; }
+        let (hangar, mine) = (self.hangar.clone(), cx.entity_id());
         self.close_timer = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.term.as_ref().is_none_or(|t| t.question.is_none()) { window.close_dialog(cx); }
+                if this.term.as_ref().is_none_or(|t| t.question.is_none()) {
+                    let _ = hangar.update(cx, |hangar, cx| hangar.close_question_of(mine, window, cx));
+                }
             });
         }));
     }
@@ -436,9 +473,9 @@ impl QuestionCard {
     }
 
     fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (hangar, server, owner, id) = (self.hangar.clone(), self.server.clone(), self.owner.clone(), self.id.clone());
-        window.close_dialog(cx);
+        let (hangar, server, owner, id, mine) = (self.hangar.clone(), self.server.clone(), self.owner.clone(), self.id.clone(), cx.entity_id());
         let _ = hangar.update(cx, |this, cx| {
+            this.close_question_of(mine, window, cx);
             if owner.is_empty() { this.open_hangar_terminal(&server, &id, window, cx); }
             else { this.open_session_terminal(&server, &owner, &id, window, cx); }
         });

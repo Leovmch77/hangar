@@ -45,6 +45,7 @@ impl Terminal {
     /// `token` é a credencial da conexão de `api`, nunca o texto atual do formulário.
     /// `shortcut`: terminal de atalho da sessão; o backend confere o dono antes de anexar. Com `hangar`, é o terminal
     /// No Hangar `shortcut`, que não pertence a sessão nenhuma.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(runtime: &Handle, api: &Api, session: &str, shortcut: Option<&str>, hangar: bool, token: String, cols: u16, rows: u16) -> Self {
         let url = terminal_url(api, session, shortcut, hangar, &token, cols, rows);
         let (commands, input) = async_channel::bounded(8);

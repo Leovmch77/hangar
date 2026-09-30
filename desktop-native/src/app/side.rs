@@ -782,11 +782,12 @@ impl Hangar {
                 _ => (shortcut.label(), shortcut.label()),
             };
             let missing = shortcut.missing_secret();
-            let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
             // Estado do terminal do atalho (No Hangar: a cópia do servidor; na sessão: só a pergunta): borda e fundo verdes
             // rodando, âmbar perguntando, com a marca HANGAR no canto e a linha de estado embaixo.
             let live = key.as_ref().map(|key| self.tile_for(&key.server, &key.name, &shortcut)).unwrap_or_default();
             let tip = live.tip.clone().unwrap_or(tip);
+            // A credencial em branco vale mais que a dica: o clique não roda nada.
+            let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
             let tone = match live.state { hangar_live::TileState::Running => Some((theme::success(), 0.45)), hangar_live::TileState::Asking => Some((theme::warning(), 0.55)), _ => None };
             let fill = tone.map_or_else(transparent_black, |(color, _)| color.opacity(0.08));
             let edge = tone.map_or_else(theme::border, |(color, alpha)| color.opacity(alpha));

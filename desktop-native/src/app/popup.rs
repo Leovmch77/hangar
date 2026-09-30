@@ -116,7 +116,7 @@ impl Hangar {
             Floating::Usage => ((if self.accounts.card_top { "topbar-account" } else { "composer-account" }).to_owned(), Align::End, true,
                 Some(self.render_usage_card())),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
-            Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(cx))),
+            Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);

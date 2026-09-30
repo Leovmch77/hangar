@@ -440,7 +440,7 @@ impl Hangar {
         let api = self.session_api();
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some(shell) = panel.shell_index() else { return; };
-        panel.active = shell;
+        (panel.active, panel.error) = (shell, None);
         panel.focus.focus(window, cx);
         if panel.tabs[shell].name.is_empty() && !panel.shell_pending {
             panel.shell_pending = true;
@@ -625,7 +625,7 @@ impl Hangar {
             let element = match &slot.kind {
                 Kind::Session => Button::new("term-session").ghost().small().selected(selected).label(panel.session.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(panel) = this.terminal.as_mut() { panel.active = index; panel.focus.focus(window, cx); }
+                        if let Some(panel) = this.terminal.as_mut() { (panel.active, panel.error) = (index, None); panel.focus.focus(window, cx); }
                         this.refresh_hangar_sockets();
                         cx.notify();
                     })).into_any_element(),
@@ -639,6 +639,7 @@ impl Hangar {
                             .label(label).tooltip(term.label.clone())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(panel) = this.terminal.as_mut() {
+                                    panel.error = None;
                                     if panel.select_shortcut(&id) { panel.focus.focus(window, cx); }
                                 }
                                 this.refresh_hangar_sockets();
@@ -663,6 +664,7 @@ impl Hangar {
                             .child(div().flex().items_center().gap(px(6.)).child(dot).child(shortcut_tab_label(term)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(panel) = this.terminal.as_mut() {
+                                    panel.error = None;
                                     if panel.select_hangar(&id) { panel.focus.focus(window, cx); }
                                 }
                                 this.refresh_hangar_sockets();
