@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app import pair, pqueue, registry
+from app import orq_timeline, pair, pqueue, registry
 from app.adapters import get_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs
@@ -183,8 +183,14 @@ def test_panel_route_serves_one_snapshot_per_run(root, monkeypatch):
     _run(root, "2026-09-28-g1", "g1")
     monkeypatch.setattr(settings, "auth_token", "secret")
     from app.api import app
-    r = TestClient(app).get("/api/sessions/g1-orq/orq/panel", headers=H)
+    client = TestClient(app)
+    r = client.get("/api/sessions/g1-orq/orq/panel", headers=H)
     assert r.status_code == 200, r.text
+    assert r.json()["consumption"] is None            # a soma roda numa thread: o 1º pedido não espera
+    for lock in list(orq_timeline._consumption_locks.values()):
+        with lock:                                     # a thread solta a trava ao terminar
+            pass
+    r = client.get("/api/sessions/g1-orq/orq/panel", headers=H)
     body = r.json()
     assert body["run"] == "2026-09-28-g1" and body["gid"] == "g1"
     assert body["consumption"]["sessions"]["team"] == 1 and body["automation"]["mode"] == {"jev": "shadow", "regex": "shadow"}

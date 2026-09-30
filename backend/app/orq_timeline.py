@@ -507,10 +507,12 @@ def panel(d: Path, live=None) -> dict:
             _PANELS[key] = (sig, out, aux)
     names = [m["name"] for m in out["team"]]
     if not names and out["errors"]:
-        return {**out, "consumption": None}    # time que falhou: sem nomes o consumo sairia zerado, e não se guarda
+        # Time que falhou: sem nomes o consumo sairia zerado, e não se guarda; o erro próprio evita "calculando" eterno.
+        return {**out, "errors": [*out["errors"], {"file": "consumption", "error": _NO_TEAM_ERROR}],
+                "consumption": None}
     consumption, error = _consumption(d, names, aux, live)
     if error:
-        return {**out, "errors": [*out["errors"], {"file": "consumo", "error": error}], "consumption": None}
+        return {**out, "errors": [*out["errors"], {"file": "consumption", "error": error}], "consumption": None}
     return {**out, "consumption": consumption}
 
 
@@ -592,6 +594,8 @@ def _build_panel(d: Path) -> tuple[dict, dict]:
                              exact=True),
     }, aux
 
+
+_NO_TEAM_ERROR = "sem o time não há como somar o consumo"
 
 _NO_INTEGRATION = {"branch": None, "last": None, "outcome": None, "red_log": None,
                    "delivery_checks": {"ok": 0, "total": 0, "failing": []}}
@@ -729,7 +733,9 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[di
             readable.add(name)
             for row in rows:
                 subagents = subagents or bool(row.subagente)
-                if since is not None and row.ts < since:
+                # Claude: `ts` é a 1ª resposta do dia, então o corte é por dia e inclui o dia inteiro do início.
+                if since is not None and (row.ts.astimezone().date() < since.date()
+                                          if row.source == "claude" else row.ts < since):
                     continue
                 if not row.model and hints.get(name):
                     row = replace(row, model=hints[name])
@@ -769,8 +775,8 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[di
 
 def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | None, str | None]:
     """(consumo, erro), refeito depois de `CONSUMPTION_TTL_S` (`_UNAVAILABLE_TTL_S` se algum
-    transcript não pôde ser lido). Quem chega com a soma em andamento não espera: recebe o último
-    valor guardado, mesmo vencido, ou `None` se ainda não houve nenhum."""
+    transcript não pôde ser lido). Ninguém espera a soma: o pedido devolve o último valor guardado,
+    mesmo vencido, ou `None` (calculando) se ainda não houve nenhum, e o cálculo roda numa thread."""
     key = str(d.resolve())
     with _consumption_guard:
         lock = _consumption_locks.get(key)
@@ -783,19 +789,25 @@ def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | Non
         hit = _CONSUMPTION.get(key)
     if hit and time.monotonic() - hit[0] < (_UNAVAILABLE_TTL_S if hit[3] else CONSUMPTION_TTL_S):
         return hit[1], hit[2]
+    stale = (hit[1], hit[2]) if hit else (None, None)
     if not lock.acquire(blocking=False):
-        return (hit[1], hit[2]) if hit else (None, None)
-    try:
-        hit = _CONSUMPTION.get(key)     # quem tinha a trava pode ter acabado entre a leitura e o acquire
-        if hit and time.monotonic() - hit[0] < (_UNAVAILABLE_TTL_S if hit[3] else CONSUMPTION_TTL_S):
-            return hit[1], hit[2]
+        return stale
+
+    def run() -> None:
         try:
-            value, unavailable = _compute_consumption(d, names, aux, live)
-            error = None
-        except Exception as e:
-            _log.warning("orq_timeline: consumo falhou", exc_info=True)
-            value, error, unavailable = None, _err(e), False
-        _CONSUMPTION[key] = (time.monotonic(), value, error, unavailable)
-        return value, error
-    finally:
-        lock.release()
+            fresh = _CONSUMPTION.get(key)     # quem tinha a trava pode ter acabado entre a leitura e o acquire
+            if fresh and time.monotonic() - fresh[0] < (_UNAVAILABLE_TTL_S if fresh[3] else CONSUMPTION_TTL_S):
+                return
+            try:
+                value, unavailable = _compute_consumption(d, names, aux, live)
+                error = None
+            except Exception as e:
+                _log.warning("orq_timeline: consumption failed", exc_info=True)
+                value, error, unavailable = None, _err(e), False
+            _CONSUMPTION[key] = (time.monotonic(), value, error, unavailable)
+        finally:
+            lock.release()
+
+    # A soma lê transcripts grandes: nunca dentro do pedido. Uma thread por execução (a trava).
+    threading.Thread(target=run, name="orq-consumption", daemon=True).start()
+    return stale

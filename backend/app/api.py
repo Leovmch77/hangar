@@ -4289,7 +4289,7 @@ async def orq_panel(name: str):
     info = await asyncio.to_thread(_cached_info_sync, name)
     if info is None or info.provider != "orq" or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
-    return await asyncio.to_thread(orq_timeline.panel, Path(info.jsonl).parent, registry.list)
+    return await asyncio.to_thread(orq_timeline.panel, Path(info.jsonl).parent, _guardar_snap)
 
 
 class PapelItem(_StrictBody):

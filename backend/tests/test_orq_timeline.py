@@ -374,7 +374,7 @@ def test_arquivos_faltando_e_ilegiveis(tmp_path, real):
     shutil.copy(real / "timeline-2026-09-29-cad3e6fe.jsonl", only / "timeline-so-timeline.jsonl")
     p = ot.panel(only)
     assert p["tasks"]["rows"] == [] and p["team"] == [] and p["integration"]["last"] is None
-    assert [e["file"] for e in p["errors"]] == ["orq.json"] and p["empty"] is False
+    assert [e["file"] for e in p["errors"]] == ["orq.json", "consumption"] and p["empty"] is False
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root lê arquivo sem permissão")
@@ -403,7 +403,7 @@ def test_execucao_recem_criada_e_vazia(tmp_path):
 def test_linha_do_tempo_grande_usa_o_cache(real, monkeypatch):
     tl = ot.timeline_path(real)
     tl.write_text(tl.read_text() * 400)              # ~5.000 linhas
-    first = ot.panel(real)
+    first = settled(real)
     calls = {"n": 0}
     real_entry = ot.entry
     monkeypatch.setattr(ot, "entry", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real_entry(*a, **k))[1])
@@ -454,6 +454,23 @@ def _row(source, model, i, o, cw, cr, ts="2026-09-30T01:00:00+00:00"):
 LIVE = lambda: [type("S", (), {"name": "hangar-mobile-t5", "provider": "claude", "jsonl": "/p/t5.jsonl"})()]
 
 
+def wait_idle(d):
+    """A soma do consumo roda numa thread: espera a trava da execução soltar."""
+    import time
+    lock = ot._consumption_locks.get(str(d.resolve()))
+    end = time.monotonic() + 5
+    while lock is not None and lock.locked() and time.monotonic() < end:
+        time.sleep(0.005)
+    assert lock is None or not lock.locked()
+
+
+def settled(d, live=None):
+    """O 1º pedido devolve `None` (calculando); o seguinte já traz a soma."""
+    ot.panel(d, live)
+    wait_idle(d)
+    return ot.panel(d, live)
+
+
 def _sources(real, tmp_path):
     rollout = tmp_path / "rollout-2026-09-29T21-46-41-01a0efc7-25ef-7ee0-b078-1d31dc2c7c7d.jsonl"
     rollout.write_text("")
@@ -472,7 +489,7 @@ def test_consumo_por_provider_e_modelo(real, tmp_path, monkeypatch):
                             _row("claude", "claude-sonnet-5", 1, 1, 0, 10)]}
     monkeypatch.setattr(ot, "_rows_for", lambda provider, path: fake[path])
     before = sorted(p.name for p in real.iterdir())
-    c = ot.panel(real, LIVE)["consumption"]
+    c = settled(real, LIVE)["consumption"]
     assert sorted(p.name for p in real.iterdir()) == before          # o GET nunca escreve
     assert c["since"] == "2026-09-29T21:53:31-03:00"
     assert (c["sessions"]["team"], c["sessions"]["measured"]) == (11, 2)
@@ -489,31 +506,32 @@ def test_medicao_serve_de_fonte_para_execucao_antiga(real, monkeypatch):
         "source": {"path": "/x/rollout.jsonl"}}))
     monkeypatch.setattr(ot, "_exists", lambda p: True)
     monkeypatch.setattr(ot, "_rows_for", lambda provider, path: [_row("codex", "gpt-6.1-sol", 1, 1, 0, 0)])
-    assert ot.panel(real, None)["consumption"]["sessions"]["measured"] == 1
+    assert settled(real, None)["consumption"]["sessions"]["measured"] == 1
 
 
 def test_consumo_e_refeito_so_depois_do_ttl(real, monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(ot, "_rows_for", lambda *a: (calls.__setitem__("n", calls["n"] + 1), [])[1])
     monkeypatch.setattr(ot, "_exists", lambda p: True)
-    ot.panel(real, LIVE); ot.panel(real, LIVE)
+    settled(real, LIVE)
     assert calls["n"] == 1
     monkeypatch.setattr(ot, "CONSUMPTION_TTL_S", 0)
     ot.panel(real, LIVE)
+    wait_idle(real)
     assert calls["n"] == 2
 
 
 def test_modelo_sem_preco_marca_o_total_como_parcial(real, monkeypatch):
     monkeypatch.setattr(ot, "_exists", lambda p: True)
     monkeypatch.setattr(ot, "_rows_for", lambda *a: [_row("claude", "modelo-inventado", 1, 1, 0, 0)])
-    c = ot.panel(real, LIVE)["consumption"]
+    c = settled(real, LIVE)["consumption"]
     assert c["missing_prices"] == ["modelo-inventado"] and c["totals"]["usd_partial"] is True
 
 
 def test_falha_no_consumo_vira_erro_e_o_resto_sai(real, monkeypatch):
     monkeypatch.setattr(ot, "_rows_for", lambda *a: 1 / 0)
-    p = ot.panel(real, LIVE)
-    assert p["consumption"] is None and any(e["file"] == "consumo" for e in p["errors"])
+    p = settled(real, LIVE)
+    assert p["consumption"] is None and any(e["file"] == "consumption" for e in p["errors"])
     assert len(p["team"]) == 11
 
 
@@ -525,11 +543,11 @@ def test_ultima_linha_do_nome_vence_em_sessions_jsonl(real, tmp_path, monkeypatc
     seen = []
     monkeypatch.setattr(ot, "_find_rollout", lambda home, thread: seen.append(thread) or rollout)
     monkeypatch.setattr(ot, "_rows_for", lambda *a: [])
-    ot.panel(real, None)
+    settled(real, None)
     assert seen == ["bbbb"]
 
 
-def test_consumo_em_andamento_nao_faz_o_painel_esperar(real, monkeypatch):
+def test_primeiro_pedido_volta_na_hora_com_none_e_o_seguinte_traz_o_valor(real, monkeypatch):
     import threading
     started, release = threading.Event(), threading.Event()
 
@@ -539,50 +557,58 @@ def test_consumo_em_andamento_nao_faz_o_painel_esperar(real, monkeypatch):
         return {"computed_at": "x"}, False
 
     monkeypatch.setattr(ot, "_compute_consumption", slow)
-    first = []
-    t = threading.Thread(target=lambda: first.append(ot.panel(real, None)))
-    t.start()
-    assert started.wait(5)
-    p = ot.panel(real, None)                       # a soma segue: este poll não espera
+    p = ot.panel(real, None)                       # dispara a soma numa thread e não espera por ela
     assert p["consumption"] is None and p["tasks"]["rows"]
+    assert started.wait(5)
+    assert ot.panel(real, None)["consumption"] is None   # a soma segue: este poll também não espera
     release.set()
-    t.join(5)
-    assert first[0]["consumption"] == {"computed_at": "x"}
+    wait_idle(real)
     assert ot.panel(real, None)["consumption"] == {"computed_at": "x"}
 
 
-def test_consumo_em_andamento_devolve_o_ultimo_valor_vencido(real, monkeypatch):
+def test_consumo_vencido_devolve_o_ultimo_valor_enquanto_recalcula(real, monkeypatch):
     import threading
     monkeypatch.setattr(ot, "_rows_for", lambda *a: [])
-    old = ot.panel(real, None)["consumption"]
+    old = settled(real, None)["consumption"]
     assert old is not None
     monkeypatch.setattr(ot, "CONSUMPTION_TTL_S", 0)
     started, release = threading.Event(), threading.Event()
     monkeypatch.setattr(ot, "_compute_consumption", lambda *a: (started.set(), release.wait(5), ({"computed_at": "novo"}, False))[2])
-    t = threading.Thread(target=lambda: ot.panel(real, None))
-    t.start()
+    assert ot.panel(real, None)["consumption"] == old
     assert started.wait(5)
     assert ot.panel(real, None)["consumption"] == old
     release.set()
-    t.join(5)
+    wait_idle(real)
 
 
 def test_time_que_falhou_nao_gera_consumo_zerado_nem_cache(real, monkeypatch):
     monkeypatch.setattr(ot, "_team", lambda *a: 1 / 0)
     ot._CONSUMPTION.clear()
     p = ot.panel(real, LIVE)
-    assert p["consumption"] is None and [e["file"] for e in p["errors"]] == ["team"]
+    assert p["consumption"] is None and [e["file"] for e in p["errors"]] == ["team", "consumption"]
     assert str(real.resolve()) not in ot._CONSUMPTION
 
 
 def test_transcript_indisponivel_fica_em_missing_e_tenta_de_novo_logo(real, monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(ot, "_rows_for", lambda *a: (calls.__setitem__("n", calls["n"] + 1), None)[1])
-    c = ot.panel(real, LIVE)["consumption"]
+    c = settled(real, LIVE)["consumption"]
     assert c["sessions"]["measured"] == 0 and "hangar-mobile-t5" in c["sessions"]["missing"]
     ot.panel(real, LIVE)
+    wait_idle(real)
     assert calls["n"] == 1                          # dentro dos 5 s ainda é o mesmo resultado
     now = ot.time.monotonic()
     monkeypatch.setattr(ot.time, "monotonic", lambda: now + ot._UNAVAILABLE_TTL_S + 1)
     ot.panel(real, LIVE)
+    wait_idle(real)
     assert calls["n"] == 2
+
+
+def test_claude_do_dia_do_inicio_entra_inteiro_mesmo_antes_do_inicio(real, monkeypatch):
+    # `ts` do Claude é a 1ª resposta do dia: o árbitro respondeu antes do `execucao_inicio` (21:53 -03:00).
+    monkeypatch.setattr(ot, "_exists", lambda p: True)
+    fake = {"/p/t5.jsonl": [_row("claude", "claude-opus-5-5", 50, 5, 0, 0, ts="2026-09-29T20:00:00-03:00"),
+                            _row("claude", "claude-opus-5-5", 999, 0, 0, 0, ts="2026-09-28T23:00:00-03:00")]}
+    monkeypatch.setattr(ot, "_rows_for", lambda provider, path: fake.get(path, []))
+    c = settled(real, LIVE)["consumption"]
+    assert c["totals"]["new"] == 55                 # o dia anterior fica fora
