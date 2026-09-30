@@ -2699,6 +2699,7 @@
   "erro_convite_inexistente": "invite not found",
   "erro_sessao_indisponivel": "the shared session is briefly unavailable",
   "erro_bootstrap_invalido": "bad bootstrap",
+  "erro_usuario_em_uso": "this username is already taken",
   "erro_ja_registrado": "already registered",
   "erro_muitas_tentativas": "too many attempts",
   "erro_assinatura_invalida": "bad signature",

@@ -244,3 +244,63 @@ def test_setup_sem_blob_cria_cofre_vazio(tmp_path, monkeypatch):
     assert c.post("/api/sync/setup", json=payload).status_code == 200
     assert sync.load_vault()["enc_blob"] is None
     assert sync.load_vault()["rev"] == 0
+
+
+BLOB = {"iv": base64.b64encode(b"123456789012").decode(),
+        "data": base64.b64encode(b"x" * 32).decode()}
+GUEST_AUTH = base64.b64encode(b"guest-hash-32-bytes-padding-her!").decode()
+
+
+def _owner_logged(client):
+    client.post("/api/sync/register",
+                json={"user": "j", "salt": SALT, "auth_hash": AUTH, "bootstrap": "boot-secret"})
+    assert client.post("/api/sync/login", json={"user": "j", "auth_hash": AUTH}).status_code == 200
+
+
+def _add_guest(client, user="ana"):
+    return client.post("/api/sync/guests", json={
+        "user": user, "salt": SALT, "auth_hash": GUEST_AUTH, "enc_blob": BLOB, "admin_blob": BLOB})
+
+
+def test_owner_adds_guest_and_guest_logs_in(client):
+    _owner_logged(client)
+    assert _add_guest(client).status_code == 200
+    assert client.get("/api/sync/guests").json() == [{"user": "ana", "admin_blob": BLOB}]
+    client.post("/api/sync/logout")
+    assert client.get("/api/sync/prelogin", params={"user": "ana"}).json()["salt"] == SALT
+    assert client.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH}).status_code == 200
+    v = client.get("/api/sync/vault").json()
+    assert v["enc_blob"] == BLOB and v["rev"] == 1
+
+
+def test_guest_cannot_manage_guests(client):
+    _owner_logged(client)
+    _add_guest(client)
+    client.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH})
+    assert client.get("/api/sync/guests").status_code == 403
+    assert _add_guest(client, "bia").status_code == 403
+
+
+def test_guest_vault_is_separate_from_owner(client):
+    _owner_logged(client)
+    _add_guest(client)
+    owner = client.get("/api/sync/vault").json()
+    assert owner["enc_blob"] is None                     # o do dono não mudou
+    client.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH})
+    assert client.put("/api/sync/vault", json={"enc_blob": BLOB, "base_rev": 1}).json() == {"rev": 2}
+
+
+def test_guest_cannot_take_owner_name(client):
+    _owner_logged(client)
+    r = _add_guest(client, "j")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_usuario_em_uso"
+
+
+def test_deleted_guest_vault_is_401(client):
+    _owner_logged(client)
+    _add_guest(client)
+    guest = TestClient(client.app)
+    guest.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH})
+    assert client.post("/api/sync/guests/ana/delete").json() == {"ok": True}
+    assert guest.get("/api/sync/vault").status_code == 401
+    assert guest.post("/api/sync/login", json={"user": "ana", "auth_hash": GUEST_AUTH}).status_code == 401
