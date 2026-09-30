@@ -16,6 +16,7 @@ import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncFor
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
 import { answerQuestions, createSessionForServer, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
@@ -822,5 +823,80 @@ describe('catálogos da criação com servidor explícito', () => {
     fetchMock.mockImplementation(async () => new Response('{}', { status: 401 }));
     await expect(listClaudeConfigsForServer(target)).rejects.toMatchObject({ status: 401 });
     expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('arquivos, planos e contrato do par com servidor explícito', () => {
+  const target = { id: 'b', label: 'Servidor B', baseUrl: 'https://b.test', token: 'token-b' };
+  const s = 'mesma/sessão';
+  const enc = 'mesma%2Fsess%C3%A3o';
+  const calls = [
+    { rota: '/files/list?so_modificados=true', run: (x?: Server) => listFiles(s, undefined, true, x) },
+    { rota: '/files/list?so_modificados=false&path=src', run: (x?: Server) => listFiles(s, 'src', false, x) },
+    { rota: '/files/read?path=a.md', run: (x?: Server) => readFile(s, 'a.md', x) },
+    { rota: '/files/search?q=foo&mode=contents', run: (x?: Server) => searchFiles(s, 'foo', 'contents', x) },
+    { rota: '/git/path-diff', body: { path: 'a.md', escopo: 'branch' }, run: (x?: Server) => pathDiff(s, 'a.md', 'branch', x) },
+    { rota: '/files/write', body: { path: 'a.md', text: 't', digest: 'd1' }, run: (x?: Server) => writeFile(s, 'a.md', 't', 'd1', x) },
+    { rota: '/git/discard', body: { path: 'a.md' }, run: (x?: Server) => discardFile(s, 'a.md', x) },
+    { rota: '/plans', run: (x?: Server) => getPlans(s, x) },
+    { rota: '/plan-pin', body: { stem: null }, run: (x?: Server) => setPlanPin(s, null, x) },
+    { rota: '/pair/contract', run: (x?: Server) => getPairContract(s, x) },
+    { rota: '/pair', body: { peers: ['outra'], task: 't', replace_task: true }, run: (x?: Server) => pairSession(s, ['outra'], 't', true, x) },
+    { rota: '/pair', method: 'DELETE', run: (x?: Server) => unpairSession(s, x) },
+  ];
+
+  it.each(calls)('$rota vai a B com o token de B e a chamada antiga segue no ativo', async ({ rota, body, method, run }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    await expect(run(target)).resolves.toEqual({ ok: true });
+    await run();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `https://b.test/api/sessions/${enc}${rota}`,
+      `https://a.test/api/sessions/${enc}${rota}`,
+    ]);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method ?? 'GET').toBe(method ?? (body ? 'POST' : 'GET'));
+      if (body) expect(JSON.parse(init?.body as string)).toEqual(body);
+    }
+    // Chamada antiga sem prazo imposto; a explícita tem teto pra não pendurar em servidor desligado.
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(fetchMock.mock.calls[1][1]?.signal).toBeUndefined();
+  });
+
+  it('busca, gravação e par em B usam teto de 30s; leituras, o padrão de 8s', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}'));
+    await searchFiles(s, 'foo', 'names', target);
+    await writeFile(s, 'a.md', 't', null, target);
+    await readFile(s, 'a.md', target);
+    await pairSession(s, ['outra'], 't', false, target);
+    await unpairSession(s, target);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000, 8000, 30_000, 30_000]);
+  });
+
+  it('conflito de digest em B chega com status, sem repetir o POST nem tocar a credencial ativa', async () => {
+    const msg = 'Nao deu pra acessar esse arquivo ou pasta.';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      detail: { code: 'erro_arq_mudou_no_disco', params: { msg }, msg },
+    }), { status: 409 }));
+    await expect(writeFile(s, 'a.md', 't', 'velho', target)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/^409: /) });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(readFile(s, 'a.md', target)).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  it('visor nativo aponta URL e token para B; sem servidor, para o ativo; token nunca na URL', () => {
+    expect(fileUrlNative(s, 'a.html', target)).toBe(`https://b.test/api/sessions/${enc}/file?path=a.html`);
+    expect(fileAuthHeader(target)).toEqual({ Authorization: 'Bearer token-b' });
+    expect(fileUrlNative(s, 'a.html')).toBe(`https://a.test/api/sessions/${enc}/file?path=a.html`);
+    expect(fileAuthHeader()).toEqual({ Authorization: 'Bearer token-a' });
+  });
+
+  it('404 de arquivo em B conserva o status que o filesStore lê', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"não existe"}', { status: 404 }));
+    await expect(readFile(s, 'x.md', target)).rejects.toMatchObject({ status: 404 });
+    await expect(listFiles(s, 'sumiu', true, target)).rejects.toMatchObject({ status: 404 });
   });
 });

@@ -111,13 +111,14 @@ export function fileUrl(name: string, path: string): string {
 
 // URL nativa (sem token na query) — para WebView/Image nativo que manda Authorization header.
 // PWA/browser continua no fileUrl com ?token porque <img> não manda header.
-export function fileUrlNative(name: string, path: string): string {
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`;
+export function fileUrlNative(name: string, path: string, server?: Server): string {
+  const base = server ? baseOf(server) : apiEnv().getBaseUrl();
+  return `${base}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}`;
 }
 
 // Header Authorization para caminho nativo (mesmo token do fileUrl, mas só no header).
-export function fileAuthHeader(): Record<string, string> {
-  return authHeaders();
+export function fileAuthHeader(server?: Server): Record<string, string> {
+  return server ? { Authorization: `Bearer ${server.token}` } : authHeaders();
 }
 
 // URL de uma imagem ENVIADA do phone (upload), servida do cofre (~/.hangar/uploads/<projeto>/<sessão>/).
@@ -1361,11 +1362,12 @@ export async function pairSession(
   peers: string[],
   task = '',
   replaceTask = false,
+  server?: Server,
 ): Promise<PairResult> {
-  return apiFetch<PairResult>(`/api/sessions/${encodeURIComponent(name)}/pair`, {
-    method: 'POST',
-    body: JSON.stringify({ peers, task, replace_task: replaceTask }),
-  });
+  const rota = `/api/sessions/${encodeURIComponent(name)}/pair`;
+  const init = { method: 'POST', body: JSON.stringify({ peers, task, replace_task: replaceTask }) };
+  // A rota espera o backend do par remoto e a entrega do aviso a cada membro: 8s dava falso "fora do ar".
+  return server ? apiFetchForServer<PairResult>(server, rota, init, 30_000) : apiFetch<PairResult>(rota, init);
 }
 
 export function suggestGroupTask(sessions: string[]): Promise<{ task: string }> {
@@ -1375,16 +1377,17 @@ export function suggestGroupTask(sessions: string[]): Promise<{ task: string }> 
   });
 }
 
-export async function unpairSession(name: string): Promise<PairResult> {
-  return apiFetch<PairResult>(`/api/sessions/${encodeURIComponent(name)}/pair`, {
-    method: 'DELETE',
-  });
+export async function unpairSession(name: string, server?: Server): Promise<PairResult> {
+  const rota = `/api/sessions/${encodeURIComponent(name)}/pair`;
+  const init = { method: 'DELETE' };
+  return server ? apiFetchForServer<PairResult>(server, rota, init, 30_000) : apiFetch<PairResult>(rota, init);
 }
 
 // Contrato compartilhado do par: markdown que as duas sessões editam via fs; o app só exibe.
 export interface PairContract { peers: string[]; path: string; content: string }
-export function getPairContract(name: string): Promise<PairContract> {
-  return apiFetch<PairContract>(`/api/sessions/${encodeURIComponent(name)}/pair/contract`);
+export function getPairContract(name: string, server?: Server): Promise<PairContract> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/pair/contract`;
+  return server ? apiFetchForServer<PairContract>(server, path) : apiFetch<PairContract>(path);
 }
 
 // Fan-out de um prompt pra N sessoes DO SERVIDOR ATIVO (feature #9). Mira sempre 1 servidor por
@@ -1555,15 +1558,16 @@ export interface PlanListItem {
   complete: boolean;
 }
 
-export function getPlans(name: string): Promise<{ plans: PlanListItem[]; pinned: string | null }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/plans`);
+export function getPlans(name: string, server?: Server): Promise<{ plans: PlanListItem[]; pinned: string | null }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plans`;
+  return server ? apiFetchForServer(server, path) : apiFetch(path);
 }
 
 // stem = null solta o pin e devolve o painel pra eleição automática.
-export function setPlanPin(name: string, stem: string | null): Promise<{ pinned: string | null }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/plan-pin`, {
-    method: 'POST', body: JSON.stringify({ stem }),
-  });
+export function setPlanPin(name: string, stem: string | null, server?: Server): Promise<{ pinned: string | null }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plan-pin`;
+  const init = { method: 'POST', body: JSON.stringify({ stem }) };
+  return server ? apiFetchForServer(server, path, init) : apiFetch(path, init);
 }
 
 // Marca/desmarca um step no .md do plano. Quem marca no fluxo normal é o agente — isto é pro caso
@@ -1875,15 +1879,17 @@ export function getFileDiff(name: string, path: string): Promise<{ path: string;
 }
 
 // Arvore de arquivos do repo da sessao (filetree.py): lista, le e busca de arquivos.
-export function listFiles(name: string, path?: string, soModificados = true): Promise<TreeListing> {
+export function listFiles(name: string, path?: string, soModificados = true, server?: Server): Promise<TreeListing> {
   const q = new URLSearchParams({ so_modificados: String(soModificados) });
   if (path) q.set('path', path);
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/list?${q}`);
+  const rota = `/api/sessions/${encodeURIComponent(name)}/files/list?${q}`;
+  return server ? apiFetchForServer(server, rota) : apiFetch(rota);
 }
 
-export function readFile(name: string, path: string): Promise<FileContent> {
+export function readFile(name: string, path: string, server?: Server): Promise<FileContent> {
   const q = new URLSearchParams({ path });
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/read?${q}`);
+  const rota = `/api/sessions/${encodeURIComponent(name)}/files/read?${q}`;
+  return server ? apiFetchForServer(server, rota) : apiFetch(rota);
 }
 
 // Arquivo CITADO na conversa (fora da raiz da sessao), como texto editavel: mesma resposta do
@@ -1910,17 +1916,18 @@ export function resolverCitados(name: string, caminhos: string[]): Promise<{ ok:
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/resolver`, { method: 'POST', body: JSON.stringify({ caminhos }) });
 }
 
-export function searchFiles(name: string, q: string, mode: 'names' | 'contents'): Promise<SearchResult> {
+// Busca por conteúdo varre o repo inteiro: o prazo padrão de outro servidor (8s) cortaria repo grande.
+export function searchFiles(name: string, q: string, mode: 'names' | 'contents', server?: Server): Promise<SearchResult> {
   const qs = new URLSearchParams({ q, mode });
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/search?${qs}`);
+  const rota = `/api/sessions/${encodeURIComponent(name)}/files/search?${qs}`;
+  return server ? apiFetchForServer(server, rota, undefined, 30_000) : apiFetch(rota);
 }
 
 // Diff de UM arquivo (git_ops.path_diff), soma desde a base da branch ou so o nao-commitado.
-export function pathDiff(name: string, path: string, escopo: 'branch' | 'nao_commitado'): Promise<PathDiff> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/git/path-diff`, {
-    method: 'POST',
-    body: JSON.stringify({ path, escopo }),
-  });
+export function pathDiff(name: string, path: string, escopo: 'branch' | 'nao_commitado', server?: Server): Promise<PathDiff> {
+  const rota = `/api/sessions/${encodeURIComponent(name)}/git/path-diff`;
+  const init = { method: 'POST', body: JSON.stringify({ path, escopo }) };
+  return server ? apiFetchForServer(server, rota, init) : apiFetch(rota, init);
 }
 
 export function getCommitFiles(name: string, sha: string): Promise<{ files: ChangedFile[] }> {
@@ -2013,11 +2020,10 @@ export function getGitLog(name: string, q?: string, n?: number):
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/git/log${qs}`);
 }
 
-export function discardFile(name: string, path: string): Promise<{ ok: boolean; path: string }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/git/discard`, {
-    method: 'POST',
-    body: JSON.stringify({ path }),
-  });
+export function discardFile(name: string, path: string, server?: Server): Promise<{ ok: boolean; path: string }> {
+  const rota = `/api/sessions/${encodeURIComponent(name)}/git/discard`;
+  const init = { method: 'POST', body: JSON.stringify({ path }) };
+  return server ? apiFetchForServer(server, rota, init) : apiFetch(rota, init);
 }
 
 export function commitFiles(name: string, message: string, paths: string[],
@@ -2699,11 +2705,10 @@ export function setKimiModel(
 // NÃO recusa: BTab troca o modo no meio do turno, como no terminal.
 // GET devolve o ciclo vivo (4 ou 5) + o atual; POST devolve o que FICOU.
 
-export function writeFile(name: string, path: string, text: string, digest: string | null): Promise<{ path: string; size: number; digest: string }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/files/write`, {
-    method: 'POST',
-    body: JSON.stringify({ path, text, digest }),
-  });
+export function writeFile(name: string, path: string, text: string, digest: string | null, server?: Server): Promise<{ path: string; size: number; digest: string }> {
+  const rota = `/api/sessions/${encodeURIComponent(name)}/files/write`;
+  const init = { method: 'POST', body: JSON.stringify({ path, text, digest }) };
+  return server ? apiFetchForServer(server, rota, init, 30_000) : apiFetch(rota, init);
 }
 
 export function getPermissionModes(name: string, sondar = false): Promise<{ current: string; modes: string[]; sondavel: boolean; restaurado?: boolean; previous_non_plan: string }> {
