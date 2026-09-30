@@ -28,7 +28,7 @@ import * as m from '../../../../src/paraglide/messages';
 // O composer real entra na Task 9; aqui só o placeholder sticky de 56px.
 export default function ChatScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ server: string; name: string }>();
+  const params = useLocalSearchParams<{ server: string; name: string; askFallback?: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
 
@@ -101,6 +101,10 @@ export default function ChatScreen() {
     if (avisoTimer.current) clearTimeout(avisoTimer.current);
     avisoTimer.current = setTimeout(() => setAviso(''), 8000);
   }
+  useEffect(() => {
+    if (params.askFallback) mostrarAviso(m.native_ask_fallback());
+    return () => { if (avisoTimer.current) clearTimeout(avisoTimer.current); };
+  }, [params.askFallback, serverId, name]);
 
   // Sem SSE adicional: acompanha a abertura e o Git do Codex pela lista.
   const rowsProvider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider ?? null) as Provider | null;
@@ -169,12 +173,45 @@ export default function ChatScreen() {
 
   // quem responde: OptionButtons quando awaiting_input com question/options e sem stepper aberto
   const showOptions = !!(!askOpen && stateEvent?.state === 'awaiting_input' && stateEvent.question && stateEvent.options?.length);
+  const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.question, stateEvent?.options]);
+  const optionScope = useRef({ key: optionKey, generation: 0 });
+  if (optionScope.current.key !== optionKey) {
+    optionScope.current = { key: optionKey, generation: optionScope.current.generation + 1 };
+  }
+  const optionRequest = optionScope.current;
+  const optionsMounted = useRef(true);
+  const liveOptionKey = () => {
+    const live = chat.use.getState();
+    return JSON.stringify([
+      serverId, name, !live.askOpen && live.stateEvent?.state === 'awaiting_input'
+        && !!live.stateEvent.question && !!live.stateEvent.options?.length,
+      live.stateEvent?.question, live.stateEvent?.options,
+    ]);
+  };
+  const optionCurrent = () => optionsMounted.current && optionScope.current === optionRequest && liveOptionKey() === optionKey;
+  useEffect(() => {
+    optionsMounted.current = true;
+    const unsubscribe = chat.use.subscribe(() => {
+      const key = liveOptionKey();
+      if (optionScope.current.key !== key) {
+        optionScope.current = { key, generation: optionScope.current.generation + 1 };
+      }
+    });
+    return () => { unsubscribe(); optionsMounted.current = false; };
+  }, [chat, serverId, name]);
+  const optionError = (e: unknown) => {
+    if (!optionCurrent()) return;
+    const msg = e instanceof Error ? e.message : m.comum_falha_envio_opcao();
+    mostrarAviso((e as { status?: number })?.status || /^\d{3}: /.test(msg) ? msg : `${m.native_action_uncertain()} ${msg}`);
+  };
   // Cada ação copia o servidor da rota no toque: removido vira aviso, nunca cai no ativo.
   const destino = () => useServers.getState().servers.find((s) => s.id === serverId);
-  const handleSelectOption = (n: number) => {
+  const handleSelectOption = async (n: number) => {
+    if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    void selectOptionForServer(target, name, n).catch((e) => mostrarAviso(e));
+    try { await selectOptionForServer(target, name, n); }
+    catch (e) { optionError(e); }
   };
   // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
   const rota = `${serverId}::${name}`;
@@ -211,26 +248,26 @@ export default function ChatScreen() {
     setRecarregando(true);
     void recarregarSessao(name).catch((e) => mostrarAviso(e)).finally(() => setRecarregando(false));
   };
-  const handleCancelOptions = () => {
+  const handleCancelOptions = async () => {
+    if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
-    if (last) {
-      setDraft(last.text);
-      chat.use.setState({ pending: cur.filter((p) => p.id !== last.id) });
-      void interrupt(name, true, target).catch((e) => mostrarAviso(e));
-    } else {
-      void interrupt(name, false, target).catch((e) => mostrarAviso(e));
-    }
+    // Recupera o texto no toque; um ACK tardio não sobrescreve o que a pessoa digitou depois.
+    if (last) setDraft(last.text);
+    try {
+      await interrupt(name, !!last, target);
+      if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+    } catch (e) { optionError(e); }
   };
   const optionsSlot = showOptions ? (
     <View>
-      <OptionButtons question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} />
-      {aviso ? <Text style={styles.aviso}>{aviso}</Text> : null}
+      <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} />
+      {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}
     </View>
   ) : aviso ? (
-    <Text style={styles.aviso}>{aviso}</Text>
+    <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text>
   ) : undefined;
 
   return (

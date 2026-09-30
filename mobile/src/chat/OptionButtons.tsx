@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { kindOf, isPermission } from '@hangar/core';
@@ -7,14 +8,35 @@ import { superficie } from '../theme/superficie';
 interface Props {
   question: string;
   options: string[];
-  onSelect: (n: number) => void;
-  onCancel: () => void;
+  onSelect: (n: number) => void | Promise<void>;
+  onCancel: () => void | Promise<void>;
 }
 
 export function OptionButtons({ question, options, onSelect, onCancel }: Props) {
   const { theme } = useUnistyles();
   const permission = isPermission(options);
   const kinds = options.map((o) => kindOf(o));
+  const locked = useRef(false);
+  const mounted = useRef(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  async function run(action: () => void | Promise<void>) {
+    if (locked.current) return;
+    locked.current = true;
+    setBusy(true);
+    setError('');
+    try { await action(); }
+    catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : m.comum_falha_envio_opcao());
+    } finally {
+      locked.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  }
 
   return (
     <View style={styles.wrap}>
@@ -43,7 +65,9 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
           return (
             <Pressable
               key={i}
-              onPress={() => onSelect(i + 1)}
+              onPress={() => void run(() => onSelect(i + 1))}
+              disabled={busy}
+              accessibilityState={{ disabled: busy, busy }}
               style={[
                 styles.btn,
                 { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.default },
@@ -79,7 +103,9 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
           );
         })}
         <Pressable
-          onPress={onCancel}
+          onPress={() => void run(onCancel)}
+          disabled={busy}
+          accessibilityState={{ disabled: busy, busy }}
           style={[styles.btn, styles.btnCancel, { borderColor: theme.tokens.status.error }]}
           accessibilityRole="button"
         >
@@ -87,6 +113,7 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
           <Text style={[styles.optTxt, { color: theme.tokens.status.error }]}>{m.comum_cancelar()}</Text>
         </Pressable>
       </View>
+      {error ? <Text accessibilityRole="alert" style={{ color: theme.tokens.status.error }}>{error}</Text> : null}
     </View>
   );
 }
