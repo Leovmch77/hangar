@@ -58,11 +58,11 @@ describe('comConfig', () => {
   it('hash vazio nao vira string vazia', () => {
     expect(comConfig('', null)).toBe('#/');
   });
-  it('ida e volta', () => {
-    const h = comConfig('#/canvas', 'notificacoes', 'srv-1');
-    expect(parseConfig(h)).toEqual({ tela: 'notificacoes', srv: 'srv-1' });
+  it.each(['notificacoes', 'jev'] as const)('ida e volta de %s', (tela) => {
+    const h = comConfig('#/canvas', tela, 'srv-1');
+    expect(parseConfig(h)).toEqual({ tela, srv: 'srv-1' });
   });
   it('as telas de servidor sao as que exigem alvo', () => {
-    expect(TELAS_DE_SERVIDOR).toEqual(['contas', 'notificacoes', 'anexos', 'atalhos', 'avancado', 'orquestracao', 'voz', 'harnesses', 'sincronizacao', 'shared-config', 'computer']);
+    expect(TELAS_DE_SERVIDOR).toEqual(['contas', 'notificacoes', 'anexos', 'atalhos', 'avancado', 'orquestracao', 'voz', 'harnesses', 'sincronizacao', 'shared-config', 'jev', 'computer']);
   });
 });
