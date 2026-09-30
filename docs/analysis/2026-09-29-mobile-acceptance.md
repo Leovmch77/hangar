@@ -571,8 +571,8 @@ Todo `eas` rodou em subshell dentro de `mobile/` com `eas-cli/23.2.0` do cache d
 | Item | Esperado | Observado / resultado |
 |---|---|---|
 | Conta Expo e projeto | owner `jeffer1312`, projeto do `app.json` | conferido: `whoami` = `jeffer1312 (Owner)`; `project:info` = `@jeffer1312/hangar`, ID `9fd06001-…` igual ao `app.json` |
-| Equipe Apple ligada à conta | equipe com capacidade de assinar | conferido parcialmente: EAS lista uma equipe, `23AH874D3J` (organização); capacidade de assinar ad hoc não comprovada (ver credenciais) |
-| iPhone registrado | UDID do aparelho do Jefferson na equipe | conferido no EAS: um `iPhone` registrado, UDID `00008120…`, nome `Unknown`. Não confirmado que é o aparelho atual dele nem que está no perfil |
+| Equipe Apple ligada à conta | equipe com capacidade de assinar | conferido parcialmente: EAS lista uma equipe do tipo organização; capacidade de assinar ad hoc não comprovada (ver credenciais) |
+| iPhone registrado | aparelho do dono registrado na equipe | conferido no EAS: um `iPhone` registrado, nome `Unknown`. Não confirmado que é o aparelho atual dele nem que está no perfil |
 | Credenciais de distribuição interna (certificado + perfil ad hoc) | existentes no servidor Expo | **falhou**: `eas build --platform ios --profile preview --non-interactive --freeze-credentials` → "EAS CLI couldn't find any credentials suitable for internal distribution. Run this command again in interactive mode." |
 | Canal | preview ad hoc interno; sem TestFlight/submit | escolhido o `preview` existente (`distribution: internal`); TestFlight, submit, loja e OTA não usados |
 | iOS suportado pelo binário | versão mínima do SDK 57 compatível com o aparelho | não conferido: sem binário e sem acesso ao aparelho |
