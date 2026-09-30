@@ -156,8 +156,12 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     if (blockedRef.current) return false;
     let current: ConversationDraft | null;
     try { current = readDraft(origin.serverId, origin.name) ?? draftRef.current; } catch (e) {
-      setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
-      return false;
+      // Formato inválido não tem o que salvar: a edição nova grava por cima, como no boot.
+      if (!(e instanceof Error && e.message === m.draft_invalid())) {
+        setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
+        return false;
+      }
+      current = draftRef.current;
     }
     if (current?.transcript && transcriptRef.current && current.transcript !== transcriptRef.current) current = draftRef.current;
     const base: ConversationDraft = current
@@ -181,6 +185,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     return true;
   }, [origin]);
   const persistText = useCallback((next: string) => persistDraft({ text: next }), [persistDraft]);
+
+  // ACK do primeiro input depois do handoff: some o texto entregue, nunca uma edição nova.
+  useEffect(() => {
+    const handoff = adoptedDraftRef.current;
+    if (!firstInputSent || !handoff || textRef.current.trim() !== handoff.trim()) return;
+    adoptedDraftRef.current = undefined;
+    if (persistText('')) setText('');
+  }, [firstInputSent, persistText]);
 
   useEffect(() => {
     if ((draftRef.current?.text ?? '') !== text) persistText(text);
@@ -416,6 +428,13 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const sendText = useCallback(async (value: string, revision?: number): Promise<void> => {
     if (!firstInputId) return chat.send(value, revision);
     const snapshot = readFirstInput(serverId, name);
+    // Tentativa já confirmada e apagada enquanto o campo ainda mostrava o texto do handoff: não reenviar.
+    const handoff = adoptedDraftRef.current;
+    if (!snapshot && handoff !== undefined && value.trim() === handoff.trim()) {
+      adoptedDraftRef.current = undefined;
+      if (persistText('')) setText('');
+      return;
+    }
     if (snapshot?.id !== firstInputId) {
       return chat.send(value, revision);
     }
@@ -432,7 +451,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     const issue = useNewConversation.getState().issues[serverId];
     throw new Error(issue?.message ?? (current.phase === 'created'
       ? m.composer_falha_envio() : m.nova_conversa_envio_incerto()));
-  }, [serverId, name, firstInputId, draft, chat]);
+  }, [serverId, name, firstInputId, draft, chat, persistText]);
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();

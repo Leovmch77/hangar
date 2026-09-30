@@ -24,15 +24,22 @@ const calls = vi.hoisted(() => ({
 const server = { id: 'server-b', label: 'Servidor B', baseUrl: 'https://b.local', token: 'token-b' };
 
 vi.mock('expo-router', () => ({ useRouter: () => ({ replace: calls.replace }) }));
-vi.mock('react-native', async (original) => ({
-  ...await original<typeof import('react-native')>(),
+vi.mock('react-native', async (original) => {
+  const actual = await original<typeof import('react-native')>();
+  return {
+  ...actual,
+  // O mock global só achata arrays; o estilo por função do Pressable precisa ser resolvido antes.
+  Pressable: (props: { style?: unknown }) => (actual.Pressable as unknown as (p: object) => ReactNode)({
+    ...props, style: typeof props.style === 'function' ? props.style({ pressed: false }) : props.style,
+  }),
   Alert: { alert: calls.alert },
   TextInput: (props: { value?: string; accessibilityLabel?: string; onChangeText?: (value: string) => void }) => createElement('textarea', {
     value: props.value,
     'aria-label': props.accessibilityLabel,
     onInput: (event: { currentTarget: { value: string } }) => props.onChangeText?.(event.currentTarget.value),
   }),
-}));
+  };
+});
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open = false, children, onDismiss }: { open?: boolean; children: ReactNode; onDismiss?: () => void }) => {
   const [retained, setRetained] = useState(open);
@@ -145,6 +152,7 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
   nova_conversa_placeholder: () => 'nova_conversa_placeholder', nova_conversa_enviar: () => 'nova_conversa_enviar',
   nova_conversa_opcoes: () => 'nova_conversa_opcoes', nova_conversa_sem_destino: () => 'nova_conversa_sem_destino',
+  nova_conversa_destino_hint: () => 'nova_conversa_destino_hint', nova_conversa_config_hint: () => 'nova_conversa_config_hint',
   nova_conversa_guardada: () => 'nova_conversa_guardada', nova_conversa_abrir: () => 'nova_conversa_abrir',
   nova_conversa_reenviar: () => 'nova_conversa_reenviar', nova_conversa_conferir: () => 'nova_conversa_conferir',
   nova_conversa_adotar: () => 'nova_conversa_adotar', nova_conversa_descartar: () => 'nova_conversa_descartar',
