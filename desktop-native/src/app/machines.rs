@@ -976,7 +976,9 @@ impl Hangar {
                 if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.discovered(seq, parsed, cx)); }
             }
             MachinesReply::Probed(dialog, seq, result) => {
-                if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.probed(seq, result, window, cx)); }
+                // O diálogo não pode ler o Hangar daqui de dentro (ele está em atualização): o nome conhecido vai pronto.
+                let known = result.as_ref().ok().and_then(|f| self.known_machine(f.id())).map(|k| k.label).filter(|l| !l.is_empty());
+                if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.probed(seq, result, known, window, cx)); }
             }
             MachinesReply::Registered(dialog, seq, result) => {
                 // Gravou aqui: a lista já tem a máquina, mesmo que o outro lado tenha falhado.

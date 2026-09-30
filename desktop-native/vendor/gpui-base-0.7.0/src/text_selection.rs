@@ -2824,6 +2824,13 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
                 if state.touch.drag.is_some() {
                     return;
                 }
+                // The release can be lost (a system window-move loop, a
+                // compositor grab, focus leaving mid-drag); a move with the
+                // button up must end the gesture, not keep extending it.
+                if event.pressed_button != Some(MouseButton::Left) {
+                    state.end(cx);
+                    return;
+                }
                 state.update_in_window(event.position, window, cx)
             });
             WindowSelectionState::resolve_content_keys(&state, cx);
