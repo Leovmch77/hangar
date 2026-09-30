@@ -518,16 +518,24 @@ def ler_custos(scope: str | None = None, desde: str | None = None, file_id: int 
 
 
 def ler_usos(scope: str, conta: str, desde: str | None = None) -> list[UsoLinha]:
-    sql = f"SELECT {', '.join('u.' + c for c in CAMPOS_USO)} FROM uso u"
+    a, b = _BOOL_USO
+    return [UsoLinha(*t[:a], bool(t[a]), *t[a + 1:b], bool(t[b]), *t[b + 1:-1], conta)
+            for t in iter_usage_rows(scope, conta, desde)]
+
+
+# Colunas na ordem dos campos de `UsoLinha`, com a conta entrando como parâmetro.
+_SELECT_USAGE = "SELECT " + ", ".join("?" if f.name == "conta" else f"u.{f.name}" for f in fields(UsoLinha))
+
+
+def iter_usage_rows(scope: str, conta: str, desde: str | None = None) -> Iterable[tuple]:
+    """Linhas de uso como tuplas na ordem dos campos de `UsoLinha` (booleanos como 0/1), lidas
+    do cursor à medida que o relatório soma: sem a lista inteira nem um objeto por linha."""
     where, args = _filtro(scope, desde, None, "u")
     conn = _abrir()
     try:
-        linhas = conn.execute(f"{sql} WHERE {where} ORDER BY u.rowid", args).fetchall()
+        yield from conn.execute(f"{_SELECT_USAGE} FROM uso u WHERE {where} ORDER BY u.rowid", (conta, *args))
     finally:
         conn.close()
-    a, b = _BOOL_USO
-    return [UsoLinha(*t[:a], bool(t[a]), *t[a + 1:b], bool(t[b]), *t[b + 1:], conta)
-            for t in linhas]
 
 
 def _filtro(scope, desde, file_id, t: str) -> tuple[str, tuple]:

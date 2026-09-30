@@ -520,6 +520,42 @@ def test_skill_sem_prefixo_ganha_o_grupo_da_pasta_de_onde_veio(tmp_path, monkeyp
     assert (origens.get("orquestrar"), origens.get("brainstorming")) == ("@repo", "superpowers")
 
 
+def test_skill_origins_rescan_only_when_a_skill_dir_changes(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(uso_report, "_REPO", tmp_path / "repo")
+    monkeypatch.setattr(uso_report, "_origens_cache", (float("-inf"), {}))
+    monkeypatch.setattr(uso_report, "_origins_watch", ([], ()))
+    skills = home / ".claude" / "plugins" / "cache" / "mkt" / "p" / "1.0" / "skills"
+    (skills / "a").mkdir(parents=True)
+    (skills / "a" / "SKILL.md").write_text("x", encoding="utf-8")
+    scans = []
+    original = uso_report.origens_de_skill
+    monkeypatch.setattr(uso_report, "origens_de_skill", lambda h=None: scans.append(h) or original(h))
+
+    uso_report._atualizar_origens(home, force=True)
+    stamp, found = uso_report._origens_cache
+    assert set(found) == {"a"}
+    # Nada mudou: nem varre, nem troca o instante que chaveia o relatório pronto.
+    uso_report._atualizar_origens(home)
+    assert len(scans) == 1 and uso_report._origens_cache[0] == stamp
+
+    (skills / "b").mkdir()
+    (skills / "b" / "SKILL.md").write_text("x", encoding="utf-8")
+    uso_report._atualizar_origens(home)
+    assert len(scans) == 2 and set(uso_report._origens_cache[1]) == {"a", "b"}
+
+
+def test_montar_accepts_index_tuples_like_uso_linha(tmp_path):
+    _escrever(tmp_path / "p" / "s1.jsonl", [
+        _user("x", "p1"),
+        _assistant([_tool_use("Skill", {"skill": "orquestrar"}, "t1"),
+                    _tool_use("Bash", {"command": "ls"}, "t2")], "m1", _usage(i=10)),
+    ])
+    uso = ct.varrer_uso(tmp_path / "p")
+    rows = iter([tuple(getattr(l, c) for c in uso_report.FIELDS) for l in uso])
+    assert uso_report.montar(rows, [], "all") == uso_report.montar(uso, [], "all")
+
+
 def test_subagente_nao_e_sessao(tmp_path):
     def sessao(p, dia, i):
         _escrever(p, [

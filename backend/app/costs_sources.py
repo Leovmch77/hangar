@@ -10,17 +10,17 @@ nada — devolve um número plausível e errado.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app import codex_contas, costs_cache, costs_claude_transcript, pricing, uso_codex
-from app.uso_claude import UsoLinha
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
 from app.config import list_config_dirs
@@ -704,19 +704,20 @@ def coletar_ou_aquecendo(esperar: float = 3.0, *, fresco: bool = False,
     return _ler_custos(desde)
 
 
-def _ler_uso(desde: str | None = None) -> tuple[list[UsoLinha], list[UsageRow]]:
-    """Linhas de uso (tools/skills/contexto) e de tokens do Claude, de todas as contas. As de
-    tokens vêm junto porque o custo de um agente é o transcript filho dele, que só existe nelas."""
-    uso: list[UsoLinha] = []
+def _ler_uso(desde: str | None = None) -> tuple[Iterable[tuple], list[UsageRow]]:
+    """Linhas de uso (tools/skills/contexto, tuplas de `costs_cache.iter_usage_rows`, lidas sob
+    demanda) e de tokens do Claude, de todas as contas. As de tokens vêm junto porque o custo
+    de um agente é o transcript filho dele, que só existe nelas."""
+    escopos = [(costs_claude_transcript.escopo(raiz), account_id)
+               for raiz, account_id in _escopos["claude"]]
+    escopos += [(identidade, identidade) for identidade in _escopos["codex"]]
     tokens: list[UsageRow] = []
     for raiz, account_id in _escopos["claude"]:
-        uso.extend(costs_cache.ler_usos(costs_claude_transcript.escopo(raiz), account_id, desde))
         # `account_id` carimbado aqui (o custo usa `provider`, que em sessão de motor é o
         # provedor do modelo, não a conta): o filtro por conta precisa da conta.
         tokens.extend(_linhas_claude_do_indice(raiz, account_id, desde, carimbar_conta=True))
-    for identidade in _escopos["codex"]:
-        uso.extend(costs_cache.ler_usos(identidade, identidade, desde))
-    return uso, tokens
+    return itertools.chain.from_iterable(
+        costs_cache.iter_usage_rows(scope, conta, desde) for scope, conta in escopos), tokens
 
 
 def _codex_do_indice(identidade: str, desde: str | None = None) -> list[UsageRow]:
