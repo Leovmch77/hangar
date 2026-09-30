@@ -848,7 +848,7 @@ export interface OrqDecision {
 }
 
 export interface OrqAutomation {
-  mode: { jev: number; regex: number };
+  mode: { jev: string; regex: string }; // "on" | "shadow" | "off"
   woke: { total: number; decisions: number; alarms: number; messages: number };
   alone: { total: number; opened: number; integrated: number; dropped: number };
   dropped_by_jev: number;
@@ -887,7 +887,7 @@ export interface OrqConsumption {
 }
 
 export interface OrqIntegration {
-  branch: string;
+  branch: string | null;
   last: { task: number; commit: string; ts: string } | null;
   outcome: 'green' | 'red' | 'conflict' | 'failed' | null;
   red_log: string | null;

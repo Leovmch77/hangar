@@ -27,6 +27,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import BtwSheet from '../components/BtwSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
+  import OrqPanelSheet from '../components/OrqPanelSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { textoProblema } from '../lib/problema';
@@ -702,6 +703,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Pareamento ("trabalhando juntas"): sheet + par atual derivado da lista já carregada.
   let pairOpen = $state(false);
   let orqOpen = $state(false);
+  // Folha "Orquestração" da sessão orq, para onde o painel lateral não aparece.
+  let orqPanelOpen = $state(false);
   // Aquece o painel de Orquestração ao ENTRAR na sessão: o GET da política lê o disco e já foi
   // medido em ~3s frio, então buscá-lo no toque do botão é o que fazia o painel abrir em spinner.
   // Mesmo padrão do prefetch de modelos no Composer.
@@ -936,6 +939,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Orquestrador sem LLM: não recebe texto nem interrupção. O rodapé leva ao árbitro atual.
   const orqSession = $derived(isOrq({ provider: sessionProvider }));
   const orqArbiter = $derived(allSessions.find((s) => s.name === sessionName)?.orq_arbiter ?? null);
+  const orqServer = $derived(listServers().find((s) => s.id === getActiveId()));
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
   // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
@@ -3046,6 +3050,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onProviderTap={isCodex ? () => (limitsOpen = true) : undefined}
       onOpenPair={orqSession ? undefined : () => (pairOpen = true)}
       onOpenOrq={() => (orqOpen = true)}
+      {orqArbiter}
+      onOpenSession={onNavigateToChat}
+      onOpenFile={(p) => void abrirArquivoCitado(p, null)}
       onOpenPeerChat={nested ? undefined : (peer) => (peerChat = peer)}
       onOpenGit={() => (gitOpen = true)}
       recarregarMotivo={avisoErr ? null : recarregarMotivo}
@@ -3303,8 +3310,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
            já procura `.dead-footer .back-btn`, e aqui ele cai no botão do árbitro. -->
       <div class="dead-footer orq-footer">
         <p class="dead-text">{m.orq_row_badge()}</p>
-        <button class="back-btn" disabled={!orqArbiter}
-                onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
+        <div class="orq-footer-btns">
+          <button class="back-btn" disabled={!orqArbiter}
+                  onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
+          {#if !filesInContext && orqServer}
+            <!-- Sem o painel lateral (celular, 820–1280 px, recolhido) o retrato abre em folha. -->
+            <button class="back-btn" onclick={() => (orqPanelOpen = true)}>{m.orq_tab_title()}</button>
+          {/if}
+        </div>
       </div>
     {:else}
       <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor
@@ -3405,6 +3418,18 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     sessoes={allSessions}
     onClose={() => (orqOpen = false)}
   />
+
+  {#if orqSession && orqServer}
+    <OrqPanelSheet
+      open={orqPanelOpen}
+      onClose={() => (orqPanelOpen = false)}
+      server={orqServer}
+      {sessionName}
+      arbiter={orqArbiter}
+      onOpenSession={onNavigateToChat}
+      onOpenFile={(p) => void abrirArquivoCitado(p, null)}
+    />
+  {/if}
 
   <PairSheet
     open={pairOpen}
@@ -4037,6 +4062,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     padding: var(--space-5) var(--space-6);
     background: var(--bg-base);
   }
+
+  .orq-footer-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); }
 
   .dead-text {
     font-size: var(--text-sm);

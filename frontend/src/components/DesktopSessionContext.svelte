@@ -27,7 +27,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields, ScopedShortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { customOf } from '../lib/shortcuts.svelte';
-  import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type LiveShortcutTerminal, type SessionCostEstimate } from '@hangar/core';
+  import OrqPanel from './OrqPanel.svelte';
+  import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, isOrq, providerName, type LiveShortcutTerminal, type SessionCostEstimate } from '@hangar/core';
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { listServers } from '../lib/auth';
@@ -112,6 +113,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenPair?: () => void;
     // Grupo -> modal Orquestração (quem roda cada papel, contas liberadas).
     onOpenOrq?: () => void;
+    // Sessão orq (sem LLM): a aba "Contexto" vira "Orquestração" e abre a sessão do time / o parecer.
+    orqArbiter?: string | null;
+    onOpenSession?: (name: string) => void;
+    onOpenFile?: (path: string) => void;
     // Repositorio -> modal de git do cwd. Mesmo caso: dado sem porta.
     onOpenGit?: () => void;
     // Claude sem terminal com MCP/hooks/settings mudados depois da subida: o aviso é ACIONÁVEL e
@@ -154,6 +159,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     working = false,
     loopLabel = null, loopColor = undefined, onLoopTap = undefined,
     onProviderTap = undefined, onOpenPair = undefined, onOpenOrq = undefined, onOpenGit = undefined,
+    orqArbiter = null, onOpenSession = undefined, onOpenFile = undefined,
     recarregarMotivo = null, onRecarregar = undefined, recarregarBloqueado = false,
     onAbrirArquivo = undefined, onCompactar = undefined, onPassarBastao = undefined,
     onOpenPeerChat = undefined,
@@ -175,6 +181,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     }
   }));
   const hasActions = $derived(visibleShortcuts.length > 0);
+  const orq = $derived(isOrq({ provider }));
+  const orqServer = $derived(listServers().find((s) => s.id === serverId));
   const customShortcuts = $derived(customOf(shortcuts ?? []));
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
@@ -537,7 +545,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     <button type="button" id="aba-ctx-contexto" class="aba" class:sel={ctxPanel.aba === 'contexto'}
             role="tab" aria-selected={ctxPanel.aba === 'contexto'} aria-controls="painel-ctx-contexto"
             onclick={() => (ctxPanel.aba = 'contexto')}>
-      {m.ctx_aba_contexto()}
+      {orq ? m.orq_tab_title() : m.ctx_aba_contexto()}
     </button>
     <button type="button" id="aba-ctx-arquivos" class="aba" class:sel={ctxPanel.aba === 'arquivos'}
             role="tab" aria-selected={ctxPanel.aba === 'arquivos'} aria-controls="painel-ctx-arquivos"
@@ -602,6 +610,22 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   <!-- A secao "Estado" saiu: repetia o chip do header a 60px de distancia, mesma palavra e mesma
        cor. O detalhe e o chip do loop subiram pro header, que ja era o lugar do estado. -->
 
+  {#if orq && orqServer}
+  <!-- Sessão orq não tem LLM: no lugar do medidor de contexto, o retrato da orquestração. -->
+  <div class="ctx-scroll ctx-scroll-orq">
+    <OrqPanel server={orqServer} sessionName={sessionName ?? ''} arbiter={orqArbiter}
+              onOpenSession={(n) => onOpenSession?.(n)} onOpenFile={(p) => onOpenFile?.(p)}>
+      {#snippet actions()}
+        {#if (customShortcuts.length || projectError) && onShortcut}
+          <ShortcutTiles shortcuts={customShortcuts} {projectName} {projectError} {projectKey} {sessionName}
+                         {hangarOf} {sessionTerminal} onShortcut={onShortcut} onAdd={onEditShortcuts}>
+            {#snippet extra()}<ShortcutTransfer compact />{/snippet}
+          </ShortcutTiles>
+        {/if}
+      {/snippet}
+    </OrqPanel>
+  </div>
+  {:else}
   <div class="ctx-scroll">
   <!-- AGORA: o que muda sozinho enquanto a sessao trabalha — contexto, custo, tempo e turno —
        num bloco so, com o numero grande. Antes eram cinco rotulos de secao de peso igual e o
@@ -810,6 +834,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   {/if}
 
   </div>
+  {/if}
 
   <!-- EXECUÇÃO no RODAPÉ, fora do scroller: provider e máquina não mudam na vida da sessão, e
        como seção irmã das outras gastavam o mesmo rótulo e o mesmo respiro que o que muda.
@@ -962,6 +987,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     overflow-y: auto;
     overscroll-behavior: contain;
   }
+  .ctx-scroll-orq { padding: var(--space-4); }
 
   header {
     min-height: 64px;
