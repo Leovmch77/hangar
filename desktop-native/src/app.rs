@@ -4426,6 +4426,7 @@ impl Hangar {
                 .child(format!("? {}", session.pending_questions))))
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
             .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
+            .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_target, click_target) = (target.clone(), target.clone(), target.clone());
