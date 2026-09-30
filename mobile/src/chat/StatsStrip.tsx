@@ -29,20 +29,20 @@ export function StatsStrip({ stats }: { stats: StatsEvent | null }) {
   return (
     <ScrollView
       horizontal
-      showsHorizontalScrollIndicator={false}
+      showsHorizontalScrollIndicator
       // Sem o flexGrow: 0 a ScrollView come toda a altura que sobra da coluna e empurra a lista
       // pra fora da tela — ela só precisa da altura da própria linha.
       style={styles.fora}
       contentContainerStyle={styles.strip}
       accessibilityLabel={m.stats_faixa_aria()}
     >
-      <Text style={[styles.txt, { color: theme.tokens.text.muted }]}>{linhaStats(stats).join('  ·  ')}</Text>
+      <Text style={[styles.txt, { color: theme.tokens.text.secondary }]}>{linhaStats(stats).join('  ·  ')}</Text>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create(() => ({
+const styles = StyleSheet.create((theme) => ({
   fora: { flexGrow: 0 },
-  strip: { paddingHorizontal: 12, paddingVertical: 4 },
-  txt: { fontSize: 11 },
+  strip: { paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[1] },
+  txt: { fontSize: theme.base.text.sm },
 }));

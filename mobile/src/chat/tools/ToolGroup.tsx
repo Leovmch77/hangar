@@ -24,15 +24,17 @@ export const ToolGroup = memo(function ToolGroup({ tools, resultOf, onAbrir }: {
   const visiveis = tudo ? tools : tools.slice(0, TETO);
   return (
     <View style={styles.wrap}>
-      <Pressable onPress={() => setAberto((v) => !v)} style={styles.head} accessibilityRole="button" accessibilityState={{ expanded: aberto }}>
+      <Pressable onPress={() => setAberto((v) => !v)} style={({ pressed }) => [styles.head, pressed && { backgroundColor: theme.tokens.bg.hover }]} accessibilityRole="button" accessibilityState={{ expanded: aberto }}>
         <Icon name={aberto ? 'ChevronDown' : 'ChevronRight'} size={14} color={theme.tokens.text.muted} />
-        <Text style={[styles.label, { color: erro ? theme.tokens.status.error : theme.tokens.text.secondary }]}>{label}</Text>
-        <Text style={[styles.counts, { color: theme.tokens.text.muted }]} numberOfLines={1}>{toolGroupCounts(fases)}</Text>
+        <View style={styles.summary}>
+          <Text style={[styles.label, { color: theme.tokens.text.primary }]}>{label}</Text>
+          <Text style={[styles.counts, { color: erro ? theme.tokens.status.error : theme.tokens.text.secondary }]}>{toolGroupCounts(fases)}</Text>
+        </View>
       </Pressable>
       {!aberto && viva ? <ToolCard use={viva} result={resultOf(viva)} semNome={!mixed} onPress={onAbrir} /> : null}
       {aberto ? visiveis.map((t) => <ToolCard key={t.id} use={t} result={resultOf(t)} semNome={!mixed} onPress={onAbrir} />) : null}
       {aberto && !tudo && tools.length > TETO ? (
-        <Pressable onPress={() => setTudo(true)} style={styles.mais} accessibilityRole="button">
+        <Pressable onPress={() => setTudo(true)} style={({ pressed }) => [styles.mais, pressed && { backgroundColor: theme.tokens.bg.hover }]} accessibilityRole="button">
           <Text style={[styles.maisTxt, { color: theme.tokens.accent.base }]}>{m.tool_mostrar_todas({ n: tools.length })}</Text>
         </Pressable>
       ) : null}
@@ -42,9 +44,10 @@ export const ToolGroup = memo(function ToolGroup({ tools, resultOf, onAbrir }: {
 
 const styles = StyleSheet.create((theme) => ({
   wrap: { gap: 4 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6, paddingHorizontal: 4 },
-  label: { fontSize: theme.base.text.xs, fontWeight: '600' },
-  counts: { fontSize: theme.base.text.xxs, flex: 1 },
+  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[1], minHeight: 44 },
+  summary: { flex: 1, gap: theme.base.space[1] },
+  label: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  counts: { fontSize: theme.base.text.xs },
   mais: { paddingVertical: 8, paddingHorizontal: 10, minHeight: 44, justifyContent: 'center' },
   maisTxt: { fontSize: theme.base.text.xs, fontWeight: '600' },
 }));
