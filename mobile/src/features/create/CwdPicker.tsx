@@ -1,68 +1,107 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Pressable, Text, TextInput, View, ActivityIndicator, ScrollView } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { getRoots, scanDir } from '@hangar/core';
-import type { FsRoot, FsEntry } from '@hangar/core';
+import { getRootsForServer, scanDirForServer } from '@hangar/core';
+import type { FsRoot, FsEntry, FsScanError, Server } from '@hangar/core';
+import { readProject } from '../../stores/createPreferences';
 import * as m from '../../paraglide/messages';
 
+function scanMessage(error: FsScanError): string {
+  return ({
+    permission_denied: m.arquivo_sem_permissao, unreadable: m.arquivo_ilegivel,
+    root_not_allowed: m.arquivo_raiz_nao_liberada, invalid_path: m.arquivo_caminho_invalido,
+    not_found: m.arquivo_pasta_nao_encontrada, unknown: m.arquivo_ler_falhou,
+  })[error]();
+}
+
 export function CwdPicker({
+  server,
   onPick,
   selected,
+  autoSelect = true,
 }: {
-  onPick: (path: string) => void;
+  server: Server;
+  onPick: (path: string, root: string) => void;
   selected?: string | null;
+  autoSelect?: boolean;
 }) {
   const [roots, setRoots] = useState<FsRoot[]>([]);
   const [rootsLoading, setRootsLoading] = useState(true);
-  const [rootsError, setRootsError] = useState(false);
+  const [rootsError, setRootsError] = useState('');
   const [activeRoot, setActiveRoot] = useState<FsRoot | null>(null);
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const scanController = useRef<AbortController | null>(null);
 
-  const loadRoots = useCallback(async () => {
-    try {
-      const r = await getRoots();
+  useEffect(() => {
+    const controller = new AbortController();
+    setRootsLoading(true);
+    setRootsError('');
+    void (async () => {
+      const r = await getRootsForServer(server, controller.signal);
+      if (controller.signal.aborted) return;
       setRoots(r);
-      if (r.length) {
+      const saved = autoSelect ? readProject(server.id) : null;
+      if (!autoSelect && r.length) {
         setActiveRoot(r[0]);
         setPath(r[0].path);
       }
-    } catch {
-      setRootsError(true);
-    } finally {
-      setRootsLoading(false);
-    }
-  }, []);
+      if (saved && !r.some((root) => root.path === saved.root)) {
+        setScanError(m.criar_projeto_indisponivel());
+        return;
+      }
+      if (!autoSelect) return;
+      for (const root of saved ? r.filter((root) => root.path === saved.root) : r) {
+        const cwd = saved?.cwd ?? root.path;
+        const result = await scanDirForServer(server, root.path, cwd, controller.signal);
+        if (controller.signal.aborted) return;
+        if (result.error) {
+          setScanError(saved ? `${m.criar_projeto_indisponivel()} ${scanMessage(result.error)}` : scanMessage(result.error));
+          continue;
+        }
+        onPick(cwd, root.path);
+        return;
+      }
+    })().catch((cause: unknown) => {
+      if (!controller.signal.aborted) setRootsError(cause instanceof Error ? cause.message : m.arquivo_carregar_raizes_erro());
+    }).finally(() => {
+      if (!controller.signal.aborted) setRootsLoading(false);
+    });
+    return () => { controller.abort(); scanController.current?.abort(); };
+  }, [server, onPick, autoSelect]);
 
-  useEffect(() => {
-    void loadRoots();
-  }, [loadRoots]);
-
-  const doScan = useCallback(async (rootPath: string, target: string) => {
+  const doScan = useCallback(async (rootPath: string, target: string, pick = false) => {
+    scanController.current?.abort();
+    const controller = new AbortController();
+    scanController.current = controller;
     setScanning(true);
     setScanError(null);
     try {
-      const res = await scanDir(rootPath, target);
+      const res = await scanDirForServer(server, rootPath, target, controller.signal);
+      if (controller.signal.aborted) return;
       if (res.error) {
-        setScanError(res.error);
+        setScanError(scanMessage(res.error));
         setEntries([]);
       } else {
         setEntries(res.entries);
+        if (pick) onPick(target, rootPath);
       }
     } catch (e) {
-      setScanError(e instanceof Error ? e.message : 'erro');
+      if (controller.signal.aborted) return;
+      setScanError(e instanceof Error ? e.message : m.arquivo_ler_falhou());
       setEntries([]);
     } finally {
-      setScanning(false);
+      if (!controller.signal.aborted) setScanning(false);
     }
-  }, []);
+  }, [server, onPick]);
 
   useEffect(() => {
-    if (activeRoot) void doScan(activeRoot.path, path || activeRoot.path);
-  }, [activeRoot, path, doScan]);
+    if (!rootsLoading && activeRoot) void doScan(activeRoot.path, path || activeRoot.path);
+    return () => scanController.current?.abort();
+  }, [activeRoot, path, doScan, rootsLoading, autoSelect]);
 
   const selectRoot = (r: FsRoot) => {
     setActiveRoot(r);
@@ -81,15 +120,11 @@ export function CwdPicker({
     const base = activeRoot.path;
     const rest = path.startsWith(base) ? path.slice(base.length) : '';
     const out = [{ label: activeRoot.name, path: base }];
-    let acc = base;
-    for (const seg of rest.split('/').filter(Boolean)) {
-      acc = acc + '/' + seg;
-      out.push({ label: seg, path: acc });
+    for (const match of rest.matchAll(/[^/\\]+/g)) {
+      out.push({ label: match[0], path: path.slice(0, base.length + match.index + match[0].length) });
     }
     return out;
   })();
-
-  const drilled = !!activeRoot && path !== activeRoot?.path;
 
   if (rootsLoading) {
     return (
@@ -102,7 +137,7 @@ export function CwdPicker({
   if (rootsError) {
     return (
       <View style={styles.center}>
-        <Text style={styles.muted}>{m.arquivo_carregar_raizes_erro()}</Text>
+        <Text style={styles.muted} accessibilityRole="alert">{rootsError}</Text>
       </View>
     );
   }
@@ -110,6 +145,7 @@ export function CwdPicker({
     return (
       <View style={styles.center}>
         <Text style={styles.muted}>{m.arquivo_sem_raizes()}</Text>
+        {scanError ? <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text> : null}
       </View>
     );
   }
@@ -138,7 +174,7 @@ export function CwdPicker({
         autoCorrect={false}
       />
 
-      {drilled ? (
+      {activeRoot ? (
         <View style={styles.crumbsWrap}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.crumbs}>
             {crumbs.map((c, i) => (
@@ -150,7 +186,7 @@ export function CwdPicker({
               </View>
             ))}
           </ScrollView>
-          <Pressable onPress={() => onPick(path)} style={styles.useHere}>
+          <Pressable onPress={() => void doScan(activeRoot!.path, path, true)} style={styles.useHere}>
             <Text style={styles.useHereTxt}>{m.arquivo_usar_pasta()}</Text>
           </Pressable>
         </View>
@@ -171,7 +207,7 @@ export function CwdPicker({
               const sel = selected === e.path;
               return (
                 <View key={e.path} style={[styles.row, sel && styles.rowSel]}>
-                  <Pressable onPress={() => onPick(e.path)} style={styles.rowBody} accessibilityState={{ selected: sel }}>
+                  <Pressable onPress={() => void doScan(activeRoot!.path, e.path, true)} style={styles.rowBody} accessibilityState={{ selected: sel }}>
                     <Text style={styles.rowName} numberOfLines={1}>
                       {e.name}
                     </Text>

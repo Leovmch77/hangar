@@ -2,13 +2,14 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { createSession, createSessionForServer, getArchivePorCwd, getCodexAccountsForServer,
-  getEngines, getSessions, listClaudeConfigs, listarCotasResumo, modelOptions,
+import { createSessionForServer, getArchivePorCwd, getCodexAccountsForServer,
+  getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation } from '@hangar/core';
 import { basename, providerName, cotaDaConta, cotaParada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS } from '@hangar/core';
-import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
+import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
+import { rememberProject } from '../../stores/createPreferences';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { CodexContextControl } from './CodexContextControl';
@@ -59,9 +60,14 @@ function MenuSelect({
 }
 
 export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
-  const router = useRouter();
   const active = useServers((s) => s.active());
-  const serverId = active?.id ?? useServers.getState().servers[0]?.id ?? '';
+  const target = active ?? useServers.getState().servers[0];
+  return target ? <CreateSessionForm key={`${target.id}:${target.baseUrl}`} active={target} onClose={onClose} />
+    : <Text accessibilityRole="alert">{m.servidor_nao_existe()}</Text>;
+}
+
+function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () => void }) {
+  const router = useRouter();
 
   const [picked, setPicked] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -71,6 +77,10 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [loading, setLoading] = useState(false);
   const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
+  const [catalogError, setCatalogError] = useState('');
+  const [browse, setBrowse] = useState(false);
+  const [projectWarning, setProjectWarning] = useState('');
+  const pickGeneration = useRef(0);
 
   const [provider, setProvider] = useState<Provider>('claude');
 
@@ -117,6 +127,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     mounted.current = true;
     return () => {
     mounted.current = false;
+    pickGeneration.current++;
     codexGeneration.current++;
     archiveGeneration.current++;
     codexController.current?.abort();
@@ -156,40 +167,54 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     return () => { controller.abort(); codexGeneration.current++; };
   }, [provider, active, active?.id, active?.baseUrl, active?.token]);
 
-  // carrega configs + motores uma vez (e quando provider volta a claude)
+  // Cada catálogo pertence ao destino capturado, mesmo após trocar de máquina.
   useEffect(() => {
     let alive = true;
-    void listClaudeConfigs()
+    setConfigs([]);
+    setSelectedConfig(null);
+    setMotores({});
+    setEngine('');
+    setCotas([]);
+    setCatalogError('');
+    void listClaudeConfigsForServer(active)
       .then((cs) => {
         if (!alive) return;
         setConfigs(cs);
         const sel = cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null;
         setSelectedConfig(sel);
       })
-      .catch(() => {
-        if (alive) setConfigs([]);
+      .catch((cause: unknown) => {
+        if (alive) setCatalogError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
       });
-    void listarCotasResumo()
+    void probeServerResponse(active, '/api/cotas')
+      .then((response) => {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json() as Promise<CotaContaResumo[]>;
+      })
       .then((cs) => {
         if (alive) setCotas(cs);
       })
       .catch(() => {});
-    void getEngines()
+    void getEnginesForServer(active)
       .then((r) => {
-        if (alive) setMotores(r.motores as any);
+        if (alive) {
+          setMotores(r.motores);
+          if (r.arquivo_corrompido) setCatalogError(m.criar_motores_erro());
+        }
       })
-      .catch(() => {
-        if (alive) setMotores({});
+      .catch((cause: unknown) => {
+        if (alive) setCatalogError(cause instanceof Error ? cause.message : m.criar_motores_erro());
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [active]);
 
   // modelos quando provider/config/engine mudam
   useEffect(() => {
     // reset incondicional — igual à PWA (CreateSessionSheet.svelte:141), evita vazar modelo/esforço pro Codex
     setModelo('');
+    setModelos([]);
     setEsforco('');
     setSubagente('');
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi') {
@@ -209,7 +234,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     setErroModelos('');
     const request = provider === 'codex'
       ? modelOptionsForServer(active!, 'codex', null, null, codexAccount, controller.signal)
-      : modelOptions(provider, engine || null, selectedConfig);
+      : modelOptionsForServer(active, provider, engine || null, selectedConfig, null, controller.signal);
     void request
       .then((r) => {
         if (!alive) return;
@@ -247,24 +272,34 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     return () => { controller.abort(); archiveGeneration.current++; };
   }, [provider, picked, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
 
-  const handlePick = useCallback(async (p: string) => {
+  const handlePick = useCallback(async (p: string, root?: string) => {
+    const generation = ++pickGeneration.current;
     setPicked(p);
+    setBrowse(false);
     setError('');
+    setProjectWarning('');
+    if (root) {
+      try { rememberProject(active.id, { root, cwd: p }); }
+      catch { setProjectWarning(m.criar_projeto_salvar_erro()); }
+    }
     setChecking(true);
     try {
-      const sessions = await getSessions();
+      const sessions = await fetchSessionsForServer(active);
+      if (!mounted.current || generation !== pickGeneration.current) return;
       const taken = new Set(sessions.map((s) => s.name));
       setTakenNames(taken);
       setHasSameFolder(sessions.some((s) => (s as any).cwd === p));
       setName(uniqueName(basename(p), taken));
-    } catch {
+    } catch (cause: unknown) {
+      if (!mounted.current || generation !== pickGeneration.current) return;
+      setError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
       setTakenNames(new Set());
       setHasSameFolder(false);
       setName(basename(p));
     } finally {
-      setChecking(false);
+      if (mounted.current && generation === pickGeneration.current) setChecking(false);
     }
-  }, []);
+  }, [active]);
 
   const handleManual = () => {
     const p = manualPath.trim();
@@ -325,27 +360,18 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
         router.replace((`/s/${target.id}/${s.name}` as never) as never);
         return;
       }
-      const s = await createSession(
-        name.trim(),
-        picked,
-        provider === 'claude' ? selectedConfig : null,
-        provider,
-        provider === 'claude' ? engine || null : null,
-        (provider === 'claude' || provider === 'pi' || provider === 'kimi') ? (modelo || null) : null,
-        (provider === 'claude' || provider === 'pi') ? (esforco || null) : null,
-        provider === 'claude' ? permissao || null : null,
-        null,
-        null,
-        false,
-        provider === 'claude' && !engine ? subagente || null : null,
-      );
+      const s = await createSessionForServer(target, {
+        name: name.trim(), cwd: picked, provider,
+        config_dir: provider === 'claude' ? selectedConfig : null,
+        engine: provider === 'claude' ? engine || null : null,
+        model: (provider === 'claude' || provider === 'pi' || provider === 'kimi') ? modelo || null : null,
+        effort: (provider === 'claude' || provider === 'pi') ? esforco || null : null,
+        permission_mode: provider === 'claude' ? permissao || null : null,
+        subagent_model: provider === 'claude' && !engine ? subagente || null : null,
+      });
       // sucesso → abre chat da nova sessão — não chamar onClose (router.back) que desfaz o replace
       if (!mounted.current || generation !== codexGeneration.current) return;
-      if (serverId) {
-        router.replace((`/s/${serverId}/${s.name}` as never) as never);
-      } else {
-        router.replace('/' as never);
-      }
+      router.replace((`/s/${target.id}/${s.name}` as never) as never);
     } catch (e) {
       if (mounted.current && generation === codexGeneration.current) setError(e instanceof Error ? e.message : m.criar_sessao_erro());
     } finally {
@@ -360,8 +386,10 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <Text style={styles.title}>{m.sessao_nova()}</Text>
           <View style={styles.pickerWrap}>
-            <CwdPicker onPick={handlePick} selected={picked} />
+            <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={!browse} />
           </View>
+          {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
+          {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
           <View style={styles.advanced}>
             <Pressable onPress={() => setManualOpen((v) => !v)} style={styles.advToggle}>
               <Text style={styles.advTxt}>{m.criar_avancado()}</Text>
@@ -399,6 +427,8 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
             {picked}
           </Text>
         </View>
+        {projectWarning ? <Text style={styles.error} accessibilityRole="alert">{projectWarning}</Text> : null}
+        {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
 
         {checking ? (
           <View style={styles.rowCenter}>
@@ -576,7 +606,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
               <Text style={styles.primaryTxt}>{loading ? m.criar_criando() : m.sessao_nova()}</Text>
             </Pressable>
 
-            <Pressable onPress={() => setPicked(null)} style={styles.ghost}>
+            <Pressable onPress={() => { pickGeneration.current++; setBrowse(true); setPicked(null); }} style={styles.ghost}>
               <Text style={styles.ghostTxt}>{m.criar_outra_pasta()}</Text>
             </Pressable>
           </>
