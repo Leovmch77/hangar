@@ -195,6 +195,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es?.close();
 
     es = openEventStream(name, lastEventId);
+    const source = es;
 
     // Prova de vida pro watchdog do adapter: SEM listener registrado o wrap do adapter
     // não roda rearmar() e o stream saudável morre aos 25s (mesmo padrão do sessions.ts).
@@ -386,23 +387,19 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
     // reset do backoff quando a conexão estabiliza (paridade com Chat.svelte:1017 noteAlive)
     es.onopen = () => {
+      if (es !== source) return;
       retryDelay = SSE_RETRY_MIN_MS;
     };
-    // Erro REAL (TCP RST ou watchdog do adapter): FECHA e reagenda com backoff. O adapter
-    // mobile já tem auto-retry nativo desligado? Não: react-native-sse reconecta sozinho —
-    // fechar aqui impede a 2ª máquina de retry martelar em paralelo (mesma lição da PWA).
-    // Atribuição ÚNICA por conexão (objeto novo a cada connectSSE) — o setter do adapter
-    // acumula listeners a cada atribuição (regra do grupo, achado da T4 r2).
-    es.onerror = () => {
-      // Lido ANTES do close, que zera o estado: 2 (CLOSED) = o servidor recusou de vez (401, 404,
-      // sessão que não existe); 0/1 = rede caiu ou o backend reiniciou, e aí insistir é o certo.
-      const estadoSSE = es?.readyState ?? 2;
-      es?.close();
+    // Fechar a fonte deixa apenas este backoff dono da repetição, sem polling em paralelo.
+    es.onerror = (error) => {
+      if (es !== source) return;
+      const status = (error as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
+      const refused = status >= 400 && status < 500 && status !== 408 && status !== 429;
       es = null;
+      source.close();
       if (!alive) return;
       clearTimeout(retryTimer);
-      if (estadoSSE === 2) {
-        // Mesma medição da PWA: 2h14 de laço contra uma sessão que o servidor dizia não existir.
+      if (refused) {
         useChatStore.setState({ sseRecusado: true });
         return;
       }

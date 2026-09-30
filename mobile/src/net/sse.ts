@@ -76,7 +76,9 @@ export function createEventSource(
   let curOnError: ((ev: unknown) => void) | null = null;
   let curOnOpen: ((ev: unknown) => void) | null = null;
   const fechar = () => {
+    if (estado === 2) return;
     if (vigia) clearTimeout(vigia);
+    vigia = null;
     estado = 2;
     // A lib agenda _pollAgain DEPOIS de despachar 'error' (EventSource.js:121-134); um close
     // síncrono de dentro do handler só limpa o timer anterior. Este mata o que nasce em seguida.
@@ -96,19 +98,19 @@ export function createEventSource(
     estado = 1;
     rearmar();
   });
-  // Erro de REDE não marca CLOSED — a lib reconecta sozinha (pollingInterval) e insistir é o certo.
-  // Erro de STATUS, não: a lib despacha 'error' com o status e segue no `_pollAgain` para SEMPRE,
-  // sem nunca despachar 'close'. Sem separar os dois, um 401/404 vira laço infinito — o mesmo que
-  // a PWA mediu em 2h14, e que ela evita lendo `readyState === 2`. Aqui a leitura só existe se
-  // alguém marcar, então é este handler que marca.
+  // Recusa definitiva interrompe o polling; erro temporário deixa o consumidor decidir o retry.
   es.addEventListener('error', (ev: unknown) => {
+    if (estado === 2) return;
     const status = (ev as { xhrStatus?: number } | null)?.xhrStatus ?? 0;
     falhou(Number.isInteger(status) && status >= 100 && status <= 599 ? String(status) : 'rede');
     if (recusaDefinitiva(status)) fechar();
+    errHandlers.forEach((fn) => fn(ev));
   });
   es.addEventListener('close', () => {
-    if (estado !== 2) falhou('servidor_fechou');
-    estado = 2;
+    if (estado === 2) return;
+    falhou('servidor_fechou');
+    fechar();
+    errHandlers.forEach((fn) => fn({ type: 'close' }));
   });
   // emenda 2: wrap ramifica por tipo — eventos de dados tem {data,lastEventId}, error/close/open não
   const wrapData =
@@ -151,15 +153,9 @@ export function createEventSource(
     },
     // emenda 4: atribuição substitui, não acumula
     set onerror(fn) {
-      if (curOnError) {
-        es.removeEventListener('error', curOnError as never);
-        errHandlers.delete(curOnError);
-      }
+      if (curOnError) errHandlers.delete(curOnError);
       curOnError = fn as ((ev: unknown) => void) | null;
-      if (fn) {
-        es.addEventListener('error', fn as never);
-        errHandlers.add(fn as (ev: unknown) => void);
-      }
+      if (fn) errHandlers.add(fn as (ev: unknown) => void);
     },
     get onerror() {
       return null;

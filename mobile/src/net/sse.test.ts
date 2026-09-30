@@ -14,7 +14,7 @@ vi.mock('react-native-sse', () => ({
     opts: Record<string, unknown>;
     listeners: Record<string, Function[]> = {};
     close = vi.fn();
-    removeAllEventListeners = vi.fn();
+    removeAllEventListeners = vi.fn(() => { this.listeners = {}; });
     constructor(url: string, opts: Record<string, unknown>) {
       this.url = url;
       this.opts = opts;
@@ -23,11 +23,18 @@ vi.mock('react-native-sse', () => ({
     addEventListener(t: string, f: Function) {
       (this.listeners[t] ??= []).push(f);
     }
-    removeEventListener() {}
+    removeEventListener(t: string, f: Function) {
+      this.listeners[t] = (this.listeners[t] ?? []).filter((listener) => listener !== f);
+    }
   },
 }));
 
 import { createEventSource } from './sse';
+
+function emitNative(type: string, event: unknown = {}) {
+  // O transporte despacha uma cópia, mesmo se o handler fechar e remover os listeners.
+  for (const listener of [...(ultimo!.listeners[type] ?? [])]) listener(event);
+}
 
 beforeEach(() => {
   vi.useRealTimers();
@@ -182,5 +189,60 @@ test('watchdog fecha após 25s de silêncio e avisa onerror com type timeout', (
   vi.advanceTimersByTime(25_000);
   expect(mock.close).toHaveBeenCalledTimes(1);
   expect(onErr).toHaveBeenCalledWith({ type: 'timeout' });
+  vi.advanceTimersByTime(60_000);
+  expect(onErr).toHaveBeenCalledTimes(1);
   vi.useRealTimers();
+});
+
+test.each([401, 403, 404, 408, 429, 503, 0])('repassa HTTP %i mesmo quando fecha por recusa', (xhrStatus) => {
+  vi.useFakeTimers();
+  const es = createEventSource('http://x/api/sessions/http/events', { withCredentials: false });
+  const onError = vi.fn();
+  es.onerror = onError;
+  const error = { type: 'error', xhrStatus };
+  emitNative('error', error);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith(error);
+  expect(es.readyState).toBe([401, 403, 404].includes(xhrStatus) ? 2 : 0);
+  es.close();
+});
+
+test('fechamento natural avisa uma vez e desarma o watchdog; fechar voluntariamente não avisa', () => {
+  vi.useFakeTimers();
+  const es = createEventSource('http://x/api/sessions/close/events', { withCredentials: false });
+  const onError = vi.fn();
+  es.onerror = onError;
+  emitNative('open');
+  emitNative('close');
+  expect(es.readyState).toBe(2);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith({ type: 'close' });
+  vi.advanceTimersByTime(60_000);
+  expect(onError).toHaveBeenCalledTimes(1);
+  es.close();
+  expect(onError).toHaveBeenCalledTimes(1);
+
+  const voluntary = createEventSource('http://x/api/sessions/voluntary/events', { withCredentials: false });
+  voluntary.onerror = onError;
+  emitNative('open');
+  voluntary.close();
+  emitNative('close');
+  vi.advanceTimersByTime(60_000);
+  expect(onError).toHaveBeenCalledTimes(1);
+});
+
+test('onerror substitui e remove o consumidor sem acumular handlers nativos', () => {
+  vi.useFakeTimers();
+  const es = createEventSource('http://x/api/sessions/handlers/events', { withCredentials: false });
+  const first = vi.fn();
+  const second = vi.fn();
+  es.onerror = first;
+  es.onerror = second;
+  emitNative('error', { type: 'error', xhrStatus: 503 });
+  expect(first).not.toHaveBeenCalled();
+  expect(second).toHaveBeenCalledTimes(1);
+  es.onerror = null;
+  emitNative('error', { type: 'error', xhrStatus: 503 });
+  expect(second).toHaveBeenCalledTimes(1);
+  es.close();
 });
