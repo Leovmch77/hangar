@@ -61,8 +61,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `new-session … ; set-option …` numa chamada só derruba a sessão; texto livre nunca vai no argv
   do psmux (`\n` e `;` quebram), então o comando mora em `<id>-cmd.cmd` e o "Rodar de novo" o
   relê de lá (`%%` desfeito). Opção de valor vazio nem é gravada. O código de saída vem do
-  `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medição e o que
-  falta medir: [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
+  `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medições completas,
+  ver [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
 
 ## Terminais de atalho no psmux
 
@@ -87,10 +87,17 @@ que não forma `%NOME%` de variável existente (ambiente ou dinâmica: `CD`, `DA
 Os `.cmd`/`.exit` podem carregar credencial: são apagados ao fechar o terminal, se o start falha e
 por varredura (`list_all`) dos que não têm terminal, com carência de 60 s para um start em andamento.
 
-**Ainda não medido no psmux:** o lançamento `cmd /d /c "<outer.cmd>"` como um argv só via
-`subprocess`; o `.exit` com o código real; o `pause` segurando o pane; `set-option` com `;` e com
-valor vazio; `logical_line` sobre a tela do psmux; e a regra de `%` acima (só foi decidida lendo a
-documentação do cmd). A sonda é `scripts/probe-shortcut-psmux.ps1` (não rode `taskkill` com PID
+**Medido nesta data** (29/09/2026 via `app.shortcut_terminals` em clone limpo de main at 3964985b):
+o lançamento `cmd /d /c "<outer.cmd>"` como um argv só via `subprocess` funciona; o `.exit` recebe
+o código real (exit 3 → `exit_code: 3`, `alive: False`); o `pause` segura o pane após saída; o
+"Rodar de novo" reutiliza a mesma linha de comando (`exit 3` de novo); a segunda `start_hangar` com
+a mesma chave reutiliza a cópia viva (`reused: True`); a regra de `%` funciona (echo URL=a%20b
+USER=%USERNAME% imprime `URL=a%20b USER=administrator`, literal `%20`, env var expandida);
+detecção de pergunta com `Read-Host 'Porta [3000]'` → `{"text": "Porta", "default": "3000"}`;
+entrega de resposta via `terminal_prompt.answer` funciona; limpeza ao fechar é OK (sem orfãos).
+
+**Ainda não medido no psmux:** `set-option` com `;` no valor e `logical_line` numa prompt envolvida
+em múltiplas linhas. A sonda é `scripts/probe-shortcut-psmux.ps1` (não rode `taskkill` com PID
 até 4: sessão que não sobe deixa o PID em 0). Um PowerShell 5.1 estraga aspas embutidas numa
 string; a sonda passa os argumentos separados.
 
