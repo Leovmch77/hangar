@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import type { Server } from '@hangar/core';
 import { MultilineInput } from '../../ui/MultilineInput';
 import { Sheet } from '../../ui/Sheet';
@@ -14,13 +15,17 @@ import * as m from '../../paraglide/messages';
 type Props = {
   server: Server;
   destination: ReactNode;
+  destinationPending: boolean;
+  destinationSummary: ReactNode;
+  settingsSummary: ReactNode;
+  notices: ReactNode;
   options: ReactNode;
   // null enquanto falta destino ou conta; o texto continua editável.
   body: NewConversationInput['body'] | null;
   blocked: boolean;
 };
 
-export function NewConversation({ server, destination, options, body, blocked }: Props) {
+export function NewConversation({ server, destination, destinationPending, destinationSummary, settingsSummary, notices, options, body, blocked }: Props) {
   const router = useRouter();
   const serverId = server.id;
   const attempt = useNewConversation((s) => s.attempts[serverId] ?? null);
@@ -78,20 +83,11 @@ export function NewConversation({ server, destination, options, body, blocked }:
 
   return (
     <View style={styles.root}>
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      <KeyboardAvoidingView behavior="padding" style={styles.keyboard}>
+      <ScrollView style={styles.states} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>{m.sessao_nova()}</Text>
-        <View style={styles.inputWrap}>
-          <MultilineInput
-            value={text}
-            onChangeText={setText}
-            placeholder={m.nova_conversa_placeholder()}
-            accessibilityLabel={m.nova_conversa_placeholder()}
-            autoFocus
-            maxHeight={200}
-          />
-        </View>
-
-        {destination}
+        {destinationPending && !optionsOpen ? destination : null}
+        {notices}
 
         {pending ? (
           <View style={styles.pending}>
@@ -130,18 +126,46 @@ export function NewConversation({ server, destination, options, body, blocked }:
 
         {issue ? <Text style={styles.error} accessibilityRole="alert">{issue.message}</Text> : null}
         {!body && !blocked && !pending ? <Text style={styles.hint}>{m.nova_conversa_sem_destino()}</Text> : null}
-
+      </ScrollView>
+      <View style={styles.entry}>
+        <ScrollView style={styles.entryScroll} contentContainerStyle={styles.entryContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.inputWrap}>
+            <MultilineInput
+              value={text}
+              onChangeText={setText}
+              placeholder={m.nova_conversa_placeholder()}
+              accessibilityLabel={m.nova_conversa_placeholder()}
+              autoFocus
+              maxHeight={200}
+            />
+          </View>
+          <View style={styles.summaries}>
+            <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
+              {destinationSummary}
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
+              {settingsSummary}
+            </Pressable>
+          </View>
+        </ScrollView>
         <View style={styles.actions}>
-          <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={styles.options}>
+          <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.options, pressed && styles.pressed]}>
             <Text style={styles.secondaryTxt}>{m.nova_conversa_opcoes()}</Text>
           </Pressable>
           <Pressable accessibilityRole="button" onPress={() => void handleSend()} disabled={!canSend} style={[styles.primary, !canSend && styles.disabled]}>
             <Text style={styles.primaryTxt}>{busy ? m.criar_criando() : m.nova_conversa_enviar()}</Text>
           </Pressable>
         </View>
-      </ScrollView>
+      </View>
+      </KeyboardAvoidingView>
       <Sheet open={optionsOpen} onDismiss={() => setOptionsOpen(false)} sizes={['medium', 'large']} scrollable>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">{options}</ScrollView>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+          <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(false)} style={styles.ghost}>
+            <Text style={styles.ghostTxt}>{m.nova_conversa_opcoes_fechar()}</Text>
+          </Pressable>
+          {optionsOpen ? destination : null}
+          {options}
+        </ScrollView>
       </Sheet>
     </View>
   );
@@ -149,7 +173,25 @@ export function NewConversation({ server, destination, options, body, blocked }:
 
 const styles = StyleSheet.create((theme) => ({
   root: { flex: 1, backgroundColor: theme.tokens.bg.base },
+  keyboard: { flex: 1 },
+  states: { flex: 1, minHeight: 44 },
   scroll: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: 32 },
+  entry: { flexShrink: 1, padding: theme.base.space[4], gap: theme.base.space[2] },
+  entryScroll: { flexGrow: 0, flexShrink: 1 },
+  entryContent: { gap: theme.base.space[2] },
+  summaries: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  summary: {
+    flexGrow: 1,
+    flexBasis: '45%',
+    minWidth: 104,
+    minHeight: 44,
+    justifyContent: 'center',
+    padding: theme.base.space[2],
+    borderWidth: 1,
+    borderColor: theme.tokens.border.default,
+    borderRadius: theme.base.radius.md,
+  },
+  pressed: { backgroundColor: theme.tokens.accent.dim },
   title: { fontSize: 20, fontWeight: '600', color: theme.tokens.text.primary },
   inputWrap: {
     minHeight: 96,
@@ -171,7 +213,8 @@ const styles = StyleSheet.create((theme) => ({
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm },
   actions: { flexDirection: 'row', gap: theme.base.space[2] },
   options: {
-    height: 50,
+    minHeight: 50,
+    paddingVertical: theme.base.space[2],
     paddingHorizontal: theme.base.space[4],
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
@@ -181,16 +224,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   primary: {
     flex: 1,
-    height: 50,
+    minHeight: 50,
+    paddingVertical: theme.base.space[2],
     backgroundColor: theme.tokens.accent.base,
     borderRadius: theme.base.radius.md,
     justifyContent: 'center',
     alignItems: 'center',
   },
   primaryTxt: { color: '#fff', fontWeight: '600', fontSize: theme.base.text.base },
-  secondary: { height: 44, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
+  secondary: { minHeight: 44, padding: theme.base.space[2], borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
   secondaryTxt: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm, fontWeight: '500' },
-  ghost: { height: 44, justifyContent: 'center', alignItems: 'center' },
+  ghost: { minHeight: 44, padding: theme.base.space[2], justifyContent: 'center', alignItems: 'center' },
   ghostTxt: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
   disabled: { opacity: 0.5 },
 }));

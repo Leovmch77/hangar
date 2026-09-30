@@ -338,7 +338,7 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
           accessibilityLabel={m.criar_outra_pasta()}
         >
           <Text style={styles.pickedName}>{basename(picked)}</Text>
-          <Text style={styles.pickedPath} numberOfLines={1}>{picked}</Text>
+          <Text style={styles.pickedPath}>{picked}</Text>
           <Text style={styles.hintSm}>{m.criar_outra_pasta()}</Text>
         </Pressable>
       ) : (
@@ -370,8 +370,30 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
           </View>
         </>
       )}
+    </View>
+  );
+
+  const selectedModel = modelos.find((model) => valorModelo(model) === modelo || model.id === modelo);
+  const modelLabel = modelo ? selectedModel?.name ?? modelo : m.criar_padrao();
+  const settingsLabel = retomavel
+    ? `${providerName(provider)} · ${m.criar_retomar()}`
+    : [providerName(provider), settings.engine ? motores[engine]?.label ?? engine : null, modelLabel, settings.effort].filter(Boolean).join(' · ');
+  const destinationSummary = <Text style={styles.summary} numberOfLines={2}>{active.label} · {picked || m.nova_conversa_sem_destino()}</Text>;
+  const settingsSummary = <Text style={styles.summary} numberOfLines={2}>{settingsLabel}</Text>;
+  const quotaNotice = provider === 'claude' && cotaSelecionada ? (
+    <Text style={styles.hint}>
+      {resumoCota(cotaSelecionada) ||
+        `${m.cota_sem_cota()} ${
+          cotaSelecionada.estado === 'indisponivel'
+            ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
+            : m.cota_precisa_entrar()
+        }`.trim()}
+    </Text>
+  ) : null;
+
+  const notices = (
+    <View style={styles.field}>
       {hasSameFolder ? <Text style={styles.hint}>{m.criar_ja_existe()}</Text> : null}
-      {/* A conta Codex mora na folha de opções; o motivo do Enviar travado aparece aqui. */}
       {picked && !codexReady ? (
         codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text>
           : <Text style={styles.hint}>{codexLoading ? m.comum_carregando() : m.contas_nao_conectada()}</Text>
@@ -379,6 +401,12 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
       {projectWarning ? <Text style={styles.error} accessibilityRole="alert">{projectWarning}</Text> : null}
       {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
       {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
+      {!retomavel && listaReduzida ? <Text style={styles.hint}>{m.criar_lista_reduzida()}</Text> : null}
+      {!retomavel && erroModelos ? <Text style={styles.hint} accessibilityRole="alert">{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
+      {quotaNotice}
+      {contextBusy ? <Text style={styles.hint} accessibilityLiveRegion="polite">{m.comum_carregando()}</Text> : null}
+      {retomavel ? <Text style={styles.hint}>{m.nova_conversa_retomada_selecionada()}</Text> : null}
+      {provider === 'codex' && retomando && codexProgress ? <Text style={styles.hint} accessibilityLiveRegion="polite">{codexProgress}</Text> : null}
     </View>
   );
 
@@ -449,16 +477,7 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
             }))}
             onChange={(v) => setSelectedConfig(v)}
           />
-          {cotaSelecionada ? (
-            <Text style={styles.hint}>
-              {resumoCota(cotaSelecionada) ||
-                `${m.cota_sem_cota()} ${
-                  cotaSelecionada.estado === 'indisponivel'
-                    ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
-                    : m.cota_precisa_entrar()
-                }`.trim()}
-            </Text>
-          ) : null}
+          {quotaNotice}
         </View>
       ) : null}
 
@@ -551,6 +570,10 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
     <NewConversation
       server={active}
       destination={destination}
+      destinationPending={!picked}
+      destinationSummary={destinationSummary}
+      settingsSummary={settingsSummary}
+      notices={notices}
       options={options}
       body={body}
       blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
@@ -596,6 +619,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   pickedName: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
   pickedPath: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
+  summary: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary },
   rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   hintSm: { fontSize: 12, color: theme.tokens.text.muted, marginTop: 4 },

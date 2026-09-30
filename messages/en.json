@@ -6090,6 +6090,8 @@
   "nova_conversa_adotar": "Use this conversation",
   "nova_conversa_descartar": "Discard attempt",
   "nova_conversa_nome_automatico": "Leave blank to name it after the folder plus a short code.",
+  "nova_conversa_retomada_selecionada": "Resume selected. Open Options to continue the archived conversation.",
+  "nova_conversa_opcoes_fechar": "Close options",
   "draft_read_error": "Could not read the draft on this device. Try again; the saved content was not deleted.",
   "draft_invalid": "The draft saved on this device has an invalid format and could not be restored.",
   "draft_write_error": "Could not save the draft on this device. Keep the conversation open to avoid losing your text.",
