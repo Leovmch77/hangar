@@ -52,4 +52,12 @@ describe('reconcilePending', () => {
   test('vazio retorna vazio', () => {
     expect(reconcilePending([], incoming('oi'))).toEqual([]);
   });
+
+  test('replay de queued e user_msg reconcilia eco sem alterar o rascunho ou confirmar envio', () => {
+    const pending = [p('primeiro', 'p1'), p('edição nova', 'p2')];
+    const queued = reconcilePending(pending, incoming('primeiro', 'queued-1'));
+    const real = reconcilePending(queued, incoming('primeiro', 'transcript:1'));
+    expect(real).toEqual([p('edição nova', 'p2')]);
+    expect(reconcilePending(real, incoming('primeiro', 'transcript:1'))).toEqual(real);
+  });
 });

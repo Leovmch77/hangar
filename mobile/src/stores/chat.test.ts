@@ -1,7 +1,15 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureApi, configureDiag } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
-import { chatStore, _resetChatsForTests, filaCount, setChatsForeground } from './chat';
+import { chatStore, _resetChatsForTests, filaCount, setChatsForeground, submitConversationDraft, isSubmitting } from './chat';
+import * as m from '../paraglide/messages';
+import { readDraft, writeDraft } from './drafts';
+const disk = vi.hoisted(() => ({ values: new Map<string, string>(), fail: false }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({
+  getString: (key: string) => disk.values.get(key),
+  set: (key: string, value: string) => { if (disk.fail) throw new Error('disk'); disk.values.set(key, value); },
+  remove: (key: string) => { disk.values.delete(key); },
+}) }));
 const servidores = vi.hoisted(() => ({
   lista: [] as { id: string; label: string; baseUrl: string; token: string }[],
 }));
@@ -72,6 +80,8 @@ function ev(partial: Partial<ChatEvent> & { id: string }): ChatEvent {
 }
 
 beforeEach(() => {
+  disk.values.clear();
+  disk.fail = false;
   servidores.lista = [
     { id: 'srv1', label: 'um', baseUrl: 'http://10.0.0.1:8765', token: 'tok' },
     { id: 'srv2', label: 'dois', baseUrl: 'http://10.0.0.2:8765', token: 'tok2' },
@@ -554,7 +564,8 @@ describe('send vai ao servidor da conversa', () => {
     expect(err).not.toBeInstanceOf(TypeError);
     expect((err as Error).message).not.toBe('Network request failed');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(chat.use.getState().pending).toHaveLength(0);
+    expect(chat.use.getState().pending).toHaveLength(1);
+    expect(readDraft('srv3', 'sess')?.submission?.status).toBe('unknown');
   });
 
   test('recusa HTTP continua como erro com status', async () => {
@@ -589,24 +600,122 @@ function fetchManual(): Pedido[] {
   return pedidos;
 }
 
-test('rejeição antiga não apaga o envio novo após reabrir a conversa', async () => {
+test('ACK antigo preserva edição nova, snapshot e eco sobrevivem ao release', async () => {
   const pedidos = fetchManual();
   const chat = chatStore('srv1', 'sess');
   chat.retain();
   pedidos[0].responder([]);
   await tick();
   const first = chat.send('antiga');
+  expect(JSON.parse(disk.values.get('draft.v1:srv1::sess')!).submission).toMatchObject({ text: 'antiga', status: 'sending' });
   chat.release();
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['antiga']);
   chat.retain();
   pedidos[2].responder([]);
   await tick();
-  const second = chat.send('nova');
-  const rejected = expect(first).rejects.toThrow();
-  pedidos[1].responder(null, { status: 503 });
+  const current = readDraft('srv1', 'sess')!;
+  writeDraft('srv1', 'sess', { ...current, text: 'nova', revision: current.revision + 1 });
+  pedidos[1].responder(null);
+  await first;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'nova', submission: null });
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['antiga']);
+  chat.release();
+});
+
+test('disco indisponível impede POST e mantém texto; recusa conserva snapshot sem pisar na edição', async () => {
+  const chat = chatStore('srv1', 'sess');
+  writeDraft('srv1', 'sess', { version: 1, text: 'antiga', revision: 4, transcript: '/t', attachment: null, submission: null });
+  const requests = fetchManual();
+  disk.fail = true;
+  await expect(chat.send('antiga')).rejects.toThrow();
+  expect(requests).toHaveLength(0);
+  expect(chat.use.getState().pending).toHaveLength(0);
+  disk.fail = false;
+  const sending = chat.send('antiga');
+  const current = readDraft('srv1', 'sess')!;
+  writeDraft('srv1', 'sess', { ...current, text: 'nova', revision: 5 });
+  const rejected = expect(sending).rejects.toMatchObject({ status: 404 });
+  requests[0].responder(null, { status: 404 });
   await rejected;
-  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['nova']);
-  pedidos[3].responder(null);
-  await second;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'nova', revision: 5,
+    submission: { text: 'antiga', draftRevision: 4, status: 'rejected' } });
+  expect(chat.use.getState().pending).toHaveLength(0);
+});
+
+test('reabertura só lê; reenvio explícito faz um POST e recusa toque concorrente', async () => {
+  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: '/t', attachment: null,
+    submission: { text: 'oi', draftRevision: 1, status: 'sending' } });
+  historyResponses = [[ev({ id: 'old:1', text: 'oi' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain(); await tick();
+  expect(historyCalls).toBe(1);
+  expect(readDraft('srv1', 'sess')?.submission?.status).toBe('unknown');
+  chat.use.setState({ pending: [{ id: 'pending-old', text: 'oi' }] });
+  const requests = fetchManual();
+  const sending = chat.send('oi');
+  expect(requests).toHaveLength(1);
+  expect(isSubmitting('srv1', 'sess')).toBe(true);
+  await expect(chat.send('oi')).rejects.toThrow();
+  expect(requests).toHaveLength(1);
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['oi']);
+  requests[0].responder(null);
+  await sending;
+  expect(isSubmitting('srv1', 'sess')).toBe(false);
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: '', submission: null });
+  chat.release();
+});
+
+test('snapshot incerto com outra edição exige recuperação sem fazer POST', async () => {
+  writeDraft('srv1', 'sess', { version: 1, text: 'outro', revision: 2, transcript: '/t', attachment: null,
+    submission: { text: 'oi', draftRevision: 1, status: 'unknown' } });
+  const requests = fetchManual();
+  await expect(chatStore('srv1', 'sess').send('outro')).rejects.toThrow(m.composer_submission_recover_first());
+  expect(requests).toHaveLength(0);
+  expect(isSubmitting('srv1', 'sess')).toBe(false);
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'outro', submission: { text: 'oi', status: 'unknown' } });
+});
+
+test('falha parcial de broadcast conserva detalhe por destino e snapshot incerto', async () => {
+  await expect(submitConversationDraft('srv1', 'sess', 'oi', async () => {
+    throw new Error('chegou em a; não chegou em b');
+  })).rejects.toThrow('chegou em a; não chegou em b');
+  expect(readDraft('srv1', 'sess')?.submission?.status).toBe('unknown');
+  expect(isSubmitting('srv1', 'sess')).toBe(false);
+});
+
+test('ACK compara revisão mesmo quando a nova edição tem texto idêntico; associação inicial conserva identidade', async () => {
+  writeDraft('srv1', 'sess', { version: 1, text: 'oi', revision: 1, transcript: null, attachment: null, submission: null });
+  const requests = fetchManual();
+  const sending = chatStore('srv1', 'sess').send('oi');
+  const current = readDraft('srv1', 'sess')!;
+  writeDraft('srv1', 'sess', { ...current, transcript: '/first', revision: 2 });
+  requests[0].responder(null);
+  await sending;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'oi', revision: 2, transcript: '/first', submission: null });
+});
+
+test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {
+  writeDraft('srv1', 'sess', { version: 1, text: 'legenda', revision: 7, transcript: '/first',
+    attachment: { uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }, submission: null });
+  const requests = fetchManual();
+  const sending = chatStore('srv1', 'sess').send('legenda — 📎 imagem: /uploaded/image.jpg', 7);
+  requests[0].responder(null);
+  await sending;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: '', revision: 8, transcript: '/first', submission: null,
+    attachment: { uri: 'file:///own/image', name: 'image.jpg' } });
+});
+
+test('history recuperado reconcilia eco preservado sem duplicar user_msg', async () => {
+  const chat = chatStore('srv1', 'sess');
+  historyResponses = [[]];
+  chat.retain(); await tick();
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
+  await chat.send('oi');
+  chat.release();
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify([ev({ id: 'real:1', text: 'oi' })]), { status: 200 })));
+  chat.retain(); await tick();
+  expect(chat.use.getState().pending).toEqual([]);
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['real:1']);
   chat.release();
 });
 

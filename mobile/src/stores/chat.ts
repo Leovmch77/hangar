@@ -18,6 +18,7 @@ import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEven
 import * as m from '../paraglide/messages';
 import { reconcilePending, type PendingMsg } from '../chat/pending';
 import { useServers } from './servers';
+import { readDraft, writeDraft, type ConversationDraft } from './drafts';
 
 // Store vivo do chat de UMA sessão — porte do núcleo de frontend/src/screens/Chat.svelte
 // para zustand. Histórico janelado (cauda primeiro), merge SSE com dedup por id, preview ao
@@ -36,6 +37,7 @@ const SSE_RETRY_MIN_MS = 3_000;
 const SSE_RETRY_MAX_MS = 30_000;
 
 export interface ChatState {
+  draftUpdate: number;
   events: ChatEvent[];
   stateEvent: StateEvent | null;
   // Prévia do bloco em voo (texto cru/markdown). Full-replace; some quando o assistant_msg
@@ -73,7 +75,7 @@ export interface ChatApi {
   retain: () => void;
   release: () => void;
   loadOlder: () => void;
-  send: (text: string) => Promise<void>;
+  send: (text: string, draftRevision?: number) => Promise<void>;
   // Recarrega o histórico depois de falha da primeira carga (o SSE segue vivo por conta
   // própria — onerror reconecta —, então retry é só a parte REST).
   retry: () => void;
@@ -86,9 +88,12 @@ export interface ChatApi {
 
 // Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
 let foregroundAtual = true;
+const submitting = new Set<string>();
+export const isSubmitting = (serverId: string, name: string) => submitting.has(`${serverId}::${name}`);
 
 function criarChatStore(serverId: string, name: string): ChatApi {
   const useChatStore = create<ChatState>(() => ({
+    draftUpdate: 0,
     events: [],
     stateEvent: null,
     preview: '',
@@ -137,7 +142,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
   function aplicarEvents(events: ChatEvent[]) {
     rebuildIndex(events);
-    useChatStore.setState({ events });
+    const pending = events.reduce(reconcilePending, useChatStore.getState().pending);
+    useChatStore.setState({ events, pending });
   }
 
   // Destino desta conversa, nunca o servidor ativo: sem ele nenhuma leitura cai em outra máquina.
@@ -499,29 +505,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es?.close();
       es = null;
       clearTimeout(retryTimer);
-      idIndex.clear();
-      prevState = null;
-      lastEventId = null;
-      etag = null;
-      baseLoaded = false;
-      useChatStore.setState({
-        events: [],
-        stateEvent: null,
-        preview: '',
-        previewMd: false,
-        previewFull: false,
-        askPayload: null,
-        askOpen: false,
-        askPiId: null,
-        askPiDismissed: null,
-        statusLine: null,
-        stats: null,
-        loading: true,
-        error: '',
-        olderFailed: '',
-        sseRecusado: false,
-        pending: [],
-      });
+      // Soltar a tela fecha leituras; POST, ecos e identidade continuam na origem.
     },
     loadOlder,
     retry: () => {
@@ -564,25 +548,70 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const { askPiId } = useChatStore.getState();
       useChatStore.setState({ askOpen: false, askPayload: null, ...(askPiId ? { askPiDismissed: askPiId, askPiId: null } : {}) });
     },
-    async send(text: string) {
+    async send(text: string, draftRevision?: number) {
       const trimmed = text.trim();
       if (!trimmed) return;
       // Destino desta conversa, nunca o servidor ativo: trocar de servidor no meio não desvia o envio.
       const target = useServers.getState().servers.find((s) => s.id === serverId);
       if (!target) throw new Error(m.chat_servidor_removido());
-      const id = `pending-${pendingSeq++}`;
-      useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed }] }));
-      try {
-        await sendInputForServer(target, name, trimmed);
-      } catch (err) {
-        useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));
-        // Rede caiu com o POST em voo: pode ter chegado. Quem chama devolve o texto ao campo e a
-        // pessoa decide reenviar; nunca reenviamos sozinhos.
-        if (err instanceof TypeError) throw new Error(m.chat_envio_incerto(), { cause: err });
-        throw err;
-      }
+      const wasUnknown = readDraft(serverId, name)?.submission?.status === 'unknown';
+      return submitConversationDraft(serverId, name, trimmed, async () => {
+        if (wasUnknown) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.text !== trimmed) }));
+        const id = `pending-${pendingSeq++}`;
+        useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed }] }));
+        try {
+          await sendInputForServer(target, name, trimmed);
+        } catch (err) {
+          if (isInputRejected(err)) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));
+          throw err;
+        }
+      }, draftRevision);
     },
   };
+}
+
+function isInputRejected(error: unknown): boolean {
+  const status = (error as { status?: number } | null)?.status;
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 408;
+}
+
+// O snapshot precede qualquer POST; só o ACK desta revisão pode limpar o campo.
+export async function submitConversationDraft(serverId: string, name: string, text: string, deliver: () => Promise<void>, draftRevision?: number): Promise<void> {
+  const key = `${serverId}::${name}`;
+  if (submitting.has(key)) throw new Error(m.chat_envio_incerto());
+  submitting.add(key);
+  const notify = () => chatStore(serverId, name).use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+  try {
+    const current: ConversationDraft = readDraft(serverId, name) ?? {
+      version: 1, text, revision: 1, transcript: null, attachment: null, submission: null,
+    };
+    if (current.submission && current.submission.text.trim() !== text.trim()) throw new Error(m.composer_submission_recover_first());
+    const submission = { text, draftRevision: draftRevision ?? current.revision, status: 'sending' as const };
+    // Primeiro input pode já ter outra edição no campo: aquela revisão não é a enviada.
+    writeDraft(serverId, name, { ...current, submission,
+      revision: draftRevision !== undefined || current.text.trim() === text.trim() ? current.revision : current.revision + 1 });
+    notify();
+    const settle = (status: 'unknown' | 'rejected' | null) => {
+      const latest = readDraft(serverId, name);
+      if (!latest || (current.transcript !== null && latest.transcript !== current.transcript)
+        || latest.submission?.draftRevision !== submission.draftRevision || latest.submission.text !== text) return;
+      writeDraft(serverId, name, { ...latest,
+        text: status === null && latest.revision === submission.draftRevision ? '' : latest.text,
+        revision: status === null && latest.revision === submission.draftRevision ? latest.revision + 1 : latest.revision,
+        submission: status === null ? null : { ...submission, status },
+      });
+    };
+    try { await deliver(); } catch (error) {
+      const rejected = isInputRejected(error);
+      settle(rejected ? 'rejected' : 'unknown');
+      if (!rejected && error instanceof TypeError) throw new Error(m.chat_envio_incerto(), { cause: error });
+      throw error;
+    }
+    settle(null);
+  } finally {
+    submitting.delete(key);
+    notify();
+  }
 }
 
 // Um store por sessão, registry global — remonta só quando todos os consumers soltam.

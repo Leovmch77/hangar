@@ -3,7 +3,7 @@ import type { SessionInfo } from '@hangar/core';
 
 const { memory, calls, failWrites } = vi.hoisted(() => ({
   memory: new Map<string, string>(),
-  failWrites: { on: false },
+  failWrites: { on: false, drafts: false },
   calls: {
     create: vi.fn(),
     sessions: vi.fn(),
@@ -17,7 +17,7 @@ vi.mock('react-native-mmkv', () => ({
   createMMKV: () => ({
     getString: (key: string) => memory.get(key),
     set: (key: string, value: string) => {
-      if (failWrites.on) throw new Error('disk full');
+      if (failWrites.on || (failWrites.drafts && key.startsWith('draft.v1:'))) throw new Error('disk full');
       memory.set(key, value);
     },
     remove: (key: string) => { memory.delete(key); },
@@ -38,6 +38,7 @@ vi.mock('@hangar/core', async (original) => ({
 }));
 
 import { useServers } from './servers';
+import { readDraft, writeDraft } from './drafts';
 import {
   _resetNewConversationForTests, adoptCandidate, beginAttempt, discardAttempt, recoverAttempt,
   restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput,
@@ -67,11 +68,30 @@ describe('newConversation', () => {
   beforeEach(() => {
     memory.clear();
     failWrites.on = false;
+    failWrites.drafts = false;
     vi.clearAllMocks();
     _resetNewConversationForTests();
     useServers.setState({ servers: [serverA, serverB], activeId: 'server-b' });
     calls.sessions.mockResolvedValue([]);
     calls.progress.mockResolvedValue({ step: null, params: {} });
+  });
+
+  it('criação publica sessão somente depois de gravar texto na chave real; recuperação termina handoff interrompido', async () => {
+    calls.create.mockImplementation(async (_server, body) => {
+      failWrites.drafts = true;
+      return { name: body.name, state: 'idle', jsonl: '/transcript/first' };
+    });
+    await beginAttempt('server-a', input);
+    expect(issue()?.kind).toBe('local');
+    expect(attempt()?.sessionName).toBeNull();
+    expect(stored().phase).toBe('created');
+    const name = stored().sessionName;
+    failWrites.drafts = false;
+    _resetNewConversationForTests();
+    expect(restoreAttempt('server-a')?.phase).toBe('created');
+    expect(readDraft('server-a', name)).toMatchObject({ text: 'oi', submission: null });
+    await beginAttempt('server-a', input);
+    expect(calls.create).toHaveBeenCalledOnce();
   });
 
   it('persiste body, destino, nome e texto antes do POST e nunca grava token', async () => {
@@ -297,7 +317,7 @@ describe('newConversation', () => {
 // Sem ACK não há limpeza; falha de input nunca inicia outra criação.
 describe('primeiro input', () => {
   beforeEach(() => {
-    memory.clear(); failWrites.on = false; vi.clearAllMocks();
+    memory.clear(); failWrites.on = false; failWrites.drafts = false; vi.clearAllMocks();
     _resetNewConversationForTests();
     useServers.setState({ servers: [serverA, serverB], activeId: 'server-a' });
     calls.sessions.mockResolvedValue([]);
@@ -310,6 +330,8 @@ describe('primeiro input', () => {
     const ack = deferred<void>();
     calls.send.mockImplementation(() => {
       expect(stored()).toMatchObject({ phase: 'sending', sessionName: attempt()!.sessionName, text: 'oi' });
+      expect(JSON.parse(memory.get(`draft.v1:server-a::${attempt()!.sessionName}`)!)).submission)
+        .toMatchObject({ text: 'oi', status: 'sending' });
       return ack.promise;
     });
     await beginAttempt('server-a', input);
@@ -333,6 +355,7 @@ describe('primeiro input', () => {
     confirmFirstInput(created.id);
     expect(readFirstInput('server-a', created.sessionName!)).toBeNull();
     expect(memory.has('create.attempt.v1:server-a')).toBe(false);
+    expect(readDraft('server-a', created.sessionName!)?.text).toBe('');
   });
 
   it('input recusado mantém sessão/texto e nova ação envia nela sem outro create', async () => {
@@ -342,6 +365,7 @@ describe('primeiro input', () => {
     await sendFirstInput('server-a', created.id);
     expect(attempt()).toMatchObject({ id: created.id, phase: 'created', text: 'oi', sessionName: created.sessionName });
     expect(issue()?.kind).toBe('rejected');
+    expect(readDraft('server-a', created.sessionName!)).toMatchObject({ text: 'oi', submission: { text: 'oi', status: 'rejected' } });
     confirmFirstInput(created.id);
     expect(attempt()?.id).toBe(created.id);
     await beginAttempt('server-a', { ...input, text: 'nova edição' });
@@ -359,6 +383,7 @@ describe('primeiro input', () => {
       calls.send.mockRejectedValueOnce(cause);
       await sendFirstInput('server-a', created.id);
       expect(stored()).toMatchObject({ phase: 'send_unknown', text: 'oi' });
+      expect(readDraft('server-a', created.sessionName!)?.submission?.status).toBe('unknown');
       _resetNewConversationForTests();
       expect(readFirstInput('server-a', created.sessionName!)?.phase).toBe('send_unknown');
       expect(issue()?.kind).toBe('unknown');
@@ -414,6 +439,26 @@ describe('primeiro input', () => {
     expect(calls.send).toHaveBeenCalledOnce();
   });
 
+  it('falha só no draft antes do input mostra erro local sem declarar envio incerto', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    failWrites.drafts = true;
+    await sendFirstInput('server-a', created.id);
+    expect(calls.send).not.toHaveBeenCalled();
+    expect(attempt()?.phase).toBe('created');
+    expect(issue()?.kind).toBe('local');
+  });
+
+  it('ACK recebido seguido de falha no draft registra sent com aviso local', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    calls.send.mockImplementation(async () => { failWrites.drafts = true; });
+    await sendFirstInput('server-a', created.id);
+    expect(calls.send).toHaveBeenCalledOnce();
+    expect(attempt()?.phase).toBe('sent');
+    expect(issue()?.kind).toBe('local');
+  });
+
   it('ACK tardio não apaga texto de tentativa nova nem altera seu destino', async () => {
     await beginAttempt('server-a', input);
     const created = attempt()!;
@@ -426,5 +471,22 @@ describe('primeiro input', () => {
     expect(attempt()).toMatchObject({ id: next.id, phase: 'created', text: 'nova edição' });
     expect(calls.send).toHaveBeenCalledOnce();
     expect(readFirstInput('server-a', created.sessionName!)).toBeNull();
+  });
+
+  it('ACK do primeiro input conserva edição posterior na sessão real após confirmar a transferência', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    expect(readDraft('server-a', created.sessionName!)?.text).toBe('oi');
+    const ack = deferred<void>();
+    calls.send.mockReturnValue(ack.promise);
+    const sending = sendFirstInput('server-a', created.id);
+    const current = readDraft('server-a', created.sessionName!)!;
+    writeDraft('server-a', created.sessionName!, { ...current, text: 'edição posterior', revision: current.revision + 1 });
+    ack.resolve(); await sending;
+    confirmFirstInput(created.id);
+    _resetNewConversationForTests();
+    expect(readDraft('server-a', created.sessionName!)).toMatchObject({ text: 'edição posterior', submission: null });
+    expect(readFirstInput('server-a', created.sessionName!)).toBeNull();
+    expect(calls.send).toHaveBeenCalledOnce();
   });
 });

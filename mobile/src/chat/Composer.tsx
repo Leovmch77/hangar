@@ -10,10 +10,10 @@ import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
 import * as m from '../paraglide/messages';
-import { chatStore, filaCount as filaCountOf } from '../stores/chat';
+import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
 import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
-import { clearDraft, clearRecoverableDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft, type ConversationDraft } from '../stores/drafts';
+import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft, type ConversationDraft } from '../stores/drafts';
 import { useRouter } from 'expo-router';
 import { ModelPill } from '../features/pills/ModelPill';
 import { EffortPill } from '../features/pills/EffortPill';
@@ -84,6 +84,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const chat = chatStore(serverId, name);
   const pending = chat.use((s) => s.pending);
   const events = chat.use((s) => s.events);
+  const draftUpdate = chat.use((s) => s.draftUpdate);
   const state = chat.use((s) => s.stateEvent?.state ?? 'idle');
   const detectedProvider = useSessions((s) => {
     const byServer = s.byServerRecord?.[serverId];
@@ -118,9 +119,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [readBlocked, setReadBlocked] = useState(boot.blocked);
   const [draftIssue, setDraftIssue] = useState(boot.issue);
   const [recoverable, setRecoverable] = useState(boot.recoverable);
+  const [submission, setSubmission] = useState(boot.draft?.submission ?? null);
   // Rascunho guardado é mais novo que o texto de handoff/cancelamento que a rota ainda carrega.
   const adoptedDraftRef = useRef(draft);
-  const [text, setText] = useState(() => boot.draft?.text || draft || '');
+  const [text, setText] = useState(() => boot.draft?.text ?? (firstInputSent ? '' : draft ?? ''));
   const textRef = useRef(text);
   useEffect(() => {
     textRef.current = text;
@@ -128,7 +130,12 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
   const persistText = useCallback((next: string): boolean => {
     if (blockedRef.current) return false;
-    const current = draftRef.current;
+    let current: ConversationDraft | null;
+    try { current = readDraft(origin.serverId, origin.name) ?? draftRef.current; } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
+      return false;
+    }
+    if (current?.transcript && transcriptRef.current && current.transcript !== transcriptRef.current) current = draftRef.current;
     const value: ConversationDraft = current
       ? { ...current, text: next, revision: current.revision + 1, transcript: current.transcript ?? transcriptRef.current }
       : { version: 1, text: next, revision: 1, transcript: transcriptRef.current, attachment: null, submission: null };
@@ -140,6 +147,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       return false;
     }
     draftRef.current = value;
+    setSubmission(value.submission);
     setDraftIssue('');
     return true;
   }, [origin]);
@@ -147,6 +155,43 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   useEffect(() => {
     if ((draftRef.current?.text ?? '') !== text) persistText(text);
   }, [text, persistText]);
+
+  useEffect(() => {
+    if (blockedRef.current) return;
+    try {
+      const latest = readDraft(origin.serverId, origin.name);
+      if (!latest || (latest.transcript && transcriptRef.current && latest.transcript !== transcriptRef.current)) return;
+      const unchanged = textRef.current === (draftRef.current?.text ?? '');
+      draftRef.current = latest;
+      setSubmission(latest.submission);
+      if (unchanged) {
+        textRef.current = latest.text;
+        setText(latest.text);
+      }
+    } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
+    }
+  }, [draftUpdate, origin]);
+
+  const handleRecoverSubmission = useCallback(() => {
+    if (isSubmitting(origin.serverId, origin.name) || !submission
+      || (submission.status !== 'rejected' && submission.status !== 'unknown')) return;
+    const next = textRef.current.trim() === submission.text.trim()
+      ? textRef.current : joinDrafts(textRef.current, submission.text);
+    try {
+      const latest = readDraft(origin.serverId, origin.name);
+      if (!latest?.submission || (latest.submission.status !== 'rejected' && latest.submission.status !== 'unknown')) return;
+      const value = { ...latest, text: next, revision: latest.revision + 1, submission: null };
+      writeDraft(origin.serverId, origin.name, value);
+      draftRef.current = value;
+      textRef.current = next;
+      setText(next);
+      setSubmission(null);
+      setDraftIssue('');
+    } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
+    }
+  }, [submission, origin]);
 
   // null → caminho é a primeira confirmação (Codex iniciando); caminho → outro é sessão recriada.
   useEffect(() => {
@@ -160,6 +205,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         const latest = draftRef.current?.text === textRef.current ? old : { ...old, text: textRef.current };
         const kept = keepRecoverable(origin.serverId, origin.name, latest);
         draftRef.current = null;
+        setSubmission(null);
         setRecoverable(kept);
         setText('');
       } else {
@@ -208,6 +254,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     blockedRef.current = false;
     setReadBlocked(false);
     draftRef.current = load.draft;
+    setSubmission(load.draft?.submission ?? null);
     setRecoverable(load.recoverable);
     // O que a pessoa digitou enquanto a leitura falhava fica depois do guardado.
     const next = joinDrafts(load.draft?.text ?? '', typed);
@@ -257,12 +304,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   // Atalho `/`: enquanto a linha é só o nome do comando, a lista fica aberta e filtrada.
   const handleChangeText = useCallback(
     (v: string) => {
+      textRef.current = v;
+      persistText(v);
       setText(v);
       setCmdFiltro(comandoParcial(v));
       if (undo) limparUndo();
       if (autoN !== null) cancelarAuto();
     },
-    [undo, autoN, limparUndo, cancelarAuto],
+    [undo, autoN, limparUndo, cancelarAuto, persistText],
   );
 
   // draft devolvido pelo cancelar do picker (Task 3): adota quando muda
@@ -275,22 +324,18 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
-  useEffect(() => {
-    if (firstInputSent && draft !== undefined) setText((current) => current === draft ? '' : current);
-  }, [firstInputSent, draft]);
-
-  const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading;
+  const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== text.trim());
+  const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading && !readBlocked && !submissionBlocksSend;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
-  const sendText = useCallback(async (value: string): Promise<void> => {
-    if (!firstInputId) return chat.send(value);
+  const sendText = useCallback(async (value: string, revision?: number): Promise<void> => {
+    if (!firstInputId) return chat.send(value, revision);
     const snapshot = readFirstInput(serverId, name);
     if (snapshot?.id !== firstInputId) {
-      if (value.trim() === draft?.trim()) return;
-      return chat.send(value);
+      return chat.send(value, revision);
     }
     if (value.trim() !== snapshot.text.trim()) {
-      return chat.send(value);
+      return chat.send(value, revision);
     }
     if (snapshot.phase === 'created') await sendFirstInput(serverId, snapshot.id);
     const current = readFirstInput(serverId, name);
@@ -308,7 +353,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     const trimmed = text.trim();
     const hasAttach = pendingAttach !== null;
     if (!trimmed && !hasAttach) return;
+    if (submissionBlocksSend) return;
     if (sendingRef.current || sending || uploading) return;
+    if (blockedRef.current || !persistText(textRef.current)) return;
+    const sentRevision = draftRef.current!.revision;
     sendingRef.current = true;
     limparUndo();
     cancelarAuto();
@@ -344,8 +392,6 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       sendingRef.current = false;
       return;
     }
-    setText('');
-    if (toClearAttach) setPendingAttach(null);
     let groupPendingId: string | null = null;
     try {
       const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
@@ -353,36 +399,41 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
       if (sendToPairNow && pairPeers?.length) {
         const recipients = [name, ...pairPeers];
-        groupPendingId = `pending-group-${Date.now()}`;
-        chat.use.setState((current) => ({ pending: [...current.pending, { id: groupPendingId!, text: finalText }] }));
-        const results = await broadcast(recipients, finalText);
-        const failedRecipients = recipients.filter((recipient) => !results[recipient]?.ok);
-        if (failedRecipients.length) {
-          const delivered = recipients.filter((recipient) => results[recipient]?.ok);
-          const detail = failedRecipients.map((recipient) => formataErro(results[recipient]?.error)).find(Boolean);
-          throw new Error(
-            `${delivered.length ? m.chat_chegou_mas({ n: delivered.join(', ') }) : ''}${m.chat_nao_chegou_em()}${failedRecipients.join(', ')} (${detail ?? m.board_falha_envio()})`,
-          );
-        }
+        await submitConversationDraft(serverId, name, finalText, async () => {
+          groupPendingId = `pending-group-${Date.now()}`;
+          chat.use.setState((current) => ({ pending: [...current.pending, { id: groupPendingId!, text: finalText }] }));
+          const results = await broadcast(recipients, finalText);
+          const failedRecipients = recipients.filter((recipient) => !results[recipient]?.ok);
+          if (failedRecipients.length) {
+            const delivered = recipients.filter((recipient) => results[recipient]?.ok);
+            const detail = failedRecipients.map((recipient) => formataErro(results[recipient]?.error)).find(Boolean);
+            throw new Error(
+              `${delivered.length ? m.chat_chegou_mas({ n: delivered.join(', ') }) : ''}${m.chat_nao_chegou_em()}${failedRecipients.join(', ')} (${detail ?? m.board_falha_envio()})`,
+            );
+          }
+        }, sentRevision);
       } else {
-        await sendText(finalText);
+        await sendText(finalText, sentRevision);
       }
+      if (toClearAttach) setPendingAttach(null);
     } catch (e) {
       if (groupPendingId) {
         chat.use.setState((current) => ({ pending: current.pending.filter((item) => item.id !== groupPendingId) }));
       }
       const msg = e instanceof Error ? e.message : m.composer_falha_envio();
       setError(msg);
-      setText((prev) => (prev.trim() ? prev : finalText));
       if (toClearAttach) {
-        // mantém o anexo pra tentar de novo? recoloca se falhou o envio mas upload já foi
-        // upload já ocorreu, path está em finalText; recolocar pending seria duplicar
+        try {
+          if (readDraft(serverId, name)?.submission?.text === finalText) setPendingAttach(null);
+        } catch (cause) {
+          setDraftIssue(cause instanceof Error ? cause.message : m.draft_read_error());
+        }
       }
     } finally {
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, submissionBlocksSend]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -397,14 +448,12 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           cancelarAuto();
           const toSend = autoTextoRef.current.trim();
           if (!toSend) return;
-          setText('');
           limparUndo();
           void sendText(toSend)
             .then(() => setError(''))
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
               setError(msg);
-              setText((prev) => (prev.trim() ? prev : toSend));
             });
           return;
         }
@@ -819,6 +868,25 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             {readBlocked ? (
               <Pressable onPress={handleRereadDraft} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_draft_read_again()}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+
+        {submission ? (
+          <View style={styles.undoRow}>
+            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]}>
+              {submission.status === 'rejected' ? m.composer_submission_rejected()
+                : submission.status === 'sending' || sending ? m.composer_submission_sending() : m.chat_envio_incerto()}
+            </Text>
+            {submission.status === 'rejected' || (submission.status === 'unknown' && !sending) ? (
+              <Pressable onPress={handleRecoverSubmission} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+                <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>
+              </Pressable>
+            ) : null}
+            {submission.status === 'unknown' ? (
+              <Pressable onPress={chat.retry} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+                <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_submission_check()}</Text>
               </Pressable>
             ) : null}
           </View>
