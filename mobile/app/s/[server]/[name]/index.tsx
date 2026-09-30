@@ -20,7 +20,7 @@ import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, parseStatusLine, selectOption, interrupt, recarregarSessao } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, parseStatusLine, selectOptionForServer, interrupt, recarregarSessao } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -169,8 +169,37 @@ export default function ChatScreen() {
 
   // quem responde: OptionButtons quando awaiting_input com question/options e sem stepper aberto
   const showOptions = !!(!askOpen && stateEvent?.state === 'awaiting_input' && stateEvent.question && stateEvent.options?.length);
+  // Cada ação copia o servidor da rota no toque: removido vira aviso, nunca cai no ativo.
+  const destino = () => useServers.getState().servers.find((s) => s.id === serverId);
   const handleSelectOption = (n: number) => {
-    void selectOption(name, n).catch((e) => mostrarAviso(e));
+    const target = destino();
+    if (!target) return mostrarAviso(m.chat_servidor_removido());
+    void selectOptionForServer(target, name, n).catch((e) => mostrarAviso(e));
+  };
+  // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
+  const rota = `${serverId}::${name}`;
+  const rotaAtual = useRef(rota);
+  rotaAtual.current = rota;
+  // Um objeto por toque: a resposta de um Parar antigo só libera a trava que ela mesma criou.
+  const stopEmVoo = useRef<{ rota: string } | null>(null);
+  const [stopVivo, setStopVivo] = useState<{ rota: string } | null>(null);
+  const stopping = stopVivo?.rota === rota;
+  const handleStop = () => {
+    if (stopEmVoo.current?.rota === rota) return;
+    const target = destino();
+    if (!target) return mostrarAviso(m.chat_servidor_removido());
+    const tok = { rota };
+    stopEmVoo.current = tok;
+    setStopVivo(tok);
+    void interrupt(name, false, target)
+      .catch((e) => {
+        if (rotaAtual.current === rota) mostrarAviso(e);
+      })
+      .finally(() => {
+        if (stopEmVoo.current !== tok) return;
+        stopEmVoo.current = null;
+        setStopVivo(null);
+      });
   };
   // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra reler MCP/hooks/
   // settings. O motivo vem do backend no `state`; sem motivo a ação fica só no "⋯".
@@ -183,14 +212,16 @@ export default function ChatScreen() {
     void recarregarSessao(name).catch((e) => mostrarAviso(e)).finally(() => setRecarregando(false));
   };
   const handleCancelOptions = () => {
+    const target = destino();
+    if (!target) return mostrarAviso(m.chat_servidor_removido());
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
     if (last) {
       setDraft(last.text);
       chat.use.setState({ pending: cur.filter((p) => p.id !== last.id) });
-      void interrupt(name, true).catch((e) => mostrarAviso(e));
+      void interrupt(name, true, target).catch((e) => mostrarAviso(e));
     } else {
-      void interrupt(name, false).catch((e) => mostrarAviso(e));
+      void interrupt(name, false, target).catch((e) => mostrarAviso(e));
     }
   };
   const optionsSlot = showOptions ? (
@@ -324,7 +355,8 @@ export default function ChatScreen() {
         {!servidorSumiu && !codexPreThread && fetchedSession !== null
           ? orq
             ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
-            : <Composer serverId={serverId} name={name} draft={draft} sessionProvider={provider} />
+            : <Composer key={rota} serverId={serverId} name={name} draft={draft} sessionProvider={provider}
+                        onStop={handleStop} stopping={stopping} />
           : null}
       </KeyboardAvoidingView>
     </Screen>

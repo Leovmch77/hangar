@@ -2,9 +2,10 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureApi, configureDiag } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
 import { chatStore, _resetChatsForTests, filaCount } from './chat';
-vi.mock('./servers', () => ({ useServers: { getState: () => ({
-  servers: [{ id: 'srv1', baseUrl: 'http://10.0.0.1:8765' }],
-}) } }));
+const servidores = vi.hoisted(() => ({
+  lista: [] as { id: string; label: string; baseUrl: string; token: string }[],
+}));
+vi.mock('./servers', () => ({ useServers: { getState: () => ({ servers: servidores.lista }) } }));
 
 // EventSource falso injetado via configureApi (mesmo padrão de sessions.test.ts)
 type FakeES = {
@@ -67,6 +68,10 @@ function ev(partial: Partial<ChatEvent> & { id: string }): ChatEvent {
 }
 
 beforeEach(() => {
+  servidores.lista = [
+    { id: 'srv1', label: 'um', baseUrl: 'http://10.0.0.1:8765', token: 'tok' },
+    { id: 'srv2', label: 'dois', baseUrl: 'http://10.0.0.2:8765', token: 'tok2' },
+  ];
   created = [];
   historyCalls = 0;
   historyResponses = [];
@@ -462,3 +467,43 @@ test('closeAsk marca askPiDismissed', async () => {
 async function tick(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
+
+describe('send vai ao servidor da conversa', () => {
+  test('sessão de mesmo nome em outra máquina: POST sai para o servidor do store, não para o ativo', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await chatStore('srv2', 'sess').send('oi');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://10.0.0.2:8765/api/sessions/sess/input');
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer tok2');
+  });
+
+  test('servidor removido: erro visível e nenhum POST cai no ativo', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const chat = chatStore('sumiu', 'sess');
+    await expect(chat.send('oi')).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(chat.use.getState().pending).toHaveLength(0);
+  });
+
+  test('rede cai com o POST em voo: erro de envio incerto e nenhuma segunda tentativa', async () => {
+    servidores.lista.push({ id: 'srv3', label: 'tres', baseUrl: 'http://10.0.0.3:8765', token: 'tok3' });
+    const fetchMock = vi.fn(async () => { throw new TypeError('Network request failed'); });
+    vi.stubGlobal('fetch', fetchMock);
+    const chat = chatStore('srv3', 'sess');
+    const err = await chat.send('oi').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(TypeError);
+    expect((err as Error).message).not.toBe('Network request failed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(chat.use.getState().pending).toHaveLength(0);
+  });
+
+  test('recusa HTTP continua como erro com status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"x"}', { status: 404 })));
+    const err = await chatStore('srv1', 'sess').send('oi').catch((e: unknown) => e);
+    expect((err as { status?: number }).status).toBe(404);
+  });
+});

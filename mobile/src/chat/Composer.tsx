@@ -7,6 +7,7 @@ import { Image } from 'expo-image';
 import { broadcast, formataErro, uploadFile, transcribeFile, steerSession, podeEnviarSozinho } from '@hangar/core';
 import type { MotivoFim } from '@hangar/core';
 import { Glass } from '../ui/Glass';
+import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
 import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf } from '../stores/chat';
@@ -28,6 +29,8 @@ interface Props {
   name: string;
   draft?: string;
   sessionProvider?: string | null;
+  onStop?: () => void;
+  stopping?: boolean;
 }
 
 type PendingAttach = {
@@ -38,7 +41,7 @@ type PendingAttach = {
   size?: number;
 };
 
-export function Composer({ serverId, name, draft, sessionProvider }: Props) {
+export function Composer({ serverId, name, draft, sessionProvider, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const chat = chatStore(serverId, name);
@@ -576,6 +579,19 @@ export function Composer({ serverId, name, draft, sessionProvider }: Props) {
               <Text style={[styles.iconGlyph, { color: theme.tokens.text.secondary }]}>📎</Text>
             )}
           </Pressable>
+
+          {onStop && state === 'working' ? (
+            <Pressable
+              onPress={onStop}
+              disabled={stopping}
+              style={[styles.iconBtn, stopping && styles.iconBtnDisabled]}
+              accessibilityLabel={m.composer_parar()}
+              accessibilityRole="button"
+              accessibilityState={{ disabled: stopping, busy: stopping }}
+            >
+              <Icon name="Square" size={20} />
+            </Pressable>
+          ) : null}
 
           <Pressable
             onPress={handleSend}

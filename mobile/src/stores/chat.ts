@@ -9,7 +9,7 @@ import {
   isTimeoutError,
   especificidade,
   donoDaLinha,
-  sendInput,
+  sendInputForServer,
   queuedMessages,
   registrarDiag,
 } from '@hangar/core';
@@ -484,13 +484,18 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     async send(text: string) {
       const trimmed = text.trim();
       if (!trimmed) return;
+      // Destino desta conversa, nunca o servidor ativo: trocar de servidor no meio não desvia o envio.
+      const target = useServers.getState().servers.find((s) => s.id === serverId);
+      if (!target) throw new Error(m.chat_servidor_removido());
       const id = `pending-${pendingSeq++}`;
       useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed }] }));
       try {
-        await sendInput(name, trimmed);
+        await sendInputForServer(target, name, trimmed);
       } catch (err) {
-        // falhou -> remove o eco que acabamos de pôr (não ficou enfileirado)
         useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));
+        // Rede caiu com o POST em voo: pode ter chegado. Quem chama devolve o texto ao campo e a
+        // pessoa decide reenviar; nunca reenviamos sozinhos.
+        if (err instanceof TypeError) throw new Error(m.chat_envio_incerto(), { cause: err });
         throw err;
       }
     },
