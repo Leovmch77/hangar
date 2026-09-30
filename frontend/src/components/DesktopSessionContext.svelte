@@ -27,7 +27,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import type { Provider, State, SessionInfo, PlanDetail, ChatEvent, Activity, ShellVivo } from '@hangar/core';
   import type { StatusFields, ScopedShortcut, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import { customOf } from '../lib/shortcuts.svelte';
-  import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type SessionCostEstimate } from '@hangar/core';
+  import { comTeto, ctxWindow, defaultShortcuts, getSessionCostForServer, providerName, type LiveShortcutTerminal, type SessionCostEstimate } from '@hangar/core';
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { listServers } from '../lib/auth';
@@ -79,6 +79,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     shortcuts?: ScopedShortcut[];
     projectName?: string;
     projectError?: string;
+    // Estado dos blocos de atalho: identidade do projeto e terminais vivos (cópia No Hangar / da sessão).
+    projectKey?: string;
+    hangarOf?: (key: string) => LiveShortcutTerminal | null;
+    sessionTerminal?: (key: string) => LiveShortcutTerminal | null;
     onShortcut?: (s: ShortcutSendText | ShortcutShell) => void;
     onEditShortcuts?: () => void;
     onOpenActivity?: () => void;
@@ -142,7 +146,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     onOpenNavegador = undefined,
     onOpenRun = undefined, runRunning = false,
     onOpenAttachments = undefined,
-    shortcuts = undefined, projectName = '', projectError = '', onShortcut = undefined, onEditShortcuts = undefined,
+    shortcuts = undefined, projectName = '', projectError = '', projectKey = undefined,
+    hangarOf = undefined, sessionTerminal = undefined, onShortcut = undefined, onEditShortcuts = undefined,
     onOpenActivity = undefined,
     activity = null, processos = [], abrirAgente = null,
     onExpandUsage = undefined, limited = false, limitReset = null,
@@ -750,7 +755,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   <!-- AÇÕES: os atalhos customizados, seção própria em blocos que quebram linha (sem rolar). -->
   {#if (customShortcuts.length || projectError) && onShortcut}
   <section class="sec-break">
-    <ShortcutTiles shortcuts={customShortcuts} {projectName} {projectError} onShortcut={onShortcut} onAdd={onEditShortcuts}>
+    <ShortcutTiles shortcuts={customShortcuts} {projectName} {projectError} {projectKey} {sessionName}
+                   {hangarOf} {sessionTerminal} onShortcut={onShortcut} onAdd={onEditShortcuts}>
       {#snippet extra()}<ShortcutTransfer compact />{/snippet}
     </ShortcutTiles>
   </section>

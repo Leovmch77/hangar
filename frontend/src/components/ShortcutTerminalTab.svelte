@@ -9,8 +9,10 @@
   import type { Terminal } from '@xterm/xterm';
   import * as m from '../paraglide/messages';
 
-  interface Props { srv: Server; sessionName: string; id: string; visible: boolean }
-  let { srv, sessionName, id, visible }: Props = $props();
+  // `hangar`: terminal No Hangar (sem sessão dona). O backend guarda UM cliente por alvo, então
+  // ele só conecta enquanto a aba está visível — senão painel, celular e nativo se derrubariam.
+  interface Props { srv: Server; sessionName: string; id: string; visible: boolean; hangar?: boolean }
+  let { srv, sessionName, id, visible, hangar = false }: Props = $props();
 
   let host = $state<HTMLDivElement | null>(null);
   let caiu = $state(false);
@@ -25,6 +27,7 @@
     const alvo = sessionName, ident = id, server = srv;
     void geracao;
     if (!hostEl) return;
+    if (hangar && !visible) return;
     let vivo = true;
     let sock: TermSocket | null = null;
     let ro: ResizeObserver | null = null;
@@ -45,7 +48,7 @@
       mo = new MutationObserver(() => { t.options.theme = temaDe(hostEl); });
       mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
       const enc = new TextEncoder();
-      sock = new TermSocket(termUrlForServer(server, alvo, t.cols, t.rows, { shortcut: ident }), {
+      sock = new TermSocket(termUrlForServer(server, alvo, t.cols, t.rows, hangar ? { hangar: ident } : { shortcut: ident }), {
         data: (b) => t.write(b),
         close: (why) => { if (vivo) { caiu = true; motivo = why ?? null; } },
       });
