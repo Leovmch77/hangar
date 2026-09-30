@@ -333,6 +333,7 @@
   "sessao_excluir": "Close this session?",
   "lista_filtrar": "Filter sessions",
   "lista_filtro_placeholder": "Filter sessions…",
+  "lista_filtro_limpar": "Clear filter",
   "lista_msg_selecionadas": "Message to selected sessions",
   "lista_cancelar_selecao": "Cancel selection",
   "lista_comparar_selecionadas": "Compare selected sessions",

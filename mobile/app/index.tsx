@@ -14,7 +14,7 @@ export default function Index() {
   return (
     <Screen>
       <View style={styles.header}>
-        <Text style={styles.title}>{m.lista_titulo()}</Text>
+        <Text style={styles.title} numberOfLines={1} accessibilityRole="header">{m.lista_titulo()}</Text>
         <View style={styles.acoes}>
           <Pressable
             onPress={() => setServidoresAberto(true)}
@@ -62,7 +62,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.base.space[2],
     paddingBottom: theme.base.space[3],
   },
+  // Encolhe o título, não os botões: com texto ampliado ele empurrava Nova conversa para fora.
   title: {
+    flexShrink: 1,
     fontSize: 34,
     fontWeight: '700',
     color: theme.tokens.text.primary,

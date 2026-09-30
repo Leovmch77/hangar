@@ -162,7 +162,7 @@ export function SessionList() {
             style={[styles.input, { color: theme.tokens.text.primary }]}
           />
           {filtro ? (
-            <Pressable onPress={() => setFiltro('')} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.comum_cancelar()}>
+            <Pressable onPress={() => setFiltro('')} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.lista_filtro_limpar()}>
               <Icon name="X" size={16} color={theme.tokens.text.muted} />
             </Pressable>
           ) : null}
@@ -177,7 +177,7 @@ export function SessionList() {
             state: g === agrupar ? ('on' as const) : ('off' as const),
           }))}
         >
-          <View style={styles.agrupar} accessibilityRole="button" accessibilityLabel={m.lista_agrupar()}>
+          <View style={styles.agrupar} accessible accessibilityRole="button" accessibilityLabel={m.lista_agrupar()} accessibilityValue={{ text: ROTULO_AGRUPAR[agrupar]() }}>
             <Icon name="ListFilter" size={18} color={theme.tokens.text.secondary} />
           </View>
         </MenuView>
