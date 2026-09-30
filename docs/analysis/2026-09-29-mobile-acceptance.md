@@ -233,3 +233,148 @@ instalado, percursos nativos não conferidos e comparação visual pendente. Nen
 `cx-mobile-t12-*` foi criado, portanto não há sessão descartável para remover. O emulador
 iniciado pela T12 foi encerrado e as cinco reservas liberadas; o build remoto não foi cancelado.
 A aceitação da entrega continua pendente, sem pedir ao revisor que repita suites/retome contador.
+
+
+## Entrega 2 — T21: lote amplo Android, criação no primeiro envio
+
+Execução: 30/09/2026, worktree `hangar-mobile-deliveries-cad3e6fe-t21`, branch
+`mobile-deliveries-orq-cad3e6fe-t21`. Base integrada T1–T20:
+`1201802ba271b2848320eb1fa9909aef5093a83a`, conferida antes da primeira edição; árvore limpa
+na entrada. Nenhum teste de backend/PWA/Rust rodou. **O resultado automatizado não aprova
+a entrega Android**; a situação do APK e dos percursos está separada abaixo.
+
+### Regressões acrescentadas (Step 1)
+
+A maior parte dos casos do Step 1 já existia nas Tasks 18–20 (`newConversation.test.ts`:
+toque duplo, create OK/input recusado, timeout/rede/5xx/408 sem outro create, processo
+reaberto sem novo POST, troca de máquina, cwd inválido editável, ACK tardio;
+`firstConversation.test.ts`: tabela completa de transições, incluindo `send_rejected` que
+conserva sessão e texto). Faltavam e foram escritos:
+
+| Arquivo | Caso novo |
+|---|---|
+| `packages/core/src/api.test.ts` | `createSessionForServer` preserva `status` numérico (400/408/409/502) e faz um só POST; transporte incerto não inventa `status` nem repete |
+| `mobile/src/features/create/CreateSessionSheet.test.tsx` | toque duplo em Enviar na tela faz um único create; cwd recusado (400) mantém o texto no campo, mostra o motivo, deixa Enviar habilitado e não navega |
+
+Os dois casos de tela e os dois de API passaram na primeira execução: descrevem comportamento
+já existente, nunca foram vistos vermelhos.
+
+### Preparação
+
+Dependências: `npm ci --prefix mobile --workspaces=false` e depois
+`npm ci --workspace=@hangar/core --include-workspace-root`, ambos exit 0 — mas o segundo
+esvaziou `mobile/node_modules` (a raiz lista `mobile` como workspace). O primeiro
+`typecheck` falhou por isso também (`TS6053: File 'expo/tsconfig.base' not found`).
+Reinstalado o mobile depois do core (690 pacotes, exit 0). Ordem correta para os próximos
+lotes: core primeiro, mobile depois. Lockfiles inalterados; nenhum `audit fix`.
+
+### Suites e typechecks
+
+Evidências no diretório durável `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/tasks`.
+
+| Família/comando | Tentativa 1 | Correção e tentativa 2 | Resultado |
+|---|---|---|---|
+| `npm --prefix packages/core run check` | exit 0 (`t21-core-check-attempt1.txt`) | não repetido | conferido |
+| `npm --prefix packages/core run test` | exit 0, 742/742 testes, 48/48 arquivos (`t21-core-test-attempt1.txt`) | não repetido | conferido |
+| `npm --prefix mobile run typecheck` | exit 2: `CreateSessionSheet.tsx(540,7): error TS1005: ')' expected` + `TS6053` da instalação (`t21-mobile-typecheck-attempt1.txt`) | Fechamento `) : null}` do bloco de retomada Codex, perdido no commit `5a532f95` (Task 19), restaurado; mobile reinstalado; reteste exit 0 (`t21-mobile-typecheck-attempt2.txt`) | conferido. **Defeito produtivo real**: sem a correção a tela Nova conversa não compila e o bundle do APK quebraria |
+| `npm --prefix mobile run test` | exit 1, 273/274 testes, 37/38 arquivos (`t21-mobile-test-attempt1.txt`) — `envia esforço Codex…`: mock de mensagens sem `criar_subagente` (a lista de modelos cheia faz o Claude inicial renderizar o seletor de subagente) | Três chaves `criar_subagente*` acrescentadas ao mock; reteste só de `CreateSessionSheet.test.tsx`, exit 0, 22/22 (`t21-mobile-retest-attempt2.txt`) | falha inicial de teste consertada e conferida; suite inteira não repetida; produto inalterado por esta correção |
+
+Durações do Vitest: core 34,74 s; mobile 144,72 s; reteste 10,91 s.
+
+### Entrega 1 no aparelho (APK do lote T12, conferido nesta janela)
+
+O build T12 `2410f755-df87-4722-a946-8c7bd5557c65` terminou `FINISHED` depois da janela da T12
+(`gitCommitHash` `8b157f05…`, versionCode 1). Baixado nesta Task: 204 MB, SHA-256
+`11fd78e55d3a52cb7098929d0b03ca1704c12761423a1dedd9adb1c93aec597b`, contém
+`assets/index.android.bundle`. Estes resultados são da **T21**, não reescrevem a janela da T12.
+
+AVD `hangar` (Pixel 7, API 36, x86_64, 1080×2400, pt-BR). A instalação sobre o app de
+05/09 falhou com `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (assinatura diferente); o app antigo
+do emulador (cópia preservada em `visual/t12/reference.apk`) foi desinstalado e o APK T12
+instalado limpo. Backend alcançado por `adb reverse tcp:8765 tcp:8765` e URL
+`http://127.0.0.1:8765` (a rota `10.0.2.2` da T12 não foi retentada). Token digitado
+direto do arquivo de configuração no campo, sem impressão nem registro.
+
+| Percurso (APK entrega 1) | Observado | Resultado |
+|---|---|---|
+| Abrir sem Metro | tela "Conectar a um servidor" montou (`visual/t21/e1-open.png`) | conferido |
+| Login por endereço/token | lista "Sessões" carregou do backend (`visual/t21/e1-after-login.png`) | conferido |
+| Reabertura com servidor salvo | `force-stop` + abrir: lista direto, sem login | conferido |
+| Filtro da lista | campo aceita texto e filtra | conferido; lista vazia filtrada mostrou só "Cancelar", sem texto de vazio (não investigado) |
+| Botões do cabeçalho (Servidores, Configurações, "+") | "+" com três toques curtos e um de 120 ms, Servidores e Configurações com um toque cada, e deep link `hangar://create`: nada abre, nenhum erro no logcat (`visual/t21/e1-tap-new*.png`) | **falhou**; causa indeterminada; `mobile/app/index.tsx`, `Screen`, `Background` fora dos Files desta Task |
+
+### APK da entrega 2 e percursos no aparelho
+
+Build `664e770a-d7f2-452d-964e-a4be776725a3`, perfil `preview`, `--freeze-credentials
+--non-interactive --no-wait`, criado 05:56 (UTC−3) a partir da árvore desta Task com a
+correção do JSX (`gitCommitHash` informa a base `1201802b…`; o EAS empacota a árvore de
+trabalho). Cinco leituras de estado espaçadas de 5 min (`tasks/t21-eas-reads.txt`);
+`FINISHED` às 06:21. APK 204 MB, SHA-256
+`0dd02e4bcba7344df67b56bc8e41c25a22ed32568fa24cf366a34d65c60a09e2`, com
+`assets/index.android.bundle`, versionCode 1. **Instalado por cima da entrega 1** (`install -r`,
+mesma assinatura, `Success`), dados e servidor salvos preservados.
+
+Sessões descartáveis próprias, criadas pelo app numa pasta própria
+(`~/Projetos/cx-mobile-t21-fixture` e `sub-b`), fechadas e pastas removidas ao fim. Codex na
+conta Codex padrão da máquina, `gpt-6.1-sol`; Claude na conta autorizada pelo árbitro,
+Opus 1M/medium. Nenhuma sessão de terceiros operada.
+
+| Percurso (APK entrega 2) | Observado | Resultado |
+|---|---|---|
+| Atualizar sobre a entrega 1 e abrir sem Metro | lista com o servidor salvo, sem login | conferido |
+| "+" do cabeçalho | mesmo resultado da entrega 1: toque não abre a Nova conversa | **falhou**, segunda observação da família; esgotada, sem correção (fora dos Files) |
+| Chegar à Nova conversa | deep link `hangar:///create` com o app fechado abre a rota; aberto, o link não navega | conferido só por deep link |
+| Campo imediato, linha de máquina/projeto, Enviar | campo, rótulo da máquina, projeto e Enviar desabilitado sem texto (`visual/t21/e2-deeplink-create.png`) | conferido; o rótulo da máquina ficou "127" (derivado do endereço) |
+| Seletor de pasta: raízes, busca, subpasta, campo avançado | todos respondem; o seletor reabre na primeira raiz, não na última usada | conferido |
+| cwd inexistente pelo campo avançado | `400: a pasta … não existe` na tela, texto no campo, Enviar reabilitado, sem navegar, sem sessão criada (`e2-cwd-invalido.png`) | conferido; a mensagem de erro continua visível depois de trocar a pasta |
+| Toque duplo em Enviar | uma única sessão (`/api/sessions`) | conferido |
+| cwd/provider/modelo do lado do servidor | Codex: cwd da pasta, `gpt-6.1-sol (high)`; Claude: `sub-b`, Opus 1M medium (statusline do pane) | conferido |
+| Passagem Nova conversa → chat | 1ª criação: **crash nativo** do app ao abrir o chat, `SIGSEGV` no `RenderThread`, estouro de pilha em `RenderNode::prepareTreeImpl` (`tasks/t21-e2-crash-open-chat.txt`); 2ª e 3ª criações abriram o chat normalmente | **falhou 1 em 3**, intermitente; causa indeterminada (árvore de render recursiva) |
+| Primeira mensagem chega ao provider | 1ª sessão Codex: backend gravou a mensagem com `queued_delivered: true`, mas o Codex nunca recebeu (TUI vazia, nenhum turno); 2ª Codex e a Claude receberam e responderam | **falhou 1 em 3**, intermitente; o app não reenviou por conta própria; causa no caminho fila→Codex na partida, backend fora do escopo |
+| Tentativa fechada após o ACK | reaberta a Nova conversa: campo vazio, sem "mensagem guardada" | conferido |
+| Rede cortada logo após Enviar (create) | "Não deu para confirmar se a conversa foi criada", "Conferir"/"Descartar", Enviar travado (`e2-create-cut.png`); servidor não criou nada | conferido |
+| Reabrir o app com a tentativa incerta | mesma tentativa incerta, nenhum POST novo | conferido |
+| "Conferir" sem a sessão no servidor | "A conversa ainda não aparece… Isso não prova que falhou"; nada criado | conferido |
+| "Descartar" e enviar de novo | texto fica no campo; nova ação explícita cria uma sessão e abre o chat | conferido |
+| Trocar de projeto e repetir | segunda sessão em `sub-b` com o cwd novo | conferido |
+| Enviar/receber no chat (Codex) | "Diga apenas ok" → "ok" no app e no pane | conferido |
+| Parar (Codex) | "Conversation interrupted" no pane; app volta a "pronto" | conferido |
+| Retorno do fundo | resposta que chegou com o app em segundo plano aparece ao voltar | conferido |
+| Pergunta (Claude `AskUserQuestion`) | banner "Precisa de você" abre a folha nativa; dois toques numa opção levam à revisão com uma resposta; dois toques em Enviar entregam uma resposta ("Verde") | conferido |
+| create OK com input recusado no aparelho | não há como provocar recusa do input no backend real sem mexer nele | não conferido; coberto por teste automatizado |
+| Rede cortada depois do input (incerto) | janela entre o create e o input curta demais para cortar pelo adb | não conferido; coberto por teste automatizado |
+| Troca de máquina durante a resposta | um só servidor; o botão Servidores não abre | não conferido |
+| Aprovação permitir/negar | sessões em modo sem aprovação | não conferido |
+| Token recusado com causa visível | não repetido nesta janela | não conferido |
+| Idioma en | aparelho em pt-BR | não conferido |
+| iOS | nenhum recurso iOS | não conferido |
+
+A comparação visual com a referência do `provar-tela` continua pendente: não há captura de
+referência comparável (a do app antigo não carregava o bundle). As capturas desta janela ficam
+em `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/visual/t21/`; nenhuma contém token.
+Um tutorial de caneta do teclado Gboard cobriu a tela na primeira abertura com foco no campo
+e engoliu toques até ser fechado; é do emulador, não do app.
+
+### Pendências do lote 2
+
+1. Botões do cabeçalho da lista não respondem no APK (entregas 1 e 2). Sem eles não se
+   chega à Nova conversa, às Configurações nem aos Servidores pelo toque. Família esgotada;
+   causa indeterminada; arquivos fora dos Files da T21.
+2. Crash nativo intermitente ao passar da Nova conversa para o chat (1 em 3).
+3. Primeira mensagem marcada como entregue pela fila sem chegar ao Codex na partida (1 em 3).
+4. Desvios observados em percursos marcados conferido (uma observação cada, não investigados,
+   sem tentativa de correção):
+   a. Linha "Filtro da lista" (entrega 1): lista vazia filtrada mostra só "Cancelar", sem texto
+      de estado vazio.
+   b. Linha "Chegar à Nova conversa": com o app aberto o deep link `hangar:///create` não
+      navega; somado ao item 1, o app em execução não tem caminho para a Nova conversa.
+   c. Linha "cwd inexistente pelo campo avançado": a mensagem de erro continua visível depois
+      de trocar a pasta.
+   d. Linha "Campo imediato, linha de máquina/projeto, Enviar": o rótulo da máquina ficou
+      "127", derivado do endereço.
+   e. Linha "Seletor de pasta": o seletor reabre na primeira raiz, não na última usada.
+5. Cenários não conferidos da tabela acima.
+
+**Lote encerrado com pendências.** A entrega 2 não está aceita: os percursos centrais do
+primeiro envio funcionaram no APK, mas a entrada normal pela lista falha e há dois defeitos
+intermitentes. Emulador encerrado, `adb reverse` removido e as cinco reservas liberadas.
