@@ -150,7 +150,7 @@ export interface ConfigSyncProgress {
 }
 
 export type ConfigSyncStage = 'waiting' | 'connecting' | 'read' | 'read_done' | 'packing' | 'packed'
-  | 'uploading' | 'apply' | 'install' | 'after' | 'applied' | 'failed';
+  | 'uploading' | 'apply' | 'install' | 'after' | 'applied' | 'partial' | 'failed';
 
 /** Onde uma máquina está. `detailed` falso = Hangar antigo, que só devolve o resultado no fim. */
 export interface ConfigSyncMachineStep {
@@ -161,14 +161,25 @@ export interface ConfigSyncMachineStep {
   total?: number;
   detailed?: boolean;
   error?: string;
+  /** Itens com falha num relatório que terminou (`partial`). */
+  failed?: number;
 }
 
 export function configSyncStepFrom(prev: ConfigSyncMachineStep, p: ConfigSyncProgress): ConfigSyncMachineStep {
   const itemLevel = p.entry === null && p.total !== undefined;
+  // Os passos finais não são itens: contador e barra do último item ficariam parados.
+  const counted = p.phase !== 'after';
   return {
     stage: p.phase, item: p.item ?? prev.item, entry: p.entry, detailed: true,
-    index: itemLevel ? p.index : prev.index, total: itemLevel ? p.total : prev.total,
+    index: !counted ? undefined : itemLevel ? p.index : prev.index,
+    total: !counted ? undefined : itemLevel ? p.total : prev.total,
   };
+}
+
+/** Etapa final de um destino pelo relatório: `done` com item falho não é "aplicado". */
+export function configSyncReportStep(r: ConfigSyncReport): ConfigSyncMachineStep {
+  const failed = Object.values(r.items).filter((i) => i?.status === 'failed').length;
+  return failed ? { stage: 'partial', failed } : { stage: 'applied' };
 }
 
 const AFTER: Record<string, () => string> = {
@@ -189,8 +200,10 @@ export function configSyncStepText(s: ConfigSyncMachineStep): string {
     case 'uploading': return m.shared_config_step_uploading();
     case 'apply': return m.shared_config_step_apply({ item });
     case 'install': return m.shared_config_step_install({ entry: s.entry ?? '' });
-    case 'after': return AFTER[s.entry ?? '']?.() ?? m.shared_config_step_after_other({ step: s.entry ?? '' });
+    case 'after': return Object.prototype.hasOwnProperty.call(AFTER, s.entry ?? '')
+      ? AFTER[s.entry!]() : m.shared_config_step_after_other({ step: s.entry ?? '' });
     case 'applied': return m.shared_config_step_applied();
+    case 'partial': return m.shared_config_step_partial({ count: s.failed ?? 0 });
     case 'failed': return m.shared_config_step_failed();
   }
 }

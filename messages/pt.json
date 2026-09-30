@@ -4136,6 +4136,7 @@
   "shared_config_step_after_codex_integration": "Religando a integração do Codex",
   "shared_config_step_after_other": "Finalizando: {step}",
   "shared_config_step_applied": "Aplicado",
+  "shared_config_step_partial": "Aplicado, com {count} item(ns) com falha",
   "shared_config_step_failed": "Falhou",
   "shared_config_step_count": "{index} de {total}",
   "shared_config_step_no_detail": "Este Hangar não informa as etapas; aguardando o resultado…",

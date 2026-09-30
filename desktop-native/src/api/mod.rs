@@ -458,7 +458,14 @@ impl Api {
             }
             match tokio::time::timeout(wait, chunks.next()).await {
                 Ok(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
-                Ok(None) => return Err(Failure { uncertain: post, ..Failure::local("shared_config_stream_cut") }),
+                Ok(None) => {
+                    // Última linha sem `\n` ainda é resposta; o stream não é lido de novo depois do fim.
+                    if let Ok(event) = serde_json::from_slice::<Value>(&buf)
+                        && event.get("type").and_then(Value::as_str) == Some("done") {
+                        return Ok(event.get("result").cloned().unwrap_or(Value::Null));
+                    }
+                    return Err(Failure { uncertain: post, ..Failure::local("shared_config_stream_cut") });
+                }
                 _ => return Err(cut()),
             }
         }

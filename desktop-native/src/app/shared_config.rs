@@ -131,11 +131,12 @@ fn warning_text(w: &Warning) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) enum Stage { #[default] Waiting, Connecting, Read, ReadDone, Packing, Packed, Uploading, Apply, Install, After, Applied, Failed }
+pub(super) enum Stage { #[default] Waiting, Connecting, Read, ReadDone, Packing, Packed, Uploading, Apply, Install, After, Applied, Partial, Failed }
 
-/// Onde uma máquina está. `no_detail`: Hangar antigo, que só devolve o resultado no fim.
+/// Onde uma máquina está. `no_detail`: Hangar antigo, que só devolve o resultado no fim. `failed`: itens com falha
+/// num relatório que terminou (`Partial`).
 #[derive(Clone, Default)]
-struct Step { stage: Stage, item: Option<String>, entry: Option<String>, index: Option<u64>, total: Option<u64>, no_detail: bool, error: Option<String> }
+struct Step { stage: Stage, item: Option<String>, entry: Option<String>, index: Option<u64>, total: Option<u64>, no_detail: bool, error: Option<String>, failed: usize }
 
 impl Step {
     fn at(stage: Stage) -> Self { Self { stage, ..Self::default() } }
@@ -149,6 +150,8 @@ impl Step {
         let entry = text("entry");
         let total = event.get("total").and_then(Value::as_u64);
         if entry.is_none() && total.is_some() { (self.index, self.total) = (event.get("index").and_then(Value::as_u64), total); }
+        // Os passos finais não são itens: contador e barra do último item ficariam parados.
+        if stage == Stage::After { (self.index, self.total) = (None, None); }
         self.item = text("item").or(self.item.take());
         (self.stage, self.entry, self.no_detail) = (stage, entry, false);
     }
@@ -172,6 +175,7 @@ impl Step {
                 _ => tr_shared("shared_config_step_after_other", &[("step", &entry)]),
             },
             Stage::Applied => tr_shared("shared_config_step_applied", &[]),
+            Stage::Partial => tr_shared("shared_config_step_partial", &[("count", &self.failed.to_string())]),
             Stage::Failed => tr_shared("shared_config_step_failed", &[]),
         }
     }
@@ -500,13 +504,21 @@ impl Hangar {
                 let origin_id = self.shared.progress.iter().find(|m| m.origin).map(|m| m.id.clone()).unwrap_or_default();
                 match result {
                     Ok(()) => if let Some(step) = self.shared_step(&origin_id) { *step = Step::at(Stage::Packed); },
-                    Err(error) => self.fail_shared_step(&origin_id, &error),
+                    Err(error) => {
+                        // Sem pacote nenhum destino recebe nada: "Na fila" pararia na tela como se ainda fosse.
+                        self.shared.progress.retain(|m| m.origin);
+                        self.fail_shared_step(&origin_id, &error);
+                    }
                 }
             }
             SharedConfigReply::Applied(_, id, result) => {
                 let label = self.shared_label(&id);
                 match &result {
-                    Ok(_) => if let Some(step) = self.shared_step(&id) { *step = Step::at(Stage::Applied); },
+                    // `done` com item falho não é "aplicado".
+                    Ok(report) => if let Some(step) = self.shared_step(&id) {
+                        let failed = report.items.values().filter(|i| i.status == "failed").count();
+                        *step = if failed > 0 { Step { failed, ..Step::at(Stage::Partial) } } else { Step::at(Stage::Applied) };
+                    },
                     Err(error) => self.fail_shared_step(&id, error),
                 }
                 self.shared.reports.insert(id, result.map_err(|error| machine_error(&error, &label)));
@@ -643,7 +655,7 @@ impl Hangar {
     fn render_shared_progress(&self) -> Div {
         let rows = self.shared.progress.iter().map(|m| {
             let step = &m.step;
-            let failed = step.stage == Stage::Failed;
+            let failed = matches!(step.stage, Stage::Failed | Stage::Partial);
             let (color, bg) = if m.origin { (theme::accent_text(), theme::accent_dim()) } else { (theme::muted(), theme::raised()) };
             let role = tr_shared(if m.origin { "shared_config_role_origin" } else { "shared_config_role_target" }, &[]);
             let count = step.running().then(|| step.index.zip(step.total)).flatten().filter(|(_, total)| *total > 0);

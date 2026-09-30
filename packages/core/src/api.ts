@@ -2820,23 +2820,42 @@ async function readConfigSyncStream<T>(res: Response, onProgress: (p: ConfigSync
     return res.json() as Promise<T>;
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  // Só a linha `error` é falha certa; corte, prazo ou linha ilegível no meio deixam o
+  // resultado em aberto (o servidor segue aplicando), e a mensagem diz para conferir a máquina.
   let rest = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    rest += value;
-    const lines = rest.split('\n');
-    rest = lines.pop() ?? '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const ev = JSON.parse(line);
-      if (ev.type === 'progress') onProgress(ev as ConfigSyncProgress);
-      else if (ev.type === 'done') return ev.result as T;
-      else {
-        const detail = formataErro(ev.detail) ?? String(ev.detail);
-        throw Object.assign(new Error(`${ev.status}: ${detail}`), { status: ev.status });
+  let last: { type: string; result?: T; status?: number; detail?: unknown } | null = null;
+  const take = (line: string) => {
+    if (!line.trim()) return;
+    const ev = JSON.parse(line);
+    if (ev.type === 'progress') onProgress(ev as ConfigSyncProgress);
+    else last = ev;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        take(rest);
+        break;
       }
+      rest += value;
+      const lines = rest.split('\n');
+      rest = lines.pop() ?? '';
+      for (const line of lines) {
+        take(line);
+        if (last) break;
+      }
+      if (last) break;
     }
+  } catch {
+    throw new Error(m.shared_config_stream_cut());
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  const end = last as { type: string; result?: T; status?: number; detail?: unknown } | null;
+  if (end?.type === 'done') return end.result as T;
+  if (end?.type === 'error') {
+    const detail = formataErro(end.detail) ?? String(end.detail);
+    throw Object.assign(new Error(`${end.status}: ${detail}`), { status: end.status });
   }
   throw new Error(m.shared_config_stream_cut());
 }

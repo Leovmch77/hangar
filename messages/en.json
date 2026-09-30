@@ -4136,6 +4136,7 @@
   "shared_config_step_after_codex_integration": "Reconnecting the Codex integration",
   "shared_config_step_after_other": "Finishing: {step}",
   "shared_config_step_applied": "Applied",
+  "shared_config_step_partial": "Applied, {count} item(s) failed",
   "shared_config_step_failed": "Failed",
   "shared_config_step_count": "{index} of {total}",
   "shared_config_step_no_detail": "This Hangar does not report its steps; waiting for the result…",

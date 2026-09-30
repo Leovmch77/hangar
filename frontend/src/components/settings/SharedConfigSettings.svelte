@@ -2,7 +2,7 @@
   import { onDestroy, untrack } from 'svelte';
   import {
     CONFIG_SYNC_ITEMS, applyConfigSyncForServer, configSyncItemLabel,
-    configSyncRows, configSyncStepFrom, configSyncStepText, configSyncWarningText, diffManifests,
+    configSyncReportStep, configSyncRows, configSyncStepFrom, configSyncStepText, configSyncWarningText, diffManifests,
     getConfigSyncBundleForServer, getConfigSyncManifestForServer, translateConfigSyncTextsForServer,
     type ConfigSyncDiff, type ConfigSyncGroup, type ConfigSyncItem, type ConfigSyncItemResult,
     type ConfigSyncMachineStep, type ConfigSyncManifest, type ConfigSyncProgress,
@@ -206,15 +206,17 @@
         setStep(origin.id, { stage: 'packed' });
       } catch (e) {
         error = errorText(e, origin);
-        setStep(origin.id, { stage: 'failed', error });
+        // Sem pacote nenhum destino recebe nada: "Na fila" pararia na tela como se ainda fosse.
+        steps = { [origin.id]: { stage: 'failed', error } };
         return;
       }
       for (const t of targets) {
         setStep(t.id, { stage: 'uploading' });
         const tr = track(t.id);
         try {
-          reports[t.id] = await applyConfigSyncForServer(t, items, bundle, controller.signal, tr.onProgress, tr.onPlain);
-          setStep(t.id, { stage: 'applied' });
+          const report = await applyConfigSyncForServer(t, items, bundle, controller.signal, tr.onProgress, tr.onPlain);
+          reports[t.id] = report;
+          setStep(t.id, configSyncReportStep(report));
         } catch (e) {
           reports[t.id] = errorText(e, t);
           setStep(t.id, { stage: 'failed', error: reports[t.id] as string });
@@ -264,12 +266,12 @@
         <p class="rotulo">{m.shared_config_progress_title()}</p>
         <ul>
           {#each progressRows as { server: s, role, step } (s.id)}
-            {@const live = !['waiting', 'read_done', 'packed', 'applied', 'failed'].includes(step.stage)}
+            {@const live = !['waiting', 'read_done', 'packed', 'applied', 'partial', 'failed'].includes(step.stage)}
             <li class="maquina" class:ativa={live}>
               <span class="topo">
                 <span class="item">{s.label}</span>
                 <span class="papel">{role}</span>
-                <span class="estado" aria-live="polite" class:falhou={step.stage === 'failed'} class:pronto={step.stage === 'read_done' || step.stage === 'packed' || step.stage === 'applied'}>
+                <span class="estado" aria-live="polite" class:falhou={step.stage === 'failed' || step.stage === 'partial'} class:pronto={step.stage === 'read_done' || step.stage === 'packed' || step.stage === 'applied'}>
                   {configSyncStepText(step)}
                 </span>
                 {#if live && step.total}<span class="contador">{m.shared_config_step_count({ index: (step.index ?? 0) + 1, total: step.total })}</span>{/if}

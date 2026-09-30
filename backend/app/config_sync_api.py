@@ -5,6 +5,7 @@ máquina precisa conhecer a outra pelo peers.json.
 """
 import asyncio
 import json
+import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,6 +21,8 @@ from app.mensagens import erro
 config_sync_router = APIRouter(prefix="/api/config-sync")
 # Uma aplicação por vez: duas mexendo no mesmo settings.json trocariam backup e relatório.
 _APPLYING = asyncio.Lock()
+_RUNNING: set[asyncio.Task] = set()
+_log = logging.getLogger("hangar")
 
 
 def _items(raw: str) -> list[str]:
@@ -39,18 +42,28 @@ def _ndjson(work) -> StreamingResponse:
     loop = asyncio.get_running_loop()
 
     def progress(event: dict) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
+        except RuntimeError:   # loop fechando: aviso perdido não derruba a leitura nem a aplicação
+            pass
 
     async def run() -> None:
+        # Cancelada (desligando o servidor) também fecha a resposta, senão o cliente espera para sempre.
+        final = {"type": "error", "status": 499, "detail": "interrompido"}
         try:
             final = {"type": "done", "result": await work(progress)}
         except HTTPException as exc:
             final = {"type": "error", "status": exc.status_code, "detail": exc.detail}
         except Exception as exc:  # noqa: BLE001 — vira linha de erro em vez de corpo cortado
+            _log.exception("config-sync: falha no trabalho com progresso")
             final = {"type": "error", "status": 500, "detail": str(exc)[:300]}
-        loop.call_soon_threadsafe(queue.put_nowait, final)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, final)
 
     task = asyncio.create_task(run())
+    # O loop só guarda referência fraca: sem esta, a tela fechada deixaria a aplicação ser coletada.
+    _RUNNING.add(task)
+    task.add_done_callback(_RUNNING.discard)
 
     async def lines():
         while True:
