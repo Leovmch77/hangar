@@ -431,6 +431,15 @@ class GuestAccountBody(BaseModel):
     enc_blob: SetupBlob
     admin_blob: SetupBlob
 
+    @field_validator("user")
+    @classmethod
+    def validate_user(cls, value: str) -> str:
+        # "/" quebraria a rota /guests/{user}/delete.
+        value = value.strip()
+        if not value or "/" in value:
+            raise ValueError("usuário inválido")
+        return value
+
     @field_validator("salt", "auth_hash")
     @classmethod
     def validate_base64(cls, value, info):

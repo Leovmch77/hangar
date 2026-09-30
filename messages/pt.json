@@ -49,6 +49,7 @@
   "convidados_falha_servidor": "{servidor}: {erro}",
   "convidados_resumo": "{servidores} servidor(es)",
   "convidados_usuario_em_uso": "Esse usuário já existe. Escolha outro nome.",
+  "convidados_usuario_obrigatorio": "Informe o usuário.",
   "convidados_servidor_fora_da_lista": "Este servidor não está mais na sua lista de servidores.",
   "sessao_do_convidado": "Sessão do convidado {n}",
   "sync_config_conta_existente": "O acesso de {usuario} já está criado. Ative a sincronização para voltar a usá-lo com a mesma senha.",

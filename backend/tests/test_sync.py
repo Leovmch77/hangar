@@ -296,6 +296,13 @@ def test_guest_cannot_take_owner_name(client):
     assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_usuario_em_uso"
 
 
+@pytest.mark.parametrize("user", ["   ", "a/b"])
+def test_guest_invalid_username_is_422(client, user):
+    _owner_logged(client)
+    assert _add_guest(client, user).status_code == 422
+    assert client.get("/api/sync/guests").json() == []
+
+
 def test_deleted_guest_vault_is_401(client):
     _owner_logged(client)
     _add_guest(client)
