@@ -88,8 +88,9 @@ fn detail_lines(decided: &OrqDecidedBy) -> Vec<String> {
 
 /// Frase curta pelo código; nomes e commit entre crases viram código no markdown.
 fn line_text(line: &OrqLine) -> Option<String> {
-    let code = |text: &str| format!("`{text}`");
-    Some(match line {
+    let code = |text: &str| if text.is_empty() { String::new() } else { format!("`{text}`") };
+    // Campo que não veio deixa o separador pendurado no fim da frase; ele sai junto.
+    let text = match line {
         OrqLine::Opened { sessions } => {
             let executor = code(sessions.first().map(|s| s.name.as_str()).unwrap_or(""));
             match sessions.get(1) {
@@ -103,7 +104,8 @@ fn line_text(line: &OrqLine) -> Option<String> {
         OrqLine::RedBack { executor } => tr_shared("orq_line_red_back", &[("executor", &code(executor.as_deref().unwrap_or("")))]),
         OrqLine::RedRetry => tr_shared("orq_line_red_retry", &[]),
         OrqLine::Unknown => return None,
-    })
+    };
+    Some(text.trim_end().trim_end_matches('·').trim_end().to_owned())
 }
 
 /// Ids dos eventos que abrem um dia novo (hora local), para o separador sair antes deles.
@@ -165,7 +167,7 @@ impl Hangar {
         let view = self.text_view(&format!("{id}#orq-line"), id, source, cx);
         div().w_full().flex().items_center().gap_2().pl(px(38.)).text_sm().text_color(theme::muted())
             .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(color))
-            .when_some(orq.task, |el, task| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(format!("T{task}"))))
+            .when_some(orq.task, |el, task| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(format!("T{task}"))))
             .child(div().flex_1().min_w_0().child(TextView::new(&view).selectable(true).scrollable(false).text_sm().on_link_click(open_web_link)))
             .when_some(time, |el, time| el.child(div().flex_shrink_0().text_xs().text_color(theme::faint()).child(time)))
     }
@@ -304,6 +306,10 @@ mod tests {
         assert_eq!(solo, tr_shared("orq_line_opened_solo", &[("executor", "`exec`")]));
         assert_ne!(solo, both);
         assert!(line_text(&OrqLine::Unknown).is_none());
+        let bare = line_text(&OrqLine::Delivered { round: Some(2), commit: None }).unwrap();
+        assert!(!bare.contains('`') && !bare.ends_with('·') && !bare.ends_with(' '), "{bare}");
+        assert!(line_text(&OrqLine::Delivered { round: Some(2), commit: Some("abc123".into()) }).unwrap().ends_with("`abc123`"));
+        assert_eq!(line_text(&OrqLine::Opened { sessions: vec![] }).unwrap().matches('`').count(), 0);
     }
 
     #[test]

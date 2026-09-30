@@ -2396,7 +2396,7 @@ impl Hangar {
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
-        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(&self.chat.events) } else { HashSet::new() };
+        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(&self.chat.events.iter().filter(|event| event.orq.is_some()).cloned().collect::<Vec<_>>()) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
         api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
         self.sync_row_ids(Some(stable), cx);
@@ -2428,7 +2428,11 @@ impl Hangar {
         let events = &self.chat.events;
         let items = self.items.len();
         let (mut ids, mut signatures): (Vec<String>, Vec<String>) = if full {
-            (self.items.iter().map(|item| item.id(events)).collect(), self.items.iter().map(|item| signature(item, events)).collect())
+            (self.items.iter().map(|item| item.id(events)).collect(), self.items.iter().map(|item| {
+                // O separador de dia muda a altura da linha quando histórico mais antigo chega antes dela.
+                let day = matches!(item, Item::Event(_)) && self.orq_days.contains(&item.id(events));
+                if day { format!("day{}", signature(item, events)) } else { signature(item, events) }
+            }).collect())
         } else { (self.row_ids[..items].to_vec(), self.row_signatures[..items].to_vec()) };
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
         if let Some(tool) = &self.chat.live_tool { ids.push(LIVE_TOOL.into()); signatures.push(format!("{}{}", tool.name, tool.input)); }
