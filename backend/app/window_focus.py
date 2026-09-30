@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import os
+import shutil
 import subprocess
 
 from app import procinfo
@@ -24,8 +25,12 @@ def focus_tree(root: int, env: dict[str, str]) -> bool:
 def _focus_hyprland(tree: set[int], env: dict[str, str]) -> bool:
     if not env.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return False
+    hyprctl = shutil.which("hyprctl", path=env.get("PATH"))
+    if hyprctl is None:
+        _log.warning("window_focus: hyprctl nao encontrado no PATH")
+        return False
     try:
-        cp = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, env=env, timeout=3)
+        cp = subprocess.run([hyprctl, "clients", "-j"], capture_output=True, text=True, env=env, timeout=3)
         clients = json.loads(cp.stdout or "[]")
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         _log.warning("window_focus: hyprctl clients falhou: %r", exc)
@@ -34,7 +39,7 @@ def _focus_hyprland(tree: set[int], env: dict[str, str]) -> bool:
     if pid is None:
         return False
     try:
-        cp = subprocess.run(["hyprctl", "dispatch", "focuswindow", f"pid:{pid}"],
+        cp = subprocess.run([hyprctl, "dispatch", "focuswindow", f"pid:{pid}"],
                             capture_output=True, text=True, env=env, timeout=3)
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("window_focus: hyprctl dispatch falhou: %r", exc)

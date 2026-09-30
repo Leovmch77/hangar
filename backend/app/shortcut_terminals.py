@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import threading
@@ -307,8 +308,12 @@ def output(target: str) -> str:
 
 def _kill_group(pid: int) -> None:
     if _IS_WINDOWS:
+        taskkill = shutil.which("taskkill")
+        if taskkill is None:
+            _log.warning("shortcut: taskkill nao encontrado no PATH; pid %s segue vivo", pid)
+            return
         try:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+            subprocess.run([taskkill, "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
         except (subprocess.TimeoutExpired, OSError) as e:
             # Sem o argv: nao carrega nada do atalho, mas o tipo basta.
             _log.warning("shortcut: taskkill nao concluiu para o pid %s: %s", pid, type(e).__name__)
