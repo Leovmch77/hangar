@@ -97,3 +97,5 @@ node_modules/
 
 # Site gerado por site/build.py
 site/public/
+# vídeos do site são versionados; o *.mp4 acima é só para rascunho de análise
+!site/media/*.mp4
