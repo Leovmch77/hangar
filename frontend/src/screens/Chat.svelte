@@ -3421,7 +3421,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   {#if orqSession && orqServer}
     <OrqPanelSheet
-      open={orqPanelOpen}
+      open={orqPanelOpen && !filesInContext}
       onClose={() => (orqPanelOpen = false)}
       server={orqServer}
       {sessionName}

@@ -53,8 +53,10 @@
 
   onMount(() => {
     sessionsStore.retain();
-    const t = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 10_000);
-    return () => { clearInterval(t); sessionsStore.release(); };
+    const tick = () => { if (document.visibilityState === 'visible') void load(); };
+    const t = setInterval(tick, 10_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick); sessionsStore.release(); };
   });
 
   // Só quem vai mostrar custo pede a cotação.
@@ -292,10 +294,8 @@
   {/if}
 
   {#if actions}
-    <section class="actions">
-      <h3><span>{m.ctx_acoes()}</span></h3>
-      {@render actions()}
-    </section>
+    <!-- O ShortcutTiles já traz a própria seção titulada. -->
+    {@render actions()}
   {/if}
 </div>
 
@@ -320,7 +320,8 @@
   .muted, .note { color: var(--text-muted); }
   .note { font-size: var(--text-xs); }
   .link {
-    align-self: flex-start; min-height: 0; padding: 0; background: transparent;
+    align-self: flex-start; display: inline-flex; align-items: center;
+    min-height: 24px; padding: 4px 0; background: transparent;
     color: var(--accent); font-size: var(--text-xs);
   }
   .link:disabled { color: var(--text-muted); }

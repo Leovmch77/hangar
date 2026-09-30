@@ -183,6 +183,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   const hasActions = $derived(visibleShortcuts.length > 0);
   const orq = $derived(isOrq({ provider }));
   const orqServer = $derived(listServers().find((s) => s.id === serverId));
+  const orqTab = $derived(orq && !!orqServer);
   const customShortcuts = $derived(customOf(shortcuts ?? []));
   const navChave = $derived(workspaceSessionKey({ serverId, name: sessionName }));
   // A aba Navegador só existe na tab bar quando a sessão TEM navegador aberto (quem cria é o
@@ -545,7 +546,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     <button type="button" id="aba-ctx-contexto" class="aba" class:sel={ctxPanel.aba === 'contexto'}
             role="tab" aria-selected={ctxPanel.aba === 'contexto'} aria-controls="painel-ctx-contexto"
             onclick={() => (ctxPanel.aba = 'contexto')}>
-      {orq ? m.orq_tab_title() : m.ctx_aba_contexto()}
+      {orqTab ? m.orq_tab_title() : m.ctx_aba_contexto()}
     </button>
     <button type="button" id="aba-ctx-arquivos" class="aba" class:sel={ctxPanel.aba === 'arquivos'}
             role="tab" aria-selected={ctxPanel.aba === 'arquivos'} aria-controls="painel-ctx-arquivos"
@@ -610,7 +611,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   <!-- A secao "Estado" saiu: repetia o chip do header a 60px de distancia, mesma palavra e mesma
        cor. O detalhe e o chip do loop subiram pro header, que ja era o lugar do estado. -->
 
-  {#if orq && orqServer}
+  {#if orqTab && orqServer}
   <!-- Sessão orq não tem LLM: no lugar do medidor de contexto, o retrato da orquestração. -->
   <div class="ctx-scroll ctx-scroll-orq">
     <OrqPanel server={orqServer} sessionName={sessionName ?? ''} arbiter={orqArbiter}
