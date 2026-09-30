@@ -6090,6 +6090,8 @@
   "nova_conversa_abrir": "Abrir conversa",
   "nova_conversa_reenviar": "Enviar de novo nesta conversa",
   "nova_conversa_conferir": "Conferir",
+  "new_conversation_received_messages": "Últimas mensagens suas encontradas",
+  "new_conversation_no_received_messages": "Nenhuma mensagem sua encontrada.",
   "nova_conversa_adotar": "Usar esta conversa",
   "nova_conversa_descartar": "Descartar tentativa",
   "nova_conversa_nome_automatico": "Em branco, o nome sai da pasta com um código curto.",

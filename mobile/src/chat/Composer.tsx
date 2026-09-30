@@ -12,7 +12,7 @@ import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
 import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
-import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
+import { abandonUnknownAttempt, confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
 import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, finishDictation, recoverDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
@@ -427,7 +427,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading && !readBlocked && !submissionBlocksSend;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
-  const sendText = useCallback(async (value: string, revision?: number): Promise<void> => {
+  const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
     if (!firstInputId) return chat.send(value, revision);
     const snapshot = readFirstInput(serverId, name);
     // Tentativa já confirmada e apagada enquanto o campo ainda mostrava o texto do handoff: não reenviar.
@@ -438,6 +438,15 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       return;
     }
     if (snapshot?.id !== firstInputId) {
+      return chat.send(value, revision);
+    }
+    if (snapshot.phase === 'send_unknown') {
+      if (!explicit || readDraft(serverId, name)?.submission) {
+        throw new Error(useNewConversation.getState().issues[serverId]?.message ?? m.nova_conversa_envio_incerto());
+      }
+      if (!abandonUnknownAttempt(serverId, snapshot.id)) {
+        throw new Error(useNewConversation.getState().issues[serverId]?.message ?? m.nova_conversa_envio_incerto());
+      }
       return chat.send(value, revision);
     }
     if (value.trim() !== snapshot.text.trim()) {
@@ -531,7 +540,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           }
         }, sentRevision);
       } else {
-        await sendText(finalText, sentRevision);
+        await sendText(finalText, sentRevision, true);
       }
       if (attach && persistDraft({ attachment: null })) {
         dropCopy(attach.uri);

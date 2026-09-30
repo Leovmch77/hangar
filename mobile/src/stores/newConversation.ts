@@ -331,6 +331,24 @@ export function adoptCandidate(serverId: string, attemptId: string): boolean {
   return true;
 }
 
+export function abandonUnknownAttempt(serverId: string, attemptId: string): boolean {
+  if (inFlight.has(serverId)) return false;
+  const attempt = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
+  if (!attempt || attempt.id !== attemptId || attempt.phase !== 'send_unknown') return false;
+  try {
+    prefs.remove(KEY(serverId));
+  } catch {
+    setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+    return false;
+  }
+  useNewConversation.setState((s) => {
+    const attempts = { ...s.attempts };
+    delete attempts[serverId];
+    return { attempts, issues: { ...s.issues, [serverId]: null } };
+  });
+  return true;
+}
+
 // Descartar é sempre pedido explícito; nada aqui avisa o servidor nem apaga sessão remota.
 export function discardAttempt(serverId: string, attemptId: string): void {
   if (inFlight.has(serverId)) return;

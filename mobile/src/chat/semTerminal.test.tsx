@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FirstConversationAttempt } from '@hangar/core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FirstConversationAttempt, MotivoFim } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,6 +39,8 @@ const nativeNavigation = {
 const routerPush = vi.hoisted(() => vi.fn());
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
+const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), history: vi.fn(), transcribe: vi.fn() }));
+const voiceInput = vi.hoisted(() => ({ onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>) }));
 vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, canGoBack: () => navigation.canGoBack }),
@@ -47,6 +49,9 @@ vi.mock('expo-router', () => ({
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude' }],
+  sendInputForServer: realFirstInput.send,
+  getHistory: realFirstInput.history,
+  transcribeFileForServer: realFirstInput.transcribe,
 }));
 vi.mock('../stores/servers', () => {
   const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true };
@@ -77,14 +82,14 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro')
+    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando').split(' ').map((k) => [k, () => k]),
 ));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
-const storage = vi.hoisted(() => ({ memory: new Map<string, string>(), failSet: false }));
+const storage = vi.hoisted(() => ({ memory: new Map<string, string>(), failSet: false, failRemove: false }));
 vi.mock('react-native-mmkv', () => ({
   createMMKV: () => ({
     getString: (key: string) => storage.memory.get(key),
@@ -92,11 +97,14 @@ vi.mock('react-native-mmkv', () => ({
       if (storage.failSet) throw new Error('storage unavailable');
       storage.memory.set(key, value);
     },
-    remove: (key: string) => { storage.memory.delete(key); },
+    remove: (key: string) => {
+      if (storage.failRemove) throw new Error('storage unavailable');
+      storage.memory.delete(key);
+    },
     getNumber: () => undefined, getBoolean: () => undefined, contains: (key: string) => storage.memory.has(key),
   }),
 }));
-beforeEach(() => { storage.memory.clear(); storage.failSet = false; sessionsState.rows = []; });
+beforeEach(() => { storage.memory.clear(); storage.failSet = false; storage.failRemove = false; sessionsState.rows = []; realFirstInput.enabled = false; });
 
 const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null }[], byServerRecord: {} }));
 
@@ -118,18 +126,27 @@ vi.mock('../features/pills/EffortPill', () => ({ EffortPill: () => null }));
 vi.mock('../features/pills/PermissionPill', () => ({ PermissionPill: () => null }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ EstiloPill: () => null }));
-vi.mock('../features/ditado/useDitado', () => ({ useDitado: () => ({ gravando: false, rms: 0, iniciar: () => {}, parar: () => {} }) }));
+vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
+  voiceInput.onFim = callbacks.onFim;
+  return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
+} }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: false }) } }));
 vi.mock('./CommandSheet', () => ({ CommandSheet: () => null }));
 vi.mock('../stores/sessions', () => ({
-  useSessions: (sel: (s: unknown) => unknown) => sel(sessionsState),
+  useSessions: Object.assign((sel: (s: unknown) => unknown) => sel(sessionsState), { getState: () => sessionsState }),
 }));
-vi.mock('../stores/chat', () => {
+vi.mock('../stores/chat', async (original) => {
+  const actual = await original<typeof import('../stores/chat')>();
   const snap = () => ({ pending: [], events: [], stateEvent: { state: composerChat.state } });
   const use = Object.assign((sel: (s: unknown) => unknown) => sel(snap()), {
     getState: snap, setState: () => {}, subscribe: () => () => {},
   });
-  return { chatStore: () => ({ use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} }), filaCount: () => 0, isSubmitting: () => false };
+  return { ...actual,
+    chatStore: (serverId: string, name: string) => realFirstInput.enabled ? actual.chatStore(serverId, name)
+      : { use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} },
+    filaCount: (...args: Parameters<typeof actual.filaCount>) => realFirstInput.enabled ? actual.filaCount(...args) : 0,
+    isSubmitting: (serverId: string, name: string) => realFirstInput.enabled && actual.isSubmitting(serverId, name),
+  };
 });
 
 const firstInput = vi.hoisted(() => ({
@@ -137,16 +154,20 @@ const firstInput = vi.hoisted(() => ({
   send: vi.fn<(serverId: string, id: string) => Promise<void>>(),
   confirm: vi.fn(),
 }));
-vi.mock('../stores/newConversation', () => ({
-  useNewConversation: Object.assign((select: (state: unknown) => unknown) => select({
-    attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {}, busy: {},
-  }), { getState: () => ({ attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {} }) }),
-  readFirstInput: (serverId: string, name: string) => firstInput.attempt?.serverId === serverId
-    && firstInput.attempt.sessionName === name ? firstInput.attempt : null,
-  confirmFirstInput: firstInput.confirm,
-  sendFirstInput: firstInput.send,
-  restoreAttempt: () => null,
-}));
+vi.mock('../stores/newConversation', async (original) => {
+  const actual = await original<typeof import('../stores/newConversation')>();
+  return { ...actual,
+    useNewConversation: Object.assign((select: (state: ReturnType<typeof actual.useNewConversation.getState>) => unknown) => realFirstInput.enabled ? actual.useNewConversation(select) : select({
+      attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {}, busy: {},
+    }), { getState: () => realFirstInput.enabled ? actual.useNewConversation.getState()
+      : { attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {}, busy: {} } }),
+    readFirstInput: (serverId: string, name: string) => realFirstInput.enabled ? actual.readFirstInput(serverId, name) : firstInput.attempt?.serverId === serverId
+      && firstInput.attempt.sessionName === name ? firstInput.attempt : null,
+    confirmFirstInput: (id: string) => realFirstInput.enabled ? actual.confirmFirstInput(id) : firstInput.confirm(id),
+    sendFirstInput: (serverId: string, id: string) => realFirstInput.enabled ? actual.sendFirstInput(serverId, id) : firstInput.send(serverId, id),
+    restoreAttempt: (serverId: string) => realFirstInput.enabled ? actual.restoreAttempt(serverId) : null,
+  };
+});
 
 // Lista isolada: a bolha só registra o texto recebido, pra provar o que chega nela.
 const bubbleTexts = vi.hoisted(() => [] as string[]);
@@ -184,6 +205,7 @@ import { OptionButtons } from './OptionButtons';
 import ChatScreen from '../../app/s/[server]/[name]/index';
 import CreateRoute from '../../app/create';
 import { NewConversation } from '../features/create/NewConversation';
+import { _resetNewConversationForTests, recoverAttempt, restoreAttempt, useNewConversation } from '../stores/newConversation';
 import { AccessibilityInfo } from 'react-native';
 
 async function render(el: ReturnType<typeof createElement>) {
@@ -432,6 +454,136 @@ describe('primeiro texto recuperado no Composer', () => {
     expect(firstInput.send).toHaveBeenCalledTimes(1);
     expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('texto novo', expect.any(Number));
     act(() => reopened.root.unmount());
+  });
+});
+
+describe('primeiro envio incerto com os stores reais', () => {
+  const props = { serverId: 's1', name: 'recuperada', draft: 'primeiro texto', firstInputId: 'unknown-real' };
+  afterEach(() => { vi.useRealTimers(); _resetNewConversationForTests(); });
+  beforeEach(() => {
+    realFirstInput.enabled = true;
+    realFirstInput.send.mockReset().mockResolvedValue(undefined);
+    realFirstInput.history.mockReset().mockResolvedValue([]);
+    _resetNewConversationForTests();
+    storage.memory.set('create.attempt.v1:s1', JSON.stringify({
+      id: 'unknown-real', serverId: 's1', body: { name: 'recuperada', cwd: '/repo', provider: 'codex' },
+      sessionName: 'recuperada', text: 'primeiro texto', phase: 'send_unknown',
+    }));
+    storage.memory.set('draft.v1:s1::recuperada', JSON.stringify({
+      version: 1, text: 'primeiro texto', revision: 1, transcript: null, attachment: null,
+      submission: { text: 'primeiro texto', draftRevision: 1, status: 'unknown' },
+    }));
+    restoreAttempt('s1');
+  });
+
+  it('Recuperar não envia nem descarta; Enviar uma vez remove tentativa e libera Nova conversa', async () => {
+    let done!: () => void;
+    realFirstInput.send.mockImplementationOnce(() => new Promise<void>((resolve) => { done = resolve; }));
+    const { container, root } = await render(createElement(Composer, props));
+    const send = container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
+    await act(async () => send.click());
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('nova_conversa_envio_incerto');
+    act(() => button(container, 'composer_draft_recover')!.click());
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(useNewConversation.getState().attempts.s1?.phase).toBe('send_unknown');
+    expect(send.disabled).toBe(false);
+    act(() => { send.click(); send.click(); });
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'recuperada', 'primeiro texto');
+    expect(useNewConversation.getState().attempts.s1).toBeUndefined();
+    expect(storage.memory.has('create.attempt.v1:s1')).toBe(false);
+    await act(async () => done());
+    expect(container.querySelector('textarea')!.value).toBe('');
+    act(() => root.unmount());
+
+    const creation = await render(createElement(NewConversation, {
+      server: { id: 's1', label: 'S1', baseUrl: 'http://s1', token: 'fixture' },
+      destination: null, destinationPending: false, destinationSummary: null, settingsSummary: null,
+      notices: null, options: null, body: { cwd: '/repo', provider: 'codex' }, blocked: false,
+    }));
+    act(() => {
+      const field = creation.container.querySelector('textarea')!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'outra conversa');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(button(creation.container, 'nova_conversa_enviar')!.disabled).toBe(false);
+    expect(realFirstInput.send).toHaveBeenCalledTimes(1);
+    act(() => creation.root.unmount());
+  });
+
+  it('created que fica incerto no próprio toque não repete o POST nem abandona a tentativa', async () => {
+    storage.memory.set('create.attempt.v1:s1', JSON.stringify({
+      id: props.firstInputId, serverId: 's1', body: { name: props.name, cwd: '/repo', provider: 'codex' },
+      sessionName: props.name, text: props.draft, phase: 'created',
+    }));
+    storage.memory.delete('draft.v1:s1::recuperada');
+    _resetNewConversationForTests();
+    restoreAttempt('s1');
+    realFirstInput.send.mockRejectedValueOnce(new TypeError('offline'));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, props.name, props.draft);
+    expect(useNewConversation.getState().attempts.s1?.phase).toBe('send_unknown');
+    expect(container.textContent).toContain('nova_conversa_envio_incerto');
+    expect(container.querySelector('textarea')!.value).toBe(props.draft);
+    act(() => root.unmount());
+  });
+
+  it('envio automático após Recuperar não abandona send_unknown nem dispara POST', async () => {
+    vi.useFakeTimers();
+    realFirstInput.transcribe.mockResolvedValueOnce({ text: 'Execute a tarefa solicitada.', raw: '', aviso: null });
+    const { container, root } = await render(createElement(Composer, props));
+    act(() => button(container, 'composer_draft_recover')!.click());
+    act(() => {
+      const field = container.querySelector('textarea')!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, '');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_gravar_audio"]')!.click());
+    await act(async () => voiceInput.onFim!(new File(['audio'], 'voice.m4a', { type: 'audio/mp4' }), 'silencio', 'file:///voice.m4a'));
+    expect(container.textContent).toContain('composer_enviando_cancelar');
+    await act(async () => vi.advanceTimersByTimeAsync(3250));
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(useNewConversation.getState().attempts.s1?.phase).toBe('send_unknown');
+    expect(storage.memory.has('create.attempt.v1:s1')).toBe(true);
+    expect(container.textContent).toContain('nova_conversa_envio_incerto');
+    act(() => root.unmount());
+  });
+
+  it.each(['inFlight', 'remove'])('abandono impedido por %s conserva tentativa e texto sem POST', async (failure) => {
+    const { container, root } = await render(createElement(Composer, props));
+    act(() => button(container, 'composer_draft_recover')!.click());
+    let finish!: (events: []) => void;
+    realFirstInput.history.mockImplementationOnce(() => new Promise<[]>((resolve) => { finish = resolve; }));
+    const recovery = failure === 'inFlight' ? recoverAttempt('s1') : null;
+    storage.failRemove = failure === 'remove';
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(realFirstInput.send).not.toHaveBeenCalled();
+    expect(useNewConversation.getState().attempts.s1?.phase).toBe('send_unknown');
+    expect(storage.memory.has('create.attempt.v1:s1')).toBe(true);
+    expect(container.querySelector('textarea')!.value).toBe(props.draft);
+    expect(container.textContent).toContain(failure === 'remove' ? 'nova_conversa_salvar_erro' : 'nova_conversa_envio_incerto');
+    if (recovery) await act(async () => { finish([]); await recovery; });
+    act(() => root.unmount());
+  });
+
+  it('ACK da nova ação preserva edição posterior e o destino original', async () => {
+    let done!: () => void;
+    realFirstInput.send.mockImplementationOnce(() => new Promise<void>((resolve) => { done = resolve; }));
+    const { container, root } = await render(createElement(Composer, props));
+    act(() => button(container, 'composer_draft_recover')!.click());
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    act(() => {
+      const field = container.querySelector('textarea')!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'edição durante envio');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => done());
+    expect(container.querySelector('textarea')!.value).toBe('edição durante envio');
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::recuperada')!).text).toBe('edição durante envio');
+    expect(realFirstInput.send).toHaveBeenCalledExactlyOnceWith({ id: 's1' }, 'recuperada', 'primeiro texto');
+    expect(storage.memory.has('draft.v1:s2::recuperada')).toBe(false);
+    act(() => root.unmount());
   });
 });
 
