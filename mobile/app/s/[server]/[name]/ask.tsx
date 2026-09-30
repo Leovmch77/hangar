@@ -141,7 +141,7 @@ export default function AskSheet() {
   };
 
   return (
-    <KeyboardAvoidingView behavior="padding" style={styles.root}>
+    <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.root}>
       <View style={styles.inner}>
         <AskStepper key={request.generation} payload={payload} onSubmit={handleSubmit} onClose={handleCancel} />
         {routeError ? (

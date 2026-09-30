@@ -136,6 +136,7 @@ export function MessageList({
       initialScrollAtEnd
       maintainScrollAtEnd
       maintainVisibleContentPosition
+      keyboardShouldPersistTaps="handled"
       onStartReached={onLoadOlder}
       onStartReachedThreshold={1}
       contentContainerStyle={styles.content}

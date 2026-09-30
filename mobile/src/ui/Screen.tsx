@@ -13,7 +13,7 @@ export function Screen({ children }: { children: React.ReactNode }) {
     <BlurTargetContext.Provider value={alvo}>
       <BlurTargetView ref={alvo} style={styles.root}>
         <Background />
-        <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
           {children}
         </SafeAreaView>
       </BlurTargetView>

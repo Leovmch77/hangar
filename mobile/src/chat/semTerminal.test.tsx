@@ -12,9 +12,10 @@ vi.mock('react-native', async (original) => ({
 }));
 
 const routerPush = vi.hoisted(() => vi.fn());
+const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: routerPush, back: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
 }));
 vi.mock('@hangar/core', async (original) => ({
@@ -506,6 +507,7 @@ describe('rascunho guardado no Composer', () => {
 describe('handoff nas rotas reais', () => {
   beforeEach(() => {
     route.params = { server: 's1', name: 'sess' }; route.segments = ['s'];
+    navigation.back.mockClear(); navigation.replace.mockClear(); navigation.canGoBack = true;
     composerChat.send.mockClear(); firstInput.send.mockClear(); firstInput.confirm.mockClear();
     firstInput.attempt = {
       id: 'attempt-route', serverId: 's1', body: { name: 'sess', cwd: '/repo', provider: 'claude' },
@@ -557,6 +559,24 @@ describe('handoff nas rotas reais', () => {
     route.segments = ['s'];
     await act(async () => root.render(createElement(CreateRoute)));
     expect(container.querySelector('[data-create]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it.each([true, false])('Nova conversa tem saída acessível com ou sem tela anterior: %s', async (canGoBack) => {
+    route.segments = ['create']; navigation.canGoBack = canGoBack;
+    const { container, root } = await render(createElement(CreateRoute));
+    const cancel = container.querySelector<HTMLButtonElement>('[aria-label="comum_cancelar"]');
+    expect(cancel).not.toBeNull();
+    expect(cancel!.style.minHeight).toBe('44px');
+    expect(cancel!.style.minWidth).toBe('44px');
+    act(() => cancel!.click());
+    if (canGoBack) {
+      expect(navigation.back).toHaveBeenCalledTimes(1);
+      expect(navigation.replace).not.toHaveBeenCalled();
+    } else {
+      expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('/');
+      expect(navigation.back).not.toHaveBeenCalled();
+    }
     act(() => root.unmount());
   });
 });

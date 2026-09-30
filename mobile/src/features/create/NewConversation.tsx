@@ -83,7 +83,7 @@ export function NewConversation({ server, destination, destinationPending, desti
 
   return (
     <View style={styles.root}>
-      <KeyboardAvoidingView behavior="padding" style={styles.keyboard}>
+      <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.keyboard}>
       <ScrollView style={styles.states} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>{m.sessao_nova()}</Text>
         {destinationPending && !optionsOpen ? destination : null}

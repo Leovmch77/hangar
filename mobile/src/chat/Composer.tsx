@@ -937,7 +937,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         {steerFeedback && state === 'working' ? <Text style={[styles.steerText, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsRow}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsRow} keyboardShouldPersistTaps="handled">
           <View style={styles.pillDuo}>
             <ModelPill serverId={serverId} name={name} />
             <EffortPill serverId={serverId} name={name} />
@@ -1231,6 +1231,9 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '500',
   },
   steerBtn: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
@@ -1256,7 +1259,8 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
     paddingVertical: 6,
-    minHeight: 32,
+    minWidth: 44,
+    minHeight: 44,
     justifyContent: 'center',
   },
   codexChipText: {
@@ -1267,7 +1271,8 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[1],
-    minHeight: 32,
+    minWidth: 44,
+    minHeight: 44,
     maxWidth: 220,
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
@@ -1346,6 +1351,9 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: 3,
   },
   autoChip: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
     alignSelf: 'flex-start',
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
@@ -1365,6 +1373,9 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   undoBtn: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
@@ -1385,6 +1396,9 @@ const styles = StyleSheet.create((theme) => ({
     flexWrap: 'wrap',
   },
   retryBtn: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
@@ -1434,9 +1448,9 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
   },
   attachRemove: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 44,
+    height: 44,
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
