@@ -47,3 +47,17 @@ def test_guest_cannot_manage_guests(client):
     r = c.post("/api/guests", headers={"Authorization": f"Bearer {tok}"},
                json={"name": "x", "root": root, "sees_owner": True, "owner_sees": True})
     assert r.status_code == 403
+
+
+def test_update_and_delete_force_list_republish(client):
+    from app import sse
+    c, root = client
+    gid = c.post("/api/guests", headers=OWNER,
+                 json={"name": "ana", "root": root, "sees_owner": False, "owner_sees": True}).json()["id"]
+    sse._list_refresher.sig = "velha"
+    c.post(f"/api/guests/{gid}", headers=OWNER,
+           json={"root": root, "sees_owner": True, "owner_sees": False})
+    assert sse._list_refresher.sig is None
+    sse._list_refresher.sig = "velha"
+    c.post(f"/api/guests/{gid}/delete", headers=OWNER)
+    assert sse._list_refresher.sig is None

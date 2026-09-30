@@ -378,6 +378,9 @@ def _list_sig(infos) -> str:
           # Ligar/desligar o compartilhamento não mexe em mais nada da sessão: sem isto o selo 🔗
           # não aparece nem some até outra coisa mudar a assinatura.
           getattr(i, "shared", False),
+          # O dono da sessão (convidado) é gravado depois da criação, e some ao apagar o convidado:
+          # sem isto o rótulo e a visibilidade ficam velhos até outra coisa mudar a assinatura.
+          getattr(i, "owner", None),
           # Sucessão do árbitro muda só este campo na linha do orquestrador.
           getattr(i, "orq_arbiter", None))
          for i in infos],

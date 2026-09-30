@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app import guest_users
+from app import guest_users, sse
 from app.auth import require_auth
 from app.mensagens import erro
 
@@ -44,12 +44,18 @@ def create_guest(body: NewGuest) -> dict:
     return {"id": g.id, "token": token}
 
 
+def _republish_lists() -> None:
+    # A lista SSE só refiltra quando a versão muda; zerar a assinatura força a próxima publicação.
+    sse._list_refresher.sig = None
+
+
 @router.post("/api/guests/{gid}", dependencies=[Depends(_owner_only)])
 def update_guest(gid: str, body: GuestSettings) -> dict:
     try:
         g = guest_users.update(gid, body.root, body.sees_owner, body.owner_sees)
     except guest_users.GuestError as e:
         raise _falha(e) from None
+    _republish_lists()
     return {"id": g.id}
 
 
@@ -59,6 +65,7 @@ def delete_guest(gid: str) -> dict:
         guest_users.delete(gid)
     except guest_users.GuestError as e:
         raise _falha(e) from None
+    _republish_lists()
     return {"ok": True}
 
 

@@ -55,3 +55,10 @@ def test_push_suppressed_for_hidden_guest_session(ana, monkeypatch):
     monkeypatch.setattr(push, "_in_quiet_hours", lambda: False)
     assert push._suppressed("a")
     assert not push._suppressed("dono")
+
+
+def test_list_sig_changes_when_only_owner_changes():
+    from app.models import SessionInfo
+    a = SessionInfo(name="a", cwd="/p")
+    b = SessionInfo(name="a", cwd="/p", owner="ana")
+    assert sse._list_sig([a]) != sse._list_sig([b])
