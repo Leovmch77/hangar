@@ -225,8 +225,13 @@ def collect(commands: list[str], sanitize: Callable[[str, bool, bool], str]) -> 
                     if word in {";", "&&", "||", "|", "&"}:
                         segment(words)
                         words = []
-                    elif word in {"<", ">", ">>", "<<", "(", ")"}:
-                        # Redirecionamento e substituição não são novas chamadas de script.
+                    elif word in {"<", ">", ">>", "<>", ">|", ">&", "<&", "&>", "&>>"}:
+                        # O destino não é comando; a chamada após &&, || ou ; ainda precisa entrar.
+                        if words and words[-1].isdigit():
+                            words.pop()
+                        next(lexer, None)
+                    elif word in {"<<", "<<<", "(", ")"}:
+                        warn("Sintaxe composta precisa de conferência manual das dependências.")
                         break
                     else:
                         words.append(word)

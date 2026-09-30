@@ -144,6 +144,9 @@
     try {
       const preview = await importShortcuts({ data }, target);
       if (mine !== generation) return;
+      if (data && typeof data === 'object' && 'version' in data && data.version === 2 && !Array.isArray(preview.files)) {
+        throw new Error(m.shortcut_transfer_update_required());
+      }
       secrets = Object.fromEntries(preview.placeholders.map((p) => [p.id, Object.fromEntries(p.names.map((n) => [n, '']))]));
       pending = { data, preview, target };
     } catch (err) {

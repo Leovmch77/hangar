@@ -720,3 +720,18 @@ def test_import_warning_resolves_destination_home_without_reading_credential(tmp
     result = import_shortcuts({"version": 2, "shortcuts": [], "scripts": [],
                                "warnings": ["Credencial externa: ⟦HOME⟧/.local/vm.pw --token private-value"]})
     assert result["warnings"] == [f"Credencial externa: {tmp_path}/.local/vm.pw --token ⟦SEGREDO:token⟧"]
+
+
+@pytest.mark.parametrize("command", [
+    "printf ready >/dev/null && child",
+    "printf ready 2>&1; child",
+    ">/dev/null child",
+    'printf ready >>"$HOME/output" || child',
+])
+def test_script_dependencies_after_redirection_are_included(tmp_path, command):
+    from app.shortcut_transfer import export_payload
+    _script(tmp_path, ".local/bin/parent", "#!/bin/sh\n" + command)
+    _script(tmp_path, ".local/bin/child", "#!/bin/sh\necho ok")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "parent"}])
+    result = export_payload()
+    assert {s["path"] for s in result["scripts"]} == {".local/bin/parent", ".local/bin/child"}

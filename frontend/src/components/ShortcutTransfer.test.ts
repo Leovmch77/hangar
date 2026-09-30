@@ -98,13 +98,29 @@ describe('transferência seletiva', () => {
   });
 
   it('bloqueia importação até preencher os segredos de scripts', async () => {
-    vi.mocked(importShortcuts).mockResolvedValue({ added: 1, replaced: 0,
+    vi.mocked(importShortcuts).mockResolvedValue({ added: 1, replaced: 0, files: [],
       placeholders: [{ id: 'script:.local/bin/one', label: '.local/bin/one', names: ['token'] }] });
     await readFile({ version: 2, shortcuts: [shortcuts[0]], scripts });
     const dialog = document.querySelector('[role=dialog]')!;
     expect(button(m.atalhos_importar(), dialog).disabled).toBe(true);
     const input = dialog.querySelector<HTMLInputElement>('input[type=password]')!;
     input.value = 'own-token'; input.dispatchEvent(new Event('input', { bubbles: true })); await tick();
+    expect(button(m.atalhos_importar(), dialog).disabled).toBe(false);
+  });
+
+  it('recusa prévia antiga para bundle v2 antes de permitir gravar', async () => {
+    await readFile({ version: 2, shortcuts: [shortcuts[0]], scripts });
+    expect(target.textContent).toContain(m.shortcut_transfer_update_required());
+    expect(document.querySelector('[role=dialog]')).toBeNull();
+    expect(importShortcuts).toHaveBeenCalledTimes(1);
+    expect(importShortcuts).toHaveBeenCalledWith({ data: expect.anything() }, fixture.servers[0]);
+    expect(reloadShortcuts).not.toHaveBeenCalled();
+  });
+
+  it('continua aceitando arquivo legado em servidor legado', async () => {
+    await readFile({ version: 1, shortcuts: [shortcuts[0]] });
+    const dialog = document.querySelector('[role=dialog]')!;
+    expect(dialog).not.toBeNull();
     expect(button(m.atalhos_importar(), dialog).disabled).toBe(false);
   });
 });

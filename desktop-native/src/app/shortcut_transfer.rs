@@ -60,6 +60,11 @@ fn export_supported(value: &Value, include_scripts: bool) -> bool {
         && (!include_scripts || value.get("scripts").is_some_and(Value::is_array))
 }
 
+fn import_supported(data: &Value, preview: &Value) -> bool {
+    data.get("version").and_then(Value::as_u64) != Some(2)
+        || preview.get("files").is_some_and(Value::is_array)
+}
+
 impl Hangar {
     fn transfer_note(&mut self, text: String, error: bool, cx: &mut Context<Self>) {
         self.shortcuts.transfer_note = Some((text, error));
@@ -234,6 +239,10 @@ impl Hangar {
             }
             ShortcutsReply::Previewed(_, data, Ok(preview)) => {
                 self.shortcuts.import_loading = false;
+                if !import_supported(&data, &preview) {
+                    self.transfer_note(tr_shared("shortcut_transfer_update_required", &[]), true, cx);
+                    return;
+                }
                 let Some(api) = self.api.clone() else { return };
                 let mut fields = Vec::new();
                 let mut changes = Vec::new();
@@ -419,7 +428,7 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{export_file, export_query, export_supported, missing_secret, warnings};
+    use super::{export_file, export_query, export_supported, import_supported, missing_secret, warnings};
     use serde_json::json;
 
     #[test]
@@ -460,5 +469,15 @@ mod tests {
         assert!(!export_supported(&json!({"version": 2, "shortcuts": []}), true));
         assert!(!export_supported(&json!({"version": 2, "scripts": null}), true));
         assert!(export_supported(&json!({"version": 2, "shortcuts": [], "scripts": []}), true));
+    }
+
+    #[test]
+    fn import_requires_bundle_preview_support_but_keeps_legacy_files() {
+        let old = json!({"added": 1, "replaced": 0, "placeholders": []});
+        assert!(!import_supported(&json!({"version": 2, "scripts": []}), &old));
+        assert!(!import_supported(&json!({"version": 2}), &json!({"files": null})));
+        assert!(import_supported(&json!({"version": 2}), &json!({"files": []})));
+        assert!(import_supported(&json!({"version": 1}), &old));
+        assert!(import_supported(&json!([]), &old));
     }
 }
