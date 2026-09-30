@@ -65,7 +65,9 @@ o hook `eas-build-post-install` compila as duas antes do bundle; sem a do core o
 
 CLI: `eas-cli` 23.2.0 (o `eas.json` exige `>= 12.0.0`). Rode sempre em subshell dentro de
 `mobile/`, nunca na raiz: na raiz o CLI não acha o projeto e pode deixar um `app.json` vazio.
-O EAS envia só o que o git rastreia — o que não foi commitado não entra no binário.
+O EAS empacota a árvore de trabalho, incluindo alterações em arquivos rastreados ainda
+não commitadas. Gere da revisão conferida e registre também o diff: o `gitCommitHash` do
+build identifica o HEAD e, sozinho, não identifica alterações locais enviadas.
 
 ```bash
 (cd mobile && eas build --platform android --profile preview)
@@ -96,6 +98,31 @@ O EAS envia só o que o git rastreia — o que não foi commitado não entra no 
 `npm run typecheck` e `npm test` (em `mobile/`) rodam sob a trava `/tmp/hangar-verificacao.lock`,
 compartilhada com as outras sessões da máquina. No repositório, testes e typecheck só rodam
 quando pedidos; não contorne a trava.
+
+## Fronteira de manutenção
+
+| Parte | Responsabilidade |
+|---|---|
+| `packages/core` | APIs e destino por servidor, tipos, parser/histórico, formatação, traduções, agrupamento e transições puras da primeira conversa (`firstConversation.ts`) |
+| `mobile` | UI Expo/React Native, teclado, permissões, `AppState`, transporte SSE nativo, persistência e recuperação no aparelho |
+| Backend | processos dos providers e entrega ao agente; o app chama o servidor existente |
+| Desktop Rust | consome a API do backend e os catálogos `messages/*.json`; mantém UI própria e não importa o core TypeScript |
+
+Os stores nativos coordenam conexões, respostas antigas, SecureStore/MMKV, URIs de anexos
+e áudio Expo. Não devem ir para o core só porque têm o mesmo nome que stores do PWA.
+A criação já usa as transições puras do core; sua execução e persistência ficam no app.
+
+Duplicações concretas ainda presentes, sem refatoração nesta entrega:
+
+- Classificação de recusa definitiva de SSE em `src/net/sse.ts` e `src/stores/chat.ts`.
+- Classificação de input recusado em `src/stores/chat.ts` e `src/stores/newConversation.ts`;
+  a criação distingue `409`, portanto as regras não são intercambiáveis.
+- Validação de opacidade em `src/stores/aparencia.ts` e `src/theme/unistyles.ts`; o tema
+  precisa inicializar antes do store.
+
+Esses exemplos foram conferidos no código mobile/core. A equivalência entre implementações
+web e nativa não foi auditada neste lote. A fronteira define onde manter cada integração,
+sem afirmar que toda regra compartilhável já foi extraída.
 
 ## Limitações conhecidas
 
