@@ -94,3 +94,6 @@ node_modules/
 
 # Referencia de terceiros baixada pra estudo (beautiful-ui). Nao e nosso codigo, nao vai pro repo.
 .refs/
+
+# Site gerado por site/build.py
+site/public/

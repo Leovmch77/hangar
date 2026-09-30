@@ -1,0 +1,73 @@
+import pathlib
+import re
+import sys
+import tempfile
+import unittest
+
+SITE = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SITE))
+sys.path.insert(0, str(SITE / "src"))
+
+import build  # noqa: E402
+import strings  # noqa: E402
+
+# home real e IP da tailnet; /home/dev/ é o dado sintético das cenas
+MACHINE = re.compile(r"/home/(?!dev/)[a-z]|/tmp/claude-|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+")
+LEFTOVER = re.compile(r"«[^»]*»|\{\{|<sc-(for|if)|<dc-import|<x-dc|<helmet|/_blob/|\bonClick=|\bref=")
+
+
+class BuildTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = pathlib.Path(self.tmp.name)
+        self.pages = build.build(self.out)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_writes_pt_and_en(self):
+        self.assertEqual({p.relative_to(self.out).as_posix() for p in self.pages}, {"index.html", "en/index.html"})
+        self.assertIn('<html lang="pt-BR"', (self.out / "index.html").read_text())
+        self.assertIn('<html lang="en"', (self.out / "en/index.html").read_text())
+
+    def test_no_template_syntax_left(self):
+        for page in self.pages:
+            m = LEFTOVER.search(page.read_text())
+            self.assertIsNone(m, f"{page}: {m and m.group(0)}")
+
+    def test_every_local_asset_exists(self):
+        for page in self.pages:
+            for ref in re.findall(r'(?:src|href|poster|data-src|data-poster)="(/[^"#]*)"', page.read_text()):
+                target = self.out / ref.lstrip("/")
+                if ref.endswith("/"):
+                    target = target / "index.html"
+                self.assertTrue(target.exists(), f"{page}: {ref}")
+
+    def test_hreflang_both_ways(self):
+        for page in self.pages:
+            html = page.read_text()
+            self.assertIn('hreflang="pt-BR" href="https://hangar.dev.br/"', html)
+            self.assertIn('hreflang="en" href="https://hangar.dev.br/en/"', html)
+
+    def test_same_structure_in_both_languages(self):
+        def tags(p):
+            return re.findall(r"<(section|article|video|button|a)\b", p.read_text())
+        self.assertEqual(tags(self.out / "index.html"), tags(self.out / "en/index.html"))
+
+    def test_every_string_has_both_languages(self):
+        for key, pair in strings.T.items():
+            self.assertEqual(len(pair), 2, key)
+            self.assertTrue(pair[0] and pair[1], key)
+
+    def test_no_machine_data_in_site_tree(self):
+        for f in SITE.rglob("*"):
+            parts = set(f.relative_to(SITE).parts)
+            if not f.is_file() or parts & {"_fonte", "public", "media", "out", "cfg"} or f.name == "test_build.py":
+                continue
+            if f.suffix in {".html", ".py", ".js", ".css", ".sh", ".json", ".md", ".mjs", ".txt"}:
+                m = MACHINE.search(f.read_text())
+                self.assertIsNone(m, f"{f}: {m and m.group(0)}")
+
+
+if __name__ == "__main__":
+    unittest.main()
