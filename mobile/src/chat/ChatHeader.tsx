@@ -1,10 +1,13 @@
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import type { State } from '@hangar/core';
+import { useLocalSearchParams } from 'expo-router';
+import { cwdParts, type State } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { StatePill } from '../features/sessions/StatePill';
 import { ContextRing } from './ContextRing';
 import { Icon } from '../ui/Icon';
+import { useSessions } from '../stores/sessions';
+import { useServers } from '../stores/servers';
 
 // Cabeçalho do chat, na ordem da PWA no celular: voltar · título+chevron · anel · pílula de
 // estado · terminal · ⋯. O título é o que cede espaço primeiro, então o chip do plano fica na
@@ -31,6 +34,13 @@ export function ChatHeader({
   chipPlan?: React.ReactNode;
 }) {
   const { theme } = useUnistyles();
+  // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
+  const params = useLocalSearchParams<{ server?: string | string[] }>();
+  const serverId = Array.isArray(params.server) ? params.server[0] : params.server;
+  const row = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
+  const serverLabel = useServers((s) => s.servers.find((x) => x.id === serverId)?.label) ?? row?.serverLabel ?? '';
+  const pasta = row?.cwd ? cwdParts(row.cwd).base : '';
+  const destino = [serverLabel, pasta].filter(Boolean).join(' · ');
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -45,14 +55,23 @@ export function ChatHeader({
         </Pressable>
         <Pressable
           onPress={onTitlePress}
-          style={styles.titulo}
+          style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
           accessibilityRole="button"
-          accessibilityLabel={m.sessao_trocar_de()}
+          // Nome e destino completos para o leitor de tela; a ação vai na dica.
+          accessibilityLabel={[name, serverLabel, row?.cwd].filter(Boolean).join(', ')}
+          accessibilityHint={m.sessao_trocar_de()}
         >
-          <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-            {name}
-          </Text>
-          <Icon name="ChevronDown" size={14} color={theme.tokens.text.muted} />
+          <View style={styles.nomeLinha}>
+            <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
+              {name}
+            </Text>
+            <Icon name="ChevronDown" size={14} color={theme.tokens.text.muted} />
+          </View>
+          {destino ? (
+            <Text style={[styles.destino, { color: theme.tokens.text.secondary }]} numberOfLines={1}>
+              {destino}
+            </Text>
+          ) : null}
         </Pressable>
         <ContextRing pct={contextPct} />
         {state ? <StatePill state={state} /> : null}
@@ -111,10 +130,21 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     flexShrink: 1,
     minWidth: 0,
+    justifyContent: 'center',
+    minHeight: 44,
+    borderRadius: theme.base.radius.md,
+  },
+  nomeLinha: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    minHeight: 44,
+    minWidth: 0,
+  },
+  destino: {
+    fontSize: theme.base.text.xs,
+  },
+  tocado: {
+    backgroundColor: theme.tokens.bg.hover,
   },
   back: {
     width: 44,
