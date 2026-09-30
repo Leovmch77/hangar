@@ -14,7 +14,7 @@ import {
 import type { CotaContaResumo } from './cotaResumo';
 import type { ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
-import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncReport } from './configSync';
+import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
   SessionInfo,
@@ -2805,10 +2805,44 @@ export async function resolveLoopForServer(s: Server, name: string, accept: bool
   return res.json() as Promise<{ loop: LoopState }>;
 }
 
+// Com `stream=1` o backend manda uma linha por etapa e o resultado na última. Hangar antigo
+// ignora o parâmetro e devolve JSON puro: aí só o resultado, sem as etapas.
+async function readConfigSyncStream<T>(res: Response, onProgress: (p: ConfigSyncProgress) => void,
+  onPlain: () => void): Promise<T> {
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  if (!res.headers.get('content-type')?.includes('ndjson') || !res.body) {
+    onPlain();
+    return res.json() as Promise<T>;
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let rest = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    rest += value;
+    const lines = rest.split('\n');
+    rest = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const ev = JSON.parse(line);
+      if (ev.type === 'progress') onProgress(ev as ConfigSyncProgress);
+      else if (ev.type === 'done') return ev.result as T;
+      else {
+        const detail = formataErro(ev.detail) ?? String(ev.detail);
+        throw Object.assign(new Error(`${ev.status}: ${detail}`), { status: ev.status });
+      }
+    }
+  }
+  throw new Error(m.shared_config_stream_cut());
+}
+
 // Configuração compartilhada. O manifesto soma o disco inteiro de skills da máquina, e a
 // aplicação instala plugins no destino: os prazos são de minutos, não os 8s de uma leitura.
-export function getConfigSyncManifestForServer(s: Server, signal?: AbortSignal): Promise<ConfigSyncManifest> {
-  return apiFetchForServer(s, '/api/config-sync/manifest', { signal: comTeto(signal, 60_000) }, 60_000);
+export async function getConfigSyncManifestForServer(s: Server, signal?: AbortSignal,
+  onProgress?: (p: ConfigSyncProgress) => void, onPlain?: () => void): Promise<ConfigSyncManifest> {
+  if (!onProgress) return apiFetchForServer(s, '/api/config-sync/manifest', { signal: comTeto(signal, 60_000) }, 60_000);
+  const res = await apiFetchRes('/api/config-sync/manifest?stream=1', { signal: comTeto(signal, 180_000) }, s);
+  return readConfigSyncStream(res, onProgress, onPlain ?? (() => {}));
 }
 
 export async function getConfigSyncBundleForServer(s: Server, items: readonly ConfigSyncItem[], signal?: AbortSignal,
@@ -2830,13 +2864,15 @@ export function translateConfigSyncTextsForServer(s: Server, texts: string[], la
   }, 300_000);
 }
 
-export async function applyConfigSyncForServer(s: Server, items: readonly ConfigSyncItem[], bundle: Blob, signal?: AbortSignal): Promise<ConfigSyncReport> {
-  const res = await apiFetchRes(`/api/config-sync/apply?items=${encodeURIComponent(items.join(','))}`, {
+export async function applyConfigSyncForServer(s: Server, items: readonly ConfigSyncItem[], bundle: Blob, signal?: AbortSignal,
+  onProgress?: (p: ConfigSyncProgress) => void, onPlain?: () => void): Promise<ConfigSyncReport> {
+  const res = await apiFetchRes(`/api/config-sync/apply?items=${encodeURIComponent(items.join(','))}${onProgress ? '&stream=1' : ''}`, {
     method: 'POST',
     body: bundle,
     headers: { 'Content-Type': 'application/gzip' },
     signal: comTeto(signal, 600_000),
   }, s);
+  if (onProgress) return readConfigSyncStream(res, onProgress, onPlain ?? (() => {}));
   if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
   return res.json() as Promise<ConfigSyncReport>;
 }

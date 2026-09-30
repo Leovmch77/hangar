@@ -2,10 +2,11 @@
   import { onDestroy, untrack } from 'svelte';
   import {
     CONFIG_SYNC_ITEMS, applyConfigSyncForServer, configSyncItemLabel,
-    configSyncRows, configSyncWarningText, diffManifests, getConfigSyncBundleForServer,
-    getConfigSyncManifestForServer, translateConfigSyncTextsForServer,
+    configSyncRows, configSyncStepFrom, configSyncStepText, configSyncWarningText, diffManifests,
+    getConfigSyncBundleForServer, getConfigSyncManifestForServer, translateConfigSyncTextsForServer,
     type ConfigSyncDiff, type ConfigSyncGroup, type ConfigSyncItem, type ConfigSyncItemResult,
-    type ConfigSyncManifest, type ConfigSyncReport, type ConfigSyncRow,
+    type ConfigSyncMachineStep, type ConfigSyncManifest, type ConfigSyncProgress,
+    type ConfigSyncReport, type ConfigSyncRow,
   } from '@hangar/core';
   import { listOwnServers, onServersChanged, type Server } from '../../lib/auth';
   import ConfirmSheet from '../ConfirmSheet.svelte';
@@ -27,7 +28,9 @@
   let originId = $state(untrack(() => server.id));
   let targetIds = $state<string[]>([]);
   let items = $state<ConfigSyncItem[]>([...CONFIG_SYNC_ITEMS]);
-  let busy = $state('');
+  let busy = $state<'' | 'compare' | 'send'>('');
+  // Etapa de cada máquina na comparação ou no envio em curso; fica na tela depois de acabar.
+  let steps = $state<Record<string, ConfigSyncMachineStep>>({});
   let error = $state('');
   let confirming = $state(false);
   let diffs = $state<Record<string, Partial<Record<ConfigSyncItem, ConfigSyncDiff>> | string>>({});
@@ -56,6 +59,7 @@
   function clearResults() {
     diffs = {};
     reports = {};
+    steps = {};
     base = null;
     picked = {};
     translated = {};
@@ -107,6 +111,11 @@
     };
   }).filter((p) => p.rows.length > 0));
 
+  const progressRows = $derived([
+    ...(origin ? [{ server: origin, role: m.shared_config_role_origin() }] : []),
+    ...targets.map((t) => ({ server: t, role: m.shared_config_role_target() })),
+  ].flatMap((r) => (steps[r.server.id] ? [{ ...r, step: steps[r.server.id] }] : [])));
+
   function togglePick(item: ConfigSyncItem, key: string) {
     picked = { ...picked, [item]: toggle(picked[item] ?? [], key) };
   }
@@ -131,27 +140,48 @@
     return m.shared_config_status_same();
   }
 
+  function setStep(id: string, next: ConfigSyncMachineStep) {
+    steps = { ...steps, [id]: next };
+  }
+
+  function track(id: string) {
+    return {
+      onProgress: (p: ConfigSyncProgress) => setStep(id, configSyncStepFrom(steps[id] ?? { stage: 'connecting' }, p)),
+      onPlain: () => setStep(id, { ...(steps[id] ?? { stage: 'connecting' }), detailed: false }),
+    };
+  }
+
+  async function readManifest(s: Server): Promise<ConfigSyncManifest | string> {
+    setStep(s.id, { stage: 'connecting' });
+    const t = track(s.id);
+    try {
+      const r = await getConfigSyncManifestForServer(s, controller.signal, t.onProgress, t.onPlain);
+      setStep(s.id, { stage: 'read_done', detailed: true });
+      return r;
+    } catch (e) {
+      const text = errorText(e, s);
+      setStep(s.id, { stage: 'failed', error: text });
+      return text;
+    }
+  }
+
   async function compare() {
     if (!origin) return;
     error = '';
     clearResults();
-    busy = m.shared_config_comparing();
+    busy = 'compare';
     try {
-      let from: ConfigSyncManifest;
-      try {
-        from = await getConfigSyncManifestForServer(origin, controller.signal);
-      } catch (e) {
-        error = errorText(e, origin);
+      // Origem e destinos em paralelo: cada linha do andamento avança sozinha.
+      const [from, ...rest] = await Promise.all([origin, ...targets].map(readManifest));
+      if (typeof from === 'string') {
+        error = from;
         return;
       }
       const next: typeof diffs = {};
-      await Promise.all(targets.map(async (t) => {
-        try {
-          next[t.id] = diffManifests(from, await getConfigSyncManifestForServer(t, controller.signal), items);
-        } catch (e) {
-          next[t.id] = errorText(e, t);
-        }
-      }));
+      targets.forEach((t, i) => {
+        const r = rest[i];
+        next[t.id] = typeof r === 'string' ? r : diffManifests(from, r, items);
+      });
       diffs = next;
       base = from;
       void translateDescriptions(origin, from);
@@ -167,21 +197,27 @@
     if (!origin) return;
     error = '';
     reports = {};
+    busy = 'send';
+    steps = Object.fromEntries([[origin.id, { stage: 'packing' }], ...targets.map((t) => [t.id, { stage: 'waiting' }])]);
     try {
-      busy = m.shared_config_packing({ machine: origin.label });
       let bundle: Blob;
       try {
         bundle = await getConfigSyncBundleForServer(origin, items, controller.signal, $state.snapshot(picked));
+        setStep(origin.id, { stage: 'packed' });
       } catch (e) {
         error = errorText(e, origin);
+        setStep(origin.id, { stage: 'failed', error });
         return;
       }
       for (const t of targets) {
-        busy = m.shared_config_sending({ machine: t.label });
+        setStep(t.id, { stage: 'uploading' });
+        const tr = track(t.id);
         try {
-          reports[t.id] = await applyConfigSyncForServer(t, items, bundle, controller.signal);
+          reports[t.id] = await applyConfigSyncForServer(t, items, bundle, controller.signal, tr.onProgress, tr.onPlain);
+          setStep(t.id, { stage: 'applied' });
         } catch (e) {
           reports[t.id] = errorText(e, t);
+          setStep(t.id, { stage: 'failed', error: reports[t.id] as string });
         }
       }
     } finally {
@@ -223,7 +259,32 @@
       <button type="button" disabled={!ready || !!busy} aria-busy={!!busy} onclick={compare}>{m.shared_config_compare()}</button>
       <button type="button" class="primaria" disabled={!ready || !!busy} onclick={() => (confirming = true)}>{m.shared_config_send()}</button>
     </div>
-    {#if busy}<p role="status">{busy}</p>{/if}
+    {#if progressRows.length}
+      <div class="andamento">
+        <p class="rotulo">{m.shared_config_progress_title()}</p>
+        <ul>
+          {#each progressRows as { server: s, role, step } (s.id)}
+            {@const live = !['waiting', 'read_done', 'packed', 'applied', 'failed'].includes(step.stage)}
+            <li class="maquina" class:ativa={live}>
+              <span class="topo">
+                <span class="item">{s.label}</span>
+                <span class="papel">{role}</span>
+                <span class="estado" aria-live="polite" class:falhou={step.stage === 'failed'} class:pronto={step.stage === 'read_done' || step.stage === 'packed' || step.stage === 'applied'}>
+                  {configSyncStepText(step)}
+                </span>
+                {#if live && step.total}<span class="contador">{m.shared_config_step_count({ index: (step.index ?? 0) + 1, total: step.total })}</span>{/if}
+              </span>
+              {#if live && step.total}
+                <span class="barra"><span style:width="{(((step.index ?? 0) + 1) / step.total) * 100}%"></span></span>
+              {/if}
+              {#if live && step.entry && step.stage !== 'after'}<span class="entrada-atual">{step.entry}</span>{/if}
+              {#if live && step.detailed === false}<span class="dica">{m.shared_config_step_no_detail()}</span>{/if}
+              {#if step.stage === 'failed' && step.error}<span class="nomes">{step.error}</span>{/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
 
     {#if translating}<p role="status" class="dica">{m.shared_config_translating()}</p>{/if}
@@ -380,5 +441,15 @@
   .resto { margin-top: var(--space-3); font-size: var(--text-xs); }
   .resto summary { color: var(--text-secondary); cursor: pointer; }
   .resto .nomes { margin-top: var(--space-2); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .andamento { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+  .maquina { flex-direction: column; gap: var(--space-1); }
+  .maquina .topo { align-items: baseline; }
+  .papel { color: var(--text-muted); font-size: var(--text-xs); }
+  .pronto { color: var(--success); }
+  .ativa .estado { color: var(--text-primary); }
+  .contador { color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+  .barra { display: block; height: 3px; border-radius: var(--radius-full); background: var(--border-subtle); overflow: hidden; }
+  .barra > span { display: block; height: 100%; background: var(--accent); transition: width .2s ease; }
+  .entrada-atual { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; }
   select:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 </style>

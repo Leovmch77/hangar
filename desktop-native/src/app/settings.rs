@@ -14,18 +14,18 @@ mod appearance_page;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     General, Appearance, Diary, About,
-    Servers, Sync, Accounts, Orchestration, Harnesses, Voice, Windows, Notifications, Shortcuts, Attachments, Advanced,
+    Servers, Sync, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Windows, Notifications, Shortcuts, Attachments, Advanced,
 }
 
 impl Page {
     const DEVICE: [Page; 4] = [Page::General, Page::Appearance, Page::Diary, Page::About];
-    const SERVER: [Page; 11] = [Page::Servers, Page::Sync, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
+    const SERVER: [Page; 12] = [Page::Servers, Page::Sync, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
         Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Advanced];
 
     fn key(self) -> &'static str {
         match self {
             Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about",
-            Page::Servers => "servers", Page::Sync => "sync", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
+            Page::Servers => "servers", Page::Sync => "sync", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
             Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Windows => "windows", Page::Notifications => "notifications",
             Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Advanced => "advanced",
         }
@@ -34,14 +34,18 @@ impl Page {
     fn icon(self) -> IconName {
         match self {
             Page::General => IconName::Globe, Page::Appearance => IconName::Palette, Page::Diary => IconName::FileText,
-            Page::About => IconName::Info, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw,
+            Page::About => IconName::Info, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
             Page::Voice => IconName::Mic, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
             Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Advanced => IconName::SlidersHorizontal,
         }
     }
 
-    pub(super) fn title(self) -> String { tr(&format!("settings_page_{}", self.key())) }
+    pub(super) fn title(self) -> String {
+        // O nome é o do web: uma frase, um dicionário.
+        if self == Page::SharedConfig { return tr_shared("shared_config_title", &[]); }
+        tr(&format!("settings_page_{}", self.key()))
+    }
 }
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
@@ -724,6 +728,7 @@ impl Hangar {
             Page::Voice | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
             Page::Servers => self.render_machines(window.viewport_size().width, cx),
             Page::Sync => self.render_sync(cx),
+            Page::SharedConfig => self.render_shared_config(cx),
             Page::Windows => self.render_computer(cx),
         };
         let scroll = div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)

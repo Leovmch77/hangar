@@ -65,6 +65,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::String(message) => Some(message.clone()),
         Value::Object(fields) => {
             let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
+            // Configuração compartilhada: a frase do web pelo código, com os parâmetros dela.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("config_sync_")) {
+                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
                 let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");
@@ -389,6 +395,73 @@ impl Api {
         let r = self.client.delete(self.server_url(path, query)).timeout(Duration::from_secs(seconds)).send().await
             .map_err(|_| Failure::transport(true))?;
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
+    }
+
+    /// Manifesto da configuração compartilhada, com as etapas da leitura em `on` (`None` = Hangar sem etapas).
+    pub async fn config_sync_manifest<F, Fut>(&self, on: F) -> Result<Value, Failure>
+    where F: FnMut(Option<Value>) -> Fut, Fut: std::future::Future<Output = ()> {
+        let req = self.client.get(self.server_url(&["config-sync", "manifest"], &[("stream", "1")]));
+        Self::ndjson(req, false, 60, on).await
+    }
+
+    /// Pacote da origem (gzip). `keys` é o JSON `{item: [chaves]}` das entradas marcadas.
+    pub async fn config_sync_bundle(&self, items: &str, keys: Option<&str>) -> Result<Vec<u8>, Failure> {
+        let mut query = vec![("items", items)];
+        if let Some(keys) = keys { query.push(("keys", keys)); }
+        let r = self.client.get(self.server_url(&["config-sync", "bundle"], &query)).timeout(Duration::from_secs(180)).send().await
+            .map_err(|_| Failure::transport(false))?;
+        let r = Self::checked(r, false).await?;
+        if r.content_length().is_some_and(|n| n > MAX_BYTES) { return Err(Failure::local("attach_too_big")); }
+        let bytes = r.bytes().await.map_err(|_| Failure::transport(false))?;
+        if bytes.len() as u64 > MAX_BYTES { return Err(Failure::local("attach_too_big")); }
+        Ok(bytes.to_vec())
+    }
+
+    /// Aplica o pacote no destino; o envio e a aplicação são o mesmo pedido, e as etapas chegam em `on`.
+    pub async fn config_sync_apply<F, Fut>(&self, items: &str, bundle: Vec<u8>, on: F) -> Result<Value, Failure>
+    where F: FnMut(Option<Value>) -> Fut, Fut: std::future::Future<Output = ()> {
+        let req = self.client.post(self.server_url(&["config-sync", "apply"], &[("items", items), ("stream", "1")]))
+            .header(header::CONTENT_TYPE, "application/gzip").body(bundle);
+        Self::ndjson(req, true, 600, on).await
+    }
+
+    /// Resposta NDJSON: `progress` vai para `on`, `done` é o resultado e `error` a falha. Hangar antigo ignora `stream=1`
+    /// e responde JSON inteiro: `on(None)` e o corpo é o resultado. `seconds` vale para a resposta e para cada silêncio.
+    async fn ndjson<F, Fut>(req: reqwest::RequestBuilder, post: bool, seconds: u64, mut on: F) -> Result<Value, Failure>
+    where F: FnMut(Option<Value>) -> Fut, Fut: std::future::Future<Output = ()> {
+        use futures::StreamExt;
+        let wait = Duration::from_secs(seconds);
+        let cut = || if post { Failure { uncertain: true, ..Failure::local("shared_config_stream_cut") } } else { Failure::transport(false) };
+        let r = tokio::time::timeout(wait, req.send()).await.map_err(|_| Failure::transport(post))?.map_err(|_| Failure::transport(post))?;
+        let r = Self::checked(r, post).await?;
+        let ndjson = r.headers().get(header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).is_some_and(|t| t.starts_with("application/x-ndjson"));
+        if !ndjson {
+            on(None).await;
+            return tokio::time::timeout(wait, r.json()).await.ok().and_then(Result::ok).ok_or_else(cut);
+        }
+        let mut chunks = std::pin::pin!(r.bytes_stream());
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            while let Some(end) = buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=end).collect();
+                let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
+                match event.get("type").and_then(Value::as_str) {
+                    Some("progress") => on(Some(event)).await,
+                    Some("done") => return Ok(event.get("result").cloned().unwrap_or(Value::Null)),
+                    Some("error") => {
+                        let status = event.get("status").and_then(Value::as_u64).unwrap_or(500) as u16;
+                        let detail = failure_detail(Some(json!({"detail": event.get("detail")})), status);
+                        return Err(Failure { status: Some(status), detail: detail.chars().take(500).collect(), retry_after: None, uncertain: false });
+                    }
+                    _ => {}
+                }
+            }
+            match tokio::time::timeout(wait, chunks.next()).await {
+                Ok(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
+                Ok(None) => return Err(Failure { uncertain: post, ..Failure::local("shared_config_stream_cut") }),
+                _ => return Err(cut()),
+            }
+        }
     }
 
     /// Paleta do papel de parede desta máquina. O backend só responde a pedidos locais: ligado a outro

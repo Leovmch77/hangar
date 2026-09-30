@@ -8,7 +8,7 @@ import json
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import config_sync, config_sync_translate
@@ -32,10 +32,45 @@ def _items(raw: str) -> list[str]:
     return items
 
 
+def _ndjson(work) -> StreamingResponse:
+    """`work(progress)` roda como tarefa própria: se a tela fechar no meio, a aplicação termina
+    em vez de parar pela metade. Linhas `progress`, e no fim `done` ou `error`."""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def progress(event: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "progress", **event})
+
+    async def run() -> None:
+        try:
+            final = {"type": "done", "result": await work(progress)}
+        except HTTPException as exc:
+            final = {"type": "error", "status": exc.status_code, "detail": exc.detail}
+        except Exception as exc:  # noqa: BLE001 — vira linha de erro em vez de corpo cortado
+            final = {"type": "error", "status": 500, "detail": str(exc)[:300]}
+        loop.call_soon_threadsafe(queue.put_nowait, final)
+
+    task = asyncio.create_task(run())
+
+    async def lines():
+        while True:
+            event = await queue.get()
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+            if event["type"] != "progress":
+                await task
+                return
+
+    # Sem o identity o GZipMiddleware seguraria as linhas até juntar o bastante para comprimir.
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
+                             headers={"Content-Encoding": "identity", "Cache-Control": "no-store"})
+
+
 @config_sync_router.get("/manifest", dependencies=[Depends(require_auth)])
-async def get_manifest() -> dict:
-    data = await asyncio.to_thread(config_sync.manifest, Roots.this_machine())
-    return {**data, "machine": settings.server_id or ""}
+async def get_manifest(stream: bool = False):
+    async def work(progress=None) -> dict:
+        data = await asyncio.to_thread(config_sync.manifest, Roots.this_machine(), progress)
+        return {**data, "machine": settings.server_id or ""}
+    return _ndjson(work) if stream else await work()
 
 
 def _keep(raw: str) -> dict[str, list[str]] | None:
@@ -87,16 +122,27 @@ async def post_translate(body: TranslateBody) -> dict:
     return {"texts": texts, "error": error}
 
 
+def _busy() -> HTTPException:
+    return HTTPException(409, detail=erro("config_sync_busy",
+                                          "outra aplicação está em andamento nesta máquina"))
+
+
 @config_sync_router.post("/apply", dependencies=[Depends(require_auth)])
-async def post_apply(request: Request, items: str = Query("")) -> dict:
+async def post_apply(request: Request, items: str = Query(""), stream: bool = False):
     chosen = _items(items)
     if _APPLYING.locked():
-        raise HTTPException(409, detail=erro("config_sync_busy",
-                                             "outra aplicação está em andamento nesta máquina"))
-    async with _APPLYING:
-        raw = await request.body()
-        try:
-            bundle = await asyncio.to_thread(config_sync.unpack, raw)
-        except config_sync.BundleError as exc:
-            raise HTTPException(400, detail=erro(exc.code, str(exc), **exc.params)) from exc
-        return await config_sync.apply_bundle(bundle, chosen, Roots.this_machine())
+        raise _busy()
+    raw = await request.body()
+    try:
+        bundle = await asyncio.to_thread(config_sync.unpack, raw)
+    except config_sync.BundleError as exc:
+        raise HTTPException(400, detail=erro(exc.code, str(exc), **exc.params)) from exc
+
+    async def work(progress=None) -> dict:
+        # Conferido de novo: outro pedido pode ter entrado enquanto este lia o corpo.
+        if _APPLYING.locked():
+            raise _busy()
+        async with _APPLYING:
+            return await config_sync.apply_bundle(bundle, chosen, Roots.this_machine(),
+                                                  progress=progress)
+    return _ndjson(work) if stream else await work()

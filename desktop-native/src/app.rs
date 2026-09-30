@@ -54,6 +54,7 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod shared_config;
 mod tree;
 mod costs;
 mod stats;
@@ -177,6 +178,8 @@ enum Payload {
     // Notificações e Anexos: rascunho do servidor e horas silenciosas da conexão atual.
     ServerConfig(server_config::ServerConfigReply),
     Sync(sync::SyncReply),
+    // Configuração compartilhada: fala com várias máquinas, cada uma pelo token dela.
+    SharedConfig(shared_config::SharedConfigReply),
     // Máquinas: identificador, alcance e reinício do servidor conectado.
     Machines(machines::MachinesReply),
     Computer(computer::ComputerReply),
@@ -457,6 +460,7 @@ pub struct Hangar {
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
+    shared: shared_config::SharedConfig,
     machines: machines::Machines,
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
     costs: costs::Costs,
@@ -682,7 +686,7 @@ impl Hangar {
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
-            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(),
+            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
@@ -964,6 +968,7 @@ impl Hangar {
         // A lista viva da nova conexão chega pelo stream dela; o cartão da pergunta segue, com a conexão que ele guarda.
         (self.live_terms, self.hangar_open, self.hangar_error) = (Vec::new(), false, None);
         self.sync = sync::Sync::default();
+        self.shared = shared_config::SharedConfig::default();
         self.controls = controls::Controls::default();
         self.accounts = accounts::Accounts::default();
         self.orchestration = orchestration::Orchestration::default();
@@ -1408,6 +1413,7 @@ impl Hangar {
                 self.receive_server_config(reply, window, cx); return;
             }
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
+            Payload::SharedConfig(reply) => { self.receive_shared_config(reply, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }

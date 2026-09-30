@@ -140,6 +140,61 @@ const WARNING: Record<string, (p: P) => string> = {
   config_sync_link_replaced: (p) => m.config_sync_link_replaced({ entry: p.entry ?? '', target: p.target ?? '' }),
 };
 
+/** Linha `progress` do NDJSON do manifesto e da aplicação. `index`/`total` só vêm na troca de item. */
+export interface ConfigSyncProgress {
+  phase: 'read' | 'apply' | 'install' | 'after';
+  item: ConfigSyncItem | null;
+  entry: string | null;
+  index?: number;
+  total?: number;
+}
+
+export type ConfigSyncStage = 'waiting' | 'connecting' | 'read' | 'read_done' | 'packing' | 'packed'
+  | 'uploading' | 'apply' | 'install' | 'after' | 'applied' | 'failed';
+
+/** Onde uma máquina está. `detailed` falso = Hangar antigo, que só devolve o resultado no fim. */
+export interface ConfigSyncMachineStep {
+  stage: ConfigSyncStage;
+  item?: ConfigSyncItem | null;
+  entry?: string | null;
+  index?: number;
+  total?: number;
+  detailed?: boolean;
+  error?: string;
+}
+
+export function configSyncStepFrom(prev: ConfigSyncMachineStep, p: ConfigSyncProgress): ConfigSyncMachineStep {
+  const itemLevel = p.entry === null && p.total !== undefined;
+  return {
+    stage: p.phase, item: p.item ?? prev.item, entry: p.entry, detailed: true,
+    index: itemLevel ? p.index : prev.index, total: itemLevel ? p.total : prev.total,
+  };
+}
+
+const AFTER: Record<string, () => string> = {
+  skill_bridge: m.shared_config_step_after_skill_bridge,
+  hangar_hooks: m.shared_config_step_after_hangar_hooks,
+  codex_integration: m.shared_config_step_after_codex_integration,
+};
+
+export function configSyncStepText(s: ConfigSyncMachineStep): string {
+  const item = s.item ? configSyncItemLabel(s.item) : '';
+  switch (s.stage) {
+    case 'waiting': return m.shared_config_step_waiting();
+    case 'connecting': return m.shared_config_step_connecting();
+    case 'read': return m.shared_config_step_read({ item });
+    case 'read_done': return m.shared_config_step_read_done();
+    case 'packing': return m.shared_config_step_packing();
+    case 'packed': return m.shared_config_step_packed();
+    case 'uploading': return m.shared_config_step_uploading();
+    case 'apply': return m.shared_config_step_apply({ item });
+    case 'install': return m.shared_config_step_install({ entry: s.entry ?? '' });
+    case 'after': return AFTER[s.entry ?? '']?.() ?? m.shared_config_step_after_other({ step: s.entry ?? '' });
+    case 'applied': return m.shared_config_step_applied();
+    case 'failed': return m.shared_config_step_failed();
+  }
+}
+
 export function configSyncWarningText(w: ConfigSyncWarning): string {
   return Object.prototype.hasOwnProperty.call(WARNING, w.code) ? WARNING[w.code](w.params ?? {}) : w.code;
 }
