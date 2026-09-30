@@ -6524,6 +6524,12 @@ def _shortcut_reused(term: dict) -> dict:
             "terminal": {"id": term["id"], "label": term["label"], "alive": True, "exit_code": None}}
 
 
+def _shortcut_mux_unavailable() -> HTTPException:
+    # Sem resposta nao da pra saber se a copia ja existe: abrir outra derrubaria a primeira.
+    return HTTPException(500, detail=erro("erro_shortcut_mux_indisponivel",
+                                          "o multiplexador nao respondeu; tente de novo"))
+
+
 def _shortcut_shell_hangar(name: str, cwd: str, command: str, body: ShortcutShellBody):
     # Copia unica do servidor: clicar de novo reaproveita em vez de abrir outra (a VM do RDP so
     # aceita uma conexao por usuario, e a segunda derrubava a primeira).
@@ -6531,8 +6537,11 @@ def _shortcut_shell_hangar(name: str, cwd: str, command: str, body: ShortcutShel
     if not key:
         raise HTTPException(400, detail=erro("erro_shortcut_sem_chave", "atalho No Hangar sem chave"))
     from app import shortcut_terminals
-    term, reused = shortcut_terminals.start_hangar(key, cwd, command, body.label or "",
-                                                   _shortcut_display_env(), name, body.ask)
+    try:
+        term, reused = shortcut_terminals.start_hangar(key, cwd, command, body.label or "",
+                                                       _shortcut_display_env(), name, body.ask)
+    except shortcut_terminals.MuxUnavailable:
+        raise _shortcut_mux_unavailable()
     if term is None:
         raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
     _log.info("shortcut-shell: hangar terminal=%s reaproveitou=%s", term["tmux"], reused)
@@ -6626,6 +6635,8 @@ def hangar_terminal_restart(ident: str):
     except shortcut_terminals.RestartError:
         raise HTTPException(500, detail=erro("erro_hangar_terminal_rodar_de_novo",
                                              "nao foi possivel recuperar o comando do terminal No Hangar"))
+    except shortcut_terminals.MuxUnavailable:
+        raise _shortcut_mux_unavailable()
     if term is None:
         raise _hangar_404()
     if reused:

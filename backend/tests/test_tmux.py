@@ -77,6 +77,16 @@ def test_timeout_do_tmux_nao_vira_lista_vazia():
                 chamada()
 
 
+def test_timeout_do_tmux_nao_registra_o_argv(caplog):
+    # O argv pode carregar o texto de um atalho (credencial): nem o log nem o stderr o repetem.
+    args = ["tmux", "new-session", "-d", "--", "sh", "-c", "senha=SEGREDO123"]
+    with patch.object(tmux, "RUN", side_effect=subprocess.TimeoutExpired(args, 5)):
+        with caplog.at_level("DEBUG"):
+            cp = tmux._run(args)
+    assert cp.returncode == tmux.RC_INDISPONIVEL and "SEGREDO123" not in cp.stderr
+    assert "SEGREDO123" not in caplog.text
+
+
 def test_tmux_ausente_tambem_levanta():
     # FileNotFoundError (tmux fora do PATH) e a mesma classe de "nao sei", nao "nao ha sessao".
     with patch.object(tmux, "RUN", side_effect=FileNotFoundError("tmux")):

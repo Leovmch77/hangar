@@ -165,8 +165,10 @@ def _run(args: list[str], input: bytes | None = None) -> subprocess.CompletedPro
         return cp
     except (subprocess.TimeoutExpired, OSError) as exc:
         failure = exc
-        _log.warning("tmux nao respondeu (%s): %s", args[1:3], exc)
-        cp = subprocess.CompletedProcess(args, RC_INDISPONIVEL, stdout="", stderr=str(exc))
+        # So o tipo e o subcomando: o argv (que o `str(exc)` repete) pode carregar o texto de um atalho.
+        kind = type(exc).__name__
+        _log.warning("tmux nao respondeu (%s): %s", args[1] if args[0] == "tmux" and len(args) > 1 else "outro", kind)
+        cp = subprocess.CompletedProcess(args, RC_INDISPONIVEL, stdout="", stderr=kind)
         return cp
     finally:
         elapsed = int((time.monotonic() - started) * 1000)
@@ -977,7 +979,7 @@ def _send_literal(target: str, text: str) -> bool:
     como delivered=True (o `claim_undelivered` marca antes do envio). Ou seja: a exceção trocava um
     silêncio por outro pior. Bool não escapa por acidente — quem não confere segue como sempre.
     """
-    # POSIX: caminho de sempre, BYTE-IDENTICO. O bug do '-' e do psmux; o tmux real honra o `--`.
+    # POSIX: o bug do '-' e do psmux; o tmux real honra o `--`.
     if os.name != "nt":
         # `;` no fim do argumento o tmux le como separador de comando e descarta; `\;` chega literal.
         if text.endswith(";"):

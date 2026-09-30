@@ -676,3 +676,127 @@ def test_prompt_longer_than_the_pane_width_keeps_text_and_default(client, monkey
     assert question["default"] == "Administrator@delphi-02"
     assert client.post(f"/api/hangar-terminals/{ident}/answer", json={"text": "vm@x"}, headers=_auth()).status_code == 200
     assert _wait_file(tmp_path / "resposta.txt") == "vm@x"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("start https://x/a%20b", "start https://x/a%%20b"),
+    ("for %i in (a) do echo %i", "for %%i in (a) do echo %%i"),
+    ("echo %1 %* %~dp0", "echo %%1 %%* %%~dp0"),
+    ("echo 100%%", "echo 100%%%%"),
+    ("echo %HANGAR_TEST_VAR% %NAO_EXISTE_XYZ%", "echo %HANGAR_TEST_VAR% %%NAO_EXISTE_XYZ%%"),
+    ("echo %ERRORLEVEL% %cd%", "echo %ERRORLEVEL% %cd%"),
+])
+def test_batch_escape_keeps_cmd_line_meaning_and_env_vars(monkeypatch, raw, expected):
+    from app import shortcut_terminals as st
+    monkeypatch.setenv("HANGAR_TEST_VAR", "1")
+    escaped = st._batch_escape(raw)
+    assert escaped == expected
+    assert st._batch_unescape(escaped) == raw                          # o "Rodar de novo" recupera o original
+
+
+def test_windows_start_does_not_store_the_command_option_nor_an_empty_owner(monkeypatch, tmp_path):
+    from app import shortcut_terminals, tmux
+    calls = []
+    monkeypatch.setattr(shortcut_terminals, "_IS_WINDOWS", True)
+    monkeypatch.setattr(shortcut_terminals, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    term = shortcut_terminals.start("", str(tmp_path), "echo a;\necho b", "X", {}, key="global:k")
+    assert term is not None
+    options = [a[a.index("set-option") + 3] for a in calls if "set-option" in a]
+    assert "@cp_shortcut_cmd" not in options and "@cp_shortcut_owner" not in options
+    assert "@cp_shortcut_cwd" in options and "@cp_shortcut_key" in options
+
+
+def test_windows_restart_gets_the_original_percent_back(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st, tmux
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, 0, "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    term = st.start("", str(tmp_path), "start https://x/a%20b", "X", {}, key="global:k")
+    assert "a%%20b" in (tmp_path / f"{term['id']}-cmd.cmd").read_bytes().decode("latin-1")
+    seen = []
+    monkeypatch.setattr(st, "_rows", lambda: [_fake_row(term, tmp_path)])
+    monkeypatch.setattr(st, "_option", lambda target, opt: str(tmp_path) if opt == "@cp_shortcut_cwd" else "")
+    monkeypatch.setattr(st, "start_hangar", lambda *a: seen.append(a) or (None, False))
+    st.restart_hangar(term["id"], {})
+    assert seen[0][2] == "start https://x/a%20b"
+
+
+def test_windows_sweep_removes_only_old_files_of_terminals_that_no_longer_exist(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    old = time.time() - 3600
+    names = ["aaaaaa.cmd", "aaaaaa-cmd.cmd", "aaaaaa.exit", "bbbbbb.cmd", "cccccc.cmd", "leia-me.txt"]
+    for n in names:
+        (tmp_path / n).write_text("x")
+    for n in names:
+        if n != "cccccc.cmd":                                          # cccccc e de um start em andamento
+            os.utime(tmp_path / n, (old, old))
+    live = {"bbbbbb"}
+    monkeypatch.setattr(st, "_read_rows", lambda: [
+        {"id": i, "created": 1, "seq": 1, "tmux": i, "alive": False, "label": "", "exit_code": None, "owner": "",
+         "key": "", "origin": "", "ask": True, "pid": None} for i in live])
+    st.list_all()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bbbbbb.cmd", "cccccc.cmd", "leia-me.txt"]
+
+
+def test_windows_sweep_does_nothing_when_the_multiplexer_did_not_answer(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    (tmp_path / "aaaaaa.cmd").write_text("x")
+    os.utime(tmp_path / "aaaaaa.cmd", (1, 1))
+    monkeypatch.setattr(st, "_read_rows", lambda: None)
+    assert st.list_all() == []
+    assert (tmp_path / "aaaaaa.cmd").exists()
+
+
+def test_windows_start_failure_removes_the_command_files(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st, tmux
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, 1, "", "boom"))
+    monkeypatch.setattr(tmux, "has_session", lambda name: False)
+    assert st.start("s", str(tmp_path), "echo segredo", "X", {}) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_windows_abort_before_the_id_removes_the_command_files(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st, tmux
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    monkeypatch.setattr(tmux, "_scope_prefix", lambda: [])
+    rc = lambda args: 1 if "@cp_hidden" in args else 0                  # noqa: E731
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, rc(args), "", ""))
+    monkeypatch.setattr(tmux, "has_session", lambda name: True)
+    monkeypatch.setattr(tmux, "kill_session", lambda name: True)
+    assert st.start("s", str(tmp_path), "echo segredo", "X", {}) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_hangar_start_refuses_when_the_multiplexer_did_not_answer(client, monkeypatch, tmp_path, home):
+    from app import shortcut_terminals as st, tmux
+    started = []
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: started.append(args) or subprocess.CompletedProcess(
+        args, tmux.RC_INDISPONIVEL, "", "TimeoutExpired"))
+    r = _run_hangar(client, monkeypatch, tmp_path, "sleep 30")
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_shortcut_mux_indisponivel"
+    assert not any("new-session" in a for a in started)               # nao abriu segunda copia
+    with pytest.raises(st.MuxUnavailable):
+        st.start_hangar("global:k1", str(tmp_path), "x", "X", {}, "", True)
+
+
+def test_windows_kill_group_survives_taskkill_timeout_and_missing_binary(monkeypatch):
+    from app import shortcut_terminals as st
+    monkeypatch.setattr(st, "_IS_WINDOWS", True)
+    for exc in (subprocess.TimeoutExpired(["taskkill"], 10), FileNotFoundError("taskkill"), OSError("x")):
+        def boom(*a, _exc=exc, **kw):
+            raise _exc
+        monkeypatch.setattr(st.subprocess, "run", boom)
+        st._kill_group(1234)                                          # nao levanta

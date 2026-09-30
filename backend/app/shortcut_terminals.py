@@ -73,6 +73,61 @@ def _write_cmd(path: Path, text: str) -> None:
         f.write(text)
 
 
+_FILE_SUFFIXES = (".cmd", "-cmd.cmd", ".exit")
+_FILE_RE = re.compile(r"^([0-9a-f]{6})(?:-cmd\.cmd|\.cmd|\.exit)$")
+# Arquivo mais novo que isto pode ser de um start que ainda nao criou a sessao.
+_ORPHAN_GRACE = 60.0
+# Variaveis que o cmd expande sem estarem no ambiente.
+_DYNAMIC_VARS = frozenset({"CD", "DATE", "TIME", "RANDOM", "ERRORLEVEL", "CMDCMDLINE", "CMDEXTVERSION",
+                           "HIGHESTNUMANODENUMBER"})
+_VAR_RE = re.compile(r"%([A-Za-z_][A-Za-z0-9_()]*)%")
+
+
+def _batch_escape(command: str) -> str:
+    """Numa linha de `cmd /c` o `%` e literal; num arquivo de lote ele expande (`%20`, `%1`, `%i`).
+    Todo `%` vira `%%`, menos o `%NOME%` de variavel que existe (ambiente ou dinamica): essa segue
+    expandindo nos dois, como a pessoa escreveria. `%VAR:~0,3%` e `%VAR:a=b%` ficam literais."""
+    known = _DYNAMIC_VARS | {k.upper() for k in os.environ}
+    out, i = [], 0
+    while i < len(command):
+        if command[i] != "%":
+            out.append(command[i])
+            i += 1
+            continue
+        m = _VAR_RE.match(command, i)
+        if m and m.group(1).upper() in known:
+            out.append(m.group(0))
+            i = m.end()
+        else:
+            out.append("%%")
+            i += 1
+    return "".join(out)
+
+
+def _batch_unescape(text: str) -> str:
+    # Inverso do escape: `%%` volta a `%`; `%NOME%` inteiro nao e tocado (o par `%%` vem sempre antes).
+    return re.sub(r"%%|%[A-Za-z_][A-Za-z0-9_()]*%", lambda m: "%" if m.group(0) == "%%" else m.group(0), text)
+
+
+def _forget_files(ident: str) -> None:
+    for suffix in _FILE_SUFFIXES:
+        (_windows_dir() / f"{ident}{suffix}").unlink(missing_ok=True)
+
+
+def _sweep_orphans(live: set[str]) -> None:
+    # O `.cmd` guarda o texto do comando (pode ter credencial): nao pode sobrar sem terminal dono.
+    now = time.time()
+    for path in _windows_dir().iterdir():
+        m = _FILE_RE.match(path.name)
+        if not m or m.group(1) in live:
+            continue
+        try:
+            if now - path.stat().st_mtime > _ORPHAN_GRACE:
+                path.unlink()
+        except OSError:
+            pass
+
+
 def _windows_command(ident: str, command: str) -> str:
     # O comando fica num .cmd proprio (nada de aspas do psmux no caminho dele) e roda num `cmd /c`
     # filho: `exit 3` sem /b mataria um `call`. O de fora grava o codigo com o redirecionamento na
@@ -81,7 +136,7 @@ def _windows_command(ident: str, command: str) -> str:
     d = _windows_dir()
     inner, outer, exit_file = d / f"{ident}-cmd.cmd", d / f"{ident}.cmd", d / f"{ident}.exit"
     exit_file.unlink(missing_ok=True)
-    body = command.replace("\r\n", "\n").replace("\n", "\r\n")
+    body = _batch_escape(command).replace("\r\n", "\n").replace("\n", "\r\n")
     _write_cmd(inner, f"@echo off\r\n{body}\r\n")
     _write_cmd(outer, f'@cmd /d /c "{inner}"\r\n@>"{exit_file}" echo %ERRORLEVEL%\r\n:h\r\n@pause >nul\r\n@goto h\r\n')
     return f'cmd /d /c "{outer}"'
@@ -104,8 +159,9 @@ def _abort(target: str) -> None:
     row = next((r for r in _rows() if r["tmux"] == target), None)
     if row is not None:
         _close_row(row)
-    else:
-        tmux.kill_session(target)
+    elif tmux.kill_session(target) and _IS_WINDOWS:
+        # Sem `_ID` a lista nao o ve: o id vem do nome.
+        _forget_files(target.rsplit("-", 1)[-1])
 
 
 def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
@@ -118,13 +174,17 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
     args = [*tmux._scope_prefix(), "tmux", "new-session", "-d", "-s", target, "-c", cwd]
     for k, value in env.items():
         args += ["-e", f"{k}={value}"]
-    fixed = (("@cp_hidden", "1"), (_OWNER, owner), (_ID, ident), (_SEQ, str(time.time_ns())))
-    free = ((_LABEL, label), (_KEY, " ".join(key.split())), (_ORIGIN, _clean_label(origin)),
-            (_ASK, "1" if ask else "0"), (_CWD, cwd), (_CMD, command))
+    # Opcao ausente volta vazia no `-F`: valor vazio nem e gravado. No Windows o comando nao vai pra
+    # opcao (argv do psmux quebra em `\n` e `;`): o "Rodar de novo" le o `.cmd`.
+    fixed = tuple(kv for kv in (("@cp_hidden", "1"), (_OWNER, owner), (_ID, ident), (_SEQ, str(time.time_ns()))) if kv[1])
+    free = tuple(kv for kv in ((_LABEL, label), (_KEY, " ".join(key.split())), (_ORIGIN, _clean_label(origin)),
+                               (_ASK, "1" if ask else "0"), (_CWD, cwd), *(() if _IS_WINDOWS else ((_CMD, command),)))
+                 if kv[1])
     if _IS_WINDOWS:
         cp = tmux._run([*args, _windows_command(ident, command)])
         if cp.returncode != 0 and not tmux.has_session(target):
             _log.warning("shortcut: psmux recusou criar %r: %s", target, (cp.stderr or "").strip()[:200])
+            _forget_files(ident)
             return None
         # Escondida ANTES de tudo, senao a lista de sessoes ve um card no meio do caminho.
         if not _set_options(target, fixed) or not _set_options(target, (*free, ("status", "off"))):
@@ -154,11 +214,22 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
     return {"id": ident, "label": label, "tmux": target}
 
 
+class MuxUnavailable(Exception):
+    """O multiplexador nao respondeu: nao da pra saber se ja existe uma copia do atalho."""
+
+
 def _rows() -> list[dict]:
+    return _read_rows() or []
+
+
+def _read_rows() -> list[dict] | None:
+    """None = o multiplexador nao respondeu (diferente de "sem servidor", que e lista vazia)."""
     cp = tmux._run(["tmux", "list-sessions", "-F",
                     f"#{{session_name}}\t#{{{_OWNER}}}\t#{{{_ID}}}\t#{{session_created}}"
                     f"\t#{{pane_dead}}\t#{{pane_dead_status}}\t#{{pane_pid}}\t#{{{_SEQ}}}"
                     f"\t#{{{_KEY}}}\t#{{{_ORIGIN}}}\t#{{{_ASK}}}\t#{{{_LABEL}}}"])
+    if cp.returncode == tmux.RC_INDISPONIVEL:
+        return None
     if cp.returncode != 0:
         return []
     out = []
@@ -220,7 +291,11 @@ def output(target: str) -> str:
 
 def _kill_group(pid: int) -> None:
     if _IS_WINDOWS:
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            # Sem o argv: nao carrega nada do atalho, mas o tipo basta.
+            _log.warning("shortcut: taskkill nao concluiu para o pid %s: %s", pid, type(e).__name__)
         return
     # O pane e lider de sessao e de grupo (o tmux faz setsid): o grupo leva junto o que o comando
     # abriu em primeiro plano (o xfreerdp do atalho do RDP). O kill-session so fecha o pty, e
@@ -248,8 +323,7 @@ def _close_row(row: dict) -> bool:
         _kill_group(row["pid"])
     gone = tmux.kill_session(row["tmux"])
     if _IS_WINDOWS and gone:
-        for suffix in (".cmd", "-cmd.cmd", ".exit"):
-            (_windows_dir() / f"{row['id']}{suffix}").unlink(missing_ok=True)
+        _forget_files(row["id"])
     return gone
 
 
@@ -281,7 +355,10 @@ def start_hangar(key: str, cwd: str, command: str, label: str, env: dict[str, st
     da lugar a uma nova."""
     key = " ".join(key.split())
     with _HANGAR_LOCK:
-        for row in _rows():
+        rows = _read_rows()
+        if rows is None:
+            raise MuxUnavailable(key)
+        for row in rows:
             if row["owner"] or row["key"] != key:
                 continue
             if row["alive"]:
@@ -292,7 +369,10 @@ def start_hangar(key: str, cwd: str, command: str, label: str, env: dict[str, st
 
 def list_all() -> list[dict]:
     """Todos os terminais de atalho (das sessoes e No Hangar), do mais antigo pro mais novo."""
-    rows = sorted(_rows(), key=lambda r: (r["created"], r["seq"], r["tmux"]))
+    found = _read_rows()
+    if _IS_WINDOWS and found is not None:
+        _sweep_orphans({r["id"] for r in found})
+    rows = sorted(found or [], key=lambda r: (r["created"], r["seq"], r["tmux"]))
     terminal_prompt.forget({r["tmux"] for r in rows if r["alive"]})
     return [{**{k: r[k] for k in ("id", "label", "alive", "exit_code", "created", "owner", "key", "origin", "ask")},
              "question": _question(r)} for r in rows]
@@ -330,7 +410,7 @@ def restart_hangar(ident: str, env: dict[str, str]) -> tuple[dict | None, bool]:
         # esta inteiro no .cmd dele, e sem ele nao ha o que rodar de novo.
         try:
             with open(_windows_dir() / f"{ident}-cmd.cmd", encoding=_OEM, newline="") as f:
-                command = f.read().split("\r\n", 1)[1].rstrip("\r\n")
+                command = _batch_unescape(f.read().split("\r\n", 1)[1].rstrip("\r\n"))
         except (OSError, IndexError) as e:
             _log.warning("shortcut: sem o .cmd do terminal %s para rodar de novo: %r", ident, e)
             raise RestartError(ident) from e
