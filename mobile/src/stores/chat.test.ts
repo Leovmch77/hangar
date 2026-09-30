@@ -13,7 +13,8 @@ type FakeES = {
   listeners: Record<string, ((e: { data: string; lastEventId?: string }) => void)[]>;
   close: ReturnType<typeof vi.fn>;
   trigger: (type: string, data: string, lastEventId?: string) => void;
-  fail: () => void;
+  fail: (error?: unknown) => void;
+  readyState: number;
   onerror: ((e: unknown) => void) | null;
 };
 
@@ -29,9 +30,10 @@ function fakeCreateEventSource(url: string): unknown {
         fn({ data, ...(lastEventId ? { lastEventId } : {}) }),
       );
     },
-    fail() {
-      this.onerror?.(new Error('tcp'));
+    fail(error = new Error('tcp')) {
+      this.onerror?.(error);
     },
+    readyState: 1,
     onerror: null as ((e: unknown) => void) | null,
   };
   created.push(fake);
@@ -55,7 +57,9 @@ function fakeCreateEventSource(url: string): unknown {
       (fake as unknown as { _onopen: ((e: unknown) => void) | null })._onopen = fn;
       if (fn) (fake.listeners['open'] ??= []).push(fn as never);
     },
-    readyState: 1,
+    get readyState() {
+      return fake.readyState;
+    },
   };
 }
 
@@ -351,6 +355,58 @@ test('onerror fecha e reconecta com backoff crescente', async () => {
     await vi.advanceTimersByTimeAsync(6_000); // backoff dobrou
     expect(created).toHaveLength(3);
 
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each([
+  { type: 'timeout' }, { type: 'close' }, { type: 'error' },
+  { type: 'error', xhrStatus: 408 }, { type: 'error', xhrStatus: 429 },
+  { type: 'error', xhrStatus: 503 },
+])('fonte fechada por $type/$xhrStatus recupera uma vez sem marcar recusa', async (error) => {
+  vi.useFakeTimers();
+  try {
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    const source = created[0];
+    source.readyState = 2;
+    source.fail(error);
+    expect(chat.use.getState().sseRecusado).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    source.fail(error); // repetição atrasada não desloca o timer nem duplica a reconexão.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(created).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(created).toHaveLength(2);
+    expect(source.close).toHaveBeenCalledTimes(1);
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each([400, 401, 403, 404, 405, 410])('HTTP %i mantém recusa visível até retry manual', async (xhrStatus) => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[ev({ id: 'recusa:1', text: 'conversa preservada' })]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    const source = created[0];
+    source.fail({ type: 'error', xhrStatus });
+    expect(chat.use.getState().sseRecusado).toBe(true);
+    expect(chat.use.getState().events[0].text).toBe('conversa preservada');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(created).toHaveLength(1);
+    chat.retry();
+    expect(chat.use.getState().sseRecusado).toBe(false);
+    expect(created).toHaveLength(2);
+    source.fail({ type: 'error', xhrStatus });
+    expect(chat.use.getState().sseRecusado).toBe(false);
+    expect(created[1].close).not.toHaveBeenCalled();
     chat.release();
   } finally {
     vi.useRealTimers();
