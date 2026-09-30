@@ -6059,6 +6059,13 @@
   "compartilhar_falta_funnel": "Funnel is not enabled in your tailnet",
   "compartilhar_liberar_tailscale": "Enable in Tailscale",
   "compartilhar_conferindo": "Waiting for Tailscale to allow it…",
-  "compartilhar_operador_dica": "In the Hangar native app on this machine, the Authorize button does this in one click."
-
+  "compartilhar_operador_dica": "In the Hangar native app on this machine, the Authorize button does this in one click.",
+  "nova_conversa_criacao_incerta": "Could not confirm whether the conversation was created. Check before trying again.",
+  "nova_conversa_criando": "The conversation is still being created on this machine.",
+  "nova_conversa_nao_encontrada": "The conversation does not show up on this machine yet. That does not prove it failed; check again in a moment.",
+  "nova_conversa_candidata": "Found session {nome} in this folder. Open it to check whether it is your conversation.",
+  "nova_conversa_nome_conflito": "A session named {nome} already exists but does not match this folder or provider. Check before creating another.",
+  "nova_conversa_conferir_erro": "Could not check the creation: {erro}",
+  "nova_conversa_salvar_erro": "Could not save the message on this device; nothing was sent.",
+  "nova_conversa_servidor_ausente": "This machine is no longer in the list; pick another."
 }

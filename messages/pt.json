@@ -6059,6 +6059,13 @@
   "compartilhar_falta_funnel": "o Funnel não está liberado na sua tailnet",
   "compartilhar_liberar_tailscale": "Liberar no Tailscale",
   "compartilhar_conferindo": "Esperando a liberação no Tailscale…",
-  "compartilhar_operador_dica": "No app nativo do Hangar nesta máquina, o botão Autorizar faz isso com um clique."
-
+  "compartilhar_operador_dica": "No app nativo do Hangar nesta máquina, o botão Autorizar faz isso com um clique.",
+  "nova_conversa_criacao_incerta": "Não deu para confirmar se a conversa foi criada. Confira antes de tentar de novo.",
+  "nova_conversa_criando": "A conversa ainda está sendo criada nesta máquina.",
+  "nova_conversa_nao_encontrada": "A conversa ainda não aparece nesta máquina. Isso não prova que falhou; confira de novo em instantes.",
+  "nova_conversa_candidata": "Encontrei a sessão {nome} nesta pasta. Abra para conferir se é a sua conversa.",
+  "nova_conversa_nome_conflito": "Já existe uma sessão chamada {nome} que não bate com esta pasta ou provider. Confira antes de criar outra.",
+  "nova_conversa_conferir_erro": "Não consegui conferir a criação: {erro}",
+  "nova_conversa_salvar_erro": "Não foi possível guardar a mensagem neste aparelho; nada foi enviado.",
+  "nova_conversa_servidor_ausente": "Esta máquina não está mais na lista; escolha outra."
 }
