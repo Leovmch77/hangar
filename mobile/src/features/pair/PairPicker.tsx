@@ -43,9 +43,10 @@ export function PairPicker({ sessions, picked, task, busy, error, loading, onTog
               <Pressable
                 key={session.name}
                 onPress={() => onToggle(session.name)}
+                disabled={busy || loading}
                 style={[styles.row, { borderColor: selected ? theme.tokens.accent.base : 'transparent', backgroundColor: selected ? theme.tokens.bg.elevated : 'transparent' }]}
                 accessibilityRole="checkbox"
-                accessibilityState={{ checked: selected }}
+                accessibilityState={{ checked: selected, disabled: busy || loading }}
                 accessibilityLabel={m.par_parear_aria({ nome: session.name, estado: rotuloEstado(session.state) })}
               >
                 <View style={[styles.dot, { backgroundColor: stateDot(session.state) }]} />
@@ -74,8 +75,8 @@ export function PairPicker({ sessions, picked, task, busy, error, loading, onTog
 
       <Pressable
         onPress={onPair}
-        disabled={!picked.length || busy}
-        style={[styles.primary, { backgroundColor: theme.tokens.accent.base }, (!picked.length || busy) && styles.disabled]}
+        disabled={!picked.length || busy || loading}
+        style={[styles.primary, { backgroundColor: theme.tokens.accent.base }, (!picked.length || busy || loading) && styles.disabled]}
         accessibilityRole="button"
       >
         <Text style={[styles.primaryText, { color: theme.tokens.text.inverse }]}>

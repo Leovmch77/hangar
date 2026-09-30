@@ -20,7 +20,7 @@ export function PairFeed({ sessionName, feed, failed, loading }: Props) {
       {failed.length ? <Text style={[styles.warning, { color: theme.tokens.status.warning }]} accessibilityRole="alert" selectable>{`⚠ ${m.par_sem_historico({ nomes: failed.join(', ') })}`}</Text> : null}
       {loading ? (
         <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
-      ) : feed.length === 0 ? (
+      ) : feed.length === 0 && failed.length === 0 ? (
         <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.par_vazio_trocas()}</Text>
       ) : (
         <View style={styles.list}>
