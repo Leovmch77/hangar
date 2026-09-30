@@ -4,7 +4,7 @@
 //! lateral lê a mesma resolução, e o que for salvo ou lido aqui aparece lá na hora.
 use super::*;
 use super::device::Remote;
-use super::settings::{segments, settings_box};
+use super::settings::{section_head, segments, settings_box};
 use serde_json::Map;
 
 /// Os botões nativos de hoje, na ordem de hoje. Só "anexos" roda no painel nativo; os outros são preservados na ordem.
@@ -116,6 +116,13 @@ pub(super) fn parse_icon(icon: Option<&str>) -> Glyph {
     if let Some(e) = icon.and_then(|i| i.strip_prefix("emoji:")).map(str::trim).filter(|e| !e.is_empty()) { return Glyph::Emoji(e.to_owned()); }
     let name = icon.and_then(|i| i.strip_prefix("glifo:")).unwrap_or("bolt");
     Glyph::Icon(GLYPHS.iter().find(|(g, _)| *g == name).map_or(IconName::Zap, |(_, i)| *i))
+}
+
+/// Rodapé colado na caixa: a ação que alimenta a lista mora DENTRO dela, com a mesma divisória das linhas — solta
+/// embaixo, ela virava só mais um botão numa pilha que não dizia sobre o que agia.
+fn card_footer() -> Div {
+    div().mt(px(-1.)).border_t_1().border_color(theme::border()).px(px(16.)).py(px(10.))
+        .flex().flex_wrap().items_center().gap(px(8.))
 }
 
 pub(super) fn icon_element(icon: Option<&str>, size: f32, color: Hsla) -> AnyElement {
@@ -566,39 +573,50 @@ impl Hangar {
         }
         let saving = s.busy();
         let count = s.items.len();
-        let mut list = settings_box().mt(px(24.));
+        let mut list = settings_box();
         if count == 0 { list = list.child(note(tr("shortcuts_empty"), theme::muted())); }
         for (n, item) in s.items.iter().enumerate() {
             list = list.child(self.render_shortcut_row(item, n, count, saving, false, cx));
         }
+        // Repor um nativo é adicionar um item à lista: vive no rodapé DELA, ao lado do Adicionar, não numa linha solta
+        // no meio da pilha de botões.
         let missing: Vec<&str> = NATIVES.into_iter().filter(|a| !s.items.iter().any(|i| i.kind() == "internal" && i.action() == *a)).collect();
-        let restore_natives = (!missing.is_empty()).then(|| div().mt(px(12.)).flex().flex_wrap().items_center().gap(px(8.))
+        let restore_natives = (!missing.is_empty()).then(|| div().flex().flex_wrap().items_center().justify_end().gap(px(6.))
             .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr("shortcuts_restore_native")))
-            .children(missing.into_iter().map(|action| Button::new(SharedString::from(format!("shortcut-native-{action}"))).outline().small()
+            .children(missing.into_iter().map(|action| Button::new(SharedString::from(format!("shortcut-native-{action}"))).ghost().small()
                 .icon(IconName::Plus).label(native_label(action)).disabled(saving)
                 .on_click(cx.listener(move |this, _, _, cx| this.shortcuts_edit(cx, |items| items.push(Item::native(action))))))));
-        let form = match &s.form {
-            Some(form) if !form.project => self.render_shortcut_form(form, cx),
-            _ => self.mark(div().mt(px(16.)).flex(), "shortcuts_add").child(Button::new("shortcut-add").outline().small().icon(IconName::Plus).label(tr("shortcuts_add"))
-                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, false, window, cx)))),
-        };
+        // Adicionar é a ação da lista: botão primário no rodapé DA CAIXA, colado nela, em vez de solto embaixo com o
+        // mesmo peso de Importar, Exportar e Restaurar.
+        let add = self.mark(card_footer(), "shortcuts_add")
+            .child(Button::new("shortcut-add").primary().small().icon(IconName::Plus).label(tr("shortcuts_add"))
+                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, false, window, cx))))
+            .child(div().flex_1().min_w_0().flex().justify_end().children(restore_natives));
+        let open_form = matches!(&s.form, Some(form) if !form.project);
+        let list = list.when(!open_form, |el| el.child(add));
+        let form = open_form.then(|| match &s.form { Some(form) => self.render_shortcut_form(form, cx), None => div() });
         // A falha fica logo abaixo da lista (e dentro do formulário aberto), nunca só no rodapé fora da tela.
-        let error_line = s.save_error.clone().map(|error| div().id("shortcuts-save-error").role(Role::Alert).mt(px(10.)).text_size(px(12.5))
+        let error_line = s.save_error.clone().map(|error| div().id("shortcuts-save-error").role(Role::Alert).text_size(px(12.5))
             .text_color(theme::danger()).whitespace_normal().child(error));
         let feedback = s.saved.filter(|_| s.save_error.is_none()).map(|_| div().text_color(theme::success()).child(tr("shortcuts_saved")));
-        let transfer = div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(8.))
+        let draft = self.render_import_draft(cx);
+        // Caixa própria para o que mexe na lista inteira: mover para outra máquina à esquerda, repor o padrão na ponta
+        // direita. Antes eram três fileiras soltas embaixo da lista, sem dizer sobre o que agiam.
+        let transfer = self.mark(settings_box(), "shortcuts_restore").child(div().px(px(16.)).py(px(12.))
+            .flex().flex_wrap().items_center().gap(px(8.))
             .child(Button::new("shortcuts-import").outline().small().icon(IconName::Upload).label(tr("shortcuts_import"))
                 .disabled(saving || s.import.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
             .child(Button::new("shortcuts-export").outline().small().icon(IconName::Download).label(tr("shortcuts_export"))
                 .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
-            .children(self.transfer_note_element());
-        let draft = self.render_import_draft(cx);
-        let footer = self.mark(div().mt(px(24.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))
-            .child(Button::new("shortcuts-restore").outline().small().label(tr("shortcuts_restore")).tooltip(tr("shortcuts_restore_help"))
-                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(None, cx))))
-            .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback));
+            .children(self.transfer_note_element())
+            .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback))
+            .child(Button::new("shortcuts-restore").ghost().small().icon(IconName::RefreshCw).label(tr("shortcuts_restore"))
+                .tooltip(tr("shortcuts_restore_help"))
+                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(None, cx)))));
         let project = self.render_project_shortcuts(cx);
-        page.child(list).children(error_line).children(restore_natives).child(form).child(transfer).children(draft).child(footer).children(project).into_any_element()
+        // Uma pilha de caixas com o mesmo vão, como Máquinas e Contas: a página deixa de ser lista + botões avulsos.
+        page.child(div().mt(px(20.)).flex().flex_col().gap(px(16.)).pb(px(8.))
+            .child(list).children(error_line).children(form).children(draft).child(transfer).children(project)).into_any_element()
     }
 
     /// Seção "Deste projeto": só com uma sessão aberta. Cada mudança grava na hora, sem o Salvar dos globais.
@@ -607,17 +625,19 @@ impl Hangar {
         let p = &self.side.project;
         if p.owner.as_ref() != Some(&key) { return None; }
         let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
-        let heading = |text: String| div().mt(px(28.)).mb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
-        let section = div().id("project-shortcuts").flex().flex_col();
-        let save_error = p.save_error.clone().map(|error| div().mt(px(10.)).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
+        // Mesmo cabeçalho das outras páginas de config (ícone no quadradinho, título, linha que explica): o título
+        // miúdo em negrito não dizia que dali para baixo era outra lista.
+        let head = |title: String| section_head(IconName::Folder, title, Some(tr("shortcuts_project_lead")), None, px(16.));
+        let section = div().id("project-shortcuts").flex().flex_col().gap(px(10.));
+        let save_error = p.save_error.clone().map(|error| div().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
         let project = match (&p.list.value, p.list.loading) {
-            (None, _) => return Some(section.child(heading(tr("shortcuts_project")))
-                .child(settings_box().mt(px(8.)).child(note(tr("shortcuts_project_loading"), theme::muted())))),
+            (None, _) => return Some(section.child(settings_box().child(head(tr("shortcuts_project")))
+                .child(note(tr("shortcuts_project_loading"), theme::muted())))),
             (Some(Err(error)), loading) => {
                 let retry = Button::new("project-shortcuts-retry").outline().small().icon(IconName::RefreshCw)
                     .label(tr(if loading { "shortcuts_loading" } else { "shortcuts_retry" })).disabled(loading)
                     .on_click(cx.listener(|this, _, _, cx| { this.load_project_shortcuts(); cx.notify(); }));
-                return Some(section.child(heading(tr("shortcuts_project"))).child(settings_box().mt(px(8.))
+                return Some(section.child(settings_box().child(head(tr("shortcuts_project")))
                     .child(note(tr("shortcuts_project_failed").replace("{reason}", error), theme::danger()))
                     .child(div().px_4().pb(px(16.)).flex().child(retry))).children(save_error));
             }
@@ -625,20 +645,18 @@ impl Hangar {
         };
         let saving = p.saving.is_some();
         let count = project.items.len();
-        let mut list = settings_box().mt(px(16.));
+        let mut list = settings_box().child(head(tr("shortcuts_project_named").replace("{name}", &project.name)));
         if count == 0 { list = list.child(note(tr("shortcuts_project_empty"), theme::muted())); }
         for (n, item) in project.items.iter().enumerate() {
             list = list.child(self.render_shortcut_row(item, n, count, saving, true, cx));
         }
-        let form = match &self.shortcuts.form {
-            Some(form) if form.project => self.render_shortcut_form(form, cx),
-            _ => div().mt(px(16.)).flex().child(Button::new("project-shortcut-add").outline().small().icon(IconName::Plus)
+        let open_form = matches!(&self.shortcuts.form, Some(form) if form.project);
+        let list = list.when(!open_form, |el| el.child(card_footer()
+            .child(Button::new("project-shortcut-add").primary().small().icon(IconName::Plus)
                 .label(tr("shortcuts_project_add")).loading(saving).disabled(saving)
-                .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx)))),
-        };
-        Some(section.child(heading(tr("shortcuts_project_named").replace("{name}", &project.name)))
-            .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_project_lead")))
-            .child(list).child(form).children(save_error))
+                .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx))))));
+        let form = open_form.then(|| match &self.shortcuts.form { Some(form) => self.render_shortcut_form(form, cx), None => div() });
+        Some(section.child(list).children(form).children(save_error))
     }
 
     /// Linha de um atalho; `project` = da seção "Deste projeto" (ids próprios, grava na hora, sem arrastar).
@@ -650,19 +668,19 @@ impl Hangar {
         let button = |key: &str, icon: IconName, tip: &str, off: bool| chrome::icon_button(SharedString::from(format!("{prefix}-{key}-{id}")), icon, tr(tip), cx)
             .small().disabled(off || saving);
         let (up, down, remove, edit) = (id.clone(), id.clone(), id.clone(), id.clone());
-        let actions = div().flex().flex_shrink_0().gap(px(2.))
+        // Reordenar é um par; editar e remover são outra coisa. Quatro glifos com o mesmo vão liam como um borrão —
+        // o par fica junto, com folga dos vizinhos.
+        let actions = div().flex().flex_shrink_0().items_center().gap(px(8.))
             .when(!native, |el| el.child(button("edit", IconName::Pencil, "shortcuts_edit", false)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_shortcut_form(Some(edit.clone()), project, window, cx)))))
-            .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, project, cx))))
-            .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, project, cx))))
+            .child(div().flex().gap(px(1.))
+                .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, project, cx))))
+                .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, project, cx)))))
             .child(button("remove", IconName::Close, "shortcuts_remove", false).on_click(cx.listener(move |this, _, _, cx| {
                 let change = |items: &mut Vec<Item>| items.retain(|i| i.id() != remove);
                 if project { this.project_edit(cx, change) } else { this.shortcuts_edit(cx, change) }
             })));
         let content = match item.pasta() { Some(pasta) => format!("{} · {pasta}", item.content()), None => item.content().to_owned() };
-        let text = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
-            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::faint()).truncate().child(content)));
         // Onde o atalho roda: "Na sessão · texto" (envio), "Na sessão" ou "No Hangar" (comando).
         let mark = match item.kind() {
             "send_text" => Some((tr_shared("atalhos_marca_sessao_texto", &[]), false)),
@@ -670,25 +688,35 @@ impl Hangar {
             "shell" => Some((tr_shared("atalhos_marca_sessao_comando", &[]), false)),
             _ => None,
         };
-        let mark = mark.map(|(text, hangar)| div().flex_shrink_0().px(px(8.)).py(px(3.)).rounded_full().text_size(px(12.))
-            .when(hangar, |el| el.bg(theme::accent().opacity(0.16)).text_color(theme::accent_text()))
-            .when(!hangar, |el| el.bg(theme::raised()).text_color(theme::muted())).child(text));
+        // As duas marcas com o mesmo peso: só o "No Hangar" tinha fundo visível, e a coluna ficava desalinhada a olho
+        // (o fundo da outra some no vidro). A borda entra nas duas, senão uma fica 2px mais alta que a vizinha.
+        let mark = mark.map(|(text, hangar)| div().flex_shrink_0().px(px(8.)).py(px(3.)).rounded_full().text_size(px(12.)).border_1()
+            .when(hangar, |el| el.bg(theme::accent().opacity(0.16)).border_color(theme::accent().opacity(0.35)).text_color(theme::accent_text()))
+            .when(!hangar, |el| el.bg(theme::raised()).border_color(theme::border()).text_color(theme::muted())).child(text));
         // A linha aberta no formulário troca a marca por "editando" e ganha um realce de destaque.
         let editing = self.shortcuts.form.as_ref().is_some_and(|f| f.project == project && f.editing.as_deref() == Some(id.as_str()));
         let mark = if editing { Some(div().flex_shrink_0().text_size(px(12.)).text_color(theme::faint()).child(tr_shared("atalhos_editando", &[]))) } else { mark };
+        // A marca vem colada ao nome, não encostada nas setas: encostada, sobrava uma faixa vazia no meio de toda linha
+        // e as marcas nunca começavam na mesma coluna.
+        let text = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+            .child(div().flex().items_center().gap(px(8.)).min_w_0()
+                .child(div().min_w_0().text_size(px(15.)).font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
+                .children(mark))
+            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::faint()).truncate().child(content)));
         let dragged = Dragged { id: id.clone(), label };
         // A linha que saiu do lugar esmaece, como a `.linha.arrastando` do web.
         let lifted = !project && cx.has_active_drag() && self.shortcuts.dragging.as_deref() == Some(id.as_str());
         let this = cx.entity().downgrade();
         // Divisória em cima de toda linha, como nas outras páginas; a da primeira some sob a borda da caixa.
+        // Altura igual em toda linha: a do nativo tem uma linha de texto e a do customizado duas, e a lista ficava
+        // com degraus. O quadradinho do ícone ganha borda — sem ela o fundo somia no vidro.
         div().id(SharedString::from(format!("{prefix}-row-{id}"))).mt(px(-1.)).border_t_1().border_color(theme::border())
-            .flex().items_center().gap(px(14.)).px(px(16.)).py(px(12.))
+            .flex().items_center().gap(px(12.)).px(px(16.)).py(px(10.)).min_h(px(56.))
             .when(editing, |el| el.bg(theme::accent().opacity(0.06)))
             .child(chrome::small_icon(IconName::GripVertical, 16., theme::faint()))
-            .child(div().size(px(32.)).flex_shrink_0().rounded(px(8.)).bg(theme::raised())
-                .flex().items_center().justify_center().child(icon_element(icon, 16., theme::muted())))
+            .child(div().size(px(34.)).flex_shrink_0().rounded(px(9.)).bg(theme::raised()).border_1().border_color(theme::border())
+                .flex().items_center().justify_center().child(icon_element(icon, 17., theme::muted())))
             .child(text)
-            .children(mark)
             .child(actions)
             .when(lifted, |el| el.opacity(0.45))
             .when(!saving && !project, |el| el.on_drag(dragged, move |d, _, _, cx| {
