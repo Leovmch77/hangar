@@ -1,0 +1,88 @@
+import { useEffect, useState } from 'react';
+import { Pressable, Text, View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
+import type { StateEvent } from '@hangar/core';
+import * as m from '../paraglide/messages';
+import { superficie } from '../theme/superficie';
+
+interface Props {
+  problem?: StateEvent['problema'];
+  detail?: StateEvent['problema_detalhe'];
+}
+
+const problemLabels: Record<string, () => string> = {
+  codex_hooks_nao_aprovados: m.problema_codex_hooks,
+  codex_abertura_falhou: m.problema_codex_abertura_falhou,
+  headless_nao_subiu: m.problema_headless_nao_subiu,
+  codex_headless_nao_subiu: m.problema_codex_headless_nao_subiu,
+  codex_sem_conexao: m.problema_codex_sem_conexao,
+  codex_prompt_bloqueado: m.problema_codex_prompt_bloqueado,
+  headless_sem_resposta: m.problema_headless_sem_resposta,
+  headless_processo_caiu: m.problema_headless_processo_caiu,
+  headless_turno_erro: m.problema_headless_turno_erro,
+  headless_sem_login: m.problema_headless_sem_login,
+};
+
+export function SessionProblem({ problem, detail }: Props) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => setExpanded(false), [problem, detail]);
+
+  // O detalhe é saída crua: só o código de saída reconhecido pode chegar à tela.
+  const match = problem === 'headless_processo_caiu'
+    ? detail?.split('\n').at(-1)?.match(/^rc=(-?\d+)$/)
+    : null;
+  const exitCode = match ? Number(match[1]) : NaN;
+  const hasDetail = Number.isSafeInteger(exitCode);
+  const label = problem && Object.hasOwn(problemLabels, problem) ? problemLabels[problem]() : m.session_problem_unknown();
+
+  if (!problem) return null;
+
+  return (
+    <View style={styles.wrap}>
+      <Text style={styles.message} accessibilityRole="alert" accessibilityLiveRegion="polite">{label}</Text>
+      {hasDetail ? (
+        <Pressable
+          onPress={() => setExpanded((value) => !value)}
+          style={styles.toggle}
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+        >
+          <Text style={styles.toggleText}>{expanded ? m.session_problem_hide_details() : m.session_problem_show_details()}</Text>
+        </Pressable>
+      ) : null}
+      {hasDetail && expanded ? (
+        <Text style={styles.detail} selectable>{m.session_problem_exit_code({ code: String(exitCode) })}</Text>
+      ) : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create((theme) => ({
+  wrap: {
+    backgroundColor: superficie(theme, 0.8),
+    borderColor: theme.tokens.status.warning,
+    borderWidth: 1,
+    borderRadius: theme.base.radius.md,
+    padding: theme.base.space[3],
+    gap: theme.base.space[1],
+  },
+  message: {
+    color: theme.tokens.text.primary,
+    fontSize: theme.base.text.base,
+  },
+  toggle: {
+    alignSelf: 'flex-start',
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
+  },
+  toggleText: {
+    color: theme.tokens.accent.base,
+    fontSize: theme.base.text.sm,
+    fontWeight: '600',
+  },
+  detail: {
+    color: theme.tokens.text.secondary,
+    fontSize: theme.base.text.sm,
+  },
+}));
